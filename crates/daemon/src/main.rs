@@ -195,7 +195,7 @@ pub struct App {
     hover: Option<Hit>,
     /// Pointer position in surface coordinates, while inside.
     pointer_pos: Option<(f32, f32)>,
-    /// App-list scroll offset in pixels (clamped during layout).
+    /// App-grid scroll offset in pixels (clamped during layout).
     list_scroll: f32,
 
     exit: bool,
@@ -607,7 +607,7 @@ impl PointerHandler for App {
                 PointerEventKind::Axis { vertical, .. } => match self.ui.target() {
                     // Docked: the wheel is the expand/collapse gesture.
                     Target::Dock => self.scroll_accum += vertical.absolute,
-                    // Open: the wheel scrolls the list; pushing past the
+                    // Open: the wheel scrolls the grid; pushing past the
                     // top accumulates into the collapse gesture instead.
                     Target::Open => {
                         let next = self.list_scroll + vertical.absolute as f32;
@@ -651,7 +651,7 @@ impl PointerHandler for App {
                         // the card moved under a stationary pointer.
                         self.update_hover();
                         match self.hover {
-                            Some(Hit::DockIcon(i)) | Some(Hit::ListRow(i)) => self.activate(i),
+                            Some(Hit::DockIcon(i)) | Some(Hit::GridCell(i)) => self.activate(i),
                             None => {}
                         }
                     }
@@ -661,7 +661,7 @@ impl PointerHandler for App {
         }
         // Natural scroll (default): scrolling down (positive axis values,
         // content-follows-fingers) on the dock expands to the full popup,
-        // scrolling up collapses; from the open list, scrolling past the
+        // scrolling up collapses; from the open grid, scrolling past the
         // top collapses. Classic direction when disabled.
         let mut toward_open = self.scroll_accum;
         if self.config.input.natural_scroll {

@@ -3,7 +3,7 @@
 //! Draws the scene assembled by [`crate::content`]: instanced rounded
 //! rectangles (card background, hover highlights) via an SDF shader,
 //! app icons as instanced quads over one `ICON_SIZE`² texture array,
-//! and app names via glyphon. List content is clipped with a scissor
+//! and app names via glyphon. Grid content is clipped with a scissor
 //! rect; everything below the surface edge is clipped by the
 //! framebuffer. Text and icons fade with the card's animation alpha.
 
@@ -456,14 +456,14 @@ impl Renderer {
             }),
         );
 
-        // Instance buffers: unclipped ranges first, then list ranges.
+        // Instance buffers: unclipped ranges first, then grid ranges.
         let mut rects: Vec<RectInstance> = scene.rects.iter().map(rect_instance).collect();
         let n_rects_unclipped = rects.len() as u32;
         let mut icons: Vec<IconInstance> = scene.icons.iter().map(icon_instance).collect();
         let n_icons_unclipped = icons.len() as u32;
-        if let Some(list) = &scene.list {
-            rects.extend(list.rects.iter().map(rect_instance));
-            icons.extend(list.icons.iter().map(icon_instance));
+        if let Some(grid) = &scene.grid {
+            rects.extend(grid.rects.iter().map(rect_instance));
+            icons.extend(grid.icons.iter().map(icon_instance));
         }
         let rect_buf = self
             .device
@@ -489,15 +489,15 @@ impl Renderer {
             (text_color[3] * alpha * 255.0) as u8,
         );
         let mut text_buffers: Vec<(TextBuffer, (f32, f32), TextBounds)> = Vec::new();
-        if let Some(list) = &scene.list {
-            for label in &list.labels {
+        if let Some(grid) = &scene.grid {
+            for label in &grid.labels {
                 let mut buffer = TextBuffer::new(
                     &mut self.font_system,
                     Metrics::new(LABEL_FONT_PX, LABEL_LINE_PX),
                 );
                 buffer.set_size(
                     &mut self.font_system,
-                    Some(label.bounds.w),
+                    Some(label.max_w),
                     Some(LABEL_LINE_PX),
                 );
                 buffer.set_text(
@@ -507,14 +507,23 @@ impl Renderer {
                     Shaping::Advanced,
                 );
                 buffer.shape_until_scroll(&mut self.font_system, false);
-                let clip = &list.clip;
+                // Center under the icon: measure the shaped line and
+                // offset left by half its width (clamped to max_w).
+                let line_w = buffer
+                    .layout_runs()
+                    .next()
+                    .map(|run| run.line_w)
+                    .unwrap_or(0.0)
+                    .min(label.max_w);
+                let left = label.center.0 - line_w / 2.0;
+                let clip = &grid.clip;
                 let bounds = TextBounds {
                     left: clip.x as i32,
                     top: clip.y as i32,
                     right: (clip.x + clip.w) as i32,
                     bottom: (clip.y + clip.h).min(h as f32) as i32,
                 };
-                text_buffers.push((buffer, label.pos, bounds));
+                text_buffers.push((buffer, (left, label.center.1), bounds));
             }
         }
         self.text_viewport.update(
@@ -582,12 +591,12 @@ impl Renderer {
                 }
             }
 
-            // List content under a scissor rect.
-            if let Some(list) = &scene.list {
-                let sx = (list.clip.x.max(0.0) as u32).min(w);
-                let sy = (list.clip.y.max(0.0) as u32).min(h);
-                let sw = (list.clip.w as u32).min(w - sx);
-                let sh = ((list.clip.y + list.clip.h).min(h as f32) as u32).saturating_sub(sy);
+            // Grid content under a scissor rect.
+            if let Some(grid) = &scene.grid {
+                let sx = (grid.clip.x.max(0.0) as u32).min(w);
+                let sy = (grid.clip.y.max(0.0) as u32).min(h);
+                let sw = (grid.clip.w as u32).min(w - sx);
+                let sh = ((grid.clip.y + grid.clip.h).min(h as f32) as u32).saturating_sub(sy);
                 if sw > 0 && sh > 0 {
                     pass.set_scissor_rect(sx, sy, sw, sh);
                     let n_rects = rects.len() as u32;

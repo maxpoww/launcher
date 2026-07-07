@@ -1,4 +1,4 @@
-//! Card content layout: where the dock icon row and the app-list rows
+//! Card content layout: where the dock icon row and the app-grid cells
 //! sit for a given animation extent, pointer hit-testing against them,
 //! and assembly of the frame's draw scene. Pure math — no Wayland, no
 //! wgpu — so it stays unit-testable and is shared by rendering and
@@ -42,19 +42,19 @@ pub struct IconInst {
     pub layer: u32,
 }
 
-/// One app-name label.
+/// One app-name label, centered under its icon.
 #[derive(Debug, Clone)]
 pub struct Label {
     pub text: String,
-    /// Top-left of the text box.
-    pub pos: (f32, f32),
-    /// Clip bounds for the glyph run.
-    pub bounds: Rect,
+    /// Horizontal center and top edge of the text box.
+    pub center: (f32, f32),
+    /// Maximum text width; longer names are clipped.
+    pub max_w: f32,
 }
 
-/// Scrollable list content, clipped to `clip` by the renderer.
+/// Scrollable grid content, clipped to `clip` by the renderer.
 #[derive(Debug, Default)]
-pub struct ListContent {
+pub struct GridContent {
     pub clip: Rect,
     pub rects: Vec<RectInst>,
     pub icons: Vec<IconInst>,
@@ -69,15 +69,15 @@ pub struct Scene {
     pub rects: Vec<RectInst>,
     /// Dock icon quads (unclipped; they live in the card's top sliver).
     pub icons: Vec<IconInst>,
-    /// List rows, present once the card is risen past the dock band.
-    pub list: Option<ListContent>,
+    /// App grid, present once the card is risen past the dock band.
+    pub grid: Option<GridContent>,
 }
 
 /// What the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     DockIcon(usize),
-    ListRow(usize),
+    GridCell(usize),
 }
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
@@ -85,15 +85,16 @@ pub enum Hit {
 const DOCK_ICON: f32 = 36.0;
 const DOCK_SLOT: f32 = 52.0;
 const DOCK_PAD_X: f32 = 20.0;
-const LIST_ROW_H: f32 = 44.0;
-const LIST_ICON: f32 = 26.0;
-const LIST_PAD_X: f32 = 14.0;
-const LIST_TOP_GAP: f32 = 6.0;
-const LIST_BOTTOM_PAD: f32 = 10.0;
-/// Text line height the labels are laid out for (matches the renderer's
+const GRID_CELL_W: f32 = 104.0;
+const GRID_CELL_H: f32 = 96.0;
+const GRID_ICON: f32 = 48.0;
+const GRID_PAD_X: f32 = 14.0;
+const GRID_TOP_GAP: f32 = 8.0;
+const GRID_BOTTOM_PAD: f32 = 10.0;
+/// Text metrics the labels are laid out for (matches the renderer's
 /// glyphon metrics).
-pub const LABEL_FONT_PX: f32 = 15.0;
-pub const LABEL_LINE_PX: f32 = 20.0;
+pub const LABEL_FONT_PX: f32 = 12.0;
+pub const LABEL_LINE_PX: f32 = 16.0;
 
 /// Geometry shared by scene assembly and hit-testing.
 #[derive(Debug)]
@@ -103,18 +104,22 @@ pub struct Layout {
     /// Dock slot rects, one per shown dock icon (entry index == slot
     /// index: the dock shows the first N entries).
     pub dock_slots: Vec<Rect>,
-    /// List viewport (may have zero height while docked).
+    /// Grid viewport (may lie below the surface while docked).
     pub viewport: Rect,
+    /// Left edge of the first grid column (columns are centered).
+    pub grid_x0: f32,
+    /// Number of grid columns (>= 1).
+    pub cols: usize,
     /// Current scroll offset actually applied (clamped).
     pub scroll: f32,
-    /// Number of list rows (all entries).
-    pub rows: usize,
+    /// Total number of grid cells (all entries).
+    pub cells: usize,
 }
 
 /// Compute the layout for the current animation state.
 ///
 /// `surface` is the full surface size, `extent` the card's rise, `n`
-/// the number of app entries, `scroll` the unclamped list offset.
+/// the number of app entries, `scroll` the unclamped grid offset.
 pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scroll: f32) -> Layout {
     let (w, h) = surface;
     let card_top = h - extent;
@@ -135,22 +140,28 @@ pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scrol
         })
         .collect();
 
-    let list_top = card_top + dock_h + LIST_TOP_GAP;
-    let list_bottom = (card_top + card_h - LIST_BOTTOM_PAD).min(h);
+    let grid_top = card_top + dock_h + GRID_TOP_GAP;
+    let grid_bottom = (card_top + card_h - GRID_BOTTOM_PAD).min(h);
+    let inner_w = (w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
+    let cols = ((inner_w / GRID_CELL_W).floor() as usize).max(1);
+    let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
     let viewport = Rect::new(
-        LIST_PAD_X,
-        list_top,
-        (w - 2.0 * LIST_PAD_X).max(0.0),
-        (list_bottom - list_top).max(0.0),
+        grid_x0,
+        grid_top,
+        cols as f32 * GRID_CELL_W,
+        (grid_bottom - grid_top).max(0.0),
     );
-    let max_scroll = (n as f32 * LIST_ROW_H - viewport.h).max(0.0);
+    let rows = n.div_ceil(cols);
+    let max_scroll = (rows as f32 * GRID_CELL_H - viewport.h).max(0.0);
 
     Layout {
         card_top,
         dock_slots,
         viewport,
+        grid_x0,
+        cols,
         scroll: scroll.clamp(0.0, max_scroll),
-        rows: n,
+        cells: n,
     }
 }
 
@@ -162,9 +173,13 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32)) -> Option<Hit> {
         }
     }
     if layout.viewport.h > 0.0 && layout.viewport.contains(pos) {
-        let row = ((pos.1 - layout.viewport.y + layout.scroll) / LIST_ROW_H).floor();
-        if row >= 0.0 && (row as usize) < layout.rows {
-            return Some(Hit::ListRow(row as usize));
+        let col = ((pos.0 - layout.grid_x0) / GRID_CELL_W).floor();
+        let row = ((pos.1 - layout.viewport.y + layout.scroll) / GRID_CELL_H).floor();
+        if col >= 0.0 && (col as usize) < layout.cols && row >= 0.0 {
+            let i = row as usize * layout.cols + col as usize;
+            if i < layout.cells {
+                return Some(Hit::GridCell(i));
+            }
         }
     }
     None
@@ -216,48 +231,47 @@ pub fn scene(
         });
     }
 
-    // List rows, once there is any viewport to draw into.
+    // Grid cells, once there is any viewport to draw into.
     if layout.viewport.h > 1.0 && !entries.is_empty() {
-        let mut list = ListContent {
+        let mut grid = GridContent {
             clip: layout.viewport,
             ..Default::default()
         };
-        let first = (layout.scroll / LIST_ROW_H).floor().max(0.0) as usize;
-        let last = ((layout.scroll + layout.viewport.h) / LIST_ROW_H).ceil() as usize;
-        for (i, entry) in entries
-            .iter()
-            .enumerate()
-            .take(last.min(entries.len()))
-            .skip(first)
-        {
-            let y = layout.viewport.y + i as f32 * LIST_ROW_H - layout.scroll;
-            let row = Rect::new(layout.viewport.x, y, layout.viewport.w, LIST_ROW_H);
-            if hover == Some(Hit::ListRow(i)) {
-                list.rects.push(RectInst {
-                    rect: Rect::new(row.x, row.y + 2.0, row.w, row.h - 4.0),
-                    radius: 10.0,
-                    color: config.theme.highlight_rgba(),
+        let first_row = (layout.scroll / GRID_CELL_H).floor().max(0.0) as usize;
+        let last_row = ((layout.scroll + layout.viewport.h) / GRID_CELL_H).ceil() as usize;
+        for row in first_row..last_row {
+            let y = layout.viewport.y + row as f32 * GRID_CELL_H - layout.scroll;
+            for col in 0..layout.cols {
+                let i = row * layout.cols + col;
+                let Some(entry) = entries.get(i) else {
+                    break;
+                };
+                let cell = Rect::new(
+                    layout.grid_x0 + col as f32 * GRID_CELL_W,
+                    y,
+                    GRID_CELL_W,
+                    GRID_CELL_H,
+                );
+                if hover == Some(Hit::GridCell(i)) {
+                    grid.rects.push(RectInst {
+                        rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                        radius: 14.0,
+                        color: config.theme.highlight_rgba(),
+                    });
+                }
+                let cx = cell.x + cell.w / 2.0;
+                grid.icons.push(IconInst {
+                    rect: Rect::new(cx - GRID_ICON / 2.0, cell.y + 12.0, GRID_ICON, GRID_ICON),
+                    layer: i as u32,
+                });
+                grid.labels.push(Label {
+                    text: entry.name.clone(),
+                    center: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
+                    max_w: cell.w - 12.0,
                 });
             }
-            list.icons.push(IconInst {
-                rect: Rect::new(
-                    row.x + 10.0,
-                    y + (LIST_ROW_H - LIST_ICON) / 2.0,
-                    LIST_ICON,
-                    LIST_ICON,
-                ),
-                layer: i as u32,
-            });
-            list.labels.push(Label {
-                text: entry.name.clone(),
-                pos: (
-                    row.x + 10.0 + LIST_ICON + 12.0,
-                    y + (LIST_ROW_H - LABEL_LINE_PX) / 2.0,
-                ),
-                bounds: layout.viewport,
-            });
         }
-        scene.list = Some(list);
+        scene.grid = Some(grid);
     }
 
     scene
@@ -269,7 +283,8 @@ mod tests {
 
     /// Largest valid scroll offset for the current layout.
     fn max_scroll(layout: &Layout) -> f32 {
-        (layout.rows as f32 * LIST_ROW_H - layout.viewport.h).max(0.0)
+        let rows = layout.cells.div_ceil(layout.cols);
+        (rows as f32 * GRID_CELL_H - layout.viewport.h).max(0.0)
     }
 
     fn entries(n: usize) -> Vec<AppEntry> {
@@ -297,25 +312,26 @@ mod tests {
         let l = layout(&cfg, SURFACE, 48.0, 20, 0.0);
         assert!(!l.dock_slots.is_empty());
         // Viewport exists geometrically but lies below the surface
-        // bottom, so no rows are visible while docked.
+        // bottom, so no cells are visible while docked.
         let s = scene(&cfg, &l, &entries(20), None, 1.0, SURFACE);
-        assert!(s.list.is_none() || s.list.as_ref().unwrap().clip.y >= SURFACE.1);
+        assert!(s.grid.is_none() || s.grid.as_ref().unwrap().clip.y >= SURFACE.1);
     }
 
     #[test]
-    fn open_extent_shows_rows_and_clamps_scroll() {
+    fn open_extent_shows_grid_and_clamps_scroll() {
         let cfg = config();
         let l = layout(&cfg, SURFACE, 572.0, 40, 1e9);
+        assert!(l.cols >= 2, "720px card should fit several columns");
         assert!(l.viewport.h > 100.0);
         assert!(l.scroll <= max_scroll(&l) + f32::EPSILON);
         let s = scene(&cfg, &l, &entries(40), None, 1.0, SURFACE);
-        let list = s.list.expect("open card must show the list");
-        assert!(!list.icons.is_empty());
-        assert_eq!(list.icons.len(), list.labels.len());
+        let grid = s.grid.expect("open card must show the grid");
+        assert!(!grid.icons.is_empty());
+        assert_eq!(grid.icons.len(), grid.labels.len());
     }
 
     #[test]
-    fn hit_test_finds_dock_icon_and_row() {
+    fn hit_test_finds_dock_icon_and_cell() {
         let cfg = config();
         let l = layout(&cfg, SURFACE, 572.0, 10, 0.0);
         let slot = l.dock_slots[0];
@@ -323,16 +339,37 @@ mod tests {
             hit_test(&l, (slot.x + 1.0, slot.y + 1.0)),
             Some(Hit::DockIcon(0))
         );
-        let row1 = (l.viewport.x + 5.0, l.viewport.y + LIST_ROW_H * 1.5);
-        assert_eq!(hit_test(&l, row1), Some(Hit::ListRow(1)));
+        // Second cell of the first row.
+        let cell1 = (
+            l.grid_x0 + GRID_CELL_W * 1.5,
+            l.viewport.y + GRID_CELL_H / 2.0,
+        );
+        assert_eq!(hit_test(&l, cell1), Some(Hit::GridCell(1)));
         assert_eq!(hit_test(&l, (1.0, 1.0)), None);
     }
 
     #[test]
-    fn scrolled_hit_test_offsets_rows() {
+    fn scrolled_hit_test_offsets_cells() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 572.0, 40, LIST_ROW_H * 3.0);
-        let top_row = (l.viewport.x + 5.0, l.viewport.y + 1.0);
-        assert_eq!(hit_test(&l, top_row), Some(Hit::ListRow(3)));
+        let l = layout(&cfg, SURFACE, 572.0, 100, GRID_CELL_H * 2.0);
+        // Top-left visible cell is the first cell of row 2.
+        let pos = (l.grid_x0 + 2.0, l.viewport.y + 2.0);
+        assert_eq!(hit_test(&l, pos), Some(Hit::GridCell(2 * l.cols)));
+    }
+
+    #[test]
+    fn partial_last_row_is_not_hit_beyond_entries() {
+        let cfg = config();
+        // 7 entries in >= 2 columns: the last row is partial.
+        let l = layout(&cfg, SURFACE, 572.0, 7, 0.0);
+        let last_row = 7 / l.cols;
+        let beyond = 7 % l.cols; // first empty column of the last row
+        if beyond > 0 {
+            let pos = (
+                l.grid_x0 + (beyond as f32 + 0.5) * GRID_CELL_W,
+                l.viewport.y + (last_row as f32 + 0.5) * GRID_CELL_H,
+            );
+            assert_eq!(hit_test(&l, pos), None);
+        }
     }
 }
