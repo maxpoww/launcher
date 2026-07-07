@@ -184,7 +184,9 @@ pub struct InputConfig {
     /// (within the dock's horizontal span). While hidden, a thin
     /// `edge_reveal_px` strip stays pointer-sensitive.
     pub edge_reveal: bool,
-    /// Height of the edge-reveal strip, in logical pixels.
+    /// Height of the edge-reveal strip, in logical pixels. Keep a few px
+    /// of margin: some pointer stacks (e.g. VM tablet integration) clamp
+    /// the cursor short of the true last screen row.
     pub edge_reveal_px: u32,
     /// Hide the dock again when the pointer leaves it.
     pub autohide: bool,
@@ -198,7 +200,7 @@ impl Default for InputConfig {
         Self {
             natural_scroll: true,
             edge_reveal: true,
-            edge_reveal_px: 2,
+            edge_reveal_px: 5,
             autohide: true,
             autohide_delay_ms: 300,
         }

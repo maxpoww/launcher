@@ -85,8 +85,10 @@ Working (verified live in the VM):
 - Scroll on the dock expands to the popup / collapses back
   (`natural_scroll` config).
 - Edge reveal: while hidden, a thin input-region strip
-  (`edge_reveal_px`, default 2) hugs the bottom edge; pointer-enter
-  reveals the dock.
+  (`edge_reveal_px`, default 5) hugs the bottom edge; pointer-enter
+  reveals the dock. Default keeps margin for pointer stacks that clamp
+  the cursor short of the last screen row (this VM tops out at y=797
+  of 800 — a 2px strip was physically unreachable by mouse).
 - Auto-hide: pointer-leave arms a grace timer (`autohide_delay_ms`,
   default 300); re-entry cancels it; firing hides dock *and* popup.
   P4 must suppress this while a search query is active / keyboard
