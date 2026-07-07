@@ -4,11 +4,15 @@ Project context for Claude Code. Read this before making changes.
 
 ## Project: waverunner (working name)
 
-A rofi-like application launcher for Wayland/Hyprland, written in Rust.
+An auto-hiding dock + launcher for Wayland/Hyprland, written in Rust.
 Runs as a persistent daemon holding a layer-shell surface anchored to the
-bottom edge of the screen. On hotkey toggle, the UI slides up from the bottom
-and grows from a slim input bar into a full result list, with fluid
-spring/eased animation. Auto-hides on focus loss, Escape, or selection.
+bottom edge of the screen. The dock is conceptually always present but
+auto-hidden: touching the bottom screen edge with the pointer reveals a
+slim dock bar; from there you click an icon to launch, scroll to expand
+into the full search popup, or start typing to search. Moving the pointer
+away auto-hides it again after a short grace period. All motion is fluid
+spring/eased animation. `waverunner-ctl toggle|show|hide` over the control
+socket remains as the hotkey-driven alternative path.
 
 ## Non-negotiable design decisions (already made — do not revisit)
 
@@ -23,6 +27,10 @@ spring/eased animation. Auto-hides on focus loss, Escape, or selection.
    fully idle (0% CPU, no frame requests) once settled.
 4. **Hotkeys are compositor-side.** Hyprland keybind executes the CLI client
    which writes to the socket. The daemon never grabs global input itself.
+5. **Pointer reveal is surface-side.** While hidden, a thin input-region
+   strip (a few px) stays alive at the bottom edge of the surface;
+   pointer-enter on it reveals the dock, pointer-leave starts a grace
+   timer that hides it again. No compositor plugins, no cursor polling.
 
 ## Tech stack
 
@@ -60,17 +68,25 @@ waverunner/
 
 ## Animation model
 
-State machine: `Hidden -> Opening -> Open -> Closing -> Hidden`.
+Three rest points: `Hidden <-> Dock (slim bar) <-> Open (full popup)`.
+Pointer edge-touch / `show` moves Hidden->Dock; scroll on the dock (or
+`expand`) moves Dock->Open; Escape / focus loss collapse, pointer-leave
+(after the grace timer) hides.
+
+The animated quantity is `extent`: the visible content height in pixels,
+growing up from the bottom edge. Each transition animates `extent` from
+wherever it currently is toward the target rest point, so interrupting an
+animation never causes a visual jump.
 
 Per frame while animating:
 ```
-progress    = spring.step(dt)              // damped spring, or ease-out-cubic
-y_offset    = lerp(surface_h, 0.0, progress)
-content_h   = lerp(input_bar_h, full_h, progress)
-opacity     = progress
+progress = spring.step(dt)                    // damped spring, or eased
+extent   = lerp(start_extent, target_extent, progress)
+alpha    = clamp(extent / dock_extent, 0, 1)  // fades only below dock level
 ```
-- Open: damped spring (slight settle, no big overshoot) or ease-out-quart.
-- Close: faster, ease-in-cubic, ~120-160ms.
+- Growing transitions: damped spring (slight settle, no big overshoot)
+  or ease-out-quart.
+- Shrinking transitions: faster, ease-in-cubic, ~120-160ms.
 - All timings/curves must be configurable in config.toml.
 - Animation must be dt-based (frame-rate independent) — never per-frame
   fixed increments. Test at 60Hz and 144Hz.
@@ -118,17 +134,22 @@ describe what to verify visually instead of claiming it is tested.
 
 ## Roadmap (phases)
 
-- [ ] **P1 — Skeleton:** layer-shell surface on Hyprland, transparent,
-      bottom-anchored, manual show/hide via stdin. Validate the
-      smithay-client-toolkit + wgpu combo works before anything else.
-- [ ] **P2 — IPC:** socket server + `waverunner-ctl`; Hyprland keybind docs;
-      target < 50ms keypress-to-visible.
-- [ ] **P3 — Animation engine:** frame-callback loop, spring/easing,
-      slide + grow + fade, idle-at-rest behavior.
-- [ ] **P4 — Launcher core:** .desktop indexing + cache, nucleo fuzzy
-      search, keyboard nav, exec + detach (setsid, close fds).
-- [ ] **P5 — Polish:** icons, TOML theming (colors, radius, timings),
-      auto-hide on focus loss.
+- [x] **P1 — Skeleton:** layer-shell surface on Hyprland, transparent,
+      bottom-anchored. Validate the smithay-client-toolkit + wgpu combo
+      works before anything else. *(accepted 2026-07-06 on a Hyprland VM,
+      llvmpipe, scale 1 — recheck on real GPU + scale 2)*
+- [~] **P2 — IPC:** socket server + `waverunner-ctl`; Hyprland keybind docs;
+      target < 50ms keypress-to-visible. *(mash/malformed/SIGKILL-recovery/
+      second-instance verified; latency measurement + keybind docs open)*
+- [~] **P3 — Animation & dock interaction:** frame-callback loop,
+      spring/easing, grow + fade, idle-at-rest; edge-reveal strip,
+      scroll expand/collapse, pointer-leave auto-hide.
+      *(working; visual pacing at 144Hz and scale-2 checks open)*
+- [ ] **P4 — Launcher core:** .desktop indexing + cache, dock icon row,
+      click-to-launch, nucleo fuzzy search, keyboard nav, exec + detach
+      (setsid, close fds).
+- [ ] **P5 — Polish:** icons everywhere, TOML theming (colors, radius,
+      timings), focus-loss handling, fractional scaling.
 - [ ] **P6 — Modes:** rofi-style prefixed modes (calc, ssh, clipboard).
 
 Work strictly in phase order. Do not start a phase before the previous
@@ -140,7 +161,11 @@ one's acceptance criteria are met.
   handle plumbing). If stuck, look at `wgpu` examples and sctk's
   `simple_layer` example before inventing something.
 - Keyboard focus with layer-shell `OnDemand` interactivity — focus-loss
-  detection drives auto-hide; test alt-tabbing and clicking other windows.
+  detection drives auto-collapse; test alt-tabbing and clicking other
+  windows.
+- "Start typing to search" needs keyboard focus without a click. `OnDemand`
+  only grants focus on click; likely needs `Exclusive` while Dock/Open is
+  visible (which steals keys from the focused window). Decide in P4.
 - Fractional scaling on Hyprland: all pixel math must respect the surface
   scale factor, or text will blur.
 

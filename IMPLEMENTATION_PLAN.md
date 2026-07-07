@@ -4,99 +4,103 @@ Derived from CLAUDE.md. Phases are strictly ordered; a phase starts only
 after the previous phase's acceptance criteria pass on a live Hyprland
 session.
 
-## Current status (scaffold)
+## Current status (2026-07-06)
 
-The workspace is generated and structured per CLAUDE.md. Implemented and
-unit-tested (headless):
+Design pivot: waverunner is an **auto-hiding dock**, not a hotkey-first
+launcher. Touching the bottom screen edge reveals a slim dock bar;
+click launches, scroll expands to the full search popup, typing searches;
+pointer-leave auto-hides. `waverunner-ctl` stays as the hotkey path.
+
+Implemented and verified on a live Hyprland session (QEMU VM, llvmpipe,
+scale 1 — redo visual checks on real GPU hardware):
 
 - `proto`: line-based socket protocol (`Command`, `Response`, `socket_path`).
 - `core::config`: full TOML config schema with defaults, XDG loading,
-  hex-color parsing, `deny_unknown_fields` typo detection.
+  hex-color parsing, `deny_unknown_fields` typo detection; `[input]`
+  covers `natural_scroll`, `edge_reveal(_px)`, `autohide(_delay_ms)`.
 - `core::search`: nucleo-backed fuzzy `Searcher`.
 - `daemon::animation`: dt-based spring + easing engine (60/144 Hz
   invariance tests included).
-- `daemon::state`: `Hidden → Opening → Open → Closing` state machine,
-  interrupt-safe (hide mid-open does not jump).
+- `daemon::state`: `Hidden → Dock → Open` rest-point machine animating
+  `extent`, interrupt-safe (hide mid-open does not jump).
 - `client`: complete `waverunner-ctl toggle|show|hide`.
-- `daemon::ipc`: calloop-integrated Unix socket server with stale-socket
-  cleanup and socket-file guard.
-- `daemon::{main,surface,renderer}`: P1 code written (layer surface,
-  wgpu clear-only renderer, frame-callback loop) — **not yet compiled or
-  run against a compositor**; treat as the P1 starting point, not done.
+- `daemon::ipc`: calloop-integrated Unix socket server; live-probe
+  single-instance guard (connect() before removing a "stale" socket),
+  SIGKILL recovery verified, malformed input answered with `err ...`.
+- `daemon::{main,surface,renderer}`: fixed-size bottom-anchored layer
+  surface, wgpu rounded-bar renderer, frame-callback loop that goes fully
+  idle (0.0% CPU) at every rest point; input region tracks the visible
+  extent (edge-reveal strip while hidden); scroll expand/collapse;
+  pointer-leave auto-hide via calloop grace timer.
 
 Deferred stubs: `core::index::DesktopIndex::scan()` returns empty (P4).
 
 ---
 
-## P1 — Skeleton
+## P1 — Skeleton ✅ (accepted 2026-07-06)
 
 **Goal:** prove smithay-client-toolkit + wgpu render onto a bottom-anchored,
 transparent, fixed-size layer surface on Hyprland.
 
-Tasks:
-1. `nix develop && cargo build` — fix compile errors in the daemon first.
-   The sctk handler trait signatures and the wgpu (pinned `24.x`)
-   surface-creation API are the likely friction points; compare against
-   sctk's `simple_layer` example and wgpu's raw-handle examples before
-   restructuring anything.
-2. Run `cargo run -p waverunner-daemon` inside Hyprland. Debug surface
-   creation / adapter selection (`LD_LIBRARY_PATH` from the flake must
-   expose `libvulkan.so` and `libwayland-client.so`).
-3. Validate the design decisions: surface created once at full size,
-   anchored bottom, transparent when progress = 0.
+Verified on a live Hyprland session (QEMU VM, llvmpipe adapter, scale 1):
+- Daemon starts, logs adapter info, no panic; `hyprctl layers` shows the
+  surface at 720x420, bottom-anchored, top layer.
+- `waverunner-ctl show`/`hide` fade the translucent bar in and out.
+- 0.0% CPU over 10 s when settled (cumulative CPU time frozen).
+- Surface never resized after mapping (single configure size).
 
-Acceptance criteria (visual, on Hyprland):
-- Daemon starts, logs adapter info, no panic; a transparent surface exists
-  (check `hyprctl layers`).
-- `waverunner-ctl show` makes a translucent rectangle fade in at the
-  bottom edge; `hide` fades it out (P1 renders opacity only — slide/grow
-  come with P3 geometry).
-- When settled (hidden or open), `top` shows ~0% CPU and `WAYLAND_DEBUG=1`
-  shows no frame callbacks being requested.
-- Surface is never resized after mapping.
+Open follow-ups: repeat the visual checks on real GPU hardware (Vulkan
+adapter, not llvmpipe) and confirm no frame callbacks with
+`WAYLAND_DEBUG=1`.
 
-## P2 — IPC
+## P2 — IPC (mostly verified)
 
-**Goal:** hotkey-driven toggle with < 50 ms keypress-to-visible.
+**Goal:** reliable control socket; < 50 ms command-to-visible.
 
-Tasks:
-1. Exercise `waverunner-ctl toggle|show|hide` against the daemon;
-   verify stale-socket recovery after `kill -9`.
-2. Hyprland keybind docs in README:
+Verified live:
+- 20 rapid `toggle`s complete in ~83 ms total (~4 ms round-trip each),
+  daemon settles in the correct end state, no stuck states.
+- Malformed socket input (`frobnicate`, empty line, trailing args) gets an
+  `err ...` response and the daemon stays up.
+- `kill -9` leaves a stale socket; the next start probes it with
+  `connect()`, removes it, and rebinds.
+- A second instance while one is live now *refuses to start* instead of
+  stealing the socket (the original unconditional-remove orphaned the
+  running daemon; fixed with the connect-probe).
+
+Remaining tasks:
+1. Hyprland keybind docs in README:
    `bind = SUPER, SPACE, exec, waverunner-ctl toggle`.
-3. Measure latency: timestamp in client before connect vs. first frame
+2. Measure latency: timestamp in client before connect vs. first frame
    presented (add a `tracing` span; target < 50 ms).
-4. Decide single-instance policy (flock on the socket path) if stale-socket
-   handling proves insufficient.
 
-Acceptance criteria:
-- Keybind toggles reliably under repeated mashing (no stuck states —
-  the state machine's interrupt tests model this, verify live).
-- Malformed socket input gets an `err ...` response and the daemon stays up.
-- Measured keypress-to-visible < 50 ms.
+## P3 — Animation & dock interaction (working, checks open)
 
-## P3 — Animation engine
+**Goal:** the grow + fade motion and the pointer-driven dock loop,
+fully config-driven, idle at rest.
 
-**Goal:** the slide-up + grow + fade motion, fully config-driven, idle at rest.
+Working (verified live in the VM):
+- Rounded-bar wgpu rendering; `extent`/`alpha` animation between the
+  Hidden/Dock/Open rest points; goes fully idle at every rest point.
+- Scroll on the dock expands to the popup / collapses back
+  (`natural_scroll` config).
+- Edge reveal: while hidden, a thin input-region strip
+  (`edge_reveal_px`, default 2) hugs the bottom edge; pointer-enter
+  reveals the dock.
+- Auto-hide: pointer-leave arms a grace timer (`autohide_delay_ms`,
+  default 300); re-entry cancels it; firing hides dock *and* popup.
+  P4 must suppress this while a search query is active / keyboard
+  focused.
 
-Tasks:
-1. Add real geometry to the renderer: a rounded-rect pipeline (single quad
-   + SDF corner shader) replacing clear-only rendering. Per frame:
-   `y_offset = lerp(surface_h, 0, progress)`,
-   `content_h = lerp(input_bar_h, full_h, progress)`, `opacity = progress`
-   — translate/clip *content inside* the fixed surface.
-2. Wire `[animation]` config (already parsed) through: kind, duration,
-   spring params for open and close independently.
-3. Handle scale factor in pixel math (integer scale now; fractional-scale
-   protocol is P5).
-4. Verify frame pacing at 60 Hz and 144 Hz monitors (animation engine is
-   dt-based and unit-tested for this; confirm visually).
-
-Acceptance criteria:
-- Open: springy slide-up that settles without big overshoot; close:
-  ~120–160 ms ease-in. Both tunable via config.toml with visible effect.
-- Zero frame requests when settled (verify with `WAYLAND_DEBUG=1`).
-- No blurry rendering at scale 2.
+Remaining tasks:
+1. Wire `[animation]` config through end-to-end sanity pass (kind,
+   duration, spring params for open and close independently) — schema is
+   parsed and plumbed; confirm each knob has visible effect.
+2. Handle scale factor in pixel math (integer scale now; fractional-scale
+   protocol is P5). Verify no blurry rendering at scale 2.
+3. Verify frame pacing at 60 Hz and 144 Hz monitors (engine is dt-based
+   and unit-tested for this; confirm visually on real hardware).
+4. Confirm zero frame requests when settled with `WAYLAND_DEBUG=1`.
 
 ## P4 — Launcher core
 
@@ -110,15 +114,22 @@ Tasks:
    invalidation.
 2. Index on a background thread at daemon start (the one allowed thread);
    deliver via `calloop::channel` into the event loop.
-3. Text input: xkb keysym → UTF-8 (sctk provides this on `KeyEvent`),
+3. Dock icon row: pinned/frequent apps rendered in the dock bar,
+   hover highlight, click-to-launch. Suppress auto-hide while a launch
+   click is in flight.
+4. Text input: xkb keysym → UTF-8 (sctk provides this on `KeyEvent`),
    maintain query string, re-rank with `core::Searcher` per keystroke.
-4. Render input bar text + result list + selection highlight (this is
+   Typing while docked expands to Open. Decide the keyboard-focus model
+   here (`Exclusive` while visible vs. click-to-focus with `OnDemand`)
+   and suppress auto-hide while a query is active.
+5. Render input bar text + result list + selection highlight (this is
    where `egui`'s wgpu backend may come in for text/list widgets —
    animation offsets stay in our engine per CLAUDE.md).
-5. Exec + detach: `fork`/`setsid`, close fds, `exec` via `/bin/sh -c`;
+6. Exec + detach: `fork`/`setsid`, close fds, `exec` via `/bin/sh -c`;
    hide popup on launch.
 
 Acceptance criteria:
+- Edge-touch → click an icon launches it and the dock hides.
 - Typing filters apps with nucleo ranking; Up/Down/Enter work; Escape hides.
 - Launched apps survive daemon restart (properly detached, no zombies).
 - Cold start with cold cache < 100 ms to interactive; warm cache instant.
