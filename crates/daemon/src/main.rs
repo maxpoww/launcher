@@ -9,7 +9,10 @@
 //! the process goes fully idle.
 
 mod animation;
+mod apps;
+mod content;
 mod ipc;
+mod launch;
 mod renderer;
 mod state;
 mod surface;
@@ -17,6 +20,7 @@ mod surface;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use calloop::channel;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, LoopHandle};
 use calloop_wayland_source::WaylandSource;
@@ -35,12 +39,14 @@ use smithay_client_toolkit::{
     delegate_registry, delegate_seat, registry_handlers,
 };
 use tracing::{debug, error, info, warn};
+use waverunner_core::index::AppEntry;
 use waverunner_core::Config;
 use waverunner_proto::Command;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface};
 use wayland_client::{Connection, QueueHandle};
 
+use crate::content::Hit;
 use crate::renderer::Renderer;
 use crate::state::{Target, UiState};
 
@@ -111,11 +117,29 @@ fn main() -> anyhow::Result<()> {
         hide_deadline: None,
         interactive: false,
         input_extent: None,
+        entries: Vec::new(),
+        pending_icons: None,
+        hover: None,
+        pointer_pos: None,
+        list_scroll: 0.0,
         exit: false,
     };
 
     let socket_path = waverunner_proto::socket_path();
     let _socket_guard = ipc::listen(&event_loop.handle(), &socket_path)?;
+
+    // App discovery runs on the one allowed background thread; results
+    // arrive in the event loop over this channel.
+    let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
+    apps::spawn_indexer(app.config.theme.icon_theme.clone(), apps_tx);
+    event_loop
+        .handle()
+        .insert_source(apps_rx, |event, _, app| {
+            if let channel::Event::Msg(loaded) = event {
+                app.on_apps_loaded(loaded);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering apps channel: {e}"))?;
 
     info!("daemon up; try: waverunner-ctl toggle");
     while !app.exit {
@@ -162,6 +186,18 @@ pub struct App {
     /// Last input-region extent sent to the compositor.
     input_extent: Option<u32>,
 
+    /// Discovered applications, sorted by name (icon texture layers are
+    /// aligned with this order).
+    entries: Vec<AppEntry>,
+    /// Icons that arrived before the renderer existed.
+    pending_icons: Option<Vec<Vec<u8>>>,
+    /// Item currently under the pointer.
+    hover: Option<Hit>,
+    /// Pointer position in surface coordinates, while inside.
+    pointer_pos: Option<(f32, f32)>,
+    /// App-list scroll offset in pixels (clamped during layout).
+    list_scroll: f32,
+
     exit: bool,
 }
 
@@ -179,11 +215,62 @@ impl App {
         }
     }
 
+    /// The indexer thread finished: adopt the entries and upload icons
+    /// (or stash them until the renderer exists).
+    fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
+        info!("app index ready: {} entries", loaded.entries.len());
+        self.entries = loaded.entries;
+        match self.renderer.as_mut() {
+            Some(renderer) => renderer.set_icons(&loaded.icons),
+            None => self.pending_icons = Some(loaded.icons),
+        }
+        self.update_hover();
+        self.schedule_frame();
+    }
+
+    /// Layout for the current animation extent and scroll offset.
+    fn current_layout(&self) -> content::Layout {
+        content::layout(
+            &self.config,
+            (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
+            self.ui.extent(),
+            self.entries.len(),
+            self.list_scroll,
+        )
+    }
+
+    /// Recompute which item the pointer is over; redraw on change.
+    fn update_hover(&mut self) {
+        let hover = self
+            .pointer_pos
+            .and_then(|pos| content::hit_test(&self.current_layout(), pos));
+        if hover != self.hover {
+            self.hover = hover;
+            self.schedule_frame();
+        }
+    }
+
+    /// Launch the app under the pointer and hide the card.
+    fn activate(&mut self, index: usize) {
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        if let Err(e) = launch::launch(&entry.exec) {
+            error!("launch failed for {}: {e:#}", entry.id);
+        }
+        self.handle_command(Command::Hide);
+    }
+
     /// Push keyboard interactivity and the pointer input region to the
     /// compositor whenever the targeted rest state changes. The input
     /// region covers the *target* rect immediately so the dock/popup is
     /// interactive without waiting for the slide to finish.
     fn sync_surface_state(&mut self) {
+        if self.ui.target() == Target::Hidden {
+            // Fresh card next time it rises.
+            self.list_scroll = 0.0;
+            self.hover = None;
+        }
         let interactive = self.ui.wants_keyboard();
         if interactive != self.interactive {
             surface::set_interactive(&self.layer, interactive);
@@ -221,9 +308,9 @@ impl App {
     /// Render one frame; while animating, request the next frame callback
     /// *before* presenting so it rides on this frame's commit.
     fn draw(&mut self) {
-        let Some(renderer) = self.renderer.as_mut() else {
+        if self.renderer.is_none() {
             return;
-        };
+        }
 
         let now = Instant::now();
         let dt = self
@@ -244,7 +331,20 @@ impl App {
             debug!("settled in {:?}, going idle", self.ui.target());
         }
 
-        if let Err(e) = renderer.render(self.ui.extent(), self.ui.alpha()) {
+        let layout = self.current_layout();
+        self.list_scroll = layout.scroll; // keep the clamped value
+        let scene = content::scene(
+            &self.config,
+            &layout,
+            &self.entries,
+            self.hover,
+            self.ui.alpha(),
+            (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
+        );
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        if let Err(e) = renderer.render(&scene, self.config.theme.text_rgba()) {
             error!("render failed: {e:#}");
         }
     }
@@ -353,24 +453,19 @@ impl LayerShellHandler for App {
 
         match self.renderer.as_mut() {
             Some(renderer) => renderer.resize(width, height),
-            None => {
-                match Renderer::new(
-                    &self.conn,
-                    self.layer.wl_surface(),
-                    width,
-                    height,
-                    self.config.theme.background_rgba(),
-                    self.config.theme.corner_radius,
-                    self.config.window.bottom_margin as f32,
-                ) {
-                    Ok(renderer) => self.renderer = Some(renderer),
-                    Err(e) => {
-                        error!("renderer init failed: {e:#}");
-                        self.exit = true;
-                        return;
+            None => match Renderer::new(&self.conn, self.layer.wl_surface(), width, height) {
+                Ok(mut renderer) => {
+                    if let Some(icons) = self.pending_icons.take() {
+                        renderer.set_icons(&icons);
                     }
+                    self.renderer = Some(renderer);
                 }
-            }
+                Err(e) => {
+                    error!("renderer init failed: {e:#}");
+                    self.exit = true;
+                    return;
+                }
+            },
         }
         // The buffer size is now known: restrict pointer input to the
         // visible content (empty region while hidden = click-through).
@@ -509,22 +604,56 @@ impl PointerHandler for App {
     ) {
         for event in events {
             match event.kind {
-                PointerEventKind::Axis { vertical, .. } => {
-                    self.scroll_accum += vertical.absolute;
-                }
+                PointerEventKind::Axis { vertical, .. } => match self.ui.target() {
+                    // Docked: the wheel is the expand/collapse gesture.
+                    Target::Dock => self.scroll_accum += vertical.absolute,
+                    // Open: the wheel scrolls the list; pushing past the
+                    // top accumulates into the collapse gesture instead.
+                    Target::Open => {
+                        let next = self.list_scroll + vertical.absolute as f32;
+                        if next < 0.0 && self.list_scroll <= 0.0 {
+                            self.scroll_accum += vertical.absolute;
+                        } else {
+                            self.list_scroll = next.max(0.0);
+                            self.update_hover();
+                            self.schedule_frame();
+                        }
+                    }
+                    Target::Hidden => {}
+                },
                 PointerEventKind::Enter { .. } => {
                     // Any pending auto-hide is off: the pointer is back.
                     self.hide_deadline = None;
+                    self.pointer_pos = Some((event.position.0 as f32, event.position.1 as f32));
                     // While hidden, only the edge-reveal strip is
                     // pointer-sensitive, so entering means "summon".
                     if self.ui.target() == Target::Hidden && self.config.input.edge_reveal {
                         self.handle_command(Command::Show);
                     }
+                    self.update_hover();
+                }
+                PointerEventKind::Motion { .. } => {
+                    self.pointer_pos = Some((event.position.0 as f32, event.position.1 as f32));
+                    self.update_hover();
                 }
                 PointerEventKind::Leave { .. } => {
                     self.scroll_accum = 0.0;
+                    self.pointer_pos = None;
+                    self.update_hover();
                     if self.config.input.autohide && self.ui.target() != Target::Hidden {
                         self.schedule_autohide();
+                    }
+                }
+                PointerEventKind::Press { button, .. } => {
+                    const BTN_LEFT: u32 = 0x110;
+                    if button == BTN_LEFT {
+                        // Hit-test at press time: hover may be stale if
+                        // the card moved under a stationary pointer.
+                        self.update_hover();
+                        match self.hover {
+                            Some(Hit::DockIcon(i)) | Some(Hit::ListRow(i)) => self.activate(i),
+                            None => {}
+                        }
                     }
                 }
                 _ => {}
@@ -532,7 +661,8 @@ impl PointerHandler for App {
         }
         // Natural scroll (default): scrolling down (positive axis values,
         // content-follows-fingers) on the dock expands to the full popup,
-        // scrolling up collapses. Classic direction when disabled.
+        // scrolling up collapses; from the open list, scrolling past the
+        // top collapses. Classic direction when disabled.
         let mut toward_open = self.scroll_accum;
         if self.config.input.natural_scroll {
             toward_open = -toward_open;

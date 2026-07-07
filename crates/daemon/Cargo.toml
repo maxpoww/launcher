@@ -27,3 +27,7 @@ wgpu = "24"
 raw-window-handle = "0.6"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+freedesktop-icons = { workspace = true }
+resvg = { workspace = true }
+glyphon = { workspace = true }
+libc = { workspace = true }
