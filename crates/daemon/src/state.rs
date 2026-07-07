@@ -5,8 +5,9 @@
 //! the dock (or `expand`) slides to Open, scrolling down (or `collapse`,
 //! Escape, focus loss) slides back to the dock.
 //!
-//! The animated quantity is `extent`: the visible content height in
-//! pixels, growing up from the bottom edge. Each transition animates
+//! The animated quantity is `extent`: how far the card has risen above
+//! the bottom surface edge, in pixels (docked, just its top sliver;
+//! open, its full height plus the bottom gap). Each transition animates
 //! `extent` from wherever it currently is toward the target rest point,
 //! so interrupting an animation never causes a visual jump. Pure logic,
 //! no Wayland types.
@@ -61,7 +62,7 @@ impl UiState {
         self.target
     }
 
-    /// Current visible content height in pixels.
+    /// Current rise of the card above the bottom surface edge, in pixels.
     pub fn extent(&self) -> f32 {
         self.extent
     }

@@ -1,9 +1,11 @@
 //! wgpu rendering onto the layer-shell surface.
 //!
-//! Draws the popup as a single rounded rectangle (top corners only)
-//! anchored to the bottom edge, via an SDF fragment shader. The rect's
-//! height is the animation's `extent`; its opacity is the animation's
-//! `alpha`. Text and list content arrive with P4.
+//! Draws the UI as a single fixed-size rounded card (all four corners)
+//! that slides up from below the bottom surface edge, via an SDF
+//! fragment shader. The animation's `extent` is how far the card has
+//! risen; anything below the surface edge is clipped by the framebuffer.
+//! Fully risen, the card floats `bottom_margin` pixels above the edge.
+//! Text and list content arrive with P4.
 
 use std::ptr::NonNull;
 
@@ -37,12 +39,14 @@ pub struct Renderer {
     bind_group: wgpu::BindGroup,
     background: [f32; 4],
     corner_radius: f32,
+    bottom_margin: f32,
 }
 
 impl Renderer {
     /// Create the wgpu device and configure the swapchain against an
     /// already-configured layer surface of `width` x `height` (buffer
-    /// pixels).
+    /// pixels). `bottom_margin` is the gap kept under the fully risen
+    /// card; the card itself is `height - bottom_margin` tall.
     pub fn new(
         conn: &Connection,
         wl_surface: &WlSurface,
@@ -50,6 +54,7 @@ impl Renderer {
         height: u32,
         background: [f32; 4],
         corner_radius: f32,
+        bottom_margin: f32,
     ) -> anyhow::Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
@@ -216,6 +221,7 @@ impl Renderer {
             bind_group,
             background,
             corner_radius,
+            bottom_margin,
         })
     }
 
@@ -230,8 +236,8 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Render one frame: the popup rect occupying the bottom `extent`
-    /// pixels of the surface at the given opacity.
+    /// Render one frame: the card risen `extent` pixels above the bottom
+    /// surface edge, at the given opacity.
     pub fn render(&mut self, extent: f32, alpha: f32) -> anyhow::Result<()> {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -249,11 +255,13 @@ impl Renderer {
 
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let extent = extent.clamp(0.0, h);
-        // Don't let the corner rounding exceed the visible sliver.
-        let radius = self.corner_radius.min(extent);
+        // The card is fixed-size; its top rises with extent and its
+        // below-edge remainder is clipped by the framebuffer.
+        let card_h = (h - self.bottom_margin).max(1.0);
+        let radius = self.corner_radius.min(card_h * 0.5).min(w * 0.5);
         let params = Params {
             rect_min: [0.0, h - extent],
-            rect_max: [w, h],
+            rect_max: [w, h - extent + card_h],
             color: self.background,
             radius,
             alpha: alpha.clamp(0.0, 1.0),

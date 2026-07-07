@@ -73,10 +73,14 @@ Pointer edge-touch / `show` moves Hidden->Dock; scroll on the dock (or
 `expand`) moves Dock->Open; Escape / focus loss collapse, pointer-leave
 (after the grace timer) hides.
 
-The animated quantity is `extent`: the visible content height in pixels,
-growing up from the bottom edge. Each transition animates `extent` from
-wherever it currently is toward the target rest point, so interrupting an
-animation never causes a visual jump.
+The UI is one fixed-size rounded card (all four corners) that slides up
+from below the bottom screen edge. Docked, only its top
+`input_bar_height` sliver peeks above the edge (bottom clipped by the
+surface); fully open it floats `bottom_margin` px above the edge. The
+animated quantity is `extent`: how far the card has risen. Each
+transition animates `extent` from wherever it currently is toward the
+target rest point, so interrupting an animation never causes a visual
+jump.
 
 Per frame while animating:
 ```

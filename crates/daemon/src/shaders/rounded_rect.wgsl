@@ -1,12 +1,13 @@
-// Single rounded rectangle, top corners only, drawn as a fullscreen
-// triangle with an SDF in the fragment shader. Output is premultiplied
-// alpha over a transparent surface.
+// Single rounded card (all four corners), drawn as a fullscreen
+// triangle with an SDF in the fragment shader. The card may extend
+// below the surface edge; the framebuffer clips that part. Output is
+// premultiplied alpha over a transparent surface.
 
 struct Params {
     rect_min: vec2<f32>,  // top-left corner, pixels
-    rect_max: vec2<f32>,  // bottom-right corner, pixels
+    rect_max: vec2<f32>,  // bottom-right corner, pixels (may be off-surface)
     color: vec4<f32>,     // straight-alpha background color
-    radius: f32,          // top corner radius, pixels
+    radius: f32,          // corner radius, pixels
     alpha: f32,           // animation opacity multiplier
     _pad: vec2<f32>,
 };
@@ -27,10 +28,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let half = (params.rect_max - params.rect_min) * 0.5;
     let p = pos.xy - center;
 
-    // Round only the top corners; the bottom edge sits flush on the
-    // screen edge and stays square. Framebuffer y grows downward, so the
-    // top half is p.y < 0.
-    let r = select(0.0, params.radius, p.y < 0.0);
+    let r = params.radius;
     let q = abs(p) - half + vec2<f32>(r, r);
     let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 

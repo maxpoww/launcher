@@ -73,12 +73,15 @@ fn main() -> anyhow::Result<()> {
     let layer_shell = LayerShell::bind(&globals, &qh)
         .context("zwlr_layer_shell_v1 not available (compositor must support wlr-layer-shell)")?;
 
+    // The surface is tall enough for the fully risen card plus the gap
+    // beneath it; the card slides within this fixed extent.
+    let surface_height = config.window.height + config.window.bottom_margin;
     let layer = surface::create_layer_surface(
         &compositor,
         &layer_shell,
         &qh,
         config.window.width,
-        config.window.height,
+        surface_height,
     );
 
     let mut app = App {
@@ -94,7 +97,8 @@ fn main() -> anyhow::Result<()> {
         ui: UiState::new(
             config.animation.clone(),
             config.window.input_bar_height as f32,
-            config.window.height as f32,
+            // Fully open, the card has risen its own height plus the gap.
+            surface_height as f32,
         ),
         config,
         buffer_size: (0, 0),
@@ -342,7 +346,7 @@ impl LayerShellHandler for App {
             width = self.config.window.width;
         }
         if height == 0 {
-            height = self.config.window.height;
+            height = self.config.window.height + self.config.window.bottom_margin;
         }
         debug!("configure: {width}x{height}");
         self.buffer_size = (width, height);
@@ -357,6 +361,7 @@ impl LayerShellHandler for App {
                     height,
                     self.config.theme.background_rgba(),
                     self.config.theme.corner_radius,
+                    self.config.window.bottom_margin as f32,
                 ) {
                     Ok(renderer) => self.renderer = Some(renderer),
                     Err(e) => {

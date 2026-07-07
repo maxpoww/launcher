@@ -74,24 +74,32 @@ impl Config {
     }
 }
 
-/// Popup geometry, in logical pixels (scale factor applied by the daemon).
+/// Card geometry, in logical pixels (scale factor applied by the daemon).
+///
+/// The UI is one fixed-size rounded card that slides up from below the
+/// bottom screen edge. Docked, only its top `input_bar_height` pixels
+/// peek above the edge; open, the whole card floats `bottom_margin`
+/// pixels above it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WindowConfig {
-    /// Width of the popup surface.
+    /// Width of the card.
     pub width: u32,
-    /// Full height of the popup when open (input bar + result list).
+    /// Full height of the card (input bar + result list).
     pub height: u32,
-    /// Height of the slim input bar the popup grows from.
+    /// Height of the card's top sliver shown in the docked state.
     pub input_bar_height: u32,
+    /// Gap between the fully risen card and the bottom screen edge.
+    pub bottom_margin: u32,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             width: 720,
-            height: 420,
+            height: 560,
             input_bar_height: 48,
+            bottom_margin: 12,
         }
     }
 }
