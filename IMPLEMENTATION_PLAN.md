@@ -104,37 +104,47 @@ Remaining tasks:
    and unit-tested for this; confirm visually on real hardware).
 4. Confirm zero frame requests when settled with `WAYLAND_DEBUG=1`.
 
-## P4 — Launcher core
+## P4 — Launcher core (icons + list + launch done; search open)
 
 **Goal:** it actually launches things.
 
-Tasks:
-1. Implement `core::index::DesktopIndex::scan()` with
-   `freedesktop-desktop-entry`: XDG data dirs, locale-aware `Name=`,
-   dedupe by desktop-file ID, honor `NoDisplay`/`Hidden`, strip Exec field
-   codes. Cache to `$XDG_CACHE_HOME/waverunner/index` with mtime
-   invalidation.
-2. Index on a background thread at daemon start (the one allowed thread);
-   deliver via `calloop::channel` into the event loop.
-3. Dock icon row: pinned/frequent apps rendered in the dock bar,
-   hover highlight, click-to-launch. Suppress auto-hide while a launch
-   click is in flight.
-4. Text input: xkb keysym → UTF-8 (sctk provides this on `KeyEvent`),
-   maintain query string, re-rank with `core::Searcher` per keystroke.
-   Typing while docked expands to Open. Decide the keyboard-focus model
-   here (`Exclusive` while visible vs. click-to-focus with `OnDemand`)
-   and suppress auto-hide while a query is active.
-5. Render input bar text + result list + selection highlight (this is
-   where `egui`'s wgpu backend may come in for text/list widgets —
-   animation offsets stay in our engine per CLAUDE.md).
-6. Exec + detach: `fork`/`setsid`, close fds, `exec` via `/bin/sh -c`;
-   hide popup on launch.
+Done (verified live in the VM, 11-entry corpus):
+- `core::index::DesktopIndex::scan()` via `freedesktop-desktop-entry`:
+  XDG precedence, locale-aware `Name=`, dedupe by desktop-file ID,
+  `NoDisplay`/`Hidden` honored, Exec field codes stripped; unit-tested.
+- Background indexer thread (`daemon::apps`) rasterizes icons
+  (`freedesktop-icons` lookup; PNG via tiny-skia, SVG via resvg; muted
+  colored tile as placeholder) to 48² premultiplied RGBA and delivers
+  everything over a `calloop::channel`.
+- `daemon::content`: pure layout/hit-test/scene module (dock icon row =
+  first N entries by name; scrollable icon+name list in the open card);
+  unit-tested, shared by rendering and input.
+- Renderer: instanced SDF rounded-rects, icon texture array, glyphon
+  text; list clipped by scissor; content fades with the card alpha.
+- Hover highlight (dock slots + list rows), wheel scrolls the open list
+  (scrolling past the top collapses), click launches via double-fork +
+  `setsid` (`daemon::launch`) and hides the card.
+
+Remaining tasks:
+1. Index/icon cache under `$XDG_CACHE_HOME/waverunner` with mtime
+   invalidation (scan+raster is ~1.2 s cold on the VM, off-thread).
+2. Text input: xkb keysym → UTF-8, query string, re-rank with
+   `core::Searcher` per keystroke; typing while docked expands. Decide
+   the keyboard-focus model (`Exclusive` while visible vs.
+   click-to-focus with `OnDemand`); suppress auto-hide while a query is
+   active. Render the input bar + selection keyboard nav (Up/Down/Enter).
+3. `Terminal=true` entries currently exec directly; wrap in a terminal
+   emulator (config knob) or hide them.
+4. Optional `[dock] pinned` list instead of first-N-by-name.
 
 Acceptance criteria:
-- Edge-touch → click an icon launches it and the dock hides.
-- Typing filters apps with nucleo ranking; Up/Down/Enter work; Escape hides.
+- Edge-touch → click an icon launches it and the dock hides. *(click
+  path implemented; needs a live human click to sign off)*
+- Typing filters apps with nucleo ranking; Up/Down/Enter work; Escape
+  hides. *(open)*
 - Launched apps survive daemon restart (properly detached, no zombies).
-- Cold start with cold cache < 100 ms to interactive; warm cache instant.
+- Cold start with cold cache < 100 ms to interactive; warm cache
+  instant. *(needs the cache from task 1)*
 
 ## P5 — Polish
 
