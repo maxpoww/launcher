@@ -1,0 +1,86 @@
+//! Layer-shell surface setup.
+//!
+//! Design decision #2: the surface is created once, at full popup size,
+//! anchored to the bottom edge, and never resized per frame. All motion
+//! happens in what we *draw* inside it.
+
+use smithay_client_toolkit::compositor::{CompositorState, Region};
+use smithay_client_toolkit::shell::wlr_layer::{
+    Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface,
+};
+use smithay_client_toolkit::shell::WaylandSurface;
+use wayland_client::QueueHandle;
+
+use crate::App;
+
+/// Create and commit the (initially input-less) layer surface.
+///
+/// The first `configure` event from the compositor tells us the final
+/// buffer size; only then is the wgpu renderer created.
+pub fn create_layer_surface(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<App>,
+    width: u32,
+    height: u32,
+) -> LayerSurface {
+    let surface = compositor.create_surface(qh);
+    let layer = layer_shell.create_layer_surface(
+        qh,
+        surface,
+        Layer::Top,
+        Some("waverunner"),
+        None, // let the compositor pick the active output
+    );
+
+    layer.set_anchor(Anchor::BOTTOM);
+    layer.set_size(width, height);
+    // Hidden at startup: never steal focus until shown.
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    layer.commit();
+    layer
+}
+
+/// Flip keyboard interactivity as the popup expands/collapses.
+///
+/// `OnDemand` while fully open (focus can be taken away — that drives
+/// auto-collapse), `None` while docked or hidden: the dock is
+/// pointer-only and must never steal keys.
+pub fn set_interactive(layer: &LayerSurface, interactive: bool) {
+    layer.set_keyboard_interactivity(if interactive {
+        KeyboardInteractivity::OnDemand
+    } else {
+        KeyboardInteractivity::None
+    });
+    layer.commit();
+}
+
+/// Restrict pointer input to the bottom `extent` pixels of the surface.
+///
+/// The surface is full popup size at all times (design decision #2), so
+/// without this the transparent area above the dock would swallow clicks
+/// meant for windows behind it. `extent == 0` makes the whole surface
+/// click-through.
+pub fn set_input_extent(
+    compositor: &CompositorState,
+    layer: &LayerSurface,
+    (surface_w, surface_h): (u32, u32),
+    extent: u32,
+) -> anyhow::Result<()> {
+    let region =
+        Region::new(compositor).map_err(|e| anyhow::anyhow!("cannot create input region: {e}"))?;
+    if extent > 0 {
+        let extent = extent.min(surface_h);
+        region.add(
+            0,
+            (surface_h - extent) as i32,
+            surface_w as i32,
+            extent as i32,
+        );
+    }
+    layer
+        .wl_surface()
+        .set_input_region(Some(region.wl_region()));
+    layer.commit();
+    Ok(())
+}

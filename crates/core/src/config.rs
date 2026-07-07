@@ -1,0 +1,272 @@
+//! Configuration types, loaded from
+//! `$XDG_CONFIG_HOME/waverunner/config.toml` (default `~/.config/...`).
+//!
+//! Every field has a default so a missing or partial file always yields a
+//! usable configuration. Unknown keys are rejected to catch typos early.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// Errors that can occur while loading the configuration file.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// The file exists but could not be read.
+    #[error("failed to read {path}: {source}")]
+    Io {
+        /// Path of the offending file.
+        path: PathBuf,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
+    /// The file was read but is not valid TOML / does not match the schema.
+    #[error("failed to parse {path}: {source}")]
+    Parse {
+        /// Path of the offending file.
+        path: PathBuf,
+        /// Underlying TOML error.
+        source: toml::de::Error,
+    },
+}
+
+/// Top-level configuration.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    /// Popup geometry.
+    pub window: WindowConfig,
+    /// Animation curves and timings.
+    pub animation: AnimationConfig,
+    /// Colors and shapes.
+    pub theme: ThemeConfig,
+    /// Pointer/gesture behavior.
+    pub input: InputConfig,
+}
+
+impl Config {
+    /// Compute the config file path from `XDG_CONFIG_HOME`, falling back
+    /// to `~/.config`.
+    pub fn default_path() -> PathBuf {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .unwrap_or_else(|| PathBuf::from("."));
+        base.join("waverunner").join("config.toml")
+    }
+
+    /// Load configuration from [`Config::default_path`].
+    ///
+    /// A missing file is not an error: defaults are returned. A present
+    /// but malformed file *is* an error — silently ignoring a broken
+    /// config confuses users more than failing loudly.
+    pub fn load() -> Result<Self, ConfigError> {
+        Self::load_from(Self::default_path())
+    }
+
+    /// Load configuration from an explicit path (missing file ⇒ defaults).
+    pub fn load_from(path: PathBuf) -> Result<Self, ConfigError> {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(source) => return Err(ConfigError::Io { path, source }),
+        };
+        toml::from_str(&text).map_err(|source| ConfigError::Parse { path, source })
+    }
+}
+
+/// Popup geometry, in logical pixels (scale factor applied by the daemon).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindowConfig {
+    /// Width of the popup surface.
+    pub width: u32,
+    /// Full height of the popup when open (input bar + result list).
+    pub height: u32,
+    /// Height of the slim input bar the popup grows from.
+    pub input_bar_height: u32,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            width: 720,
+            height: 420,
+            input_bar_height: 48,
+        }
+    }
+}
+
+/// Animation configuration for the open and close transitions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnimationConfig {
+    /// Curve used while opening (Hidden -> Open).
+    pub open: CurveConfig,
+    /// Curve used while closing (Open -> Hidden).
+    pub close: CurveConfig,
+}
+
+/// The shape of a single animation curve.
+///
+/// `kind` selects the curve; `duration_ms` applies to the eased kinds,
+/// while the `spring_*` fields apply to `kind = "spring"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CurveConfig {
+    /// One of: `spring`, `ease-out-quart`, `ease-out-cubic`, `ease-in-cubic`.
+    pub kind: CurveKind,
+    /// Duration in milliseconds (eased kinds only).
+    pub duration_ms: u32,
+    /// Spring stiffness (spring kind only).
+    pub spring_stiffness: f32,
+    /// Spring damping (spring kind only).
+    pub spring_damping: f32,
+    /// Spring mass (spring kind only).
+    pub spring_mass: f32,
+}
+
+impl Default for CurveConfig {
+    fn default() -> Self {
+        Self {
+            kind: CurveKind::Spring,
+            duration_ms: 220,
+            spring_stiffness: 550.0,
+            spring_damping: 42.0,
+            spring_mass: 1.0,
+        }
+    }
+}
+
+impl CurveConfig {
+    /// Default close curve: faster, ease-in-cubic, per the design notes.
+    pub fn default_close() -> Self {
+        Self {
+            kind: CurveKind::EaseInCubic,
+            duration_ms: 140,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for AnimationConfig {
+    fn default() -> Self {
+        Self {
+            open: CurveConfig::default(),
+            close: CurveConfig::default_close(),
+        }
+    }
+}
+
+/// Enumeration of supported curve kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CurveKind {
+    /// Damped spring (slight settle, no big overshoot).
+    Spring,
+    /// Ease-out quartic.
+    EaseOutQuart,
+    /// Ease-out cubic.
+    EaseOutCubic,
+    /// Ease-in cubic.
+    EaseInCubic,
+}
+
+/// Pointer/gesture behavior.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputConfig {
+    /// Natural (content-follows-fingers) scroll direction for the dock
+    /// expand/collapse gesture: scrolling *down* on the dock opens the
+    /// popup, scrolling *up* collapses it. Set to `false` for classic
+    /// wheel direction (up opens).
+    pub natural_scroll: bool,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        Self {
+            natural_scroll: true,
+        }
+    }
+}
+
+/// Colors and shape parameters. Colors are `#rrggbb` or `#rrggbbaa` hex.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ThemeConfig {
+    /// Popup background color.
+    pub background: String,
+    /// Radius of the two *top* corners, in logical pixels (the bottom
+    /// edge sits flush on the screen edge and stays square).
+    pub corner_radius: f32,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            background: "#1e1e2ecc".to_owned(),
+            corner_radius: 24.0,
+        }
+    }
+}
+
+impl ThemeConfig {
+    /// Parse [`ThemeConfig::background`] into linear-ish RGBA floats in
+    /// `0.0..=1.0`. Invalid values fall back to an opaque dark grey rather
+    /// than erroring per frame.
+    pub fn background_rgba(&self) -> [f32; 4] {
+        parse_hex_rgba(&self.background).unwrap_or([0.12, 0.12, 0.18, 1.0])
+    }
+}
+
+/// Parse `#rgb`, `#rrggbb`, or `#rrggbbaa` into RGBA floats.
+fn parse_hex_rgba(s: &str) -> Option<[f32; 4]> {
+    let hex = s.strip_prefix('#')?;
+    let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
+    match hex.len() {
+        6 => Some([
+            byte(0)? as f32 / 255.0,
+            byte(2)? as f32 / 255.0,
+            byte(4)? as f32 / 255.0,
+            1.0,
+        ]),
+        8 => Some([
+            byte(0)? as f32 / 255.0,
+            byte(2)? as f32 / 255.0,
+            byte(4)? as f32 / 255.0,
+            byte(6)? as f32 / 255.0,
+        ]),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_sane() {
+        let c = Config::default();
+        assert!(c.window.input_bar_height < c.window.height);
+        assert_eq!(c.animation.close.kind, CurveKind::EaseInCubic);
+    }
+
+    #[test]
+    fn partial_toml_fills_defaults() {
+        let c: Config = toml::from_str("[window]\nwidth = 800\n").unwrap();
+        assert_eq!(c.window.width, 800);
+        assert_eq!(c.window.height, WindowConfig::default().height);
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        assert!(toml::from_str::<Config>("[window]\nwdith = 800\n").is_err());
+    }
+
+    #[test]
+    fn hex_colors_parse() {
+        assert_eq!(parse_hex_rgba("#ff0000"), Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(parse_hex_rgba("#00000000"), Some([0.0, 0.0, 0.0, 0.0]));
+        assert_eq!(parse_hex_rgba("nope"), None);
+    }
+}
