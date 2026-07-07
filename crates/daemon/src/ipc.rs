@@ -40,14 +40,24 @@ impl Drop for SocketGuard {
 
 /// Bind the control socket at `path` and register it with the event loop.
 ///
-/// A pre-existing socket file is assumed stale (previous crash) and
-/// removed; running two daemons against one `XDG_RUNTIME_DIR` is not
-/// supported.
+/// A pre-existing socket file is probed with a `connect()` first: if a
+/// daemon answers, we refuse to start; only a refused connection marks
+/// the file as stale (previous crash) and safe to remove.
 pub fn listen(handle: &LoopHandle<'static, App>, path: &Path) -> anyhow::Result<SocketGuard> {
-    match std::fs::remove_file(path) {
-        Ok(()) => info!("removed stale socket {}", path.display()),
+    match UnixStream::connect(path) {
+        Ok(_) => {
+            return Err(anyhow!(
+                "another waverunner daemon is already running on {}",
+                path.display()
+            ))
+        }
         Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("cannot clear {}", path.display())),
+        Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
+            std::fs::remove_file(path)
+                .with_context(|| format!("cannot clear stale socket {}", path.display()))?;
+            info!("removed stale socket {}", path.display());
+        }
+        Err(e) => return Err(e).with_context(|| format!("cannot probe {}", path.display())),
     }
 
     let listener = UnixListener::bind(path)
