@@ -219,11 +219,17 @@ impl Default for InputConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeConfig {
-    /// Popup background color.
+    /// Card background color.
     pub background: String,
-    /// Radius of the two *top* corners, in logical pixels (the bottom
-    /// edge sits flush on the screen edge and stays square).
+    /// Radius of the card corners, in logical pixels.
     pub corner_radius: f32,
+    /// Primary text color (app names).
+    pub text: String,
+    /// Hover-highlight fill behind dock icons and list rows.
+    pub highlight: String,
+    /// Icon theme name for `freedesktop-icons` lookup (falls back to
+    /// `hicolor` automatically).
+    pub icon_theme: String,
 }
 
 impl Default for ThemeConfig {
@@ -231,6 +237,9 @@ impl Default for ThemeConfig {
         Self {
             background: "#1e1e2ecc".to_owned(),
             corner_radius: 24.0,
+            text: "#e6e6efff".to_owned(),
+            highlight: "#ffffff26".to_owned(),
+            icon_theme: "hicolor".to_owned(),
         }
     }
 }
@@ -241,6 +250,16 @@ impl ThemeConfig {
     /// than erroring per frame.
     pub fn background_rgba(&self) -> [f32; 4] {
         parse_hex_rgba(&self.background).unwrap_or([0.12, 0.12, 0.18, 1.0])
+    }
+
+    /// Parse [`ThemeConfig::text`], falling back to near-white.
+    pub fn text_rgba(&self) -> [f32; 4] {
+        parse_hex_rgba(&self.text).unwrap_or([0.9, 0.9, 0.94, 1.0])
+    }
+
+    /// Parse [`ThemeConfig::highlight`], falling back to faint white.
+    pub fn highlight_rgba(&self) -> [f32; 4] {
+        parse_hex_rgba(&self.highlight).unwrap_or([1.0, 1.0, 1.0, 0.15])
     }
 }
 

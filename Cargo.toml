@@ -20,6 +20,11 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nucleo-matcher = "0.3"
+freedesktop-desktop-entry = "0.8"
+freedesktop-icons = "0.4"
+resvg = "0.47"
+glyphon = "0.8"
+libc = "0.2"
 
 waverunner-core = { path = "crates/core" }
 waverunner-proto = { path = "crates/proto" }
