@@ -14,10 +14,11 @@ mod renderer;
 mod state;
 mod surface;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use calloop::EventLoop;
+use calloop::timer::{TimeoutAction, Timer};
+use calloop::{EventLoop, LoopHandle};
 use calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
@@ -41,7 +42,7 @@ use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_s
 use wayland_client::{Connection, QueueHandle};
 
 use crate::renderer::Renderer;
-use crate::state::UiState;
+use crate::state::{Target, UiState};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -86,6 +87,7 @@ fn main() -> anyhow::Result<()> {
         output_state: OutputState::new(&globals, &qh),
         conn: conn.clone(),
         qh: qh.clone(),
+        loop_handle: event_loop.handle(),
         compositor,
         layer,
         renderer: None,
@@ -102,6 +104,7 @@ fn main() -> anyhow::Result<()> {
         keyboard: None,
         pointer: None,
         scroll_accum: 0.0,
+        hide_deadline: None,
         interactive: false,
         input_extent: None,
         exit: false,
@@ -129,6 +132,7 @@ pub struct App {
 
     conn: Connection,
     qh: QueueHandle<App>,
+    loop_handle: LoopHandle<'static, App>,
     compositor: CompositorState,
     layer: LayerSurface,
     renderer: Option<Renderer>,
@@ -146,6 +150,9 @@ pub struct App {
     pointer: Option<wl_pointer::WlPointer>,
     /// Accumulated vertical scroll over the dock, for the expand gesture.
     scroll_accum: f64,
+    /// Deadline of the pending auto-hide, if the pointer has left the
+    /// dock. Re-entry clears it, invalidating the in-flight timer.
+    hide_deadline: Option<Instant>,
     /// Last keyboard-interactivity value sent to the compositor.
     interactive: bool,
     /// Last input-region extent sent to the compositor.
@@ -179,7 +186,12 @@ impl App {
             self.interactive = interactive;
         }
 
-        let extent = self.ui.extent_of(self.ui.target()).round() as u32;
+        let mut extent = self.ui.extent_of(self.ui.target()).round() as u32;
+        // While hidden, keep a thin strip alive at the bottom edge so
+        // touching it with the pointer can reveal the dock.
+        if self.ui.target() == Target::Hidden && self.config.input.edge_reveal {
+            extent = extent.max(self.config.input.edge_reveal_px);
+        }
         if self.input_extent != Some(extent) {
             match surface::set_input_extent(&self.compositor, &self.layer, self.buffer_size, extent)
             {
@@ -230,6 +242,29 @@ impl App {
 
         if let Err(e) = renderer.render(self.ui.extent(), self.ui.alpha()) {
             error!("render failed: {e:#}");
+        }
+    }
+
+    /// Arm the auto-hide grace timer after the pointer leaves the dock.
+    /// A later pointer re-entry clears `hide_deadline`, turning the
+    /// in-flight timer into a no-op when it fires.
+    fn schedule_autohide(&mut self) {
+        let delay = Duration::from_millis(u64::from(self.config.input.autohide_delay_ms));
+        let deadline = Instant::now() + delay;
+        self.hide_deadline = Some(deadline);
+        let timer = Timer::from_duration(delay);
+        if let Err(e) = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                if app.hide_deadline == Some(deadline) {
+                    app.hide_deadline = None;
+                    app.handle_command(Command::Hide);
+                }
+                TimeoutAction::Drop
+            })
+        {
+            warn!("failed to arm auto-hide timer: {e}");
+            self.hide_deadline = None;
         }
     }
 }
@@ -472,8 +507,20 @@ impl PointerHandler for App {
                 PointerEventKind::Axis { vertical, .. } => {
                     self.scroll_accum += vertical.absolute;
                 }
+                PointerEventKind::Enter { .. } => {
+                    // Any pending auto-hide is off: the pointer is back.
+                    self.hide_deadline = None;
+                    // While hidden, only the edge-reveal strip is
+                    // pointer-sensitive, so entering means "summon".
+                    if self.ui.target() == Target::Hidden && self.config.input.edge_reveal {
+                        self.handle_command(Command::Show);
+                    }
+                }
                 PointerEventKind::Leave { .. } => {
                     self.scroll_accum = 0.0;
+                    if self.config.input.autohide && self.ui.target() != Target::Hidden {
+                        self.schedule_autohide();
+                    }
                 }
                 _ => {}
             }

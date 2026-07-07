@@ -180,12 +180,27 @@ pub struct InputConfig {
     /// popup, scrolling *up* collapses it. Set to `false` for classic
     /// wheel direction (up opens).
     pub natural_scroll: bool,
+    /// Reveal the dock when the pointer touches the bottom screen edge
+    /// (within the dock's horizontal span). While hidden, a thin
+    /// `edge_reveal_px` strip stays pointer-sensitive.
+    pub edge_reveal: bool,
+    /// Height of the edge-reveal strip, in logical pixels.
+    pub edge_reveal_px: u32,
+    /// Hide the dock again when the pointer leaves it.
+    pub autohide: bool,
+    /// Grace period before auto-hiding, in milliseconds. Re-entering
+    /// within this window cancels the hide.
+    pub autohide_delay_ms: u32,
 }
 
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
             natural_scroll: true,
+            edge_reveal: true,
+            edge_reveal_px: 2,
+            autohide: true,
+            autohide_delay_ms: 300,
         }
     }
 }
