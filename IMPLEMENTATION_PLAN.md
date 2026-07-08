@@ -104,7 +104,7 @@ Remaining tasks:
    and unit-tested for this; confirm visually on real hardware).
 4. Confirm zero frame requests when settled with `WAYLAND_DEBUG=1`.
 
-## P4 — Launcher core (icons + list + launch done; search open)
+## P4 — Launcher core (icons + grid + launch + search done)
 
 **Goal:** it actually launches things.
 
@@ -133,23 +133,33 @@ on theme updates, invalidating naturally). Note: on NixOS, a session
 whose XDG_DATA_DIRS pins a package-specific store path keeps showing
 that app until re-login — env staleness, not scan staleness.
 
+Type-to-search (done): search box at the card bottom; typing filters
+the grid live (`Searcher::rank` → ranked entry indices), non-matches
+hidden, best match auto-selected; Enter/click launches; Backspace
+edits, arrows move selection, Escape clears then collapses.
+Focus-model decision: `Exclusive` keyboard interactivity while open
+(deliberate-gesture popup, rofi behavior); dock stays pointer-only, so
+typing-while-docked is out by design. The ranked-indices pipeline is
+the seam for future system-wide "search all" providers (P6).
+
+Intellihide (done): via Hyprland IPC (`daemon::hypr`), the dock parks
+visible while no window overlaps its zone and dodges when one does;
+dismissals collapse to the parked dock. `input.intellihide = false`,
+IPC failure, or a non-Hyprland compositor fall back to always-auto-hide.
+
 Remaining tasks:
 1. Persistent icon cache under `$XDG_CACHE_HOME/waverunner` so cold
    daemon start skips rasterization (in-memory cache covers rescans).
-2. Text input: xkb keysym → UTF-8, query string, re-rank with
-   `core::Searcher` per keystroke; typing while docked expands. Decide
-   the keyboard-focus model (`Exclusive` while visible vs.
-   click-to-focus with `OnDemand`); suppress auto-hide while a query is
-   active. Render the input bar + selection keyboard nav (Up/Down/Enter).
-3. `Terminal=true` entries currently exec directly; wrap in a terminal
+2. `Terminal=true` entries currently exec directly; wrap in a terminal
    emulator (config knob) or hide them.
-4. Optional `[dock] pinned` list instead of first-N-by-name.
+3. Optional `[dock] pinned` list instead of first-N-by-name.
 
 Acceptance criteria:
 - Edge-touch → click an icon launches it and the dock hides. *(click
   path implemented; needs a live human click to sign off)*
-- Typing filters apps with nucleo ranking; Up/Down/Enter work; Escape
-  hides. *(open)*
+- Typing filters apps with nucleo ranking; arrows/Enter work; Escape
+  clears/collapses. *(implemented; typing needs a live keyboard to
+  sign off)*
 - Launched apps survive daemon restart (properly detached, no zombies).
 - Cold start with cold cache < 100 ms to interactive; warm cache
   instant. *(needs the cache from task 1)*
