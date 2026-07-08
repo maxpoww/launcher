@@ -8,10 +8,10 @@
 //! gracefully: without the Hyprland sockets the daemon behaves exactly
 //! as before (always auto-hide).
 //!
-//! Known limitation: Hyprland emits no event for interactively moving
-//! or resizing a floating window within a workspace, so a floating
-//! window dragged over the zone is only noticed at the next relevant
-//! event or reveal.
+//! Hyprland emits no event for float toggles or interactive float
+//! moves/resizes (verified on socket2), so the daemon combines events
+//! (instant) with a steady poll (the only reliable signal for the
+//! silent transitions).
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -137,15 +137,31 @@ pub fn focused_monitor() -> anyhow::Result<MonitorInfo> {
         .ok_or_else(|| anyhow!("no focused monitor in Hyprland reply"))
 }
 
-/// Whether any window on workspace `active_ws` overlaps `zone`
-/// (x, y, w, h in layout pixels), or is fullscreen.
+/// Result of a dock-zone evaluation.
+pub struct ZoneState {
+    /// A window overlaps the zone (or is fullscreen): the dock dodges.
+    pub occupied: bool,
+}
+
+/// Evaluate `zone` (x, y, w, h in layout pixels) against the windows
+/// of workspace `active_ws`.
+pub fn zone_state(zone: (f64, f64, f64, f64), active_ws: i64) -> anyhow::Result<ZoneState> {
+    zone_state_from(&request("j/clients")?, zone, active_ws)
+}
+
+/// Pure core of [`zone_state`], parsing a `j/clients` JSON reply.
 ///
 /// Filtering is by workspace id: this Hyprland reports `visible: true`
 /// even for clients parked on inactive workspaces.
-pub fn dock_zone_occupied(zone: (f64, f64, f64, f64), active_ws: i64) -> anyhow::Result<bool> {
+fn zone_state_from(
+    clients_json: &str,
+    zone: (f64, f64, f64, f64),
+    active_ws: i64,
+) -> anyhow::Result<ZoneState> {
     let clients: serde_json::Value =
-        serde_json::from_str(&request("j/clients")?).context("parsing clients JSON")?;
+        serde_json::from_str(clients_json).context("parsing clients JSON")?;
     let (zx, zy, zw, zh) = zone;
+    let mut occupied = false;
     for c in clients.as_array().into_iter().flatten() {
         if c["workspace"]["id"].as_i64().unwrap_or(-2) != active_ws
             || !c["mapped"].as_bool().unwrap_or(false)
@@ -154,7 +170,8 @@ pub fn dock_zone_occupied(zone: (f64, f64, f64, f64), active_ws: i64) -> anyhow:
             continue;
         }
         if c["fullscreen"].as_i64().unwrap_or(0) > 0 {
-            return Ok(true);
+            occupied = true;
+            continue;
         }
         let (x, y) = (
             c["at"][0].as_f64().unwrap_or(0.0),
@@ -165,8 +182,85 @@ pub fn dock_zone_occupied(zone: (f64, f64, f64, f64), active_ws: i64) -> anyhow:
             c["size"][1].as_f64().unwrap_or(0.0),
         );
         if x < zx + zw && x + w > zx && y < zy + zh && y + h > zy {
-            return Ok(true);
+            occupied = true;
         }
     }
-    Ok(false)
+    Ok(ZoneState { occupied })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real dock zone at default config: 720 wide centered on a
+    /// 1280x800 layout, bottom 60 px.
+    const ZONE: (f64, f64, f64, f64) = (280.0, 740.0, 720.0, 60.0);
+
+    fn client(ws: i64, at: (i64, i64), size: (i64, i64)) -> String {
+        format!(
+            r#"{{"workspace": {{"id": {ws}}}, "mapped": true, "hidden": false,
+                "fullscreen": 0, "at": [{}, {}], "size": [{}, {}]}}"#,
+            at.0, at.1, size.0, size.1,
+        )
+    }
+
+    fn occupied(clients: &[String], ws: i64) -> bool {
+        let json = format!("[{}]", clients.join(","));
+        zone_state_from(&json, ZONE, ws).unwrap().occupied
+    }
+
+    #[test]
+    fn empty_workspace_is_free() {
+        assert!(!occupied(&[], 9));
+    }
+
+    #[test]
+    fn fullscreen_sized_tiled_window_occupies() {
+        assert!(occupied(&[client(1, (0, 0), (1280, 800))], 1));
+    }
+
+    #[test]
+    fn window_on_other_workspace_does_not_occupy() {
+        assert!(!occupied(&[client(1, (0, 0), (1280, 800))], 9));
+    }
+
+    #[test]
+    fn small_float_away_from_zone_is_free() {
+        // The case from the field: a floating window parked at the top
+        // must leave the dock zone free.
+        assert!(!occupied(&[client(1, (100, 50), (400, 300))], 1));
+    }
+
+    #[test]
+    fn small_float_over_zone_occupies() {
+        assert!(occupied(&[client(1, (400, 700), (400, 300))], 1));
+    }
+
+    #[test]
+    fn float_beside_zone_horizontally_is_free() {
+        // Bottom-left corner, outside the centered zone's x-range.
+        assert!(!occupied(&[client(1, (0, 700), (250, 100))], 1));
+    }
+
+    #[test]
+    fn fullscreen_flag_occupies_regardless_of_geometry() {
+        let c =
+            client(1, (0, 0), (100, 100)).replacen(r#""fullscreen": 0"#, r#""fullscreen": 2"#, 1);
+        assert!(occupied(&[c], 1));
+    }
+
+    #[test]
+    fn hidden_or_unmapped_windows_do_not_occupy() {
+        let hidden = client(1, (400, 700), (400, 300)).replacen(
+            r#""hidden": false"#,
+            r#""hidden": true"#,
+            1,
+        );
+        let unmapped = client(1, (400, 700), (400, 300)).replacen(
+            r#""mapped": true"#,
+            r#""mapped": false"#,
+            1,
+        );
+        assert!(!occupied(&[hidden, unmapped], 1));
+    }
 }

@@ -156,11 +156,24 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("registering apps channel: {e}"))?;
 
     // Intellihide: watch Hyprland window events so the dock can stay
-    // up while nothing overlaps its zone. Optional — without Hyprland
-    // IPC the dock simply always auto-hides.
+    // up while nothing overlaps its zone, plus a steady poll — this
+    // Hyprland emits no event for float toggles or float moves/resizes,
+    // so events alone can never catch every layout change. Optional:
+    // without Hyprland IPC the dock simply always auto-hides.
     if app.config.input.intellihide {
         match hypr::subscribe(&event_loop.handle()) {
-            Ok(()) => app.on_layout_changed(),
+            Ok(()) => {
+                app.on_layout_changed();
+                if let Err(e) = event_loop.handle().insert_source(
+                    Timer::from_duration(ZONE_POLL_INTERVAL),
+                    |_, _, app: &mut App| {
+                        app.on_layout_changed();
+                        TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
+                    },
+                ) {
+                    warn!("zone poll timer failed ({e}); intellihide is event-driven only");
+                }
+            }
             Err(e) => warn!("intellihide inactive: {e:#}"),
         }
     }
@@ -261,6 +274,12 @@ const BTN_LEFT: u32 = 0x110;
 /// freshness; mashing toggle does not scan repeatedly.
 const RESCAN_COOLDOWN: Duration = Duration::from_secs(2);
 
+/// Steady re-poll interval for the dock zone (two tiny local-socket
+/// queries): float toggles/moves/resizes and the re-tiling they cause
+/// emit no Hyprland event, so polling is the only reliable signal. The
+/// render loop stays fully idle between polls.
+const ZONE_POLL_INTERVAL: Duration = Duration::from_millis(800);
+
 /// Duration of the launch bounce (two decaying hops), after which the
 /// card hides.
 const BOUNCE_DURATION: Duration = Duration::from_millis(550);
@@ -284,7 +303,10 @@ impl App {
     }
 
     /// Re-evaluate the dock zone against Hyprland's window layout
-    /// (intellihide). Called on relevant compositor events.
+    /// (intellihide). Called on relevant compositor events and from the
+    /// steady zone poll: float toggles, interactive float moves/resizes,
+    /// and the re-tiling they cause all emit *no* Hyprland event
+    /// (verified on socket2), so events alone can never be sufficient.
     fn on_layout_changed(&mut self) {
         if !self.config.input.intellihide {
             return;
@@ -302,12 +324,13 @@ impl App {
                     zone_w,
                     zone_h,
                 );
-                hypr::dock_zone_occupied(zone, mon.active_ws).map(|occupied| !occupied)
+                hypr::zone_state(zone, mon.active_ws).map(|state| !state.occupied)
             })
             .unwrap_or_else(|e| {
                 debug!("dock zone query failed: {e:#}");
                 false
             });
+
         if free == self.zone_free {
             return;
         }
