@@ -43,12 +43,15 @@ pub fn create_layer_surface(
 
 /// Flip keyboard interactivity as the popup expands/collapses.
 ///
-/// `OnDemand` while fully open (focus can be taken away — that drives
-/// auto-collapse), `None` while docked or hidden: the dock is
-/// pointer-only and must never steal keys.
+/// `Exclusive` while fully open: the popup only opens by deliberate
+/// gesture, and grabbing the keyboard is what makes type-to-search
+/// work without a click (the P4 focus-model decision). Losing focus
+/// (compositor override, alt-tab on some setups) still collapses via
+/// the keyboard-leave handler. `None` while docked or hidden: the dock
+/// is pointer-only and must never steal keys.
 pub fn set_interactive(layer: &LayerSurface, interactive: bool) {
     layer.set_keyboard_interactivity(if interactive {
-        KeyboardInteractivity::OnDemand
+        KeyboardInteractivity::Exclusive
     } else {
         KeyboardInteractivity::None
     });

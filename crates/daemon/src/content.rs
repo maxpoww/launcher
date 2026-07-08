@@ -42,14 +42,26 @@ pub struct IconInst {
     pub layer: u32,
 }
 
-/// One app-name label, centered under its icon.
+/// One text label.
 #[derive(Debug, Clone)]
 pub struct Label {
     pub text: String,
-    /// Horizontal center and top edge of the text box.
-    pub center: (f32, f32),
-    /// Maximum text width; longer names are clipped.
+    /// Anchor: (center-x, top) when `centered`, else (left, top).
+    pub pos: (f32, f32),
+    /// Maximum text width; longer text is clipped.
     pub max_w: f32,
+    /// Font size / line height in px.
+    pub font_px: f32,
+    pub line_px: f32,
+    /// Center horizontally about `pos.0` (app names under icons).
+    pub centered: bool,
+    /// Draw at reduced opacity (placeholder text).
+    pub dim: bool,
+    /// Cache the shaped glyphs (stable text like app names); the live
+    /// query string changes per keystroke and skips the cache.
+    pub cache: bool,
+    /// Extra clip rect for labels outside the grid scissor.
+    pub clip: Option<Rect>,
 }
 
 /// Scrollable grid content, clipped to `clip` by the renderer.
@@ -65,10 +77,13 @@ pub struct GridContent {
 #[derive(Debug, Default)]
 pub struct Scene {
     pub alpha: f32,
-    /// Unclipped fills: card background first, then dock hover.
+    /// Unclipped fills: card background first, then dock hover and the
+    /// search box.
     pub rects: Vec<RectInst>,
     /// Dock icon quads (unclipped; they live in the card's top sliver).
     pub icons: Vec<IconInst>,
+    /// Unclipped labels (search box text), clipped per-label.
+    pub labels: Vec<Label>,
     /// App grid, present once the card is risen past the dock band.
     pub grid: Option<GridContent>,
 }
@@ -91,10 +106,15 @@ const GRID_ICON: f32 = 48.0;
 const GRID_PAD_X: f32 = 14.0;
 const GRID_TOP_GAP: f32 = 8.0;
 const GRID_BOTTOM_PAD: f32 = 10.0;
-/// Text metrics the labels are laid out for (matches the renderer's
-/// glyphon metrics).
+/// Text metrics for the app-name labels.
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
+/// Search box: height, inner padding, and text metrics.
+const SEARCH_H: f32 = 40.0;
+const SEARCH_PAD_X: f32 = 14.0;
+const SEARCH_GAP: f32 = 10.0;
+const SEARCH_FONT_PX: f32 = 15.0;
+const SEARCH_LINE_PX: f32 = 20.0;
 
 /// Space kept above the fully risen card so magnified dock icons can
 /// swell past the card edge (macOS-style). The wl surface is this much
@@ -135,8 +155,10 @@ pub struct Layout {
     pub cols: usize,
     /// Current scroll offset actually applied (clamped).
     pub scroll: f32,
-    /// Total number of grid cells (all entries).
+    /// Total number of grid cells (the *visible*, filtered entries).
     pub cells: usize,
+    /// Search box at the bottom of the card.
+    pub search_box: Rect,
 }
 
 /// Compute the layout for the current animation state.
@@ -163,8 +185,16 @@ pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scrol
         })
         .collect();
 
+    // Search box hugs the card bottom; the grid ends above it.
+    let search_box = Rect::new(
+        GRID_PAD_X,
+        card_top + card_h - GRID_BOTTOM_PAD - SEARCH_H,
+        (w - 2.0 * GRID_PAD_X).max(0.0),
+        SEARCH_H,
+    );
+
     let grid_top = card_top + dock_h + GRID_TOP_GAP;
-    let grid_bottom = (card_top + card_h - GRID_BOTTOM_PAD).min(h);
+    let grid_bottom = (search_box.y - SEARCH_GAP).min(h);
     let inner_w = (w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
     let cols = ((inner_w / GRID_CELL_W).floor() as usize).max(1);
     let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
@@ -185,6 +215,7 @@ pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scrol
         cols,
         scroll: scroll.clamp(0.0, max_scroll),
         cells: n,
+        search_box,
     }
 }
 
@@ -210,7 +241,7 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32)) -> Option<Hit> {
 
 /// Per-frame dynamic inputs to scene assembly.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct FrameInput {
+pub struct FrameInput<'a> {
     /// Item under the pointer (hover highlight).
     pub hover: Option<Hit>,
     /// Card opacity from the animation.
@@ -221,13 +252,22 @@ pub struct FrameInput {
     pub pointer: Option<(f32, f32)>,
     /// Launch bounce: (entry index, upward offset in px).
     pub bounce: Option<(usize, f32)>,
+    /// Live search query (empty shows the placeholder).
+    pub query: &'a str,
+    /// Auto-selected grid position (best match while searching).
+    pub selected: Option<usize>,
 }
 
 /// Assemble the draw scene for one frame.
+///
+/// `visible` holds indices into `entries`, ranked by the current query
+/// — the grid shows exactly these, in order. Dock icons always show
+/// the first entries unfiltered.
 pub fn scene(
     config: &Config,
     layout: &Layout,
     entries: &[AppEntry],
+    visible: &[usize],
     surface: (f32, f32),
     frame: &FrameInput,
 ) -> Scene {
@@ -236,6 +276,8 @@ pub fn scene(
         alpha,
         pointer,
         bounce,
+        query,
+        selected,
     } = *frame;
     let (w, h) = surface;
     let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
@@ -288,8 +330,40 @@ pub fn scene(
         });
     }
 
+    // Search box at the card bottom, visible whenever the grid area is.
+    if layout.viewport.h > 1.0 {
+        let box_color = {
+            let hl = config.theme.highlight_rgba();
+            [hl[0], hl[1], hl[2], (hl[3] * 0.6).min(1.0)]
+        };
+        scene.rects.push(RectInst {
+            rect: layout.search_box,
+            radius: 12.0,
+            color: box_color,
+        });
+        let (text, dim) = if query.is_empty() {
+            ("Search apps…".to_string(), true)
+        } else {
+            (format!("{query}|"), false)
+        };
+        scene.labels.push(Label {
+            text,
+            pos: (
+                layout.search_box.x + SEARCH_PAD_X,
+                layout.search_box.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0,
+            ),
+            max_w: layout.search_box.w - 2.0 * SEARCH_PAD_X,
+            font_px: SEARCH_FONT_PX,
+            line_px: SEARCH_LINE_PX,
+            centered: false,
+            dim,
+            cache: query.is_empty(), // the placeholder is stable
+            clip: Some(layout.search_box),
+        });
+    }
+
     // Grid cells, once there is any viewport to draw into.
-    if layout.viewport.h > 1.0 && !entries.is_empty() {
+    if layout.viewport.h > 1.0 && !visible.is_empty() {
         let mut grid = GridContent {
             clip: layout.viewport,
             ..Default::default()
@@ -300,7 +374,10 @@ pub fn scene(
             let y = layout.viewport.y + row as f32 * GRID_CELL_H - layout.scroll;
             for col in 0..layout.cols {
                 let i = row * layout.cols + col;
-                let Some(entry) = entries.get(i) else {
+                let Some(&entry_idx) = visible.get(i) else {
+                    break;
+                };
+                let Some(entry) = entries.get(entry_idx) else {
                     break;
                 };
                 let cell = Rect::new(
@@ -309,7 +386,16 @@ pub fn scene(
                     GRID_CELL_W,
                     GRID_CELL_H,
                 );
-                if hover == Some(Hit::GridCell(i)) {
+                // Keyboard selection (best match) reads slightly stronger
+                // than the pointer hover.
+                if selected == Some(i) {
+                    let hl = config.theme.highlight_rgba();
+                    grid.rects.push(RectInst {
+                        rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                        radius: 14.0,
+                        color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
+                    });
+                } else if hover == Some(Hit::GridCell(i)) {
                     grid.rects.push(RectInst {
                         rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                         radius: 14.0,
@@ -328,13 +414,24 @@ pub fn scene(
                 };
                 let size = GRID_ICON * scale;
                 grid.icons.push(IconInst {
-                    rect: Rect::new(cx - size / 2.0, icon_cy - size / 2.0 - lift(i), size, size),
-                    layer: i as u32,
+                    rect: Rect::new(
+                        cx - size / 2.0,
+                        icon_cy - size / 2.0 - lift(entry_idx),
+                        size,
+                        size,
+                    ),
+                    layer: entry_idx as u32,
                 });
                 grid.labels.push(Label {
                     text: entry.name.clone(),
-                    center: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
+                    pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
                     max_w: cell.w - 12.0,
+                    font_px: LABEL_FONT_PX,
+                    line_px: LABEL_LINE_PX,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    clip: None,
                 });
             }
         }
@@ -367,6 +464,10 @@ mod tests {
             .collect()
     }
 
+    fn vis(n: usize) -> Vec<usize> {
+        (0..n).collect()
+    }
+
     fn config() -> Config {
         Config::default()
     }
@@ -384,6 +485,7 @@ mod tests {
             &cfg,
             &l,
             &entries(20),
+            &vis(20),
             SURFACE,
             &FrameInput {
                 alpha: 1.0,
@@ -404,6 +506,7 @@ mod tests {
             &cfg,
             &l,
             &entries(40),
+            &vis(40),
             SURFACE,
             &FrameInput {
                 alpha: 1.0,

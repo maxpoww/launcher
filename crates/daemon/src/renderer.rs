@@ -22,7 +22,7 @@ use wayland_client::{Connection, Proxy};
 use wgpu::util::DeviceExt;
 
 use crate::apps::ICON_SIZE;
-use crate::content::{Scene, LABEL_FONT_PX, LABEL_LINE_PX};
+use crate::content::Scene;
 
 /// Global uniforms shared by the rect and icon pipelines.
 #[repr(C)]
@@ -494,58 +494,90 @@ impl Renderer {
             (text_color[2] * 255.0) as u8,
             (text_color[3] * alpha * 255.0) as u8,
         );
-        // Shaping is by far the most expensive step of a frame, so shaped
-        // buffers are cached per label text (cleared when a new app set
-        // arrives); frames only rebuild the cheap TextAreas.
+        // Collect every label with its default clip: grid labels clip to
+        // the grid viewport, top-level labels to their own clip rect.
+        let full = crate::content::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: w as f32,
+            h: h as f32,
+        };
+        let mut all_labels: Vec<(&crate::content::Label, crate::content::Rect)> = Vec::new();
+        for label in &scene.labels {
+            all_labels.push((label, label.clip.unwrap_or(full)));
+        }
         if let Some(grid) = &scene.grid {
             for label in &grid.labels {
-                if !self.label_cache.contains_key(&label.text) {
-                    let mut buffer = TextBuffer::new(
-                        &mut self.font_system,
-                        Metrics::new(LABEL_FONT_PX, LABEL_LINE_PX),
-                    );
-                    buffer.set_size(
-                        &mut self.font_system,
-                        Some(label.max_w),
-                        Some(LABEL_LINE_PX),
-                    );
-                    buffer.set_text(
-                        &mut self.font_system,
-                        &label.text,
-                        Attrs::new().family(Family::SansSerif),
-                        Shaping::Advanced,
-                    );
-                    buffer.shape_until_scroll(&mut self.font_system, false);
-                    self.label_cache.insert(label.text.clone(), buffer);
-                }
+                all_labels.push((label, label.clip.unwrap_or(grid.clip)));
             }
         }
-        let mut text_buffers: Vec<(&TextBuffer, (f32, f32), TextBounds)> = Vec::new();
-        if let Some(grid) = &scene.grid {
-            for label in &grid.labels {
-                let Some(buffer) = self.label_cache.get(&label.text) else {
-                    continue;
-                };
-                // Center under the icon: measure the shaped line, offset
-                // left by half its width, and snap to whole pixels so
-                // glyphs stay crisp while the card moves.
-                let line_w = buffer
-                    .layout_runs()
-                    .next()
-                    .map(|run| run.line_w)
-                    .unwrap_or(0.0)
-                    .min(label.max_w);
-                let left = (label.center.0 - line_w / 2.0).round();
-                let top = label.center.1.round();
-                let clip = &grid.clip;
-                let bounds = TextBounds {
-                    left: clip.x as i32,
-                    top: clip.y as i32,
-                    right: (clip.x + clip.w) as i32,
-                    bottom: (clip.y + clip.h).min(h as f32) as i32,
-                };
-                text_buffers.push((buffer, (left, top), bounds));
+
+        // Shaping is by far the most expensive step of a frame, so
+        // cacheable labels (stable text like app names) keep their
+        // shaped buffers across frames; volatile ones (the live query)
+        // are shaped fresh into `fresh` each frame.
+        let shape = |font_system: &mut FontSystem, label: &crate::content::Label| {
+            let mut buffer =
+                TextBuffer::new(font_system, Metrics::new(label.font_px, label.line_px));
+            buffer.set_size(font_system, Some(label.max_w), Some(label.line_px));
+            buffer.set_text(
+                font_system,
+                &label.text,
+                Attrs::new().family(Family::SansSerif),
+                Shaping::Advanced,
+            );
+            buffer.shape_until_scroll(font_system, false);
+            buffer
+        };
+        let mut fresh: Vec<TextBuffer> = Vec::new();
+        let mut fresh_of: Vec<Option<usize>> = Vec::with_capacity(all_labels.len());
+        for (label, _) in &all_labels {
+            if label.cache {
+                let key = format!("{}\u{1}{}", label.text, label.font_px);
+                if !self.label_cache.contains_key(&key) {
+                    let buffer = shape(&mut self.font_system, label);
+                    self.label_cache.insert(key, buffer);
+                }
+                fresh_of.push(None);
+            } else {
+                fresh.push(shape(&mut self.font_system, label));
+                fresh_of.push(Some(fresh.len() - 1));
             }
+        }
+
+        let mut text_buffers: Vec<(&TextBuffer, (f32, f32), TextBounds, bool)> = Vec::new();
+        for (i, (label, clip)) in all_labels.iter().enumerate() {
+            let buffer = match fresh_of[i] {
+                Some(fi) => &fresh[fi],
+                None => {
+                    let key = format!("{}\u{1}{}", label.text, label.font_px);
+                    match self.label_cache.get(&key) {
+                        Some(buffer) => buffer,
+                        None => continue,
+                    }
+                }
+            };
+            // Measure the shaped line; center about the anchor when
+            // requested; snap to whole pixels so glyphs stay crisp.
+            let line_w = buffer
+                .layout_runs()
+                .next()
+                .map(|run| run.line_w)
+                .unwrap_or(0.0)
+                .min(label.max_w);
+            let left = if label.centered {
+                (label.pos.0 - line_w / 2.0).round()
+            } else {
+                label.pos.0.round()
+            };
+            let top = label.pos.1.round();
+            let bounds = TextBounds {
+                left: clip.x as i32,
+                top: clip.y as i32,
+                right: (clip.x + clip.w) as i32,
+                bottom: (clip.y + clip.h).min(h as f32) as i32,
+            };
+            text_buffers.push((buffer, (left, top), bounds, label.dim));
         }
         self.text_viewport.update(
             &self.queue,
@@ -554,15 +586,23 @@ impl Renderer {
                 height: h,
             },
         );
-        let areas = text_buffers.iter().map(|(buffer, pos, bounds)| TextArea {
-            buffer,
-            left: pos.0,
-            top: pos.1,
-            scale: 1.0,
-            bounds: *bounds,
-            default_color: text_rgba,
-            custom_glyphs: &[],
-        });
+        let dim_rgba = glyphon::Color::rgba(
+            (text_color[0] * 255.0) as u8,
+            (text_color[1] * 255.0) as u8,
+            (text_color[2] * 255.0) as u8,
+            (text_color[3] * alpha * 0.45 * 255.0) as u8,
+        );
+        let areas = text_buffers
+            .iter()
+            .map(|(buffer, pos, bounds, dim)| TextArea {
+                buffer,
+                left: pos.0,
+                top: pos.1,
+                scale: 1.0,
+                bounds: *bounds,
+                default_color: if *dim { dim_rgba } else { text_rgba },
+                custom_glyphs: &[],
+            });
         self.text_renderer
             .prepare(
                 &self.device,
@@ -635,13 +675,17 @@ impl Renderer {
                             pass.draw(0..4, n_icons_unclipped..n_icons);
                         }
                     }
-                    if !text_buffers.is_empty() {
-                        self.text_renderer
-                            .render(&self.text_atlas, &self.text_viewport, &mut pass)
-                            .context("glyphon render failed")?;
-                    }
                     pass.set_scissor_rect(0, 0, w, h);
                 }
+            }
+
+            // Text renders unscissored: every TextArea carries its own
+            // clip bounds (grid viewport for app names, the search box
+            // for the query), so labels outside the grid still show.
+            if !text_buffers.is_empty() {
+                self.text_renderer
+                    .render(&self.text_atlas, &self.text_viewport, &mut pass)
+                    .context("glyphon render failed")?;
             }
         }
 
