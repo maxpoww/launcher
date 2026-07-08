@@ -76,6 +76,9 @@ pub struct Renderer {
     text_viewport: Viewport,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
+    /// Shaped label buffers, keyed by label text; invalidated when a
+    /// new app set arrives via [`Renderer::set_icons`].
+    label_cache: std::collections::HashMap<String, TextBuffer>,
 }
 
 impl Renderer {
@@ -352,6 +355,7 @@ impl Renderer {
             text_viewport,
             text_atlas,
             text_renderer,
+            label_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -369,6 +373,8 @@ impl Renderer {
     /// Upload the icon texture array delivered by the indexer thread.
     /// `icons` holds one premultiplied RGBA8 `ICON_SIZE`² image per app.
     pub fn set_icons(&mut self, icons: &[Vec<u8>]) {
+        // New app set: previously shaped labels may be stale.
+        self.label_cache.clear();
         let layers = icons.len().max(1) as u32;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("waverunner.icons"),
@@ -488,34 +494,49 @@ impl Renderer {
             (text_color[2] * 255.0) as u8,
             (text_color[3] * alpha * 255.0) as u8,
         );
-        let mut text_buffers: Vec<(TextBuffer, (f32, f32), TextBounds)> = Vec::new();
+        // Shaping is by far the most expensive step of a frame, so shaped
+        // buffers are cached per label text (cleared when a new app set
+        // arrives); frames only rebuild the cheap TextAreas.
         if let Some(grid) = &scene.grid {
             for label in &grid.labels {
-                let mut buffer = TextBuffer::new(
-                    &mut self.font_system,
-                    Metrics::new(LABEL_FONT_PX, LABEL_LINE_PX),
-                );
-                buffer.set_size(
-                    &mut self.font_system,
-                    Some(label.max_w),
-                    Some(LABEL_LINE_PX),
-                );
-                buffer.set_text(
-                    &mut self.font_system,
-                    &label.text,
-                    Attrs::new().family(Family::SansSerif),
-                    Shaping::Advanced,
-                );
-                buffer.shape_until_scroll(&mut self.font_system, false);
-                // Center under the icon: measure the shaped line and
-                // offset left by half its width (clamped to max_w).
+                if !self.label_cache.contains_key(&label.text) {
+                    let mut buffer = TextBuffer::new(
+                        &mut self.font_system,
+                        Metrics::new(LABEL_FONT_PX, LABEL_LINE_PX),
+                    );
+                    buffer.set_size(
+                        &mut self.font_system,
+                        Some(label.max_w),
+                        Some(LABEL_LINE_PX),
+                    );
+                    buffer.set_text(
+                        &mut self.font_system,
+                        &label.text,
+                        Attrs::new().family(Family::SansSerif),
+                        Shaping::Advanced,
+                    );
+                    buffer.shape_until_scroll(&mut self.font_system, false);
+                    self.label_cache.insert(label.text.clone(), buffer);
+                }
+            }
+        }
+        let mut text_buffers: Vec<(&TextBuffer, (f32, f32), TextBounds)> = Vec::new();
+        if let Some(grid) = &scene.grid {
+            for label in &grid.labels {
+                let Some(buffer) = self.label_cache.get(&label.text) else {
+                    continue;
+                };
+                // Center under the icon: measure the shaped line, offset
+                // left by half its width, and snap to whole pixels so
+                // glyphs stay crisp while the card moves.
                 let line_w = buffer
                     .layout_runs()
                     .next()
                     .map(|run| run.line_w)
                     .unwrap_or(0.0)
                     .min(label.max_w);
-                let left = label.center.0 - line_w / 2.0;
+                let left = (label.center.0 - line_w / 2.0).round();
+                let top = label.center.1.round();
                 let clip = &grid.clip;
                 let bounds = TextBounds {
                     left: clip.x as i32,
@@ -523,7 +544,7 @@ impl Renderer {
                     right: (clip.x + clip.w) as i32,
                     bottom: (clip.y + clip.h).min(h as f32) as i32,
                 };
-                text_buffers.push((buffer, (left, label.center.1), bounds));
+                text_buffers.push((buffer, (left, top), bounds));
             }
         }
         self.text_viewport.update(
