@@ -28,15 +28,14 @@ use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
-use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{
     LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
 };
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
-    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
-    delegate_registry, delegate_seat, registry_handlers,
+    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
+    delegate_seat, registry_handlers,
 };
 use tracing::{debug, error, info, warn};
 use waverunner_core::index::AppEntry;
@@ -44,7 +43,7 @@ use waverunner_core::Config;
 use waverunner_proto::Command;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface};
-use wayland_client::{Connection, QueueHandle};
+use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 
 use crate::content::Hit;
 use crate::renderer::Renderer;
@@ -111,6 +110,7 @@ fn main() -> anyhow::Result<()> {
         scale_factor: 1,
         last_frame: None,
         frame_pending: false,
+        dirty: false,
         keyboard: None,
         pointer: None,
         scroll_accum: 0.0,
@@ -120,6 +120,7 @@ fn main() -> anyhow::Result<()> {
         entries: Vec::new(),
         pending_icons: None,
         hover: None,
+        pressed: None,
         pointer_pos: None,
         list_scroll: 0.0,
         exit: false,
@@ -174,6 +175,9 @@ pub struct App {
     last_frame: Option<Instant>,
     /// True while a frame callback is in flight (avoid double-requesting).
     frame_pending: bool,
+    /// Scene changed since the last draw; the pending frame callback
+    /// (if any) will redraw.
+    dirty: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
     /// Accumulated vertical scroll over the dock, for the expand gesture.
@@ -193,6 +197,9 @@ pub struct App {
     pending_icons: Option<Vec<Vec<u8>>>,
     /// Item currently under the pointer.
     hover: Option<Hit>,
+    /// Item a left-button press started on; release on the same item
+    /// activates it.
+    pressed: Option<Hit>,
     /// Pointer position in surface coordinates, while inside.
     pointer_pos: Option<(f32, f32)>,
     /// App-grid scroll offset in pixels (clamped during layout).
@@ -204,6 +211,9 @@ pub struct App {
 /// Accumulated scroll (in wl_pointer axis units; one wheel notch ≈ 15)
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
+
+/// Linux evdev code for the left mouse button.
+const BTN_LEFT: u32 = 0x110;
 
 impl App {
     /// Entry point for IPC commands (called from ipc.rs) and for
@@ -245,6 +255,13 @@ impl App {
             .pointer_pos
             .and_then(|pos| content::hit_test(&self.current_layout(), pos));
         if hover != self.hover {
+            debug!(
+                "hover: {:?} -> {:?} at {:?} (extent {})",
+                self.hover,
+                hover,
+                self.pointer_pos,
+                self.ui.extent()
+            );
             self.hover = hover;
             self.schedule_frame();
         }
@@ -292,21 +309,26 @@ impl App {
         }
     }
 
-    /// Draw immediately if the surface is ready and no frame callback is
-    /// already in flight.
+    /// Mark the scene damaged. Draws immediately when no frame callback
+    /// is in flight; otherwise the damage is coalesced onto the pending
+    /// callback, so redraw rate never exceeds the display refresh no
+    /// matter how fast input events arrive.
     fn schedule_frame(&mut self) {
         if self.renderer.is_none() {
             debug!("frame requested before first configure; deferring");
             return;
         }
+        self.dirty = true;
         if !self.frame_pending {
-            self.last_frame = None; // animation resumes: don't count idle time as dt
+            self.last_frame = None; // waking from idle: don't count idle time as dt
             self.draw();
         }
     }
 
-    /// Render one frame; while animating, request the next frame callback
-    /// *before* presenting so it rides on this frame's commit.
+    /// Render one frame and request the next frame callback, which rides
+    /// on this frame's commit. The callback redraws only if the scene is
+    /// animating or damaged again — otherwise it fires clean and the
+    /// daemon goes fully idle (no further frame requests).
     fn draw(&mut self) {
         if self.renderer.is_none() {
             return;
@@ -320,16 +342,18 @@ impl App {
         self.last_frame = Some(now);
 
         let animating = self.ui.tick(dt);
-
         if animating {
-            let wl_surface = self.layer.wl_surface();
-            wl_surface.frame(&self.qh, wl_surface.clone());
-            self.frame_pending = true;
-        } else {
-            self.frame_pending = false;
-            self.last_frame = None;
-            debug!("settled in {:?}, going idle", self.ui.target());
+            // The card is moving under a possibly stationary pointer:
+            // keep the hover highlight glued to what is really beneath it.
+            self.hover = self
+                .pointer_pos
+                .and_then(|pos| content::hit_test(&self.current_layout(), pos));
         }
+        self.dirty = false;
+
+        let wl_surface = self.layer.wl_surface();
+        wl_surface.frame(&self.qh, wl_surface.clone());
+        self.frame_pending = true;
 
         let layout = self.current_layout();
         self.list_scroll = layout.scroll; // keep the clamped value
@@ -346,6 +370,43 @@ impl App {
         };
         if let Err(e) = renderer.render(&scene, self.config.theme.text_rgba()) {
             error!("render failed: {e:#}");
+        }
+    }
+
+    /// One vertical-scroll step of `value` axis units.
+    ///
+    /// Docked, the wheel is the expand/collapse gesture; open, it
+    /// scrolls the grid, and pushing past the top accumulates into the
+    /// collapse gesture instead. Natural scroll (default): scrolling
+    /// down expands, up collapses; classic direction when disabled.
+    fn on_scroll(&mut self, value: f64) {
+        match self.ui.target() {
+            Target::Dock => self.scroll_accum += value,
+            Target::Open => {
+                let next = self.list_scroll + value as f32;
+                if next < 0.0 && self.list_scroll <= 0.0 {
+                    self.scroll_accum += value;
+                } else {
+                    // Normal grid scrolling: any partial collapse
+                    // gesture is abandoned.
+                    self.scroll_accum = 0.0;
+                    self.list_scroll = next.max(0.0);
+                    self.update_hover();
+                    self.schedule_frame();
+                }
+            }
+            Target::Hidden => {}
+        }
+        let mut toward_open = self.scroll_accum;
+        if self.config.input.natural_scroll {
+            toward_open = -toward_open;
+        }
+        if toward_open <= -SCROLL_THRESHOLD {
+            self.scroll_accum = 0.0;
+            self.handle_command(Command::Expand);
+        } else if toward_open >= SCROLL_THRESHOLD {
+            self.scroll_accum = 0.0;
+            self.handle_command(Command::Collapse);
         }
     }
 
@@ -404,8 +465,11 @@ impl CompositorHandler for App {
         _time: u32,
     ) {
         self.frame_pending = false;
-        if self.ui.is_animating() {
+        if self.ui.is_animating() || self.dirty {
             self.draw();
+        } else {
+            self.last_frame = None;
+            debug!("settled in {:?}, going idle", self.ui.target());
         }
     }
 
@@ -498,10 +562,9 @@ impl SeatHandler for App {
             }
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
-            match self.seat_state.get_pointer(qh, &seat) {
-                Ok(pointer) => self.pointer = Some(pointer),
-                Err(e) => warn!("cannot get pointer: {e}"),
-            }
+            // Raw wl_pointer (see the Dispatch impl below for why sctk's
+            // frame-batched pointer helper is not used).
+            self.pointer = Some(seat.get_pointer(qh, ()));
         }
     }
 
@@ -594,85 +657,86 @@ impl KeyboardHandler for App {
     }
 }
 
-impl PointerHandler for App {
-    fn pointer_frame(
-        &mut self,
+/// Raw `wl_pointer` dispatch — deliberately *not* sctk's `PointerHandler`.
+///
+/// sctk batches pointer events and only delivers them when a
+/// `wl_pointer.frame` event arrives, but this compositor (Hyprland) only
+/// sends `frame` alongside enter/leave/button: plain motion arrives
+/// frameless and would sit buffered forever, freezing hover on whatever
+/// the enter event hit first. Processing each event as it arrives is
+/// what the mainstream toolkits do and works on both behaviors.
+impl Dispatch<wl_pointer::WlPointer, ()> for App {
+    fn event(
+        app: &mut Self,
+        _pointer: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _pointer: &wl_pointer::WlPointer,
-        events: &[PointerEvent],
     ) {
-        for event in events {
-            match event.kind {
-                PointerEventKind::Axis { vertical, .. } => match self.ui.target() {
-                    // Docked: the wheel is the expand/collapse gesture.
-                    Target::Dock => self.scroll_accum += vertical.absolute,
-                    // Open: the wheel scrolls the grid; pushing past the
-                    // top accumulates into the collapse gesture instead.
-                    Target::Open => {
-                        let next = self.list_scroll + vertical.absolute as f32;
-                        if next < 0.0 && self.list_scroll <= 0.0 {
-                            self.scroll_accum += vertical.absolute;
-                        } else {
-                            self.list_scroll = next.max(0.0);
-                            self.update_hover();
-                            self.schedule_frame();
-                        }
-                    }
-                    Target::Hidden => {}
-                },
-                PointerEventKind::Enter { .. } => {
-                    // Any pending auto-hide is off: the pointer is back.
-                    self.hide_deadline = None;
-                    self.pointer_pos = Some((event.position.0 as f32, event.position.1 as f32));
-                    // While hidden, only the edge-reveal strip is
-                    // pointer-sensitive, so entering means "summon".
-                    if self.ui.target() == Target::Hidden && self.config.input.edge_reveal {
-                        self.handle_command(Command::Show);
-                    }
-                    self.update_hover();
+        match event {
+            wl_pointer::Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                // Any pending auto-hide is off: the pointer is back.
+                app.hide_deadline = None;
+                app.pointer_pos = Some((surface_x as f32, surface_y as f32));
+                // While hidden, only the edge-reveal strip is
+                // pointer-sensitive, so entering means "summon".
+                if app.ui.target() == Target::Hidden && app.config.input.edge_reveal {
+                    app.handle_command(Command::Show);
                 }
-                PointerEventKind::Motion { .. } => {
-                    self.pointer_pos = Some((event.position.0 as f32, event.position.1 as f32));
-                    self.update_hover();
-                }
-                PointerEventKind::Leave { .. } => {
-                    self.scroll_accum = 0.0;
-                    self.pointer_pos = None;
-                    self.update_hover();
-                    if self.config.input.autohide && self.ui.target() != Target::Hidden {
-                        self.schedule_autohide();
-                    }
-                }
-                PointerEventKind::Press { button, .. } => {
-                    const BTN_LEFT: u32 = 0x110;
-                    if button == BTN_LEFT {
-                        // Hit-test at press time: hover may be stale if
-                        // the card moved under a stationary pointer.
-                        self.update_hover();
-                        match self.hover {
-                            Some(Hit::DockIcon(i)) | Some(Hit::GridCell(i)) => self.activate(i),
-                            None => {}
-                        }
-                    }
-                }
-                _ => {}
+                app.update_hover();
             }
-        }
-        // Natural scroll (default): scrolling down (positive axis values,
-        // content-follows-fingers) on the dock expands to the full popup,
-        // scrolling up collapses; from the open grid, scrolling past the
-        // top collapses. Classic direction when disabled.
-        let mut toward_open = self.scroll_accum;
-        if self.config.input.natural_scroll {
-            toward_open = -toward_open;
-        }
-        if toward_open <= -SCROLL_THRESHOLD {
-            self.scroll_accum = 0.0;
-            self.handle_command(Command::Expand);
-        } else if toward_open >= SCROLL_THRESHOLD {
-            self.scroll_accum = 0.0;
-            self.handle_command(Command::Collapse);
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                app.pointer_pos = Some((surface_x as f32, surface_y as f32));
+                app.update_hover();
+            }
+            wl_pointer::Event::Leave { .. } => {
+                app.scroll_accum = 0.0;
+                app.pointer_pos = None;
+                app.pressed = None;
+                app.update_hover();
+                if app.config.input.autohide && app.ui.target() != Target::Hidden {
+                    app.schedule_autohide();
+                }
+            }
+            wl_pointer::Event::Button { button, state, .. } if button == BTN_LEFT => {
+                match state {
+                    WEnum::Value(wl_pointer::ButtonState::Pressed) => {
+                        app.update_hover();
+                        app.pressed = app.hover;
+                    }
+                    WEnum::Value(wl_pointer::ButtonState::Released) => {
+                        // Native button behavior: activate on release,
+                        // only if it happens on the item the press armed
+                        // (dragging away cancels the click).
+                        app.update_hover();
+                        if let Some(hit) = app.pressed.take() {
+                            if app.hover == Some(hit) {
+                                match hit {
+                                    Hit::DockIcon(i) | Hit::GridCell(i) => app.activate(i),
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } => {
+                app.on_scroll(value);
+            }
+            _ => {} // frame, axis metadata, other buttons/axes
         }
     }
 }
@@ -718,6 +782,5 @@ delegate_compositor!(App);
 delegate_output!(App);
 delegate_seat!(App);
 delegate_keyboard!(App);
-delegate_pointer!(App);
 delegate_layer!(App);
 delegate_registry!(App);
