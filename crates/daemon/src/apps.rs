@@ -1,7 +1,17 @@
 //! Background application discovery: desktop-entry scan plus icon
 //! rasterization, run on the one background thread the daemon allows.
-//! The finished result is handed to the event loop over a calloop
-//! channel; nothing here touches Wayland or wgpu.
+//!
+//! The thread is long-lived and rescans on request (the daemon asks
+//! whenever the dock is summoned), so newly installed apps appear and
+//! uninstalled ones vanish without a daemon restart. Rasterized icons
+//! are cached across rescans keyed by resolved file path — a nix
+//! store path changes when the theme updates, invalidating naturally —
+//! so a rescan costs only the `.desktop` parse plus new icons. Results
+//! are handed to the event loop over a calloop channel; nothing here
+//! touches Wayland or wgpu.
+
+use std::collections::HashMap;
+use std::sync::mpsc;
 
 use calloop::channel::Sender;
 use resvg::tiny_skia;
@@ -23,39 +33,80 @@ pub struct LoadedApps {
     pub icons: Vec<Vec<u8>>,
 }
 
-/// Spawn the indexer thread. Errors sending the result mean the daemon
-/// is shutting down and are ignored.
-pub fn spawn_indexer(icon_theme: String, sender: Sender<LoadedApps>) {
+/// Handle to the long-lived indexer thread.
+pub struct Indexer {
+    requests: mpsc::Sender<()>,
+}
+
+impl Indexer {
+    /// Ask for a rescan. Multiple queued requests coalesce into one
+    /// scan; a dead indexer thread makes this a no-op.
+    pub fn request_rescan(&self) {
+        let _ = self.requests.send(());
+    }
+}
+
+/// Spawn the indexer thread and queue the initial scan. The thread
+/// exits when either channel closes (daemon shutdown).
+pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer {
+    let (requests, rx) = mpsc::channel::<()>();
     let spawned = std::thread::Builder::new()
         .name("waverunner-index".into())
         .spawn(move || {
-            let started = std::time::Instant::now();
-            let index = DesktopIndex::scan();
-            let icons = index
-                .entries
-                .iter()
-                .map(|entry| {
-                    load_icon(entry, &icon_theme).unwrap_or_else(|| placeholder_icon(&entry.name))
-                })
-                .collect();
-            debug!(
-                "indexed {} apps in {:?}",
-                index.entries.len(),
-                started.elapsed()
-            );
-            let _ = sender.send(LoadedApps {
-                entries: index.entries,
-                icons,
-            });
+            let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+            while rx.recv().is_ok() {
+                // Coalesce any requests that queued up meanwhile.
+                while rx.try_recv().is_ok() {}
+
+                let started = std::time::Instant::now();
+                let index = DesktopIndex::scan();
+                let icons = index
+                    .entries
+                    .iter()
+                    .map(|entry| cached_icon(&mut icon_cache, entry, &icon_theme))
+                    .collect();
+                debug!(
+                    "indexed {} apps in {:?}",
+                    index.entries.len(),
+                    started.elapsed()
+                );
+                if results
+                    .send(LoadedApps {
+                        entries: index.entries,
+                        icons,
+                    })
+                    .is_err()
+                {
+                    return; // event loop is gone
+                }
+            }
         });
     if let Err(e) = spawned {
         warn!("cannot spawn indexer thread: {e}");
     }
+    let indexer = Indexer { requests };
+    indexer.request_rescan();
+    indexer
 }
 
-/// Resolve and rasterize one entry's icon to `ICON_SIZE`² premultiplied
-/// RGBA. Returns `None` when the icon is missing or undecodable.
-fn load_icon(entry: &AppEntry, theme: &str) -> Option<Vec<u8>> {
+/// Look an entry's icon up in (or insert it into) the raster cache.
+fn cached_icon(cache: &mut HashMap<String, Vec<u8>>, entry: &AppEntry, theme: &str) -> Vec<u8> {
+    let (key, path) = match resolve_icon_path(entry, theme) {
+        Some(path) => (path.clone(), Some(path)),
+        None => (format!("placeholder:{}", entry.name), None),
+    };
+    if let Some(pixels) = cache.get(&key) {
+        return pixels.clone();
+    }
+    let pixels = path
+        .and_then(|p| rasterize_icon_file(&p, &entry.id))
+        .unwrap_or_else(|| placeholder_icon(&entry.name));
+    cache.insert(key, pixels.clone());
+    pixels
+}
+
+/// Resolve an entry's icon name to a file path via the theme lookup.
+fn resolve_icon_path(entry: &AppEntry, theme: &str) -> Option<String> {
     let name = entry.icon.as_deref()?;
     let path = if name.starts_with('/') {
         std::path::PathBuf::from(name)
@@ -70,13 +121,18 @@ fn load_icon(entry: &AppEntry, theme: &str) -> Option<Vec<u8>> {
                     .find()
             })?
     };
+    Some(path.to_string_lossy().into_owned())
+}
 
-    let data = std::fs::read(&path).ok()?;
+/// Read and rasterize one icon file to `ICON_SIZE`² premultiplied RGBA.
+fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
+    let path = std::path::Path::new(path);
+    let data = std::fs::read(path).ok()?;
     let pixmap = match path.extension().and_then(|e| e.to_str()) {
         Some("svg") | Some("svgz") => rasterize_svg(&data)?,
         Some("png") => fit_pixmap(tiny_skia::Pixmap::decode_png(&data).ok()?),
         other => {
-            debug!("unsupported icon format {other:?} for {}", entry.id);
+            debug!("unsupported icon format {other:?} for {id}");
             return None;
         }
     };

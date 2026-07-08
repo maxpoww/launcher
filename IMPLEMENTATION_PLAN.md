@@ -125,9 +125,17 @@ Done (verified live in the VM, 11-entry corpus):
   (scrolling past the top collapses), click launches via double-fork +
   `setsid` (`daemon::launch`) and hides the card.
 
+The index auto-refreshes: summoning the dock requests a rescan
+(coalesced, 2 s cooldown) from the long-lived indexer thread, so
+installs/uninstalls appear without a restart. Rasterized icons are
+cached across rescans keyed by resolved path (nix store paths change
+on theme updates, invalidating naturally). Note: on NixOS, a session
+whose XDG_DATA_DIRS pins a package-specific store path keeps showing
+that app until re-login — env staleness, not scan staleness.
+
 Remaining tasks:
-1. Index/icon cache under `$XDG_CACHE_HOME/waverunner` with mtime
-   invalidation (scan+raster is ~1.2 s cold on the VM, off-thread).
+1. Persistent icon cache under `$XDG_CACHE_HOME/waverunner` so cold
+   daemon start skips rasterization (in-memory cache covers rescans).
 2. Text input: xkb keysym → UTF-8, query string, re-rank with
    `core::Searcher` per keystroke; typing while docked expands. Decide
    the keyboard-focus model (`Exclusive` while visible vs.

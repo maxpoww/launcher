@@ -89,6 +89,12 @@ fn main() -> anyhow::Result<()> {
         surface_height,
     );
 
+    // App discovery runs on the one allowed background thread; it
+    // rescans on request (dock reveals) and delivers results over this
+    // channel. The initial scan is queued by spawn_indexer.
+    let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
+    let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -123,16 +129,14 @@ fn main() -> anyhow::Result<()> {
         pressed: None,
         pointer_pos: None,
         list_scroll: 0.0,
+        indexer,
+        last_rescan: Instant::now(),
         exit: false,
     };
 
     let socket_path = waverunner_proto::socket_path();
     let _socket_guard = ipc::listen(&event_loop.handle(), &socket_path)?;
 
-    // App discovery runs on the one allowed background thread; results
-    // arrive in the event loop over this channel.
-    let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
-    apps::spawn_indexer(app.config.theme.icon_theme.clone(), apps_tx);
     event_loop
         .handle()
         .insert_source(apps_rx, |event, _, app| {
@@ -204,6 +208,10 @@ pub struct App {
     pointer_pos: Option<(f32, f32)>,
     /// App-grid scroll offset in pixels (clamped during layout).
     list_scroll: f32,
+    /// Handle to the background indexer thread.
+    indexer: apps::Indexer,
+    /// When the last rescan was requested, for the reveal cooldown.
+    last_rescan: Instant,
 
     exit: bool,
 }
@@ -215,13 +223,31 @@ const SCROLL_THRESHOLD: f64 = 10.0;
 /// Linux evdev code for the left mouse button.
 const BTN_LEFT: u32 = 0x110;
 
+/// Minimum time between app-index rescans. Summoning the dock checks
+/// freshness; mashing toggle does not scan repeatedly.
+const RESCAN_COOLDOWN: Duration = Duration::from_secs(2);
+
 impl App {
     /// Entry point for IPC commands (called from ipc.rs) and for
     /// internally generated commands (Escape, focus loss, scroll).
     pub fn handle_command(&mut self, command: Command) {
+        // Summoning or expanding is the moment freshness matters:
+        // rescan (coalesced, cooldown-limited) so newly installed and
+        // uninstalled apps are reflected without a restart.
+        if matches!(command, Command::Show | Command::Toggle | Command::Expand) {
+            self.maybe_rescan();
+        }
         if self.ui.apply(command) {
             self.sync_surface_state();
             self.schedule_frame();
+        }
+    }
+
+    /// Request an app-index rescan unless one was requested recently.
+    fn maybe_rescan(&mut self) {
+        if self.last_rescan.elapsed() >= RESCAN_COOLDOWN {
+            self.last_rescan = Instant::now();
+            self.indexer.request_rescan();
         }
     }
 
@@ -234,6 +260,9 @@ impl App {
             Some(renderer) => renderer.set_icons(&loaded.icons),
             None => self.pending_icons = Some(loaded.icons),
         }
+        // Indices may have shifted: drop any armed click and re-resolve
+        // what the pointer is over.
+        self.pressed = None;
         self.update_hover();
         self.schedule_frame();
     }
