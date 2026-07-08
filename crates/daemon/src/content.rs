@@ -96,6 +96,29 @@ const GRID_BOTTOM_PAD: f32 = 10.0;
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
 
+/// Space kept above the fully risen card so magnified dock icons can
+/// swell past the card edge (macOS-style). The wl surface is this much
+/// taller than the card + gap; the animation extent never enters it.
+pub const MAGNIFY_HEADROOM: f32 = 24.0;
+/// Peak scale of a dock icon directly under the cursor.
+const DOCK_MAGNIFY: f32 = 1.5;
+/// Horizontal falloff radius of dock magnification, in pixels.
+const DOCK_MAG_RADIUS: f32 = 120.0;
+/// Vertical attenuation radius, measured from the dock band's edges
+/// (zero inside the band). Small on purpose: the effect must die out
+/// before the first grid row so hovering the grid never stirs the dock.
+const DOCK_MAG_VRADIUS: f32 = 28.0;
+/// Peak scale of a grid icon under the cursor.
+const GRID_MAGNIFY: f32 = 1.22;
+/// Radial falloff radius of grid magnification, in pixels.
+const GRID_MAG_RADIUS: f32 = 95.0;
+
+/// Cosine ease from 1.0 at `d == 0` to 0.0 at `d >= radius`.
+fn falloff(d: f32, radius: f32) -> f32 {
+    let t = (d.abs() / radius).min(1.0);
+    0.5 * (1.0 + (std::f32::consts::PI * t).cos())
+}
+
 /// Geometry shared by scene assembly and hit-testing.
 #[derive(Debug)]
 pub struct Layout {
@@ -124,7 +147,7 @@ pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scrol
     let (w, h) = surface;
     let card_top = h - extent;
     let dock_h = config.window.input_bar_height as f32;
-    let card_h = h - config.window.bottom_margin as f32;
+    let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
 
     let max_slots = (((w - 2.0 * DOCK_PAD_X) / DOCK_SLOT).floor() as usize).max(1);
     let n_dock = n.min(max_slots);
@@ -185,20 +208,44 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32)) -> Option<Hit> {
     None
 }
 
+/// Per-frame dynamic inputs to scene assembly.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameInput {
+    /// Item under the pointer (hover highlight).
+    pub hover: Option<Hit>,
+    /// Card opacity from the animation.
+    pub alpha: f32,
+    /// Pointer position driving the macOS-style magnification (icons
+    /// swell under the cursor with cosine falloff; purely visual,
+    /// hit-boxes stay fixed).
+    pub pointer: Option<(f32, f32)>,
+    /// Launch bounce: (entry index, upward offset in px).
+    pub bounce: Option<(usize, f32)>,
+}
+
 /// Assemble the draw scene for one frame.
 pub fn scene(
     config: &Config,
     layout: &Layout,
     entries: &[AppEntry],
-    hover: Option<Hit>,
-    alpha: f32,
     surface: (f32, f32),
+    frame: &FrameInput,
 ) -> Scene {
+    let FrameInput {
+        hover,
+        alpha,
+        pointer,
+        bounce,
+    } = *frame;
     let (w, h) = surface;
-    let card_h = h - config.window.bottom_margin as f32;
+    let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
     let mut scene = Scene {
         alpha,
         ..Default::default()
+    };
+    let lift = |i: usize| match bounce {
+        Some((b, offset)) if b == i => offset,
+        _ => 0.0,
     };
 
     // Card background.
@@ -219,14 +266,24 @@ pub fn scene(
         }
     }
     for (i, slot) in layout.dock_slots.iter().enumerate() {
-        let inset = (DOCK_SLOT - DOCK_ICON) / 2.0;
+        // Magnify with the cursor: horizontal cosine falloff, attenuated
+        // by vertical distance from the dock row. Icons grow upward from
+        // a fixed baseline (into the headroom), macOS style.
+        let cx = slot.x + slot.w / 2.0;
+        let baseline = slot.y + slot.h - 6.0;
+        let scale = match pointer {
+            Some((px, py)) => {
+                // Distance outside the dock band (zero while on the row),
+                // so hovering the grid never stirs the dock icons.
+                let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
+                let fy = falloff(d_out, DOCK_MAG_VRADIUS);
+                1.0 + (DOCK_MAGNIFY - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy
+            }
+            None => 1.0,
+        };
+        let size = (DOCK_ICON * scale).min(slot.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
         scene.icons.push(IconInst {
-            rect: Rect::new(
-                slot.x + inset,
-                slot.y + (slot.h - DOCK_ICON).max(0.0) / 2.0,
-                DOCK_ICON,
-                DOCK_ICON.min(slot.h),
-            ),
+            rect: Rect::new(cx - size / 2.0, baseline - size - lift(i), size, size),
             layer: i as u32,
         });
     }
@@ -260,8 +317,18 @@ pub fn scene(
                     });
                 }
                 let cx = cell.x + cell.w / 2.0;
+                let icon_cy = cell.y + 12.0 + GRID_ICON / 2.0;
+                // Radial magnification about the icon center.
+                let scale = match pointer {
+                    Some((px, py)) => {
+                        let d = ((px - cx).powi(2) + (py - icon_cy).powi(2)).sqrt();
+                        1.0 + (GRID_MAGNIFY - 1.0) * falloff(d, GRID_MAG_RADIUS)
+                    }
+                    None => 1.0,
+                };
+                let size = GRID_ICON * scale;
                 grid.icons.push(IconInst {
-                    rect: Rect::new(cx - GRID_ICON / 2.0, cell.y + 12.0, GRID_ICON, GRID_ICON),
+                    rect: Rect::new(cx - size / 2.0, icon_cy - size / 2.0 - lift(i), size, size),
                     layer: i as u32,
                 });
                 grid.labels.push(Label {
@@ -313,7 +380,16 @@ mod tests {
         assert!(!l.dock_slots.is_empty());
         // Viewport exists geometrically but lies below the surface
         // bottom, so no cells are visible while docked.
-        let s = scene(&cfg, &l, &entries(20), None, 1.0, SURFACE);
+        let s = scene(
+            &cfg,
+            &l,
+            &entries(20),
+            SURFACE,
+            &FrameInput {
+                alpha: 1.0,
+                ..Default::default()
+            },
+        );
         assert!(s.grid.is_none() || s.grid.as_ref().unwrap().clip.y >= SURFACE.1);
     }
 
@@ -324,7 +400,16 @@ mod tests {
         assert!(l.cols >= 2, "720px card should fit several columns");
         assert!(l.viewport.h > 100.0);
         assert!(l.scroll <= max_scroll(&l) + f32::EPSILON);
-        let s = scene(&cfg, &l, &entries(40), None, 1.0, SURFACE);
+        let s = scene(
+            &cfg,
+            &l,
+            &entries(40),
+            SURFACE,
+            &FrameInput {
+                alpha: 1.0,
+                ..Default::default()
+            },
+        );
         let grid = s.grid.expect("open card must show the grid");
         assert!(!grid.icons.is_empty());
         assert_eq!(grid.icons.len(), grid.labels.len());

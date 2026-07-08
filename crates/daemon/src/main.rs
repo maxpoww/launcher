@@ -78,9 +78,11 @@ fn main() -> anyhow::Result<()> {
     let layer_shell = LayerShell::bind(&globals, &qh)
         .context("zwlr_layer_shell_v1 not available (compositor must support wlr-layer-shell)")?;
 
-    // The surface is tall enough for the fully risen card plus the gap
-    // beneath it; the card slides within this fixed extent.
-    let surface_height = config.window.height + config.window.bottom_margin;
+    // The surface is tall enough for the fully risen card, the gap
+    // beneath it, and the magnification headroom above; the card slides
+    // within the extent range only (headroom excluded).
+    let full_extent = config.window.height + config.window.bottom_margin;
+    let surface_height = full_extent + content::MAGNIFY_HEADROOM as u32;
     let layer = surface::create_layer_surface(
         &compositor,
         &layer_shell,
@@ -109,7 +111,7 @@ fn main() -> anyhow::Result<()> {
             config.animation.clone(),
             config.window.input_bar_height as f32,
             // Fully open, the card has risen its own height plus the gap.
-            surface_height as f32,
+            full_extent as f32,
         ),
         config,
         buffer_size: (0, 0),
@@ -131,6 +133,7 @@ fn main() -> anyhow::Result<()> {
         list_scroll: 0.0,
         indexer,
         last_rescan: Instant::now(),
+        bounce: None,
         exit: false,
     };
 
@@ -212,6 +215,8 @@ pub struct App {
     indexer: apps::Indexer,
     /// When the last rescan was requested, for the reveal cooldown.
     last_rescan: Instant,
+    /// A launch bounce in flight: (entry index, start time).
+    bounce: Option<(usize, Instant)>,
 
     exit: bool,
 }
@@ -226,6 +231,12 @@ const BTN_LEFT: u32 = 0x110;
 /// Minimum time between app-index rescans. Summoning the dock checks
 /// freshness; mashing toggle does not scan repeatedly.
 const RESCAN_COOLDOWN: Duration = Duration::from_secs(2);
+
+/// Duration of the launch bounce (two decaying hops), after which the
+/// card hides.
+const BOUNCE_DURATION: Duration = Duration::from_millis(550);
+/// Peak height of the launch bounce, in logical pixels.
+const BOUNCE_HEIGHT: f32 = 18.0;
 
 impl App {
     /// Entry point for IPC commands (called from ipc.rs) and for
@@ -296,7 +307,8 @@ impl App {
         }
     }
 
-    /// Launch the app under the pointer and hide the card.
+    /// Launch the app under the pointer; its icon plays a bounce
+    /// (macOS launch feedback), then the card hides.
     fn activate(&mut self, index: usize) {
         let Some(entry) = self.entries.get(index) else {
             return;
@@ -304,7 +316,32 @@ impl App {
         if let Err(e) = launch::launch(&entry.exec) {
             error!("launch failed for {}: {e:#}", entry.id);
         }
-        self.handle_command(Command::Hide);
+        self.bounce = Some((index, Instant::now()));
+        self.schedule_frame();
+        let timer = Timer::from_duration(BOUNCE_DURATION);
+        if let Err(e) = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.handle_command(Command::Hide);
+                TimeoutAction::Drop
+            })
+        {
+            warn!("failed to arm launch-hide timer: {e}");
+            self.handle_command(Command::Hide);
+        }
+    }
+
+    /// Current upward offset of the launch bounce, expiring it when
+    /// done: two hops decaying in height.
+    fn bounce_offset(&mut self) -> Option<(usize, f32)> {
+        let (index, start) = self.bounce?;
+        let t = start.elapsed().as_secs_f32() / BOUNCE_DURATION.as_secs_f32();
+        if t >= 1.0 {
+            self.bounce = None;
+            return None;
+        }
+        let hops = (2.0 * std::f32::consts::PI * t).sin().abs();
+        Some((index, BOUNCE_HEIGHT * hops * (1.0 - 0.45 * t)))
     }
 
     /// Push keyboard interactivity and the pointer input region to the
@@ -384,15 +421,20 @@ impl App {
         wl_surface.frame(&self.qh, wl_surface.clone());
         self.frame_pending = true;
 
+        let bounce = self.bounce_offset();
         let layout = self.current_layout();
         self.list_scroll = layout.scroll; // keep the clamped value
         let scene = content::scene(
             &self.config,
             &layout,
             &self.entries,
-            self.hover,
-            self.ui.alpha(),
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
+            &content::FrameInput {
+                hover: self.hover,
+                alpha: self.ui.alpha(),
+                pointer: self.pointer_pos,
+                bounce,
+            },
         );
         let Some(renderer) = self.renderer.as_mut() else {
             return;
@@ -494,7 +536,7 @@ impl CompositorHandler for App {
         _time: u32,
     ) {
         self.frame_pending = false;
-        if self.ui.is_animating() || self.dirty {
+        if self.ui.is_animating() || self.bounce.is_some() || self.dirty {
             self.draw();
         } else {
             self.last_frame = None;
@@ -539,7 +581,9 @@ impl LayerShellHandler for App {
             width = self.config.window.width;
         }
         if height == 0 {
-            height = self.config.window.height + self.config.window.bottom_margin;
+            height = self.config.window.height
+                + self.config.window.bottom_margin
+                + content::MAGNIFY_HEADROOM as u32;
         }
         debug!("configure: {width}x{height}");
         self.buffer_size = (width, height);
@@ -726,14 +770,22 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
             } => {
                 app.pointer_pos = Some((surface_x as f32, surface_y as f32));
                 app.update_hover();
+                // Magnification is a function of the pointer position:
+                // every move damages the scene (coalesced to refresh).
+                if app.ui.target() != Target::Hidden {
+                    app.schedule_frame();
+                }
             }
             wl_pointer::Event::Leave { .. } => {
                 app.scroll_accum = 0.0;
                 app.pointer_pos = None;
                 app.pressed = None;
                 app.update_hover();
-                if app.config.input.autohide && app.ui.target() != Target::Hidden {
-                    app.schedule_autohide();
+                if app.ui.target() != Target::Hidden {
+                    app.schedule_frame(); // relax any magnification
+                    if app.config.input.autohide {
+                        app.schedule_autohide();
+                    }
                 }
             }
             wl_pointer::Event::Button { button, state, .. } if button == BTN_LEFT => {
