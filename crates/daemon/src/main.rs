@@ -11,6 +11,7 @@
 mod animation;
 mod apps;
 mod content;
+mod hypr;
 mod ipc;
 mod launch;
 mod renderer;
@@ -39,7 +40,7 @@ use smithay_client_toolkit::{
 };
 use tracing::{debug, error, info, warn};
 use waverunner_core::index::AppEntry;
-use waverunner_core::Config;
+use waverunner_core::{Config, Searcher};
 use waverunner_proto::Command;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface};
@@ -134,6 +135,11 @@ fn main() -> anyhow::Result<()> {
         indexer,
         last_rescan: Instant::now(),
         bounce: None,
+        query: String::new(),
+        searcher: Searcher::new(),
+        visible: Vec::new(),
+        selected: None,
+        zone_free: false,
         exit: false,
     };
 
@@ -148,6 +154,16 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("registering apps channel: {e}"))?;
+
+    // Intellihide: watch Hyprland window events so the dock can stay
+    // up while nothing overlaps its zone. Optional — without Hyprland
+    // IPC the dock simply always auto-hides.
+    if app.config.input.intellihide {
+        match hypr::subscribe(&event_loop.handle()) {
+            Ok(()) => app.on_layout_changed(),
+            Err(e) => warn!("intellihide inactive: {e:#}"),
+        }
+    }
 
     info!("daemon up; try: waverunner-ctl toggle");
     while !app.exit {
@@ -217,6 +233,19 @@ pub struct App {
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
     bounce: Option<(usize, Instant)>,
+    /// Live search query (empty = unfiltered).
+    query: String,
+    /// Fuzzy matcher (heap-heavy, allocated once per daemon).
+    searcher: Searcher,
+    /// Indices into `entries` shown in the grid, ranked by the query
+    /// (every entry in order when the query is empty).
+    visible: Vec<usize>,
+    /// Auto-selected grid position (best match while searching);
+    /// Enter launches it.
+    selected: Option<usize>,
+    /// Intellihide: no window currently overlaps the dock zone, so the
+    /// dock parks visible instead of auto-hiding.
+    zone_free: bool,
 
     exit: bool,
 }
@@ -254,6 +283,48 @@ impl App {
         }
     }
 
+    /// Re-evaluate the dock zone against Hyprland's window layout
+    /// (intellihide). Called on relevant compositor events.
+    fn on_layout_changed(&mut self) {
+        if !self.config.input.intellihide {
+            return;
+        }
+        // On any IPC failure, assume occupied: that is the plain
+        // auto-hide behavior the daemon has without intellihide.
+        let free = hypr::focused_monitor()
+            .and_then(|mon| {
+                let zone_w = self.config.window.width as f64;
+                let zone_h =
+                    (self.config.window.input_bar_height + self.config.window.bottom_margin) as f64;
+                let zone = (
+                    mon.x + (mon.w - zone_w) / 2.0,
+                    mon.y + mon.h - zone_h,
+                    zone_w,
+                    zone_h,
+                );
+                hypr::dock_zone_occupied(zone, mon.active_ws).map(|occupied| !occupied)
+            })
+            .unwrap_or_else(|e| {
+                debug!("dock zone query failed: {e:#}");
+                false
+            });
+        if free == self.zone_free {
+            return;
+        }
+        debug!("dock zone free: {free}");
+        self.zone_free = free;
+        if free {
+            // Nothing needs the space: park the dock visible.
+            self.hide_deadline = None;
+            if self.ui.target() == Target::Hidden {
+                self.handle_command(Command::Show);
+            }
+        } else if self.ui.target() == Target::Dock && self.pointer_pos.is_none() {
+            // A window moved in and the user isn't on the dock: dodge.
+            self.handle_command(Command::Hide);
+        }
+    }
+
     /// Request an app-index rescan unless one was requested recently.
     fn maybe_rescan(&mut self) {
         if self.last_rescan.elapsed() >= RESCAN_COOLDOWN {
@@ -271,9 +342,25 @@ impl App {
             Some(renderer) => renderer.set_icons(&loaded.icons),
             None => self.pending_icons = Some(loaded.icons),
         }
-        // Indices may have shifted: drop any armed click and re-resolve
-        // what the pointer is over.
+        // Indices may have shifted: drop any armed click, re-rank the
+        // query against the new entries, re-resolve hover.
         self.pressed = None;
+        self.refilter();
+        self.schedule_frame();
+    }
+
+    /// Re-rank entries against the current query: the grid shows only
+    /// matches, best first, with the top match auto-selected so Enter
+    /// (or a click) launches it.
+    fn refilter(&mut self) {
+        let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
+        self.visible = self.searcher.rank(&self.query, &names);
+        self.selected = if self.query.is_empty() || self.visible.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.list_scroll = 0.0;
         self.update_hover();
         self.schedule_frame();
     }
@@ -284,7 +371,7 @@ impl App {
             &self.config,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             self.ui.extent(),
-            self.entries.len(),
+            self.visible.len(),
             self.list_scroll,
         )
     }
@@ -307,8 +394,31 @@ impl App {
         }
     }
 
-    /// Launch the app under the pointer; its icon plays a bounce
-    /// (macOS launch feedback), then the card hides.
+    /// Resolve a hit to an entry index (grid cells go through the
+    /// filtered `visible` list) and launch it.
+    fn activate_hit(&mut self, hit: Hit) {
+        let entry_idx = match hit {
+            Hit::DockIcon(i) => Some(i),
+            Hit::GridCell(i) => self.visible.get(i).copied(),
+        };
+        if let Some(entry_idx) = entry_idx {
+            self.activate(entry_idx);
+        }
+    }
+
+    /// The out-of-the-way command for the current situation: fully hide,
+    /// or just collapse to the dock when nothing overlaps its zone
+    /// (intellihide keeps the dock parked).
+    fn dismiss_command(&self) -> Command {
+        if self.zone_free {
+            Command::Collapse
+        } else {
+            Command::Hide
+        }
+    }
+
+    /// Launch an entry by index; its icon plays a bounce (macOS launch
+    /// feedback), then the card gets out of the way.
     fn activate(&mut self, index: usize) {
         let Some(entry) = self.entries.get(index) else {
             return;
@@ -322,12 +432,14 @@ impl App {
         if let Err(e) = self
             .loop_handle
             .insert_source(timer, |_, _, app: &mut App| {
-                app.handle_command(Command::Hide);
+                let cmd = app.dismiss_command();
+                app.handle_command(cmd);
                 TimeoutAction::Drop
             })
         {
             warn!("failed to arm launch-hide timer: {e}");
-            self.handle_command(Command::Hide);
+            let cmd = self.dismiss_command();
+            self.handle_command(cmd);
         }
     }
 
@@ -353,6 +465,11 @@ impl App {
             // Fresh card next time it rises.
             self.list_scroll = 0.0;
             self.hover = None;
+        }
+        // The search only lives while the popup is open.
+        if self.ui.target() != Target::Open && !self.query.is_empty() {
+            self.query.clear();
+            self.refilter();
         }
         let interactive = self.ui.wants_keyboard();
         if interactive != self.interactive {
@@ -428,12 +545,15 @@ impl App {
             &self.config,
             &layout,
             &self.entries,
+            &self.visible,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             &content::FrameInput {
                 hover: self.hover,
                 alpha: self.ui.alpha(),
                 pointer: self.pointer_pos,
                 bounce,
+                query: &self.query,
+                selected: self.selected,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -494,7 +614,10 @@ impl App {
             .insert_source(timer, move |_, _, app: &mut App| {
                 if app.hide_deadline == Some(deadline) {
                     app.hide_deadline = None;
-                    app.handle_command(Command::Hide);
+                    // Fully hide, or just fall back to the parked dock
+                    // when the zone is free (intellihide).
+                    let cmd = app.dismiss_command();
+                    app.handle_command(cmd);
                 }
                 TimeoutAction::Drop
             })
@@ -700,12 +823,54 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
-        if event.keysym == Keysym::Escape {
-            // Escape only arrives while open (the dock never has keys):
-            // slide back down to the dock.
-            self.handle_command(Command::Collapse);
+        // Keys only arrive while open (the popup takes exclusive
+        // keyboard focus; the dock never has keys).
+        match event.keysym {
+            Keysym::Escape => {
+                if self.query.is_empty() {
+                    // Slide back down to the dock.
+                    self.handle_command(Command::Collapse);
+                } else {
+                    self.query.clear();
+                    self.refilter();
+                }
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                if let Some(sel) = self.selected {
+                    self.activate_hit(Hit::GridCell(sel));
+                }
+            }
+            Keysym::BackSpace => {
+                if self.query.pop().is_some() {
+                    self.refilter();
+                }
+            }
+            Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
+                if !self.visible.is_empty() {
+                    let cols = self.current_layout().cols.max(1);
+                    let last = self.visible.len() - 1;
+                    let cur = self.selected.unwrap_or(0);
+                    let next = match event.keysym {
+                        Keysym::Left => cur.saturating_sub(1),
+                        Keysym::Right => (cur + 1).min(last),
+                        Keysym::Up => cur.saturating_sub(cols),
+                        _ => (cur + cols).min(last),
+                    };
+                    self.selected = Some(next);
+                    self.schedule_frame();
+                }
+            }
+            _ => {
+                // Printable input extends the query.
+                if let Some(text) = &event.utf8 {
+                    let printable: String = text.chars().filter(|c| !c.is_control()).collect();
+                    if !printable.is_empty() {
+                        self.query.push_str(&printable);
+                        self.refilter();
+                    }
+                }
+            }
         }
-        // P4: feed printable keys / Up / Down / Return into the search UI.
     }
 
     fn release_key(
@@ -801,9 +966,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         app.update_hover();
                         if let Some(hit) = app.pressed.take() {
                             if app.hover == Some(hit) {
-                                match hit {
-                                    Hit::DockIcon(i) | Hit::GridCell(i) => app.activate(i),
-                                }
+                                app.activate_hit(hit);
                             }
                         }
                     }

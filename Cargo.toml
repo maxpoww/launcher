@@ -25,6 +25,7 @@ freedesktop-icons = "0.4"
 resvg = "0.47"
 glyphon = "0.8"
 libc = "0.2"
+serde_json = "1"
 
 waverunner-core = { path = "crates/core" }
 waverunner-proto = { path = "crates/proto" }

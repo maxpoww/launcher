@@ -201,6 +201,10 @@ pub struct InputConfig {
     /// Grace period before auto-hiding, in milliseconds. Re-entering
     /// within this window cancels the hide.
     pub autohide_delay_ms: u32,
+    /// Keep the dock visible while no window overlaps its zone and only
+    /// hide when one does (macOS dodge-windows). Needs Hyprland IPC;
+    /// silently falls back to always-auto-hide elsewhere.
+    pub intellihide: bool,
 }
 
 impl Default for InputConfig {
@@ -211,6 +215,7 @@ impl Default for InputConfig {
             edge_reveal_px: 5,
             autohide: true,
             autohide_delay_ms: 300,
+            intellihide: true,
         }
     }
 }
