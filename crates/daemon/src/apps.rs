@@ -58,23 +58,26 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
     let spawned = std::thread::Builder::new()
         .name("waverunner-index".into())
         .spawn(move || {
-            let mut icon_cache: HashMap<String, (Vec<u8>, bool)> = HashMap::new();
-            let disk_cache = DiskCache::new();
+            let mut loader = IconLoader::new(icon_theme);
             while rx.recv().is_ok() {
                 // Coalesce any requests that queued up meanwhile.
                 while rx.try_recv().is_ok() {}
 
                 let started = std::time::Instant::now();
                 let index = DesktopIndex::scan();
+                let scanned = std::time::Instant::now();
                 let (icons, placeholders): (Vec<_>, Vec<_>) = index
                     .entries
                     .iter()
-                    .map(|entry| cached_icon(&mut icon_cache, &disk_cache, entry, &icon_theme))
+                    .map(|entry| loader.icon_for(entry))
                     .unzip();
+                loader.resolutions.save();
                 debug!(
-                    "indexed {} apps in {:?}",
+                    "indexed {} apps in {:?} (scan {:?}, icons {:?})",
                     index.entries.len(),
-                    started.elapsed()
+                    started.elapsed(),
+                    scanned - started,
+                    scanned.elapsed()
                 );
                 if results
                     .send(LoadedApps {
@@ -96,39 +99,65 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
     indexer
 }
 
-/// Look an entry's icon up in (or insert it into) the raster caches:
-/// in-memory first, then disk, then rasterize the icon file (persisting
-/// the result). Returns `(pixels, is_placeholder)`.
-fn cached_icon(
-    cache: &mut HashMap<String, (Vec<u8>, bool)>,
-    disk: &DiskCache,
-    entry: &AppEntry,
-    theme: &str,
-) -> (Vec<u8>, bool) {
-    let (key, path) = match resolve_icon_path(entry, theme) {
-        Some(path) => (path.clone(), Some(path)),
-        None => (format!("placeholder:{}", entry.name), None),
-    };
-    if let Some((pixels, is_placeholder)) = cache.get(&key) {
-        return (pixels.clone(), *is_placeholder);
+/// Turns an `AppEntry` into `ICON_SIZE`² pixels, cheapest source first:
+/// in-memory rasters (covers rescans), on-disk rasters (covers cold
+/// start), then rasterizing the icon file. Icon-name → file-path
+/// resolutions get their own persistent cache because the theme
+/// directory walk — not rasterization — dominates index time.
+struct IconLoader {
+    theme: String,
+    rasters: HashMap<String, (Vec<u8>, bool)>,
+    disk: DiskCache,
+    resolutions: ResolutionCache,
+}
+
+impl IconLoader {
+    fn new(theme: String) -> Self {
+        Self {
+            resolutions: ResolutionCache::load(&theme),
+            rasters: HashMap::new(),
+            disk: DiskCache::new(),
+            theme,
+        }
     }
-    // Placeholder tiles are cheap to regenerate and never touch disk;
-    // real icons go through the persistent cache.
-    let cache_file = path.as_deref().and_then(|p| disk.file_for(p));
-    let (pixels, is_placeholder) = match cache_file.as_deref().and_then(DiskCache::load) {
-        Some(pixels) => (pixels, false),
-        None => match path.and_then(|p| rasterize_icon_file(&p, &entry.id)) {
-            Some(pixels) => {
-                if let Some(file) = &cache_file {
-                    disk.store(file, &pixels);
+
+    /// The entry's icon as `(pixels, is_placeholder)`.
+    fn icon_for(&mut self, entry: &AppEntry) -> (Vec<u8>, bool) {
+        let (key, path) = match self.resolve(entry) {
+            Some(path) => (path.clone(), Some(path)),
+            None => (format!("placeholder:{}", entry.name), None),
+        };
+        if let Some((pixels, is_placeholder)) = self.rasters.get(&key) {
+            return (pixels.clone(), *is_placeholder);
+        }
+        // Placeholder tiles are cheap to regenerate and never touch disk;
+        // real icons go through the persistent cache.
+        let cache_file = path.as_deref().and_then(|p| self.disk.file_for(p));
+        let (pixels, is_placeholder) = match cache_file.as_deref().and_then(DiskCache::load) {
+            Some(pixels) => (pixels, false),
+            None => match path.and_then(|p| rasterize_icon_file(&p, &entry.id)) {
+                Some(pixels) => {
+                    if let Some(file) = &cache_file {
+                        self.disk.store(file, &pixels);
+                    }
+                    (pixels, false)
                 }
-                (pixels, false)
-            }
-            None => (placeholder_icon(&entry.name), true),
-        },
-    };
-    cache.insert(key, (pixels.clone(), is_placeholder));
-    (pixels, is_placeholder)
+                None => (placeholder_icon(&entry.name), true),
+            },
+        };
+        self.rasters.insert(key, (pixels.clone(), is_placeholder));
+        (pixels, is_placeholder)
+    }
+
+    /// Resolve an entry's icon name to a file path (absolute names pass
+    /// through; the rest go via the theme lookup and its cache).
+    fn resolve(&mut self, entry: &AppEntry) -> Option<String> {
+        let name = entry.icon.as_deref()?;
+        if name.starts_with('/') {
+            return Some(name.to_owned());
+        }
+        self.resolutions.resolve(name, &self.theme)
+    }
 }
 
 /// Persistent raster cache: one raw premultiplied-RGBA8 file per source
@@ -143,13 +172,10 @@ struct DiskCache {
 
 impl DiskCache {
     fn new() -> Self {
-        let base = std::env::var("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache")
-            });
         Self {
-            dir: base.join("waverunner").join(format!("icons-{ICON_SIZE}")),
+            dir: cache_base()
+                .join("waverunner")
+                .join(format!("icons-{ICON_SIZE}")),
         }
     }
 
@@ -199,13 +225,52 @@ fn fnv1a64(s: &str) -> u64 {
     })
 }
 
-/// Resolve an entry's icon name to a file path via the theme lookup.
-fn resolve_icon_path(entry: &AppEntry, theme: &str) -> Option<String> {
-    let name = entry.icon.as_deref()?;
-    let path = if name.starts_with('/') {
-        std::path::PathBuf::from(name)
-    } else {
-        freedesktop_icons::lookup(name)
+/// Persistent icon-name → file-path resolution cache
+/// (`$XDG_CACHE_HOME/waverunner/icon-paths.json`). The theme-directory
+/// walk costs ~15 ms per icon on a long NixOS `XDG_DATA_DIRS` — failed
+/// lookups are the worst, walking everything twice — so resolutions,
+/// including negative ones, are memoized across daemon runs.
+///
+/// Staleness control: positive hits must still exist on disk (re-looked
+/// up otherwise), and the whole map is dropped when the [`fence`]
+/// fingerprint moves — theme installs/removals, config theme changes,
+/// and nix store churn all move it. The residual gap (a file added deep
+/// inside an existing theme without touching top-level mtimes) costs a
+/// placeholder icon until the fence moves.
+struct ResolutionCache {
+    file: PathBuf,
+    fence: String,
+    /// Icon name → resolved path; `None` records a failed lookup.
+    map: HashMap<String, Option<String>>,
+    dirty: bool,
+}
+
+impl ResolutionCache {
+    /// Load from disk, dropping the map if the fence moved.
+    fn load(theme: &str) -> Self {
+        let file = cache_base().join("waverunner").join("icon-paths.json");
+        let fence = fence(theme);
+        let map = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|s| parse_resolutions(&s, &fence))
+            .unwrap_or_default();
+        Self {
+            file,
+            fence,
+            map,
+            dirty: false,
+        }
+    }
+
+    /// Resolve `name` via the cache, falling back to the theme walk.
+    fn resolve(&mut self, name: &str, theme: &str) -> Option<String> {
+        match self.map.get(name) {
+            Some(None) => return None,
+            Some(Some(path)) if std::path::Path::new(path).exists() => return Some(path.clone()),
+            // Cached path vanished (theme update): re-walk below.
+            _ => {}
+        }
+        let found = freedesktop_icons::lookup(name)
             .with_size(ICON_SIZE as u16)
             .with_theme(theme)
             .find()
@@ -213,9 +278,90 @@ fn resolve_icon_path(entry: &AppEntry, theme: &str) -> Option<String> {
                 freedesktop_icons::lookup(name)
                     .with_size(ICON_SIZE as u16)
                     .find()
-            })?
-    };
-    Some(path.to_string_lossy().into_owned())
+            })
+            .map(|p| p.to_string_lossy().into_owned());
+        self.map.insert(name.to_owned(), found.clone());
+        self.dirty = true;
+        found
+    }
+
+    /// Persist if anything changed since the last save.
+    fn save(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        let json = serde_json::json!({ "fence": self.fence, "entries": self.map });
+        if let Some(dir) = self.file.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                debug!("icon paths: cannot create {dir:?}: {e}");
+                return;
+            }
+        }
+        let tmp = self
+            .file
+            .with_extension(format!("tmp{}", std::process::id()));
+        let write =
+            std::fs::write(&tmp, json.to_string()).and_then(|()| std::fs::rename(&tmp, &self.file));
+        if let Err(e) = write {
+            debug!("icon paths: cannot write {:?}: {e}", self.file);
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// Parse the resolution-cache file, rejecting it wholesale on a fence
+/// mismatch or any shape surprise.
+fn parse_resolutions(s: &str, fence: &str) -> Option<HashMap<String, Option<String>>> {
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    if v.get("fence")?.as_str()? != fence {
+        return None;
+    }
+    let entries = v.get("entries")?.as_object()?;
+    Some(
+        entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().map(str::to_owned)))
+            .collect(),
+    )
+}
+
+/// Fingerprint of the icon search environment: theme name, icon size,
+/// the data-dir list itself, and the mtime of each top-level icon dir.
+/// Installing/removing a theme touches a top-level dir; changing the
+/// configured theme or any nix store path in `XDG_DATA_DIRS` changes
+/// the string; either drops the resolution cache wholesale.
+fn fence(theme: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data_home =
+        std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+    let data_dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
+    let mut parts = format!("{theme}|{ICON_SIZE}");
+    let icon_dirs = std::iter::once(format!("{data_home}/icons"))
+        .chain(data_dirs.split(':').map(|d| format!("{d}/icons")))
+        .chain([format!("{home}/.icons"), "/usr/share/pixmaps".to_owned()]);
+    for dir in icon_dirs {
+        parts.push_str(&format!("|{dir}:{}", mtime_secs(&dir)));
+    }
+    format!("{:016x}", fnv1a64(&parts))
+}
+
+/// A path's mtime in unix seconds; 0 if it cannot be stat'ed.
+fn mtime_secs(path: &str) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// `$XDG_CACHE_HOME`, falling back to `~/.cache`.
+fn cache_base() -> PathBuf {
+    std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"))
 }
 
 /// Read and rasterize one icon file to `ICON_SIZE`² premultiplied RGBA.
@@ -385,5 +531,46 @@ mod tests {
         assert_eq!(cache.file_for("/nonexistent/icon.svg"), None);
 
         std::fs::remove_dir_all(&cache.dir).unwrap();
+    }
+
+    #[test]
+    fn resolution_cache_parses_and_fences() {
+        let json = r#"{"fence":"abc","entries":{"firefox":"/path/firefox.svg","gone":null}}"#;
+        let map = parse_resolutions(json, "abc").unwrap();
+        assert_eq!(
+            map.get("firefox").unwrap().as_deref(),
+            Some("/path/firefox.svg")
+        );
+        assert_eq!(map.get("gone").unwrap(), &None, "negative result kept");
+
+        assert_eq!(
+            parse_resolutions(json, "other"),
+            None,
+            "fence mismatch drops all"
+        );
+        assert_eq!(parse_resolutions("not json", "abc"), None);
+        assert_eq!(parse_resolutions(r#"{"entries":{}}"#, "abc"), None);
+    }
+
+    #[test]
+    fn resolution_cache_save_load_round_trips() {
+        let (disk, _icon) = scratch("resolutions");
+        let mut cache = ResolutionCache {
+            file: disk.dir.join("icon-paths.json"),
+            fence: "f".to_owned(),
+            map: HashMap::from([
+                ("firefox".to_owned(), Some("/p/firefox.svg".to_owned())),
+                ("gone".to_owned(), None),
+            ]),
+            dirty: true,
+        };
+        cache.save();
+
+        let written = std::fs::read_to_string(&cache.file).unwrap();
+        assert_eq!(parse_resolutions(&written, "f").unwrap(), cache.map);
+        // A moved fence rejects the same file.
+        assert_eq!(parse_resolutions(&written, "g"), None);
+
+        std::fs::remove_dir_all(&disk.dir).unwrap();
     }
 }

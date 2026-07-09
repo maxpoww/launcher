@@ -151,7 +151,13 @@ Remaining tasks: none — all three landed 2026-07-09:
 1. ✅ Persistent icon cache: rasters persist as raw RGBA files under
    `$XDG_CACHE_HOME/waverunner/icons-48/`, keyed by hash of icon
    path + size + mtime (nix store churn invalidates via the path), so
-   cold daemon start skips rasterization for unchanged icons.
+   cold daemon start skips rasterization for unchanged icons. Profiling
+   showed the theme-directory walk (freedesktop_icons lookup), not
+   rasterization, dominated (~15 ms/icon on NixOS's long
+   XDG_DATA_DIRS), so icon-name → path resolutions — including negative
+   ones — persist too (`icon-paths.json`, invalidated by a fence over
+   theme + XDG_DATA_DIRS + icon-dir mtimes). Measured on the VM:
+   875 ms cold → 26 ms warm.
 2. ✅ `Terminal=true` entries run inside the configured `[launch]
    terminal` (default `foot`), exec line shell-quoted.
 3. ✅ Dock pinning via drag-and-drop (`PinDb`: ordered pins + exclusion
@@ -165,9 +171,9 @@ Acceptance criteria:
   sign off)*
 - Launched apps survive daemon restart (properly detached, no zombies).
 - Cold start with cold cache < 100 ms to interactive; warm cache
-  instant. *(cache implemented; timing sign-off needs a live restart —
-  compare the daemon's "indexed N apps in T" debug line across two
-  starts and confirm `icons-48/` is populated.)*
+  instant. *(✅ verified 2026-07-09 on the VM: warm-cache start indexes
+  38 apps in 26 ms — see the `RUST_LOG=debug` "indexed N apps in T
+  (scan …, icons …)" line.)*
 
 ## P5 — Polish
 
