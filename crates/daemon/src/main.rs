@@ -11,6 +11,7 @@
 mod animation;
 mod apps;
 mod content;
+mod usage;
 mod hypr;
 mod ipc;
 mod launch;
@@ -134,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         list_scroll: 0.0,
         scroll_target: 0.0,
         indexer,
+        usage: usage::UsageDb::load(),
         last_rescan: Instant::now(),
         bounce: None,
         placeholders: Vec::new(),
@@ -248,6 +250,8 @@ pub struct App {
     scroll_target: f32,
     /// Handle to the background indexer thread.
     indexer: apps::Indexer,
+    /// Persistent launch-frequency database; drives sort order.
+    usage: usage::UsageDb,
     /// When the last rescan was requested, for the reveal cooldown.
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
@@ -372,11 +376,35 @@ impl App {
     /// (or stash them until the renderer exists).
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
         info!("app index ready: {} entries", loaded.entries.len());
-        self.entries = loaded.entries;
-        self.placeholders = loaded.placeholders;
+
+        // Sort by descending launch frequency so the most-used apps appear
+        // first in both the dock and the unfiltered grid. Ties preserve the
+        // alphabetical order that comes from the indexer.
+        let mut combined: Vec<(waverunner_core::index::AppEntry, Vec<u8>, bool)> = loaded
+            .entries
+            .into_iter()
+            .zip(loaded.icons)
+            .zip(loaded.placeholders)
+            .map(|((e, i), p)| (e, i, p))
+            .collect();
+        combined.sort_by(|(a, _, _), (b, _, _)| {
+            self.usage.count(&b.id).cmp(&self.usage.count(&a.id))
+        });
+        let mut icons = Vec::with_capacity(combined.len());
+        let mut placeholders = Vec::with_capacity(combined.len());
+        self.entries = combined
+            .into_iter()
+            .map(|(e, i, p)| {
+                icons.push(i);
+                placeholders.push(p);
+                e
+            })
+            .collect();
+        self.placeholders = placeholders;
+
         match self.renderer.as_mut() {
-            Some(renderer) => renderer.set_icons(&loaded.icons),
-            None => self.pending_icons = Some(loaded.icons),
+            Some(renderer) => renderer.set_icons(&icons),
+            None => self.pending_icons = Some(icons),
         }
         // Indices may have shifted: drop any armed click, re-rank the
         // query against the new entries, re-resolve hover.
@@ -470,9 +498,11 @@ impl App {
         let Some(entry) = self.entries.get(index) else {
             return;
         };
-        if let Err(e) = launch::launch(&entry.exec) {
-            error!("launch failed for {}: {e:#}", entry.id);
+        let (exec, id) = (entry.exec.clone(), entry.id.clone());
+        if let Err(e) = launch::launch(&exec) {
+            error!("launch failed for {id}: {e:#}");
         }
+        self.usage.increment(&id);
         self.bounce = Some((index, Instant::now()));
         self.schedule_frame();
         let timer = Timer::from_duration(BOUNCE_DURATION);
