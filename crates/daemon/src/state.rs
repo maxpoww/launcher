@@ -175,10 +175,11 @@ mod tests {
         let mut s = state();
         assert_eq!(s.target(), Target::Hidden);
 
+        // Toggle from hidden goes directly to Open (full popup).
         assert!(s.apply(Command::Toggle));
-        assert_eq!(s.target(), Target::Dock);
+        assert_eq!(s.target(), Target::Open);
         settle(&mut s);
-        assert_eq!(s.extent(), DOCK);
+        assert_eq!(s.extent(), FULL);
         assert_eq!(s.alpha(), 1.0);
 
         assert!(s.apply(Command::Toggle));

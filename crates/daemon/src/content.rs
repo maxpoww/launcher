@@ -171,13 +171,17 @@ pub struct Layout {
     /// Dock slot rects, one per shown dock icon (entry index == slot
     /// index: the dock shows the first N entries, unaffected by search).
     pub dock_slots: Vec<Rect>,
-    /// Grid viewport (may lie below the surface while docked).
+    /// Grid viewport clipped to an exact multiple of GRID_CELL_H rows.
     pub viewport: Rect,
     /// Left edge of the first grid column (columns are centered).
     pub grid_x0: f32,
     /// Number of grid columns (>= 1).
     pub cols: usize,
-    /// Current scroll offset actually applied (clamped).
+    /// Rows visible at once (one page height).
+    pub rows_per_page: usize,
+    /// Total pages of grid content.
+    pub n_pages: usize,
+    /// Horizontal scroll offset in pixels (page 0 = 0, page 1 = viewport.w, …).
     pub scroll: f32,
     /// Total number of grid cells (the *visible*, filtered entries).
     pub cells: usize,
@@ -241,15 +245,17 @@ pub fn layout(
     let inner_w = (w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
     let cols = ((inner_w / GRID_CELL_W).floor() as usize).max(1);
     let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
-    let viewport = Rect::new(
-        grid_x0,
-        grid_top,
-        cols as f32 * GRID_CELL_W,
-        (grid_bottom - grid_top).max(0.0),
-    );
-    // Grid scrolling uses the visible (filtered) count.
-    let rows = n_visible.div_ceil(cols);
-    let max_scroll = (rows as f32 * GRID_CELL_H - viewport.h).max(0.0);
+    // Truncate viewport height to a clean multiple of GRID_CELL_H so every
+    // page has the same number of full rows.
+    let raw_h = (grid_bottom - grid_top).max(0.0);
+    let rows_per_page = ((raw_h / GRID_CELL_H).floor() as usize).max(1);
+    let viewport_h = rows_per_page as f32 * GRID_CELL_H;
+    let viewport = Rect::new(grid_x0, grid_top, cols as f32 * GRID_CELL_W, viewport_h);
+
+    // Horizontal paging: each page is viewport.w wide.
+    let cells_per_page = cols * rows_per_page;
+    let n_pages = if n_visible == 0 { 0 } else { n_visible.div_ceil(cells_per_page) };
+    let max_scroll = (n_pages.saturating_sub(1) as f32 * viewport.w).max(0.0);
 
     Layout {
         card_top,
@@ -257,6 +263,8 @@ pub fn layout(
         viewport,
         grid_x0,
         cols,
+        rows_per_page,
+        n_pages,
         scroll: scroll.clamp(0.0, max_scroll),
         cells: n_visible,
         search_box,
@@ -264,19 +272,13 @@ pub fn layout(
     }
 }
 
-/// Return the scroll offset that makes `cell` fully visible in the
-/// viewport, keeping the current offset when it is already in view.
+/// Return the horizontal scroll offset (page * viewport.w) that makes
+/// `cell` visible, snapping to the page that contains it.
 pub fn scroll_to_reveal(layout: &Layout, cell: usize) -> f32 {
-    let row = (cell / layout.cols.max(1)) as f32;
-    let top = row * GRID_CELL_H;
-    let bot = top + GRID_CELL_H;
-    if top < layout.scroll {
-        top
-    } else if bot > layout.scroll + layout.viewport.h {
-        (bot - layout.viewport.h).max(0.0)
-    } else {
-        layout.scroll
-    }
+    let cells_per_page = (layout.cols * layout.rows_per_page).max(1);
+    let page = cell / cells_per_page;
+    let max_page = layout.n_pages.saturating_sub(1);
+    (page.min(max_page) as f32 * layout.viewport.w).max(0.0)
 }
 
 /// Which item (if any) the pointer is over.
@@ -294,10 +296,16 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<H
             return Some(Hit::SearchButton);
         }
         if layout.viewport.contains(pos) {
-            let col = ((pos.0 - layout.grid_x0) / GRID_CELL_W).floor();
-            let row = ((pos.1 - layout.viewport.y + layout.scroll) / GRID_CELL_H).floor();
-            if col >= 0.0 && (col as usize) < layout.cols && row >= 0.0 {
-                let i = row as usize * layout.cols + col as usize;
+            // Adjust for horizontal page scroll.
+            let adjusted_x = pos.0 - layout.grid_x0 + layout.scroll;
+            let page_w = layout.viewport.w.max(1.0);
+            let page = (adjusted_x / page_w).floor() as usize;
+            let col_f = (adjusted_x - page as f32 * page_w) / GRID_CELL_W;
+            let row = ((pos.1 - layout.viewport.y) / GRID_CELL_H).floor() as usize;
+            let col = col_f.floor() as usize;
+            if col_f >= 0.0 && col < layout.cols && row < layout.rows_per_page {
+                let cells_per_page = layout.cols * layout.rows_per_page;
+                let i = page * cells_per_page + row * layout.cols + col;
                 if i < layout.cells {
                     return Some(Hit::GridCell(i));
                 }
@@ -516,9 +524,9 @@ pub fn scene(
         scene.rects.push(RectInst { rect: draw_rect, radius: SEARCH_H / 2.0, color: box_color });
 
         if search_expand < 0.5 {
-            // Compact button: "Filter" label.
+            // Compact button: "Search" label.
             scene.labels.push(Label {
-                text: "Filter".to_string(),
+                text: "Search".to_string(),
                 pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
                 max_w: btn.w,
                 font_px: SEARCH_FONT_PX,
@@ -532,7 +540,7 @@ pub fn scene(
             // Expanded: show query text with a static cursor, or dim
             // placeholder when the box is open but nothing typed yet.
             let (text, dim) = if query.is_empty() {
-                ("Filter".to_string(), true)
+                ("Search".to_string(), true)
             } else {
                 (format!("{}│", query), false)
             };
@@ -550,98 +558,117 @@ pub fn scene(
         }
     }
 
-    // Grid cells, once there is any viewport to draw into.
+    // Grid cells with horizontal paging.
     if layout.viewport.h > 1.0 && !visible.is_empty() {
         let mut grid = GridContent {
             clip: layout.viewport,
             ..Default::default()
         };
-        let first_row = (layout.scroll / GRID_CELL_H).floor().max(0.0) as usize;
-        let last_row = ((layout.scroll + layout.viewport.h) / GRID_CELL_H).ceil() as usize;
-        for row in first_row..last_row {
-            let y = layout.viewport.y + row as f32 * GRID_CELL_H - layout.scroll;
-            for col in 0..layout.cols {
-                let i = row * layout.cols + col;
-                let Some(&entry_idx) = visible.get(i) else {
-                    break;
-                };
-                let Some(entry) = entries.get(entry_idx) else {
-                    break;
-                };
-                let cell = Rect::new(
-                    layout.grid_x0 + col as f32 * GRID_CELL_W,
-                    y,
-                    GRID_CELL_W,
-                    GRID_CELL_H,
-                );
-                // Keyboard selection (best match) reads slightly stronger
-                // than the pointer hover.
-                if selected == Some(i) {
-                    let hl = config.theme.highlight_rgba();
-                    grid.rects.push(RectInst {
-                        rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
-                        radius: 14.0,
-                        color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
-                    });
-                } else if hover == Some(Hit::GridCell(i)) {
-                    grid.rects.push(RectInst {
-                        rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
-                        radius: 14.0,
-                        color: config.theme.highlight_rgba(),
-                    });
-                }
-                let cx = cell.x + cell.w / 2.0;
-                let icon_cy = cell.y + 12.0 + GRID_ICON / 2.0;
-                // Radial magnification about the icon center.
-                let scale = match pointer {
-                    Some((px, py)) => {
-                        let d = ((px - cx).powi(2) + (py - icon_cy).powi(2)).sqrt();
-                        1.0 + (GRID_MAGNIFY - 1.0) * falloff(d, GRID_MAG_RADIUS)
-                    }
-                    None => 1.0,
-                };
-                let size = GRID_ICON * scale;
-                grid.icons.push(IconInst {
-                    rect: Rect::new(
-                        cx - size / 2.0,
-                        icon_cy - size / 2.0 - lift(entry_idx),
-                        size,
-                        size,
-                    ),
-                    layer: entry_idx as u32,
-                });
-                if placeholders.get(entry_idx).copied().unwrap_or(false) {
-                    if let Some(ch) = entry.name.chars().next() {
-                        let letter: String = ch.to_uppercase().collect();
-                        let font_px = (size * 0.46).max(10.0).min(30.0);
-                        let line_px = font_px * 1.3;
-                        grid.labels.push(Label {
-                            text: letter,
-                            pos: (cx, icon_cy - lift(entry_idx) - line_px / 2.0),
-                            max_w: size,
-                            font_px,
-                            line_px,
-                            centered: true,
-                            dim: false,
-                            cache: true,
-                            clip: None,
+        let page_w = layout.viewport.w;
+        let cells_per_page = (layout.cols * layout.rows_per_page).max(1);
+        // Render the page(s) currently in view (at most two during a slide).
+        let first_page = (layout.scroll / page_w).floor() as usize;
+        let last_page = (layout.scroll / page_w).ceil() as usize;
+        for page in first_page..=last_page.min(layout.n_pages.saturating_sub(1)) {
+            for row in 0..layout.rows_per_page {
+                for col in 0..layout.cols {
+                    let i = page * cells_per_page + row * layout.cols + col;
+                    let Some(&entry_idx) = visible.get(i) else { break };
+                    let Some(entry) = entries.get(entry_idx) else { break };
+                    // Horizontal position accounts for which page and current scroll.
+                    let cell_x = layout.grid_x0
+                        + page as f32 * page_w
+                        + col as f32 * GRID_CELL_W
+                        - layout.scroll;
+                    let cell_y = layout.viewport.y + row as f32 * GRID_CELL_H;
+                    let cell = Rect::new(cell_x, cell_y, GRID_CELL_W, GRID_CELL_H);
+                    if selected == Some(i) {
+                        let hl = config.theme.highlight_rgba();
+                        grid.rects.push(RectInst {
+                            rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                            radius: 14.0,
+                            color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
+                        });
+                    } else if hover == Some(Hit::GridCell(i)) {
+                        grid.rects.push(RectInst {
+                            rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                            radius: 14.0,
+                            color: config.theme.highlight_rgba(),
                         });
                     }
+                    let cx = cell.x + cell.w / 2.0;
+                    let icon_cy = cell.y + 12.0 + GRID_ICON / 2.0;
+                    let scale = match pointer {
+                        Some((px, py)) => {
+                            let d = ((px - cx).powi(2) + (py - icon_cy).powi(2)).sqrt();
+                            1.0 + (GRID_MAGNIFY - 1.0) * falloff(d, GRID_MAG_RADIUS)
+                        }
+                        None => 1.0,
+                    };
+                    let size = GRID_ICON * scale;
+                    grid.icons.push(IconInst {
+                        rect: Rect::new(
+                            cx - size / 2.0,
+                            icon_cy - size / 2.0 - lift(entry_idx),
+                            size,
+                            size,
+                        ),
+                        layer: entry_idx as u32,
+                    });
+                    if placeholders.get(entry_idx).copied().unwrap_or(false) {
+                        if let Some(ch) = entry.name.chars().next() {
+                            let letter: String = ch.to_uppercase().collect();
+                            let font_px = (size * 0.46).max(10.0).min(30.0);
+                            let line_px = font_px * 1.3;
+                            grid.labels.push(Label {
+                                text: letter,
+                                pos: (cx, icon_cy - lift(entry_idx) - line_px / 2.0),
+                                max_w: size,
+                                font_px,
+                                line_px,
+                                centered: true,
+                                dim: false,
+                                cache: true,
+                                clip: None,
+                            });
+                        }
+                    }
+                    grid.labels.push(Label {
+                        text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
+                        pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
+                        max_w: cell.w - 12.0,
+                        font_px: LABEL_FONT_PX,
+                        line_px: LABEL_LINE_PX,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        clip: None,
+                    });
                 }
-                grid.labels.push(Label {
-                    text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
-                    pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
-                    max_w: cell.w - 12.0,
-                    font_px: LABEL_FONT_PX,
-                    line_px: LABEL_LINE_PX,
-                    centered: true,
-                    dim: false,
-                    cache: true,
-                    clip: None,
-                });
             }
         }
         scene.grid = Some(grid);
+
+        // Page indicator dots between the grid and the search button.
+        if layout.n_pages > 1 {
+            let dot_r = 3.0;
+            let dot_spacing = 10.0;
+            let total_dots_w = layout.n_pages as f32 * dot_spacing - (dot_spacing - dot_r * 2.0);
+            let dot_cx = layout.viewport.x + layout.viewport.w / 2.0;
+            let dot_y = layout.viewport.y + layout.viewport.h + 10.0;
+            let page_frac = layout.scroll / page_w;
+            let hl = config.theme.highlight_rgba();
+            for p in 0..layout.n_pages {
+                let x = dot_cx - total_dots_w / 2.0 + p as f32 * dot_spacing + dot_r;
+                let dist = (p as f32 - page_frac).abs().min(1.0);
+                let alpha = 1.0 - dist * 0.72;
+                scene.rects.push(RectInst {
+                    rect: Rect::new(x - dot_r, dot_y - dot_r, dot_r * 2.0, dot_r * 2.0),
+                    radius: dot_r,
+                    color: [hl[0], hl[1], hl[2], hl[3] * alpha],
+                });
+            }
+        }
     } else if layout.viewport.h > 1.0 && !query.is_empty() {
         // Search active but nothing matched: show a soft empty state.
         let cx = layout.viewport.x + layout.viewport.w / 2.0;
@@ -671,10 +698,9 @@ pub fn scene(
 mod tests {
     use super::*;
 
-    /// Largest valid scroll offset for the current layout.
+    /// Largest valid horizontal scroll offset for the current layout.
     fn max_scroll(layout: &Layout) -> f32 {
-        let rows = layout.cells.div_ceil(layout.cols);
-        (rows as f32 * GRID_CELL_H - layout.viewport.h).max(0.0)
+        (layout.n_pages.saturating_sub(1) as f32 * layout.viewport.w).max(0.0)
     }
 
     fn entries(n: usize) -> Vec<AppEntry> {
@@ -765,10 +791,17 @@ mod tests {
     #[test]
     fn scrolled_hit_test_offsets_cells() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 572.0, 100, 100, GRID_CELL_H * 2.0);
-        // Top-left visible cell is the first cell of row 2.
+        // Scroll exactly one page forward.
+        let cells_per_page_guess = 6 * 4; // rough: 6 cols × 4 rows
+        let l = layout(&cfg, SURFACE, 572.0, cells_per_page_guess * 3, cells_per_page_guess * 3, l_page_w(&cfg));
+        // Top-left of the visible area is now the first cell of page 1.
         let pos = (l.grid_x0 + 2.0, l.viewport.y + 2.0);
-        assert_eq!(hit_test(&l, pos, false), Some(Hit::GridCell(2 * l.cols)));
+        let cells_per_page = l.cols * l.rows_per_page;
+        assert_eq!(hit_test(&l, pos, false), Some(Hit::GridCell(cells_per_page)));
+    }
+
+    fn l_page_w(cfg: &Config) -> f32 {
+        layout(cfg, SURFACE, 572.0, 24, 24, 0.0).viewport.w
     }
 
     #[test]

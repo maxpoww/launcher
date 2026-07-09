@@ -135,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         pointer_pos: None,
         list_scroll: 0.0,
         scroll_target: 0.0,
+        open_at: None,
         indexer,
         usage: usage::UsageDb::load(),
         pins: pins::PinDb::load(),
@@ -253,6 +254,10 @@ pub struct App {
     list_scroll: f32,
     /// Scroll animation target; list_scroll eases toward this each frame.
     scroll_target: f32,
+    /// Set when a scroll gesture triggers Expand. Events within 300 ms are
+    /// eaten so the gesture doesn't bleed through and advance a page.
+    /// Cleared immediately by AxisStop so keyboard Toggle has zero cooldown.
+    open_at: Option<Instant>,
     /// Handle to the background indexer thread.
     indexer: apps::Indexer,
     /// Persistent launch-frequency database; drives sort order.
@@ -446,6 +451,11 @@ impl App {
     fn refilter(&mut self) {
         let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
         self.visible = self.searcher.rank(&self.query, &names);
+        // Hide pinned apps from the grid when the search box is empty —
+        // they're already visible on the dock, no need to show them twice.
+        if self.query.is_empty() {
+            self.visible.retain(|&idx| !self.pins.is_pinned(&self.entries[idx].id));
+        }
         self.selected = if self.query.is_empty() || self.visible.is_empty() {
             None
         } else {
@@ -611,6 +621,12 @@ impl App {
             self.hover = None;
             self.search_open = false;
         }
+        if self.ui.target() == Target::Open {
+            self.list_scroll = 0.0;
+            self.scroll_target = 0.0;
+            // open_at is set only when expand was triggered by a scroll gesture
+            // (in on_scroll), so keyboard Toggle has no cooldown.
+        }
         // The search only lives while the popup is open.
         if self.ui.target() != Target::Open && !self.query.is_empty() {
             self.query.clear();
@@ -768,20 +784,37 @@ impl App {
         match self.ui.target() {
             Target::Dock => self.scroll_accum += value,
             Target::Open => {
-                let next = self.scroll_target + value as f32;
-                if next < 0.0 && self.scroll_target <= 0.0 {
+                if self.open_at.map_or(false, |t| t.elapsed() < Duration::from_millis(300)) {
+                    self.scroll_accum = 0.0;
+                    return;
+                }
+                let settled_layout = content::layout(
+                    &self.config,
+                    (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
+                    self.ui.extent_of(Target::Open),
+                    self.dock_order.len(),
+                    self.visible.len(),
+                    self.list_scroll,
+                );
+                let page_w = settled_layout.viewport.w.max(1.0);
+                let n_pages = settled_layout.n_pages;
+                if n_pages <= 1 {
                     self.scroll_accum += value;
                 } else {
-                    // Normal grid scrolling: any partial collapse
-                    // gesture is abandoned.
-                    self.scroll_accum = 0.0;
-                    let layout = self.current_layout();
-                    let rows = layout.cells.div_ceil(layout.cols.max(1));
-                    let max_scroll =
-                        (rows as f32 * content::GRID_CELL_H - layout.viewport.h).max(0.0);
-                    self.scroll_target = next.clamp(0.0, max_scroll);
-                    self.update_hover();
-                    self.schedule_frame();
+                    // Use scroll_target (intended page) not list_scroll (animated
+                    // position) so mid-animation events don't mis-compute the page.
+                    let current_page = (self.scroll_target / page_w).round() as i64;
+                    // positive = scroll down = next page; negative = up = prev/collapse.
+                    let dir: i64 = if value > 0.0 { 1 } else { -1 };
+                    let next_page = (current_page + dir).clamp(0, n_pages as i64 - 1);
+                    if next_page == current_page && dir < 0 {
+                        self.scroll_accum += value;
+                    } else if next_page != current_page {
+                        self.scroll_accum = 0.0;
+                        self.scroll_target = next_page as f32 * page_w;
+                        self.update_hover();
+                        self.schedule_frame();
+                    }
                 }
             }
             Target::Hidden => {}
@@ -792,6 +825,9 @@ impl App {
         }
         if toward_open <= -SCROLL_THRESHOLD {
             self.scroll_accum = 0.0;
+            // Mark that expand was triggered by scroll so the bleed-through
+            // events are eaten until the gesture ends (AxisStop clears this).
+            self.open_at = Some(Instant::now());
             self.handle_command(Command::Expand);
         } else if toward_open >= SCROLL_THRESHOLD {
             self.scroll_accum = 0.0;
@@ -1271,6 +1307,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 ..
             } => {
                 app.on_scroll(value);
+            }
+            wl_pointer::Event::AxisStop {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                ..
+            } => {
+                // Gesture ended: clear the expand-bleed cooldown immediately so
+                // the next gesture can navigate pages without the 300 ms wait.
+                app.open_at = None;
             }
             _ => {} // frame, axis metadata, other buttons/axes
         }
