@@ -1089,7 +1089,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 if app.ui.target() != Target::Hidden {
                     app.schedule_frame(); // relax any magnification
                     if app.config.input.autohide {
-                        app.schedule_autohide();
+                        if app.ui.target() == Target::Open {
+                            // Full popup is up and the pointer left — the user
+                            // clicked or moved to another window. Dismiss now;
+                            // no grace period needed (the card is fully open,
+                            // not just a slim dock sliver to accidentally graze).
+                            let cmd = app.dismiss_command();
+                            app.handle_command(cmd);
+                        } else {
+                            app.schedule_autohide();
+                        }
                     }
                 }
             }
