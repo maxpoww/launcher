@@ -175,6 +175,19 @@ Acceptance criteria:
   38 apps in 26 ms — see the `RUST_LOG=debug` "indexed N apps in T
   (scan …, icons …)" line.)*
 
+## P4.5 — Sectioned popup (2026-07-09)
+
+The open card is split into three independently paging sections, top to
+bottom: **Apps** (6×3 grid), **Install** (6×1, empty "Coming soon"
+placeholder — future package search), and **Files** (6×1, the standard
+home folders opened via `xdg-open`). Search fans results into their
+sections (apps → Apps, folders → Files); each section has its own
+cyclic horizontal paging, page dots, and wheel routing by pointer
+position; keyboard selection walks the sections as one flat list.
+Folders never auto-fill the dock but can be pinned explicitly. Default
+card height grew to 680 to fit the five rows; shorter cards shrink the
+Apps section first.
+
 ## P5 — Polish
 
 - Icons: `freedesktop-icons` lookup + texture atlas.

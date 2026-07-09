@@ -84,17 +84,34 @@ pub struct Scene {
     pub icons: Vec<IconInst>,
     /// Unclipped labels (search box text), clipped per-label.
     pub labels: Vec<Label>,
-    /// App grid, present once the card is risen past the dock band.
-    pub grid: Option<GridContent>,
+    /// Section grids (Apps / Install / Files), each clipped to its own
+    /// viewport by the renderer.
+    pub grids: Vec<GridContent>,
 }
 
 /// What the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     DockIcon(usize),
-    GridCell(usize),
+    /// A cell in one of the popup sections: (section, cell index into
+    /// that section's visible list).
+    GridCell(usize, usize),
     SearchButton,
 }
+
+/// Popup sections, top to bottom: the app grid, the (future) install
+/// row, and the home-folder row. Each pages independently.
+pub const SECTION_APPS: usize = 0;
+pub const SECTION_INSTALL: usize = 1;
+pub const SECTION_FILES: usize = 2;
+pub const N_SECTIONS: usize = 3;
+const SECTION_TITLES: [&str; N_SECTIONS] = ["Apps", "Install", "Files"];
+/// Grid rows per section (Apps is a cap; it shrinks on short cards).
+const SECTION_ROWS: [usize; N_SECTIONS] = [3, 1, 1];
+/// Height of a section's title line above its grid.
+const SECTION_TITLE_H: f32 = 22.0;
+/// Vertical gap beneath each section (page dots live here).
+const SECTION_GAP: f32 = 14.0;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
@@ -162,22 +179,18 @@ fn truncate_label(text: &str, max_w: f32, font_px: f32) -> String {
     }
 }
 
-/// Geometry shared by scene assembly and hit-testing.
+/// One section's geometry: title anchor plus a grid viewport with its
+/// own cyclic horizontal paging.
 #[derive(Debug)]
-pub struct Layout {
-    /// Card top edge in surface coordinates for the current extent.
-    pub card_top: f32,
-    /// Dock slot rects, one per shown dock icon (entry index == slot
-    /// index: the dock shows the first N entries, unaffected by search).
-    pub dock_slots: Vec<Rect>,
-    /// Grid viewport clipped to an exact multiple of GRID_CELL_H rows.
+pub struct SectionLayout {
+    /// Title anchor: (left, top).
+    pub title_pos: (f32, f32),
+    /// Grid viewport (exactly `rows` × GRID_CELL_H tall).
     pub viewport: Rect,
-    /// Left edge of the first grid column (columns are centered).
-    pub grid_x0: f32,
     /// Number of grid columns (>= 1).
     pub cols: usize,
     /// Rows visible at once (one page height).
-    pub rows_per_page: usize,
+    pub rows: usize,
     /// Total pages of grid content.
     pub n_pages: usize,
     /// Horizontal scroll offset in pixels (page 0 = 0, page 1 =
@@ -186,6 +199,18 @@ pub struct Layout {
     pub scroll: f32,
     /// Total number of grid cells (the *visible*, filtered entries).
     pub cells: usize,
+}
+
+/// Geometry shared by scene assembly and hit-testing.
+#[derive(Debug)]
+pub struct Layout {
+    /// Card top edge in surface coordinates for the current extent.
+    pub card_top: f32,
+    /// Dock slot rects, one per shown dock icon (entry index == slot
+    /// index: the dock shows the first N entries, unaffected by search).
+    pub dock_slots: Vec<Rect>,
+    /// The popup sections, top to bottom (Apps, Install, Files).
+    pub sections: [SectionLayout; N_SECTIONS],
     /// Fully expanded search box (centered, fixed width).
     pub search_box: Rect,
     /// Compact search button (circle, same center-x and y as search_box).
@@ -196,15 +221,15 @@ pub struct Layout {
 ///
 /// `surface` is the full surface size, `extent` the card's rise,
 /// `n_entries` the total (unfiltered) entry count for the dock,
-/// `n_visible` the filtered count for the grid, `scroll` the unclamped
-/// grid offset.
+/// `n_visible` the filtered count per section, `scroll` the unclamped
+/// per-section grid offsets.
 pub fn layout(
     config: &Config,
     surface: (f32, f32),
     extent: f32,
     n_entries: usize,
-    n_visible: usize,
-    scroll: f32,
+    n_visible: [usize; N_SECTIONS],
+    scroll: [f32; N_SECTIONS],
 ) -> Layout {
     let (w, h) = surface;
     let card_top = h - extent;
@@ -246,51 +271,84 @@ pub fn layout(
     let inner_w = (w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
     let cols = ((inner_w / GRID_CELL_W).floor() as usize).max(1);
     let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
-    // Truncate viewport height to a clean multiple of GRID_CELL_H so every
-    // page has the same number of full rows.
-    let raw_h = (grid_bottom - grid_top).max(0.0);
-    let rows_per_page = ((raw_h / GRID_CELL_H).floor() as usize).max(1);
-    let viewport_h = rows_per_page as f32 * GRID_CELL_H;
-    let viewport = Rect::new(grid_x0, grid_top, cols as f32 * GRID_CELL_W, viewport_h);
 
-    // Horizontal paging: each page is viewport.w wide. Pages wrap
-    // cyclically (infinite scroll), so the offset is normalized into
-    // [0, n_pages * viewport.w) rather than clamped.
-    let cells_per_page = cols * rows_per_page;
-    let n_pages = if n_visible == 0 {
-        0
-    } else {
-        n_visible.div_ceil(cells_per_page)
-    };
-    let total_w = n_pages as f32 * viewport.w;
-    let scroll = if total_w > 0.0 {
-        scroll.rem_euclid(total_w)
-    } else {
-        0.0
-    };
+    // Apps takes whatever rows fit after the fixed single-row sections
+    // and the three title lines, capped at its design height (6×3 at
+    // the default card size); short cards degrade to fewer rows.
+    let fixed = (SECTION_ROWS[SECTION_INSTALL] + SECTION_ROWS[SECTION_FILES]) as f32 * GRID_CELL_H
+        + N_SECTIONS as f32 * SECTION_TITLE_H
+        + (N_SECTIONS - 1) as f32 * SECTION_GAP;
+    let avail = grid_bottom - grid_top - fixed;
+    let apps_rows = ((avail / GRID_CELL_H) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
+
+    let mut y = grid_top;
+    let sections = std::array::from_fn(|s| {
+        let rows = if s == SECTION_APPS {
+            apps_rows
+        } else {
+            SECTION_ROWS[s]
+        };
+        let title_pos = (grid_x0 + 8.0, y);
+        y += SECTION_TITLE_H;
+        let viewport = Rect::new(
+            grid_x0,
+            y,
+            cols as f32 * GRID_CELL_W,
+            rows as f32 * GRID_CELL_H,
+        );
+        y += viewport.h + SECTION_GAP;
+        // Horizontal paging: each page is viewport.w wide. Pages wrap
+        // cyclically (infinite scroll), so the offset is normalized into
+        // [0, n_pages * viewport.w) rather than clamped.
+        let cells_per_page = cols * rows;
+        let n_pages = if n_visible[s] == 0 {
+            0
+        } else {
+            n_visible[s].div_ceil(cells_per_page)
+        };
+        let total_w = n_pages as f32 * viewport.w;
+        let scroll = if total_w > 0.0 {
+            scroll[s].rem_euclid(total_w)
+        } else {
+            0.0
+        };
+        SectionLayout {
+            title_pos,
+            viewport,
+            cols,
+            rows,
+            n_pages,
+            scroll,
+            cells: n_visible[s],
+        }
+    });
 
     Layout {
         card_top,
         dock_slots,
-        viewport,
-        grid_x0,
-        cols,
-        rows_per_page,
-        n_pages,
-        scroll,
-        cells: n_visible,
+        sections,
         search_box,
         search_btn,
     }
 }
 
 /// Return the horizontal scroll offset (page * viewport.w) that makes
-/// `cell` visible, snapping to the page that contains it.
-pub fn scroll_to_reveal(layout: &Layout, cell: usize) -> f32 {
-    let cells_per_page = (layout.cols * layout.rows_per_page).max(1);
+/// `cell` visible in its section, snapping to the page containing it.
+pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
+    let cells_per_page = (section.cols * section.rows).max(1);
     let page = cell / cells_per_page;
-    let max_page = layout.n_pages.saturating_sub(1);
-    (page.min(max_page) as f32 * layout.viewport.w).max(0.0)
+    let max_page = section.n_pages.saturating_sub(1);
+    (page.min(max_page) as f32 * section.viewport.w).max(0.0)
+}
+
+/// Which section's scroll band contains `pos`: the viewport plus its
+/// title line above and the gap (page dots) beneath, so wheel paging is
+/// forgiving about the exact pointer height.
+pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
+    layout.sections.iter().position(|sec| {
+        pos.1 >= sec.viewport.y - SECTION_TITLE_H
+            && pos.1 < sec.viewport.y + sec.viewport.h + SECTION_GAP
+    })
 }
 
 /// Which item (if any) the pointer is over.
@@ -303,23 +361,23 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<H
             return Some(Hit::DockIcon(i));
         }
     }
-    if layout.viewport.h > 0.0 {
-        if !search_open && layout.search_btn.contains(pos) {
-            return Some(Hit::SearchButton);
-        }
-        if layout.viewport.contains(pos) {
+    if !search_open && layout.search_btn.contains(pos) {
+        return Some(Hit::SearchButton);
+    }
+    for (s, sec) in layout.sections.iter().enumerate() {
+        if sec.n_pages > 0 && sec.viewport.contains(pos) {
             // Adjust for horizontal page scroll; pages wrap cyclically.
-            let adjusted_x = pos.0 - layout.grid_x0 + layout.scroll;
-            let page_w = layout.viewport.w.max(1.0);
-            let page = (adjusted_x / page_w).floor() as usize % layout.n_pages.max(1);
+            let adjusted_x = pos.0 - sec.viewport.x + sec.scroll;
+            let page_w = sec.viewport.w.max(1.0);
+            let page = (adjusted_x / page_w).floor() as usize % sec.n_pages.max(1);
             let col_f = (adjusted_x - page as f32 * page_w) / GRID_CELL_W;
-            let row = ((pos.1 - layout.viewport.y) / GRID_CELL_H).floor() as usize;
+            let row = ((pos.1 - sec.viewport.y) / GRID_CELL_H).floor() as usize;
             let col = col_f.floor() as usize;
-            if col_f >= 0.0 && col < layout.cols && row < layout.rows_per_page {
-                let cells_per_page = layout.cols * layout.rows_per_page;
-                let i = page * cells_per_page + row * layout.cols + col;
-                if i < layout.cells {
-                    return Some(Hit::GridCell(i));
+            if col_f >= 0.0 && col < sec.cols && row < sec.rows {
+                let cells_per_page = sec.cols * sec.rows;
+                let i = page * cells_per_page + row * sec.cols + col;
+                if i < sec.cells {
+                    return Some(Hit::GridCell(s, i));
                 }
             }
         }
@@ -354,8 +412,9 @@ pub struct FrameInput<'a> {
     pub bounce: Option<(usize, f32)>,
     /// Live search query (empty shows the placeholder).
     pub query: &'a str,
-    /// Auto-selected grid position (best match while searching).
-    pub selected: Option<usize>,
+    /// Auto-selected grid position (best match while searching), as
+    /// (section, cell index within that section's visible list).
+    pub selected: Option<(usize, usize)>,
     /// Search box expansion: 0.0 = compact circle button, 1.0 = full pill.
     pub search_expand: f32,
     /// Which entries are using placeholder tiles (no resolved icon file).
@@ -370,14 +429,14 @@ pub struct FrameInput<'a> {
 
 /// Assemble the draw scene for one frame.
 ///
-/// `visible` holds indices into `entries`, ranked by the current query
-/// — the grid shows exactly these, in order. Dock icons always show
-/// the first entries unfiltered.
+/// `visible` holds, per section, indices into `entries` ranked by the
+/// current query — each section's grid shows exactly its list, in
+/// order. Dock icons always show the dock order unfiltered.
 pub fn scene(
     config: &Config,
     layout: &Layout,
     entries: &[AppEntry],
-    visible: &[usize],
+    visible: &[Vec<usize>; N_SECTIONS],
     surface: (f32, f32),
     frame: &FrameInput,
 ) -> Scene {
@@ -527,7 +586,7 @@ pub fn scene(
 
     // Search widget: "Filter" pill button that morphs into an expanding
     // search box. search_expand drives the open animation (0→1).
-    if layout.viewport.h > 1.0 {
+    {
         let btn = layout.search_btn;
         let boxx = layout.search_box;
         let cx = w / 2.0;
@@ -592,44 +651,86 @@ pub fn scene(
         }
     }
 
-    // Grid cells with horizontal paging.
-    if layout.viewport.h > 1.0 && !visible.is_empty() {
+    // The three sections: title, grid cells with per-section horizontal
+    // paging, page dots, and per-section empty states.
+    for (s, sec) in layout.sections.iter().enumerate() {
+        scene.labels.push(Label {
+            text: SECTION_TITLES[s].to_string(),
+            pos: (sec.title_pos.0, sec.title_pos.1 + 2.0),
+            max_w: sec.viewport.w,
+            font_px: LABEL_FONT_PX,
+            line_px: LABEL_LINE_PX,
+            centered: false,
+            dim: true,
+            cache: true,
+            clip: None,
+        });
+
         let mut grid = GridContent {
-            clip: layout.viewport,
+            clip: sec.viewport,
             ..Default::default()
         };
-        let page_w = layout.viewport.w;
-        let cells_per_page = (layout.cols * layout.rows_per_page).max(1);
-        let total_w = (layout.n_pages as f32 * page_w).max(1.0);
+        if sec.cells == 0 {
+            // Empty state: Install has none yet by design; Apps/Files
+            // show one only when a search matched nothing in them.
+            let text = match s {
+                SECTION_INSTALL => "Coming soon",
+                _ if !query.is_empty() => "No results",
+                _ => {
+                    scene.grids.push(grid);
+                    continue;
+                }
+            };
+            grid.labels.push(Label {
+                text: text.to_string(),
+                pos: (
+                    sec.viewport.x + sec.viewport.w / 2.0,
+                    sec.viewport.y + sec.viewport.h / 2.0 - LABEL_LINE_PX / 2.0,
+                ),
+                max_w: 200.0,
+                font_px: LABEL_FONT_PX + 2.0,
+                line_px: LABEL_LINE_PX + 2.0,
+                centered: true,
+                dim: true,
+                cache: true,
+                clip: None,
+            });
+            scene.grids.push(grid);
+            continue;
+        }
+
+        let page_w = sec.viewport.w;
+        let cells_per_page = (sec.cols * sec.rows).max(1);
+        let total_w = (sec.n_pages as f32 * page_w).max(1.0);
         // Paging wraps cyclically: place every page at its nearest wrapped
         // offset relative to the viewport and cull the off-screen ones (at
         // most two pages remain visible during a slide).
-        for page in 0..layout.n_pages {
-            let rel0 = (page as f32 * page_w - layout.scroll).rem_euclid(total_w);
+        for page in 0..sec.n_pages {
+            let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
             let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
             if rel <= -page_w || rel >= page_w {
                 continue;
             }
-            for row in 0..layout.rows_per_page {
-                for col in 0..layout.cols {
-                    let i = page * cells_per_page + row * layout.cols + col;
-                    let Some(&entry_idx) = visible.get(i) else {
+            for row in 0..sec.rows {
+                for col in 0..sec.cols {
+                    let i = page * cells_per_page + row * sec.cols + col;
+                    let Some(&entry_idx) = visible[s].get(i) else {
                         break;
                     };
                     let Some(entry) = entries.get(entry_idx) else {
                         break;
                     };
-                    let cell_x = layout.grid_x0 + rel + col as f32 * GRID_CELL_W;
-                    let cell_y = layout.viewport.y + row as f32 * GRID_CELL_H;
+                    let cell_x = sec.viewport.x + rel + col as f32 * GRID_CELL_W;
+                    let cell_y = sec.viewport.y + row as f32 * GRID_CELL_H;
                     let cell = Rect::new(cell_x, cell_y, GRID_CELL_W, GRID_CELL_H);
-                    if selected == Some(i) {
+                    if selected == Some((s, i)) {
                         let hl = config.theme.highlight_rgba();
                         grid.rects.push(RectInst {
                             rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                             radius: 14.0,
                             color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
                         });
-                    } else if hover == Some(Hit::GridCell(i)) {
+                    } else if hover == Some(Hit::GridCell(s, i)) {
                         grid.rects.push(RectInst {
                             rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                             radius: 14.0,
@@ -687,22 +788,22 @@ pub fn scene(
                 }
             }
         }
-        scene.grid = Some(grid);
+        scene.grids.push(grid);
 
-        // Page indicator dots between the grid and the search button.
-        if layout.n_pages > 1 {
+        // Page indicator dots in the gap beneath the section.
+        if sec.n_pages > 1 {
             let dot_r = 3.0;
             let dot_spacing = 10.0;
-            let total_dots_w = layout.n_pages as f32 * dot_spacing - (dot_spacing - dot_r * 2.0);
-            let dot_cx = layout.viewport.x + layout.viewport.w / 2.0;
-            let dot_y = layout.viewport.y + layout.viewport.h + 10.0;
-            let page_frac = layout.scroll / page_w;
+            let total_dots_w = sec.n_pages as f32 * dot_spacing - (dot_spacing - dot_r * 2.0);
+            let dot_cx = sec.viewport.x + sec.viewport.w / 2.0;
+            let dot_y = sec.viewport.y + sec.viewport.h + SECTION_GAP / 2.0;
+            let page_frac = sec.scroll / page_w;
             let hl = config.theme.highlight_rgba();
-            for p in 0..layout.n_pages {
+            for p in 0..sec.n_pages {
                 let x = dot_cx - total_dots_w / 2.0 + p as f32 * dot_spacing + dot_r;
                 // Cyclic distance: the highlight wraps with the pages.
                 let raw = (p as f32 - page_frac).abs();
-                let dist = raw.min(layout.n_pages as f32 - raw).min(1.0);
+                let dist = raw.min(sec.n_pages as f32 - raw).min(1.0);
                 let alpha = 1.0 - dist * 0.72;
                 scene.rects.push(RectInst {
                     rect: Rect::new(x - dot_r, dot_y - dot_r, dot_r * 2.0, dot_r * 2.0),
@@ -711,26 +812,6 @@ pub fn scene(
                 });
             }
         }
-    } else if layout.viewport.h > 1.0 && !query.is_empty() {
-        // Search active but nothing matched: show a soft empty state.
-        let cx = layout.viewport.x + layout.viewport.w / 2.0;
-        let cy = layout.viewport.y + layout.viewport.h / 2.0;
-        let mut grid = GridContent {
-            clip: layout.viewport,
-            ..Default::default()
-        };
-        grid.labels.push(Label {
-            text: "No results".to_string(),
-            pos: (cx, cy - LABEL_LINE_PX / 2.0),
-            max_w: 200.0,
-            font_px: LABEL_FONT_PX + 2.0,
-            line_px: LABEL_LINE_PX + 2.0,
-            centered: true,
-            dim: true,
-            cache: true,
-            clip: None,
-        });
-        scene.grid = Some(grid);
     }
 
     scene
@@ -753,22 +834,29 @@ mod tests {
             .collect()
     }
 
-    fn vis(n: usize) -> Vec<usize> {
-        (0..n).collect()
+    fn vis(n: usize) -> [Vec<usize>; N_SECTIONS] {
+        [(0..n).collect(), Vec::new(), Vec::new()]
     }
 
     fn config() -> Config {
         Config::default()
     }
 
-    const SURFACE: (f32, f32) = (720.0, 572.0);
+    /// Surface for the default config: width × (height + margin + headroom).
+    const SURFACE: (f32, f32) = (720.0, 716.0);
+    /// Fully-open extent for the default config (height + margin).
+    const OPEN: f32 = 692.0;
+
+    fn open_layout(cfg: &Config, n: usize, scroll: f32) -> Layout {
+        layout(cfg, SURFACE, OPEN, n, [n, 0, 0], [scroll, 0.0, 0.0])
+    }
 
     #[test]
     fn docked_extent_shows_dock_row_only() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 48.0, 20, 20, 0.0);
+        let l = layout(&cfg, SURFACE, 48.0, 20, [20, 0, 6], [0.0; N_SECTIONS]);
         assert!(!l.dock_slots.is_empty());
-        // Viewport exists geometrically but lies below the surface
+        // Sections exist geometrically but lie below the surface
         // bottom, so no cells are visible while docked.
         let s = scene(
             &cfg,
@@ -781,17 +869,24 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(s.grid.is_none() || s.grid.as_ref().unwrap().clip.y >= SURFACE.1);
+        assert!(s.grids.iter().all(|g| g.clip.y >= SURFACE.1));
     }
 
     #[test]
-    fn open_extent_shows_grid_and_wraps_scroll() {
+    fn open_extent_shows_three_sections() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 572.0, 40, 40, 1e9);
-        assert!(l.cols >= 2, "720px card should fit several columns");
-        assert!(l.viewport.h > 100.0);
+        let l = open_layout(&cfg, 40, 1e9);
+        let apps = &l.sections[SECTION_APPS];
+        assert_eq!(apps.cols, 6, "720px card fits exactly 6 columns");
+        assert_eq!(apps.rows, 3, "default card height fits the 6×3 grid");
+        assert_eq!(l.sections[SECTION_INSTALL].rows, 1);
+        assert_eq!(l.sections[SECTION_FILES].rows, 1);
+        // Sections stack without overlap and fit above the search box.
+        assert!(l.sections[SECTION_INSTALL].viewport.y >= apps.viewport.y + apps.viewport.h);
+        let files = &l.sections[SECTION_FILES];
+        assert!(files.viewport.y + files.viewport.h <= l.search_box.y);
         // Scroll wraps cyclically into the page strip.
-        assert!(l.scroll >= 0.0 && l.scroll < l.n_pages as f32 * l.viewport.w);
+        assert!(apps.scroll >= 0.0 && apps.scroll < apps.n_pages as f32 * apps.viewport.w);
         let s = scene(
             &cfg,
             &l,
@@ -803,9 +898,32 @@ mod tests {
                 ..Default::default()
             },
         );
-        let grid = s.grid.expect("open card must show the grid");
-        assert!(!grid.icons.is_empty());
-        assert_eq!(grid.icons.len(), grid.labels.len());
+        assert_eq!(s.grids.len(), N_SECTIONS);
+        let apps_grid = &s.grids[SECTION_APPS];
+        assert!(!apps_grid.icons.is_empty());
+        assert_eq!(apps_grid.icons.len(), apps_grid.labels.len());
+    }
+
+    #[test]
+    fn files_section_shows_its_own_entries() {
+        let cfg = config();
+        let l = layout(&cfg, SURFACE, OPEN, 10, [4, 0, 6], [0.0; N_SECTIONS]);
+        let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
+        let s = scene(
+            &cfg,
+            &l,
+            &entries(10),
+            &visible,
+            SURFACE,
+            &FrameInput {
+                alpha: 1.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(s.grids[SECTION_FILES].icons.len(), 6);
+        // Install is empty: no icons, just the placeholder label.
+        assert!(s.grids[SECTION_INSTALL].icons.is_empty());
+        assert!(!s.grids[SECTION_INSTALL].labels.is_empty());
     }
 
     #[test]
@@ -813,72 +931,105 @@ mod tests {
         let cfg = config();
         let page_w = l_page_w(&cfg);
         // One page-width left of page 0 is the last page's position.
-        let l = layout(&cfg, SURFACE, 572.0, 72, 72, -page_w);
-        assert!(l.n_pages >= 2, "test needs multiple pages");
-        let expect = (l.n_pages - 1) as f32 * page_w;
+        let l = open_layout(&cfg, 72, -page_w);
+        let apps = &l.sections[SECTION_APPS];
+        assert!(apps.n_pages >= 2, "test needs multiple pages");
+        let expect = (apps.n_pages - 1) as f32 * page_w;
         assert!(
-            (l.scroll - expect).abs() < 0.5,
+            (apps.scroll - expect).abs() < 0.5,
             "scroll={} expected={}",
-            l.scroll,
+            apps.scroll,
             expect
         );
     }
 
     #[test]
-    fn hit_test_finds_dock_icon_and_cell() {
+    fn hit_test_finds_dock_icon_and_cells_per_section() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 572.0, 10, 10, 0.0);
+        let l = layout(&cfg, SURFACE, OPEN, 10, [10, 0, 6], [0.0; N_SECTIONS]);
         let slot = l.dock_slots[0];
         assert_eq!(
             hit_test(&l, (slot.x + 1.0, slot.y + 1.0), false),
             Some(Hit::DockIcon(0))
         );
-        // Second cell of the first row.
+        // Second cell of the apps section's first row.
+        let apps = &l.sections[SECTION_APPS];
         let cell1 = (
-            l.grid_x0 + GRID_CELL_W * 1.5,
-            l.viewport.y + GRID_CELL_H / 2.0,
+            apps.viewport.x + GRID_CELL_W * 1.5,
+            apps.viewport.y + GRID_CELL_H / 2.0,
         );
-        assert_eq!(hit_test(&l, cell1, false), Some(Hit::GridCell(1)));
+        assert_eq!(
+            hit_test(&l, cell1, false),
+            Some(Hit::GridCell(SECTION_APPS, 1))
+        );
+        // First cell of the files section.
+        let files = &l.sections[SECTION_FILES];
+        let fcell = (
+            files.viewport.x + GRID_CELL_W / 2.0,
+            files.viewport.y + GRID_CELL_H / 2.0,
+        );
+        assert_eq!(
+            hit_test(&l, fcell, false),
+            Some(Hit::GridCell(SECTION_FILES, 0))
+        );
+        // The empty install section hits nothing.
+        let install = &l.sections[SECTION_INSTALL];
+        let icell = (
+            install.viewport.x + GRID_CELL_W / 2.0,
+            install.viewport.y + GRID_CELL_H / 2.0,
+        );
+        assert_eq!(hit_test(&l, icell, false), None);
         assert_eq!(hit_test(&l, (1.0, 1.0), false), None);
+    }
+
+    #[test]
+    fn section_at_routes_scroll_bands() {
+        let cfg = config();
+        let l = layout(&cfg, SURFACE, OPEN, 10, [10, 0, 6], [0.0; N_SECTIONS]);
+        let apps = &l.sections[SECTION_APPS];
+        let mid = (
+            apps.viewport.x + 10.0,
+            apps.viewport.y + apps.viewport.h / 2.0,
+        );
+        assert_eq!(section_at(&l, mid), Some(SECTION_APPS));
+        let files = &l.sections[SECTION_FILES];
+        // The title line above the grid belongs to the section too.
+        let title = (files.viewport.x + 10.0, files.viewport.y - 4.0);
+        assert_eq!(section_at(&l, title), Some(SECTION_FILES));
+        assert_eq!(section_at(&l, (10.0, 0.0)), None);
     }
 
     #[test]
     fn scrolled_hit_test_offsets_cells() {
         let cfg = config();
         // Scroll exactly one page forward.
-        let cells_per_page_guess = 6 * 4; // rough: 6 cols × 4 rows
-        let l = layout(
-            &cfg,
-            SURFACE,
-            572.0,
-            cells_per_page_guess * 3,
-            cells_per_page_guess * 3,
-            l_page_w(&cfg),
-        );
+        let l = open_layout(&cfg, 18 * 3, l_page_w(&cfg));
+        let apps = &l.sections[SECTION_APPS];
         // Top-left of the visible area is now the first cell of page 1.
-        let pos = (l.grid_x0 + 2.0, l.viewport.y + 2.0);
-        let cells_per_page = l.cols * l.rows_per_page;
+        let pos = (apps.viewport.x + 2.0, apps.viewport.y + 2.0);
+        let cells_per_page = apps.cols * apps.rows;
         assert_eq!(
             hit_test(&l, pos, false),
-            Some(Hit::GridCell(cells_per_page))
+            Some(Hit::GridCell(SECTION_APPS, cells_per_page))
         );
     }
 
     fn l_page_w(cfg: &Config) -> f32 {
-        layout(cfg, SURFACE, 572.0, 24, 24, 0.0).viewport.w
+        open_layout(cfg, 24, 0.0).sections[SECTION_APPS].viewport.w
     }
 
     #[test]
     fn partial_last_row_is_not_hit_beyond_entries() {
         let cfg = config();
         // 7 entries in >= 2 columns: the last row is partial.
-        let l = layout(&cfg, SURFACE, 572.0, 7, 7, 0.0);
-        let last_row = 7 / l.cols;
-        let beyond = 7 % l.cols; // first empty column of the last row
-        if beyond > 0 {
+        let l = open_layout(&cfg, 7, 0.0);
+        let apps = &l.sections[SECTION_APPS];
+        let last_row = 7 / apps.cols;
+        let beyond = 7 % apps.cols; // first empty column of the last row
+        if beyond > 0 && last_row < apps.rows {
             let pos = (
-                l.grid_x0 + (beyond as f32 + 0.5) * GRID_CELL_W,
-                l.viewport.y + (last_row as f32 + 0.5) * GRID_CELL_H,
+                apps.viewport.x + (beyond as f32 + 0.5) * GRID_CELL_W,
+                apps.viewport.y + (last_row as f32 + 0.5) * GRID_CELL_H,
             );
             assert_eq!(hit_test(&l, pos, false), None);
         }

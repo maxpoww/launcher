@@ -128,6 +128,7 @@ fn main() -> anyhow::Result<()> {
         interactive: false,
         input_extent: None,
         entries: Vec::new(),
+        kinds: Vec::new(),
         pending_icons: None,
         hover: None,
         pointer_pos: None,
@@ -226,9 +227,11 @@ pub struct App {
     /// Last input-region extent sent to the compositor.
     input_extent: Option<u32>,
 
-    /// Discovered applications, sorted by name (icon texture layers are
-    /// aligned with this order).
+    /// Discovered applications and home folders (icon texture layers
+    /// are aligned with this order).
     entries: Vec<AppEntry>,
+    /// What each entry is (app / file), aligned with `entries`.
+    kinds: Vec<apps::EntryKind>,
     /// Icons that arrived before the renderer existed.
     pending_icons: Option<Vec<Vec<u8>>>,
     /// Item currently under the pointer.
@@ -268,15 +271,30 @@ pub struct App {
 struct ScrollState {
     /// Accumulated vertical scroll over the dock, for the expand gesture.
     accum: f64,
-    /// App-grid scroll offset in pixels (visual, lags behind `target`).
-    pos: f32,
-    /// Scroll animation target; `pos` eases toward this each frame.
-    target: f32,
     /// Set when a scroll gesture triggers Expand. Events within
     /// EXPAND_BLEED_COOLDOWN are eaten so the gesture doesn't bleed
     /// through and advance a page. Cleared immediately by AxisStop so
     /// keyboard Toggle has zero cooldown.
     open_at: Option<Instant>,
+    /// Per-section paging state — every popup section scrolls
+    /// independently.
+    per: [SectionScroll; content::N_SECTIONS],
+}
+
+impl ScrollState {
+    /// Reset every section to page 0 and clear paging accumulators.
+    fn reset_sections(&mut self) {
+        self.per = Default::default();
+    }
+}
+
+/// One section's horizontal paging state.
+#[derive(Default)]
+struct SectionScroll {
+    /// Scroll offset in pixels (visual, lags behind `target`).
+    pos: f32,
+    /// Scroll animation target; `pos` eases toward this each frame.
+    target: f32,
     /// Accumulated scroll toward the next page turn (resets on direction
     /// change and after each turn).
     page_accum: f64,
@@ -303,11 +321,12 @@ struct SearchState {
     query: String,
     /// Fuzzy matcher (heap-heavy, allocated once per daemon).
     matcher: Searcher,
-    /// Indices into `entries` shown in the grid, ranked by the query
-    /// (every entry in order when the query is empty).
-    visible: Vec<usize>,
-    /// Auto-selected grid position (best match while searching);
-    /// Enter launches it.
+    /// Indices into `entries` shown per section, ranked by the query
+    /// (every entry in order when the query is empty). Apps land in the
+    /// Apps section, home folders in Files; Install is empty for now.
+    visible: [Vec<usize>; content::N_SECTIONS],
+    /// Auto-selected position (best match while searching) as a flat
+    /// index across the sections in order; Enter launches it.
     selected: Option<usize>,
     /// Whether the search box is expanded (vs. compact circle button).
     open: bool,
@@ -320,7 +339,7 @@ impl Default for SearchState {
         Self {
             query: String::new(),
             matcher: Searcher::new(),
-            visible: Vec::new(),
+            visible: Default::default(),
             selected: None,
             open: false,
             expand: 0.0,
@@ -449,27 +468,36 @@ impl App {
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
         info!("app index ready: {} entries", loaded.entries.len());
 
-        // Sort by descending launch frequency so the most-used apps appear
-        // first in both the dock and the unfiltered grid. Ties preserve the
-        // alphabetical order that comes from the indexer.
-        let mut combined: Vec<(waverunner_core::index::AppEntry, Vec<u8>, bool)> = loaded
+        // Sort by descending launch frequency so the most-used entries
+        // appear first in both the dock and the unfiltered grids. Ties
+        // preserve the alphabetical order that comes from the indexer.
+        let mut combined: Vec<(
+            waverunner_core::index::AppEntry,
+            apps::EntryKind,
+            Vec<u8>,
+            bool,
+        )> = loaded
             .entries
             .into_iter()
+            .zip(loaded.kinds)
             .zip(loaded.icons)
             .zip(loaded.placeholders)
-            .map(|((e, i), p)| (e, i, p))
+            .map(|(((e, k), i), p)| (e, k, i, p))
             .collect();
-        combined.sort_by_key(|(e, _, _)| std::cmp::Reverse(self.usage.count(&e.id)));
+        combined.sort_by_key(|(e, _, _, _)| std::cmp::Reverse(self.usage.count(&e.id)));
+        let mut kinds = Vec::with_capacity(combined.len());
         let mut icons = Vec::with_capacity(combined.len());
         let mut placeholders = Vec::with_capacity(combined.len());
         self.entries = combined
             .into_iter()
-            .map(|(e, i, p)| {
+            .map(|(e, k, i, p)| {
+                kinds.push(k);
                 icons.push(i);
                 placeholders.push(p);
                 e
             })
             .collect();
+        self.kinds = kinds;
         self.placeholders = placeholders;
 
         match self.renderer.as_mut() {
@@ -485,39 +513,63 @@ impl App {
         self.schedule_frame();
     }
 
-    /// Re-rank entries against the current query: the grid shows only
-    /// matches, best first, with the top match auto-selected so Enter
-    /// (or a click) launches it.
+    /// Re-rank entries against the current query, fanning matches into
+    /// their sections (apps → Apps, folders → Files) best-first, with
+    /// the top match overall auto-selected so Enter launches it.
     fn refilter(&mut self) {
         let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
-        self.search.visible = self.search.matcher.rank(&self.search.query, &names);
+        let ranked = self.search.matcher.rank(&self.search.query, &names);
+        let mut visible: [Vec<usize>; content::N_SECTIONS] = Default::default();
+        for idx in ranked {
+            let section = match self.kinds.get(idx) {
+                Some(apps::EntryKind::File) => content::SECTION_FILES,
+                _ => content::SECTION_APPS,
+            };
+            visible[section].push(idx);
+        }
         // Hide pinned apps from the grid when the search box is empty —
         // they're already visible on the dock, no need to show them twice.
         if self.search.query.is_empty() {
-            self.search
-                .visible
+            visible[content::SECTION_APPS]
                 .retain(|&idx| !self.pins.is_pinned(&self.entries[idx].id));
         }
-        self.search.selected = if self.search.query.is_empty() || self.search.visible.is_empty() {
+        self.search.visible = visible;
+        self.search.selected = if self.search.query.is_empty() || self.flat_len() == 0 {
             None
         } else {
             Some(0)
         };
-        self.scroll.pos = 0.0;
-        self.scroll.target = 0.0;
+        self.scroll.reset_sections();
         self.update_hover();
         self.schedule_frame();
     }
 
-    /// Layout for an arbitrary card extent at the current scroll offset.
+    /// Total selectable cells across all sections (flat keyboard order:
+    /// Apps, Install, Files).
+    fn flat_len(&self) -> usize {
+        self.search.visible.iter().map(Vec::len).sum()
+    }
+
+    /// Map a flat selection index to (section, cell within section).
+    fn flat_to_pos(&self, mut i: usize) -> Option<(usize, usize)> {
+        for (s, list) in self.search.visible.iter().enumerate() {
+            if i < list.len() {
+                return Some((s, i));
+            }
+            i -= list.len();
+        }
+        None
+    }
+
+    /// Layout for an arbitrary card extent at the current scroll offsets.
     fn layout_at(&self, extent: f32) -> content::Layout {
         content::layout(
             &self.config,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             extent,
             self.dock_order.len(),
-            self.search.visible.len(),
-            self.scroll.pos,
+            std::array::from_fn(|s| self.search.visible[s].len()),
+            std::array::from_fn(|s| self.scroll.per[s].pos),
         )
     }
 
@@ -527,7 +579,8 @@ impl App {
     }
 
     /// Rebuild `dock_order`: pinned entries first (in pin order), then
-    /// most-used non-pinned entries (entries are already usage-sorted).
+    /// most-used non-pinned apps (entries are already usage-sorted).
+    /// Folders never auto-fill the dock, but an explicit pin works.
     fn recompute_dock_order(&mut self) {
         self.dock_order.clear();
         for pin_id in self.pins.pins() {
@@ -538,6 +591,9 @@ impl App {
             }
         }
         for idx in 0..self.entries.len() {
+            if self.kinds.get(idx) != Some(&apps::EntryKind::App) {
+                continue;
+            }
             if !self.dock_order.contains(&idx) && !self.pins.is_excluded(&self.entries[idx].id) {
                 self.dock_order.push(idx);
             }
@@ -617,8 +673,8 @@ impl App {
                     self.activate(entry_idx);
                 }
             }
-            Hit::GridCell(i) => {
-                if let Some(entry_idx) = self.search.visible.get(i).copied() {
+            Hit::GridCell(s, i) => {
+                if let Some(entry_idx) = self.search.visible[s].get(i).copied() {
                     self.activate(entry_idx);
                 }
             }
@@ -691,16 +747,12 @@ impl App {
     fn sync_surface_state(&mut self) {
         if self.ui.target() == Target::Hidden {
             // Fresh card next time it rises.
-            self.scroll.pos = 0.0;
-            self.scroll.target = 0.0;
+            self.scroll.reset_sections();
             self.hover = None;
             self.search.open = false;
         }
         if self.ui.target() == Target::Open {
-            self.scroll.pos = 0.0;
-            self.scroll.target = 0.0;
-            self.scroll.page_accum = 0.0;
-            self.scroll.page_turned_at = None;
+            self.scroll.reset_sections();
             // open_at is set only when expand was triggered by a scroll gesture
             // (in on_scroll), so keyboard Toggle has no cooldown.
         }
@@ -783,15 +835,18 @@ impl App {
             };
         }
 
-        // Smooth-scroll the grid: list_scroll eases toward scroll_target
-        // with an exponential decay (~200 ms to settle at 60 fps).
-        let scroll_delta = self.scroll.target - self.scroll.pos;
-        let scroll_animating = scroll_delta.abs() > 0.5;
-        if scroll_animating {
-            let k = 1.0 - (-dt * 12.0f32).exp();
-            self.scroll.pos += scroll_delta * k;
-        } else if scroll_delta != 0.0 {
-            self.scroll.pos = self.scroll.target;
+        // Smooth-scroll each section: pos eases toward target with an
+        // exponential decay (~200 ms to settle at 60 fps).
+        let mut scroll_animating = false;
+        for sec in &mut self.scroll.per {
+            let delta = sec.target - sec.pos;
+            if delta.abs() > 0.5 {
+                scroll_animating = true;
+                let k = 1.0 - (-dt * 12.0f32).exp();
+                sec.pos += delta * k;
+            } else if delta != 0.0 {
+                sec.pos = sec.target;
+            }
         }
 
         self.dirty = false;
@@ -834,7 +889,7 @@ impl App {
                 },
                 bounce,
                 query: &self.search.query,
-                selected: self.search.selected,
+                selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
                 search_expand: self.search.expand,
                 placeholders: &self.placeholders,
                 dock_order: &self.dock_order,
@@ -851,7 +906,11 @@ impl App {
             self.dirty = true;
         }
         if scroll_animating
-            && (self.scroll.target - self.scroll.pos).abs() > 0.5
+            && self
+                .scroll
+                .per
+                .iter()
+                .any(|sec| (sec.target - sec.pos).abs() > 0.5)
             && self.ui.target() == Target::Open
         {
             self.dirty = true;
@@ -910,7 +969,14 @@ impl App {
                 {
                     return;
                 }
-                self.page_scroll(value);
+                // Page the section under the pointer; each section
+                // scrolls independently.
+                if let Some(section) = self
+                    .pointer_pos
+                    .and_then(|pos| content::section_at(&self.current_layout(), pos))
+                {
+                    self.page_scroll(section, value);
+                }
             }
         }
     }
@@ -925,68 +991,76 @@ impl App {
         self.pointer_pos.is_some_and(|(_, y)| y >= strip_top)
     }
 
-    /// Horizontal scroll: pages the open grid left/right.
+    /// Horizontal scroll: pages the section under the pointer.
     /// (Untestable in the dev VM — its virtual pointer has no horizontal
     /// axis; verify on real hardware.)
     fn on_hscroll(&mut self, value: f64) {
         if self.ui.target() == Target::Open {
-            self.page_scroll(value);
+            if let Some(section) = self
+                .pointer_pos
+                .and_then(|pos| content::section_at(&self.current_layout(), pos))
+            {
+                self.page_scroll(section, value);
+            }
         }
     }
 
-    /// Accumulate scroll toward a page turn: turning requires
-    /// PAGE_SCROLL_THRESHOLD worth of travel, and successive turns are at
-    /// least PAGE_COOLDOWN apart — so one notch nudges, a deliberate
-    /// scroll turns one page, and a fast flick can't spin the wheel.
-    fn page_scroll(&mut self, value: f64) {
-        if self
-            .scroll
+    /// Accumulate scroll toward a page turn of `section`: turning
+    /// requires PAGE_SCROLL_THRESHOLD worth of travel, and successive
+    /// turns are at least PAGE_COOLDOWN apart — so one notch nudges, a
+    /// deliberate scroll turns one page, and a fast flick can't spin
+    /// the wheel.
+    fn page_scroll(&mut self, section: usize, value: f64) {
+        let sec = &mut self.scroll.per[section];
+        if sec
             .page_turned_at
             .is_some_and(|t| t.elapsed() < PAGE_COOLDOWN)
         {
             return;
         }
         // A direction change discards progress toward the old direction.
-        if value * self.scroll.page_accum < 0.0 {
-            self.scroll.page_accum = 0.0;
+        if value * sec.page_accum < 0.0 {
+            sec.page_accum = 0.0;
         }
-        self.scroll.page_accum += value;
-        if self.scroll.page_accum.abs() >= PAGE_SCROLL_THRESHOLD {
-            let dir = if self.scroll.page_accum > 0.0 { 1 } else { -1 };
-            self.scroll.page_accum = 0.0;
-            self.scroll.page_turned_at = Some(Instant::now());
-            self.page_by(dir);
+        sec.page_accum += value;
+        if sec.page_accum.abs() >= PAGE_SCROLL_THRESHOLD {
+            let dir = if sec.page_accum > 0.0 { 1 } else { -1 };
+            sec.page_accum = 0.0;
+            sec.page_turned_at = Some(Instant::now());
+            self.page_by(section, dir);
         }
     }
 
-    /// Slide the app grid one page in `dir` (+1 = next, -1 = previous),
-    /// wrapping past either end (infinite scroll).
-    fn page_by(&mut self, dir: i64) {
+    /// Slide one section's grid a page in `dir` (+1 = next, -1 =
+    /// previous), wrapping past either end (infinite scroll).
+    fn page_by(&mut self, section: usize, dir: i64) {
         // Use the SETTLED (full-extent) layout: mid-open-animation the
         // current layout has a tiny viewport and a bogus page count.
         let settled = self.layout_at(self.ui.extent_of(Target::Open));
-        let page_w = settled.viewport.w.max(1.0);
-        let n_pages = settled.n_pages;
+        let sec_layout = &settled.sections[section];
+        let page_w = sec_layout.viewport.w.max(1.0);
+        let n_pages = sec_layout.n_pages;
         if n_pages <= 1 {
             return;
         }
         let total_w = n_pages as f32 * page_w;
-        // Use scroll_target (intended page) not list_scroll (animated
-        // position) so mid-animation events don't mis-compute the page.
-        let current_page = (self.scroll.target / page_w).round() as i64;
+        let sec = &mut self.scroll.per[section];
+        // Use the target (intended page) not the animated position so
+        // mid-animation events don't mis-compute the page.
+        let current_page = (sec.target / page_w).round() as i64;
         let next_page = current_page + dir;
         if next_page < 0 {
             // Wrap to the last page. Shift the animated position one full
             // strip right so the slide still moves in the gesture
             // direction; rendering is cyclic, so the shift is invisible.
-            self.scroll.pos += total_w;
-            self.scroll.target = (n_pages - 1) as f32 * page_w;
+            sec.pos += total_w;
+            sec.target = (n_pages - 1) as f32 * page_w;
         } else if next_page >= n_pages as i64 {
             // Wrap to the first page (shift one strip left, as above).
-            self.scroll.pos -= total_w;
-            self.scroll.target = 0.0;
+            sec.pos -= total_w;
+            sec.target = 0.0;
         } else {
-            self.scroll.target = next_page as f32 * page_w;
+            sec.target = next_page as f32 * page_w;
         }
         self.update_hover();
         self.schedule_frame();
@@ -1001,8 +1075,8 @@ impl App {
                 self.dismiss();
             }
             Keysym::Return | Keysym::KP_Enter => {
-                if let Some(sel) = self.search.selected {
-                    self.activate_hit(Hit::GridCell(sel));
+                if let Some((s, i)) = self.search.selected.and_then(|i| self.flat_to_pos(i)) {
+                    self.activate_hit(Hit::GridCell(s, i));
                 }
             }
             Keysym::BackSpace => {
@@ -1014,12 +1088,13 @@ impl App {
                 }
             }
             Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
-                if !self.search.visible.is_empty() {
+                if self.flat_len() > 0 {
                     let layout = self.current_layout();
-                    let cols = layout.cols.max(1);
-                    let last = self.search.visible.len() - 1;
+                    let cols = layout.sections[content::SECTION_APPS].cols.max(1);
+                    let last = self.flat_len() - 1;
                     // When nothing is selected yet, the first arrow key
-                    // lands on item 0 regardless of direction.
+                    // lands on item 0 regardless of direction. Selection
+                    // walks the sections as one flat list (Apps → Files).
                     let next = if let Some(cur) = self.search.selected {
                         match keysym {
                             Keysym::Left => cur.saturating_sub(1),
@@ -1031,7 +1106,10 @@ impl App {
                         0
                     };
                     self.search.selected = Some(next);
-                    self.scroll.target = content::scroll_to_reveal(&layout, next);
+                    if let Some((s, cell)) = self.flat_to_pos(next) {
+                        self.scroll.per[s].target =
+                            content::scroll_to_reveal(&layout.sections[s], cell);
+                    }
                     self.schedule_frame();
                 }
             }
@@ -1360,7 +1438,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         if dx * dx + dy * dy > 6.0 * 6.0 {
                             let entry_idx = match hit {
                                 Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
-                                Hit::GridCell(cell) => app.search.visible.get(cell).copied(),
+                                Hit::GridCell(s, cell) => app.search.visible[s].get(cell).copied(),
                                 Hit::SearchButton => None,
                             };
                             if let Some(entry_idx) = entry_idx {

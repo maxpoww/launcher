@@ -119,7 +119,9 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             width: 720,
-            height: 560,
+            // Tall enough for the three popup sections: the 6×3 app
+            // grid plus the single-row Install and Files strips.
+            height: 680,
             input_bar_height: 42,
             bottom_margin: 12,
         }

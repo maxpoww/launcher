@@ -26,11 +26,23 @@ use waverunner_core::index::{AppEntry, DesktopIndex};
 /// texture array layer each.
 pub const ICON_SIZE: u32 = 48;
 
+/// What an entry is, deciding which popup section shows it. Applications
+/// come from `.desktop` files; files are the user's home folders
+/// (opened with `xdg-open` rather than launched).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    App,
+    File,
+}
+
 /// The indexer thread's result: entries plus one RGBA8 (premultiplied)
 /// `ICON_SIZE`² image per entry, aligned by index.
 pub struct LoadedApps {
-    /// Discovered entries, sorted by name.
+    /// Discovered entries, sorted by name: applications first, then the
+    /// home folders.
     pub entries: Vec<AppEntry>,
+    /// What each entry is, aligned with `entries`.
+    pub kinds: Vec<EntryKind>,
     /// Premultiplied RGBA8 pixels, `ICON_SIZE * ICON_SIZE * 4` bytes per
     /// entry; a generated placeholder tile where no icon was found.
     pub icons: Vec<Vec<u8>>,
@@ -66,22 +78,25 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let started = std::time::Instant::now();
                 let index = DesktopIndex::scan();
                 let scanned = std::time::Instant::now();
-                let (icons, placeholders): (Vec<_>, Vec<_>) = index
-                    .entries
-                    .iter()
-                    .map(|entry| loader.icon_for(entry))
-                    .unzip();
+                let mut entries = index.entries;
+                let mut kinds = vec![EntryKind::App; entries.len()];
+                let folders = home_folders();
+                kinds.extend(std::iter::repeat_n(EntryKind::File, folders.len()));
+                entries.extend(folders);
+                let (icons, placeholders): (Vec<_>, Vec<_>) =
+                    entries.iter().map(|entry| loader.icon_for(entry)).unzip();
                 loader.resolutions.save();
                 debug!(
-                    "indexed {} apps in {:?} (scan {:?}, icons {:?})",
-                    index.entries.len(),
+                    "indexed {} entries in {:?} (scan {:?}, icons {:?})",
+                    entries.len(),
                     started.elapsed(),
                     scanned - started,
                     scanned.elapsed()
                 );
                 if results
                     .send(LoadedApps {
-                        entries: index.entries,
+                        entries,
+                        kinds,
                         icons,
                         placeholders,
                     })
@@ -97,6 +112,37 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
     let indexer = Indexer { requests };
     indexer.request_rescan();
     indexer
+}
+
+/// The standard home folders shown in the popup's Files section, as
+/// entries opened with `xdg-open`. Only folders that actually exist
+/// appear; the fixed name list keeps the section stable and small (no
+/// home-dir walking).
+fn home_folders() -> Vec<AppEntry> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Vec::new();
+    };
+    [
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Music",
+        "Pictures",
+        "Videos",
+    ]
+    .iter()
+    .filter_map(|name| {
+        let path = format!("{home}/{name}");
+        std::fs::metadata(&path).ok()?.is_dir().then(|| AppEntry {
+            id: format!("folder-{name}"),
+            name: (*name).to_owned(),
+            description: Some(path.clone()),
+            exec: format!("xdg-open '{path}'"),
+            icon: Some("folder".to_owned()),
+            needs_terminal: false,
+        })
+    })
+    .collect()
 }
 
 /// Turns an `AppEntry` into `ICON_SIZE`² pixels, cheapest source first:

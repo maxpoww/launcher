@@ -462,15 +462,28 @@ impl Renderer {
             }),
         );
 
-        // Instance buffers: unclipped ranges first, then grid ranges.
+        // Instance buffers: unclipped ranges first, then one scissored
+        // range per section grid.
         let mut rects: Vec<RectInstance> = scene.rects.iter().map(rect_instance).collect();
         let n_rects_unclipped = rects.len() as u32;
         let mut icons: Vec<IconInstance> = scene.icons.iter().map(icon_instance).collect();
         let n_icons_unclipped = icons.len() as u32;
-        if let Some(grid) = &scene.grid {
-            rects.extend(grid.rects.iter().map(rect_instance));
-            icons.extend(grid.icons.iter().map(icon_instance));
-        }
+        // Per grid: (clip, rect range, icon range) into the shared buffers.
+        let grid_ranges: Vec<(
+            crate::content::Rect,
+            std::ops::Range<u32>,
+            std::ops::Range<u32>,
+        )> = scene
+            .grids
+            .iter()
+            .map(|grid| {
+                let r0 = rects.len() as u32;
+                rects.extend(grid.rects.iter().map(rect_instance));
+                let i0 = icons.len() as u32;
+                icons.extend(grid.icons.iter().map(icon_instance));
+                (grid.clip, r0..rects.len() as u32, i0..icons.len() as u32)
+            })
+            .collect();
         let rect_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -506,7 +519,7 @@ impl Renderer {
         for label in &scene.labels {
             all_labels.push((label, label.clip.unwrap_or(full)));
         }
-        if let Some(grid) = &scene.grid {
+        for grid in &scene.grids {
             for label in &grid.labels {
                 all_labels.push((label, label.clip.unwrap_or(grid.clip)));
             }
@@ -652,32 +665,31 @@ impl Renderer {
                 }
             }
 
-            // Grid content under a scissor rect.
-            if let Some(grid) = &scene.grid {
-                let sx = (grid.clip.x.max(0.0) as u32).min(w);
-                let sy = (grid.clip.y.max(0.0) as u32).min(h);
-                let sw = (grid.clip.w as u32).min(w - sx);
-                let sh = ((grid.clip.y + grid.clip.h).min(h as f32) as u32).saturating_sub(sy);
-                if sw > 0 && sh > 0 {
-                    pass.set_scissor_rect(sx, sy, sw, sh);
-                    let n_rects = rects.len() as u32;
-                    if n_rects > n_rects_unclipped {
-                        pass.set_pipeline(&self.rect_pipeline);
-                        pass.set_vertex_buffer(0, rect_buf.slice(..));
-                        pass.draw(0..4, n_rects_unclipped..n_rects);
+            // Each section's grid content under its own scissor rect.
+            for (clip, rect_range, icon_range) in &grid_ranges {
+                let sx = (clip.x.max(0.0) as u32).min(w);
+                let sy = (clip.y.max(0.0) as u32).min(h);
+                let sw = (clip.w as u32).min(w - sx);
+                let sh = ((clip.y + clip.h).min(h as f32) as u32).saturating_sub(sy);
+                if sw == 0 || sh == 0 {
+                    continue;
+                }
+                pass.set_scissor_rect(sx, sy, sw, sh);
+                if !rect_range.is_empty() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, rect_buf.slice(..));
+                    pass.draw(0..4, rect_range.clone());
+                }
+                if !icon_range.is_empty() {
+                    if let Some(icon_bind) = &self.icon_bind {
+                        pass.set_pipeline(&self.icon_pipeline);
+                        pass.set_bind_group(1, icon_bind, &[]);
+                        pass.set_vertex_buffer(0, icon_buf.slice(..));
+                        pass.draw(0..4, icon_range.clone());
                     }
-                    let n_icons = icons.len() as u32;
-                    if n_icons > n_icons_unclipped {
-                        if let Some(icon_bind) = &self.icon_bind {
-                            pass.set_pipeline(&self.icon_pipeline);
-                            pass.set_bind_group(1, icon_bind, &[]);
-                            pass.set_vertex_buffer(0, icon_buf.slice(..));
-                            pass.draw(0..4, n_icons_unclipped..n_icons);
-                        }
-                    }
-                    pass.set_scissor_rect(0, 0, w, h);
                 }
             }
+            pass.set_scissor_rect(0, 0, w, h);
 
             // Text renders unscissored: every TextArea carries its own
             // clip bounds (grid viewport for app names, the search box
