@@ -147,12 +147,15 @@ visible while no window overlaps its zone and dodges when one does;
 dismissals collapse to the parked dock. `input.intellihide = false`,
 IPC failure, or a non-Hyprland compositor fall back to always-auto-hide.
 
-Remaining tasks:
-1. Persistent icon cache under `$XDG_CACHE_HOME/waverunner` so cold
-   daemon start skips rasterization (in-memory cache covers rescans).
-2. `Terminal=true` entries currently exec directly; wrap in a terminal
-   emulator (config knob) or hide them.
-3. Optional `[dock] pinned` list instead of first-N-by-name.
+Remaining tasks: none — all three landed 2026-07-09:
+1. ✅ Persistent icon cache: rasters persist as raw RGBA files under
+   `$XDG_CACHE_HOME/waverunner/icons-48/`, keyed by hash of icon
+   path + size + mtime (nix store churn invalidates via the path), so
+   cold daemon start skips rasterization for unchanged icons.
+2. ✅ `Terminal=true` entries run inside the configured `[launch]
+   terminal` (default `foot`), exec line shell-quoted.
+3. ✅ Dock pinning via drag-and-drop (`PinDb`: ordered pins + exclusion
+   list in `pins.json`), richer than a static `[dock] pinned` list.
 
 Acceptance criteria:
 - Edge-touch → click an icon launches it and the dock hides. *(click
@@ -162,7 +165,9 @@ Acceptance criteria:
   sign off)*
 - Launched apps survive daemon restart (properly detached, no zombies).
 - Cold start with cold cache < 100 ms to interactive; warm cache
-  instant. *(needs the cache from task 1)*
+  instant. *(cache implemented; timing sign-off needs a live restart —
+  compare the daemon's "indexed N apps in T" debug line across two
+  starts and confirm `icons-48/` is populated.)*
 
 ## P5 — Polish
 
