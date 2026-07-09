@@ -451,8 +451,10 @@ pub fn scene(
         };
         // Expanded width: SEARCH_W_MIN, or wider to snugly fit the query.
         // 0.52 × font_px ≈ average proportional glyph width at this size.
+        // +1 for the cursor character shown when query is non-empty.
         let content_w = {
-            let text_px = query.len() as f32 * SEARCH_FONT_PX * 0.52 + 2.0 * SEARCH_PAD_X;
+            let chars = if query.is_empty() { 0 } else { query.len() + 1 };
+            let text_px = chars as f32 * SEARCH_FONT_PX * 0.52 + 2.0 * SEARCH_PAD_X;
             text_px.max(SEARCH_W_MIN).min(w - 2.0 * GRID_PAD_X)
         };
         let sw = lerp(btn.w, content_w, search_expand);
@@ -473,11 +475,12 @@ pub fn scene(
                 clip: None,
             });
         } else {
-            // Expanded: show query text or placeholder.
+            // Expanded: show query text with a static cursor, or dim
+            // placeholder when the box is open but nothing typed yet.
             let (text, dim) = if query.is_empty() {
                 ("Filter".to_string(), true)
             } else {
-                (query.to_string(), false)
+                (format!("{}│", query), false)
             };
             scene.labels.push(Label {
                 text,
