@@ -307,6 +307,18 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<H
     None
 }
 
+/// Active drag state forwarded to scene assembly for ghost + indicator.
+#[derive(Debug, Clone, Copy)]
+pub struct DragFrame {
+    /// The entry being dragged (index into the entries slice).
+    pub entry_idx: usize,
+    /// Current pointer position in surface coordinates.
+    pub pos: (f32, f32),
+    /// Target dock insertion slot (0 = before first, n = after last)
+    /// while hovering the dock band; `None` when outside the dock.
+    pub dock_insert: Option<usize>,
+}
+
 /// Per-frame dynamic inputs to scene assembly.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameInput<'a> {
@@ -329,6 +341,11 @@ pub struct FrameInput<'a> {
     /// Which entries are using placeholder tiles (no resolved icon file).
     /// Aligned with the `entries` slice passed to `scene()`.
     pub placeholders: &'a [bool],
+    /// Dock display order: maps slot position → entry index. Empty slice
+    /// renders no dock icons (safe default for tests / pre-load frames).
+    pub dock_order: &'a [usize],
+    /// Active drag for ghost icon and insertion indicator; `None` at rest.
+    pub drag: Option<DragFrame>,
 }
 
 /// Assemble the draw scene for one frame.
@@ -353,6 +370,8 @@ pub fn scene(
         selected,
         search_expand,
         placeholders,
+        dock_order,
+        drag,
     } = *frame;
     let (w, h) = surface;
     let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
@@ -398,30 +417,36 @@ pub fn scene(
         }
         centers
     };
-    if let Some(Hit::DockIcon(i)) = hover {
-        if let (Some(slot), Some(&vcx)) = (layout.dock_slots.get(i), dock_vcx.get(i)) {
-            scene.rects.push(RectInst {
-                rect: Rect::new(vcx - DOCK_SLOT / 2.0, slot.y, DOCK_SLOT, slot.h),
-                radius: 12.0,
-                color: config.theme.highlight_rgba(),
-            });
+    // Hover highlight (suppressed while dragging).
+    if drag.is_none() {
+        if let Some(Hit::DockIcon(i)) = hover {
+            if let (Some(slot), Some(&vcx)) = (layout.dock_slots.get(i), dock_vcx.get(i)) {
+                scene.rects.push(RectInst {
+                    rect: Rect::new(vcx - DOCK_SLOT / 2.0, slot.y, DOCK_SLOT, slot.h),
+                    radius: 12.0,
+                    color: config.theme.highlight_rgba(),
+                });
+            }
         }
     }
-    for (i, slot) in layout.dock_slots.iter().enumerate() {
-        let vcx = dock_vcx[i];
-        let baseline = slot.y + slot.h + 0.0;
-        let scale = dock_scales[i];
-        let size = (DOCK_ICON * scale).min(slot.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
+    // Dock icons: slot index → entry index via dock_order.
+    for slot in 0..layout.dock_slots.len() {
+        let Some(&entry_idx) = dock_order.get(slot) else { break };
+        let slot_rect = &layout.dock_slots[slot];
+        let vcx = dock_vcx[slot];
+        let baseline = slot_rect.y + slot_rect.h;
+        let scale = dock_scales[slot];
+        let size = (DOCK_ICON * scale).min(slot_rect.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
         scene.icons.push(IconInst {
-            rect: Rect::new(vcx - size / 2.0, baseline - size - lift(i), size, size),
-            layer: i as u32,
+            rect: Rect::new(vcx - size / 2.0, baseline - size - lift(entry_idx), size, size),
+            layer: entry_idx as u32,
         });
-        if placeholders.get(i).copied().unwrap_or(false) {
-            if let Some(ch) = entries.get(i).and_then(|e| e.name.chars().next()) {
+        if placeholders.get(entry_idx).copied().unwrap_or(false) {
+            if let Some(ch) = entries.get(entry_idx).and_then(|e| e.name.chars().next()) {
                 let letter: String = ch.to_uppercase().collect();
                 let font_px = (size * 0.46).max(10.0).min(28.0);
                 let line_px = font_px * 1.3;
-                let icon_center_y = baseline - size / 2.0 - lift(i);
+                let icon_center_y = baseline - size / 2.0 - lift(entry_idx);
                 scene.labels.push(Label {
                     text: letter,
                     pos: (vcx, icon_center_y - line_px / 2.0),
@@ -435,6 +460,35 @@ pub fn scene(
                 });
             }
         }
+    }
+    // Drag-and-drop visuals: insertion bar + ghost icon.
+    if let Some(df) = drag {
+        // Thin vertical bar at the would-be insertion point.
+        if let Some(insert_slot) = df.dock_insert {
+            if let Some(first) = layout.dock_slots.first() {
+                let n = layout.dock_slots.len();
+                let bar_x = if insert_slot >= n {
+                    layout.dock_slots[n - 1].x + layout.dock_slots[n - 1].w
+                } else {
+                    layout.dock_slots[insert_slot].x
+                };
+                let bar_h = DOCK_ICON * 0.85;
+                let bar_y = first.y + (first.h - bar_h) / 2.0;
+                let hl = config.theme.highlight_rgba();
+                scene.rects.push(RectInst {
+                    rect: Rect::new(bar_x - 2.0, bar_y, 4.0, bar_h),
+                    radius: 2.0,
+                    color: [hl[0], hl[1], hl[2], 0.9],
+                });
+            }
+        }
+        // Ghost icon following the pointer.
+        let size = DOCK_ICON * 1.05;
+        let (gx, gy) = df.pos;
+        scene.icons.push(IconInst {
+            rect: Rect::new(gx - size / 2.0, gy - size / 2.0, size, size),
+            layer: df.entry_idx as u32,
+        });
     }
 
     // Search widget: "Filter" pill button that morphs into an expanding

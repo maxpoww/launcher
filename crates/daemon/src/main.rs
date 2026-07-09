@@ -11,6 +11,7 @@
 mod animation;
 mod apps;
 mod content;
+mod pins;
 mod usage;
 mod hypr;
 mod ipc;
@@ -136,6 +137,10 @@ fn main() -> anyhow::Result<()> {
         scroll_target: 0.0,
         indexer,
         usage: usage::UsageDb::load(),
+        pins: pins::PinDb::load(),
+        dock_order: Vec::new(),
+        dragging: None,
+        press_pos: None,
         last_rescan: Instant::now(),
         bounce: None,
         placeholders: Vec::new(),
@@ -252,6 +257,16 @@ pub struct App {
     indexer: apps::Indexer,
     /// Persistent launch-frequency database; drives sort order.
     usage: usage::UsageDb,
+    /// Pinned app IDs in user-defined dock order.
+    pins: pins::PinDb,
+    /// Dock display order: maps slot index → entry index. Rebuilt
+    /// whenever entries are loaded or pins change.
+    dock_order: Vec<usize>,
+    /// Active drag-and-drop gesture, if any.
+    dragging: Option<DragState>,
+    /// Surface position where the current button press started; used to
+    /// detect when a press-move crosses the drag threshold.
+    press_pos: Option<(f32, f32)>,
     /// When the last rescan was requested, for the reveal cooldown.
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
@@ -277,6 +292,17 @@ pub struct App {
     zone_free: bool,
 
     exit: bool,
+}
+
+/// State of an in-progress drag-and-drop gesture.
+struct DragState {
+    /// Which entry is being moved (index into `App::entries`).
+    entry_idx: usize,
+    /// True when the drag started from a dock slot; releasing outside
+    /// the dock zone then unpins the entry.
+    from_dock: bool,
+    /// Current pointer position in surface coordinates.
+    pos: (f32, f32),
 }
 
 /// Accumulated scroll (in wl_pointer axis units; one wheel notch ≈ 15)
@@ -406,9 +432,10 @@ impl App {
             Some(renderer) => renderer.set_icons(&icons),
             None => self.pending_icons = Some(icons),
         }
-        // Indices may have shifted: drop any armed click, re-rank the
-        // query against the new entries, re-resolve hover.
+        // Indices may have shifted: drop any armed click, rebuild the dock
+        // order, re-rank the query against the new entries, re-resolve hover.
         self.pressed = None;
+        self.recompute_dock_order();
         self.refilter();
         self.schedule_frame();
     }
@@ -436,10 +463,45 @@ impl App {
             &self.config,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             self.ui.extent(),
-            self.entries.len(),
+            self.dock_order.len(),
             self.visible.len(),
             self.list_scroll,
         )
+    }
+
+    /// Rebuild `dock_order`: pinned entries first (in pin order), then
+    /// most-used non-pinned entries (entries are already usage-sorted).
+    fn recompute_dock_order(&mut self) {
+        self.dock_order.clear();
+        for pin_id in self.pins.pins() {
+            if let Some(idx) = self.entries.iter().position(|e| &e.id == pin_id) {
+                if !self.dock_order.contains(&idx) {
+                    self.dock_order.push(idx);
+                }
+            }
+        }
+        for idx in 0..self.entries.len() {
+            if !self.dock_order.contains(&idx)
+                && !self.pins.is_excluded(&self.entries[idx].id)
+            {
+                self.dock_order.push(idx);
+            }
+        }
+        // No truncation here — layout() clamps to the available width.
+    }
+
+    /// Which dock slot a drag should insert before, given the pointer
+    /// position.  Returns `None` when the pointer is outside the dock band.
+    fn drag_dock_insert(&self, layout: &content::Layout, pos: (f32, f32)) -> Option<usize> {
+        let slots = &layout.dock_slots;
+        if slots.is_empty() { return None; }
+        let (x, y) = pos;
+        let dock_top    = layout.card_top;
+        let dock_bottom = slots[0].y + slots[0].h;
+        if y < dock_top || y > dock_bottom { return None; }
+        let insert = slots.iter().position(|s| x < s.x + s.w / 2.0)
+            .unwrap_or(slots.len());
+        Some(insert)
     }
 
     /// Recompute which item the pointer is over; redraw on change.
@@ -464,7 +526,11 @@ impl App {
     /// Resolve a hit to an action: launch an entry or toggle the search box.
     fn activate_hit(&mut self, hit: Hit) {
         match hit {
-            Hit::DockIcon(i) => self.activate(i),
+            Hit::DockIcon(slot) => {
+                if let Some(&entry_idx) = self.dock_order.get(slot) {
+                    self.activate(entry_idx);
+                }
+            }
             Hit::GridCell(i) => {
                 if let Some(entry_idx) = self.visible.get(i).copied() {
                     self.activate(entry_idx);
@@ -650,6 +716,11 @@ impl App {
             self.scroll_target = self.scroll_target.min(layout.scroll);
             self.list_scroll = layout.scroll;
         }
+        let drag_frame = self.dragging.as_ref().map(|drag| content::DragFrame {
+            entry_idx:   drag.entry_idx,
+            pos:         drag.pos,
+            dock_insert: self.drag_dock_insert(&layout, drag.pos),
+        });
         let scene = content::scene(
             &self.config,
             &layout,
@@ -657,14 +728,17 @@ impl App {
             &self.visible,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             &content::FrameInput {
-                hover: self.hover,
-                alpha: self.ui.alpha(),
-                pointer: self.pointer_pos,
+                // Suppress hover highlight and magnification while dragging.
+                hover:         if drag_frame.is_none() { self.hover } else { None },
+                alpha:         self.ui.alpha(),
+                pointer:       if drag_frame.is_none() { self.pointer_pos } else { None },
                 bounce,
-                query: &self.query,
-                selected: self.selected,
+                query:         &self.query,
+                selected:      self.selected,
                 search_expand: self.search_expand,
-                placeholders: &self.placeholders,
+                placeholders:  &self.placeholders,
+                dock_order:    &self.dock_order,
+                drag:          drag_frame,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -1073,11 +1147,34 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 surface_y,
                 ..
             } => {
-                app.pointer_pos = Some((surface_x as f32, surface_y as f32));
-                app.update_hover();
-                // Magnification is a function of the pointer position:
-                // every move damages the scene (coalesced to refresh).
+                let pos = (surface_x as f32, surface_y as f32);
+                app.pointer_pos = Some(pos);
+                // Detect drag start: press armed and pointer moved beyond
+                // the 6-px threshold (distinguishes drag from sloppy click).
+                if app.dragging.is_none() {
+                    if let (Some(pp), Some(hit)) = (app.press_pos, app.pressed) {
+                        let dx = pos.0 - pp.0;
+                        let dy = pos.1 - pp.1;
+                        if dx * dx + dy * dy > 6.0 * 6.0 {
+                            let entry_idx = match hit {
+                                Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
+                                Hit::GridCell(cell) => app.visible.get(cell).copied(),
+                                Hit::SearchButton    => None,
+                            };
+                            if let Some(entry_idx) = entry_idx {
+                                let from_dock = matches!(hit, Hit::DockIcon(_));
+                                app.dragging = Some(DragState { entry_idx, from_dock, pos });
+                                app.pressed = None;
+                            }
+                        }
+                    }
+                } else if let Some(ref mut drag) = app.dragging {
+                    drag.pos = pos;
+                }
                 if app.ui.target() != Target::Hidden {
+                    if app.dragging.is_none() {
+                        app.update_hover();
+                    }
                     app.schedule_frame();
                 }
             }
@@ -1085,6 +1182,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 app.scroll_accum = 0.0;
                 app.pointer_pos = None;
                 app.pressed = None;
+                app.press_pos = None;
+                // If a dock drag is in flight when the pointer leaves the
+                // surface, treat it as a drop outside the dock: unpin and
+                // leave the popup open (don't autohide).
+                if let Some(drag) = app.dragging.take() {
+                    if drag.from_dock {
+                        let app_id = app.entries[drag.entry_idx].id.clone();
+                        app.pins.exclude(&app_id);
+                        app.recompute_dock_order();
+                    }
+                    app.update_hover();
+                    app.schedule_frame();
+                    return; // skip autohide — keep popup open
+                }
                 app.update_hover();
                 if app.ui.target() != Target::Hidden {
                     app.schedule_frame(); // relax any magnification
@@ -1107,23 +1218,48 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                     WEnum::Value(wl_pointer::ButtonState::Pressed) => {
                         app.update_hover();
                         app.pressed = app.hover;
+                        app.press_pos = app.pointer_pos;
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
-                        // Native button behavior: activate on release,
-                        // only if it happens on the item the press armed
-                        // (dragging away cancels the click).
-                        app.update_hover();
-                        if let Some(hit) = app.pressed.take() {
-                            if app.hover == Some(hit) {
-                                app.activate_hit(hit);
+                        app.press_pos = None;
+                        // Drag drop: pin/unpin and never treat as a click.
+                        if let Some(drag) = app.dragging.take() {
+                            let layout = app.current_layout();
+                            let insert = app.drag_dock_insert(&layout, drag.pos);
+                            let app_id = app.entries[drag.entry_idx].id.clone();
+                            info!(
+                                "drop: id={} from_dock={} pos=({:.0},{:.0}) \
+                                 card_top={:.0} dock_bottom={:.0} insert={:?}",
+                                app_id, drag.from_dock,
+                                drag.pos.0, drag.pos.1,
+                                layout.card_top,
+                                layout.dock_slots.first().map_or(0.0, |s| s.y + s.h),
+                                insert,
+                            );
+                            if let Some(slot) = insert {
+                                app.pins.pin_at(&app_id, slot);
+                            } else if drag.from_dock {
+                                app.pins.exclude(&app_id);
                             }
-                            // else: drag-cancel — do nothing.
-                        } else if app.ui.target() == Target::Open {
-                            // Press started on no interactive element (card
-                            // background / transparent area): treat as a
-                            // click-outside gesture and dismiss the popup.
-                            let cmd = app.dismiss_command();
-                            app.handle_command(cmd);
+                            app.recompute_dock_order();
+                            app.schedule_frame();
+                        } else {
+                            // Native button behavior: activate on release,
+                            // only if it happens on the item the press armed
+                            // (dragging away cancels the click).
+                            app.update_hover();
+                            if let Some(hit) = app.pressed.take() {
+                                if app.hover == Some(hit) {
+                                    app.activate_hit(hit);
+                                }
+                                // else: drag-cancel — do nothing.
+                            } else if app.ui.target() == Target::Open {
+                                // Press started on no interactive element (card
+                                // background / transparent area): treat as a
+                                // click-outside gesture and dismiss the popup.
+                                let cmd = app.dismiss_command();
+                                app.handle_command(cmd);
+                            }
                         }
                     }
                     _ => {}
