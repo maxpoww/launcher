@@ -671,7 +671,8 @@ impl App {
                 self.query.clear();
                 self.search_open = false;
                 self.refilter();
-                self.handle_command(Command::Collapse);
+                let cmd = self.dismiss_command();
+                self.handle_command(cmd);
             }
             Keysym::Return | Keysym::KP_Enter => {
                 if let Some(sel) = self.selected {
@@ -688,7 +689,8 @@ impl App {
             }
             Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
                 if !self.visible.is_empty() {
-                    let cols = self.current_layout().cols.max(1);
+                    let layout = self.current_layout();
+                    let cols = layout.cols.max(1);
                     let last = self.visible.len() - 1;
                     let cur = self.selected.unwrap_or(0);
                     let next = match keysym {
@@ -698,6 +700,7 @@ impl App {
                         _ => (cur + cols).min(last),
                     };
                     self.selected = Some(next);
+                    self.list_scroll = content::scroll_to_reveal(&layout, next);
                     self.schedule_frame();
                 }
             }

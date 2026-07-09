@@ -249,6 +249,21 @@ pub fn layout(
     }
 }
 
+/// Return the scroll offset that makes `cell` fully visible in the
+/// viewport, keeping the current offset when it is already in view.
+pub fn scroll_to_reveal(layout: &Layout, cell: usize) -> f32 {
+    let row = (cell / layout.cols.max(1)) as f32;
+    let top = row * GRID_CELL_H;
+    let bot = top + GRID_CELL_H;
+    if top < layout.scroll {
+        top
+    } else if bot > layout.scroll + layout.viewport.h {
+        (bot - layout.viewport.h).max(0.0)
+    } else {
+        layout.scroll
+    }
+}
+
 /// Which item (if any) the pointer is over.
 ///
 /// `search_open` controls whether the compact search button is a target
