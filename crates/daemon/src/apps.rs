@@ -190,10 +190,9 @@ fn fit_pixmap(src: tiny_skia::Pixmap) -> tiny_skia::Pixmap {
     dst
 }
 
-/// Deterministic colored rounded tile for apps without a resolvable
-/// icon, so every entry stays clickable and visually distinct.
+/// Deterministic colored tile for apps without a resolvable icon,
+/// so every entry stays clickable and visually distinct.
 fn placeholder_icon(name: &str) -> Vec<u8> {
-    // Cheap stable hash -> hue.
     let hash = name
         .bytes()
         .fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
@@ -204,11 +203,25 @@ fn placeholder_icon(name: &str) -> Vec<u8> {
         None => return vec![0; (ICON_SIZE * ICON_SIZE * 4) as usize],
     };
     let mut paint = tiny_skia::Paint::default();
-    paint.set_color_rgba8(r, g, b, 230);
+    paint.set_color_rgba8(r, g, b, 215);
     paint.anti_alias = true;
-    let rect = tiny_skia::Rect::from_xywh(4.0, 4.0, ICON_SIZE as f32 - 8.0, ICON_SIZE as f32 - 8.0);
-    if let Some(rect) = rect {
-        let path = tiny_skia::PathBuilder::from_rect(rect);
+
+    // Rounded-rectangle path with transparent corners so the tile blends
+    // cleanly against any card background without hard square edges.
+    let s = ICON_SIZE as f32;
+    let (x, y, w, h, rad) = (4.0f32, 4.0, s - 8.0, s - 8.0, 10.0);
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(x + rad, y);
+    pb.line_to(x + w - rad, y);
+    pb.quad_to(x + w, y, x + w, y + rad);
+    pb.line_to(x + w, y + h - rad);
+    pb.quad_to(x + w, y + h, x + w - rad, y + h);
+    pb.line_to(x + rad, y + h);
+    pb.quad_to(x, y + h, x, y + h - rad);
+    pb.line_to(x, y + rad);
+    pb.quad_to(x, y, x + rad, y);
+    pb.close();
+    if let Some(path) = pb.finish() {
         pixmap.fill_path(
             &path,
             &paint,
