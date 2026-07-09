@@ -1073,6 +1073,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             if app.hover == Some(hit) {
                                 app.activate_hit(hit);
                             }
+                            // else: drag-cancel — do nothing.
+                        } else if app.ui.target() == Target::Open {
+                            // Press started on no interactive element (card
+                            // background / transparent area): treat as a
+                            // click-outside gesture and dismiss the popup.
+                            let cmd = app.dismiss_command();
+                            app.handle_command(cmd);
                         }
                     }
                     _ => {}
