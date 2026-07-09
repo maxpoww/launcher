@@ -705,8 +705,18 @@ impl App {
             }
             // "Open" launches the directory itself: not navigation.
             "nav-open" => false,
-            path => {
-                if !std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
+            _ => {
+                // The entry's path lives in `description` (the id is a
+                // path only for transient entries; home-strip folders
+                // use "folder-<name>").
+                let Some(path) = entry.description.clone() else {
+                    return false;
+                };
+                if self.kinds.get(entry_idx) != Some(&apps::EntryKind::File)
+                    || !std::fs::metadata(&path)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false)
+                {
                     return false;
                 }
                 self.files_dir = Some(std::path::PathBuf::from(path));
