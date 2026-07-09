@@ -134,6 +134,7 @@ fn main() -> anyhow::Result<()> {
         asset_folder: None,
         asset_file: None,
         file_index: Vec::new(),
+        files_dir: None,
         pending_icons: None,
         hover: None,
         pointer_pos: None,
@@ -249,6 +250,9 @@ pub struct App {
     asset_file: Option<(u32, bool)>,
     /// Home-tree file index the search ranks against (fresh per rescan).
     file_index: Vec<apps::FileEntry>,
+    /// Directory the Files section is navigated into (`None` = the
+    /// top-level home-folder strip).
+    files_dir: Option<std::path::PathBuf>,
     /// Icons that arrived before the renderer existed.
     pending_icons: Option<Vec<Vec<u8>>>,
     /// Item currently under the pointer.
@@ -388,6 +392,9 @@ const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
 
 /// Cap on file-search results shown in the Files section.
 const FILE_RESULTS_MAX: usize = 24;
+
+/// Cap on entries listed when navigated into a directory.
+const FILES_LIST_MAX: usize = 300;
 
 /// How long scroll events are eaten after a scroll gesture expands the
 /// dock: the events of that same gesture keep arriving in the Open state
@@ -579,6 +586,11 @@ impl App {
             // empty — they're already visible on the dock.
             visible[content::SECTION_APPS]
                 .retain(|&idx| !self.pins.is_pinned(&self.entries[idx].id));
+            if self.files_dir.is_some() {
+                // Navigated into a folder: list its contents instead of
+                // the top-level home strip.
+                visible[content::SECTION_FILES] = self.dir_listing();
+            }
         }
         self.search.visible = visible;
         self.search.selected = if self.search.query.is_empty() || self.flat_len() == 0 {
@@ -591,36 +603,135 @@ impl App {
         self.schedule_frame();
     }
 
+    /// Append one transient Files-section entry (kind File, generic
+    /// folder/file icon layer) and return its index. `id` doubles as
+    /// the navigation key: a path for real files, `nav-*` for the
+    /// synthetic cells.
+    fn push_transient_file(&mut self, id: &str, name: &str, exec: String, is_dir: bool) -> usize {
+        let asset = if is_dir {
+            self.asset_folder
+        } else {
+            self.asset_file
+        };
+        // Without an asset icon, fall back to a letter-tile placeholder.
+        let (layer, placeholder) = asset.unwrap_or((0, true));
+        self.entries.push(AppEntry {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            description: Some(id.to_owned()),
+            exec,
+            icon: None,
+            needs_terminal: false,
+        });
+        self.kinds.push(apps::EntryKind::File);
+        self.placeholders.push(placeholder);
+        self.icon_layers.push(layer);
+        self.entries.len() - 1
+    }
+
     /// Rank the home-tree file index against the query and append the
-    /// top matches as transient entries (kind File, generic icon layer),
-    /// returning their indices for the Files section.
+    /// top matches as transient entries, returning their indices for
+    /// the Files section.
     fn file_results(&mut self) -> Vec<usize> {
         let names: Vec<&str> = self.file_index.iter().map(|f| f.name.as_str()).collect();
         let ranked = self.search.matcher.rank(&self.search.query, &names);
         let mut out = Vec::new();
         for fi in ranked.into_iter().take(FILE_RESULTS_MAX) {
-            let f = &self.file_index[fi];
-            let asset = if f.is_dir {
-                self.asset_folder
-            } else {
-                self.asset_file
-            };
-            // Without an asset icon, fall back to a letter-tile placeholder.
-            let (layer, placeholder) = asset.unwrap_or((0, true));
-            self.entries.push(AppEntry {
-                id: f.path.clone(),
-                name: f.name.clone(),
-                description: Some(f.path.clone()),
-                exec: format!("xdg-open {}", launch::shell_quote(&f.path)),
-                icon: None,
-                needs_terminal: false,
-            });
-            self.kinds.push(apps::EntryKind::File);
-            self.placeholders.push(placeholder);
-            self.icon_layers.push(layer);
-            out.push(self.entries.len() - 1);
+            let f = self.file_index[fi].clone();
+            let exec = format!("xdg-open {}", launch::shell_quote(&f.path));
+            out.push(self.push_transient_file(&f.path, &f.name, exec, f.is_dir));
         }
         out
+    }
+
+    /// Transient listing of the navigated directory: a ".." cell (up
+    /// one level), an "Open" cell (the directory itself, via xdg-open),
+    /// then its visible children — folders first, alphabetical.
+    fn dir_listing(&mut self) -> Vec<usize> {
+        let Some(dir) = self.files_dir.clone() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        out.push(self.push_transient_file("nav-up", "..", "true".to_owned(), true));
+        let dir_str = dir.to_string_lossy().into_owned();
+        let open_exec = format!("xdg-open {}", launch::shell_quote(&dir_str));
+        out.push(self.push_transient_file("nav-open", "Open", open_exec, true));
+
+        let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    return None;
+                }
+                let is_dir = e.file_type().ok()?.is_dir();
+                Some((is_dir, name, e.path().to_string_lossy().into_owned()))
+            })
+            .collect();
+        // Folders first, then files, each alphabetical.
+        children.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        for (is_dir, name, path) in children.into_iter().take(FILES_LIST_MAX) {
+            let exec = format!("xdg-open {}", launch::shell_quote(&path));
+            out.push(self.push_transient_file(&path, &name, exec, is_dir));
+        }
+        out
+    }
+
+    /// Files-section navigation: returns true when the hit was handled
+    /// as navigation (into a folder, or up via "..") rather than a
+    /// launch. Clicking a folder in search results jumps there too,
+    /// clearing the query.
+    fn try_navigate(&mut self, entry_idx: usize) -> bool {
+        let Some(entry) = self.entries.get(entry_idx) else {
+            return false;
+        };
+        match entry.id.as_str() {
+            "nav-up" => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                self.files_dir = self
+                    .files_dir
+                    .as_ref()
+                    .and_then(|d| d.parent().map(std::path::Path::to_path_buf))
+                    // Reaching home (or escaping it) lands on the strip.
+                    .filter(|p| {
+                        !home.is_empty()
+                            && p.starts_with(&home)
+                            && *p != std::path::Path::new(&home)
+                    });
+                self.refilter();
+                true
+            }
+            // "Open" launches the directory itself: not navigation.
+            "nav-open" => false,
+            path => {
+                if !std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
+                    return false;
+                }
+                self.files_dir = Some(std::path::PathBuf::from(path));
+                // A folder clicked in search results jumps navigation
+                // there; the query has done its job.
+                self.search.query.clear();
+                self.search.open = false;
+                self.refilter();
+                true
+            }
+        }
+    }
+
+    /// Display string of the navigated directory ("~/Documents/x"),
+    /// empty at the top level.
+    fn files_path_display(&self) -> String {
+        let Some(dir) = &self.files_dir else {
+            return String::new();
+        };
+        let home = std::env::var("HOME").unwrap_or_default();
+        let s = dir.to_string_lossy();
+        match s.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() => format!("~{rest}"),
+            _ => s.into_owned(),
+        }
     }
 
     /// Total selectable cells across all sections (flat keyboard order:
@@ -754,6 +865,11 @@ impl App {
             }
             Hit::GridCell(s, i) => {
                 if let Some(entry_idx) = self.search.visible[s].get(i).copied() {
+                    // Folders in the Files section navigate instead of
+                    // launching (the popup stays open).
+                    if s == content::SECTION_FILES && self.try_navigate(entry_idx) {
+                        return;
+                    }
                     self.activate(entry_idx);
                 }
             }
@@ -829,6 +945,9 @@ impl App {
             self.scroll.reset_sections();
             self.hover = None;
             self.search.open = false;
+            if self.files_dir.take().is_some() {
+                self.refilter();
+            }
         }
         if self.ui.target() == Target::Open {
             self.scroll.reset_sections();
@@ -972,6 +1091,7 @@ impl App {
                 search_expand: self.search.expand,
                 placeholders: &self.placeholders,
                 layers: &self.icon_layers,
+                files_path: &self.files_path_display(),
                 dock_order: &self.dock_order,
                 drag: drag_frame,
             },
@@ -1518,7 +1638,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         if dx * dx + dy * dy > 6.0 * 6.0 {
                             let entry_idx = match hit {
                                 Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
-                                Hit::GridCell(s, cell) => app.search.visible[s].get(cell).copied(),
+                                Hit::GridCell(s, cell) => app.search.visible[s]
+                                    .get(cell)
+                                    .copied()
+                                    // The synthetic ".."/"Open" cells are
+                                    // not draggable.
+                                    .filter(|&idx| !app.entries[idx].id.starts_with("nav-")),
                                 Hit::SearchButton => None,
                             };
                             if let Some(entry_idx) = entry_idx {

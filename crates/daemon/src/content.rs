@@ -424,6 +424,9 @@ pub struct FrameInput<'a> {
     /// file-search results borrow a generic asset icon's layer. Empty
     /// slice = identity (entry index is the layer).
     pub layers: &'a [u32],
+    /// Directory the Files section is navigated into ("~/…"), shown in
+    /// its title; empty at the top level.
+    pub files_path: &'a str,
     /// Dock display order: maps slot position → entry index. Empty slice
     /// renders no dock icons (safe default for tests / pre-load frames).
     pub dock_order: &'a [usize],
@@ -454,6 +457,7 @@ pub fn scene(
         search_expand,
         placeholders,
         layers,
+        files_path,
         dock_order,
         drag,
     } = *frame;
@@ -660,8 +664,13 @@ pub fn scene(
     // The three sections: title, grid cells with per-section horizontal
     // paging, page dots, and per-section empty states.
     for (s, sec) in layout.sections.iter().enumerate() {
+        let title = if s == SECTION_FILES && !files_path.is_empty() {
+            format!("{} — {}", SECTION_TITLES[s], files_path)
+        } else {
+            SECTION_TITLES[s].to_string()
+        };
         scene.labels.push(Label {
-            text: SECTION_TITLES[s].to_string(),
+            text: title,
             pos: (sec.title_pos.0, sec.title_pos.1 + 2.0),
             max_w: sec.viewport.w,
             font_px: LABEL_FONT_PX,
