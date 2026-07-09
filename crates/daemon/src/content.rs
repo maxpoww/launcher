@@ -585,6 +585,26 @@ pub fn scene(
             }
         }
         scene.grid = Some(grid);
+    } else if layout.viewport.h > 1.0 && !query.is_empty() {
+        // Search active but nothing matched: show a soft empty state.
+        let cx = layout.viewport.x + layout.viewport.w / 2.0;
+        let cy = layout.viewport.y + layout.viewport.h / 2.0;
+        let mut grid = GridContent {
+            clip: layout.viewport,
+            ..Default::default()
+        };
+        grid.labels.push(Label {
+            text: "No results".to_string(),
+            pos: (cx, cy - LABEL_LINE_PX / 2.0),
+            max_w: 200.0,
+            font_px: LABEL_FONT_PX + 2.0,
+            line_px: LABEL_LINE_PX + 2.0,
+            centered: true,
+            dim: true,
+            cache: true,
+            clip: None,
+        });
+        scene.grid = Some(grid);
     }
 
     scene
