@@ -148,6 +148,21 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+/// Truncate a label to fit within `max_w` pixels, appending "…" when
+/// the text is longer. Uses an average-character-width estimate (0.52×
+/// font size) rather than shaping — close enough for app names.
+fn truncate_label(text: &str, max_w: f32, font_px: f32) -> String {
+    let avg_char_w = font_px * 0.52;
+    let max_chars = (max_w / avg_char_w) as usize;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        text.to_string()
+    } else {
+        let truncated: String = chars[..max_chars.saturating_sub(1)].iter().collect();
+        format!("{}…", truncated.trim_end())
+    }
+}
+
 /// Geometry shared by scene assembly and hit-testing.
 #[derive(Debug)]
 pub struct Layout {
@@ -557,7 +572,7 @@ pub fn scene(
                     }
                 }
                 grid.labels.push(Label {
-                    text: entry.name.clone(),
+                    text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
                     pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
                     max_w: cell.w - 12.0,
                     font_px: LABEL_FONT_PX,
