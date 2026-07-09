@@ -31,6 +31,8 @@ pub struct LoadedApps {
     /// Premultiplied RGBA8 pixels, `ICON_SIZE * ICON_SIZE * 4` bytes per
     /// entry; a generated placeholder tile where no icon was found.
     pub icons: Vec<Vec<u8>>,
+    /// `true` for entries whose icon could not be resolved (placeholder tile).
+    pub placeholders: Vec<bool>,
 }
 
 /// Handle to the long-lived indexer thread.
@@ -60,11 +62,11 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
 
                 let started = std::time::Instant::now();
                 let index = DesktopIndex::scan();
-                let icons = index
+                let (icons, placeholders): (Vec<_>, Vec<_>) = index
                     .entries
                     .iter()
                     .map(|entry| cached_icon(&mut icon_cache, entry, &icon_theme))
-                    .collect();
+                    .unzip();
                 debug!(
                     "indexed {} apps in {:?}",
                     index.entries.len(),
@@ -74,6 +76,7 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                     .send(LoadedApps {
                         entries: index.entries,
                         icons,
+                        placeholders,
                     })
                     .is_err()
                 {
@@ -90,19 +93,25 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
 }
 
 /// Look an entry's icon up in (or insert it into) the raster cache.
-fn cached_icon(cache: &mut HashMap<String, Vec<u8>>, entry: &AppEntry, theme: &str) -> Vec<u8> {
+/// Returns `(pixels, is_placeholder)`.
+fn cached_icon(
+    cache: &mut HashMap<String, Vec<u8>>,
+    entry: &AppEntry,
+    theme: &str,
+) -> (Vec<u8>, bool) {
     let (key, path) = match resolve_icon_path(entry, theme) {
         Some(path) => (path.clone(), Some(path)),
         None => (format!("placeholder:{}", entry.name), None),
     };
+    let is_placeholder = path.is_none();
     if let Some(pixels) = cache.get(&key) {
-        return pixels.clone();
+        return (pixels.clone(), is_placeholder);
     }
     let pixels = path
         .and_then(|p| rasterize_icon_file(&p, &entry.id))
         .unwrap_or_else(|| placeholder_icon(&entry.name));
     cache.insert(key, pixels.clone());
-    pixels
+    (pixels, is_placeholder)
 }
 
 /// Resolve an entry's icon name to a file path via the theme lookup.

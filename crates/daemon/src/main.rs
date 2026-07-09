@@ -135,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         indexer,
         last_rescan: Instant::now(),
         bounce: None,
+        placeholders: Vec::new(),
         query: String::new(),
         searcher: Searcher::new(),
         visible: Vec::new(),
@@ -248,6 +249,8 @@ pub struct App {
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
     bounce: Option<(usize, Instant)>,
+    /// Which entries have placeholder tiles (no resolved icon).
+    placeholders: Vec<bool>,
     /// Live search query (empty = unfiltered).
     query: String,
     /// Fuzzy matcher (heap-heavy, allocated once per daemon).
@@ -367,6 +370,7 @@ impl App {
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
         info!("app index ready: {} entries", loaded.entries.len());
         self.entries = loaded.entries;
+        self.placeholders = loaded.placeholders;
         match self.renderer.as_mut() {
             Some(renderer) => renderer.set_icons(&loaded.icons),
             None => self.pending_icons = Some(loaded.icons),
@@ -610,6 +614,7 @@ impl App {
                 query: &self.query,
                 selected: self.selected,
                 search_expand: self.search_expand,
+                placeholders: &self.placeholders,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -660,9 +665,6 @@ impl App {
         }
     }
 
-    /// Arm the auto-hide grace timer after the pointer leaves the dock.
-    /// A later pointer re-entry clears `hide_deadline`, turning the
-    /// in-flight timer into a no-op when it fires.
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
         match keysym {
             Keysym::Escape => {

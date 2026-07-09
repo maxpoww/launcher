@@ -296,6 +296,9 @@ pub struct FrameInput<'a> {
     pub selected: Option<usize>,
     /// Search box expansion: 0.0 = compact circle button, 1.0 = full pill.
     pub search_expand: f32,
+    /// Which entries are using placeholder tiles (no resolved icon file).
+    /// Aligned with the `entries` slice passed to `scene()`.
+    pub placeholders: &'a [bool],
 }
 
 /// Assemble the draw scene for one frame.
@@ -319,6 +322,7 @@ pub fn scene(
         query,
         selected,
         search_expand,
+        placeholders,
     } = *frame;
     let (w, h) = surface;
     let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
@@ -382,6 +386,25 @@ pub fn scene(
             rect: Rect::new(vcx - size / 2.0, baseline - size - lift(i), size, size),
             layer: i as u32,
         });
+        if placeholders.get(i).copied().unwrap_or(false) {
+            if let Some(ch) = entries.get(i).and_then(|e| e.name.chars().next()) {
+                let letter: String = ch.to_uppercase().collect();
+                let font_px = (size * 0.46).max(10.0).min(28.0);
+                let line_px = font_px * 1.3;
+                let icon_center_y = baseline - size / 2.0 - lift(i);
+                scene.labels.push(Label {
+                    text: letter,
+                    pos: (vcx, icon_center_y - line_px / 2.0),
+                    max_w: size,
+                    font_px,
+                    line_px,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    clip: None,
+                });
+            }
+        }
     }
 
     // Search widget: "Filter" pill button that morphs into an expanding
@@ -500,6 +523,24 @@ pub fn scene(
                     ),
                     layer: entry_idx as u32,
                 });
+                if placeholders.get(entry_idx).copied().unwrap_or(false) {
+                    if let Some(ch) = entry.name.chars().next() {
+                        let letter: String = ch.to_uppercase().collect();
+                        let font_px = (size * 0.46).max(10.0).min(30.0);
+                        let line_px = font_px * 1.3;
+                        grid.labels.push(Label {
+                            text: letter,
+                            pos: (cx, icon_cy - lift(entry_idx) - line_px / 2.0),
+                            max_w: size,
+                            font_px,
+                            line_px,
+                            centered: true,
+                            dim: false,
+                            cache: true,
+                            clip: None,
+                        });
+                    }
+                }
                 grid.labels.push(Label {
                     text: entry.name.clone(),
                     pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
