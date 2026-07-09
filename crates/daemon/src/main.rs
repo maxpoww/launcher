@@ -312,10 +312,10 @@ struct SectionScroll {
     pos: f32,
     /// Scroll animation target; `pos` eases toward this each frame.
     target: f32,
-    /// Accumulated scroll toward the next column step (resets on
-    /// direction change and after each step).
+    /// Accumulated scroll toward the next page turn (resets on direction
+    /// change and after each turn).
     page_accum: f64,
-    /// When the last column step happened, for COLUMN_COOLDOWN.
+    /// When the last page turn happened, for PAGE_COOLDOWN.
     page_turned_at: Option<Instant>,
 }
 
@@ -379,13 +379,12 @@ struct DragState {
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
 
-/// Accumulated scroll needed to slide a grid one column (≈ one wheel
-/// notch): every notch reveals a fresh column of entries.
-const COLUMN_SCROLL_THRESHOLD: f64 = 12.0;
+/// Accumulated scroll needed to turn one grid page (≈ two wheel notches).
+const PAGE_SCROLL_THRESHOLD: f64 = 30.0;
 
-/// Minimum time between column steps, so an event-storm flick still
-/// moves at a followable pace instead of blurring the (cyclic) grid.
-const COLUMN_COOLDOWN: Duration = Duration::from_millis(80);
+/// Minimum time between page turns, so a fast flick moves exactly one
+/// page instead of spinning the (cyclic) grid.
+const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
 
 /// Cap on file-search results shown in the Files section.
 const FILE_RESULTS_MAX: usize = 24;
@@ -1086,15 +1085,16 @@ impl App {
         }
     }
 
-    /// Accumulate scroll toward a column step of `section`: each
-    /// COLUMN_SCROLL_THRESHOLD of travel (≈ one notch) slides the grid
-    /// one column, so scrolling continuously discovers new entries
-    /// column by column instead of jumping whole pages.
+    /// Accumulate scroll toward a page turn of `section`: turning
+    /// requires PAGE_SCROLL_THRESHOLD worth of travel, and successive
+    /// turns are at least PAGE_COOLDOWN apart — so one notch nudges, a
+    /// deliberate scroll turns one page, and a fast flick can't spin
+    /// the wheel.
     fn page_scroll(&mut self, section: usize, value: f64) {
         let sec = &mut self.scroll.per[section];
         if sec
             .page_turned_at
-            .is_some_and(|t| t.elapsed() < COLUMN_COOLDOWN)
+            .is_some_and(|t| t.elapsed() < PAGE_COOLDOWN)
         {
             return;
         }
@@ -1103,38 +1103,44 @@ impl App {
             sec.page_accum = 0.0;
         }
         sec.page_accum += value;
-        if sec.page_accum.abs() >= COLUMN_SCROLL_THRESHOLD {
+        if sec.page_accum.abs() >= PAGE_SCROLL_THRESHOLD {
             let dir = if sec.page_accum > 0.0 { 1 } else { -1 };
             sec.page_accum = 0.0;
             sec.page_turned_at = Some(Instant::now());
-            self.column_by(section, dir);
+            self.page_by(section, dir);
         }
     }
 
-    /// Slide one section's grid a column in `dir` (+1 = next, -1 =
+    /// Slide one section's grid a page in `dir` (+1 = next, -1 =
     /// previous), wrapping past either end (infinite scroll).
-    fn column_by(&mut self, section: usize, dir: i64) {
+    fn page_by(&mut self, section: usize, dir: i64) {
         // Use the SETTLED (full-extent) layout: mid-open-animation the
         // current layout has a tiny viewport and a bogus page count.
         let settled = self.layout_at(self.ui.extent_of(Target::Open));
         let sec_layout = &settled.sections[section];
         let page_w = sec_layout.viewport.w.max(1.0);
-        if sec_layout.n_pages <= 1 {
-            return; // everything already visible: nothing to discover
+        let n_pages = sec_layout.n_pages;
+        if n_pages <= 1 {
+            return;
         }
-        let total_w = sec_layout.n_pages as f32 * page_w;
-        let step = page_w / sec_layout.cols.max(1) as f32;
+        let total_w = n_pages as f32 * page_w;
         let sec = &mut self.scroll.per[section];
-        // Step the target (intended column) so mid-animation notches
-        // chain smoothly; keep pos/target within one strip of range
-        // (rendering is cyclic, the shift is invisible).
-        sec.target += dir as f32 * step;
-        if sec.target >= total_w {
-            sec.target -= total_w;
-            sec.pos -= total_w;
-        } else if sec.target < 0.0 {
-            sec.target += total_w;
+        // Use the target (intended page) not the animated position so
+        // mid-animation events don't mis-compute the page.
+        let current_page = (sec.target / page_w).round() as i64;
+        let next_page = current_page + dir;
+        if next_page < 0 {
+            // Wrap to the last page. Shift the animated position one full
+            // strip right so the slide still moves in the gesture
+            // direction; rendering is cyclic, so the shift is invisible.
             sec.pos += total_w;
+            sec.target = (n_pages - 1) as f32 * page_w;
+        } else if next_page >= n_pages as i64 {
+            // Wrap to the first page (shift one strip left, as above).
+            sec.pos -= total_w;
+            sec.target = 0.0;
+        } else {
+            sec.target = next_page as f32 * page_w;
         }
         self.update_hover();
         self.schedule_frame();
