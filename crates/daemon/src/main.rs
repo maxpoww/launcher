@@ -722,12 +722,17 @@ impl App {
                     let layout = self.current_layout();
                     let cols = layout.cols.max(1);
                     let last = self.visible.len() - 1;
-                    let cur = self.selected.unwrap_or(0);
-                    let next = match keysym {
-                        Keysym::Left => cur.saturating_sub(1),
-                        Keysym::Right => (cur + 1).min(last),
-                        Keysym::Up => cur.saturating_sub(cols),
-                        _ => (cur + cols).min(last),
+                    // When nothing is selected yet, the first arrow key
+                    // lands on item 0 regardless of direction.
+                    let next = if let Some(cur) = self.selected {
+                        match keysym {
+                            Keysym::Left => cur.saturating_sub(1),
+                            Keysym::Right => (cur + 1).min(last),
+                            Keysym::Up => cur.saturating_sub(cols),
+                            _ => (cur + cols).min(last),
+                        }
+                    } else {
+                        0
                     };
                     self.selected = Some(next);
                     self.scroll_target = content::scroll_to_reveal(&layout, next);
