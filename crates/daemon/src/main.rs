@@ -11,14 +11,14 @@
 mod animation;
 mod apps;
 mod content;
-mod pins;
-mod usage;
 mod hypr;
 mod ipc;
 mod launch;
+mod pins;
 mod renderer;
 mod state;
 mod surface;
+mod usage;
 
 use std::time::{Duration, Instant};
 
@@ -124,33 +124,23 @@ fn main() -> anyhow::Result<()> {
         dirty: false,
         keyboard: None,
         pointer: None,
-        scroll_accum: 0.0,
         hide_deadline: None,
         interactive: false,
         input_extent: None,
         entries: Vec::new(),
         pending_icons: None,
         hover: None,
-        pressed: None,
         pointer_pos: None,
-        list_scroll: 0.0,
-        scroll_target: 0.0,
-        open_at: None,
+        scroll: ScrollState::default(),
+        gesture: GestureState::default(),
+        search: SearchState::default(),
         indexer,
         usage: usage::UsageDb::load(),
         pins: pins::PinDb::load(),
         dock_order: Vec::new(),
-        dragging: None,
-        press_pos: None,
         last_rescan: Instant::now(),
         bounce: None,
         placeholders: Vec::new(),
-        query: String::new(),
-        searcher: Searcher::new(),
-        visible: Vec::new(),
-        selected: None,
-        search_open: false,
-        search_expand: 0.0,
         zone_free: false,
         exit: false,
     };
@@ -228,8 +218,6 @@ pub struct App {
     dirty: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
-    /// Accumulated vertical scroll over the dock, for the expand gesture.
-    scroll_accum: f64,
     /// Deadline of the pending auto-hide, if the pointer has left the
     /// dock. Re-entry clears it, invalidating the in-flight timer.
     hide_deadline: Option<Instant>,
@@ -245,19 +233,14 @@ pub struct App {
     pending_icons: Option<Vec<Vec<u8>>>,
     /// Item currently under the pointer.
     hover: Option<Hit>,
-    /// Item a left-button press started on; release on the same item
-    /// activates it.
-    pressed: Option<Hit>,
     /// Pointer position in surface coordinates, while inside.
     pointer_pos: Option<(f32, f32)>,
-    /// App-grid scroll offset in pixels (visual, lags behind scroll_target).
-    list_scroll: f32,
-    /// Scroll animation target; list_scroll eases toward this each frame.
-    scroll_target: f32,
-    /// Set when a scroll gesture triggers Expand. Events within 300 ms are
-    /// eaten so the gesture doesn't bleed through and advance a page.
-    /// Cleared immediately by AxisStop so keyboard Toggle has zero cooldown.
-    open_at: Option<Instant>,
+    /// Grid scrolling / paging state.
+    scroll: ScrollState,
+    /// Press-and-drag gesture state.
+    gesture: GestureState,
+    /// Search box and query state.
+    search: SearchState,
     /// Handle to the background indexer thread.
     indexer: apps::Indexer,
     /// Persistent launch-frequency database; drives sort order.
@@ -267,21 +250,59 @@ pub struct App {
     /// Dock display order: maps slot index → entry index. Rebuilt
     /// whenever entries are loaded or pins change.
     dock_order: Vec<usize>,
-    /// Active drag-and-drop gesture, if any.
-    dragging: Option<DragState>,
-    /// Surface position where the current button press started; used to
-    /// detect when a press-move crosses the drag threshold.
-    press_pos: Option<(f32, f32)>,
     /// When the last rescan was requested, for the reveal cooldown.
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
     bounce: Option<(usize, Instant)>,
     /// Which entries have placeholder tiles (no resolved icon).
     placeholders: Vec<bool>,
-    /// Live search query (empty = unfiltered).
+    /// Intellihide: no window currently overlaps the dock zone, so the
+    /// dock parks visible instead of auto-hiding.
+    zone_free: bool,
+
+    exit: bool,
+}
+
+/// Grid scrolling and paging state.
+#[derive(Default)]
+struct ScrollState {
+    /// Accumulated vertical scroll over the dock, for the expand gesture.
+    accum: f64,
+    /// App-grid scroll offset in pixels (visual, lags behind `target`).
+    pos: f32,
+    /// Scroll animation target; `pos` eases toward this each frame.
+    target: f32,
+    /// Set when a scroll gesture triggers Expand. Events within
+    /// EXPAND_BLEED_COOLDOWN are eaten so the gesture doesn't bleed
+    /// through and advance a page. Cleared immediately by AxisStop so
+    /// keyboard Toggle has zero cooldown.
+    open_at: Option<Instant>,
+    /// Accumulated scroll toward the next page turn (resets on direction
+    /// change and after each turn).
+    page_accum: f64,
+    /// When the last page turn happened, for PAGE_COOLDOWN.
+    page_turned_at: Option<Instant>,
+}
+
+/// Press-and-drag gesture state.
+#[derive(Default)]
+struct GestureState {
+    /// Item a left-button press started on; release on the same item
+    /// activates it.
+    pressed: Option<Hit>,
+    /// Surface position where the current button press started; used to
+    /// detect when a press-move crosses the drag threshold.
+    press_pos: Option<(f32, f32)>,
+    /// Active drag-and-drop, if any.
+    dragging: Option<DragState>,
+}
+
+/// Search box and query state.
+struct SearchState {
+    /// Live query (empty = unfiltered).
     query: String,
     /// Fuzzy matcher (heap-heavy, allocated once per daemon).
-    searcher: Searcher,
+    matcher: Searcher,
     /// Indices into `entries` shown in the grid, ranked by the query
     /// (every entry in order when the query is empty).
     visible: Vec<usize>,
@@ -289,14 +310,22 @@ pub struct App {
     /// Enter launches it.
     selected: Option<usize>,
     /// Whether the search box is expanded (vs. compact circle button).
-    search_open: bool,
+    open: bool,
     /// Animated expansion of the search widget: 0.0 = button, 1.0 = pill.
-    search_expand: f32,
-    /// Intellihide: no window currently overlaps the dock zone, so the
-    /// dock parks visible instead of auto-hiding.
-    zone_free: bool,
+    expand: f32,
+}
 
-    exit: bool,
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            matcher: Searcher::new(),
+            visible: Vec::new(),
+            selected: None,
+            open: false,
+            expand: 0.0,
+        }
+    }
 }
 
 /// State of an in-progress drag-and-drop gesture.
@@ -313,6 +342,18 @@ struct DragState {
 /// Accumulated scroll (in wl_pointer axis units; one wheel notch ≈ 15)
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
+
+/// Accumulated scroll needed to turn one grid page (≈ two wheel notches).
+const PAGE_SCROLL_THRESHOLD: f64 = 30.0;
+
+/// Minimum time between page turns, so a fast flick moves exactly one
+/// page instead of spinning the (cyclic) grid.
+const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
+
+/// How long scroll events are eaten after a scroll gesture expands the
+/// dock: the events of that same gesture keep arriving in the Open state
+/// and must not page the grid. Cleared early by AxisStop (finger lift).
+const EXPAND_BLEED_COOLDOWN: Duration = Duration::from_millis(300);
 
 /// Linux evdev code for the left mouse button.
 const BTN_LEFT: u32 = 0x110;
@@ -418,9 +459,7 @@ impl App {
             .zip(loaded.placeholders)
             .map(|((e, i), p)| (e, i, p))
             .collect();
-        combined.sort_by(|(a, _, _), (b, _, _)| {
-            self.usage.count(&b.id).cmp(&self.usage.count(&a.id))
-        });
+        combined.sort_by_key(|(e, _, _)| std::cmp::Reverse(self.usage.count(&e.id)));
         let mut icons = Vec::with_capacity(combined.len());
         let mut placeholders = Vec::with_capacity(combined.len());
         self.entries = combined
@@ -437,9 +476,10 @@ impl App {
             Some(renderer) => renderer.set_icons(&icons),
             None => self.pending_icons = Some(icons),
         }
-        // Indices may have shifted: drop any armed click, rebuild the dock
-        // order, re-rank the query against the new entries, re-resolve hover.
-        self.pressed = None;
+        // Indices may have shifted: drop any armed click or in-flight drag,
+        // rebuild the dock order, re-rank the query, re-resolve hover.
+        self.gesture.pressed = None;
+        self.gesture.dragging = None;
         self.recompute_dock_order();
         self.refilter();
         self.schedule_frame();
@@ -450,33 +490,40 @@ impl App {
     /// (or a click) launches it.
     fn refilter(&mut self) {
         let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
-        self.visible = self.searcher.rank(&self.query, &names);
+        self.search.visible = self.search.matcher.rank(&self.search.query, &names);
         // Hide pinned apps from the grid when the search box is empty —
         // they're already visible on the dock, no need to show them twice.
-        if self.query.is_empty() {
-            self.visible.retain(|&idx| !self.pins.is_pinned(&self.entries[idx].id));
+        if self.search.query.is_empty() {
+            self.search
+                .visible
+                .retain(|&idx| !self.pins.is_pinned(&self.entries[idx].id));
         }
-        self.selected = if self.query.is_empty() || self.visible.is_empty() {
+        self.search.selected = if self.search.query.is_empty() || self.search.visible.is_empty() {
             None
         } else {
             Some(0)
         };
-        self.list_scroll = 0.0;
-        self.scroll_target = 0.0;
+        self.scroll.pos = 0.0;
+        self.scroll.target = 0.0;
         self.update_hover();
         self.schedule_frame();
     }
 
-    /// Layout for the current animation extent and scroll offset.
-    fn current_layout(&self) -> content::Layout {
+    /// Layout for an arbitrary card extent at the current scroll offset.
+    fn layout_at(&self, extent: f32) -> content::Layout {
         content::layout(
             &self.config,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
-            self.ui.extent(),
+            extent,
             self.dock_order.len(),
-            self.visible.len(),
-            self.list_scroll,
+            self.search.visible.len(),
+            self.scroll.pos,
         )
+    }
+
+    /// Layout for the current animation extent.
+    fn current_layout(&self) -> content::Layout {
+        self.layout_at(self.ui.extent())
     }
 
     /// Rebuild `dock_order`: pinned entries first (in pin order), then
@@ -491,9 +538,7 @@ impl App {
             }
         }
         for idx in 0..self.entries.len() {
-            if !self.dock_order.contains(&idx)
-                && !self.pins.is_excluded(&self.entries[idx].id)
-            {
+            if !self.dock_order.contains(&idx) && !self.pins.is_excluded(&self.entries[idx].id) {
                 self.dock_order.push(idx);
             }
         }
@@ -504,22 +549,53 @@ impl App {
     /// position.  Returns `None` when the pointer is outside the dock band.
     fn drag_dock_insert(&self, layout: &content::Layout, pos: (f32, f32)) -> Option<usize> {
         let slots = &layout.dock_slots;
-        if slots.is_empty() { return None; }
+        if slots.is_empty() {
+            return None;
+        }
         let (x, y) = pos;
-        let dock_top    = layout.card_top;
+        let dock_top = layout.card_top;
         let dock_bottom = slots[0].y + slots[0].h;
-        if y < dock_top || y > dock_bottom { return None; }
-        let insert = slots.iter().position(|s| x < s.x + s.w / 2.0)
+        if y < dock_top || y > dock_bottom {
+            return None;
+        }
+        let insert = slots
+            .iter()
+            .position(|s| x < s.x + s.w / 2.0)
             .unwrap_or(slots.len());
         Some(insert)
     }
 
+    /// Finish a drag: pin at the dock slot it was dropped on, or — when
+    /// dropped outside the dock band — remove a dock-origin drag from the
+    /// dock entirely (unpin + exclude from the usage-sort fill).
+    fn drop_drag(&mut self, drag: DragState, insert: Option<usize>) {
+        let Some(entry) = self.entries.get(drag.entry_idx) else {
+            return; // entries were replaced mid-drag
+        };
+        let app_id = entry.id.clone();
+        debug!(
+            "drop: id={app_id} from_dock={} insert={insert:?}",
+            drag.from_dock
+        );
+        match insert {
+            Some(slot) => self.pins.pin_at(&app_id, slot),
+            None if drag.from_dock => self.pins.exclude(&app_id),
+            None => {}
+        }
+        self.recompute_dock_order();
+        self.update_hover();
+        self.schedule_frame();
+    }
+
+    /// What the pointer is over right now (`None` when outside).
+    fn hover_at_pointer(&self) -> Option<Hit> {
+        self.pointer_pos
+            .and_then(|pos| content::hit_test(&self.current_layout(), pos, self.search.open))
+    }
+
     /// Recompute which item the pointer is over; redraw on change.
     fn update_hover(&mut self) {
-        let search_open = self.search_open;
-        let hover = self
-            .pointer_pos
-            .and_then(|pos| content::hit_test(&self.current_layout(), pos, search_open));
+        let hover = self.hover_at_pointer();
         if hover != self.hover {
             debug!(
                 "hover: {:?} -> {:?} at {:?} (extent {})",
@@ -542,14 +618,14 @@ impl App {
                 }
             }
             Hit::GridCell(i) => {
-                if let Some(entry_idx) = self.visible.get(i).copied() {
+                if let Some(entry_idx) = self.search.visible.get(i).copied() {
                     self.activate(entry_idx);
                 }
             }
             Hit::SearchButton => {
-                self.search_open = !self.search_open;
-                if !self.search_open {
-                    self.query.clear();
+                self.search.open = !self.search.open;
+                if !self.search.open {
+                    self.search.query.clear();
                     self.refilter();
                 }
                 self.schedule_frame();
@@ -557,15 +633,15 @@ impl App {
         }
     }
 
-    /// The out-of-the-way command for the current situation: fully hide,
-    /// or just collapse to the dock when nothing overlaps its zone
-    /// (intellihide keeps the dock parked).
-    fn dismiss_command(&self) -> Command {
-        if self.zone_free {
+    /// Get out of the way: fully hide, or just collapse to the dock when
+    /// nothing overlaps its zone (intellihide keeps the dock parked).
+    fn dismiss(&mut self) {
+        let command = if self.zone_free {
             Command::Collapse
         } else {
             Command::Hide
-        }
+        };
+        self.handle_command(command);
     }
 
     /// Launch an entry by index; its icon plays a bounce (macOS launch
@@ -575,7 +651,8 @@ impl App {
             return;
         };
         let (exec, id) = (entry.exec.clone(), entry.id.clone());
-        if let Err(e) = launch::launch(&exec) {
+        let needs_terminal = entry.needs_terminal;
+        if let Err(e) = launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
             error!("launch failed for {id}: {e:#}");
         }
         self.usage.increment(&id);
@@ -585,14 +662,12 @@ impl App {
         if let Err(e) = self
             .loop_handle
             .insert_source(timer, |_, _, app: &mut App| {
-                let cmd = app.dismiss_command();
-                app.handle_command(cmd);
+                app.dismiss();
                 TimeoutAction::Drop
             })
         {
             warn!("failed to arm launch-hide timer: {e}");
-            let cmd = self.dismiss_command();
-            self.handle_command(cmd);
+            self.dismiss();
         }
     }
 
@@ -616,21 +691,23 @@ impl App {
     fn sync_surface_state(&mut self) {
         if self.ui.target() == Target::Hidden {
             // Fresh card next time it rises.
-            self.list_scroll = 0.0;
-            self.scroll_target = 0.0;
+            self.scroll.pos = 0.0;
+            self.scroll.target = 0.0;
             self.hover = None;
-            self.search_open = false;
+            self.search.open = false;
         }
         if self.ui.target() == Target::Open {
-            self.list_scroll = 0.0;
-            self.scroll_target = 0.0;
+            self.scroll.pos = 0.0;
+            self.scroll.target = 0.0;
+            self.scroll.page_accum = 0.0;
+            self.scroll.page_turned_at = None;
             // open_at is set only when expand was triggered by a scroll gesture
             // (in on_scroll), so keyboard Toggle has no cooldown.
         }
         // The search only lives while the popup is open.
-        if self.ui.target() != Target::Open && !self.query.is_empty() {
-            self.query.clear();
-            self.search_open = false;
+        if self.ui.target() != Target::Open && !self.search.query.is_empty() {
+            self.search.query.clear();
+            self.search.open = false;
             self.refilter();
         }
         let interactive = self.ui.wants_keyboard();
@@ -690,33 +767,31 @@ impl App {
         if animating {
             // The card is moving under a possibly stationary pointer:
             // keep the hover highlight glued to what is really beneath it.
-            let search_open = self.search_open;
-            self.hover = self
-                .pointer_pos
-                .and_then(|pos| content::hit_test(&self.current_layout(), pos, search_open));
+            // (Not update_hover(): its schedule_frame would recurse here.)
+            self.hover = self.hover_at_pointer();
         }
 
         // Advance search-box expand animation (200 ms).
-        let search_target = if self.search_open { 1.0f32 } else { 0.0 };
-        let search_animating = self.search_expand != search_target;
+        let search_target = if self.search.open { 1.0f32 } else { 0.0 };
+        let search_animating = self.search.expand != search_target;
         if search_animating {
             let delta = dt / 0.2;
-            self.search_expand = if search_target > self.search_expand {
-                (self.search_expand + delta).min(1.0)
+            self.search.expand = if search_target > self.search.expand {
+                (self.search.expand + delta).min(1.0)
             } else {
-                (self.search_expand - delta).max(0.0)
+                (self.search.expand - delta).max(0.0)
             };
         }
 
         // Smooth-scroll the grid: list_scroll eases toward scroll_target
         // with an exponential decay (~200 ms to settle at 60 fps).
-        let scroll_delta = self.scroll_target - self.list_scroll;
+        let scroll_delta = self.scroll.target - self.scroll.pos;
         let scroll_animating = scroll_delta.abs() > 0.5;
         if scroll_animating {
             let k = 1.0 - (-dt * 12.0f32).exp();
-            self.list_scroll += scroll_delta * k;
+            self.scroll.pos += scroll_delta * k;
         } else if scroll_delta != 0.0 {
-            self.list_scroll = self.scroll_target;
+            self.scroll.pos = self.scroll.target;
         }
 
         self.dirty = false;
@@ -727,34 +802,43 @@ impl App {
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
-        // Safety: if animation overshot the max-scroll boundary, pin both.
-        if layout.scroll < self.list_scroll - 0.5 {
-            self.scroll_target = self.scroll_target.min(layout.scroll);
-            self.list_scroll = layout.scroll;
-        }
-        let drag_frame = self.dragging.as_ref().map(|drag| content::DragFrame {
-            entry_idx:   drag.entry_idx,
-            pos:         drag.pos,
-            dock_insert: self.drag_dock_insert(&layout, drag.pos),
-        });
+        // (layout.scroll is the cyclic-wrapped image of list_scroll; the
+        // raw value is what animates, so never sync it back from layout.)
+        let drag_frame = self
+            .gesture
+            .dragging
+            .as_ref()
+            .map(|drag| content::DragFrame {
+                entry_idx: drag.entry_idx,
+                pos: drag.pos,
+                dock_insert: self.drag_dock_insert(&layout, drag.pos),
+            });
         let scene = content::scene(
             &self.config,
             &layout,
             &self.entries,
-            &self.visible,
+            &self.search.visible,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             &content::FrameInput {
                 // Suppress hover highlight and magnification while dragging.
-                hover:         if drag_frame.is_none() { self.hover } else { None },
-                alpha:         self.ui.alpha(),
-                pointer:       if drag_frame.is_none() { self.pointer_pos } else { None },
+                hover: if drag_frame.is_none() {
+                    self.hover
+                } else {
+                    None
+                },
+                alpha: self.ui.alpha(),
+                pointer: if drag_frame.is_none() {
+                    self.pointer_pos
+                } else {
+                    None
+                },
                 bounce,
-                query:         &self.query,
-                selected:      self.selected,
-                search_expand: self.search_expand,
-                placeholders:  &self.placeholders,
-                dock_order:    &self.dock_order,
-                drag:          drag_frame,
+                query: &self.search.query,
+                selected: self.search.selected,
+                search_expand: self.search.expand,
+                placeholders: &self.placeholders,
+                dock_order: &self.dock_order,
+                drag: drag_frame,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -763,11 +847,11 @@ impl App {
         if let Err(e) = renderer.render(&scene, self.config.theme.text_rgba()) {
             error!("render failed: {e:#}");
         }
-        if search_animating && self.search_expand != search_target {
+        if search_animating && self.search.expand != search_target {
             self.dirty = true;
         }
         if scroll_animating
-            && (self.scroll_target - self.list_scroll).abs() > 0.5
+            && (self.scroll.target - self.scroll.pos).abs() > 0.5
             && self.ui.target() == Target::Open
         {
             self.dirty = true;
@@ -776,95 +860,140 @@ impl App {
 
     /// One vertical-scroll step of `value` axis units.
     ///
-    /// Docked, the wheel is the expand/collapse gesture; open, it
-    /// scrolls the grid, and pushing past the top accumulates into the
-    /// collapse gesture instead. Natural scroll (default): scrolling
-    /// down expands, up collapses; classic direction when disabled.
+    /// Docked, the wheel is the expand gesture. Open, it pages the grid
+    /// (down = next, up = previous) and never collapses the popup —
+    /// dismissal is Escape / pointer-leave / toggle only.
     fn on_scroll(&mut self, value: f64) {
         match self.ui.target() {
-            Target::Dock => self.scroll_accum += value,
+            Target::Dock => {
+                self.scroll.accum += value;
+                let mut toward_open = self.scroll.accum;
+                if self.config.input.natural_scroll {
+                    toward_open = -toward_open;
+                }
+                if toward_open <= -SCROLL_THRESHOLD {
+                    self.scroll.accum = 0.0;
+                    // Mark that expand was triggered by scroll so the
+                    // bleed-through events are eaten until the gesture
+                    // ends (AxisStop clears this).
+                    self.scroll.open_at = Some(Instant::now());
+                    self.handle_command(Command::Expand);
+                } else if toward_open >= SCROLL_THRESHOLD {
+                    // Scrolling away from expand on the dock: nothing to
+                    // do, just keep the accumulator bounded.
+                    self.scroll.accum = 0.0;
+                }
+            }
             Target::Open => {
-                if self.open_at.map_or(false, |t| t.elapsed() < Duration::from_millis(300)) {
-                    self.scroll_accum = 0.0;
+                if self
+                    .scroll
+                    .open_at
+                    .is_some_and(|t| t.elapsed() < EXPAND_BLEED_COOLDOWN)
+                {
                     return;
                 }
-                let settled_layout = content::layout(
-                    &self.config,
-                    (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
-                    self.ui.extent_of(Target::Open),
-                    self.dock_order.len(),
-                    self.visible.len(),
-                    self.list_scroll,
-                );
-                let page_w = settled_layout.viewport.w.max(1.0);
-                let n_pages = settled_layout.n_pages;
-                if n_pages <= 1 {
-                    self.scroll_accum += value;
-                } else {
-                    // Use scroll_target (intended page) not list_scroll (animated
-                    // position) so mid-animation events don't mis-compute the page.
-                    let current_page = (self.scroll_target / page_w).round() as i64;
-                    // positive = scroll down = next page; negative = up = prev/collapse.
-                    let dir: i64 = if value > 0.0 { 1 } else { -1 };
-                    let next_page = (current_page + dir).clamp(0, n_pages as i64 - 1);
-                    if next_page == current_page && dir < 0 {
-                        self.scroll_accum += value;
-                    } else if next_page != current_page {
-                        self.scroll_accum = 0.0;
-                        self.scroll_target = next_page as f32 * page_w;
-                        self.update_hover();
-                        self.schedule_frame();
-                    }
-                }
+                self.page_scroll(value);
             }
             Target::Hidden => {}
         }
-        let mut toward_open = self.scroll_accum;
-        if self.config.input.natural_scroll {
-            toward_open = -toward_open;
+    }
+
+    /// Horizontal scroll: pages the open grid left/right.
+    /// (Untestable in the dev VM — its virtual pointer has no horizontal
+    /// axis; verify on real hardware.)
+    fn on_hscroll(&mut self, value: f64) {
+        if self.ui.target() == Target::Open {
+            self.page_scroll(value);
         }
-        if toward_open <= -SCROLL_THRESHOLD {
-            self.scroll_accum = 0.0;
-            // Mark that expand was triggered by scroll so the bleed-through
-            // events are eaten until the gesture ends (AxisStop clears this).
-            self.open_at = Some(Instant::now());
-            self.handle_command(Command::Expand);
-        } else if toward_open >= SCROLL_THRESHOLD {
-            self.scroll_accum = 0.0;
-            self.handle_command(Command::Collapse);
+    }
+
+    /// Accumulate scroll toward a page turn: turning requires
+    /// PAGE_SCROLL_THRESHOLD worth of travel, and successive turns are at
+    /// least PAGE_COOLDOWN apart — so one notch nudges, a deliberate
+    /// scroll turns one page, and a fast flick can't spin the wheel.
+    fn page_scroll(&mut self, value: f64) {
+        if self
+            .scroll
+            .page_turned_at
+            .is_some_and(|t| t.elapsed() < PAGE_COOLDOWN)
+        {
+            return;
         }
+        // A direction change discards progress toward the old direction.
+        if value * self.scroll.page_accum < 0.0 {
+            self.scroll.page_accum = 0.0;
+        }
+        self.scroll.page_accum += value;
+        if self.scroll.page_accum.abs() >= PAGE_SCROLL_THRESHOLD {
+            let dir = if self.scroll.page_accum > 0.0 { 1 } else { -1 };
+            self.scroll.page_accum = 0.0;
+            self.scroll.page_turned_at = Some(Instant::now());
+            self.page_by(dir);
+        }
+    }
+
+    /// Slide the app grid one page in `dir` (+1 = next, -1 = previous),
+    /// wrapping past either end (infinite scroll).
+    fn page_by(&mut self, dir: i64) {
+        // Use the SETTLED (full-extent) layout: mid-open-animation the
+        // current layout has a tiny viewport and a bogus page count.
+        let settled = self.layout_at(self.ui.extent_of(Target::Open));
+        let page_w = settled.viewport.w.max(1.0);
+        let n_pages = settled.n_pages;
+        if n_pages <= 1 {
+            return;
+        }
+        let total_w = n_pages as f32 * page_w;
+        // Use scroll_target (intended page) not list_scroll (animated
+        // position) so mid-animation events don't mis-compute the page.
+        let current_page = (self.scroll.target / page_w).round() as i64;
+        let next_page = current_page + dir;
+        if next_page < 0 {
+            // Wrap to the last page. Shift the animated position one full
+            // strip right so the slide still moves in the gesture
+            // direction; rendering is cyclic, so the shift is invisible.
+            self.scroll.pos += total_w;
+            self.scroll.target = (n_pages - 1) as f32 * page_w;
+        } else if next_page >= n_pages as i64 {
+            // Wrap to the first page (shift one strip left, as above).
+            self.scroll.pos -= total_w;
+            self.scroll.target = 0.0;
+        } else {
+            self.scroll.target = next_page as f32 * page_w;
+        }
+        self.update_hover();
+        self.schedule_frame();
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
         match keysym {
             Keysym::Escape => {
-                self.query.clear();
-                self.search_open = false;
+                self.search.query.clear();
+                self.search.open = false;
                 self.refilter();
-                let cmd = self.dismiss_command();
-                self.handle_command(cmd);
+                self.dismiss();
             }
             Keysym::Return | Keysym::KP_Enter => {
-                if let Some(sel) = self.selected {
+                if let Some(sel) = self.search.selected {
                     self.activate_hit(Hit::GridCell(sel));
                 }
             }
             Keysym::BackSpace => {
-                if self.query.pop().is_some() {
-                    if self.query.is_empty() {
-                        self.search_open = false;
+                if self.search.query.pop().is_some() {
+                    if self.search.query.is_empty() {
+                        self.search.open = false;
                     }
                     self.refilter();
                 }
             }
             Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
-                if !self.visible.is_empty() {
+                if !self.search.visible.is_empty() {
                     let layout = self.current_layout();
                     let cols = layout.cols.max(1);
-                    let last = self.visible.len() - 1;
+                    let last = self.search.visible.len() - 1;
                     // When nothing is selected yet, the first arrow key
                     // lands on item 0 regardless of direction.
-                    let next = if let Some(cur) = self.selected {
+                    let next = if let Some(cur) = self.search.selected {
                         match keysym {
                             Keysym::Left => cur.saturating_sub(1),
                             Keysym::Right => (cur + 1).min(last),
@@ -874,8 +1003,8 @@ impl App {
                     } else {
                         0
                     };
-                    self.selected = Some(next);
-                    self.scroll_target = content::scroll_to_reveal(&layout, next);
+                    self.search.selected = Some(next);
+                    self.scroll.target = content::scroll_to_reveal(&layout, next);
                     self.schedule_frame();
                 }
             }
@@ -883,8 +1012,8 @@ impl App {
                 if let Some(text) = utf8 {
                     let printable: String = text.chars().filter(|c| !c.is_control()).collect();
                     if !printable.is_empty() {
-                        self.search_open = true;
-                        self.query.push_str(&printable);
+                        self.search.open = true;
+                        self.search.query.push_str(&printable);
                         self.refilter();
                     }
                 }
@@ -904,8 +1033,7 @@ impl App {
                     app.hide_deadline = None;
                     // Fully hide, or just fall back to the parked dock
                     // when the zone is free (intellihide).
-                    let cmd = app.dismiss_command();
-                    app.handle_command(cmd);
+                    app.dismiss();
                 }
                 TimeoutAction::Drop
             })
@@ -1046,9 +1174,11 @@ impl SeatHandler for App {
                 &seat,
                 None,
                 lh,
-                Box::new(|app: &mut App, _kb: &wl_keyboard::WlKeyboard, event: KeyEvent| {
-                    app.handle_key_event(event.keysym, event.utf8.as_deref());
-                }),
+                Box::new(
+                    |app: &mut App, _kb: &wl_keyboard::WlKeyboard, event: KeyEvent| {
+                        app.handle_key_event(event.keysym, event.utf8.as_deref());
+                    },
+                ),
             ) {
                 Ok(keyboard) => self.keyboard = Some(keyboard),
                 Err(e) => warn!("cannot get keyboard: {e}"),
@@ -1187,49 +1317,47 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 app.pointer_pos = Some(pos);
                 // Detect drag start: press armed and pointer moved beyond
                 // the 6-px threshold (distinguishes drag from sloppy click).
-                if app.dragging.is_none() {
-                    if let (Some(pp), Some(hit)) = (app.press_pos, app.pressed) {
+                if app.gesture.dragging.is_none() {
+                    if let (Some(pp), Some(hit)) = (app.gesture.press_pos, app.gesture.pressed) {
                         let dx = pos.0 - pp.0;
                         let dy = pos.1 - pp.1;
                         if dx * dx + dy * dy > 6.0 * 6.0 {
                             let entry_idx = match hit {
                                 Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
-                                Hit::GridCell(cell) => app.visible.get(cell).copied(),
-                                Hit::SearchButton    => None,
+                                Hit::GridCell(cell) => app.search.visible.get(cell).copied(),
+                                Hit::SearchButton => None,
                             };
                             if let Some(entry_idx) = entry_idx {
                                 let from_dock = matches!(hit, Hit::DockIcon(_));
-                                app.dragging = Some(DragState { entry_idx, from_dock, pos });
-                                app.pressed = None;
+                                app.gesture.dragging = Some(DragState {
+                                    entry_idx,
+                                    from_dock,
+                                    pos,
+                                });
+                                app.gesture.pressed = None;
                             }
                         }
                     }
-                } else if let Some(ref mut drag) = app.dragging {
+                } else if let Some(ref mut drag) = app.gesture.dragging {
                     drag.pos = pos;
                 }
                 if app.ui.target() != Target::Hidden {
-                    if app.dragging.is_none() {
+                    if app.gesture.dragging.is_none() {
                         app.update_hover();
                     }
                     app.schedule_frame();
                 }
             }
             wl_pointer::Event::Leave { .. } => {
-                app.scroll_accum = 0.0;
+                app.scroll.accum = 0.0;
                 app.pointer_pos = None;
-                app.pressed = None;
-                app.press_pos = None;
+                app.gesture.pressed = None;
+                app.gesture.press_pos = None;
                 // If a dock drag is in flight when the pointer leaves the
                 // surface, treat it as a drop outside the dock: unpin and
                 // leave the popup open (don't autohide).
-                if let Some(drag) = app.dragging.take() {
-                    if drag.from_dock {
-                        let app_id = app.entries[drag.entry_idx].id.clone();
-                        app.pins.exclude(&app_id);
-                        app.recompute_dock_order();
-                    }
-                    app.update_hover();
-                    app.schedule_frame();
+                if let Some(drag) = app.gesture.dragging.take() {
+                    app.drop_drag(drag, None);
                     return; // skip autohide — keep popup open
                 }
                 app.update_hover();
@@ -1241,8 +1369,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             // clicked or moved to another window. Dismiss now;
                             // no grace period needed (the card is fully open,
                             // not just a slim dock sliver to accidentally graze).
-                            let cmd = app.dismiss_command();
-                            app.handle_command(cmd);
+                            app.dismiss();
                         } else {
                             app.schedule_autohide();
                         }
@@ -1253,38 +1380,21 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 match state {
                     WEnum::Value(wl_pointer::ButtonState::Pressed) => {
                         app.update_hover();
-                        app.pressed = app.hover;
-                        app.press_pos = app.pointer_pos;
+                        app.gesture.pressed = app.hover;
+                        app.gesture.press_pos = app.pointer_pos;
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
-                        app.press_pos = None;
+                        app.gesture.press_pos = None;
                         // Drag drop: pin/unpin and never treat as a click.
-                        if let Some(drag) = app.dragging.take() {
-                            let layout = app.current_layout();
-                            let insert = app.drag_dock_insert(&layout, drag.pos);
-                            let app_id = app.entries[drag.entry_idx].id.clone();
-                            info!(
-                                "drop: id={} from_dock={} pos=({:.0},{:.0}) \
-                                 card_top={:.0} dock_bottom={:.0} insert={:?}",
-                                app_id, drag.from_dock,
-                                drag.pos.0, drag.pos.1,
-                                layout.card_top,
-                                layout.dock_slots.first().map_or(0.0, |s| s.y + s.h),
-                                insert,
-                            );
-                            if let Some(slot) = insert {
-                                app.pins.pin_at(&app_id, slot);
-                            } else if drag.from_dock {
-                                app.pins.exclude(&app_id);
-                            }
-                            app.recompute_dock_order();
-                            app.schedule_frame();
+                        if let Some(drag) = app.gesture.dragging.take() {
+                            let insert = app.drag_dock_insert(&app.current_layout(), drag.pos);
+                            app.drop_drag(drag, insert);
                         } else {
                             // Native button behavior: activate on release,
                             // only if it happens on the item the press armed
                             // (dragging away cancels the click).
                             app.update_hover();
-                            if let Some(hit) = app.pressed.take() {
+                            if let Some(hit) = app.gesture.pressed.take() {
                                 if app.hover == Some(hit) {
                                     app.activate_hit(hit);
                                 }
@@ -1293,8 +1403,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 // Press started on no interactive element (card
                                 // background / transparent area): treat as a
                                 // click-outside gesture and dismiss the popup.
-                                let cmd = app.dismiss_command();
-                                app.handle_command(cmd);
+                                app.dismiss();
                             }
                         }
                     }
@@ -1308,13 +1417,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
             } => {
                 app.on_scroll(value);
             }
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
+                value,
+                ..
+            } => {
+                app.on_hscroll(value);
+            }
             wl_pointer::Event::AxisStop {
                 axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
                 ..
             } => {
                 // Gesture ended: clear the expand-bleed cooldown immediately so
                 // the next gesture can navigate pages without the 300 ms wait.
-                app.open_at = None;
+                app.scroll.open_at = None;
             }
             _ => {} // frame, axis metadata, other buttons/axes
         }

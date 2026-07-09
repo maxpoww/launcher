@@ -154,11 +154,10 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 fn truncate_label(text: &str, max_w: f32, font_px: f32) -> String {
     let avg_char_w = font_px * 0.52;
     let max_chars = (max_w / avg_char_w) as usize;
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
+    if text.chars().count() <= max_chars {
         text.to_string()
     } else {
-        let truncated: String = chars[..max_chars.saturating_sub(1)].iter().collect();
+        let truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
         format!("{}…", truncated.trim_end())
     }
 }
@@ -181,7 +180,9 @@ pub struct Layout {
     pub rows_per_page: usize,
     /// Total pages of grid content.
     pub n_pages: usize,
-    /// Horizontal scroll offset in pixels (page 0 = 0, page 1 = viewport.w, …).
+    /// Horizontal scroll offset in pixels (page 0 = 0, page 1 =
+    /// viewport.w, …), normalized into [0, n_pages * viewport.w) —
+    /// paging wraps cyclically.
     pub scroll: f32,
     /// Total number of grid cells (the *visible*, filtered entries).
     pub cells: usize,
@@ -252,10 +253,21 @@ pub fn layout(
     let viewport_h = rows_per_page as f32 * GRID_CELL_H;
     let viewport = Rect::new(grid_x0, grid_top, cols as f32 * GRID_CELL_W, viewport_h);
 
-    // Horizontal paging: each page is viewport.w wide.
+    // Horizontal paging: each page is viewport.w wide. Pages wrap
+    // cyclically (infinite scroll), so the offset is normalized into
+    // [0, n_pages * viewport.w) rather than clamped.
     let cells_per_page = cols * rows_per_page;
-    let n_pages = if n_visible == 0 { 0 } else { n_visible.div_ceil(cells_per_page) };
-    let max_scroll = (n_pages.saturating_sub(1) as f32 * viewport.w).max(0.0);
+    let n_pages = if n_visible == 0 {
+        0
+    } else {
+        n_visible.div_ceil(cells_per_page)
+    };
+    let total_w = n_pages as f32 * viewport.w;
+    let scroll = if total_w > 0.0 {
+        scroll.rem_euclid(total_w)
+    } else {
+        0.0
+    };
 
     Layout {
         card_top,
@@ -265,7 +277,7 @@ pub fn layout(
         cols,
         rows_per_page,
         n_pages,
-        scroll: scroll.clamp(0.0, max_scroll),
+        scroll,
         cells: n_visible,
         search_box,
         search_btn,
@@ -296,10 +308,10 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<H
             return Some(Hit::SearchButton);
         }
         if layout.viewport.contains(pos) {
-            // Adjust for horizontal page scroll.
+            // Adjust for horizontal page scroll; pages wrap cyclically.
             let adjusted_x = pos.0 - layout.grid_x0 + layout.scroll;
             let page_w = layout.viewport.w.max(1.0);
-            let page = (adjusted_x / page_w).floor() as usize;
+            let page = (adjusted_x / page_w).floor() as usize % layout.n_pages.max(1);
             let col_f = (adjusted_x - page as f32 * page_w) / GRID_CELL_W;
             let row = ((pos.1 - layout.viewport.y) / GRID_CELL_H).floor() as usize;
             let col = col_f.floor() as usize;
@@ -401,21 +413,28 @@ pub fn scene(
 
     // Dock row: per-icon magnification scales, then spread visual centers.
     // Hit-boxes stay at fixed slot positions; only drawn positions spread.
-    let dock_scales: Vec<f32> = layout.dock_slots.iter().map(|slot| {
-        let cx = slot.x + slot.w / 2.0;
-        match pointer {
-            Some((px, py)) => {
-                let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
-                let fy = falloff(d_out, DOCK_MAG_VRADIUS);
-                1.0 + (DOCK_MAGNIFY - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy
+    let dock_scales: Vec<f32> = layout
+        .dock_slots
+        .iter()
+        .map(|slot| {
+            let cx = slot.x + slot.w / 2.0;
+            match pointer {
+                Some((px, py)) => {
+                    let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
+                    let fy = falloff(d_out, DOCK_MAG_VRADIUS);
+                    1.0 + (DOCK_MAGNIFY - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy
+                }
+                None => 1.0,
             }
-            None => 1.0,
-        }
-    }).collect();
+        })
+        .collect();
     // Each magnified icon widens its visual slot by the extra pixels it
     // grew, pushing neighbours apart. Row stays centered as a whole.
     let dock_vcx: Vec<f32> = {
-        let total_vw: f32 = dock_scales.iter().map(|&s| DOCK_SLOT + DOCK_ICON * (s - 1.0)).sum();
+        let total_vw: f32 = dock_scales
+            .iter()
+            .map(|&s| DOCK_SLOT + DOCK_ICON * (s - 1.0))
+            .sum();
         let mut x = (w - total_vw) / 2.0;
         let mut centers = Vec::with_capacity(dock_scales.len());
         for &s in &dock_scales {
@@ -439,20 +458,27 @@ pub fn scene(
     }
     // Dock icons: slot index → entry index via dock_order.
     for slot in 0..layout.dock_slots.len() {
-        let Some(&entry_idx) = dock_order.get(slot) else { break };
+        let Some(&entry_idx) = dock_order.get(slot) else {
+            break;
+        };
         let slot_rect = &layout.dock_slots[slot];
         let vcx = dock_vcx[slot];
         let baseline = slot_rect.y + slot_rect.h;
         let scale = dock_scales[slot];
         let size = (DOCK_ICON * scale).min(slot_rect.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
         scene.icons.push(IconInst {
-            rect: Rect::new(vcx - size / 2.0, baseline - size - lift(entry_idx), size, size),
+            rect: Rect::new(
+                vcx - size / 2.0,
+                baseline - size - lift(entry_idx),
+                size,
+                size,
+            ),
             layer: entry_idx as u32,
         });
         if placeholders.get(entry_idx).copied().unwrap_or(false) {
             if let Some(ch) = entries.get(entry_idx).and_then(|e| e.name.chars().next()) {
                 let letter: String = ch.to_uppercase().collect();
-                let font_px = (size * 0.46).max(10.0).min(28.0);
+                let font_px = (size * 0.46).clamp(10.0, 28.0);
                 let line_px = font_px * 1.3;
                 let icon_center_y = baseline - size / 2.0 - lift(entry_idx);
                 scene.labels.push(Label {
@@ -508,7 +534,11 @@ pub fn scene(
         let is_btn_hover = hover == Some(Hit::SearchButton) && search_expand < 0.5;
         let box_color = {
             let hl = config.theme.highlight_rgba();
-            let a = if is_btn_hover { (hl[3] * 1.0).min(1.0) } else { (hl[3] * 0.6).min(1.0) };
+            let a = if is_btn_hover {
+                (hl[3] * 1.0).min(1.0)
+            } else {
+                (hl[3] * 0.6).min(1.0)
+            };
             [hl[0], hl[1], hl[2], a]
         };
         // Expanded width: SEARCH_W_MIN, or wider to snugly fit the query.
@@ -521,7 +551,11 @@ pub fn scene(
         };
         let sw = lerp(btn.w, content_w, search_expand);
         let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
-        scene.rects.push(RectInst { rect: draw_rect, radius: SEARCH_H / 2.0, color: box_color });
+        scene.rects.push(RectInst {
+            rect: draw_rect,
+            radius: SEARCH_H / 2.0,
+            color: box_color,
+        });
 
         if search_expand < 0.5 {
             // Compact button: "Search" label.
@@ -566,20 +600,26 @@ pub fn scene(
         };
         let page_w = layout.viewport.w;
         let cells_per_page = (layout.cols * layout.rows_per_page).max(1);
-        // Render the page(s) currently in view (at most two during a slide).
-        let first_page = (layout.scroll / page_w).floor() as usize;
-        let last_page = (layout.scroll / page_w).ceil() as usize;
-        for page in first_page..=last_page.min(layout.n_pages.saturating_sub(1)) {
+        let total_w = (layout.n_pages as f32 * page_w).max(1.0);
+        // Paging wraps cyclically: place every page at its nearest wrapped
+        // offset relative to the viewport and cull the off-screen ones (at
+        // most two pages remain visible during a slide).
+        for page in 0..layout.n_pages {
+            let rel0 = (page as f32 * page_w - layout.scroll).rem_euclid(total_w);
+            let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
+            if rel <= -page_w || rel >= page_w {
+                continue;
+            }
             for row in 0..layout.rows_per_page {
                 for col in 0..layout.cols {
                     let i = page * cells_per_page + row * layout.cols + col;
-                    let Some(&entry_idx) = visible.get(i) else { break };
-                    let Some(entry) = entries.get(entry_idx) else { break };
-                    // Horizontal position accounts for which page and current scroll.
-                    let cell_x = layout.grid_x0
-                        + page as f32 * page_w
-                        + col as f32 * GRID_CELL_W
-                        - layout.scroll;
+                    let Some(&entry_idx) = visible.get(i) else {
+                        break;
+                    };
+                    let Some(entry) = entries.get(entry_idx) else {
+                        break;
+                    };
+                    let cell_x = layout.grid_x0 + rel + col as f32 * GRID_CELL_W;
                     let cell_y = layout.viewport.y + row as f32 * GRID_CELL_H;
                     let cell = Rect::new(cell_x, cell_y, GRID_CELL_W, GRID_CELL_H);
                     if selected == Some(i) {
@@ -618,7 +658,7 @@ pub fn scene(
                     if placeholders.get(entry_idx).copied().unwrap_or(false) {
                         if let Some(ch) = entry.name.chars().next() {
                             let letter: String = ch.to_uppercase().collect();
-                            let font_px = (size * 0.46).max(10.0).min(30.0);
+                            let font_px = (size * 0.46).clamp(10.0, 30.0);
                             let line_px = font_px * 1.3;
                             grid.labels.push(Label {
                                 text: letter,
@@ -660,7 +700,9 @@ pub fn scene(
             let hl = config.theme.highlight_rgba();
             for p in 0..layout.n_pages {
                 let x = dot_cx - total_dots_w / 2.0 + p as f32 * dot_spacing + dot_r;
-                let dist = (p as f32 - page_frac).abs().min(1.0);
+                // Cyclic distance: the highlight wraps with the pages.
+                let raw = (p as f32 - page_frac).abs();
+                let dist = raw.min(layout.n_pages as f32 - raw).min(1.0);
                 let alpha = 1.0 - dist * 0.72;
                 scene.rects.push(RectInst {
                     rect: Rect::new(x - dot_r, dot_y - dot_r, dot_r * 2.0, dot_r * 2.0),
@@ -697,11 +739,6 @@ pub fn scene(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Largest valid horizontal scroll offset for the current layout.
-    fn max_scroll(layout: &Layout) -> f32 {
-        (layout.n_pages.saturating_sub(1) as f32 * layout.viewport.w).max(0.0)
-    }
 
     fn entries(n: usize) -> Vec<AppEntry> {
         (0..n)
@@ -748,12 +785,13 @@ mod tests {
     }
 
     #[test]
-    fn open_extent_shows_grid_and_clamps_scroll() {
+    fn open_extent_shows_grid_and_wraps_scroll() {
         let cfg = config();
         let l = layout(&cfg, SURFACE, 572.0, 40, 40, 1e9);
         assert!(l.cols >= 2, "720px card should fit several columns");
         assert!(l.viewport.h > 100.0);
-        assert!(l.scroll <= max_scroll(&l) + f32::EPSILON);
+        // Scroll wraps cyclically into the page strip.
+        assert!(l.scroll >= 0.0 && l.scroll < l.n_pages as f32 * l.viewport.w);
         let s = scene(
             &cfg,
             &l,
@@ -768,6 +806,22 @@ mod tests {
         let grid = s.grid.expect("open card must show the grid");
         assert!(!grid.icons.is_empty());
         assert_eq!(grid.icons.len(), grid.labels.len());
+    }
+
+    #[test]
+    fn negative_scroll_wraps_to_last_page() {
+        let cfg = config();
+        let page_w = l_page_w(&cfg);
+        // One page-width left of page 0 is the last page's position.
+        let l = layout(&cfg, SURFACE, 572.0, 72, 72, -page_w);
+        assert!(l.n_pages >= 2, "test needs multiple pages");
+        let expect = (l.n_pages - 1) as f32 * page_w;
+        assert!(
+            (l.scroll - expect).abs() < 0.5,
+            "scroll={} expected={}",
+            l.scroll,
+            expect
+        );
     }
 
     #[test]
@@ -793,11 +847,21 @@ mod tests {
         let cfg = config();
         // Scroll exactly one page forward.
         let cells_per_page_guess = 6 * 4; // rough: 6 cols × 4 rows
-        let l = layout(&cfg, SURFACE, 572.0, cells_per_page_guess * 3, cells_per_page_guess * 3, l_page_w(&cfg));
+        let l = layout(
+            &cfg,
+            SURFACE,
+            572.0,
+            cells_per_page_guess * 3,
+            cells_per_page_guess * 3,
+            l_page_w(&cfg),
+        );
         // Top-left of the visible area is now the first cell of page 1.
         let pos = (l.grid_x0 + 2.0, l.viewport.y + 2.0);
         let cells_per_page = l.cols * l.rows_per_page;
-        assert_eq!(hit_test(&l, pos, false), Some(Hit::GridCell(cells_per_page)));
+        assert_eq!(
+            hit_test(&l, pos, false),
+            Some(Hit::GridCell(cells_per_page))
+        );
     }
 
     fn l_page_w(cfg: &Config) -> f32 {

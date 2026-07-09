@@ -41,6 +41,28 @@ pub struct Config {
     pub theme: ThemeConfig,
     /// Pointer/gesture behavior.
     pub input: InputConfig,
+    /// Application launch behavior.
+    pub launch: LaunchConfig,
+}
+
+/// Application launch behavior.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LaunchConfig {
+    /// Command prefix used to run `Terminal=true` apps inside a terminal
+    /// emulator. The app's command line is appended as `sh -c '<exec>'`,
+    /// which suits terminals that accept a trailing command directly
+    /// (foot, kitty, wezterm); terminals that need a flag include it
+    /// here, e.g. `terminal = "alacritty -e"`.
+    pub terminal: String,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        Self {
+            terminal: "foot".to_owned(),
+        }
+    }
 }
 
 impl Config {
@@ -268,7 +290,7 @@ impl ThemeConfig {
     }
 }
 
-/// Parse `#rgb`, `#rrggbb`, or `#rrggbbaa` into RGBA floats.
+/// Parse `#rrggbb` or `#rrggbbaa` into RGBA floats.
 fn parse_hex_rgba(s: &str) -> Option<[f32; 4]> {
     let hex = s.strip_prefix('#')?;
     let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();

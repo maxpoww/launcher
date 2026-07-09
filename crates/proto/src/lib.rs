@@ -110,15 +110,14 @@ pub fn socket_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir).join("waverunner.sock");
     }
-    let uid = unsafe { libc_getuid_fallback() };
-    PathBuf::from(format!("/tmp/waverunner-{uid}.sock"))
+    PathBuf::from(format!("/tmp/waverunner-{}.sock", uid_fallback()))
 }
 
 /// Minimal `getuid` without a libc dependency: read it from /proc.
 ///
 /// Only used on the `XDG_RUNTIME_DIR`-less fallback path, which should not
 /// happen in a real Wayland session.
-unsafe fn libc_getuid_fallback() -> u32 {
+fn uid_fallback() -> u32 {
     std::fs::metadata("/proc/self")
         .map(|m| std::os::unix::fs::MetadataExt::uid(&m))
         .unwrap_or(0)
