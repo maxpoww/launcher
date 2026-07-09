@@ -27,19 +27,33 @@ use waverunner_core::index::{AppEntry, DesktopIndex};
 pub const ICON_SIZE: u32 = 48;
 
 /// What an entry is, deciding which popup section shows it. Applications
-/// come from `.desktop` files; files are the user's home folders
-/// (opened with `xdg-open` rather than launched).
+/// come from `.desktop` files; files are home folders and file-search
+/// results (opened with `xdg-open` rather than launched); assets are
+/// invisible icon carriers (the generic folder/file icons that dynamic
+/// search results borrow a texture layer from).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     App,
     File,
+    Asset,
+}
+
+/// One indexed home file for type-to-search (not a full entry: search
+/// results become transient entries borrowing an asset icon).
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    /// File name (the fuzzy-match target).
+    pub name: String,
+    /// Absolute path.
+    pub path: String,
+    pub is_dir: bool,
 }
 
 /// The indexer thread's result: entries plus one RGBA8 (premultiplied)
 /// `ICON_SIZE`² image per entry, aligned by index.
 pub struct LoadedApps {
     /// Discovered entries, sorted by name: applications first, then the
-    /// home folders.
+    /// home folders, then the icon assets.
     pub entries: Vec<AppEntry>,
     /// What each entry is, aligned with `entries`.
     pub kinds: Vec<EntryKind>,
@@ -48,6 +62,8 @@ pub struct LoadedApps {
     pub icons: Vec<Vec<u8>>,
     /// `true` for entries whose icon could not be resolved (placeholder tile).
     pub placeholders: Vec<bool>,
+    /// Home-tree file index for search (fresh every rescan).
+    pub files: Vec<FileEntry>,
 }
 
 /// Handle to the long-lived indexer thread.
@@ -83,12 +99,18 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let folders = home_folders();
                 kinds.extend(std::iter::repeat_n(EntryKind::File, folders.len()));
                 entries.extend(folders);
+                for asset in icon_assets() {
+                    entries.push(asset);
+                    kinds.push(EntryKind::Asset);
+                }
                 let (icons, placeholders): (Vec<_>, Vec<_>) =
                     entries.iter().map(|entry| loader.icon_for(entry)).unzip();
                 loader.resolutions.save();
+                let files = scan_home_files();
                 debug!(
-                    "indexed {} entries in {:?} (scan {:?}, icons {:?})",
+                    "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?})",
                     entries.len(),
+                    files.len(),
                     started.elapsed(),
                     scanned - started,
                     scanned.elapsed()
@@ -99,6 +121,7 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                         kinds,
                         icons,
                         placeholders,
+                        files,
                     })
                     .is_err()
                 {
@@ -114,35 +137,102 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
     indexer
 }
 
-/// The standard home folders shown in the popup's Files section, as
-/// entries opened with `xdg-open`. Only folders that actually exist
-/// appear; the fixed name list keeps the section stable and small (no
-/// home-dir walking).
+/// Every visible top-level folder in the home directory, alphabetical,
+/// as entries opened with `xdg-open` — the unfiltered Files strip.
+/// (The daemon's usage sort then puts the most-opened ones first.)
 fn home_folders() -> Vec<AppEntry> {
     let Ok(home) = std::env::var("HOME") else {
         return Vec::new();
     };
-    [
-        "Desktop",
-        "Documents",
-        "Downloads",
-        "Music",
-        "Pictures",
-        "Videos",
-    ]
-    .iter()
-    .filter_map(|name| {
-        let path = format!("{home}/{name}");
-        std::fs::metadata(&path).ok()?.is_dir().then(|| AppEntry {
-            id: format!("folder-{name}"),
-            name: (*name).to_owned(),
-            description: Some(path.clone()),
-            exec: format!("xdg-open '{path}'"),
-            icon: Some("folder".to_owned()),
+    let Ok(read) = std::fs::read_dir(&home) else {
+        return Vec::new();
+    };
+    let mut folders: Vec<AppEntry> = read
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !e.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let path = format!("{home}/{name}");
+            Some(AppEntry {
+                id: format!("folder-{name}"),
+                name,
+                description: Some(path.clone()),
+                exec: format!("xdg-open {}", crate::launch::shell_quote(&path)),
+                icon: Some("folder".to_owned()),
+                needs_terminal: false,
+            })
+        })
+        .collect();
+    folders.sort_by(|a, b| a.name.cmp(&b.name));
+    folders
+}
+
+/// Invisible icon-carrier entries: dynamic file-search results borrow
+/// these texture layers (one per keystroke can't rasterize new icons).
+/// Empty names keep them out of every fuzzy match.
+fn icon_assets() -> Vec<AppEntry> {
+    [("asset-folder", "folder"), ("asset-file", "text-x-generic")]
+        .into_iter()
+        .map(|(id, icon)| AppEntry {
+            id: id.to_owned(),
+            name: String::new(),
+            description: None,
+            exec: "true".to_owned(),
+            icon: Some(icon.to_owned()),
             needs_terminal: false,
         })
-    })
-    .collect()
+        .collect()
+}
+
+/// Cap on the home-file index: keeps per-keystroke ranking and memory
+/// bounded. Breadth-first order means shallow (more relevant) paths
+/// survive the cut when a huge tree hits the cap.
+const FILE_INDEX_CAP: usize = 50_000;
+/// Directory depth limit of the home walk (home itself = depth 0).
+const FILE_WALK_DEPTH: usize = 6;
+/// Build/VCS trees indexed by no one on purpose.
+const FILE_WALK_SKIP: [&str; 2] = ["target", "node_modules"];
+
+/// Walk the home directory (breadth-first, hidden entries and symlinks
+/// skipped) into the search index. Runs on the indexer thread on every
+/// rescan, so results track the disk.
+fn scan_home_files() -> Vec<FileEntry> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(PathBuf::from(&home), 0usize)]);
+    while let Some((dir, depth)) = queue.pop_front() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in read.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || FILE_WALK_SKIP.contains(&name.as_str()) {
+                continue;
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            let is_dir = ft.is_dir();
+            let path = e.path();
+            if is_dir && depth + 1 < FILE_WALK_DEPTH {
+                queue.push_back((path.clone(), depth + 1));
+            }
+            out.push(FileEntry {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                is_dir,
+            });
+            if out.len() >= FILE_INDEX_CAP {
+                return out;
+            }
+        }
+    }
+    out
 }
 
 /// Turns an `AppEntry` into `ICON_SIZE`² pixels, cheapest source first:

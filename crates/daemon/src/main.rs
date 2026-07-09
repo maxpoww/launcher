@@ -129,6 +129,11 @@ fn main() -> anyhow::Result<()> {
         input_extent: None,
         entries: Vec::new(),
         kinds: Vec::new(),
+        icon_layers: Vec::new(),
+        base_len: 0,
+        asset_folder: None,
+        asset_file: None,
+        file_index: Vec::new(),
         pending_icons: None,
         hover: None,
         pointer_pos: None,
@@ -228,10 +233,22 @@ pub struct App {
     input_extent: Option<u32>,
 
     /// Discovered applications and home folders (icon texture layers
-    /// are aligned with this order).
+    /// are aligned with this order), plus transient file-search result
+    /// entries appended past `base_len` while a query is live.
     entries: Vec<AppEntry>,
-    /// What each entry is (app / file), aligned with `entries`.
+    /// What each entry is (app / file / icon asset), aligned with `entries`.
     kinds: Vec<apps::EntryKind>,
+    /// Texture layer per entry: its own index for indexed entries, a
+    /// generic asset layer for transient file-search results.
+    icon_layers: Vec<u32>,
+    /// Length of the indexed (non-transient) prefix of `entries`.
+    base_len: usize,
+    /// Texture layers of the generic folder/file icons, with their
+    /// placeholder flags.
+    asset_folder: Option<(u32, bool)>,
+    asset_file: Option<(u32, bool)>,
+    /// Home-tree file index the search ranks against (fresh per rescan).
+    file_index: Vec<apps::FileEntry>,
     /// Icons that arrived before the renderer existed.
     pending_icons: Option<Vec<Vec<u8>>>,
     /// Item currently under the pointer.
@@ -295,10 +312,10 @@ struct SectionScroll {
     pos: f32,
     /// Scroll animation target; `pos` eases toward this each frame.
     target: f32,
-    /// Accumulated scroll toward the next page turn (resets on direction
-    /// change and after each turn).
+    /// Accumulated scroll toward the next column step (resets on
+    /// direction change and after each step).
     page_accum: f64,
-    /// When the last page turn happened, for PAGE_COOLDOWN.
+    /// When the last column step happened, for COLUMN_COOLDOWN.
     page_turned_at: Option<Instant>,
 }
 
@@ -362,12 +379,16 @@ struct DragState {
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
 
-/// Accumulated scroll needed to turn one grid page (≈ two wheel notches).
-const PAGE_SCROLL_THRESHOLD: f64 = 30.0;
+/// Accumulated scroll needed to slide a grid one column (≈ one wheel
+/// notch): every notch reveals a fresh column of entries.
+const COLUMN_SCROLL_THRESHOLD: f64 = 12.0;
 
-/// Minimum time between page turns, so a fast flick moves exactly one
-/// page instead of spinning the (cyclic) grid.
-const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
+/// Minimum time between column steps, so an event-storm flick still
+/// moves at a followable pace instead of blurring the (cyclic) grid.
+const COLUMN_COOLDOWN: Duration = Duration::from_millis(80);
+
+/// Cap on file-search results shown in the Files section.
+const FILE_RESULTS_MAX: usize = 24;
 
 /// How long scroll events are eaten after a scroll gesture expands the
 /// dock: the events of that same gesture keep arriving in the Open state
@@ -499,6 +520,17 @@ impl App {
             .collect();
         self.kinds = kinds;
         self.placeholders = placeholders;
+        self.base_len = self.entries.len();
+        self.icon_layers = (0..self.base_len as u32).collect();
+        self.file_index = loaded.files;
+        let asset = |id: &str| {
+            self.entries
+                .iter()
+                .position(|e| e.id == id)
+                .map(|i| (i as u32, self.placeholders[i]))
+        };
+        self.asset_folder = asset("asset-folder");
+        self.asset_file = asset("asset-file");
 
         match self.renderer.as_mut() {
             Some(renderer) => renderer.set_icons(&icons),
@@ -514,22 +546,38 @@ impl App {
     }
 
     /// Re-rank entries against the current query, fanning matches into
-    /// their sections (apps → Apps, folders → Files) best-first, with
-    /// the top match overall auto-selected so Enter launches it.
+    /// their sections best-first, with the top match overall
+    /// auto-selected so Enter launches it. With a query, the Files
+    /// section searches the whole home-tree file index (transient
+    /// entries borrowing a generic icon); without one it shows the
+    /// top-level home folders, most-used first.
     fn refilter(&mut self) {
+        // Drop the previous query's transient file-result entries.
+        self.entries.truncate(self.base_len);
+        self.kinds.truncate(self.base_len);
+        self.placeholders.truncate(self.base_len);
+        self.icon_layers.truncate(self.base_len);
+
+        let searching = !self.search.query.is_empty();
         let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
         let ranked = self.search.matcher.rank(&self.search.query, &names);
         let mut visible: [Vec<usize>; content::N_SECTIONS] = Default::default();
         for idx in ranked {
-            let section = match self.kinds.get(idx) {
-                Some(apps::EntryKind::File) => content::SECTION_FILES,
-                _ => content::SECTION_APPS,
-            };
-            visible[section].push(idx);
+            match self.kinds.get(idx) {
+                Some(apps::EntryKind::App) => visible[content::SECTION_APPS].push(idx),
+                // While searching, the file index below covers folders
+                // too — don't list them twice.
+                Some(apps::EntryKind::File) if !searching => {
+                    visible[content::SECTION_FILES].push(idx)
+                }
+                _ => {}
+            }
         }
-        // Hide pinned apps from the grid when the search box is empty —
-        // they're already visible on the dock, no need to show them twice.
-        if self.search.query.is_empty() {
+        if searching {
+            visible[content::SECTION_FILES] = self.file_results();
+        } else {
+            // Hide pinned apps from the grid when the search box is
+            // empty — they're already visible on the dock.
             visible[content::SECTION_APPS]
                 .retain(|&idx| !self.pins.is_pinned(&self.entries[idx].id));
         }
@@ -542,6 +590,38 @@ impl App {
         self.scroll.reset_sections();
         self.update_hover();
         self.schedule_frame();
+    }
+
+    /// Rank the home-tree file index against the query and append the
+    /// top matches as transient entries (kind File, generic icon layer),
+    /// returning their indices for the Files section.
+    fn file_results(&mut self) -> Vec<usize> {
+        let names: Vec<&str> = self.file_index.iter().map(|f| f.name.as_str()).collect();
+        let ranked = self.search.matcher.rank(&self.search.query, &names);
+        let mut out = Vec::new();
+        for fi in ranked.into_iter().take(FILE_RESULTS_MAX) {
+            let f = &self.file_index[fi];
+            let asset = if f.is_dir {
+                self.asset_folder
+            } else {
+                self.asset_file
+            };
+            // Without an asset icon, fall back to a letter-tile placeholder.
+            let (layer, placeholder) = asset.unwrap_or((0, true));
+            self.entries.push(AppEntry {
+                id: f.path.clone(),
+                name: f.name.clone(),
+                description: Some(f.path.clone()),
+                exec: format!("xdg-open {}", launch::shell_quote(&f.path)),
+                icon: None,
+                needs_terminal: false,
+            });
+            self.kinds.push(apps::EntryKind::File);
+            self.placeholders.push(placeholder);
+            self.icon_layers.push(layer);
+            out.push(self.entries.len() - 1);
+        }
+        out
     }
 
     /// Total selectable cells across all sections (flat keyboard order:
@@ -892,6 +972,7 @@ impl App {
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
                 search_expand: self.search.expand,
                 placeholders: &self.placeholders,
+                layers: &self.icon_layers,
                 dock_order: &self.dock_order,
                 drag: drag_frame,
             },
@@ -1005,16 +1086,15 @@ impl App {
         }
     }
 
-    /// Accumulate scroll toward a page turn of `section`: turning
-    /// requires PAGE_SCROLL_THRESHOLD worth of travel, and successive
-    /// turns are at least PAGE_COOLDOWN apart — so one notch nudges, a
-    /// deliberate scroll turns one page, and a fast flick can't spin
-    /// the wheel.
+    /// Accumulate scroll toward a column step of `section`: each
+    /// COLUMN_SCROLL_THRESHOLD of travel (≈ one notch) slides the grid
+    /// one column, so scrolling continuously discovers new entries
+    /// column by column instead of jumping whole pages.
     fn page_scroll(&mut self, section: usize, value: f64) {
         let sec = &mut self.scroll.per[section];
         if sec
             .page_turned_at
-            .is_some_and(|t| t.elapsed() < PAGE_COOLDOWN)
+            .is_some_and(|t| t.elapsed() < COLUMN_COOLDOWN)
         {
             return;
         }
@@ -1023,44 +1103,38 @@ impl App {
             sec.page_accum = 0.0;
         }
         sec.page_accum += value;
-        if sec.page_accum.abs() >= PAGE_SCROLL_THRESHOLD {
+        if sec.page_accum.abs() >= COLUMN_SCROLL_THRESHOLD {
             let dir = if sec.page_accum > 0.0 { 1 } else { -1 };
             sec.page_accum = 0.0;
             sec.page_turned_at = Some(Instant::now());
-            self.page_by(section, dir);
+            self.column_by(section, dir);
         }
     }
 
-    /// Slide one section's grid a page in `dir` (+1 = next, -1 =
+    /// Slide one section's grid a column in `dir` (+1 = next, -1 =
     /// previous), wrapping past either end (infinite scroll).
-    fn page_by(&mut self, section: usize, dir: i64) {
+    fn column_by(&mut self, section: usize, dir: i64) {
         // Use the SETTLED (full-extent) layout: mid-open-animation the
         // current layout has a tiny viewport and a bogus page count.
         let settled = self.layout_at(self.ui.extent_of(Target::Open));
         let sec_layout = &settled.sections[section];
         let page_w = sec_layout.viewport.w.max(1.0);
-        let n_pages = sec_layout.n_pages;
-        if n_pages <= 1 {
-            return;
+        if sec_layout.n_pages <= 1 {
+            return; // everything already visible: nothing to discover
         }
-        let total_w = n_pages as f32 * page_w;
+        let total_w = sec_layout.n_pages as f32 * page_w;
+        let step = page_w / sec_layout.cols.max(1) as f32;
         let sec = &mut self.scroll.per[section];
-        // Use the target (intended page) not the animated position so
-        // mid-animation events don't mis-compute the page.
-        let current_page = (sec.target / page_w).round() as i64;
-        let next_page = current_page + dir;
-        if next_page < 0 {
-            // Wrap to the last page. Shift the animated position one full
-            // strip right so the slide still moves in the gesture
-            // direction; rendering is cyclic, so the shift is invisible.
-            sec.pos += total_w;
-            sec.target = (n_pages - 1) as f32 * page_w;
-        } else if next_page >= n_pages as i64 {
-            // Wrap to the first page (shift one strip left, as above).
+        // Step the target (intended column) so mid-animation notches
+        // chain smoothly; keep pos/target within one strip of range
+        // (rendering is cyclic, the shift is invisible).
+        sec.target += dir as f32 * step;
+        if sec.target >= total_w {
+            sec.target -= total_w;
             sec.pos -= total_w;
-            sec.target = 0.0;
-        } else {
-            sec.target = next_page as f32 * page_w;
+        } else if sec.target < 0.0 {
+            sec.target += total_w;
+            sec.pos += total_w;
         }
         self.update_hover();
         self.schedule_frame();

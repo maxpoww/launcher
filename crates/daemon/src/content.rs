@@ -420,6 +420,10 @@ pub struct FrameInput<'a> {
     /// Which entries are using placeholder tiles (no resolved icon file).
     /// Aligned with the `entries` slice passed to `scene()`.
     pub placeholders: &'a [bool],
+    /// Texture layer per entry. Normally the entry's own index; dynamic
+    /// file-search results borrow a generic asset icon's layer. Empty
+    /// slice = identity (entry index is the layer).
+    pub layers: &'a [u32],
     /// Dock display order: maps slot position → entry index. Empty slice
     /// renders no dock icons (safe default for tests / pre-load frames).
     pub dock_order: &'a [usize],
@@ -449,9 +453,11 @@ pub fn scene(
         selected,
         search_expand,
         placeholders,
+        layers,
         dock_order,
         drag,
     } = *frame;
+    let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     let (w, h) = surface;
     let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
     let mut scene = Scene {
@@ -532,7 +538,7 @@ pub fn scene(
                 size,
                 size,
             ),
-            layer: entry_idx as u32,
+            layer: layer_of(entry_idx),
         });
         if placeholders.get(entry_idx).copied().unwrap_or(false) {
             if let Some(ch) = entries.get(entry_idx).and_then(|e| e.name.chars().next()) {
@@ -580,7 +586,7 @@ pub fn scene(
         let (gx, gy) = df.pos;
         scene.icons.push(IconInst {
             rect: Rect::new(gx - size / 2.0, gy - size / 2.0, size, size),
-            layer: df.entry_idx as u32,
+            layer: layer_of(df.entry_idx),
         });
     }
 
@@ -754,7 +760,7 @@ pub fn scene(
                             size,
                             size,
                         ),
-                        layer: entry_idx as u32,
+                        layer: layer_of(entry_idx),
                     });
                     if placeholders.get(entry_idx).copied().unwrap_or(false) {
                         if let Some(ch) = entry.name.chars().next() {
