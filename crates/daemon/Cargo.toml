@@ -16,13 +16,13 @@ tracing-subscriber = { workspace = true }
 waverunner-core = { workspace = true }
 waverunner-proto = { workspace = true }
 
-smithay-client-toolkit = "0.19"
+smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
 wayland-client = "0.31"
 # client_system: back the connection with libwayland so we can hand raw
 # wl_display/wl_surface pointers to wgpu.
 wayland-backend = { version = "0.3", features = ["client_system"] }
-calloop = "0.14"
-calloop-wayland-source = "0.4"
+calloop = "0.13"
+calloop-wayland-source = "0.3"
 wgpu = "24"
 raw-window-handle = "0.6"
 pollster = "0.4"

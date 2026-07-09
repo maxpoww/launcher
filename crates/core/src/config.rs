@@ -98,7 +98,7 @@ impl Default for WindowConfig {
         Self {
             width: 720,
             height: 560,
-            input_bar_height: 48,
+            input_bar_height: 42,
             bottom_margin: 12,
         }
     }

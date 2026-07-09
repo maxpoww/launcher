@@ -93,24 +93,29 @@ pub struct Scene {
 pub enum Hit {
     DockIcon(usize),
     GridCell(usize),
+    SearchButton,
 }
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
-const DOCK_ICON: f32 = 36.0;
-const DOCK_SLOT: f32 = 52.0;
-const DOCK_PAD_X: f32 = 20.0;
+const DOCK_ICON: f32 = 40.0;
+const DOCK_SLOT: f32 = 44.0;
+const DOCK_PAD_X: f32 = 10.0;
 const GRID_CELL_W: f32 = 104.0;
 const GRID_CELL_H: f32 = 96.0;
-const GRID_ICON: f32 = 48.0;
+const GRID_ICON: f32 = 54.0;
 const GRID_PAD_X: f32 = 14.0;
 const GRID_TOP_GAP: f32 = 8.0;
 const GRID_BOTTOM_PAD: f32 = 10.0;
 /// Text metrics for the app-name labels.
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
-/// Search box: height, inner padding, and text metrics.
-const SEARCH_H: f32 = 40.0;
+/// Search box: height, inner padding, text metrics.
+const SEARCH_H: f32 = 32.0;
+/// Width of the collapsed "Filter" button pill.
+const SEARCH_BTN_W: f32 = 80.0;
+/// Minimum expanded width; grows with content beyond this.
+const SEARCH_W_MIN: f32 = 160.0;
 const SEARCH_PAD_X: f32 = 14.0;
 const SEARCH_GAP: f32 = 10.0;
 const SEARCH_FONT_PX: f32 = 15.0;
@@ -139,13 +144,17 @@ fn falloff(d: f32, radius: f32) -> f32 {
     0.5 * (1.0 + (std::f32::consts::PI * t).cos())
 }
 
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
 /// Geometry shared by scene assembly and hit-testing.
 #[derive(Debug)]
 pub struct Layout {
     /// Card top edge in surface coordinates for the current extent.
     pub card_top: f32,
     /// Dock slot rects, one per shown dock icon (entry index == slot
-    /// index: the dock shows the first N entries).
+    /// index: the dock shows the first N entries, unaffected by search).
     pub dock_slots: Vec<Rect>,
     /// Grid viewport (may lie below the surface while docked).
     pub viewport: Rect,
@@ -157,22 +166,34 @@ pub struct Layout {
     pub scroll: f32,
     /// Total number of grid cells (the *visible*, filtered entries).
     pub cells: usize,
-    /// Search box at the bottom of the card.
+    /// Fully expanded search box (centered, fixed width).
     pub search_box: Rect,
+    /// Compact search button (circle, same center-x and y as search_box).
+    pub search_btn: Rect,
 }
 
 /// Compute the layout for the current animation state.
 ///
-/// `surface` is the full surface size, `extent` the card's rise, `n`
-/// the number of app entries, `scroll` the unclamped grid offset.
-pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scroll: f32) -> Layout {
+/// `surface` is the full surface size, `extent` the card's rise,
+/// `n_entries` the total (unfiltered) entry count for the dock,
+/// `n_visible` the filtered count for the grid, `scroll` the unclamped
+/// grid offset.
+pub fn layout(
+    config: &Config,
+    surface: (f32, f32),
+    extent: f32,
+    n_entries: usize,
+    n_visible: usize,
+    scroll: f32,
+) -> Layout {
     let (w, h) = surface;
     let card_top = h - extent;
     let dock_h = config.window.input_bar_height as f32;
     let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
 
+    // Dock uses n_entries so search never hides dock icons.
     let max_slots = (((w - 2.0 * DOCK_PAD_X) / DOCK_SLOT).floor() as usize).max(1);
-    let n_dock = n.min(max_slots);
+    let n_dock = n_entries.min(max_slots);
     let start_x = (w - n_dock as f32 * DOCK_SLOT) / 2.0;
     let dock_slots = (0..n_dock)
         .map(|i| {
@@ -185,11 +206,18 @@ pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scrol
         })
         .collect();
 
-    // Search box hugs the card bottom; the grid ends above it.
+    // Compact button and minimum-width search box; scene() stretches the
+    // box dynamically with the query so layout just anchors the y position.
     let search_box = Rect::new(
-        GRID_PAD_X,
+        (w - SEARCH_W_MIN) / 2.0,
         card_top + card_h - GRID_BOTTOM_PAD - SEARCH_H,
-        (w - 2.0 * GRID_PAD_X).max(0.0),
+        SEARCH_W_MIN,
+        SEARCH_H,
+    );
+    let search_btn = Rect::new(
+        (w - SEARCH_BTN_W) / 2.0,
+        search_box.y,
+        SEARCH_BTN_W,
         SEARCH_H,
     );
 
@@ -204,7 +232,8 @@ pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scrol
         cols as f32 * GRID_CELL_W,
         (grid_bottom - grid_top).max(0.0),
     );
-    let rows = n.div_ceil(cols);
+    // Grid scrolling uses the visible (filtered) count.
+    let rows = n_visible.div_ceil(cols);
     let max_scroll = (rows as f32 * GRID_CELL_H - viewport.h).max(0.0);
 
     Layout {
@@ -214,25 +243,34 @@ pub fn layout(config: &Config, surface: (f32, f32), extent: f32, n: usize, scrol
         grid_x0,
         cols,
         scroll: scroll.clamp(0.0, max_scroll),
-        cells: n,
+        cells: n_visible,
         search_box,
+        search_btn,
     }
 }
 
 /// Which item (if any) the pointer is over.
-pub fn hit_test(layout: &Layout, pos: (f32, f32)) -> Option<Hit> {
+///
+/// `search_open` controls whether the compact search button is a target
+/// (it is only when the search box is collapsed).
+pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<Hit> {
     for (i, slot) in layout.dock_slots.iter().enumerate() {
         if slot.contains(pos) {
             return Some(Hit::DockIcon(i));
         }
     }
-    if layout.viewport.h > 0.0 && layout.viewport.contains(pos) {
-        let col = ((pos.0 - layout.grid_x0) / GRID_CELL_W).floor();
-        let row = ((pos.1 - layout.viewport.y + layout.scroll) / GRID_CELL_H).floor();
-        if col >= 0.0 && (col as usize) < layout.cols && row >= 0.0 {
-            let i = row as usize * layout.cols + col as usize;
-            if i < layout.cells {
-                return Some(Hit::GridCell(i));
+    if layout.viewport.h > 0.0 {
+        if !search_open && layout.search_btn.contains(pos) {
+            return Some(Hit::SearchButton);
+        }
+        if layout.viewport.contains(pos) {
+            let col = ((pos.0 - layout.grid_x0) / GRID_CELL_W).floor();
+            let row = ((pos.1 - layout.viewport.y + layout.scroll) / GRID_CELL_H).floor();
+            if col >= 0.0 && (col as usize) < layout.cols && row >= 0.0 {
+                let i = row as usize * layout.cols + col as usize;
+                if i < layout.cells {
+                    return Some(Hit::GridCell(i));
+                }
             }
         }
     }
@@ -256,6 +294,8 @@ pub struct FrameInput<'a> {
     pub query: &'a str,
     /// Auto-selected grid position (best match while searching).
     pub selected: Option<usize>,
+    /// Search box expansion: 0.0 = compact circle button, 1.0 = full pill.
+    pub search_expand: f32,
 }
 
 /// Assemble the draw scene for one frame.
@@ -278,6 +318,7 @@ pub fn scene(
         bounce,
         query,
         selected,
+        search_expand,
     } = *frame;
     let (w, h) = surface;
     let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
@@ -297,69 +338,106 @@ pub fn scene(
         color: config.theme.background_rgba(),
     });
 
-    // Dock row: hover highlight then icons.
+    // Dock row: per-icon magnification scales, then spread visual centers.
+    // Hit-boxes stay at fixed slot positions; only drawn positions spread.
+    let dock_scales: Vec<f32> = layout.dock_slots.iter().map(|slot| {
+        let cx = slot.x + slot.w / 2.0;
+        match pointer {
+            Some((px, py)) => {
+                let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
+                let fy = falloff(d_out, DOCK_MAG_VRADIUS);
+                1.0 + (DOCK_MAGNIFY - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy
+            }
+            None => 1.0,
+        }
+    }).collect();
+    // Each magnified icon widens its visual slot by the extra pixels it
+    // grew, pushing neighbours apart. Row stays centered as a whole.
+    let dock_vcx: Vec<f32> = {
+        let total_vw: f32 = dock_scales.iter().map(|&s| DOCK_SLOT + DOCK_ICON * (s - 1.0)).sum();
+        let mut x = (w - total_vw) / 2.0;
+        let mut centers = Vec::with_capacity(dock_scales.len());
+        for &s in &dock_scales {
+            let vw = DOCK_SLOT + DOCK_ICON * (s - 1.0);
+            centers.push(x + vw / 2.0);
+            x += vw;
+        }
+        centers
+    };
     if let Some(Hit::DockIcon(i)) = hover {
-        if let Some(slot) = layout.dock_slots.get(i) {
+        if let (Some(slot), Some(&vcx)) = (layout.dock_slots.get(i), dock_vcx.get(i)) {
             scene.rects.push(RectInst {
-                rect: *slot,
+                rect: Rect::new(vcx - DOCK_SLOT / 2.0, slot.y, DOCK_SLOT, slot.h),
                 radius: 12.0,
                 color: config.theme.highlight_rgba(),
             });
         }
     }
     for (i, slot) in layout.dock_slots.iter().enumerate() {
-        // Magnify with the cursor: horizontal cosine falloff, attenuated
-        // by vertical distance from the dock row. Icons grow upward from
-        // a fixed baseline (into the headroom), macOS style.
-        let cx = slot.x + slot.w / 2.0;
-        let baseline = slot.y + slot.h - 6.0;
-        let scale = match pointer {
-            Some((px, py)) => {
-                // Distance outside the dock band (zero while on the row),
-                // so hovering the grid never stirs the dock icons.
-                let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
-                let fy = falloff(d_out, DOCK_MAG_VRADIUS);
-                1.0 + (DOCK_MAGNIFY - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy
-            }
-            None => 1.0,
-        };
+        let vcx = dock_vcx[i];
+        let baseline = slot.y + slot.h + 0.0;
+        let scale = dock_scales[i];
         let size = (DOCK_ICON * scale).min(slot.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
         scene.icons.push(IconInst {
-            rect: Rect::new(cx - size / 2.0, baseline - size - lift(i), size, size),
+            rect: Rect::new(vcx - size / 2.0, baseline - size - lift(i), size, size),
             layer: i as u32,
         });
     }
 
-    // Search box at the card bottom, visible whenever the grid area is.
+    // Search widget: "Filter" pill button that morphs into an expanding
+    // search box. search_expand drives the open animation (0→1).
     if layout.viewport.h > 1.0 {
+        let btn = layout.search_btn;
+        let boxx = layout.search_box;
+        let cx = w / 2.0;
+        let is_btn_hover = hover == Some(Hit::SearchButton) && search_expand < 0.5;
         let box_color = {
             let hl = config.theme.highlight_rgba();
-            [hl[0], hl[1], hl[2], (hl[3] * 0.6).min(1.0)]
+            let a = if is_btn_hover { (hl[3] * 1.0).min(1.0) } else { (hl[3] * 0.6).min(1.0) };
+            [hl[0], hl[1], hl[2], a]
         };
-        scene.rects.push(RectInst {
-            rect: layout.search_box,
-            radius: 12.0,
-            color: box_color,
-        });
-        let (text, dim) = if query.is_empty() {
-            ("Search apps…".to_string(), true)
+        // Expanded width: SEARCH_W_MIN, or wider to snugly fit the query.
+        // 0.52 × font_px ≈ average proportional glyph width at this size.
+        let content_w = {
+            let text_px = query.len() as f32 * SEARCH_FONT_PX * 0.52 + 2.0 * SEARCH_PAD_X;
+            text_px.max(SEARCH_W_MIN).min(w - 2.0 * GRID_PAD_X)
+        };
+        let sw = lerp(btn.w, content_w, search_expand);
+        let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
+        scene.rects.push(RectInst { rect: draw_rect, radius: SEARCH_H / 2.0, color: box_color });
+
+        if search_expand < 0.5 {
+            // Compact button: "Filter" label.
+            scene.labels.push(Label {
+                text: "Filter".to_string(),
+                pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
+                max_w: btn.w,
+                font_px: SEARCH_FONT_PX,
+                line_px: SEARCH_LINE_PX,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: None,
+            });
         } else {
-            (format!("{query}|"), false)
-        };
-        scene.labels.push(Label {
-            text,
-            pos: (
-                layout.search_box.x + SEARCH_PAD_X,
-                layout.search_box.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0,
-            ),
-            max_w: layout.search_box.w - 2.0 * SEARCH_PAD_X,
-            font_px: SEARCH_FONT_PX,
-            line_px: SEARCH_LINE_PX,
-            centered: false,
-            dim,
-            cache: query.is_empty(), // the placeholder is stable
-            clip: Some(layout.search_box),
-        });
+            // Expanded: show query text or placeholder.
+            let (text, dim) = if query.is_empty() {
+                ("Filter".to_string(), true)
+            } else {
+                (query.to_string(), false)
+            };
+            scene.labels.push(Label {
+                text,
+                pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
+                max_w: sw - 2.0 * SEARCH_PAD_X,
+                font_px: SEARCH_FONT_PX,
+                line_px: SEARCH_LINE_PX,
+                centered: true,
+                dim,
+                cache: query.is_empty(),
+                clip: Some(draw_rect),
+            });
+        }
     }
 
     // Grid cells, once there is any viewport to draw into.
@@ -477,7 +555,7 @@ mod tests {
     #[test]
     fn docked_extent_shows_dock_row_only() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 48.0, 20, 0.0);
+        let l = layout(&cfg, SURFACE, 48.0, 20, 20, 0.0);
         assert!(!l.dock_slots.is_empty());
         // Viewport exists geometrically but lies below the surface
         // bottom, so no cells are visible while docked.
@@ -498,7 +576,7 @@ mod tests {
     #[test]
     fn open_extent_shows_grid_and_clamps_scroll() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 572.0, 40, 1e9);
+        let l = layout(&cfg, SURFACE, 572.0, 40, 40, 1e9);
         assert!(l.cols >= 2, "720px card should fit several columns");
         assert!(l.viewport.h > 100.0);
         assert!(l.scroll <= max_scroll(&l) + f32::EPSILON);
@@ -521,10 +599,10 @@ mod tests {
     #[test]
     fn hit_test_finds_dock_icon_and_cell() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 572.0, 10, 0.0);
+        let l = layout(&cfg, SURFACE, 572.0, 10, 10, 0.0);
         let slot = l.dock_slots[0];
         assert_eq!(
-            hit_test(&l, (slot.x + 1.0, slot.y + 1.0)),
+            hit_test(&l, (slot.x + 1.0, slot.y + 1.0), false),
             Some(Hit::DockIcon(0))
         );
         // Second cell of the first row.
@@ -532,24 +610,24 @@ mod tests {
             l.grid_x0 + GRID_CELL_W * 1.5,
             l.viewport.y + GRID_CELL_H / 2.0,
         );
-        assert_eq!(hit_test(&l, cell1), Some(Hit::GridCell(1)));
-        assert_eq!(hit_test(&l, (1.0, 1.0)), None);
+        assert_eq!(hit_test(&l, cell1, false), Some(Hit::GridCell(1)));
+        assert_eq!(hit_test(&l, (1.0, 1.0), false), None);
     }
 
     #[test]
     fn scrolled_hit_test_offsets_cells() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 572.0, 100, GRID_CELL_H * 2.0);
+        let l = layout(&cfg, SURFACE, 572.0, 100, 100, GRID_CELL_H * 2.0);
         // Top-left visible cell is the first cell of row 2.
         let pos = (l.grid_x0 + 2.0, l.viewport.y + 2.0);
-        assert_eq!(hit_test(&l, pos), Some(Hit::GridCell(2 * l.cols)));
+        assert_eq!(hit_test(&l, pos, false), Some(Hit::GridCell(2 * l.cols)));
     }
 
     #[test]
     fn partial_last_row_is_not_hit_beyond_entries() {
         let cfg = config();
         // 7 entries in >= 2 columns: the last row is partial.
-        let l = layout(&cfg, SURFACE, 572.0, 7, 0.0);
+        let l = layout(&cfg, SURFACE, 572.0, 7, 7, 0.0);
         let last_row = 7 / l.cols;
         let beyond = 7 % l.cols; // first empty column of the last row
         if beyond > 0 {
@@ -557,7 +635,7 @@ mod tests {
                 l.grid_x0 + (beyond as f32 + 0.5) * GRID_CELL_W,
                 l.viewport.y + (last_row as f32 + 0.5) * GRID_CELL_H,
             );
-            assert_eq!(hit_test(&l, pos), None);
+            assert_eq!(hit_test(&l, pos, false), None);
         }
     }
 }

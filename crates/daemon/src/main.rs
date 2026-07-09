@@ -139,6 +139,8 @@ fn main() -> anyhow::Result<()> {
         searcher: Searcher::new(),
         visible: Vec::new(),
         selected: None,
+        search_open: false,
+        search_expand: 0.0,
         zone_free: false,
         exit: false,
     };
@@ -256,6 +258,10 @@ pub struct App {
     /// Auto-selected grid position (best match while searching);
     /// Enter launches it.
     selected: Option<usize>,
+    /// Whether the search box is expanded (vs. compact circle button).
+    search_open: bool,
+    /// Animated expansion of the search widget: 0.0 = button, 1.0 = pill.
+    search_expand: f32,
     /// Intellihide: no window currently overlaps the dock zone, so the
     /// dock parks visible instead of auto-hiding.
     zone_free: bool,
@@ -394,6 +400,7 @@ impl App {
             &self.config,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             self.ui.extent(),
+            self.entries.len(),
             self.visible.len(),
             self.list_scroll,
         )
@@ -401,9 +408,10 @@ impl App {
 
     /// Recompute which item the pointer is over; redraw on change.
     fn update_hover(&mut self) {
+        let search_open = self.search_open;
         let hover = self
             .pointer_pos
-            .and_then(|pos| content::hit_test(&self.current_layout(), pos));
+            .and_then(|pos| content::hit_test(&self.current_layout(), pos, search_open));
         if hover != self.hover {
             debug!(
                 "hover: {:?} -> {:?} at {:?} (extent {})",
@@ -417,15 +425,23 @@ impl App {
         }
     }
 
-    /// Resolve a hit to an entry index (grid cells go through the
-    /// filtered `visible` list) and launch it.
+    /// Resolve a hit to an action: launch an entry or toggle the search box.
     fn activate_hit(&mut self, hit: Hit) {
-        let entry_idx = match hit {
-            Hit::DockIcon(i) => Some(i),
-            Hit::GridCell(i) => self.visible.get(i).copied(),
-        };
-        if let Some(entry_idx) = entry_idx {
-            self.activate(entry_idx);
+        match hit {
+            Hit::DockIcon(i) => self.activate(i),
+            Hit::GridCell(i) => {
+                if let Some(entry_idx) = self.visible.get(i).copied() {
+                    self.activate(entry_idx);
+                }
+            }
+            Hit::SearchButton => {
+                self.search_open = !self.search_open;
+                if !self.search_open {
+                    self.query.clear();
+                    self.refilter();
+                }
+                self.schedule_frame();
+            }
         }
     }
 
@@ -488,10 +504,12 @@ impl App {
             // Fresh card next time it rises.
             self.list_scroll = 0.0;
             self.hover = None;
+            self.search_open = false;
         }
         // The search only lives while the popup is open.
         if self.ui.target() != Target::Open && !self.query.is_empty() {
             self.query.clear();
+            self.search_open = false;
             self.refilter();
         }
         let interactive = self.ui.wants_keyboard();
@@ -551,10 +569,24 @@ impl App {
         if animating {
             // The card is moving under a possibly stationary pointer:
             // keep the hover highlight glued to what is really beneath it.
+            let search_open = self.search_open;
             self.hover = self
                 .pointer_pos
-                .and_then(|pos| content::hit_test(&self.current_layout(), pos));
+                .and_then(|pos| content::hit_test(&self.current_layout(), pos, search_open));
         }
+
+        // Advance search-box expand animation (200 ms).
+        let search_target = if self.search_open { 1.0f32 } else { 0.0 };
+        let search_animating = self.search_expand != search_target;
+        if search_animating {
+            let delta = dt / 0.2;
+            self.search_expand = if search_target > self.search_expand {
+                (self.search_expand + delta).min(1.0)
+            } else {
+                (self.search_expand - delta).max(0.0)
+            };
+        }
+
         self.dirty = false;
 
         let wl_surface = self.layer.wl_surface();
@@ -577,6 +609,7 @@ impl App {
                 bounce,
                 query: &self.query,
                 selected: self.selected,
+                search_expand: self.search_expand,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -584,6 +617,9 @@ impl App {
         };
         if let Err(e) = renderer.render(&scene, self.config.theme.text_rgba()) {
             error!("render failed: {e:#}");
+        }
+        if search_animating && self.search_expand != search_target {
+            self.dirty = true;
         }
     }
 
@@ -627,6 +663,55 @@ impl App {
     /// Arm the auto-hide grace timer after the pointer leaves the dock.
     /// A later pointer re-entry clears `hide_deadline`, turning the
     /// in-flight timer into a no-op when it fires.
+    fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        match keysym {
+            Keysym::Escape => {
+                self.query.clear();
+                self.search_open = false;
+                self.refilter();
+                self.handle_command(Command::Collapse);
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                if let Some(sel) = self.selected {
+                    self.activate_hit(Hit::GridCell(sel));
+                }
+            }
+            Keysym::BackSpace => {
+                if self.query.pop().is_some() {
+                    if self.query.is_empty() {
+                        self.search_open = false;
+                    }
+                    self.refilter();
+                }
+            }
+            Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
+                if !self.visible.is_empty() {
+                    let cols = self.current_layout().cols.max(1);
+                    let last = self.visible.len() - 1;
+                    let cur = self.selected.unwrap_or(0);
+                    let next = match keysym {
+                        Keysym::Left => cur.saturating_sub(1),
+                        Keysym::Right => (cur + 1).min(last),
+                        Keysym::Up => cur.saturating_sub(cols),
+                        _ => (cur + cols).min(last),
+                    };
+                    self.selected = Some(next);
+                    self.schedule_frame();
+                }
+            }
+            _ => {
+                if let Some(text) = utf8 {
+                    let printable: String = text.chars().filter(|c| !c.is_control()).collect();
+                    if !printable.is_empty() {
+                        self.search_open = true;
+                        self.query.push_str(&printable);
+                        self.refilter();
+                    }
+                }
+            }
+        }
+    }
+
     fn schedule_autohide(&mut self) {
         let delay = Duration::from_millis(u64::from(self.config.input.autohide_delay_ms));
         let deadline = Instant::now() + delay;
@@ -775,7 +860,16 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
-            match self.seat_state.get_keyboard(qh, &seat, None) {
+            let lh = self.loop_handle.clone();
+            match self.seat_state.get_keyboard_with_repeat(
+                qh,
+                &seat,
+                None,
+                lh,
+                Box::new(|app: &mut App, _kb: &wl_keyboard::WlKeyboard, event: KeyEvent| {
+                    app.handle_key_event(event.keysym, event.utf8.as_deref());
+                }),
+            ) {
                 Ok(keyboard) => self.keyboard = Some(keyboard),
                 Err(e) => warn!("cannot get keyboard: {e}"),
             }
@@ -846,54 +940,7 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
-        // Keys only arrive while open (the popup takes exclusive
-        // keyboard focus; the dock never has keys).
-        match event.keysym {
-            Keysym::Escape => {
-                if self.query.is_empty() {
-                    // Slide back down to the dock.
-                    self.handle_command(Command::Collapse);
-                } else {
-                    self.query.clear();
-                    self.refilter();
-                }
-            }
-            Keysym::Return | Keysym::KP_Enter => {
-                if let Some(sel) = self.selected {
-                    self.activate_hit(Hit::GridCell(sel));
-                }
-            }
-            Keysym::BackSpace => {
-                if self.query.pop().is_some() {
-                    self.refilter();
-                }
-            }
-            Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
-                if !self.visible.is_empty() {
-                    let cols = self.current_layout().cols.max(1);
-                    let last = self.visible.len() - 1;
-                    let cur = self.selected.unwrap_or(0);
-                    let next = match event.keysym {
-                        Keysym::Left => cur.saturating_sub(1),
-                        Keysym::Right => (cur + 1).min(last),
-                        Keysym::Up => cur.saturating_sub(cols),
-                        _ => (cur + cols).min(last),
-                    };
-                    self.selected = Some(next);
-                    self.schedule_frame();
-                }
-            }
-            _ => {
-                // Printable input extends the query.
-                if let Some(text) = &event.utf8 {
-                    let printable: String = text.chars().filter(|c| !c.is_control()).collect();
-                    if !printable.is_empty() {
-                        self.query.push_str(&printable);
-                        self.refilter();
-                    }
-                }
-            }
-        }
+        self.handle_key_event(event.keysym, event.utf8.as_deref());
     }
 
     fn release_key(
