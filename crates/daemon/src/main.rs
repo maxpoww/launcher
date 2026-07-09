@@ -860,12 +860,24 @@ impl App {
 
     /// One vertical-scroll step of `value` axis units.
     ///
-    /// Docked, the wheel is the expand gesture. Open, it pages the grid
-    /// (down = next, up = previous) and never collapses the popup —
-    /// dismissal is Escape / pointer-leave / toggle only.
+    /// Hidden with the pointer on the reveal strip, scrolling up summons
+    /// the dock (the compositor keeps our stale pointer focus when the
+    /// dock hides under a parked cursor, so this — not a re-enter — is
+    /// the recovery path). Docked, the wheel is the expand gesture, so
+    /// one continuous scroll rides Hidden → Dock → Open. Open, it pages
+    /// the grid (down = next, up = previous) and never collapses the
+    /// popup — dismissal is Escape / pointer-leave / toggle only.
     fn on_scroll(&mut self, value: f64) {
-        match self.ui.target() {
-            Target::Dock => {
+        let target = self.ui.target();
+        match target {
+            Target::Hidden | Target::Dock => {
+                // While hidden, only in-strip scroll may summon (stale
+                // focus can also deliver events from anywhere the open
+                // card used to be — a scroll there belongs to the window
+                // beneath).
+                if target == Target::Hidden && !self.pointer_on_reveal_strip() {
+                    return;
+                }
                 self.scroll.accum += value;
                 let mut toward_open = self.scroll.accum;
                 if self.config.input.natural_scroll {
@@ -873,14 +885,20 @@ impl App {
                 }
                 if toward_open <= -SCROLL_THRESHOLD {
                     self.scroll.accum = 0.0;
-                    // Mark that expand was triggered by scroll so the
-                    // bleed-through events are eaten until the gesture
-                    // ends (AxisStop clears this).
-                    self.scroll.open_at = Some(Instant::now());
-                    self.handle_command(Command::Expand);
+                    if target == Target::Dock {
+                        // Mark that expand was triggered by scroll so the
+                        // bleed-through events are eaten until the gesture
+                        // ends (AxisStop clears this).
+                        self.scroll.open_at = Some(Instant::now());
+                        self.handle_command(Command::Expand);
+                    } else {
+                        // No bleed cooldown: the rest of the gesture
+                        // should keep accumulating toward Expand.
+                        self.handle_command(Command::Show);
+                    }
                 } else if toward_open >= SCROLL_THRESHOLD {
-                    // Scrolling away from expand on the dock: nothing to
-                    // do, just keep the accumulator bounded.
+                    // Scrolling away from expand: nothing to do, just
+                    // keep the accumulator bounded.
                     self.scroll.accum = 0.0;
                 }
             }
@@ -894,8 +912,17 @@ impl App {
                 }
                 self.page_scroll(value);
             }
-            Target::Hidden => {}
         }
+    }
+
+    /// Whether the pointer is on the edge-reveal strip (the bottom
+    /// `edge_reveal_px` of the surface). False when edge reveal is off.
+    fn pointer_on_reveal_strip(&self) -> bool {
+        if !self.config.input.edge_reveal {
+            return false;
+        }
+        let strip_top = self.buffer_size.1 as f32 - self.config.input.edge_reveal_px as f32;
+        self.pointer_pos.is_some_and(|(_, y)| y >= strip_top)
     }
 
     /// Horizontal scroll: pages the open grid left/right.
@@ -1315,6 +1342,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
             } => {
                 let pos = (surface_x as f32, surface_y as f32);
                 app.pointer_pos = Some(pos);
+                // Hiding under a parked cursor keeps our (now stale)
+                // pointer focus — the compositor never re-sends Enter for
+                // the reveal strip. Treat in-strip motion as the edge
+                // touch it is, or the strip stays dead until the pointer
+                // fully leaves and returns.
+                if app.ui.target() == Target::Hidden && app.pointer_on_reveal_strip() {
+                    app.hide_deadline = None;
+                    app.handle_command(Command::Show);
+                }
                 // Detect drag start: press armed and pointer moved beyond
                 // the 6-px threshold (distinguishes drag from sloppy click).
                 if app.gesture.dragging.is_none() {
