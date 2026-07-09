@@ -97,8 +97,8 @@ impl UiState {
     pub fn apply(&mut self, command: Command) -> bool {
         match command {
             Command::Toggle => match self.target {
-                Target::Hidden => self.set_target(Target::Dock),
-                Target::Dock | Target::Open => self.set_target(Target::Hidden),
+                Target::Hidden | Target::Dock => self.set_target(Target::Open),
+                Target::Open => self.set_target(Target::Hidden),
             },
             Command::Show => match self.target {
                 Target::Hidden => self.set_target(Target::Dock),

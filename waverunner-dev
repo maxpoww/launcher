@@ -1,0 +1,6 @@
+#!/bin/sh
+# Dev launcher wrapper — sets LD_LIBRARY_PATH from the flake's buildInputs so
+# the daemon can find libwayland, libxkbcommon, and vulkan-loader without
+# requiring nix develop. Paths are pinned by flake.lock.
+export LD_LIBRARY_PATH=/nix/store/clvzgv5kqq953s4azqhkg3ddgpvgl9wc-wayland-1.25.0/lib:/nix/store/3kncz3fkk7sv9xc61x096jnbxvxfnx1k-libxkbcommon-1.13.1/lib:/nix/store/y5a34h6vgvsc1pmfmvcqfcvxy2grg3hx-vulkan-loader-1.4.341.0/lib
+exec /home/max/launcher/target/debug/waverunner "$@"

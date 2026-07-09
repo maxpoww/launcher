@@ -288,7 +288,7 @@ const BTN_LEFT: u32 = 0x110;
 
 /// Minimum time between app-index rescans. Summoning the dock checks
 /// freshness; mashing toggle does not scan repeatedly.
-const RESCAN_COOLDOWN: Duration = Duration::from_secs(2);
+const RESCAN_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// Steady re-poll interval for the dock zone (two tiny local-socket
 /// queries): float toggles/moves/resizes and the re-tiling they cause
@@ -309,7 +309,7 @@ impl App {
         // Summoning or expanding is the moment freshness matters:
         // rescan (coalesced, cooldown-limited) so newly installed and
         // uninstalled apps are reflected without a restart.
-        if matches!(command, Command::Show | Command::Toggle | Command::Expand) {
+        if matches!(command, Command::Toggle | Command::Expand) {
             self.maybe_rescan();
         }
         if self.ui.apply(command) {
