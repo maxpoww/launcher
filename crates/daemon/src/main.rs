@@ -132,6 +132,7 @@ fn main() -> anyhow::Result<()> {
         pressed: None,
         pointer_pos: None,
         list_scroll: 0.0,
+        scroll_target: 0.0,
         indexer,
         last_rescan: Instant::now(),
         bounce: None,
@@ -241,8 +242,10 @@ pub struct App {
     pressed: Option<Hit>,
     /// Pointer position in surface coordinates, while inside.
     pointer_pos: Option<(f32, f32)>,
-    /// App-grid scroll offset in pixels (clamped during layout).
+    /// App-grid scroll offset in pixels (visual, lags behind scroll_target).
     list_scroll: f32,
+    /// Scroll animation target; list_scroll eases toward this each frame.
+    scroll_target: f32,
     /// Handle to the background indexer thread.
     indexer: apps::Indexer,
     /// When the last rescan was requested, for the reveal cooldown.
@@ -394,6 +397,7 @@ impl App {
             Some(0)
         };
         self.list_scroll = 0.0;
+        self.scroll_target = 0.0;
         self.update_hover();
         self.schedule_frame();
     }
@@ -507,6 +511,7 @@ impl App {
         if self.ui.target() == Target::Hidden {
             // Fresh card next time it rises.
             self.list_scroll = 0.0;
+            self.scroll_target = 0.0;
             self.hover = None;
             self.search_open = false;
         }
@@ -591,6 +596,17 @@ impl App {
             };
         }
 
+        // Smooth-scroll the grid: list_scroll eases toward scroll_target
+        // with an exponential decay (~200 ms to settle at 60 fps).
+        let scroll_delta = self.scroll_target - self.list_scroll;
+        let scroll_animating = scroll_delta.abs() > 0.5;
+        if scroll_animating {
+            let k = 1.0 - (-dt * 12.0f32).exp();
+            self.list_scroll += scroll_delta * k;
+        } else if scroll_delta != 0.0 {
+            self.list_scroll = self.scroll_target;
+        }
+
         self.dirty = false;
 
         let wl_surface = self.layer.wl_surface();
@@ -599,7 +615,11 @@ impl App {
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
-        self.list_scroll = layout.scroll; // keep the clamped value
+        // Safety: if animation overshot the max-scroll boundary, pin both.
+        if layout.scroll < self.list_scroll - 0.5 {
+            self.scroll_target = self.scroll_target.min(layout.scroll);
+            self.list_scroll = layout.scroll;
+        }
         let scene = content::scene(
             &self.config,
             &layout,
@@ -626,6 +646,12 @@ impl App {
         if search_animating && self.search_expand != search_target {
             self.dirty = true;
         }
+        if scroll_animating
+            && (self.scroll_target - self.list_scroll).abs() > 0.5
+            && self.ui.target() == Target::Open
+        {
+            self.dirty = true;
+        }
     }
 
     /// One vertical-scroll step of `value` axis units.
@@ -638,14 +664,18 @@ impl App {
         match self.ui.target() {
             Target::Dock => self.scroll_accum += value,
             Target::Open => {
-                let next = self.list_scroll + value as f32;
-                if next < 0.0 && self.list_scroll <= 0.0 {
+                let next = self.scroll_target + value as f32;
+                if next < 0.0 && self.scroll_target <= 0.0 {
                     self.scroll_accum += value;
                 } else {
                     // Normal grid scrolling: any partial collapse
                     // gesture is abandoned.
                     self.scroll_accum = 0.0;
-                    self.list_scroll = next.max(0.0);
+                    let layout = self.current_layout();
+                    let rows = layout.cells.div_ceil(layout.cols.max(1));
+                    let max_scroll =
+                        (rows as f32 * content::GRID_CELL_H - layout.viewport.h).max(0.0);
+                    self.scroll_target = next.clamp(0.0, max_scroll);
                     self.update_hover();
                     self.schedule_frame();
                 }
@@ -700,7 +730,7 @@ impl App {
                         _ => (cur + cols).min(last),
                     };
                     self.selected = Some(next);
-                    self.list_scroll = content::scroll_to_reveal(&layout, next);
+                    self.scroll_target = content::scroll_to_reveal(&layout, next);
                     self.schedule_frame();
                 }
             }
