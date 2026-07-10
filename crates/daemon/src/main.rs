@@ -404,6 +404,9 @@ const EXPAND_BLEED_COOLDOWN: Duration = Duration::from_millis(300);
 /// Linux evdev code for the left mouse button.
 const BTN_LEFT: u32 = 0x110;
 
+/// Linux evdev code for the right mouse button.
+const BTN_RIGHT: u32 = 0x111;
+
 /// Minimum time between app-index rescans. Summoning the dock checks
 /// freshness; mashing toggle does not scan repeatedly.
 const RESCAN_COOLDOWN: Duration = Duration::from_secs(30);
@@ -604,9 +607,7 @@ impl App {
     }
 
     /// Append one transient Files-section entry (kind File, generic
-    /// folder/file icon layer) and return its index. `id` doubles as
-    /// the navigation key: a path for real files, `nav-*` for the
-    /// synthetic cells.
+    /// folder/file icon layer) and return its index. `id` is the path.
     fn push_transient_file(&mut self, id: &str, name: &str, exec: String, is_dir: bool) -> usize {
         let asset = if is_dir {
             self.asset_folder
@@ -644,19 +645,14 @@ impl App {
         out
     }
 
-    /// Transient listing of the navigated directory: a ".." cell (up
-    /// one level), an "Open" cell (the directory itself, via xdg-open),
-    /// then its visible children — folders first, alphabetical.
+    /// Transient listing of the navigated directory's visible children —
+    /// folders first, alphabetical. (Going up is the "‹ Back" button by
+    /// the section title; a terminal there is a right-click away.)
     fn dir_listing(&mut self) -> Vec<usize> {
         let Some(dir) = self.files_dir.clone() else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        out.push(self.push_transient_file("nav-up", "..", "true".to_owned(), true));
-        let dir_str = dir.to_string_lossy().into_owned();
-        let open_exec = format!("xdg-open {}", launch::shell_quote(&dir_str));
-        out.push(self.push_transient_file("nav-open", "Open", open_exec, true));
-
         let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -679,54 +675,97 @@ impl App {
         out
     }
 
-    /// Files-section navigation: returns true when the hit was handled
-    /// as navigation (into a folder, or up via "..") rather than a
-    /// launch. Clicking a folder in search results jumps there too,
-    /// clearing the query.
+    /// Files-section navigation: returns true when the hit was a folder
+    /// and the strip navigated into it (plain files fall through to the
+    /// launch path). Clicking a folder in search results jumps there
+    /// too, clearing the query.
     fn try_navigate(&mut self, entry_idx: usize) -> bool {
-        let Some(entry) = self.entries.get(entry_idx) else {
+        if self.kinds.get(entry_idx) != Some(&apps::EntryKind::File) {
+            return false;
+        }
+        let Some(path) = self
+            .entries
+            .get(entry_idx)
+            .and_then(|e| e.description.clone())
+        else {
             return false;
         };
-        match entry.id.as_str() {
-            "nav-up" => {
-                let home = std::env::var("HOME").unwrap_or_default();
-                self.files_dir = self
-                    .files_dir
-                    .as_ref()
-                    .and_then(|d| d.parent().map(std::path::Path::to_path_buf))
-                    // Reaching home (or escaping it) lands on the strip.
-                    .filter(|p| {
-                        !home.is_empty()
-                            && p.starts_with(&home)
-                            && *p != std::path::Path::new(&home)
-                    });
-                self.refilter();
-                true
-            }
-            // "Open" launches the directory itself: not navigation.
-            "nav-open" => false,
-            _ => {
-                // The entry's path lives in `description` (the id is a
-                // path only for transient entries; home-strip folders
-                // use "folder-<name>").
-                let Some(path) = entry.description.clone() else {
-                    return false;
-                };
-                if self.kinds.get(entry_idx) != Some(&apps::EntryKind::File)
-                    || !std::fs::metadata(&path)
-                        .map(|m| m.is_dir())
-                        .unwrap_or(false)
-                {
-                    return false;
-                }
-                self.files_dir = Some(std::path::PathBuf::from(path));
-                // A folder clicked in search results jumps navigation
-                // there; the query has done its job.
-                self.search.query.clear();
-                self.search.open = false;
-                self.refilter();
-                true
-            }
+        if !std::fs::metadata(&path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        self.files_dir = Some(std::path::PathBuf::from(path));
+        // A folder clicked in search results jumps navigation there;
+        // the query has done its job.
+        self.search.query.clear();
+        self.search.open = false;
+        self.refilter();
+        true
+    }
+
+    /// Go up one level from the navigated directory; reaching (or
+    /// escaping) home lands back on the home-folder strip.
+    fn files_nav_up(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_default();
+        self.files_dir = self
+            .files_dir
+            .as_ref()
+            .and_then(|d| d.parent().map(std::path::Path::to_path_buf))
+            .filter(|p| {
+                !home.is_empty() && p.starts_with(&home) && *p != std::path::Path::new(&home)
+            });
+        self.refilter();
+    }
+
+    /// The directory a Files-section entry stands for: the folder itself,
+    /// or the containing folder of a plain file. `None` for non-File
+    /// entries. (The path lives in `description`; the id is a path only
+    /// for transient entries, home-strip folders use "folder-<name>".)
+    fn entry_dir_path(&self, entry_idx: usize) -> Option<std::path::PathBuf> {
+        if self.kinds.get(entry_idx) != Some(&apps::EntryKind::File) {
+            return None;
+        }
+        let path = self.entries.get(entry_idx)?.description.as_deref()?;
+        let path = std::path::Path::new(path);
+        if std::fs::metadata(path).ok()?.is_dir() {
+            Some(path.to_path_buf())
+        } else {
+            path.parent().map(std::path::Path::to_path_buf)
+        }
+    }
+
+    /// Right-click on a Files cell: open a terminal in that directory
+    /// (the folder itself, or a file's containing folder), with launch
+    /// feedback and dismissal like any other activation.
+    fn open_terminal_at(&mut self, entry_idx: usize) {
+        let Some(dir) = self.entry_dir_path(entry_idx) else {
+            return;
+        };
+        let dir = dir.to_string_lossy().into_owned();
+        let exec = format!(
+            "cd {} && exec {}",
+            launch::shell_quote(&dir),
+            self.config.launch.terminal
+        );
+        info!("terminal at {dir}");
+        if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
+            error!("terminal launch failed: {e:#}");
+            return;
+        }
+        self.bounce = Some((entry_idx, Instant::now()));
+        self.schedule_frame();
+        let timer = Timer::from_duration(BOUNCE_DURATION);
+        if self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.dismiss();
+                TimeoutAction::Drop
+            })
+            .is_err()
+        {
+            self.dismiss();
         }
     }
 
@@ -770,6 +809,7 @@ impl App {
             self.dock_order.len(),
             std::array::from_fn(|s| self.search.visible[s].len()),
             std::array::from_fn(|s| self.scroll.per[s].pos),
+            self.files_dir.is_some(),
         )
     }
 
@@ -891,6 +931,7 @@ impl App {
                 }
                 self.schedule_frame();
             }
+            Hit::FilesBack => self.files_nav_up(),
         }
     }
 
@@ -1648,13 +1689,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         if dx * dx + dy * dy > 6.0 * 6.0 {
                             let entry_idx = match hit {
                                 Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
-                                Hit::GridCell(s, cell) => app.search.visible[s]
-                                    .get(cell)
-                                    .copied()
-                                    // The synthetic ".."/"Open" cells are
-                                    // not draggable.
-                                    .filter(|&idx| !app.entries[idx].id.starts_with("nav-")),
-                                Hit::SearchButton => None,
+                                Hit::GridCell(s, cell) => app.search.visible[s].get(cell).copied(),
+                                Hit::SearchButton | Hit::FilesBack => None,
                             };
                             if let Some(entry_idx) = entry_idx {
                                 let from_dock = matches!(hit, Hit::DockIcon(_));
@@ -1737,6 +1773,21 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         }
                     }
                     _ => {}
+                }
+            }
+            wl_pointer::Event::Button { button, state, .. }
+                if button == BTN_RIGHT
+                    && state == WEnum::Value(wl_pointer::ButtonState::Released) =>
+            {
+                // Right-click on a Files cell opens a terminal in that
+                // directory (a file's containing folder).
+                app.update_hover();
+                if let Some(Hit::GridCell(s, cell)) = app.hover {
+                    if s == content::SECTION_FILES {
+                        if let Some(entry_idx) = app.search.visible[s].get(cell).copied() {
+                            app.open_terminal_at(entry_idx);
+                        }
+                    }
                 }
             }
             wl_pointer::Event::Axis {

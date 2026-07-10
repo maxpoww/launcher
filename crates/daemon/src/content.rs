@@ -97,6 +97,8 @@ pub enum Hit {
     /// that section's visible list).
     GridCell(usize, usize),
     SearchButton,
+    /// The "‹ Back" button beside the Files title (navigated dirs only).
+    FilesBack,
 }
 
 /// Popup sections, top to bottom: the app grid, the (future) install
@@ -112,6 +114,9 @@ const SECTION_ROWS: [usize; N_SECTIONS] = [3, 1, 1];
 const SECTION_TITLE_H: f32 = 22.0;
 /// Vertical gap beneath each section (page dots live here).
 const SECTION_GAP: f32 = 14.0;
+/// Size of the "‹ Back" pill beside the Files title.
+const BACK_W: f32 = 52.0;
+const BACK_H: f32 = 18.0;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
@@ -215,6 +220,9 @@ pub struct Layout {
     pub search_box: Rect,
     /// Compact search button (circle, same center-x and y as search_box).
     pub search_btn: Rect,
+    /// "‹ Back" button beside the Files title; present only while the
+    /// Files section is navigated into a directory.
+    pub files_back: Option<Rect>,
 }
 
 /// Compute the layout for the current animation state.
@@ -230,6 +238,7 @@ pub fn layout(
     n_entries: usize,
     n_visible: [usize; N_SECTIONS],
     scroll: [f32; N_SECTIONS],
+    files_navigated: bool,
 ) -> Layout {
     let (w, h) = surface;
     let card_top = h - extent;
@@ -282,13 +291,24 @@ pub fn layout(
     let apps_rows = ((avail / GRID_CELL_H) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
 
     let mut y = grid_top;
+    let mut files_back = None;
     let sections = std::array::from_fn(|s| {
         let rows = if s == SECTION_APPS {
             apps_rows
         } else {
             SECTION_ROWS[s]
         };
-        let title_pos = (grid_x0 + 8.0, y);
+        let mut title_pos = (grid_x0 + 8.0, y);
+        if s == SECTION_FILES && files_navigated {
+            // "‹ Back" pill sits where the title starts; title shifts right.
+            files_back = Some(Rect::new(
+                title_pos.0,
+                y + (SECTION_TITLE_H - BACK_H) / 2.0 - 1.0,
+                BACK_W,
+                BACK_H,
+            ));
+            title_pos.0 += BACK_W + 10.0;
+        }
         y += SECTION_TITLE_H;
         let viewport = Rect::new(
             grid_x0,
@@ -329,6 +349,7 @@ pub fn layout(
         sections,
         search_box,
         search_btn,
+        files_back,
     }
 }
 
@@ -363,6 +384,9 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<H
     }
     if !search_open && layout.search_btn.contains(pos) {
         return Some(Hit::SearchButton);
+    }
+    if layout.files_back.is_some_and(|b| b.contains(pos)) {
+        return Some(Hit::FilesBack);
     }
     for (s, sec) in layout.sections.iter().enumerate() {
         if sec.n_pages > 0 && sec.viewport.contains(pos) {
@@ -661,6 +685,35 @@ pub fn scene(
         }
     }
 
+    // "‹ Back" pill beside the Files title while navigated.
+    if let Some(back) = layout.files_back {
+        let hl = config.theme.highlight_rgba();
+        let a = if hover == Some(Hit::FilesBack) {
+            hl[3].min(1.0)
+        } else {
+            (hl[3] * 0.6).min(1.0)
+        };
+        scene.rects.push(RectInst {
+            rect: back,
+            radius: back.h / 2.0,
+            color: [hl[0], hl[1], hl[2], a],
+        });
+        scene.labels.push(Label {
+            text: "‹ Back".to_string(),
+            pos: (
+                back.x + back.w / 2.0,
+                back.y + (back.h - LABEL_LINE_PX) / 2.0,
+            ),
+            max_w: back.w,
+            font_px: LABEL_FONT_PX - 1.0,
+            line_px: LABEL_LINE_PX,
+            centered: true,
+            dim: false,
+            cache: true,
+            clip: None,
+        });
+    }
+
     // The three sections: title, grid cells with per-section horizontal
     // paging, page dots, and per-section empty states.
     for (s, sec) in layout.sections.iter().enumerate() {
@@ -863,13 +916,21 @@ mod tests {
     const OPEN: f32 = 692.0;
 
     fn open_layout(cfg: &Config, n: usize, scroll: f32) -> Layout {
-        layout(cfg, SURFACE, OPEN, n, [n, 0, 0], [scroll, 0.0, 0.0])
+        layout(cfg, SURFACE, OPEN, n, [n, 0, 0], [scroll, 0.0, 0.0], false)
     }
 
     #[test]
     fn docked_extent_shows_dock_row_only() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, 48.0, 20, [20, 0, 6], [0.0; N_SECTIONS]);
+        let l = layout(
+            &cfg,
+            SURFACE,
+            48.0,
+            20,
+            [20, 0, 6],
+            [0.0; N_SECTIONS],
+            false,
+        );
         assert!(!l.dock_slots.is_empty());
         // Sections exist geometrically but lie below the surface
         // bottom, so no cells are visible while docked.
@@ -922,7 +983,7 @@ mod tests {
     #[test]
     fn files_section_shows_its_own_entries() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, OPEN, 10, [4, 0, 6], [0.0; N_SECTIONS]);
+        let l = layout(&cfg, SURFACE, OPEN, 10, [4, 0, 6], [0.0; N_SECTIONS], false);
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
         let s = scene(
             &cfg,
@@ -961,7 +1022,15 @@ mod tests {
     #[test]
     fn hit_test_finds_dock_icon_and_cells_per_section() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, OPEN, 10, [10, 0, 6], [0.0; N_SECTIONS]);
+        let l = layout(
+            &cfg,
+            SURFACE,
+            OPEN,
+            10,
+            [10, 0, 6],
+            [0.0; N_SECTIONS],
+            false,
+        );
         let slot = l.dock_slots[0];
         assert_eq!(
             hit_test(&l, (slot.x + 1.0, slot.y + 1.0), false),
@@ -998,9 +1067,38 @@ mod tests {
     }
 
     #[test]
+    fn back_button_appears_only_when_navigated() {
+        let cfg = config();
+        let flat = layout(
+            &cfg,
+            SURFACE,
+            OPEN,
+            10,
+            [10, 0, 6],
+            [0.0; N_SECTIONS],
+            false,
+        );
+        assert!(flat.files_back.is_none());
+        let nav = layout(&cfg, SURFACE, OPEN, 10, [10, 0, 6], [0.0; N_SECTIONS], true);
+        let back = nav.files_back.expect("navigated layout has a back button");
+        let center = (back.x + back.w / 2.0, back.y + back.h / 2.0);
+        assert_eq!(hit_test(&nav, center, false), Some(Hit::FilesBack));
+        // The title moved right to make room.
+        assert!(nav.sections[SECTION_FILES].title_pos.0 > flat.sections[SECTION_FILES].title_pos.0);
+    }
+
+    #[test]
     fn section_at_routes_scroll_bands() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, OPEN, 10, [10, 0, 6], [0.0; N_SECTIONS]);
+        let l = layout(
+            &cfg,
+            SURFACE,
+            OPEN,
+            10,
+            [10, 0, 6],
+            [0.0; N_SECTIONS],
+            false,
+        );
         let apps = &l.sections[SECTION_APPS];
         let mid = (
             apps.viewport.x + 10.0,
