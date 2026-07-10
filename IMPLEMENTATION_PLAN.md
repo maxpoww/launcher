@@ -193,15 +193,56 @@ Acceptance criteria:
 ## P4.5 — Sectioned popup (2026-07-09)
 
 The open card is split into three independently paging sections, top to
-bottom: **Apps** (6×3 grid), **Install** (6×1, empty "Coming soon"
-placeholder — future package search), and **Files** (6×1, the standard
-home folders opened via `xdg-open`). Search fans results into their
+bottom: **Apps** (6×3 grid), **Install** (6×1, nixpkgs package search —
+see below), and **Files** (6×1, the standard home folders opened via
+`xdg-open`). Search fans results into their
 sections (apps → Apps, folders → Files); each section has its own
 cyclic horizontal paging, page dots, and wheel routing by pointer
 position; keyboard selection walks the sections as one flat list.
 Folders never auto-fill the dock but can be pinned explicitly. Default
 card height grew to 680 to fit the five rows; shorter cards shrink the
 Apps section first.
+
+## P4.6 — Install section: nixpkgs search + drag to (un)install (2026-07-10)
+
+The Install section is live package search over all of nixpkgs, with
+drag-and-drop package management:
+
+- **Index:** a `nix.rs` background thread dumps `nix search nixpkgs ^
+  --json` (109 624 packages, ~4 s warm / minutes on the very first run)
+  into a slim TSV cache (`$XDG_CACHE_HOME/waverunner/nixpkgs-index.tsv`,
+  10 MB), loads it instantly on start, and refreshes it in the
+  background when older than a day.
+- **Search:** typing fans package matches into the Install section as
+  transient entries (same pattern as file-search results), rendered
+  with a generic package icon. Ranking 110k haystacks takes 0.2–1.8 s
+  (debug build), so it runs on the nix thread: queries coalesce to the
+  newest, answers arrive as `Ranked` events, and the previous hits keep
+  showing until the fresh ones land. Queries shorter than 2 chars are
+  not ranked.
+- **Install:** dragging a package cell onto the Apps section (or the
+  dock) runs `nix profile install nixpkgs#<attr>` on a separate
+  mutation worker (serialized; a minutes-long install never blocks
+  search). The cell's label swaps to "Installing…" until done; success
+  triggers an app rescan, so the new app pops into the Apps grid
+  (`~/.nix-profile/share` is in XDG_DATA_DIRS).
+- **Uninstall:** dragging an Apps cell onto the Install section
+  canonicalizes its `.desktop` path (new `AppEntry::path` field) and
+  matches it against `nix profile list --json` store paths; a match is
+  removed with `nix profile remove <name>`, a non-profile app is
+  refused harmlessly (logged). Label shows "Removing…" while running.
+- Drop-target sections get a highlight wash while a matching drag
+  hovers them; busy cells can't start new drags; pointer-leave cancels
+  a drag without installing/uninstalling anything.
+
+Verified on the VM: index dump + cache round-trip (unit-tested), cache
+load on start (instant), the Install hint states ("Indexing nixpkgs…" /
+"Search to install from nixpkgs"), and the desktop-path → profile
+element matching (bash equivalent against a real `nix profile install
+nixpkgs#xterm`). Typing and the two drag gestures need a live human to
+sign off; `xterm` is installed in the profile as a test subject for
+drag-to-uninstall. Follow-ups: pkg index RSS is ~50 MB (could pack into
+one string arena), and installed-state could be shown on package cells.
 
 ## P5 — Polish
 
@@ -225,7 +266,8 @@ Apps section first.
 - `nix develop` first, always; missing system libs go into `flake.nix`.
 - Clippy clean at `-D warnings`; no `unwrap`/`expect` outside `main.rs`
   startup and tests; `anyhow` in binaries, `thiserror` in libs.
-- Daemon single-threaded except the P4 indexer thread.
+- Daemon single-threaded except the P4 indexer thread and the P4.6 nix
+  threads (package index/rank + profile-mutation worker).
 - `tracing` only (client crate may `println!`).
 - Rendering changes cannot be verified headless — describe what to check
   visually in the PR/commit instead of claiming it was tested.

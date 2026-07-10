@@ -14,12 +14,14 @@ mod content;
 mod hypr;
 mod ipc;
 mod launch;
+mod nix;
 mod pins;
 mod renderer;
 mod state;
 mod surface;
 mod usage;
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -100,6 +102,12 @@ fn main() -> anyhow::Result<()> {
     let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
     let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
 
+    // The nix thread owns the nixpkgs package index (Install-section
+    // search) and serializes `nix profile` mutations; results arrive
+    // over this channel.
+    let (nix_tx, nix_rx) = channel::channel::<nix::Event>();
+    let nix = nix::spawn(nix_tx);
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -133,6 +141,12 @@ fn main() -> anyhow::Result<()> {
         base_len: 0,
         asset_folder: None,
         asset_file: None,
+        asset_pkg: None,
+        nix,
+        pkg_hits: Vec::new(),
+        pkg_hits_query: String::new(),
+        pkg_state: PkgIndexState::Loading,
+        busy_ids: HashSet::new(),
         file_index: Vec::new(),
         files_dir: None,
         pending_icons: None,
@@ -163,6 +177,15 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("registering apps channel: {e}"))?;
+
+    event_loop
+        .handle()
+        .insert_source(nix_rx, |event, _, app| {
+            if let channel::Event::Msg(event) = event {
+                app.on_nix_event(event);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering nix channel: {e}"))?;
 
     // Intellihide: watch Hyprland window events so the dock can stay
     // up while nothing overlaps its zone, plus a steady poll — this
@@ -244,10 +267,24 @@ pub struct App {
     icon_layers: Vec<u32>,
     /// Length of the indexed (non-transient) prefix of `entries`.
     base_len: usize,
-    /// Texture layers of the generic folder/file icons, with their
-    /// placeholder flags.
+    /// Texture layers of the generic folder/file/package icons, with
+    /// their placeholder flags.
     asset_folder: Option<(u32, bool)>,
     asset_file: Option<(u32, bool)>,
+    asset_pkg: Option<(u32, bool)>,
+    /// Handle to the nix threads (package index + profile mutations).
+    nix: nix::Nix,
+    /// Top-ranked packages for `pkg_hits_query`, delivered async by the
+    /// nix thread; the Install section renders these.
+    pkg_hits: Vec<nix::PkgEntry>,
+    /// The query `pkg_hits` answers (stale hits keep showing until the
+    /// fresh rank lands — no flicker to empty between keystrokes).
+    pkg_hits_query: String,
+    /// Whether the package index is usable yet (drives the Install hint).
+    pkg_state: PkgIndexState,
+    /// Entry ids (package attrs / desktop ids) with a profile mutation
+    /// in flight; their cells render dimmed and ignore input.
+    busy_ids: HashSet<String>,
     /// Home-tree file index the search ranks against (fresh per rescan).
     file_index: Vec<apps::FileEntry>,
     /// Directory the Files section is navigated into (`None` = the
@@ -285,6 +322,17 @@ pub struct App {
     zone_free: bool,
 
     exit: bool,
+}
+
+/// Readiness of the nixpkgs package index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PkgIndexState {
+    /// The nix thread is still loading or dumping the index.
+    Loading,
+    /// The index is searchable (rank queries get answers).
+    Ready,
+    /// No cache and the dump failed; package search is unavailable.
+    Failed,
 }
 
 /// Grid scrolling and paging state.
@@ -393,6 +441,10 @@ const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
 /// Cap on file-search results shown in the Files section.
 const FILE_RESULTS_MAX: usize = 24;
 
+/// Minimum query length before the package index is ranked — one
+/// character matches half of nixpkgs and helps no one.
+const PKG_QUERY_MIN: usize = 2;
+
 /// Cap on entries listed when navigated into a directory.
 const FILES_LIST_MAX: usize = 300;
 
@@ -493,6 +545,42 @@ impl App {
         }
     }
 
+    /// A message from the nix threads: the index became searchable, a
+    /// rank answer arrived, or a profile mutation finished.
+    fn on_nix_event(&mut self, event: nix::Event) {
+        match event {
+            nix::Event::IndexReady(count) => {
+                info!("package index ready: {count} packages");
+                self.pkg_state = PkgIndexState::Ready;
+                self.refilter();
+            }
+            nix::Event::IndexFailed => {
+                self.pkg_state = PkgIndexState::Failed;
+                self.schedule_frame();
+            }
+            nix::Event::Ranked { query, hits } => {
+                self.pkg_hits = hits;
+                self.pkg_hits_query = query;
+                // Re-render only if the answer matches what's typed; an
+                // outdated one keeps waiting for its follower.
+                if self.pkg_hits_query == self.search.query {
+                    self.refilter();
+                }
+            }
+            nix::Event::Done { id, ok } => {
+                debug!("profile mutation for {id}: ok={ok}");
+                self.busy_ids.remove(&id);
+                if ok {
+                    // The profile changed under us: rescan so the Apps
+                    // grid gains/loses the entry.
+                    self.indexer.request_rescan();
+                }
+                self.update_hover();
+                self.schedule_frame();
+            }
+        }
+    }
+
     /// The indexer thread finished: adopt the entries and upload icons
     /// (or stash them until the renderer exists).
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
@@ -540,6 +628,7 @@ impl App {
         };
         self.asset_folder = asset("asset-folder");
         self.asset_file = asset("asset-file");
+        self.asset_pkg = asset("asset-pkg");
 
         match self.renderer.as_mut() {
             Some(renderer) => renderer.set_icons(&icons),
@@ -584,6 +673,7 @@ impl App {
         }
         if searching {
             visible[content::SECTION_FILES] = self.file_results();
+            visible[content::SECTION_INSTALL] = self.pkg_results();
         } else {
             // Hide pinned apps from the grid when the search box is
             // empty — they're already visible on the dock.
@@ -623,6 +713,7 @@ impl App {
             exec,
             icon: None,
             needs_terminal: false,
+            path: None,
         });
         self.kinds.push(apps::EntryKind::File);
         self.placeholders.push(placeholder);
@@ -643,6 +734,64 @@ impl App {
             out.push(self.push_transient_file(&f.path, &f.name, exec, f.is_dir));
         }
         out
+    }
+
+    /// Append one transient Install-section entry for a nixpkgs package
+    /// (kind Package, generic package icon layer) and return its index.
+    /// The entry id is the package attr — the install handle.
+    fn push_transient_pkg(&mut self, pkg: &nix::PkgEntry) -> usize {
+        let (id, name, version) = (pkg.attr.clone(), pkg.name.clone(), pkg.version.clone());
+        let (layer, placeholder) = self.asset_pkg.unwrap_or((0, true));
+        self.entries.push(AppEntry {
+            id,
+            name,
+            description: Some(version),
+            exec: String::new(),
+            icon: None,
+            needs_terminal: false,
+            path: None,
+        });
+        self.kinds.push(apps::EntryKind::Package);
+        self.placeholders.push(placeholder);
+        self.icon_layers.push(layer);
+        self.entries.len() - 1
+    }
+
+    /// Rank the package index against the query and append the top
+    /// matches as transient entries, returning their indices for the
+    /// Install section.
+    fn pkg_results(&mut self) -> Vec<usize> {
+        if self.pkg_state != PkgIndexState::Ready
+            || self.search.query.chars().count() < PKG_QUERY_MIN
+        {
+            return Vec::new();
+        }
+        // Ranking 110k packages is too slow for the render path: the
+        // nix thread does it and answers with a Ranked event, which
+        // refilters again. Until then the previous hits keep showing.
+        if self.pkg_hits_query != self.search.query {
+            self.nix.request(nix::Request::Rank {
+                query: self.search.query.clone(),
+            });
+        }
+        let hits = self.pkg_hits.clone();
+        hits.iter().map(|p| self.push_transient_pkg(p)).collect()
+    }
+
+    /// Hint shown centered in an empty Install section.
+    fn install_hint(&self) -> &'static str {
+        match self.pkg_state {
+            PkgIndexState::Loading => "Indexing nixpkgs…",
+            PkgIndexState::Failed => "Package search unavailable",
+            PkgIndexState::Ready if self.search.query.is_empty() => {
+                "Search to install from nixpkgs"
+            }
+            PkgIndexState::Ready if self.search.query.chars().count() < PKG_QUERY_MIN => {
+                "Keep typing…"
+            }
+            // A live query with zero matches: the generic "No results".
+            PkgIndexState::Ready => "",
+        }
     }
 
     /// Transient listing of the navigated directory's visible children —
@@ -861,26 +1010,79 @@ impl App {
         Some(insert)
     }
 
-    /// Finish a drag: pin at the dock slot it was dropped on, or — when
-    /// dropped outside the dock band — remove a dock-origin drag from the
-    /// dock entirely (unpin + exclude from the usage-sort fill).
-    fn drop_drag(&mut self, drag: DragState, insert: Option<usize>) {
+    /// Finish a drag. Apps pin at the dock slot they were dropped on
+    /// (dock-origin drags dropped elsewhere unpin), a profile app
+    /// dropped on the Install section uninstalls, and a package dropped
+    /// on the Apps section (or the dock) installs. `released` is false
+    /// when the drag ended by the pointer leaving the surface — that
+    /// path never installs or uninstalls anything.
+    fn drop_drag(&mut self, drag: DragState, insert: Option<usize>, released: bool) {
         let Some(entry) = self.entries.get(drag.entry_idx) else {
             return; // entries were replaced mid-drag
         };
-        let app_id = entry.id.clone();
+        let (id, path) = (entry.id.clone(), entry.path.clone());
+        let kind = self.kinds.get(drag.entry_idx).copied();
+        let section = if released {
+            content::section_at(&self.current_layout(), drag.pos)
+        } else {
+            None
+        };
         debug!(
-            "drop: id={app_id} from_dock={} insert={insert:?}",
+            "drop: id={id} kind={kind:?} from_dock={} insert={insert:?} section={section:?}",
             drag.from_dock
         );
-        match insert {
-            Some(slot) => self.pins.pin_at(&app_id, slot),
-            None if drag.from_dock => self.pins.exclude(&app_id),
-            None => {}
+        match kind {
+            Some(apps::EntryKind::Package) => {
+                if (section == Some(content::SECTION_APPS) || insert.is_some())
+                    && !self.busy_ids.contains(&id)
+                {
+                    info!("installing {id}");
+                    self.busy_ids.insert(id.clone());
+                    self.nix.request(nix::Request::Install { attr: id });
+                }
+            }
+            Some(apps::EntryKind::App)
+                if section == Some(content::SECTION_INSTALL) && !self.busy_ids.contains(&id) =>
+            {
+                // Uninstall — the nix thread checks whether the app
+                // really came from the profile and refuses otherwise.
+                if let Some(path) = path.map(|p| p.to_string_lossy().into_owned()) {
+                    info!("uninstalling {id}");
+                    self.busy_ids.insert(id.clone());
+                    self.nix.request(nix::Request::Remove {
+                        id,
+                        desktop_path: path,
+                    });
+                } else {
+                    debug!("{id} has no desktop path; cannot uninstall");
+                }
+            }
+            _ => match insert {
+                Some(slot) => self.pins.pin_at(&id, slot),
+                None if drag.from_dock => self.pins.exclude(&id),
+                None => {}
+            },
         }
         self.recompute_dock_order();
         self.update_hover();
         self.schedule_frame();
+    }
+
+    /// The section that would accept the dragged entry if dropped at
+    /// `pos` (drop-target highlight): Apps installs a package, Install
+    /// uninstalls an app.
+    fn drag_drop_section(
+        &self,
+        layout: &content::Layout,
+        pos: (f32, f32),
+        entry_idx: usize,
+    ) -> Option<usize> {
+        let section = content::section_at(layout, pos)?;
+        match self.kinds.get(entry_idx) {
+            Some(apps::EntryKind::Package) if section == content::SECTION_APPS => Some(section),
+            Some(apps::EntryKind::App) if section == content::SECTION_INSTALL => Some(section),
+            _ => None,
+        }
     }
 
     /// What the pointer is over right now (`None` when outside).
@@ -952,6 +1154,11 @@ impl App {
         let Some(entry) = self.entries.get(index) else {
             return;
         };
+        // Packages aren't launchable — installing is a drag to the Apps
+        // section, not a click.
+        if self.kinds.get(index) == Some(&apps::EntryKind::Package) {
+            return;
+        }
         let (exec, id) = (entry.exec.clone(), entry.id.clone());
         let needs_terminal = entry.needs_terminal;
         if let Err(e) = launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
@@ -1115,8 +1322,20 @@ impl App {
             .map(|drag| content::DragFrame {
                 entry_idx: drag.entry_idx,
                 pos: drag.pos,
-                dock_insert: self.drag_dock_insert(&layout, drag.pos),
+                // The insertion bar means "pin here" — packages install
+                // instead, so don't show it for them.
+                dock_insert: if self.kinds.get(drag.entry_idx) == Some(&apps::EntryKind::Package) {
+                    None
+                } else {
+                    self.drag_dock_insert(&layout, drag.pos)
+                },
+                drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
             });
+        let busy: Vec<bool> = self
+            .entries
+            .iter()
+            .map(|e| self.busy_ids.contains(&e.id))
+            .collect();
         let scene = content::scene(
             &self.config,
             &layout,
@@ -1145,6 +1364,8 @@ impl App {
                 files_path: &self.files_path_display(),
                 dock_order: &self.dock_order,
                 drag: drag_frame,
+                install_hint: self.install_hint(),
+                busy: &busy,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -1692,7 +1913,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 Hit::GridCell(s, cell) => app.search.visible[s].get(cell).copied(),
                                 Hit::SearchButton | Hit::FilesBack => None,
                             };
-                            if let Some(entry_idx) = entry_idx {
+                            // Cells with a profile mutation in flight
+                            // can't start a new drag.
+                            let busy = entry_idx.is_some_and(|i| {
+                                app.entries
+                                    .get(i)
+                                    .is_some_and(|e| app.busy_ids.contains(&e.id))
+                            });
+                            if let (Some(entry_idx), false) = (entry_idx, busy) {
                                 let from_dock = matches!(hit, Hit::DockIcon(_));
                                 app.gesture.dragging = Some(DragState {
                                     entry_idx,
@@ -1722,7 +1950,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 // surface, treat it as a drop outside the dock: unpin and
                 // leave the popup open (don't autohide).
                 if let Some(drag) = app.gesture.dragging.take() {
-                    app.drop_drag(drag, None);
+                    app.drop_drag(drag, None, false);
                     return; // skip autohide — keep popup open
                 }
                 app.update_hover();
@@ -1753,7 +1981,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         // Drag drop: pin/unpin and never treat as a click.
                         if let Some(drag) = app.gesture.dragging.take() {
                             let insert = app.drag_dock_insert(&app.current_layout(), drag.pos);
-                            app.drop_drag(drag, insert);
+                            app.drop_drag(drag, insert, true);
                         } else {
                             // Native button behavior: activate on release,
                             // only if it happens on the item the press armed

@@ -35,6 +35,9 @@ pub const ICON_SIZE: u32 = 48;
 pub enum EntryKind {
     App,
     File,
+    /// A nixpkgs package search result in the Install section
+    /// (transient, not launchable; drag to Apps installs it).
+    Package,
     Asset,
 }
 
@@ -162,6 +165,7 @@ fn home_folders() -> Vec<AppEntry> {
                 exec: format!("xdg-open {}", crate::launch::shell_quote(&path)),
                 icon: Some("folder".to_owned()),
                 needs_terminal: false,
+                path: None,
             })
         })
         .collect();
@@ -173,17 +177,22 @@ fn home_folders() -> Vec<AppEntry> {
 /// these texture layers (one per keystroke can't rasterize new icons).
 /// Empty names keep them out of every fuzzy match.
 fn icon_assets() -> Vec<AppEntry> {
-    [("asset-folder", "folder"), ("asset-file", "text-x-generic")]
-        .into_iter()
-        .map(|(id, icon)| AppEntry {
-            id: id.to_owned(),
-            name: String::new(),
-            description: None,
-            exec: "true".to_owned(),
-            icon: Some(icon.to_owned()),
-            needs_terminal: false,
-        })
-        .collect()
+    [
+        ("asset-folder", "folder"),
+        ("asset-file", "text-x-generic"),
+        ("asset-pkg", "package-x-generic"),
+    ]
+    .into_iter()
+    .map(|(id, icon)| AppEntry {
+        id: id.to_owned(),
+        name: String::new(),
+        description: None,
+        exec: "true".to_owned(),
+        icon: Some(icon.to_owned()),
+        needs_terminal: false,
+        path: None,
+    })
+    .collect()
 }
 
 /// Cap on the home-file index: keeps per-keystroke ranking and memory

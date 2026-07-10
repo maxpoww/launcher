@@ -419,6 +419,9 @@ pub struct DragFrame {
     /// Target dock insertion slot (0 = before first, n = after last)
     /// while hovering the dock band; `None` when outside the dock.
     pub dock_insert: Option<usize>,
+    /// Section that would accept this drop (install/uninstall target),
+    /// washed with a highlight while hovered; `None` otherwise.
+    pub drop_section: Option<usize>,
 }
 
 /// Per-frame dynamic inputs to scene assembly.
@@ -456,6 +459,13 @@ pub struct FrameInput<'a> {
     pub dock_order: &'a [usize],
     /// Active drag for ghost icon and insertion indicator; `None` at rest.
     pub drag: Option<DragFrame>,
+    /// Hint shown centered in an empty Install section (index state /
+    /// search prompt); empty string falls back to "No results".
+    pub install_hint: &'a str,
+    /// Entries with a profile mutation in flight, aligned with
+    /// `entries`: their cells swap the name for an "Installing…" /
+    /// "Removing…" note. Empty slice = nothing busy.
+    pub busy: &'a [bool],
 }
 
 /// Assemble the draw scene for one frame.
@@ -484,6 +494,8 @@ pub fn scene(
         files_path,
         dock_order,
         drag,
+        install_hint,
+        busy,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     let (w, h) = surface;
@@ -590,6 +602,16 @@ pub fn scene(
     }
     // Drag-and-drop visuals: insertion bar + ghost icon.
     if let Some(df) = drag {
+        // Wash the section that would accept this drop.
+        if let Some(target) = df.drop_section {
+            let vp = &layout.sections[target].viewport;
+            let hl = config.theme.highlight_rgba();
+            scene.rects.push(RectInst {
+                rect: Rect::new(vp.x - 6.0, vp.y - 4.0, vp.w + 12.0, vp.h + 8.0),
+                radius: 14.0,
+                color: [hl[0], hl[1], hl[2], (hl[3] * 1.4).min(0.3)],
+            });
+        }
         // Thin vertical bar at the would-be insertion point.
         if let Some(insert_slot) = df.dock_insert {
             if let Some(first) = layout.dock_slots.first() {
@@ -739,10 +761,10 @@ pub fn scene(
             ..Default::default()
         };
         if sec.cells == 0 {
-            // Empty state: Install has none yet by design; Apps/Files
-            // show one only when a search matched nothing in them.
+            // Empty state: Install shows its index/search hint;
+            // Apps/Files show one only when a search matched nothing.
             let text = match s {
-                SECTION_INSTALL => "Coming soon",
+                SECTION_INSTALL if !install_hint.is_empty() => install_hint,
                 _ if !query.is_empty() => "No results",
                 _ => {
                     scene.grids.push(grid);
@@ -842,14 +864,24 @@ pub fn scene(
                             });
                         }
                     }
+                    // A profile mutation in flight swaps the name for a
+                    // progress note (dimmed).
+                    let is_busy = busy.get(entry_idx).copied().unwrap_or(false);
+                    let name = if !is_busy {
+                        truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
+                    } else if s == SECTION_INSTALL {
+                        "Installing…".to_string()
+                    } else {
+                        "Removing…".to_string()
+                    };
                     grid.labels.push(Label {
-                        text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
+                        text: name,
                         pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
                         max_w: cell.w - 12.0,
                         font_px: LABEL_FONT_PX,
                         line_px: LABEL_LINE_PX,
                         centered: true,
-                        dim: false,
+                        dim: is_busy,
                         cache: true,
                         clip: None,
                     });
@@ -898,6 +930,7 @@ mod tests {
                 exec: "true".into(),
                 icon: None,
                 needs_terminal: false,
+                path: None,
             })
             .collect()
     }
@@ -993,13 +1026,17 @@ mod tests {
             SURFACE,
             &FrameInput {
                 alpha: 1.0,
+                install_hint: "Search to install from nixpkgs",
                 ..Default::default()
             },
         );
         assert_eq!(s.grids[SECTION_FILES].icons.len(), 6);
-        // Install is empty: no icons, just the placeholder label.
+        // Install is empty: no icons, just the hint label.
         assert!(s.grids[SECTION_INSTALL].icons.is_empty());
-        assert!(!s.grids[SECTION_INSTALL].labels.is_empty());
+        assert_eq!(
+            s.grids[SECTION_INSTALL].labels[0].text,
+            "Search to install from nixpkgs"
+        );
     }
 
     #[test]

@@ -25,6 +25,11 @@ The whole UI is one rounded "card" that slides up from the bottom edge:
 - **Self-updating** — the app index rescans whenever the dock is
   summoned, so installs/uninstalls show up without a restart. Icons
   come from your freedesktop icon theme (SVG and PNG).
+- **Install section** — searching also matches all ~110k nixpkgs
+  packages (index cached locally, refreshed daily). Drag a package onto
+  the Apps section to `nix profile install` it — the app appears in the
+  grid when done; drag a profile-installed app onto Install to remove
+  it. Apps that didn't come from `nix profile` are left alone.
 - Launched apps are fully detached (`setsid`, double-fork): they
   survive daemon restarts.
 
@@ -104,7 +109,7 @@ xdg.configFile."waverunner/config.toml".text = ''
 Core launcher (P1–P4) works and is verified live on Hyprland: dock,
 grid, search, launch, animations, intellihide, persistent icon cache
 (cold start ~26 ms warm), terminal apps, drag-and-drop dock pinning,
-and the three-section popup (Apps / Install / Files). Open work: real
-GPU + scale-2 + 144 Hz visual checks, package search for the Install
-section, fractional scaling, theming polish, and prefix modes (see
-the plan).
+the three-section popup (Apps / Install / Files), and nixpkgs package
+search with drag-to-(un)install. Open work: real GPU + scale-2 +
+144 Hz visual checks, fractional scaling, theming polish, and prefix
+modes (see the plan).

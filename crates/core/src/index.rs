@@ -27,6 +27,9 @@ pub struct AppEntry {
     pub icon: Option<String>,
     /// Whether `Terminal=true` was set (needs a terminal emulator wrapper).
     pub needs_terminal: bool,
+    /// Absolute path of the source `.desktop` file; `None` for synthetic
+    /// entries (home folders, icon assets, transient search results).
+    pub path: Option<std::path::PathBuf>,
 }
 
 /// The full application index the search UI ranks against.
@@ -91,6 +94,7 @@ impl DesktopIndex {
                 exec,
                 icon: entry.icon().map(str::to_string),
                 needs_terminal: entry.terminal(),
+                path: Some(entry.path.clone()),
                 id: id.clone(),
             });
             seen.insert(id);
