@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use calloop::generic::Generic;
@@ -94,8 +94,11 @@ pub fn listen(handle: &LoopHandle<'static, App>, path: &Path) -> anyhow::Result<
 fn handle_client(stream: UnixStream, app: &mut App) {
     let response = match read_command(&stream) {
         Ok(command) => {
-            debug!("ipc command: {command}");
+            // handle_command draws and commits the first frame before
+            // returning, so this covers command-to-first-frame-submitted.
+            let start = Instant::now();
             app.handle_command(command);
+            debug!("ipc command {command} handled in {:?}", start.elapsed());
             Response::Ok
         }
         Err(e) => {

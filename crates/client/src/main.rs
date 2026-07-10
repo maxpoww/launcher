@@ -7,21 +7,31 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use waverunner_proto::{Command, Response};
 
+const USAGE: &str = "usage: waverunner-ctl [--time] <toggle|show|hide|expand|collapse>";
+
 fn main() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(1);
-    let (Some(cmd), None) = (args.next(), args.next()) else {
-        bail!("usage: waverunner-ctl <toggle|show|hide|expand|collapse>");
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let timed = args
+        .iter()
+        .position(|a| a == "--time")
+        .map(|i| args.remove(i))
+        .is_some();
+    let [cmd] = args.as_slice() else {
+        bail!("{USAGE}");
     };
-    let cmd: Command = cmd
-        .parse()
-        .context("usage: waverunner-ctl <toggle|show|hide|expand|collapse>")?;
+    let cmd: Command = cmd.parse().context(USAGE)?;
 
     let path = waverunner_proto::socket_path();
+    // The daemon handles the command — including rendering and committing
+    // the first frame — before it writes the response, so this round-trip
+    // covers command-to-first-frame-submitted (presentation then lands on
+    // the next vblank).
+    let start = Instant::now();
     let mut stream = UnixStream::connect(&path).with_context(|| {
         format!(
             "cannot connect to daemon at {} (is waverunner running?)",
@@ -42,7 +52,12 @@ fn main() -> anyhow::Result<()> {
         .parse::<Response>()
         .context("malformed daemon response")?
     {
-        Response::Ok => Ok(()),
+        Response::Ok => {
+            if timed {
+                println!("round-trip: {:?}", start.elapsed());
+            }
+            Ok(())
+        }
         Response::Err(reason) => bail!("daemon refused command: {reason}"),
     }
 }
