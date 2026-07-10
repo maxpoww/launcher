@@ -49,7 +49,9 @@ bind = SUPER, SPACE, exec, waverunner-ctl toggle
 ```
 
 `waverunner-ctl` speaks `toggle | show | hide | expand | collapse` over
-a Unix socket in `$XDG_RUNTIME_DIR`.
+a Unix socket in `$XDG_RUNTIME_DIR`. Pass `--time` to print the
+command round-trip (the daemon draws the first frame before it
+responds, so this is command-to-first-frame; ~5–8 ms typical).
 
 ## Configuration
 
@@ -100,6 +102,9 @@ xdg.configFile."waverunner/config.toml".text = ''
 ## Status
 
 Core launcher (P1–P4) works and is verified live on Hyprland: dock,
-grid, search, launch, animations, intellihide. Open work: persistent
-icon cache, `Terminal=true` app handling, pinned dock apps, fractional
-scaling, and prefix modes / system-wide search (see the plan).
+grid, search, launch, animations, intellihide, persistent icon cache
+(cold start ~26 ms warm), terminal apps, drag-and-drop dock pinning,
+and the three-section popup (Apps / Install / Files). Open work: real
+GPU + scale-2 + 144 Hz visual checks, package search for the Install
+section, fractional scaling, theming polish, and prefix modes (see
+the plan).

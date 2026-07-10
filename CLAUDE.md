@@ -142,9 +142,10 @@ describe what to verify visually instead of claiming it is tested.
       bottom-anchored. Validate the smithay-client-toolkit + wgpu combo
       works before anything else. *(accepted 2026-07-06 on a Hyprland VM,
       llvmpipe, scale 1 — recheck on real GPU + scale 2)*
-- [~] **P2 — IPC:** socket server + `waverunner-ctl`; Hyprland keybind docs;
-      target < 50ms keypress-to-visible. *(mash/malformed/SIGKILL-recovery/
-      second-instance verified; latency measurement + keybind docs open)*
+- [x] **P2 — IPC:** socket server + `waverunner-ctl`; Hyprland keybind docs;
+      target < 50ms keypress-to-visible. *(accepted 2026-07-09: mash/
+      malformed/SIGKILL-recovery/second-instance verified; `--time`
+      round-trip 5–8 ms steady, 36 ms cold — under target)*
 - [~] **P3 — Animation & dock interaction:** frame-callback loop,
       spring/easing, grow + fade, idle-at-rest; edge-reveal strip,
       scroll expand/collapse, pointer-leave auto-hide.

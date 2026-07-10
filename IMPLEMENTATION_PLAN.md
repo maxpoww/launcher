@@ -53,7 +53,7 @@ Open follow-ups: repeat the visual checks on real GPU hardware (Vulkan
 adapter, not llvmpipe) and confirm no frame callbacks with
 `WAYLAND_DEBUG=1`.
 
-## P2 — IPC (mostly verified)
+## P2 — IPC ✅ (accepted 2026-07-09)
 
 **Goal:** reliable control socket; < 50 ms command-to-visible.
 
@@ -68,11 +68,17 @@ Verified live:
   stealing the socket (the original unconditional-remove orphaned the
   running daemon; fixed with the connect-probe).
 
-Remaining tasks:
-1. Hyprland keybind docs in README:
-   `bind = SUPER, SPACE, exec, waverunner-ctl toggle`.
-2. Measure latency: timestamp in client before connect vs. first frame
-   presented (add a `tracing` span; target < 50 ms).
+Remaining tasks: none — both closed 2026-07-09:
+1. ✅ Hyprland keybind docs live in README ("Hyprland integration").
+2. ✅ Latency measured: `waverunner-ctl --time` stamps before `connect()`
+   and prints the round-trip after the `ok` response; since the daemon
+   renders and commits the first frame *before* responding, the
+   round-trip covers command-to-first-frame-submitted (presentation
+   lands on the next vblank). Daemon logs the handle+render span at
+   debug level. Measured on the VM (llvmpipe): 5–8 ms steady state,
+   36 ms for the first frame after an idle cold start — well under the
+   50 ms target. (Keybind path adds `waverunner-ctl` process spawn on
+   top, not included in the measurement.)
 
 ## P3 — Animation & dock interaction (working, checks open)
 
@@ -94,15 +100,24 @@ Working (verified live in the VM):
   P4 must suppress this while a search query is active / keyboard
   focused.
 
-Remaining tasks:
-1. Wire `[animation]` config through end-to-end sanity pass (kind,
-   duration, spring params for open and close independently) — schema is
-   parsed and plumbed; confirm each knob has visible effect.
+Remaining tasks (real-hardware only; VM-verifiable items closed
+2026-07-09):
+1. ✅ `[animation]` knobs verified end-to-end by timing the command →
+   "settled, going idle" gap in the debug log under contrasting
+   configs (scratch `XDG_CONFIG_HOME`): `close.duration_ms` 1200 →
+   1.27 s observed, 100 → 145 ms; `open.kind = "ease-out-quart"` +
+   `duration_ms = 800` → 870 ms; spring 550/42/1 → ~400 ms vs soft
+   underdamped 80/8/2 → ~3.35 s. kind/duration/stiffness/damping/mass
+   all take effect, open and close independently.
 2. Handle scale factor in pixel math (integer scale now; fractional-scale
-   protocol is P5). Verify no blurry rendering at scale 2.
+   protocol is P5). Verify no blurry rendering at scale 2. *(needs real
+   hardware / scale-2 output)*
 3. Verify frame pacing at 60 Hz and 144 Hz monitors (engine is dt-based
    and unit-tested for this; confirm visually on real hardware).
-4. Confirm zero frame requests when settled with `WAYLAND_DEBUG=1`.
+4. ✅ Zero frame requests when settled, confirmed with
+   `WAYLAND_DEBUG=1`: a 90 s capture on a live session contains a
+   66.7 s span with zero client requests (no `frame`, no `commit`);
+   redraw bursts correlate 1:1 with pointer motion / animation.
 
 ## P4 — Launcher core (icons + grid + launch + search done)
 
