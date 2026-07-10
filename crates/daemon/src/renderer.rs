@@ -70,6 +70,10 @@ pub struct Renderer {
     /// Bind group over the icon texture array; `None` until the indexer
     /// delivers icons.
     icon_bind: Option<wgpu::BindGroup>,
+    /// The icon texture array itself, kept for per-layer updates of the
+    /// dynamic package icons; layer count includes the reserved tail.
+    icon_texture: Option<wgpu::Texture>,
+    icon_layer_count: u32,
 
     font_system: FontSystem,
     swash: SwashCache,
@@ -350,6 +354,8 @@ impl Renderer {
             icon_bind_layout,
             icon_sampler,
             icon_bind: None,
+            icon_texture: None,
+            icon_layer_count: 0,
             font_system,
             swash,
             text_viewport,
@@ -372,10 +378,12 @@ impl Renderer {
 
     /// Upload the icon texture array delivered by the indexer thread.
     /// `icons` holds one premultiplied RGBA8 `ICON_SIZE`² image per app.
+    /// `RANK_HITS_MAX` extra layers are reserved past the end for the
+    /// dynamic package-search icons ([`Renderer::update_icon_layer`]).
     pub fn set_icons(&mut self, icons: &[Vec<u8>]) {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
-        let layers = icons.len().max(1) as u32;
+        let layers = (icons.len() + crate::nix::RANK_HITS_MAX).max(1) as u32;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("waverunner.icons"),
             size: wgpu::Extent3d {
@@ -433,6 +441,43 @@ impl Renderer {
                 },
             ],
         }));
+        self.icon_layer_count = layers;
+        self.icon_texture = Some(texture);
+    }
+
+    /// Overwrite one icon texture-array layer (a dynamic package icon in
+    /// the reserved tail of the array). Out-of-range layers and missing
+    /// textures are ignored — a rescan re-uploads shortly anyway.
+    pub fn update_icon_layer(&mut self, layer: u32, pixels: &[u8]) {
+        let Some(texture) = &self.icon_texture else {
+            return;
+        };
+        if layer >= self.icon_layer_count || pixels.len() != (ICON_SIZE * ICON_SIZE * 4) as usize {
+            return;
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ICON_SIZE * 4),
+                rows_per_image: Some(ICON_SIZE),
+            },
+            wgpu::Extent3d {
+                width: ICON_SIZE,
+                height: ICON_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Render one frame of the given scene.

@@ -249,7 +249,7 @@ fn scan_home_files() -> Vec<FileEntry> {
 /// start), then rasterizing the icon file. Icon-name → file-path
 /// resolutions get their own persistent cache because the theme
 /// directory walk — not rasterization — dominates index time.
-struct IconLoader {
+pub(crate) struct IconLoader {
     theme: String,
     rasters: HashMap<String, (Vec<u8>, bool)>,
     disk: DiskCache,
@@ -257,7 +257,7 @@ struct IconLoader {
 }
 
 impl IconLoader {
-    fn new(theme: String) -> Self {
+    pub(crate) fn new(theme: String) -> Self {
         Self {
             resolutions: ResolutionCache::load(&theme),
             rasters: HashMap::new(),
@@ -266,8 +266,16 @@ impl IconLoader {
         }
     }
 
+    /// Persist newly learned icon-name resolutions (no-op when clean).
+    /// The nix thread calls this after each ranked batch; concurrent
+    /// saves with the indexer thread are benign (atomic whole-file
+    /// writes of the same mapping, last one wins).
+    pub(crate) fn save_resolutions(&mut self) {
+        self.resolutions.save();
+    }
+
     /// The entry's icon as `(pixels, is_placeholder)`.
-    fn icon_for(&mut self, entry: &AppEntry) -> (Vec<u8>, bool) {
+    pub(crate) fn icon_for(&mut self, entry: &AppEntry) -> (Vec<u8>, bool) {
         let (key, path) = match self.resolve(entry) {
             Some(path) => (path.clone(), Some(path)),
             None => (format!("placeholder:{}", entry.name), None),

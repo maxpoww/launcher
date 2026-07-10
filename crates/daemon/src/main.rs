@@ -106,7 +106,7 @@ fn main() -> anyhow::Result<()> {
     // search) and serializes `nix profile` mutations; results arrive
     // over this channel.
     let (nix_tx, nix_rx) = channel::channel::<nix::Event>();
-    let nix = nix::spawn(nix_tx);
+    let nix = nix::spawn(nix_tx, config.theme.icon_theme.clone());
 
     let mut app = App {
         registry_state: RegistryState::new(&globals),
@@ -145,6 +145,9 @@ fn main() -> anyhow::Result<()> {
         nix,
         pkg_hits: Vec::new(),
         pkg_hits_query: String::new(),
+        pkg_hit_icons: Vec::new(),
+        pkg_hit_placeholders: Vec::new(),
+        pkg_layer_base: 0,
         pkg_state: PkgIndexState::Loading,
         busy_ids: HashSet::new(),
         file_index: Vec::new(),
@@ -280,6 +283,13 @@ pub struct App {
     /// The query `pkg_hits` answers (stale hits keep showing until the
     /// fresh rank lands — no flicker to empty between keystrokes).
     pkg_hits_query: String,
+    /// Rasterized icons for `pkg_hits` (aligned), uploaded into the
+    /// texture array's reserved tail; and their letter-tile flags.
+    pkg_hit_icons: Vec<Vec<u8>>,
+    pkg_hit_placeholders: Vec<bool>,
+    /// First reserved texture layer: the app icon count from the last
+    /// `set_icons` upload.
+    pkg_layer_base: u32,
     /// Whether the package index is usable yet (drives the Install hint).
     pkg_state: PkgIndexState,
     /// Entry ids (package attrs / desktop ids) with a profile mutation
@@ -558,9 +568,17 @@ impl App {
                 self.pkg_state = PkgIndexState::Failed;
                 self.schedule_frame();
             }
-            nix::Event::Ranked { query, hits } => {
+            nix::Event::Ranked {
+                query,
+                hits,
+                icons,
+                placeholders,
+            } => {
                 self.pkg_hits = hits;
                 self.pkg_hits_query = query;
+                self.pkg_hit_icons = icons;
+                self.pkg_hit_placeholders = placeholders;
+                self.upload_pkg_icons();
                 // Re-render only if the answer matches what's typed; an
                 // outdated one keeps waiting for its follower.
                 if self.pkg_hits_query == self.search.query {
@@ -630,8 +648,14 @@ impl App {
         self.asset_file = asset("asset-file");
         self.asset_pkg = asset("asset-pkg");
 
+        self.pkg_layer_base = icons.len() as u32;
         match self.renderer.as_mut() {
-            Some(renderer) => renderer.set_icons(&icons),
+            Some(renderer) => {
+                renderer.set_icons(&icons);
+                // set_icons rebuilt the array: restore the package-hit
+                // icons into its reserved tail.
+                self.upload_pkg_icons();
+            }
             None => self.pending_icons = Some(icons),
         }
         // Indices may have shifted: drop any armed click or in-flight drag,
@@ -736,12 +760,34 @@ impl App {
         out
     }
 
-    /// Append one transient Install-section entry for a nixpkgs package
-    /// (kind Package, generic package icon layer) and return its index.
-    /// The entry id is the package attr — the install handle.
-    fn push_transient_pkg(&mut self, pkg: &nix::PkgEntry) -> usize {
+    /// Copy the current package-hit icons into the icon texture array's
+    /// reserved tail (base = app icon count of the last `set_icons`).
+    fn upload_pkg_icons(&mut self) {
+        let base = self.pkg_layer_base;
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        for (i, pixels) in self.pkg_hit_icons.iter().enumerate() {
+            renderer.update_icon_layer(base + i as u32, pixels);
+        }
+    }
+
+    /// Append one transient Install-section entry for the `hit_idx`-th
+    /// ranked package (kind Package, its own icon from the reserved
+    /// texture tail) and return its index. The entry id is the package
+    /// attr — the install handle.
+    fn push_transient_pkg(&mut self, pkg: &nix::PkgEntry, hit_idx: usize) -> usize {
         let (id, name, version) = (pkg.attr.clone(), pkg.name.clone(), pkg.version.clone());
-        let (layer, placeholder) = self.asset_pkg.unwrap_or((0, true));
+        let (layer, placeholder) = if hit_idx < self.pkg_hit_icons.len() {
+            (
+                self.pkg_layer_base + hit_idx as u32,
+                self.pkg_hit_placeholders[hit_idx],
+            )
+        } else {
+            // No rasterized icon delivered (shouldn't happen): generic
+            // package icon.
+            self.asset_pkg.unwrap_or((0, true))
+        };
         self.entries.push(AppEntry {
             id,
             name,
@@ -775,7 +821,10 @@ impl App {
             });
         }
         let hits = self.pkg_hits.clone();
-        hits.iter().map(|p| self.push_transient_pkg(p)).collect()
+        hits.iter()
+            .enumerate()
+            .map(|(i, p)| self.push_transient_pkg(p, i))
+            .collect()
     }
 
     /// Hint shown centered in an empty Install section.
@@ -1712,6 +1761,7 @@ impl LayerShellHandler for App {
                         renderer.set_icons(&icons);
                     }
                     self.renderer = Some(renderer);
+                    self.upload_pkg_icons();
                 }
                 Err(e) => {
                     error!("renderer init failed: {e:#}");

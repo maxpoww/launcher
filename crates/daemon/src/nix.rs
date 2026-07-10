@@ -50,8 +50,16 @@ pub enum Event {
     /// There is no cache and the dump failed; searching is unavailable.
     IndexFailed,
     /// The top matches for `query` (echoed so stale answers are
-    /// recognizable after the query moved on).
-    Ranked { query: String, hits: Vec<PkgEntry> },
+    /// recognizable after the query moved on), each with a rasterized
+    /// `ICON_SIZE`² icon: the theme icon named like the package when
+    /// one exists (Papirus ships icons for far more apps than are
+    /// installed), a letter tile otherwise (`placeholder` true).
+    Ranked {
+        query: String,
+        hits: Vec<PkgEntry>,
+        icons: Vec<Vec<u8>>,
+        placeholders: Vec<bool>,
+    },
     /// An install/remove finished. `id` echoes the entry id the request
     /// carried (package attr / desktop-entry id).
     Done { id: String, ok: bool },
@@ -70,8 +78,9 @@ pub enum Request {
     Remove { id: String, desktop_path: String },
 }
 
-/// How many top-ranked packages a `Ranked` reply carries.
-const RANK_HITS_MAX: usize = 24;
+/// How many top-ranked packages a `Ranked` reply carries. The renderer
+/// reserves this many texture-array layers for their icons.
+pub const RANK_HITS_MAX: usize = 24;
 
 /// Handle to the nix threads; dropping it stops them after the work in
 /// flight.
@@ -97,16 +106,17 @@ impl Nix {
 
 /// Spawn the nix threads. The index thread loads/refreshes the package
 /// index and serves rank queries (they coalesce to the newest, so slow
-/// ranking never queues up behind typing). Profile mutations run on
-/// their own worker: a minutes-long install must not block search.
-pub fn spawn(events: Sender<Event>) -> Nix {
+/// ranking never queues up behind typing); it also rasterizes the hit
+/// icons via `icon_theme`. Profile mutations run on their own worker:
+/// a minutes-long install must not block search.
+pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
     let (ranks, ranks_rx) = mpsc::channel::<String>();
     let (mutations, mutations_rx) = mpsc::channel::<Request>();
 
     let rank_events = events.clone();
     let spawned = std::thread::Builder::new()
         .name("waverunner-nix".into())
-        .spawn(move || index_and_rank(rank_events, ranks_rx));
+        .spawn(move || index_and_rank(rank_events, ranks_rx, icon_theme));
     if let Err(e) = spawned {
         warn!("failed to spawn nix index thread: {e}");
     }
@@ -140,7 +150,7 @@ pub fn spawn(events: Sender<Event>) -> Nix {
 
 /// Body of the index thread: cache load, background refresh, then rank
 /// service until the daemon goes away.
-fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>) {
+fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_theme: String) {
     let cache = cache_path();
     let mut pkgs = match load_cache(&cache) {
         Ok(pkgs) => {
@@ -178,6 +188,7 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>) {
 
     let keys: Vec<&str> = pkgs.iter().map(|p| p.haystack.as_str()).collect();
     let mut searcher = waverunner_core::Searcher::new();
+    let mut loader = crate::apps::IconLoader::new(icon_theme);
     while let Ok(mut query) = ranks.recv() {
         // Typing outruns ranking: serve only the newest queued query.
         while let Ok(newer) = ranks.try_recv() {
@@ -190,13 +201,39 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>) {
             .take(RANK_HITS_MAX)
             .map(|&i| pkgs[i].clone())
             .collect();
+        // Most package names double as theme icon names (firefox, vlc,
+        // gimp, …) — Papirus and friends ship icons for far more apps
+        // than are installed. Misses become letter tiles.
+        let (icons, placeholders): (Vec<_>, Vec<_>) = hits
+            .iter()
+            .map(|p| {
+                loader.icon_for(&waverunner_core::index::AppEntry {
+                    id: format!("pkg-{}", p.attr),
+                    name: p.name.clone(),
+                    description: None,
+                    exec: String::new(),
+                    icon: Some(p.name.clone()),
+                    needs_terminal: false,
+                    path: None,
+                })
+            })
+            .unzip();
+        loader.save_resolutions();
         debug!(
-            "pkg rank {query:?}: {} of {} in {:?}",
+            "pkg rank {query:?}: {} of {} in {:?} (incl. icons)",
             ranked.len(),
             keys.len(),
             started.elapsed()
         );
-        if events.send(Event::Ranked { query, hits }).is_err() {
+        if events
+            .send(Event::Ranked {
+                query,
+                hits,
+                icons,
+                placeholders,
+            })
+            .is_err()
+        {
             return;
         }
     }
@@ -476,6 +513,33 @@ mod tests {
                 ranked.len(),
                 keys.len(),
                 started.elapsed()
+            );
+        }
+    }
+
+    /// Manual check of theme-icon coverage for package names:
+    /// `cargo test -p waverunner-daemon pkg_icon -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs the machine's icon theme"]
+    fn pkg_icon_lookup_coverage() {
+        let mut loader = crate::apps::IconLoader::new("Papirus-Dark".into());
+        for name in ["firefox", "vlc", "gimp", "cowsay", "ripgrep", "xterm"] {
+            let (_, placeholder) = loader.icon_for(&waverunner_core::index::AppEntry {
+                id: format!("pkg-{name}"),
+                name: name.into(),
+                description: None,
+                exec: String::new(),
+                icon: Some(name.into()),
+                needs_terminal: false,
+                path: None,
+            });
+            eprintln!(
+                "{name}: {}",
+                if placeholder {
+                    "letter tile"
+                } else {
+                    "themed icon"
+                }
             );
         }
     }

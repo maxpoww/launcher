@@ -235,14 +235,25 @@ drag-and-drop package management:
   hovers them; busy cells can't start new drags; pointer-leave cancels
   a drag without installing/uninstalling anything.
 
+Package cells show real icons: the rank thread owns its own
+`IconLoader` and resolves each hit's pname against the configured icon
+theme (Papirus ships icons for far more apps than are installed —
+firefox/vlc/gimp/xterm all resolve; CLI-only tools fall back to the
+colored letter tile). The renderer reserves `RANK_HITS_MAX` texture
+layers past the app icons; each `Ranked` answer uploads into that tail
+(`update_icon_layer`), and rescans re-upload after `set_icons` rebuilds
+the array.
+
 Verified on the VM: index dump + cache round-trip (unit-tested), cache
 load on start (instant), the Install hint states ("Indexing nixpkgs…" /
-"Search to install from nixpkgs"), and the desktop-path → profile
-element matching (bash equivalent against a real `nix profile install
-nixpkgs#xterm`). Typing and the two drag gestures need a live human to
-sign off; `xterm` is installed in the profile as a test subject for
-drag-to-uninstall. Follow-ups: pkg index RSS is ~50 MB (could pack into
-one string arena), and installed-state could be shown on package cells.
+"Search to install from nixpkgs"), the desktop-path → profile element
+matching (bash equivalent against a real `nix profile install
+nixpkgs#xterm`), and theme-icon coverage for package names (ignored
+test `pkg_icon_lookup_coverage`). Typing and the two drag gestures need
+a live human to sign off; `xterm` is installed in the profile as a test
+subject for drag-to-uninstall. Follow-ups: pkg index RSS is ~50 MB
+(could pack into one string arena), and installed-state could be shown
+on package cells.
 
 ## P5 — Polish
 
