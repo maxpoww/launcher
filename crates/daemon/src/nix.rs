@@ -199,19 +199,12 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
     // letter tile instantly instead of paying a full (negative) theme
     // walk per new name — that walk was why a repeated search felt so
     // much faster than a first one.
-    let started = std::time::Instant::now();
-    let available = crate::apps::available_icon_names(loader.themes());
-    debug!(
-        "icon availability: {} names from {:?} in {:?}",
-        available.len(),
-        loader.themes(),
-        started.elapsed()
-    );
+    let mut icon_names = IconNames::sweep(loader.themes());
     // The theme's standard "software install" box, rasterized once —
     // the default face of every package no icon name matched.
     let generic: (Vec<u8>, bool) = GENERIC_PKG_ICONS
         .iter()
-        .find_map(|name| available.get(*name).cloned())
+        .find_map(|name| icon_names.resolve(name))
         .map(|actual| {
             loader.icon_for(&waverunner_core::index::AppEntry {
                 id: "pkg-generic".into(),
@@ -268,16 +261,21 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
             Err(mpsc::TryRecvError::Disconnected) => return,
             Err(mpsc::TryRecvError::Empty) => {}
         }
+        // A fresh install drops its bundled icon into hicolor: re-sweep
+        // when stale so it shows up without a daemon restart.
+        if icon_names.is_stale() {
+            icon_names = IconNames::sweep(loader.themes());
+        }
         // Most package names double as theme icon names (firefox, vlc,
         // gimp, …) — Papirus and friends ship icons for far more apps
-        // than are installed; KDE/GNOME apps hide behind reverse-DNS
-        // aliases. Names that exist nowhere become letter tiles.
+        // than are installed; installed apps hide behind reverse-DNS
+        // vendor ids. Names that exist nowhere get the installer box.
         let (icons, placeholders): (Vec<_>, Vec<_>) = hits
             .iter()
             .map(|p| {
                 let icon = icon_candidates(p)
                     .into_iter()
-                    .find_map(|c| available.get(&c.to_lowercase()).cloned());
+                    .find_map(|c| icon_names.resolve(&c));
                 match icon {
                     Some(icon) => loader.icon_for(&waverunner_core::index::AppEntry {
                         id: format!("pkg-{}", p.attr),
@@ -346,6 +344,64 @@ const GENERIC_PKG_ICONS: [&str; 4] = [
     "package",
     "application-x-executable",
 ];
+
+/// Re-sweep the icon availability map when older than this: a freshly
+/// installed package drops its bundled icon into hicolor, and the next
+/// search should pick it up without a daemon restart.
+const ICON_SWEEP_MAX_AGE: Duration = Duration::from_secs(300);
+
+/// The icon names installed on this system, from one readdir sweep:
+/// lowercased stem → actual lookup name, plus reverse-DNS aliases —
+/// apps ship their icons under vendor ids no pname can guess
+/// (`com.mitchellh.ghostty` becomes reachable as `ghostty`).
+struct IconNames {
+    names: std::collections::HashMap<String, String>,
+    aliases: std::collections::HashMap<String, String>,
+    built: std::time::Instant,
+}
+
+impl IconNames {
+    fn sweep(themes: &[String]) -> Self {
+        let started = std::time::Instant::now();
+        let names = crate::apps::available_icon_names(themes);
+        let mut aliases = std::collections::HashMap::new();
+        for (lower, actual) in &names {
+            if let Some((_, last)) = lower.rsplit_once('.') {
+                // Guard tiny tails ("com.foo.x") from hijacking names.
+                if last.len() >= 3 {
+                    aliases
+                        .entry(last.to_owned())
+                        .or_insert_with(|| actual.clone());
+                }
+            }
+        }
+        debug!(
+            "icon sweep: {} names, {} reverse-DNS aliases in {:?}",
+            names.len(),
+            aliases.len(),
+            started.elapsed()
+        );
+        Self {
+            names,
+            aliases,
+            built: started,
+        }
+    }
+
+    fn is_stale(&self) -> bool {
+        self.built.elapsed() > ICON_SWEEP_MAX_AGE
+    }
+
+    /// Actual lookup name for a candidate: exact (case-insensitive)
+    /// stems first, reverse-DNS tails second.
+    fn resolve(&self, candidate: &str) -> Option<String> {
+        let lower = candidate.to_lowercase();
+        self.names
+            .get(&lower)
+            .or_else(|| self.aliases.get(&lower))
+            .cloned()
+    }
+}
 
 /// Icon names worth trying for a package, best first: the pname
 /// itself, the reverse-DNS aliases KDE and GNOME apps publish their
@@ -767,13 +823,12 @@ mod tests {
     #[ignore = "needs the machine's icon theme"]
     fn pkg_icon_lookup_coverage() {
         let loader = crate::apps::IconLoader::new("Papirus-Dark".into());
-        let started = std::time::Instant::now();
-        let available = crate::apps::available_icon_names(loader.themes());
+        let icon_names = IconNames::sweep(loader.themes());
         eprintln!(
-            "sweep: {} icon names from {:?} in {:?}",
-            available.len(),
-            loader.themes(),
-            started.elapsed()
+            "sweep: {} names, {} aliases from {:?}",
+            icon_names.names.len(),
+            icon_names.aliases.len(),
+            loader.themes()
         );
         for probe in [
             "firefox",
@@ -782,21 +837,15 @@ mod tests {
             "cowsay",
             "ripgrep",
             "xterm",
+            "ghostty",
             "org.kde.kate",
             "org.gnome.Calculator",
         ] {
-            eprintln!(
-                "{probe}: {}",
-                if available.contains_key(&probe.to_lowercase()) {
-                    "available"
-                } else {
-                    "missing"
-                }
-            );
+            eprintln!("{probe}: {:?}", icon_names.resolve(probe));
         }
         let generic = GENERIC_PKG_ICONS
             .iter()
-            .find_map(|name| available.get(*name).cloned());
+            .find_map(|name| icon_names.resolve(name));
         eprintln!("generic fallback icon: {generic:?}");
         if let Ok(pkgs) = load_cache(&cache_path()) {
             let covered = pkgs
@@ -804,7 +853,7 @@ mod tests {
                 .filter(|p| {
                     icon_candidates(p)
                         .iter()
-                        .any(|c| available.contains_key(&c.to_lowercase()))
+                        .any(|c| icon_names.resolve(c).is_some())
                 })
                 .count();
             eprintln!(
