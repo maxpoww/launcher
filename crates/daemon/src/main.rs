@@ -1335,8 +1335,25 @@ impl App {
                     && self.handle_grid_drop(drag.entry_idx, &id, drag.pos);
                 if !boxed && kind != Some(apps::EntryKind::Group) {
                     match insert {
-                        Some(slot) => self.pins.pin_at(&id, slot),
-                        None if drag.from_dock => self.pins.exclude(&id),
+                        Some(slot) => {
+                            // The dock parts in compact coordinates
+                            // (origin removed): translate the raw slot
+                            // so the drop lands in the visible gap,
+                            // not one past it.
+                            let slot = if drag.from_dock {
+                                let origin =
+                                    self.dock_order.iter().position(|&e| e == drag.entry_idx);
+                                slot - usize::from(origin.is_some_and(|o| o < slot))
+                            } else {
+                                slot
+                            };
+                            self.pins.pin_at(&id, slot);
+                            self.refilter();
+                        }
+                        None if drag.from_dock => {
+                            self.pins.exclude(&id);
+                            self.refilter();
+                        }
                         None => {}
                     }
                 }
@@ -1344,6 +1361,9 @@ impl App {
         }
         self.reorder_slot = None;
         self.reorder_dwell = None;
+        // The drop finalized a new arrangement: any parting offsets
+        // belong to the old one and would wobble the wrong icons.
+        self.dock_slide.fill(0.0);
         self.recompute_dock_order();
         self.update_hover();
         self.schedule_frame();
