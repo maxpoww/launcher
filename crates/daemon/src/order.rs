@@ -85,6 +85,19 @@ impl OrderDb {
         self.save();
     }
 
+    /// Place `id` immediately before `anchor` (a newly created box
+    /// takes its target app's grid position). Unknown anchors append.
+    pub fn insert_before(&mut self, id: &str, anchor: &str) {
+        self.order.retain(|o| o != id);
+        let at = self
+            .order
+            .iter()
+            .position(|o| o == anchor)
+            .unwrap_or(self.order.len());
+        self.order.insert(at, id.to_owned());
+        self.save();
+    }
+
     fn save(&self) {
         if let Some(dir) = self.path.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {

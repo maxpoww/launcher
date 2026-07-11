@@ -160,7 +160,9 @@ fn main() -> anyhow::Result<()> {
         group_minis: Vec::new(),
         order: order::OrderDb::load(),
         reorder_slot: None,
+        reorder_dwell: None,
         apps_slide: Vec::new(),
+        dock_slide: Vec::new(),
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
@@ -325,12 +327,18 @@ pub struct App {
     group_minis: Vec<(usize, [Option<u32>; 4])>,
     /// Persistent Apps-grid order (install date + manual overrides).
     order: order::OrderDb,
-    /// Drag-to-reorder: the insertion slot under the pointer, in full
-    /// visible-list coordinates (`None` = no reorder pending).
+    /// Drag-to-reorder: the make-room gap's display slot (`None` = no
+    /// grid drag in flight).
     reorder_slot: Option<usize>,
+    /// Pending gap move: the wanted slot and when the pointer started
+    /// hovering it (the gap moves after [`REORDER_DWELL`]).
+    reorder_dwell: Option<(usize, Instant)>,
     /// Per-cell animated display indices for the Apps grid (the
     /// make-room glide); identity when nothing is in flight.
     apps_slide: Vec<f32>,
+    /// Animated displacement per dock slot, in slot units (the dock's
+    /// make-room glide during drags).
+    dock_slide: Vec<f32>,
     /// Group-open transition: raw progress (0..1), its target, and the
     /// surface point the group expands from (the clicked tile).
     group_anim: f32,
@@ -493,6 +501,11 @@ const PKG_QUERY_MIN: usize = 2;
 
 /// How long a failed install/remove flashes "Failed" on its cell.
 const FAIL_FLASH: Duration = Duration::from_secs(5);
+
+/// How long the pointer must linger over a new grid slot before the
+/// make-room gap moves there. Folding is immediate; reordering is
+/// deliberate — that split keeps side-neighbor folds reachable.
+const REORDER_DWELL: Duration = Duration::from_millis(180);
 
 /// Cap on entries listed when navigated into a directory.
 const FILES_LIST_MAX: usize = 300;
@@ -786,9 +799,6 @@ impl App {
                 let id = &self.entries[idx].id;
                 !self.pins.is_pinned(id) && !self.groups.is_grouped(id)
             });
-            // Grid order: install date, with manual drags on top.
-            visible[content::SECTION_APPS]
-                .sort_by_key(|&idx| self.order.index_of(&self.entries[idx].id));
             // A dissolved group can't stay open.
             if self
                 .app_group
@@ -804,9 +814,14 @@ impl App {
                     .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
                     .collect();
             } else {
-                // Boxes lead the grid, loose apps follow.
+                // Boxes and loose apps share one grid order: install
+                // date with manual drags on top (new boxes take their
+                // target's slot; unseen ids append at the end).
                 let mut cells = self.group_cells();
                 cells.append(&mut visible[content::SECTION_APPS]);
+                let ids: Vec<String> = cells.iter().map(|&i| self.entries[i].id.clone()).collect();
+                self.order.sync(ids.iter().map(String::as_str));
+                cells.sort_by_key(|&idx| self.order.index_of(&self.entries[idx].id));
                 visible[content::SECTION_APPS] = cells;
             }
             if self.files_dir.is_some() {
@@ -936,13 +951,14 @@ impl App {
             .collect()
     }
 
-    /// Build one transient Apps-grid cell per group (id `group:<idx>`,
-    /// kind Group) and record the member texture layers for the 2×2
-    /// mini preview. Returns the cells' entry indices, group order.
+    /// Build one transient Apps-grid cell per group (id
+    /// `group:<stable-id>`, kind Group) and record the member texture
+    /// layers for the 2×2 mini preview. Returns the cells' entry
+    /// indices, group order.
     fn group_cells(&mut self) -> Vec<usize> {
         // Snapshot first: labels and member layers read groups+entries
         // while pushing mutates the entry arrays.
-        let snapshot: Vec<(String, [Option<u32>; 4])> = (0..self.groups.groups().len())
+        let snapshot: Vec<(String, String, [Option<u32>; 4])> = (0..self.groups.groups().len())
             .map(|g| {
                 let label = self.groups.label(g, |id| {
                     self.entries
@@ -958,15 +974,18 @@ impl App {
                         .position(|e| &e.id == member)
                         .and_then(|idx| self.icon_layers.get(idx).copied());
                 }
-                (label, minis)
+                (
+                    format!("group:{}", self.groups.groups()[g].id),
+                    label,
+                    minis,
+                )
             })
             .collect();
         snapshot
             .into_iter()
-            .enumerate()
-            .map(|(g, (label, minis))| {
+            .map(|(gid, label, minis)| {
                 self.entries.push(AppEntry {
-                    id: format!("group:{g}"),
+                    id: gid,
                     name: label,
                     description: None,
                     exec: String::new(),
@@ -1324,6 +1343,7 @@ impl App {
             }
         }
         self.reorder_slot = None;
+        self.reorder_dwell = None;
         self.recompute_dock_order();
         self.update_hover();
         self.schedule_frame();
@@ -1353,28 +1373,18 @@ impl App {
         Some((d, fx.fract(), fy.fract().clamp(0.0, 1.0)))
     }
 
-    /// The display-slot range the dragged kind may occupy: boxes stay
-    /// leading, loose apps stay behind them, box members span the box.
-    fn drag_slot_range(&self, kind: Option<apps::EntryKind>, len: usize) -> (usize, usize) {
-        let last = len.saturating_sub(1);
-        if self.app_group.is_some() {
-            (0, last)
-        } else if kind == Some(apps::EntryKind::Group) {
-            (0, self.groups.groups().len().saturating_sub(1).min(last))
-        } else {
-            (self.groups.groups().len().min(last), last)
-        }
-    }
-
     /// Track the drag's grid target in display space. The make-room
-    /// gap starts at the pickup slot (nothing moves on pickup) and
-    /// follows the pointer cell by cell — with dead margins against
-    /// boundary jitter — so the gap under the pointer is exactly where
-    /// the drop will land. Returns the fold target (ring), if any;
+    /// gap starts at the pickup slot (nothing moves on pickup); it
+    /// only moves after the pointer *lingers* over a new slot
+    /// ([`REORDER_DWELL`]) — that dwell is what makes folding onto a
+    /// side neighbor possible at all: icons no longer dive out of the
+    /// way the moment you approach them. Hovering an item rings it as
+    /// a fold target immediately. Returns the fold target, if any;
     /// the gap itself lives in `self.reorder_slot`.
     fn update_grid_target(&mut self, layout: &content::Layout) -> Option<(usize, usize)> {
         let Some(drag) = self.gesture.dragging.as_ref() else {
             self.reorder_slot = None;
+            self.reorder_dwell = None;
             return None;
         };
         let kind = self.kinds.get(drag.entry_idx).copied();
@@ -1386,35 +1396,32 @@ impl App {
             );
         let visible = &self.search.visible[content::SECTION_APPS];
         let (len, pos) = (visible.len(), drag.pos);
-        let Some(orig) = visible.iter().position(|&v| v == drag.entry_idx) else {
+        let orig = visible.iter().position(|&v| v == drag.entry_idx);
+        let (Some(orig), true) = (orig, grid_drag && len > 0) else {
             self.reorder_slot = None;
+            self.reorder_dwell = None;
             return None;
         };
-        if !grid_drag || len == 0 {
-            self.reorder_slot = None;
-            return None;
-        }
-        let (lo, hi) = self.drag_slot_range(kind, len);
-        let slot = (*self.reorder_slot.get_or_insert(orig)).clamp(lo, hi);
-        self.reorder_slot = Some(slot);
+        let slot = *self.reorder_slot.get_or_insert(orig);
 
         // Outside the grid the gap simply stays where it was.
-        let (d, fx, fy) = self.apps_display_cell(layout, pos)?;
-        let d = d.min(len.saturating_sub(1)).clamp(lo, hi);
+        let Some((d, fx, fy)) = self.apps_display_cell(layout, pos) else {
+            self.reorder_dwell = None;
+            return None;
+        };
+        let d = d.min(len.saturating_sub(1));
         if d == slot {
+            self.reorder_dwell = None;
             return None; // hovering the gap: stable
         }
-        // Dead margins: retarget only once the pointer is decisively
-        // inside the neighboring cell.
-        if !(0.12..0.88).contains(&fx) || !(0.08..0.92).contains(&fy) {
-            return None;
-        }
-        // The item shown at display cell `d`.
+        // The item shown at display cell `d`: hovering it rings a fold
+        // target immediately (apps only; boxes never fold or nest).
         let compact = d - usize::from(d > slot);
         let full = compact + usize::from(compact >= orig);
-        // Center band of a foldable item folds (apps only; boxes never
-        // nest); everything else slides the gap here.
-        if kind == Some(apps::EntryKind::App) && (0.34..0.66).contains(&fx) {
+        if kind == Some(apps::EntryKind::App)
+            && (0.15..0.85).contains(&fx)
+            && (0.08..0.92).contains(&fy)
+        {
             let foldable = self.search.visible[content::SECTION_APPS]
                 .get(full)
                 .is_some_and(|&t| match self.kinds.get(t) {
@@ -1423,11 +1430,34 @@ impl App {
                     _ => false,
                 });
             if foldable {
+                self.reorder_dwell = None;
                 return Some((content::SECTION_APPS, full));
             }
         }
-        self.reorder_slot = Some(d);
-        self.dirty = true;
+        // Reordering: move the gap only after a dwell.
+        let want = if fx >= 0.85 {
+            (d + 1).min(len.saturating_sub(1))
+        } else {
+            d
+        };
+        if want == slot {
+            self.reorder_dwell = None;
+            return None;
+        }
+        match self.reorder_dwell {
+            Some((w, since)) if w == want => {
+                if since.elapsed() >= REORDER_DWELL {
+                    self.reorder_slot = Some(want);
+                    self.reorder_dwell = None;
+                }
+                // Keep frames coming while the dwell clock runs.
+                self.dirty = true;
+            }
+            _ => {
+                self.reorder_dwell = Some((want, Instant::now()));
+                self.dirty = true;
+            }
+        }
         None
     }
 
@@ -1480,7 +1510,7 @@ impl App {
                             Some(apps::EntryKind::Group) => {
                                 if let Some(g) = target_id
                                     .strip_prefix("group:")
-                                    .and_then(|n| n.parse::<usize>().ok())
+                                    .and_then(|gid| self.groups.index_by_id(gid))
                                 {
                                     self.groups.add(g, id);
                                     self.refilter();
@@ -1488,7 +1518,11 @@ impl App {
                                 }
                             }
                             Some(apps::EntryKind::App) if self.app_group.is_none() => {
-                                self.groups.create(&target_id, id);
+                                // The new box takes the target's grid
+                                // position.
+                                let box_id = self.groups.create(&target_id, id);
+                                self.order
+                                    .insert_before(&format!("group:{box_id}"), &target_id);
                                 self.refilter();
                                 return true;
                             }
@@ -1503,29 +1537,16 @@ impl App {
             let n_members = self.groups.groups()[g].members.len();
             let full_before = (slot + usize::from(slot >= orig)).min(n_members);
             self.groups.move_member(g, id, full_before);
-        } else if kind == Some(apps::EntryKind::Group) {
-            if let Some(from) = id
-                .strip_prefix("group:")
-                .and_then(|n| n.parse::<usize>().ok())
-            {
-                self.groups.move_group(from, slot);
-                if self.app_group == Some(from) {
-                    self.app_group = Some(slot.min(self.groups.groups().len() - 1));
-                }
-            }
         } else {
-            // Anchor on the compacted list (dragged removed): the item
-            // currently displayed at the gap.
-            let n_boxes = self.groups.groups().len();
+            // Boxes and apps share one order: anchor on the compacted
+            // list (dragged removed) — the item displayed at the gap.
             let compact_ids: Vec<String> = self.search.visible[content::SECTION_APPS]
                 .iter()
                 .filter(|&&idx| idx != entry_idx)
-                .skip(n_boxes)
                 .map(|&idx| self.entries[idx].id.clone())
                 .collect();
             let refs: Vec<&str> = compact_ids.iter().map(String::as_str).collect();
-            self.order
-                .move_within(id, &refs, slot.saturating_sub(n_boxes));
+            self.order.move_within(id, &refs, slot);
         }
         self.refilter();
         true
@@ -1591,7 +1612,7 @@ impl App {
                             .entries
                             .get(entry_idx)
                             .and_then(|e| e.id.strip_prefix("group:"))
-                            .and_then(|n| n.parse::<usize>().ok());
+                            .and_then(|gid| self.groups.index_by_id(gid));
                         if let Some(g) = g {
                             self.open_group(g);
                         }
@@ -1795,6 +1816,9 @@ impl App {
         // fold target (ring); remember which cell to hide (the ghost
         // is its visual).
         let over_cell = self.update_grid_target(&layout);
+        // The icon in hand is the ghost: hide its resting cell — the
+        // grid cell for grid-origin drags, the dock slot for
+        // dock-origin ones.
         let drag_hidden = self.gesture.dragging.as_ref().and_then(|drag| {
             (!drag.from_dock
                 && matches!(
@@ -1803,6 +1827,12 @@ impl App {
                 ))
             .then_some(drag.entry_idx)
         });
+        let dock_hidden = self
+            .gesture
+            .dragging
+            .as_ref()
+            .filter(|d| d.from_dock)
+            .map(|d| d.entry_idx);
         // Make-room glide: each Apps cell eases toward its display
         // slot (the gap starts at the pickup slot, so nothing moves
         // until the pointer asks for room). ~90 ms exponential
@@ -1835,6 +1865,59 @@ impl App {
                 slide_animating = true;
             } else {
                 self.apps_slide[i] = target;
+            }
+        }
+        // Dock make-room glide, same idea in dock-slot units: dragging
+        // over the dock parts the icons around the insertion point;
+        // a dock-origin drag's gap rests at its old slot meanwhile.
+        let dock_insert_now =
+            self.gesture
+                .dragging
+                .as_ref()
+                .and_then(|d| match self.kinds.get(d.entry_idx) {
+                    Some(apps::EntryKind::App) | Some(apps::EntryKind::File) => {
+                        self.drag_dock_insert(&layout, d.pos)
+                    }
+                    _ => None,
+                });
+        let n_dock = layout.dock_slots.len();
+        if self.dock_slide.len() != n_dock {
+            self.dock_slide = vec![0.0; n_dock];
+        }
+        let dock_origin = self
+            .gesture
+            .dragging
+            .as_ref()
+            .filter(|d| d.from_dock)
+            .and_then(|d| self.dock_order.iter().position(|&e| e == d.entry_idx))
+            .filter(|&o| o < n_dock);
+        for kk in 0..n_dock {
+            let target = match (dock_insert_now, dock_origin) {
+                (Some(g), Some(o)) => {
+                    if kk == o {
+                        0.0
+                    } else {
+                        let compact = if kk > o { kk - 1 } else { kk };
+                        let g_c = g - usize::from(o < g);
+                        (compact + usize::from(compact >= g_c)) as f32 - kk as f32
+                    }
+                }
+                // A foreign icon hovers: part the row around the slot.
+                (Some(g), None) => {
+                    if kk >= g {
+                        0.5
+                    } else {
+                        -0.5
+                    }
+                }
+                _ => 0.0,
+            };
+            let cur = self.dock_slide[kk];
+            if (cur - target).abs() > 0.005 {
+                self.dock_slide[kk] = cur + (target - cur) * k;
+                slide_animating = true;
+            } else {
+                self.dock_slide[kk] = target;
             }
         }
         if slide_animating {
@@ -1872,13 +1955,6 @@ impl App {
             .map(|drag| content::DragFrame {
                 entry_idx: drag.entry_idx,
                 pos: drag.pos,
-                // The insertion bar means "pin here" — packages install
-                // instead, so don't show it for them.
-                dock_insert: if self.kinds.get(drag.entry_idx) == Some(&apps::EntryKind::Package) {
-                    None
-                } else {
-                    self.drag_dock_insert(&layout, drag.pos)
-                },
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
                 over_cell,
             });
@@ -1931,6 +2007,8 @@ impl App {
                 apps_group: &self.apps_group_name(),
                 apps_slide: &self.apps_slide,
                 drag_hidden,
+                dock_hidden,
+                dock_slide: &self.dock_slide,
                 group_expand,
                 group_origin: self.group_origin,
             },

@@ -390,6 +390,19 @@ codium is seeded on the VM to play with.
   ease-out, dt-based, no overshoot). The cell loop was rewritten flat
   (per-cell cyclic-page position closure) to support fractional
   positions.
+- **Second pass (2026-07-11):** the gap only moves after the pointer
+  lingers `REORDER_DWELL` (180 ms) over a new slot — hovering an item
+  rings it as a fold target immediately, so folding onto a side
+  neighbor works (icons no longer dive out of the way as you
+  approach). Boxes got stable ids (`groups.json` v2, auto-migrated)
+  and share one grid order with apps (`apps-order.json` holds
+  `group:<id>` entries; a new box takes its target's slot via
+  `insert_before`) — so boxes drag and reorder exactly like apps,
+  anywhere in the grid. The dock's insertion bar is gone: the dock
+  row parts around the hovered insertion point (±half slot, same
+  eased glide; dock-origin drags leave a resting gap at their slot),
+  and the drag ghost rides a topmost overlay pass so it can never
+  hide behind other icons.
 - **Box open/close animation:** members scale/glide out of the
   clicked tile (ease-out cubic, ~180 ms) into a centered **3×3 folder
   grid** (GROUP_COLS; pages + dots as everywhere); labels pop in at

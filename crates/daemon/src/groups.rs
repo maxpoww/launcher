@@ -14,6 +14,10 @@ use tracing::{info, warn};
 /// One app group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
+    /// Stable identity, key into the grid-order db (grid position
+    /// survives other boxes dissolving). Generated at creation.
+    #[serde(default)]
+    pub id: String,
     /// Custom name; `None` renders a generated "<First> +N" label.
     pub name: Option<String>,
     /// Member desktop-file ids, in insertion order.
@@ -33,6 +37,7 @@ pub struct GroupDb {
 
 impl GroupDb {
     /// Load from disk, or start empty if the file doesn't exist yet.
+    /// Boxes from before stable ids get one assigned (and saved).
     pub fn load() -> Self {
         let path = crate::usage::data_path("groups.json");
         let groups = std::fs::read_to_string(&path)
@@ -40,7 +45,21 @@ impl GroupDb {
             .and_then(|s| serde_json::from_str::<FileFormat>(&s).ok())
             .map(|f| f.groups)
             .unwrap_or_default();
-        Self { groups, path }
+        let mut db = Self { groups, path };
+        if db.groups.iter().any(|g| g.id.is_empty()) {
+            for i in 0..db.groups.len() {
+                if db.groups[i].id.is_empty() {
+                    db.groups[i].id = fresh_id();
+                }
+            }
+            db.save();
+        }
+        db
+    }
+
+    /// Index of the group with the given stable id.
+    pub fn index_by_id(&self, id: &str) -> Option<usize> {
+        self.groups.iter().position(|g| g.id == id)
     }
 
     pub fn groups(&self) -> &[Group] {
@@ -60,18 +79,20 @@ impl GroupDb {
     }
 
     /// Create a new group of `[target, dragged]` (the drop target
-    /// leads, macOS-style) and return its index. Members already in
-    /// other groups move out of them first.
-    pub fn create(&mut self, target: &str, dragged: &str) -> usize {
+    /// leads, macOS-style) and return its stable id. Members already
+    /// in other groups move out of them first.
+    pub fn create(&mut self, target: &str, dragged: &str) -> String {
         self.remove_member(dragged);
         self.remove_member(target);
+        let id = fresh_id();
         self.groups.push(Group {
+            id: id.clone(),
             name: None,
             members: vec![target.to_owned(), dragged.to_owned()],
         });
-        info!("group created: [{target}, {dragged}]");
+        info!("group created: [{target}, {dragged}] as {id}");
         self.save();
-        self.groups.len() - 1
+        id
     }
 
     /// Add `id` to the group at `index` (moving it out of any other
@@ -97,19 +118,6 @@ impl GroupDb {
         }
         self.groups[index].members.push(id.to_owned());
         info!("group {index}: added {id}");
-        self.save();
-    }
-
-    /// Move a whole group to position `to` in the group list (manual
-    /// reordering of the leading box cells).
-    pub fn move_group(&mut self, from: usize, to: usize) {
-        if from >= self.groups.len() {
-            return;
-        }
-        let group = self.groups.remove(from);
-        let to = to.min(self.groups.len());
-        self.groups.insert(to, group);
-        info!("group moved: {from} -> {to}");
         self.save();
     }
 
@@ -169,6 +177,10 @@ impl GroupDb {
         }
     }
 
+    #[cfg(test)]
+    fn save(&self) {}
+
+    #[cfg(not(test))]
     fn save(&self) {
         if let Some(dir) = self.path.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {
@@ -189,6 +201,19 @@ impl GroupDb {
     }
 }
 
+/// A unique, stable box id (creation-time keyed; collisions defended
+/// with a process-local counter).
+fn fresh_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    format!("box-{millis}-{n}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,7 +228,8 @@ mod tests {
     #[test]
     fn create_add_and_dissolve() {
         let mut g = db();
-        let idx = g.create("firefox", "gimp");
+        let id = g.create("firefox", "gimp");
+        let idx = g.index_by_id(&id).unwrap();
         assert_eq!(g.groups()[idx].members, vec!["firefox", "gimp"]);
         assert!(g.is_grouped("gimp"));
 
@@ -226,9 +252,11 @@ mod tests {
     #[test]
     fn create_steals_members_from_other_groups() {
         let mut g = db();
-        g.create("a", "b");
-        let idx = g.create("c", "b"); // b moves; [a] dissolves
+        let first = g.create("a", "b");
+        let second = g.create("c", "b"); // b moves; [a] dissolves
         assert_eq!(g.groups().len(), 1);
+        assert!(g.index_by_id(&first).is_none());
+        let idx = g.index_by_id(&second).unwrap();
         assert_eq!(g.groups()[idx].members, vec!["c", "b"]);
         assert!(!g.is_grouped("a"));
     }
