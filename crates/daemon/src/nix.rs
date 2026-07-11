@@ -207,6 +207,24 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
         loader.themes(),
         started.elapsed()
     );
+    // The theme's standard "software install" box, rasterized once —
+    // the default face of every package no icon name matched.
+    let generic: (Vec<u8>, bool) = GENERIC_PKG_ICONS
+        .iter()
+        .find_map(|name| available.get(*name).cloned())
+        .map(|actual| {
+            loader.icon_for(&waverunner_core::index::AppEntry {
+                id: "pkg-generic".into(),
+                name: "package".into(),
+                description: None,
+                exec: String::new(),
+                icon: Some(actual),
+                needs_terminal: false,
+                path: None,
+            })
+        })
+        .filter(|(_, placeholder)| !placeholder)
+        .unwrap_or_else(|| (crate::apps::placeholder_icon("package"), true));
     let mut pending: Option<String> = None;
     loop {
         let mut query = match pending.take() {
@@ -259,7 +277,7 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
             .map(|p| {
                 let icon = icon_candidates(p)
                     .into_iter()
-                    .find(|c| available.contains(c));
+                    .find_map(|c| available.get(&c.to_lowercase()).cloned());
                 match icon {
                     Some(icon) => loader.icon_for(&waverunner_core::index::AppEntry {
                         id: format!("pkg-{}", p.attr),
@@ -270,7 +288,7 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
                         needs_terminal: false,
                         path: None,
                     }),
-                    None => (crate::apps::placeholder_icon(&p.name), true),
+                    None => generic.clone(),
                 }
             })
             .unzip();
@@ -320,10 +338,22 @@ fn rank_hits(
     hits
 }
 
+/// Generic fallback icon names for packages nothing else matched — the
+/// standard freedesktop "software installer" box, best first.
+const GENERIC_PKG_ICONS: [&str; 4] = [
+    "system-software-install",
+    "package-x-generic",
+    "package",
+    "application-x-executable",
+];
+
 /// Icon names worth trying for a package, best first: the pname
-/// itself, then the reverse-DNS aliases KDE and GNOME apps publish
-/// their icons under (`kdePackages.kate` → `org.kde.kate`,
-/// `gnome-calculator` → `org.gnome.Calculator`).
+/// itself, the reverse-DNS aliases KDE and GNOME apps publish their
+/// icons under (`kdePackages.kate` → `org.kde.kate`,
+/// `gnome-calculator` → `org.gnome.Calculator`), then the pname with
+/// trailing `-segments` progressively stripped so variants inherit the
+/// family icon (`firefox-bin` → `firefox`, `telegram-desktop-bin` →
+/// `telegram-desktop`).
 fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
     let mut candidates = vec![pkg.name.clone()];
     if let Some(rest) = pkg.attr.strip_prefix("kdePackages.") {
@@ -341,6 +371,17 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
             })
             .collect();
         candidates.push(format!("org.gnome.{camel}"));
+    }
+    let mut base = pkg.name.as_str();
+    for _ in 0..2 {
+        let Some((stripped, _)) = base.rsplit_once('-') else {
+            break;
+        };
+        if stripped.len() < 3 {
+            break;
+        }
+        candidates.push(stripped.to_owned());
+        base = stripped;
     }
     candidates
 }
@@ -620,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn icon_candidates_cover_reverse_dns_aliases() {
+    fn icon_candidates_cover_aliases_and_variants() {
         let kate = entry("kdePackages.kate".into(), "kate".into(), "1".into(), "");
         assert_eq!(icon_candidates(&kate), vec!["kate", "org.kde.kate"]);
         let calc = entry(
@@ -631,7 +672,18 @@ mod tests {
         );
         assert_eq!(
             icon_candidates(&calc),
-            vec!["gnome-calculator", "org.gnome.Calculator"]
+            vec!["gnome-calculator", "org.gnome.Calculator", "gnome"]
+        );
+        // Variants inherit the family icon via suffix stripping.
+        let tg = entry(
+            "telegram-desktop-bin".into(),
+            "telegram-desktop-bin".into(),
+            "1".into(),
+            "",
+        );
+        assert_eq!(
+            icon_candidates(&tg),
+            vec!["telegram-desktop-bin", "telegram-desktop", "telegram"]
         );
         let plain = entry("cowsay".into(), "cowsay".into(), "1".into(), "");
         assert_eq!(icon_candidates(&plain), vec!["cowsay"]);
@@ -735,17 +787,25 @@ mod tests {
         ] {
             eprintln!(
                 "{probe}: {}",
-                if available.contains(probe) {
+                if available.contains_key(&probe.to_lowercase()) {
                     "available"
                 } else {
                     "missing"
                 }
             );
         }
+        let generic = GENERIC_PKG_ICONS
+            .iter()
+            .find_map(|name| available.get(*name).cloned());
+        eprintln!("generic fallback icon: {generic:?}");
         if let Ok(pkgs) = load_cache(&cache_path()) {
             let covered = pkgs
                 .iter()
-                .filter(|p| icon_candidates(p).iter().any(|c| available.contains(c)))
+                .filter(|p| {
+                    icon_candidates(p)
+                        .iter()
+                        .any(|c| available.contains_key(&c.to_lowercase()))
+                })
                 .count();
             eprintln!(
                 "index coverage: {covered} of {} packages have a real icon",

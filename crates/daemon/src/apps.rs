@@ -540,12 +540,14 @@ fn theme_chain(configured: &str) -> Vec<String> {
     chain
 }
 
-/// Every icon name (file stem) available in `themes` or the flat
-/// pixmaps dirs — one recursive readdir sweep. Lets callers skip the
-/// expensive per-name theme walk entirely for names that exist
-/// nowhere (the common case for CLI-only packages).
-pub(crate) fn available_icon_names(themes: &[String]) -> std::collections::HashSet<String> {
-    fn collect(dir: &std::path::Path, depth: u8, names: &mut std::collections::HashSet<String>) {
+/// Every icon name available in `themes` or the flat pixmaps dirs —
+/// one recursive readdir sweep, keyed by the lowercased file stem
+/// mapping to the actual (lookup-usable) name, so `qbittorrent` still
+/// finds `qBittorrent.svg`. Lets callers skip the expensive per-name
+/// theme walk entirely for names that exist nowhere (the common case
+/// for CLI-only packages).
+pub(crate) fn available_icon_names(themes: &[String]) -> HashMap<String, String> {
+    fn collect(dir: &std::path::Path, depth: u8, names: &mut HashMap<String, String>) {
         let Ok(read) = std::fs::read_dir(dir) else {
             return;
         };
@@ -558,12 +560,14 @@ pub(crate) fn available_icon_names(themes: &[String]) -> std::collections::HashS
                 collect(&path, depth - 1, names);
             } else if kind.is_file() || kind.is_symlink() {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    names.insert(stem.to_owned());
+                    names
+                        .entry(stem.to_lowercase())
+                        .or_insert_with(|| stem.to_owned());
                 }
             }
         }
     }
-    let mut names = std::collections::HashSet::new();
+    let mut names = HashMap::new();
     for dir in icon_dirs() {
         let dir = std::path::PathBuf::from(dir);
         if dir.ends_with("pixmaps") {

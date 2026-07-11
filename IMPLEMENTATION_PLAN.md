@@ -267,9 +267,16 @@ sweep at startup collects every icon name that exists
 (`available_icon_names`, 21 006 on this VM) so names that exist
 nowhere become letter tiles instantly instead of paying a negative
 theme walk per name — that walk was why a first search felt slower
-than a repeat. Measured coverage: 1 439 of 24 004 curated packages
-have a real themed icon (the rest are CLI tools with no icon in any
-pack; GUI apps — what searches actually surface — resolve well).
+than a repeat. Coverage maximized (third pass): the availability map
+is case-insensitive (lowercased stem → actual name, so `qbittorrent`
+finds `qBittorrent.svg`) and candidates include progressive trailing
+`-segment` strips so variants inherit the family icon (`firefox-bin` →
+`firefox`, `telegram-desktop-bin` → `telegram-desktop`). Measured:
+2 588 of 24 004 curated packages resolve a real themed icon (was
+1 439); everything else shows the theme's standard installer box
+(`system-software-install`, falling back through `package-x-generic` /
+`package` / `application-x-executable`) instead of letter tiles —
+letter tiles remain only in the no-theme degenerate case.
 
 Verified on the VM: index dump + cache round-trip (unit-tested), cache
 load on start (instant), the Install hint states ("Indexing nixpkgs…" /
