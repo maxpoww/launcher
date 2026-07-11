@@ -144,7 +144,7 @@ fn main() -> anyhow::Result<()> {
         asset_pkg: None,
         nix,
         pkg_hits: Vec::new(),
-        pkg_hits_query: String::new(),
+        pkg_hits_query: None,
         pkg_hit_icons: Vec::new(),
         pkg_hit_placeholders: Vec::new(),
         pkg_layer_base: 0,
@@ -280,9 +280,10 @@ pub struct App {
     /// Top-ranked packages for `pkg_hits_query`, delivered async by the
     /// nix thread; the Install section renders these.
     pkg_hits: Vec<nix::PkgEntry>,
-    /// The query `pkg_hits` answers (stale hits keep showing until the
-    /// fresh rank lands — no flicker to empty between keystrokes).
-    pkg_hits_query: String,
+    /// The query `pkg_hits` answers — `""` is the recommendations
+    /// storefront, `None` means no answer yet. Stale hits keep showing
+    /// until the fresh rank lands (no flicker between keystrokes).
+    pkg_hits_query: Option<String>,
     /// Rasterized icons for `pkg_hits` (aligned), uploaded into the
     /// texture array's reserved tail; and their letter-tile flags.
     pkg_hit_icons: Vec<Vec<u8>>,
@@ -570,14 +571,15 @@ impl App {
             }
             nix::Event::Ranked { query, hits } => {
                 self.pkg_hits = hits;
-                self.pkg_hits_query = query;
                 // Icons for the previous hits don't fit these; show the
                 // generic tile until this query's HitIcons arrive.
                 self.pkg_hit_icons.clear();
                 self.pkg_hit_placeholders.clear();
                 // Re-render only if the answer matches what's typed; an
                 // outdated one keeps waiting for its follower.
-                if self.pkg_hits_query == self.search.query {
+                let current = query == self.search.query;
+                self.pkg_hits_query = Some(query);
+                if current {
                     self.refilter();
                 }
             }
@@ -586,11 +588,11 @@ impl App {
                 icons,
                 placeholders,
             } => {
-                if query == self.pkg_hits_query {
+                if Some(&query) == self.pkg_hits_query.as_ref() {
                     self.pkg_hit_icons = icons;
                     self.pkg_hit_placeholders = placeholders;
                     self.upload_pkg_icons();
-                    if self.pkg_hits_query == self.search.query {
+                    if query == self.search.query {
                         // Transients hold per-entry layer/placeholder:
                         // rebuild them onto the fresh icons.
                         self.refilter();
@@ -707,9 +709,11 @@ impl App {
                 _ => {}
             }
         }
+        // The Install section fills with or without a query (live
+        // search vs the recommendations storefront).
+        visible[content::SECTION_INSTALL] = self.pkg_results();
         if searching {
             visible[content::SECTION_FILES] = self.file_results();
-            visible[content::SECTION_INSTALL] = self.pkg_results();
         } else {
             // Hide pinned apps from the grid when the search box is
             // empty — they're already visible on the dock.
@@ -819,18 +823,18 @@ impl App {
     /// matches as transient entries, returning their indices for the
     /// Install section.
     fn pkg_results(&mut self) -> Vec<usize> {
-        if self.pkg_state != PkgIndexState::Ready
-            || self.search.query.chars().count() < PKG_QUERY_MIN
-        {
+        if self.pkg_state != PkgIndexState::Ready {
             return Vec::new();
         }
-        // Ranking 110k packages is too slow for the render path: the
-        // nix thread does it and answers with a Ranked event, which
+        // Ranking the index is too slow for the render path: the nix
+        // thread does it and answers with a Ranked event, which
         // refilters again. Until then the previous hits keep showing.
-        if self.pkg_hits_query != self.search.query {
-            self.nix.request(nix::Request::Rank {
-                query: self.search.query.clone(),
-            });
+        // The empty query is the recommendations storefront; a 1-char
+        // query keeps showing whatever is up (no flash to empty).
+        let query = self.search.query.clone();
+        let rankable = query.is_empty() || query.chars().count() >= PKG_QUERY_MIN;
+        if rankable && self.pkg_hits_query.as_deref() != Some(query.as_str()) {
+            self.nix.request(nix::Request::Rank { query });
         }
         let hits = self.pkg_hits.clone();
         hits.iter()

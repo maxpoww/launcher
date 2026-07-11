@@ -101,6 +101,45 @@ pub enum Request {
 /// reserves this many texture-array layers for their icons.
 pub const RANK_HITS_MAX: usize = 24;
 
+/// The Install section's storefront: household names shown before any
+/// query is typed, best-known first. Attrs missing from the index
+/// (renames, channel drift) are skipped silently.
+const RECOMMENDED: [&str; 24] = [
+    "firefox",
+    "chromium",
+    "brave",
+    "vlc",
+    "mpv",
+    "gimp",
+    "inkscape",
+    "krita",
+    "blender",
+    "obs-studio",
+    "audacity",
+    "kdePackages.kdenlive",
+    "libreoffice",
+    "thunderbird",
+    "telegram-desktop",
+    "signal-desktop",
+    "discord",
+    "spotify",
+    "steam",
+    "vscode",
+    "ghostty",
+    "alacritty",
+    "obsidian",
+    "darktable",
+];
+
+/// The recommendation entries present in the index, in list order.
+fn recommended_hits(pkgs: &[PkgEntry]) -> Vec<PkgEntry> {
+    RECOMMENDED
+        .iter()
+        .filter_map(|attr| pkgs.iter().find(|p| &p.attr == attr).cloned())
+        .take(RANK_HITS_MAX)
+        .collect()
+}
+
 /// Handle to the nix threads; dropping it stops them after the work in
 /// flight.
 pub struct Nix {
@@ -247,10 +286,16 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
             query = newer;
         }
         let started = std::time::Instant::now();
-        let hits: Vec<PkgEntry> = rank_hits(&mut searcher, &query, &pkgs)
-            .into_iter()
-            .map(|i| pkgs[i].clone())
-            .collect();
+        // The empty query is the storefront: curated recommendations
+        // instead of a rank over everything.
+        let hits: Vec<PkgEntry> = if query.is_empty() {
+            recommended_hits(&pkgs)
+        } else {
+            rank_hits(&mut searcher, &query, &pkgs)
+                .into_iter()
+                .map(|i| pkgs[i].clone())
+                .collect()
+        };
         debug!(
             "pkg rank {query:?}: {} hits of {} in {:?}",
             hits.len(),
@@ -605,11 +650,14 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
     candidates
 }
 
-/// `nix profile install nixpkgs#<attr>`; true on success.
+/// `nix profile install nixpkgs#<attr>`; true on success. Unfree
+/// packages (spotify, discord, steam, …) install like any other — a
+/// user dragging one into Apps has consented to its license.
 fn install(attr: &str) -> bool {
     info!("nix profile install nixpkgs#{attr}");
     match Command::new("nix")
-        .args(["profile", "install", &format!("nixpkgs#{attr}")])
+        .args(["profile", "install", "--impure", &format!("nixpkgs#{attr}")])
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
         .output()
     {
         Ok(out) if out.status.success() => true,
@@ -1113,6 +1161,18 @@ mod tests {
         // And again from the disk cache without budget.
         let mut none = 0;
         assert!(fetch_store_icon(path, &mut none).is_some());
+    }
+
+    #[test]
+    fn recommendations_resolve_in_order_and_skip_missing() {
+        let pkgs = vec![
+            entry("gimp".into(), "gimp".into(), "2".into(), ""),
+            entry("firefox".into(), "firefox".into(), "128".into(), ""),
+        ];
+        let hits = recommended_hits(&pkgs);
+        let attrs: Vec<&str> = hits.iter().map(|p| p.attr.as_str()).collect();
+        // List order (firefox before gimp), everything absent skipped.
+        assert_eq!(attrs, vec!["firefox", "gimp"]);
     }
 
     #[test]
