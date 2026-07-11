@@ -162,8 +162,6 @@ fn main() -> anyhow::Result<()> {
         reorder_slot: None,
         reorder_dwell: None,
         apps_slide: Vec::new(),
-        dock_slide: Vec::new(),
-        dock_mag: Vec::new(),
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
@@ -337,14 +335,6 @@ pub struct App {
     /// Per-cell animated display indices for the Apps grid (the
     /// make-room glide); identity when nothing is in flight.
     apps_slide: Vec<f32>,
-    /// Animated displacement per dock slot, in slot units (the dock's
-    /// make-room glide during drags).
-    dock_slide: Vec<f32>,
-    /// Animated magnification per dock slot, eased toward the
-    /// pointer-derived targets so the spread glides instead of
-    /// hard-tracking every pointer twitch (and softly re-engages
-    /// after drops instead of snapping sideways).
-    dock_mag: Vec<f32>,
     /// Group-open transition: raw progress (0..1), its target, and the
     /// surface point the group expands from (the clicked tile).
     group_anim: f32,
@@ -1367,9 +1357,6 @@ impl App {
         }
         self.reorder_slot = None;
         self.reorder_dwell = None;
-        // The drop finalized a new arrangement: any parting offsets
-        // belong to the old one and would wobble the wrong icons.
-        self.dock_slide.fill(0.0);
         self.recompute_dock_order();
         self.update_hover();
         self.schedule_frame();
@@ -1853,12 +1840,6 @@ impl App {
                 ))
             .then_some(drag.entry_idx)
         });
-        let dock_hidden = self
-            .gesture
-            .dragging
-            .as_ref()
-            .filter(|d| d.from_dock)
-            .map(|d| d.entry_idx);
         // Make-room glide: each Apps cell eases toward its display
         // slot (the gap starts at the pickup slot, so nothing moves
         // until the pointer asks for room). ~90 ms exponential
@@ -1891,81 +1872,6 @@ impl App {
                 slide_animating = true;
             } else {
                 self.apps_slide[i] = target;
-            }
-        }
-        // Dock make-room glide, same idea in dock-slot units: dragging
-        // over the dock parts the icons around the insertion point;
-        // a dock-origin drag's gap rests at its old slot meanwhile.
-        let dock_insert_now =
-            self.gesture
-                .dragging
-                .as_ref()
-                .and_then(|d| match self.kinds.get(d.entry_idx) {
-                    Some(apps::EntryKind::App) | Some(apps::EntryKind::File) => {
-                        self.drag_dock_insert(&layout, d.pos)
-                    }
-                    _ => None,
-                });
-        let n_dock = layout.dock_slots.len();
-        if self.dock_slide.len() != n_dock {
-            self.dock_slide = vec![0.0; n_dock];
-        }
-        let dock_origin = self
-            .gesture
-            .dragging
-            .as_ref()
-            .filter(|d| d.from_dock)
-            .and_then(|d| self.dock_order.iter().position(|&e| e == d.entry_idx))
-            .filter(|&o| o < n_dock);
-        for kk in 0..n_dock {
-            let target = match (dock_insert_now, dock_origin) {
-                (Some(g), Some(o)) => {
-                    if kk == o {
-                        0.0
-                    } else {
-                        let compact = if kk > o { kk - 1 } else { kk };
-                        let g_c = g - usize::from(o < g);
-                        (compact + usize::from(compact >= g_c)) as f32 - kk as f32
-                    }
-                }
-                // A foreign icon hovers: part the row around the slot.
-                (Some(g), None) => {
-                    if kk >= g {
-                        0.5
-                    } else {
-                        -0.5
-                    }
-                }
-                _ => 0.0,
-            };
-            let cur = self.dock_slide[kk];
-            if (cur - target).abs() > 0.005 {
-                self.dock_slide[kk] = cur + (target - cur) * k;
-                slide_animating = true;
-            } else {
-                self.dock_slide[kk] = target;
-            }
-        }
-        // Dock magnification glides toward its pointer-derived targets
-        // (~80 ms): the spread grows and relaxes smoothly instead of
-        // snapping with the pointer — worst at drop time, when it
-        // used to re-engage mid-glide of the hand.
-        let mag_pointer = if self.gesture.dragging.is_none() {
-            self.pointer_pos
-        } else {
-            None
-        };
-        let mag_targets = content::dock_magnify_targets(&layout, mag_pointer);
-        if self.dock_mag.len() != mag_targets.len() {
-            self.dock_mag = vec![1.0; mag_targets.len()];
-        }
-        let km = 1.0 - (-dt * 12.0f32).exp();
-        for (cur, &target) in self.dock_mag.iter_mut().zip(&mag_targets) {
-            if (*cur - target).abs() > 0.002 {
-                *cur += (target - *cur) * km;
-                slide_animating = true;
-            } else {
-                *cur = target;
             }
         }
         if slide_animating {
@@ -2003,6 +1909,15 @@ impl App {
             .map(|drag| content::DragFrame {
                 entry_idx: drag.entry_idx,
                 pos: drag.pos,
+                // The insertion bar means "pin here": suppress it for
+                // things that never pin (packages install, boxes stay
+                // in the grid).
+                dock_insert: match self.kinds.get(drag.entry_idx) {
+                    Some(apps::EntryKind::App) | Some(apps::EntryKind::File) => {
+                        self.drag_dock_insert(&layout, drag.pos)
+                    }
+                    _ => None,
+                },
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
                 over_cell,
             });
@@ -2055,9 +1970,6 @@ impl App {
                 apps_group: &self.apps_group_name(),
                 apps_slide: &self.apps_slide,
                 drag_hidden,
-                dock_hidden,
-                dock_slide: &self.dock_slide,
-                dock_mag: &self.dock_mag,
                 group_expand,
                 group_origin: self.group_origin,
             },
