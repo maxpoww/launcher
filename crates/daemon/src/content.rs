@@ -90,6 +90,9 @@ pub struct Scene {
     /// Topmost icon quads, drawn over everything (the drag ghost —
     /// what's in your hand must never hide behind the grid).
     pub overlay: Vec<IconInst>,
+    /// Topmost fills, drawn over the overlay icons (the red unpin wash
+    /// on the ghost).
+    pub overlay_rects: Vec<RectInst>,
 }
 
 /// What the pointer is over.
@@ -469,6 +472,9 @@ pub struct DragFrame {
     /// Grid cell that would accept this drop (group create/add),
     /// ringed with a highlight while hovered; `None` otherwise.
     pub over_cell: Option<(usize, usize)>,
+    /// Dropping here takes the icon off the dock: the ghost wears a
+    /// red wash as a warning.
+    pub unpin: bool,
 }
 
 /// Per-frame dynamic inputs to scene assembly.
@@ -743,6 +749,21 @@ pub fn scene(
             scene.overlay.push(IconInst {
                 rect: Rect::new(gx - size / 2.0, gy - size / 2.0, size, size),
                 layer: layer_of(df.entry_idx),
+            });
+        }
+        // Dropping here would take the icon off the dock: warn with a
+        // red wash over the ghost.
+        if df.unpin {
+            let pad = size * 0.08;
+            scene.overlay_rects.push(RectInst {
+                rect: Rect::new(
+                    gx - size / 2.0 - pad,
+                    gy - size / 2.0 - pad,
+                    size + 2.0 * pad,
+                    size + 2.0 * pad,
+                ),
+                radius: size * 0.28,
+                color: [0.86, 0.16, 0.16, 0.42],
             });
         }
     }
@@ -1160,6 +1181,36 @@ mod tests {
 
     fn vis(n: usize) -> [Vec<usize>; N_SECTIONS] {
         [(0..n).collect(), Vec::new(), Vec::new()]
+    }
+
+    #[test]
+    fn unpin_wash_appears_only_when_flagged() {
+        let cfg = config();
+        let l = open_layout(&cfg, 6, 0.0);
+        let make = |unpin| {
+            scene(
+                &cfg,
+                &l,
+                &entries(6),
+                &vis(6),
+                SURFACE,
+                &FrameInput {
+                    alpha: 1.0,
+                    drag: Some(DragFrame {
+                        entry_idx: 0,
+                        pos: (100.0, 700.0),
+                        drop_section: None,
+                        over_cell: None,
+                        unpin,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .overlay_rects
+            .len()
+        };
+        assert_eq!(make(false), 0, "no wash without the unpin flag");
+        assert_eq!(make(true), 1, "one red wash over the ghost when unpinning");
     }
 
     fn config() -> Config {

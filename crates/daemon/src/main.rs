@@ -2191,11 +2191,13 @@ impl App {
             .map(|drag| content::DragFrame {
                 entry_idx: drag.entry_idx,
                 pos: drag.pos,
-                // The insertion bar means "pin here": suppress it for
-                // things that never pin (packages install, boxes stay
-                // in the grid).
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
                 over_cell,
+                // A dock-origin app dragged off the dock band (and not
+                // over Install) will be unpinned on drop: warn in red.
+                unpin: drag.from_dock
+                    && self.drag_dock_insert(&layout, drag.pos).is_none()
+                    && content::section_at(&layout, drag.pos) != Some(content::SECTION_INSTALL),
             });
         let busy: Vec<bool> = self
             .entries

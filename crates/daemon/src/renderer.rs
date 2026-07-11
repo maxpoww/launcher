@@ -533,6 +533,11 @@ impl Renderer {
         let o0 = icons.len() as u32;
         icons.extend(scene.overlay.iter().map(icon_instance));
         let overlay_range = o0..icons.len() as u32;
+        // Overlay rects (the red unpin wash) ride the rect buffer,
+        // drawn after the overlay icons.
+        let or0 = rects.len() as u32;
+        rects.extend(scene.overlay_rects.iter().map(rect_instance));
+        let overlay_rect_range = or0..rects.len() as u32;
         let rect_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -751,15 +756,23 @@ impl Renderer {
 
             // Topmost: the drag ghost — above grids and labels alike.
             // Glyphon replaced bind group 0 with its atlas; restore our
-            // globals before touching the icon pipeline again.
+            // globals before touching either pipeline again.
+            if !overlay_range.is_empty() || !overlay_rect_range.is_empty() {
+                pass.set_bind_group(0, &self.globals_bind, &[]);
+            }
             if !overlay_range.is_empty() {
                 if let Some(icon_bind) = &self.icon_bind {
-                    pass.set_bind_group(0, &self.globals_bind, &[]);
                     pass.set_pipeline(&self.icon_pipeline);
                     pass.set_bind_group(1, icon_bind, &[]);
                     pass.set_vertex_buffer(0, icon_buf.slice(..));
                     pass.draw(0..4, overlay_range.clone());
                 }
+            }
+            // The red unpin wash sits over the ghost.
+            if !overlay_rect_range.is_empty() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, rect_buf.slice(..));
+                pass.draw(0..4, overlay_rect_range.clone());
             }
         }
 
