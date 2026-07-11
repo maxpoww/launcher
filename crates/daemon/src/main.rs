@@ -163,7 +163,7 @@ fn main() -> anyhow::Result<()> {
         reorder_dwell: None,
         apps_slide: Vec::new(),
         dock_slide: Vec::new(),
-        mag_anchor: None,
+        mag_sleep: None,
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
@@ -340,10 +340,9 @@ pub struct App {
     /// Animated displacement per dock slot, in slot units (the dock's
     /// make-room glide during drags).
     dock_slide: Vec<f32>,
-    /// Where the pointer was when a drag dropped: magnification stays
-    /// off until the hand moves clear of this point, so the residual
-    /// glide at release never stirs the icons.
-    mag_anchor: Option<(f32, f32)>,
+    /// Magnification sleeps until this instant after a drop (the
+    /// landing must be still; the magnify wave returns a beat later).
+    mag_sleep: Option<Instant>,
     /// Group-open transition: raw progress (0..1), its target, and the
     /// surface point the group expands from (the clicked tile).
     group_anim: f32,
@@ -511,6 +510,10 @@ const FAIL_FLASH: Duration = Duration::from_secs(5);
 /// make-room gap moves there. Folding is immediate; reordering is
 /// deliberate — that split keeps side-neighbor folds reachable.
 const REORDER_DWELL: Duration = Duration::from_millis(180);
+
+/// Magnification blackout after a drop: the landing stays perfectly
+/// still for this long before the magnify wave may return.
+const MAG_SLEEP_AFTER_DROP: Duration = Duration::from_secs(1);
 
 /// Cap on entries listed when navigated into a directory.
 const FILES_LIST_MAX: usize = 300;
@@ -1367,10 +1370,10 @@ impl App {
         self.reorder_slot = None;
         self.reorder_dwell = None;
         // The drop finalized a new arrangement: parting offsets belong
-        // to the old one, and magnification stays asleep until the
-        // hand truly moves again.
+        // to the old one, and magnification sleeps a full second so
+        // the icon simply *is* placed before any wave returns.
         self.dock_slide.fill(0.0);
-        self.mag_anchor = Some(drag.pos);
+        self.mag_sleep = Some(Instant::now() + MAG_SLEEP_AFTER_DROP);
         self.recompute_dock_order();
         self.update_hover();
         self.schedule_frame();
@@ -1950,15 +1953,17 @@ impl App {
         if slide_animating {
             self.dirty = true;
         }
-        // Magnification is dead while dragging and stays dead after a
-        // drop until the hand moves clear of the release point — the
-        // residual glide at release must not stir the icons.
-        if let (Some((ax, ay)), Some((px, py))) = (self.mag_anchor, self.pointer_pos) {
-            if (px - ax).hypot(py - ay) > 12.0 {
-                self.mag_anchor = None;
+        // Magnification is dead while dragging and stays dead for a
+        // beat after a drop — the landing must be perfectly still.
+        if let Some(until) = self.mag_sleep {
+            if Instant::now() >= until {
+                self.mag_sleep = None;
+            } else {
+                // Keep frames coming so the wake-up isn't missed.
+                self.dirty = true;
             }
         }
-        let mag_pointer = if self.gesture.dragging.is_none() && self.mag_anchor.is_none() {
+        let mag_pointer = if self.gesture.dragging.is_none() && self.mag_sleep.is_none() {
             self.pointer_pos
         } else {
             None
