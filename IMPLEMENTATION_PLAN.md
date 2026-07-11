@@ -281,15 +281,23 @@ authoritative icon-name hints from its own desktop files (TSV cache
 v4, `icons` column; 2 930 of 24 010 curated packages are GUI apps with
 hints). The sweep re-runs lazily when older than 5 min, so a
 drag-install's bundled icon appears in search without a restart.
-Finally (pass six), GUI apps whose art exists nowhere locally fetch it
-the way distro app centers do: from Flathub's AppStream icon catalog
-(pre-extracted server-side, served per app id), keyed by the
-desktop-file id — disk-cached forever under
+Finally (passes six & seven), GUI apps whose art exists nowhere
+locally fetch it the way distro app centers do: first from Flathub's
+AppStream icon catalog (pre-extracted server-side, served per app id),
+keyed by the desktop-file id — disk-cached forever under
 `$XDG_CACHE_HOME/waverunner/flathub-icons/`, 404s remembered as miss
 markers (retried monthly), network failures retried next batch, and at
 most `FLATHUB_FETCH_BUDGET` (6) new downloads per icon batch so an
-all-new page never stalls on the network. Sources compose: local
-themes → Flathub catalog → installer box. Measured: 2 960 of 24 004 curated packages resolve
+all-new page never stalls on the network. What Flathub lacks streams
+from the package itself: the dump's second `nix-locate` sweep records
+each package's best in-package icon file (2 614 packages; 48px raster
+preferred, then scalable, pixmaps last; TSV v5 `icon_path` column) and
+`nix store cat --store https://cache.nixos.org` extracts that one file
+(narinfo pre-check skips NARs over 20 MB since the whole NAR
+transits; budget 3/batch; cached under `store-icons/`). Sources
+compose: local themes → Flathub catalog → binary-cache stream →
+installer box; verified live with firebird-emu, whose icon exists only
+inside its own uninstalled package. Measured: 2 960 of 24 004 curated packages resolve
 a real themed icon (1 439 → 2 588 → 2 960); everything else shows the
 theme's standard installer box (`system-software-install`, falling
 back through `package-x-generic` / `package` /

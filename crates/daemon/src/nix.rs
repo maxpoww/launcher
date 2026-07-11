@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 /// Re-dump the package index when the cache is older than this.
 const REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// Cache format marker (first line); bump to invalidate old caches.
-const CACHE_HEADER: &str = "waverunner-nixpkgs-v4";
+const CACHE_HEADER: &str = "waverunner-nixpkgs-v5";
 /// Prebuilt nix-index file database (weekly, ~100 MB): the file
 /// listing of every nixpkgs package, without downloading any of them.
 const FILE_INDEX_URL: &str =
@@ -52,6 +52,10 @@ pub struct PkgEntry {
     /// (via the nix-index file database) — authoritative, no guessing:
     /// `ghostty` ships `com.mitchellh.ghostty.desktop`.
     pub icons: Vec<String>,
+    /// Store path of the best icon file inside the package itself
+    /// (via nix-index), streamable from the binary cache when no local
+    /// theme or catalog has art for it.
+    pub icon_path: Option<String>,
 }
 
 /// Thread → daemon notifications.
@@ -277,12 +281,13 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
         if icon_names.is_stale() {
             icon_names = IconNames::sweep(loader.themes());
         }
-        // Local themes first (Papirus and friends ship icons for far
-        // more apps than are installed); GUI apps missing locally are
-        // fetched from Flathub's icon catalog by their desktop-file id
-        // — the same pre-extracted metadata distro app centers pull.
-        // What exists nowhere gets the installer box.
-        let mut fetch_budget = FLATHUB_FETCH_BUDGET;
+        // Icon sources compose like an app center's: local themes
+        // first (Papirus and friends ship icons for far more apps than
+        // are installed), then Flathub's pre-extracted icon catalog by
+        // desktop-file id, then the package's own icon streamed out of
+        // the binary cache. What exists nowhere gets the installer box.
+        let mut flathub_budget = FLATHUB_FETCH_BUDGET;
+        let mut store_budget = STORE_FETCH_BUDGET;
         let (icons, placeholders): (Vec<_>, Vec<_>) = hits
             .iter()
             .map(|p| {
@@ -303,7 +308,12 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
                 p.icons
                     .iter()
                     .filter(|hint| hint.contains('.'))
-                    .find_map(|id| fetch_flathub_icon(id, &mut fetch_budget))
+                    .find_map(|id| fetch_flathub_icon(id, &mut flathub_budget))
+                    .or_else(|| {
+                        p.icon_path
+                            .as_deref()
+                            .and_then(|path| fetch_store_icon(path, &mut store_budget))
+                    })
                     .map(|pixels| (pixels, false))
                     .unwrap_or_else(|| generic.clone())
             })
@@ -377,6 +387,16 @@ const FLATHUB_MISS_RETRY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// from stalling the batch on the network; the rest catch up on later
 /// queries (everything fetched is cached forever).
 const FLATHUB_FETCH_BUDGET: u32 = 6;
+
+/// The binary cache that built the nix-index database's store paths —
+/// `nix store cat` streams single files (a package's own icon) out of
+/// it without installing anything.
+const BINARY_CACHE: &str = "https://cache.nixos.org";
+/// Skip store-icon fetches whose compressed NAR is larger than this
+/// (the whole NAR transits to extract one file).
+const STORE_ICON_NAR_MAX: u64 = 20 * 1024 * 1024;
+/// New store-icon downloads per icon batch (each may pull a few MB).
+const STORE_FETCH_BUDGET: u32 = 3;
 
 /// The icon names installed on this system, from one readdir sweep:
 /// lowercased stem → actual lookup name, plus reverse-DNS aliases —
@@ -479,6 +499,69 @@ fn fetch_flathub_icon(id: &str, budget: &mut u32) -> Option<Vec<u8>> {
         let _ = std::fs::write(&miss, b"");
     }
     None
+}
+
+/// Stream a package's own icon file out of the binary cache, disk-
+/// cached under `$XDG_CACHE_HOME/waverunner/store-icons/`. The whole
+/// (compressed) NAR transits to extract the one file, so a narinfo
+/// pre-check skips packages larger than [`STORE_ICON_NAR_MAX`], and
+/// misses of any kind leave a monthly-retried marker. Returns
+/// rasterized `ICON_SIZE`² pixels.
+fn fetch_store_icon(store_path: &str, budget: &mut u32) -> Option<Vec<u8>> {
+    // `/nix/store/<32-char-hash>-name/...` — the hash keys everything.
+    let hash = store_path.strip_prefix("/nix/store/")?.get(..32)?;
+    if !hash.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let ext = std::path::Path::new(store_path)
+        .extension()
+        .and_then(|e| e.to_str())?;
+    let dir = cache_path().parent()?.join("store-icons");
+    let file = dir.join(format!("{hash}.{ext}"));
+    if file.exists() {
+        return crate::apps::rasterize_icon_file(file.to_str()?, store_path);
+    }
+    let miss = dir.join(format!("{hash}.miss"));
+    if cache_age(&miss).is_some_and(|age| age < FLATHUB_MISS_RETRY) {
+        return None;
+    }
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    std::fs::create_dir_all(&dir).ok()?;
+    let mark_miss = || {
+        let _ = std::fs::write(&miss, b"");
+    };
+    // narinfo first: how big is the NAR this icon rides in?
+    let info = Command::new("curl")
+        .args(["-fsSL", "--max-time", "5"])
+        .arg(format!("{BINARY_CACHE}/{hash}.narinfo"))
+        .output()
+        .ok()?;
+    if !info.status.success() {
+        mark_miss(); // not in the cache (or gone): remember that
+        return None;
+    }
+    let too_big = String::from_utf8_lossy(&info.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("FileSize: ")?.trim().parse::<u64>().ok())
+        .is_none_or(|size| size > STORE_ICON_NAR_MAX);
+    if too_big {
+        mark_miss();
+        return None;
+    }
+    let out = Command::new("nix")
+        .args(["store", "cat", "--store", BINARY_CACHE, store_path])
+        .output()
+        .ok()?;
+    if !out.status.success() || out.stdout.is_empty() {
+        mark_miss();
+        return None;
+    }
+    std::fs::write(&file, &out.stdout).ok()?;
+    debug!("store icon fetched: {store_path}");
+    crate::apps::rasterize_icon_file(file.to_str()?, store_path)
 }
 
 /// Icon names worth trying for a package, best first: the package's
@@ -723,6 +806,69 @@ fn desktop_icon_hints() -> anyhow::Result<std::collections::HashMap<String, Vec<
     Ok(hints)
 }
 
+/// Preference of an in-package icon path: small raster sizes first
+/// (they rasterize to `ICON_SIZE` anyway and download fastest), then
+/// scalable, then huge rasters, pixmaps last.
+fn icon_path_score(path: &str) -> u32 {
+    for (i, marker) in [
+        "/48x48/",
+        "/64x64/",
+        "/128x128/",
+        "/scalable/",
+        "/256x256/",
+        "/512x512/",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if path.contains(marker) {
+            return i as u32;
+        }
+    }
+    if path.contains("/share/pixmaps/") {
+        return 8;
+    }
+    7
+}
+
+/// Every package's best in-package icon file (attr → store path), from
+/// one `nix-locate` sweep over hicolor and pixmaps.
+fn package_icon_paths() -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let out = Command::new("nix")
+        .args([
+            "shell",
+            "nixpkgs#nix-index",
+            "-c",
+            "nix-locate",
+            "--regex",
+            r"share/(icons/hicolor/[^/]*/apps|pixmaps)/[^/]*\.(png|svg)$",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "nix-locate failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim().to_owned()
+    );
+    let mut paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut cols = line.split_whitespace();
+        let (Some(attr_out), Some(path)) = (cols.next(), cols.next_back()) else {
+            continue;
+        };
+        if !path.starts_with("/nix/store/") {
+            continue;
+        }
+        let attr = attr_out.rsplit_once('.').map_or(attr_out, |(a, _)| a);
+        match paths.get(attr) {
+            Some(best) if icon_path_score(best) <= icon_path_score(path) => {}
+            _ => {
+                paths.insert(attr.to_owned(), path.to_owned());
+            }
+        }
+    }
+    Ok(paths)
+}
+
 /// Run the full `nix search` dump and slim it into our own curated
 /// database: junk package sets filtered out ([`keep_attr`]), sorted so
 /// shallow/alphabetical attrs come first (ties in fuzzy score then
@@ -743,6 +889,10 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
         warn!("desktop-file hints unavailable: {e:#}");
         Default::default()
     });
+    let mut icon_paths = package_icon_paths().unwrap_or_else(|e| {
+        warn!("in-package icon paths unavailable: {e:#}");
+        Default::default()
+    });
     let raw: std::collections::HashMap<String, SearchMeta> = serde_json::from_slice(&out.stdout)?;
     let total = raw.len();
     let mut pkgs: Vec<PkgEntry> = raw
@@ -754,12 +904,14 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
                 return None;
             }
             let icons = desktops.remove(&attr).unwrap_or_default();
-            Some(entry_with_icons(
+            let icon_path = icon_paths.remove(&attr);
+            Some(entry_full(
                 attr,
                 meta.pname,
                 meta.version,
                 &meta.description,
                 icons,
+                icon_path,
             ))
         })
         .collect();
@@ -778,18 +930,31 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
 }
 
 /// Build one entry with its pre-computed rank haystack.
-/// [`entry_with_icons`] without hints — the common shape in tests.
+/// [`entry_full`] without hints — the common shape in tests.
 #[cfg(test)]
 fn entry(attr: String, name: String, version: String, description: &str) -> PkgEntry {
-    entry_with_icons(attr, name, version, description, Vec::new())
+    entry_full(attr, name, version, description, Vec::new(), None)
 }
 
+/// [`entry_full`] with icon-name hints only.
+#[cfg(test)]
 fn entry_with_icons(
     attr: String,
     name: String,
     version: String,
     description: &str,
     icons: Vec<String>,
+) -> PkgEntry {
+    entry_full(attr, name, version, description, icons, None)
+}
+
+fn entry_full(
+    attr: String,
+    name: String,
+    version: String,
+    description: &str,
+    icons: Vec<String>,
+    icon_path: Option<String>,
 ) -> PkgEntry {
     let clipped: String = description
         .chars()
@@ -803,6 +968,7 @@ fn entry_with_icons(
         version,
         haystack,
         icons,
+        icon_path,
     }
 }
 
@@ -823,7 +989,7 @@ fn cache_age(path: &Path) -> Option<Duration> {
 }
 
 /// TSV cache: header line, then
-/// `attr\tversion\tname\ticon;hints\tdescription`.
+/// `attr\tversion\tname\ticon;hints\ticon-store-path\tdescription`.
 fn save_cache(path: &Path, pkgs: &[PkgEntry]) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -838,11 +1004,12 @@ fn save_cache(path: &Path, pkgs: &[PkgEntry]) -> anyhow::Result<()> {
             .get(p.name.len() + p.attr.len() + 2..)
             .unwrap_or("");
         text.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
             p.attr,
             p.version,
             p.name,
             p.icons.join(";"),
+            p.icon_path.as_deref().unwrap_or(""),
             desc
         ));
     }
@@ -862,7 +1029,7 @@ fn load_cache(path: &Path) -> anyhow::Result<Vec<PkgEntry>> {
     );
     Ok(lines
         .filter_map(|line| {
-            let mut cols = line.splitn(5, '\t');
+            let mut cols = line.splitn(6, '\t');
             let attr = cols.next()?.to_owned();
             let version = cols.next()?.to_owned();
             let name = cols.next()?.to_owned();
@@ -872,8 +1039,9 @@ fn load_cache(path: &Path) -> anyhow::Result<Vec<PkgEntry>> {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .collect();
+            let icon_path = Some(cols.next()?.to_owned()).filter(|p| !p.is_empty());
             let desc = cols.next().unwrap_or("");
-            Some(entry_with_icons(attr, name, version, desc, icons))
+            Some(entry_full(attr, name, version, desc, icons, icon_path))
         })
         .collect())
 }
@@ -887,12 +1055,13 @@ mod tests {
         let dir = std::env::temp_dir().join("waverunner-nix-test");
         let path = dir.join("nixpkgs-index.tsv");
         let pkgs = vec![
-            entry_with_icons(
+            entry_full(
                 "cowsay".into(),
                 "cowsay".into(),
                 "3.8.4".into(),
                 "ASCII cow\twith\nnewline",
                 vec!["org.example.Cowsay".into(), "cowsay-alt".into()],
+                Some("/nix/store/abc-cowsay/share/pixmaps/cowsay.png".into()),
             ),
             entry("a.b.c".into(), "c".into(), String::new(), ""),
         ];
@@ -904,9 +1073,46 @@ mod tests {
         assert_eq!(loaded[0].haystack, pkgs[0].haystack);
         assert!(!loaded[0].haystack.contains('\t'));
         assert_eq!(loaded[0].icons, pkgs[0].icons);
+        assert_eq!(loaded[0].icon_path, pkgs[0].icon_path);
         assert_eq!(loaded[1].name, "c");
         assert!(loaded[1].icons.is_empty());
+        assert_eq!(loaded[1].icon_path, None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn icon_path_score_prefers_small_rasters() {
+        let s48 = icon_path_score("/nix/store/x-a/share/icons/hicolor/48x48/apps/a.png");
+        let scalable = icon_path_score("/nix/store/x-a/share/icons/hicolor/scalable/apps/a.svg");
+        let s512 = icon_path_score("/nix/store/x-a/share/icons/hicolor/512x512/apps/a.png");
+        let pixmap = icon_path_score("/nix/store/x-a/share/pixmaps/a.png");
+        assert!(s48 < scalable && scalable < s512 && s512 < pixmap);
+    }
+
+    /// Manual check of the binary-cache icon stream (network):
+    /// `cargo test -p waverunner-daemon store_icon -- --ignored --nocapture`
+    #[test]
+    #[ignore = "touches the network"]
+    fn store_icon_fetch_from_binary_cache() {
+        let Ok(pkgs) = load_cache(&cache_path()) else {
+            eprintln!("no cache; skipping");
+            return;
+        };
+        let Some(pkg) = pkgs.iter().find(|p| p.attr == "firebird-emu") else {
+            eprintln!("firebird-emu not in cache; skipping");
+            return;
+        };
+        let path = pkg
+            .icon_path
+            .as_deref()
+            .expect("firebird-emu ships an icon");
+        eprintln!("fetching {path}");
+        let mut budget = 1;
+        let pixels = fetch_store_icon(path, &mut budget);
+        assert!(pixels.is_some(), "icon must stream from the binary cache");
+        // And again from the disk cache without budget.
+        let mut none = 0;
+        assert!(fetch_store_icon(path, &mut none).is_some());
     }
 
     #[test]
