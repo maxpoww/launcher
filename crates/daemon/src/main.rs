@@ -163,6 +163,7 @@ fn main() -> anyhow::Result<()> {
         reorder_dwell: None,
         apps_slide: Vec::new(),
         dock_slide: Vec::new(),
+        dock_mag: Vec::new(),
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
@@ -339,6 +340,11 @@ pub struct App {
     /// Animated displacement per dock slot, in slot units (the dock's
     /// make-room glide during drags).
     dock_slide: Vec<f32>,
+    /// Animated magnification per dock slot, eased toward the
+    /// pointer-derived targets so the spread glides instead of
+    /// hard-tracking every pointer twitch (and softly re-engages
+    /// after drops instead of snapping sideways).
+    dock_mag: Vec<f32>,
     /// Group-open transition: raw progress (0..1), its target, and the
     /// surface point the group expands from (the clicked tile).
     group_anim: f32,
@@ -1940,6 +1946,28 @@ impl App {
                 self.dock_slide[kk] = target;
             }
         }
+        // Dock magnification glides toward its pointer-derived targets
+        // (~80 ms): the spread grows and relaxes smoothly instead of
+        // snapping with the pointer — worst at drop time, when it
+        // used to re-engage mid-glide of the hand.
+        let mag_pointer = if self.gesture.dragging.is_none() {
+            self.pointer_pos
+        } else {
+            None
+        };
+        let mag_targets = content::dock_magnify_targets(&layout, mag_pointer);
+        if self.dock_mag.len() != mag_targets.len() {
+            self.dock_mag = vec![1.0; mag_targets.len()];
+        }
+        let km = 1.0 - (-dt * 12.0f32).exp();
+        for (cur, &target) in self.dock_mag.iter_mut().zip(&mag_targets) {
+            if (*cur - target).abs() > 0.002 {
+                *cur += (target - *cur) * km;
+                slide_animating = true;
+            } else {
+                *cur = target;
+            }
+        }
         if slide_animating {
             self.dirty = true;
         }
@@ -2029,6 +2057,7 @@ impl App {
                 drag_hidden,
                 dock_hidden,
                 dock_slide: &self.dock_slide,
+                dock_mag: &self.dock_mag,
                 group_expand,
                 group_origin: self.group_origin,
             },

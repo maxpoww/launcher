@@ -154,9 +154,8 @@ const SEARCH_LINE_PX: f32 = 20.0;
 /// swell past the card edge (macOS-style). The wl surface is this much
 /// taller than the card + gap; the animation extent never enters it.
 pub const MAGNIFY_HEADROOM: f32 = 24.0;
-/// Peak scale of a dock icon directly under the cursor. In-place
-/// growth (no neighbour spread), so it stays modest to limit overlap.
-const DOCK_MAGNIFY: f32 = 1.35;
+/// Peak scale of a dock icon directly under the cursor.
+const DOCK_MAGNIFY: f32 = 1.5;
 /// Horizontal falloff radius of dock magnification, in pixels.
 const DOCK_MAG_RADIUS: f32 = 120.0;
 /// Vertical attenuation radius, measured from the dock band's edges
@@ -172,6 +171,28 @@ const GRID_MAG_RADIUS: f32 = 95.0;
 fn falloff(d: f32, radius: f32) -> f32 {
     let t = (d.abs() / radius).min(1.0);
     0.5 * (1.0 + (std::f32::consts::PI * t).cos())
+}
+
+/// Target magnification per dock slot for a pointer position (`None`
+/// relaxes everything to 1.0). The caller eases its animated state
+/// toward these each frame, so the spread glides rather than snapping
+/// with every pointer twitch.
+pub fn dock_magnify_targets(layout: &Layout, pointer: Option<(f32, f32)>) -> Vec<f32> {
+    layout
+        .dock_slots
+        .iter()
+        .map(|slot| {
+            let cx = slot.x + slot.w / 2.0;
+            match pointer {
+                Some((px, py)) => {
+                    let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
+                    let fy = falloff(d_out, DOCK_MAG_VRADIUS);
+                    1.0 + (DOCK_MAGNIFY - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy
+                }
+                None => 1.0,
+            }
+        })
+        .collect()
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -518,6 +539,9 @@ pub struct FrameInput<'a> {
     /// Animated displacement per dock slot, in slot units: the dock's
     /// make-room glide while a drag hovers it. Empty = at rest.
     pub dock_slide: &'a [f32],
+    /// Animated magnification per dock slot (eased toward
+    /// [`dock_magnify_targets`] by the caller). Empty = all 1.0.
+    pub dock_mag: &'a [f32],
     /// Open/close progress of the app-group expand animation (eased,
     /// 0 = collapsed into the tile, 1 = settled). Cells of an open
     /// group scale/glide out of `group_origin`.
@@ -561,6 +585,7 @@ pub fn scene(
         drag_hidden,
         dock_hidden,
         dock_slide,
+        dock_mag,
         group_expand,
         group_origin,
     } = *frame;
@@ -583,32 +608,29 @@ pub fn scene(
         color: config.theme.background_rgba(),
     });
 
-    // Dock row: per-icon magnification scales, then spread visual centers.
-    // Hit-boxes stay at fixed slot positions; only drawn positions spread.
-    let dock_scales: Vec<f32> = layout
-        .dock_slots
-        .iter()
-        .map(|slot| {
-            let cx = slot.x + slot.w / 2.0;
-            match pointer {
-                Some((px, py)) => {
-                    let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
-                    let fy = falloff(d_out, DOCK_MAG_VRADIUS);
-                    1.0 + (DOCK_MAGNIFY - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy
-                }
-                None => 1.0,
-            }
-        })
+    // Dock row: per-icon magnification scales (animated by the caller
+    // via `dock_mag`, so the motion glides instead of hard-tracking
+    // the pointer), then spread visual centers. Hit-boxes stay at
+    // fixed slot positions; only drawn positions spread.
+    let dock_scales: Vec<f32> = (0..layout.dock_slots.len())
+        .map(|i| dock_mag.get(i).copied().unwrap_or(1.0))
         .collect();
-    // Icons magnify in place (like the grid): no neighbour-pushing —
-    // a spread that tracks the pointer reads as icons bouncing
-    // sideways whenever magnification re-engages (e.g. right after a
-    // drop, while the hand is still gliding).
-    let dock_vcx: Vec<f32> = layout
-        .dock_slots
-        .iter()
-        .map(|slot| slot.x + slot.w / 2.0)
-        .collect();
+    // Each magnified icon widens its visual slot by the extra pixels it
+    // grew, pushing neighbours apart. Row stays centered as a whole.
+    let dock_vcx: Vec<f32> = {
+        let total_vw: f32 = dock_scales
+            .iter()
+            .map(|&s| DOCK_SLOT + DOCK_ICON * (s - 1.0))
+            .sum();
+        let mut x = (w - total_vw) / 2.0;
+        let mut centers = Vec::with_capacity(dock_scales.len());
+        for &s in &dock_scales {
+            let vw = DOCK_SLOT + DOCK_ICON * (s - 1.0);
+            centers.push(x + vw / 2.0);
+            x += vw;
+        }
+        centers
+    };
     // Hover highlight (suppressed while dragging).
     if drag.is_none() {
         if let Some(Hit::DockIcon(i)) = hover {
