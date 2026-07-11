@@ -750,8 +750,11 @@ impl Renderer {
             }
 
             // Topmost: the drag ghost — above grids and labels alike.
+            // Glyphon replaced bind group 0 with its atlas; restore our
+            // globals before touching the icon pipeline again.
             if !overlay_range.is_empty() {
                 if let Some(icon_bind) = &self.icon_bind {
+                    pass.set_bind_group(0, &self.globals_bind, &[]);
                     pass.set_pipeline(&self.icon_pipeline);
                     pass.set_bind_group(1, icon_bind, &[]);
                     pass.set_vertex_buffer(0, icon_buf.slice(..));
