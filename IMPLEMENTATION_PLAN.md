@@ -213,13 +213,24 @@ drag-and-drop package management:
   into a slim TSV cache (`$XDG_CACHE_HOME/waverunner/nixpkgs-index.tsv`,
   10 MB), loads it instantly on start, and refreshes it in the
   background when older than a day.
+- **Curated database (2026-07-10):** the dump keeps only the end-user
+  catalog — top-level attrs plus `kdePackages`, minus `-unwrapped`
+  build inputs, deduped by pname+version — 24 004 of 109 663 packages
+  (cache v3, 1.9 MB). Language-ecosystem sets (python/haskell/vim/…)
+  made four of five results noise. A format-rejected cache now forces a
+  re-dump regardless of file age (a v1→v2 bump exposed that the age
+  check alone left the index empty forever).
 - **Search:** typing fans package matches into the Install section as
-  transient entries (same pattern as file-search results), rendered
-  with a generic package icon. Ranking 110k haystacks takes 0.2–1.8 s
-  (debug build), so it runs on the nix thread: queries coalesce to the
-  newest, answers arrive as `Ranked` events, and the previous hits keep
-  showing until the fresh ones land. Queries shorter than 2 chars are
-  not ranked.
+  transient entries (same pattern as file-search results). Ranking runs
+  on the nix thread (16–270 ms debug over the curated index): queries
+  coalesce to the newest, answers arrive as `Ranked` events, and the
+  previous hits keep showing until the fresh ones land. Ranking is
+  name-first (`rank_hits`): nucleo scores a word-boundary match in a
+  description the same as one on the name, which buried `firefox`
+  itself under alphabetically-earlier packages that merely mention
+  Firefox — so names rank in their own pass and description-only
+  matches (the "media player" discovery case) fill the tail. Queries
+  shorter than 2 chars are not ranked.
 - **Install:** dragging a package cell onto the Apps section (or the
   dock) runs `nix profile install nixpkgs#<attr>` on a separate
   mutation worker (serialized; a minutes-long install never blocks
@@ -239,8 +250,12 @@ Package cells show real icons: the rank thread owns its own
 `IconLoader` and resolves each hit's pname against the configured icon
 theme (Papirus ships icons for far more apps than are installed —
 firefox/vlc/gimp/xterm all resolve; CLI-only tools fall back to the
-colored letter tile). The renderer reserves `RANK_HITS_MAX` texture
-layers past the app icons; each `Ranked` answer uploads into that tail
+colored letter tile). Icons are the slow part (cold negative theme
+lookups walk every theme dir), so they never delay results: `Ranked`
+is sent the moment ranking finishes and the icons follow as a separate
+`HitIcons` event — skipped entirely when a newer query is already
+waiting. The renderer reserves `RANK_HITS_MAX` texture layers past the
+app icons; each icon batch uploads into that tail
 (`update_icon_layer`), and rescans re-upload after `set_icons` rebuilds
 the array.
 

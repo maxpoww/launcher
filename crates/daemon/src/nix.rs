@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 /// Re-dump the package index when the cache is older than this.
 const REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// Cache format marker (first line); bump to invalidate old caches.
-const CACHE_HEADER: &str = "waverunner-nixpkgs-v1";
+const CACHE_HEADER: &str = "waverunner-nixpkgs-v3";
 /// Rank-haystack cap on the description, keeping per-keystroke fuzzy
 /// scoring over ~110k packages cheap.
 const HAYSTACK_DESC_MAX: usize = 80;
@@ -50,13 +50,17 @@ pub enum Event {
     /// There is no cache and the dump failed; searching is unavailable.
     IndexFailed,
     /// The top matches for `query` (echoed so stale answers are
-    /// recognizable after the query moved on), each with a rasterized
-    /// `ICON_SIZE`² icon: the theme icon named like the package when
-    /// one exists (Papirus ships icons for far more apps than are
-    /// installed), a letter tile otherwise (`placeholder` true).
-    Ranked {
+    /// recognizable after the query moved on). Sent the moment ranking
+    /// finishes; the icons follow separately as `HitIcons` so slow
+    /// theme lookups never delay the results themselves.
+    Ranked { query: String, hits: Vec<PkgEntry> },
+    /// Rasterized `ICON_SIZE`² icons for the hits of `query`, aligned
+    /// with them: the theme icon named like the package when one exists
+    /// (Papirus ships icons for far more apps than are installed), a
+    /// letter tile otherwise (`placeholder` true). Skipped entirely
+    /// when a newer query is already waiting.
+    HitIcons {
         query: String,
-        hits: Vec<PkgEntry>,
         icons: Vec<Vec<u8>>,
         placeholders: Vec<bool>,
     },
@@ -165,7 +169,9 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
             Vec::new()
         }
     };
-    if cache_age(&cache).is_none_or(|age| age > REFRESH_AFTER) {
+    // A cache that failed to load (missing, unreadable, or an old
+    // format) must dump regardless of its file age.
+    if pkgs.is_empty() || cache_age(&cache).is_none_or(|age| age > REFRESH_AFTER) {
         match dump_index() {
             Ok(fresh) => {
                 info!("nixpkgs index: {} packages (fresh dump)", fresh.len());
@@ -186,21 +192,51 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
         }
     }
 
-    let keys: Vec<&str> = pkgs.iter().map(|p| p.haystack.as_str()).collect();
     let mut searcher = waverunner_core::Searcher::new();
     let mut loader = crate::apps::IconLoader::new(icon_theme);
-    while let Ok(mut query) = ranks.recv() {
+    let mut pending: Option<String> = None;
+    loop {
+        let mut query = match pending.take() {
+            Some(query) => query,
+            None => match ranks.recv() {
+                Ok(query) => query,
+                Err(_) => return,
+            },
+        };
         // Typing outruns ranking: serve only the newest queued query.
         while let Ok(newer) = ranks.try_recv() {
             query = newer;
         }
         let started = std::time::Instant::now();
-        let ranked = searcher.rank(&query, &keys);
-        let hits: Vec<PkgEntry> = ranked
-            .iter()
-            .take(RANK_HITS_MAX)
-            .map(|&i| pkgs[i].clone())
+        let hits: Vec<PkgEntry> = rank_hits(&mut searcher, &query, &pkgs)
+            .into_iter()
+            .map(|i| pkgs[i].clone())
             .collect();
+        debug!(
+            "pkg rank {query:?}: {} hits of {} in {:?}",
+            hits.len(),
+            pkgs.len(),
+            started.elapsed()
+        );
+        if events
+            .send(Event::Ranked {
+                query: query.clone(),
+                hits: hits.clone(),
+            })
+            .is_err()
+        {
+            return;
+        }
+        // Icons are the slow part (cold theme lookups); only bother
+        // when no newer query is already waiting.
+        match ranks.try_recv() {
+            Ok(newer) => {
+                pending = Some(newer);
+                continue;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => return,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
         // Most package names double as theme icon names (firefox, vlc,
         // gimp, …) — Papirus and friends ship icons for far more apps
         // than are installed. Misses become letter tiles.
@@ -219,16 +255,9 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
             })
             .unzip();
         loader.save_resolutions();
-        debug!(
-            "pkg rank {query:?}: {} of {} in {:?} (incl. icons)",
-            ranked.len(),
-            keys.len(),
-            started.elapsed()
-        );
         if events
-            .send(Event::Ranked {
+            .send(Event::HitIcons {
                 query,
-                hits,
                 icons,
                 placeholders,
             })
@@ -237,6 +266,38 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
             return;
         }
     }
+}
+
+/// The top `RANK_HITS_MAX` package indices for `query`, name matches
+/// first. nucleo scores a word-boundary match in a description the
+/// same as one on the name (ties then break alphabetically), which
+/// buried `firefox` itself under dozens of packages that merely
+/// mention Firefox — so names rank in their own pass and always beat
+/// description-only matches, which remain as discovery fill (a "media
+/// player" query still finds players).
+fn rank_hits(
+    searcher: &mut waverunner_core::Searcher,
+    query: &str,
+    pkgs: &[PkgEntry],
+) -> Vec<usize> {
+    let names: Vec<&str> = pkgs.iter().map(|p| p.name.as_str()).collect();
+    let mut hits: Vec<usize> = searcher
+        .rank(query, &names)
+        .into_iter()
+        .take(RANK_HITS_MAX)
+        .collect();
+    if hits.len() < RANK_HITS_MAX {
+        let keys: Vec<&str> = pkgs.iter().map(|p| p.haystack.as_str()).collect();
+        for i in searcher.rank(query, &keys) {
+            if !hits.contains(&i) {
+                hits.push(i);
+                if hits.len() == RANK_HITS_MAX {
+                    break;
+                }
+            }
+        }
+    }
+    hits
 }
 
 /// `nix profile install nixpkgs#<attr>`; true on success.
@@ -348,9 +409,29 @@ struct SearchMeta {
     description: String,
 }
 
-/// Run the full `nix search` dump and slim it into [`PkgEntry`]s,
-/// sorted so top-level attrs come before nested package sets (ties in
-/// fuzzy score then resolve to the likelier candidate).
+/// The curated cut of nixpkgs the Install section searches: top-level
+/// attrs (the end-user catalog) plus `kdePackages` (real applications
+/// live there). Language-ecosystem sets (`python313Packages`,
+/// `haskellPackages`, `vimPlugins`, `texlivePackages`, …) are
+/// libraries and plugins, not installable apps — they made four out of
+/// five results noise.
+fn keep_attr(attr: &str) -> bool {
+    // Inner derivations of wrapper packages (firefox-unwrapped, …):
+    // build inputs, not installables.
+    if attr.ends_with("-unwrapped") {
+        return false;
+    }
+    match attr.split_once('.') {
+        None => true,
+        Some((set, _)) => set == "kdePackages",
+    }
+}
+
+/// Run the full `nix search` dump and slim it into our own curated
+/// database: junk package sets filtered out ([`keep_attr`]), sorted so
+/// shallow/alphabetical attrs come first (ties in fuzzy score then
+/// resolve to the likelier candidate), duplicate pname+version pairs
+/// collapsed onto that first attr.
 fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
     let started = std::time::Instant::now();
     let out = Command::new("nix")
@@ -362,11 +443,15 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
         String::from_utf8_lossy(&out.stderr).trim().to_owned()
     );
     let raw: std::collections::HashMap<String, SearchMeta> = serde_json::from_slice(&out.stdout)?;
+    let total = raw.len();
     let mut pkgs: Vec<PkgEntry> = raw
         .into_iter()
         .filter_map(|(key, meta)| {
             // Keys look like `legacyPackages.x86_64-linux.<attr...>`.
             let attr = key.splitn(3, '.').nth(2)?.to_owned();
+            if !keep_attr(&attr) || meta.pname.is_empty() {
+                return None;
+            }
             Some(entry(attr, meta.pname, meta.version, &meta.description))
         })
         .collect();
@@ -374,8 +459,10 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
         let depth = |p: &PkgEntry| p.attr.matches('.').count();
         depth(a).cmp(&depth(b)).then_with(|| a.attr.cmp(&b.attr))
     });
+    let mut seen = std::collections::HashSet::new();
+    pkgs.retain(|p| seen.insert((p.name.clone(), p.version.clone())));
     debug!(
-        "nixpkgs dump: {} packages in {:?}",
+        "nixpkgs dump: {} of {total} packages kept, in {:?}",
         pkgs.len(),
         started.elapsed()
     );
@@ -488,6 +575,44 @@ mod tests {
     }
 
     #[test]
+    fn name_matches_outrank_description_mentions() {
+        // Alphabetically before "firefox" AND mentioning it in the
+        // description — the exact trap that buried the real package.
+        let pkgs = vec![
+            entry(
+                "addwater".into(),
+                "addwater".into(),
+                "1".into(),
+                "Firefox theme configurator",
+            ),
+            entry(
+                "firefox".into(),
+                "firefox".into(),
+                "128".into(),
+                "Web browser",
+            ),
+        ];
+        let mut searcher = waverunner_core::Searcher::new();
+        let hits = rank_hits(&mut searcher, "firefox", &pkgs);
+        assert_eq!(hits.first(), Some(&1), "the name match must come first");
+        assert!(hits.contains(&0), "description matches still fill the tail");
+    }
+
+    #[test]
+    fn curation_keeps_apps_and_drops_ecosystems() {
+        assert!(keep_attr("firefox"));
+        assert!(keep_attr("gnome-calculator"));
+        assert!(keep_attr("kdePackages.kate"));
+        assert!(!keep_attr("python313Packages.requests"));
+        assert!(!keep_attr("haskellPackages.lens"));
+        assert!(!keep_attr("vimPlugins.telescope-nvim"));
+        assert!(!keep_attr("linuxKernel.kernels.linux_6_12"));
+        assert!(!keep_attr("tests.foo"));
+        assert!(!keep_attr("firefox-unwrapped"));
+        assert!(!keep_attr("firefox-beta-unwrapped"));
+    }
+
+    #[test]
     fn haystack_clips_long_descriptions() {
         let long = "x".repeat(500);
         let e = entry("foo".into(), "foo".into(), "1".into(), &long);
@@ -503,15 +628,19 @@ mod tests {
             eprintln!("no cache; skipping");
             return;
         };
-        let keys: Vec<&str> = pkgs.iter().map(|p| p.haystack.as_str()).collect();
         let mut searcher = waverunner_core::Searcher::new();
-        for query in ["fi", "firefox", "media player", "zzqx"] {
+        for query in ["fi", "firefox", "mozill", "media player", "zzqx"] {
             let started = std::time::Instant::now();
-            let ranked = searcher.rank(query, &keys);
+            let hits = rank_hits(&mut searcher, query, &pkgs);
+            let top: Vec<&str> = hits
+                .iter()
+                .take(5)
+                .map(|&i| pkgs[i].attr.as_str())
+                .collect();
             eprintln!(
-                "rank {query:?}: {} of {} in {:?}",
-                ranked.len(),
-                keys.len(),
+                "rank {query:?}: {} hits of {} in {:?}; top: {top:?}",
+                hits.len(),
+                pkgs.len(),
                 started.elapsed()
             );
         }

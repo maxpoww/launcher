@@ -568,21 +568,33 @@ impl App {
                 self.pkg_state = PkgIndexState::Failed;
                 self.schedule_frame();
             }
-            nix::Event::Ranked {
-                query,
-                hits,
-                icons,
-                placeholders,
-            } => {
+            nix::Event::Ranked { query, hits } => {
                 self.pkg_hits = hits;
                 self.pkg_hits_query = query;
-                self.pkg_hit_icons = icons;
-                self.pkg_hit_placeholders = placeholders;
-                self.upload_pkg_icons();
+                // Icons for the previous hits don't fit these; show the
+                // generic tile until this query's HitIcons arrive.
+                self.pkg_hit_icons.clear();
+                self.pkg_hit_placeholders.clear();
                 // Re-render only if the answer matches what's typed; an
                 // outdated one keeps waiting for its follower.
                 if self.pkg_hits_query == self.search.query {
                     self.refilter();
+                }
+            }
+            nix::Event::HitIcons {
+                query,
+                icons,
+                placeholders,
+            } => {
+                if query == self.pkg_hits_query {
+                    self.pkg_hit_icons = icons;
+                    self.pkg_hit_placeholders = placeholders;
+                    self.upload_pkg_icons();
+                    if self.pkg_hits_query == self.search.query {
+                        // Transients hold per-entry layer/placeholder:
+                        // rebuild them onto the fresh icons.
+                        self.refilter();
+                    }
                 }
             }
             nix::Event::Done { id, ok } => {
