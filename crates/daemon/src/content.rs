@@ -157,6 +157,13 @@ const SEARCH_LINE_PX: f32 = 20.0;
 /// swell past the card edge (macOS-style). The wl surface is this much
 /// taller than the card + gap; the animation extent never enters it.
 pub const MAGNIFY_HEADROOM: f32 = 24.0;
+/// Transparent margin around the card, on each side and above it: the
+/// wl surface is this much wider/taller than the card so a dragged
+/// icon (drawn topmost, unclipped within the surface) has room to roam
+/// past the card edges before the surface boundary clips it. The card
+/// itself stays centered and unchanged.
+pub const DRAG_MARGIN_X: f32 = 80.0;
+pub const DRAG_MARGIN_TOP: f32 = 56.0;
 /// Peak scale of a dock icon directly under the cursor.
 const DOCK_MAGNIFY: f32 = 1.5;
 /// Horizontal falloff radius of dock magnification, in pixels.
@@ -256,12 +263,16 @@ pub fn layout(
     navigated: [bool; N_SECTIONS],
 ) -> Layout {
     let (w, h) = surface;
+    // The card is centered in the surface with transparent drag margin
+    // around it; all card content lays out within these bounds, not
+    // the full surface.
+    let card_w = w - 2.0 * DRAG_MARGIN_X;
     let card_top = h - extent;
     let dock_h = config.window.input_bar_height as f32;
-    let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
+    let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM - DRAG_MARGIN_TOP;
 
     // Dock uses n_entries so search never hides dock icons.
-    let max_slots = (((w - 2.0 * DOCK_PAD_X) / DOCK_SLOT).floor() as usize).max(1);
+    let max_slots = (((card_w - 2.0 * DOCK_PAD_X) / DOCK_SLOT).floor() as usize).max(1);
     let n_dock = n_entries.min(max_slots);
     let start_x = (w - n_dock as f32 * DOCK_SLOT) / 2.0;
     let dock_slots = (0..n_dock)
@@ -292,7 +303,7 @@ pub fn layout(
 
     let grid_top = card_top + dock_h + GRID_TOP_GAP;
     let grid_bottom = (search_box.y - SEARCH_GAP).min(h);
-    let inner_w = (w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
+    let inner_w = (card_w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
     let cols = ((inner_w / GRID_CELL_W).floor() as usize).max(1);
 
     // Apps takes whatever rows fit after the fixed single-row sections
@@ -602,7 +613,8 @@ pub fn scene(
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     let (w, h) = surface;
-    let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM;
+    let card_w = w - 2.0 * DRAG_MARGIN_X;
+    let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM - DRAG_MARGIN_TOP;
     let mut scene = Scene {
         alpha,
         ..Default::default()
@@ -612,9 +624,9 @@ pub fn scene(
         _ => 0.0,
     };
 
-    // Card background.
+    // Card background (centered in the surface's drag margin).
     scene.rects.push(RectInst {
-        rect: Rect::new(0.0, layout.card_top, w, card_h),
+        rect: Rect::new(DRAG_MARGIN_X, layout.card_top, card_w, card_h),
         radius: config.theme.corner_radius,
         color: config.theme.background_rgba(),
     });
@@ -799,7 +811,7 @@ pub fn scene(
         let content_w = {
             let chars = if query.is_empty() { 0 } else { query.len() + 1 };
             let text_px = chars as f32 * SEARCH_FONT_PX * 0.52 + 2.0 * SEARCH_PAD_X;
-            text_px.max(SEARCH_W_MIN).min(w - 2.0 * GRID_PAD_X)
+            text_px.max(SEARCH_W_MIN).min(card_w - 2.0 * GRID_PAD_X)
         };
         let sw = lerp(btn.w, content_w, search_expand);
         let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
@@ -1217,9 +1229,11 @@ mod tests {
         Config::default()
     }
 
-    /// Surface for the default config: width × (height + margin + headroom).
-    const SURFACE: (f32, f32) = (720.0, 716.0);
-    /// Fully-open extent for the default config (height + margin).
+    /// Surface for the default config: (width + 2·drag margin) ×
+    /// (height + bottom margin + headroom + top drag margin).
+    const SURFACE: (f32, f32) = (880.0, 772.0);
+    /// Fully-open extent for the default config (height + margin);
+    /// independent of the drag margins.
     const OPEN: f32 = 692.0;
 
     fn open_layout(cfg: &Config, n: usize, scroll: f32) -> Layout {

@@ -86,15 +86,18 @@ fn main() -> anyhow::Result<()> {
         .context("zwlr_layer_shell_v1 not available (compositor must support wlr-layer-shell)")?;
 
     // The surface is tall enough for the fully risen card, the gap
-    // beneath it, and the magnification headroom above; the card slides
-    // within the extent range only (headroom excluded).
+    // beneath it, the magnification headroom above, and the transparent
+    // drag margin around it (room for a dragged icon to roam past the
+    // card edges); the card slides within the extent range only.
     let full_extent = config.window.height + config.window.bottom_margin;
-    let surface_height = full_extent + content::MAGNIFY_HEADROOM as u32;
+    let surface_height =
+        full_extent + content::MAGNIFY_HEADROOM as u32 + content::DRAG_MARGIN_TOP as u32;
+    let surface_width = config.window.width + 2 * content::DRAG_MARGIN_X as u32;
     let layer = surface::create_layer_surface(
         &compositor,
         &layer_shell,
         &qh,
-        config.window.width,
+        surface_width,
         surface_height,
     );
 
@@ -1873,8 +1876,13 @@ impl App {
             extent = extent.max(self.config.input.edge_reveal_px);
         }
         if self.input_extent != Some(extent) {
-            match surface::set_input_extent(&self.compositor, &self.layer, self.buffer_size, extent)
-            {
+            match surface::set_input_extent(
+                &self.compositor,
+                &self.layer,
+                self.buffer_size,
+                extent,
+                content::DRAG_MARGIN_X as u32,
+            ) {
                 Ok(()) => self.input_extent = Some(extent),
                 Err(e) => warn!("failed to set input region: {e:#}"),
             }
@@ -2584,12 +2592,13 @@ impl LayerShellHandler for App {
     ) {
         let (mut width, mut height) = configure.new_size;
         if width == 0 {
-            width = self.config.window.width;
+            width = self.config.window.width + 2 * content::DRAG_MARGIN_X as u32;
         }
         if height == 0 {
             height = self.config.window.height
                 + self.config.window.bottom_margin
-                + content::MAGNIFY_HEADROOM as u32;
+                + content::MAGNIFY_HEADROOM as u32
+                + content::DRAG_MARGIN_TOP as u32;
         }
         debug!("configure: {width}x{height}");
         self.buffer_size = (width, height);

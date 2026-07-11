@@ -69,15 +69,20 @@ pub fn set_input_extent(
     layer: &LayerSurface,
     (surface_w, surface_h): (u32, u32),
     extent: u32,
+    inset_x: u32,
 ) -> anyhow::Result<()> {
     let region =
         Region::new(compositor).map_err(|e| anyhow::anyhow!("cannot create input region: {e}"))?;
     if extent > 0 {
         let extent = extent.min(surface_h);
+        // Inset horizontally to the card's bounds: the transparent
+        // drag margin on the sides stays click-through to windows
+        // behind it.
+        let inset_x = inset_x.min(surface_w / 2);
         region.add(
-            0,
+            inset_x as i32,
             (surface_h - extent) as i32,
-            surface_w as i32,
+            (surface_w - 2 * inset_x) as i32,
             extent as i32,
         );
     }
