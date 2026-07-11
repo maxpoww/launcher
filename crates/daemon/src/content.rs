@@ -127,12 +127,12 @@ const GROUP_COLS: usize = 3;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
-const DOCK_ICON: f32 = 40.0;
+pub const DOCK_ICON: f32 = 40.0;
 const DOCK_SLOT: f32 = 44.0;
 const DOCK_PAD_X: f32 = 10.0;
 pub const GRID_CELL_W: f32 = 104.0;
 pub const GRID_CELL_H: f32 = 96.0;
-const GRID_ICON: f32 = 54.0;
+pub const GRID_ICON: f32 = 54.0;
 const GRID_PAD_X: f32 = 14.0;
 const GRID_TOP_GAP: f32 = 8.0;
 const GRID_BOTTOM_PAD: f32 = 10.0;
@@ -388,6 +388,24 @@ pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
     (page.min(max_page) as f32 * section.viewport.w).max(0.0)
 }
 
+/// Icon center of the `i`-th cell of section `s` (static slot
+/// geometry, cyclic paging applied) — where a landing flight ends.
+pub fn cell_icon_center(layout: &Layout, s: usize, i: usize) -> (f32, f32) {
+    let sec = &layout.sections[s];
+    let page_w = sec.viewport.w.max(1.0);
+    let cells_per_page = (sec.cols * sec.rows).max(1);
+    let total_w = (sec.n_pages as f32 * page_w).max(1.0);
+    let page = i / cells_per_page;
+    let within = i % cells_per_page;
+    let (row, col) = (within / sec.cols, within % sec.cols);
+    let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
+    let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
+    (
+        sec.viewport.x + rel + col as f32 * GRID_CELL_W + GRID_CELL_W / 2.0,
+        sec.viewport.y + row as f32 * GRID_CELL_H + 12.0 + GRID_ICON / 2.0,
+    )
+}
+
 /// Which section's scroll band contains `pos`: the viewport plus its
 /// title line above and the gap (page dots) beneath, so wheel paging is
 /// forgiving about the exact pointer height.
@@ -517,6 +535,13 @@ pub struct FrameInput<'a> {
     pub drag_hidden: Option<usize>,
     /// Entry whose dock slot is hidden (a dock-origin drag).
     pub dock_hidden: Option<usize>,
+    /// A landing flight: (entry index, current center, icon size). The
+    /// icon draws topmost at this spot while its resting cell stays
+    /// empty (`landing_hidden`).
+    pub landing: Option<(usize, (f32, f32), f32)>,
+    /// Entry whose resting cell/slot is empty because its icon is
+    /// still in flight (never compacts the grid — the seat is taken).
+    pub landing_hidden: Option<usize>,
     /// Animated displacement per dock slot, in slot units: the dock's
     /// make-room glide while a drag hovers it. Empty = at rest.
     pub dock_slide: &'a [f32],
@@ -564,6 +589,8 @@ pub fn scene(
         drag_hidden,
         dock_hidden,
         dock_slide,
+        landing,
+        landing_hidden,
         group_expand,
         group_origin,
     } = *frame;
@@ -641,7 +668,7 @@ pub fn scene(
         let Some(&entry_idx) = dock_order.get(slot) else {
             break;
         };
-        if dock_hidden == Some(entry_idx) {
+        if dock_hidden == Some(entry_idx) || landing_hidden == Some(entry_idx) {
             continue;
         }
         let slot_rect = &layout.dock_slots[slot];
@@ -718,6 +745,15 @@ pub fn scene(
                 layer: layer_of(df.entry_idx),
             });
         }
+    }
+
+    // A landing flight: the just-dropped icon glides into its seat,
+    // topmost like the drag ghost it used to be.
+    if let Some((entry_idx, (lx, ly), size)) = landing {
+        scene.overlay.push(IconInst {
+            rect: Rect::new(lx - size / 2.0, ly - size / 2.0, size, size),
+            layer: layer_of(entry_idx),
+        });
     }
 
     // Search widget: "Filter" pill button that morphs into an expanding
@@ -918,8 +954,9 @@ pub fn scene(
             let Some(entry) = entries.get(entry_idx) else {
                 break;
             };
-            // The drag's origin cell vanishes; its ghost is in flight.
-            if drag_hidden == Some(entry_idx) {
+            // The drag's origin cell vanishes (its ghost is in hand);
+            // a landing icon's seat stays empty until it arrives.
+            if drag_hidden == Some(entry_idx) || landing_hidden == Some(entry_idx) {
                 continue;
             }
             let di = if s == SECTION_APPS {

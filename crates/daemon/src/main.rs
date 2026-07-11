@@ -165,6 +165,7 @@ fn main() -> anyhow::Result<()> {
         dock_slide: Vec::new(),
         mag_sleep: None,
         mag_amount: 1.0,
+        landing: None,
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
@@ -347,6 +348,8 @@ pub struct App {
     /// Magnification amplitude envelope (0 = off, 1 = full): fades out
     /// around drags/drops and fades back in — never pops.
     mag_amount: f32,
+    /// A just-dropped icon still flying to its seat.
+    landing: Option<Landing>,
     /// Group-open transition: raw progress (0..1), its target, and the
     /// surface point the group expands from (the clicked tile).
     group_anim: f32,
@@ -518,6 +521,21 @@ const REORDER_DWELL: Duration = Duration::from_millis(180);
 /// Magnification blackout after a drop: the landing stays perfectly
 /// still for this long before the magnify wave may return.
 const MAG_SLEEP_AFTER_DROP: Duration = Duration::from_secs(1);
+
+/// Flight time of a dropped icon gliding into its seat.
+/// Deliberately very slow while the animation is being tuned.
+const LANDING_SECS: f32 = 1.5;
+
+/// A dropped icon flying from the release point to its resting cell.
+struct Landing {
+    /// Entry id (survives the reindexing a refilter causes).
+    id: String,
+    /// Where the drop released it (the ghost's last position).
+    from: (f32, f32),
+    /// Whether it lands on the dock (else: its Apps-grid cell).
+    to_dock: bool,
+    started: Instant,
+}
 
 /// Cap on entries listed when navigated into a directory.
 const FILES_LIST_MAX: usize = 300;
@@ -1345,6 +1363,15 @@ impl App {
                     )
                     && self.search.query.is_empty()
                     && self.handle_grid_drop(drag.entry_idx, &id, drag.pos);
+                if boxed && released && kind == Some(apps::EntryKind::App) {
+                    // Reordered/unboxed apps fly to their new seat.
+                    self.landing = Some(Landing {
+                        id: id.clone(),
+                        from: drag.pos,
+                        to_dock: false,
+                        started: Instant::now(),
+                    });
+                }
                 if !boxed && kind != Some(apps::EntryKind::Group) {
                     match insert {
                         Some(slot) => {
@@ -1360,10 +1387,25 @@ impl App {
                                 slot
                             };
                             self.pins.pin_at(&id, slot);
+                            self.landing = Some(Landing {
+                                id: id.clone(),
+                                from: drag.pos,
+                                to_dock: true,
+                                started: Instant::now(),
+                            });
                             self.refilter();
                         }
                         None if drag.from_dock => {
                             self.pins.exclude(&id);
+                            if released {
+                                // Unpinned: it flies back to its grid cell.
+                                self.landing = Some(Landing {
+                                    id: id.clone(),
+                                    from: drag.pos,
+                                    to_dock: false,
+                                    started: Instant::now(),
+                                });
+                            }
                             self.refilter();
                         }
                         None => {}
@@ -1969,7 +2011,64 @@ impl App {
                 self.dirty = true;
             }
         }
-        let mag_target = if self.gesture.dragging.is_none() && self.mag_sleep.is_none() {
+        // Landing flight: the dropped icon glides from the release
+        // point into its seat; the seat stays empty until it arrives.
+        let mut landing_frame: Option<(usize, (f32, f32), f32)> = None;
+        let mut landing_done = false;
+        if let Some(l) = &self.landing {
+            let t = (l.started.elapsed().as_secs_f32() / LANDING_SECS).clamp(0.0, 1.0);
+            let dest = self
+                .entries
+                .iter()
+                .position(|e| e.id == l.id)
+                .and_then(|idx| {
+                    if l.to_dock {
+                        let slot = self.dock_order.iter().position(|&e| e == idx)?;
+                        let rect = layout.dock_slots.get(slot)?;
+                        Some((
+                            idx,
+                            (
+                                rect.x + rect.w / 2.0,
+                                rect.y + rect.h - content::DOCK_ICON / 2.0,
+                            ),
+                            content::DOCK_ICON,
+                        ))
+                    } else {
+                        let cell = self.search.visible[content::SECTION_APPS]
+                            .iter()
+                            .position(|&v| v == idx)?;
+                        Some((
+                            idx,
+                            content::cell_icon_center(&layout, content::SECTION_APPS, cell),
+                            content::GRID_ICON,
+                        ))
+                    }
+                });
+            match dest {
+                Some((idx, to, end_size)) if t < 1.0 => {
+                    let e = 1.0 - (1.0 - t).powi(3); // ease-out cubic
+                    let start_size = content::DOCK_ICON * 1.25; // the ghost's size
+                    landing_frame = Some((
+                        idx,
+                        (
+                            animation::lerp(l.from.0, to.0, e),
+                            animation::lerp(l.from.1, to.1, e),
+                        ),
+                        animation::lerp(start_size, end_size, e),
+                    ));
+                    self.dirty = true;
+                }
+                _ => landing_done = true,
+            }
+        }
+        if landing_done {
+            self.landing = None;
+        }
+
+        let mag_target = if self.gesture.dragging.is_none()
+            && self.mag_sleep.is_none()
+            && self.landing.is_none()
+        {
             1.0f32
         } else {
             0.0
@@ -2077,6 +2176,8 @@ impl App {
                 drag_hidden,
                 dock_hidden,
                 dock_slide: &self.dock_slide,
+                landing: landing_frame,
+                landing_hidden: landing_frame.map(|(idx, _, _)| idx),
                 group_expand,
                 group_origin: self.group_origin,
             },
@@ -2641,6 +2742,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             });
                             if let (Some(entry_idx), false) = (entry_idx, undraggable) {
                                 let from_dock = matches!(hit, Hit::DockIcon(_));
+                                // Picking something up interrupts any
+                                // landing still in flight.
+                                app.landing = None;
                                 app.gesture.dragging = Some(DragState {
                                     entry_idx,
                                     from_dock,
