@@ -1312,11 +1312,33 @@ impl App {
         };
         let (id, path) = (entry.id.clone(), entry.path.clone());
         let kind = self.kinds.get(drag.entry_idx).copied();
+        let layout = self.current_layout();
         let section = if released {
-            content::section_at(&self.current_layout(), drag.pos)
+            content::section_at(&layout, drag.pos)
         } else {
             None
         };
+        // Visual snapshot (absolute/display positions) of everything
+        // that might rearrange: any unfinished make-room glide then
+        // completes smoothly across the drop instead of snapping.
+        let dock_vis: Vec<(usize, f32)> = self
+            .dock_order
+            .iter()
+            .enumerate()
+            .take(layout.dock_slots.len())
+            .filter(|(_, &e)| e != drag.entry_idx)
+            .map(|(k, &e)| {
+                let slot = &layout.dock_slots[k];
+                let shift = self.dock_slide.get(k).copied().unwrap_or(0.0);
+                (e, slot.x + slot.w / 2.0 + shift * slot.w)
+            })
+            .collect();
+        let grid_vis: Vec<(usize, f32)> = self.search.visible[content::SECTION_APPS]
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e != drag.entry_idx)
+            .map(|(i, &e)| (e, self.apps_slide.get(i).copied().unwrap_or(i as f32)))
+            .collect();
         debug!(
             "drop: id={id} kind={kind:?} from_dock={} insert={insert:?} section={section:?}",
             drag.from_dock
@@ -1386,6 +1408,22 @@ impl App {
                             } else {
                                 slot
                             };
+                            // Everything left of the drop keeps its
+                            // exact place: usage-filled slots there
+                            // become explicit pins first — pin_at's
+                            // index is pins-relative, and without this
+                            // a drop beyond the pinned prefix would
+                            // land elsewhere and reshuffle the fill.
+                            let prefix: Vec<String> = self
+                                .dock_order
+                                .iter()
+                                .filter(|&&e| e != drag.entry_idx)
+                                .take(slot)
+                                .map(|&e| self.entries[e].id.clone())
+                                .collect();
+                            for (k, pid) in prefix.iter().enumerate() {
+                                self.pins.pin_at(pid, k);
+                            }
                             self.pins.pin_at(&id, slot);
                             self.landing = Some(Landing {
                                 id: id.clone(),
@@ -1415,12 +1453,30 @@ impl App {
         }
         self.reorder_slot = None;
         self.reorder_dwell = None;
-        // The drop finalized a new arrangement: parting offsets belong
-        // to the old one, and magnification sleeps a full second so
-        // the icon simply *is* placed before any wave returns.
-        self.dock_slide.fill(0.0);
-        self.mag_sleep = Some(Instant::now() + MAG_SLEEP_AFTER_DROP);
         self.recompute_dock_order();
+        // Remap the glide state onto the new arrangement: every icon
+        // keeps its exact current visual position and eases to rest —
+        // nothing snaps at the drop, and icons already at their seat
+        // (the common case) don't move at all.
+        let new_layout = self.current_layout();
+        let n_dock = new_layout.dock_slots.len();
+        self.dock_slide = vec![0.0; n_dock];
+        for (k, &e) in self.dock_order.iter().take(n_dock).enumerate() {
+            if let Some(&(_, cx)) = dock_vis.iter().find(|&&(ve, _)| ve == e) {
+                let slot = &new_layout.dock_slots[k];
+                self.dock_slide[k] = (cx - (slot.x + slot.w / 2.0)) / slot.w;
+            }
+        }
+        let vis = &self.search.visible[content::SECTION_APPS];
+        self.apps_slide = (0..vis.len()).map(|i| i as f32).collect();
+        for (i, &e) in vis.iter().enumerate() {
+            if let Some(&(_, d)) = grid_vis.iter().find(|&&(ve, _)| ve == e) {
+                self.apps_slide[i] = d;
+            }
+        }
+        // Magnification sleeps a full second so the icon simply *is*
+        // placed before any wave returns.
+        self.mag_sleep = Some(Instant::now() + MAG_SLEEP_AFTER_DROP);
         self.update_hover();
         self.schedule_frame();
     }
