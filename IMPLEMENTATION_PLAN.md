@@ -220,6 +220,13 @@ drag-and-drop package management:
   made four of five results noise. A format-rejected cache now forces a
   re-dump regardless of file age (a v1→v2 bump exposed that the age
   check alone left the index empty forever).
+- **Storefront:** before any query the Install section shows 24
+  curated household names (firefox, chromium, vlc, gimp, blender, …)
+  with their icons, served as the empty query's `Ranked` answer; a
+  1-char query keeps the current hits (no flash), 2+ chars is live
+  search. `nix profile install` allows unfree (`NIXPKGS_ALLOW_UNFREE`
+  + `--impure`) so storefront names like spotify/steam install when
+  dragged.
 - **Search:** typing fans package matches into the Install section as
   transient entries (same pattern as file-search results). Ranking runs
   on the nix thread (16–270 ms debug over the curated index): queries
