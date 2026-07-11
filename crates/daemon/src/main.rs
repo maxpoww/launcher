@@ -162,6 +162,8 @@ fn main() -> anyhow::Result<()> {
         reorder_slot: None,
         reorder_dwell: None,
         apps_slide: Vec::new(),
+        dock_slide: Vec::new(),
+        mag_anchor: None,
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
@@ -335,6 +337,13 @@ pub struct App {
     /// Per-cell animated display indices for the Apps grid (the
     /// make-room glide); identity when nothing is in flight.
     apps_slide: Vec<f32>,
+    /// Animated displacement per dock slot, in slot units (the dock's
+    /// make-room glide during drags).
+    dock_slide: Vec<f32>,
+    /// Where the pointer was when a drag dropped: magnification stays
+    /// off until the hand moves clear of this point, so the residual
+    /// glide at release never stirs the icons.
+    mag_anchor: Option<(f32, f32)>,
     /// Group-open transition: raw progress (0..1), its target, and the
     /// surface point the group expands from (the clicked tile).
     group_anim: f32,
@@ -1357,6 +1366,11 @@ impl App {
         }
         self.reorder_slot = None;
         self.reorder_dwell = None;
+        // The drop finalized a new arrangement: parting offsets belong
+        // to the old one, and magnification stays asleep until the
+        // hand truly moves again.
+        self.dock_slide.fill(0.0);
+        self.mag_anchor = Some(drag.pos);
         self.recompute_dock_order();
         self.update_hover();
         self.schedule_frame();
@@ -1832,6 +1846,12 @@ impl App {
         // The icon in hand is the ghost: hide its resting cell — the
         // grid cell for grid-origin drags, the dock slot for
         // dock-origin ones.
+        let dock_hidden = self
+            .gesture
+            .dragging
+            .as_ref()
+            .filter(|d| d.from_dock)
+            .map(|d| d.entry_idx);
         let drag_hidden = self.gesture.dragging.as_ref().and_then(|drag| {
             (!drag.from_dock
                 && matches!(
@@ -1874,9 +1894,75 @@ impl App {
                 self.apps_slide[i] = target;
             }
         }
+        // Dock make-room glide, same idea in dock-slot units: dragging
+        // over the dock parts the icons around the insertion point;
+        // a dock-origin drag's gap rests at its old slot meanwhile.
+        let dock_insert_now =
+            self.gesture
+                .dragging
+                .as_ref()
+                .and_then(|d| match self.kinds.get(d.entry_idx) {
+                    Some(apps::EntryKind::App) | Some(apps::EntryKind::File) => {
+                        self.drag_dock_insert(&layout, d.pos)
+                    }
+                    _ => None,
+                });
+        let n_dock = layout.dock_slots.len();
+        if self.dock_slide.len() != n_dock {
+            self.dock_slide = vec![0.0; n_dock];
+        }
+        let dock_origin = self
+            .gesture
+            .dragging
+            .as_ref()
+            .filter(|d| d.from_dock)
+            .and_then(|d| self.dock_order.iter().position(|&e| e == d.entry_idx))
+            .filter(|&o| o < n_dock);
+        for kk in 0..n_dock {
+            let target = match (dock_insert_now, dock_origin) {
+                (Some(g), Some(o)) => {
+                    if kk == o {
+                        0.0
+                    } else {
+                        let compact = if kk > o { kk - 1 } else { kk };
+                        let g_c = g - usize::from(o < g);
+                        (compact + usize::from(compact >= g_c)) as f32 - kk as f32
+                    }
+                }
+                // A foreign icon hovers: part the row around the slot.
+                (Some(g), None) => {
+                    if kk >= g {
+                        0.5
+                    } else {
+                        -0.5
+                    }
+                }
+                _ => 0.0,
+            };
+            let cur = self.dock_slide[kk];
+            if (cur - target).abs() > 0.005 {
+                self.dock_slide[kk] = cur + (target - cur) * k;
+                slide_animating = true;
+            } else {
+                self.dock_slide[kk] = target;
+            }
+        }
         if slide_animating {
             self.dirty = true;
         }
+        // Magnification is dead while dragging and stays dead after a
+        // drop until the hand moves clear of the release point — the
+        // residual glide at release must not stir the icons.
+        if let (Some((ax, ay)), Some((px, py))) = (self.mag_anchor, self.pointer_pos) {
+            if (px - ax).hypot(py - ay) > 12.0 {
+                self.mag_anchor = None;
+            }
+        }
+        let mag_pointer = if self.gesture.dragging.is_none() && self.mag_anchor.is_none() {
+            self.pointer_pos
+        } else {
+            None
+        };
 
         // Box open/close transition (~180 ms, eased below).
         if self.group_anim != self.group_anim_target {
@@ -1912,12 +1998,6 @@ impl App {
                 // The insertion bar means "pin here": suppress it for
                 // things that never pin (packages install, boxes stay
                 // in the grid).
-                dock_insert: match self.kinds.get(drag.entry_idx) {
-                    Some(apps::EntryKind::App) | Some(apps::EntryKind::File) => {
-                        self.drag_dock_insert(&layout, drag.pos)
-                    }
-                    _ => None,
-                },
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
                 over_cell,
             });
@@ -1949,11 +2029,7 @@ impl App {
                     None
                 },
                 alpha: self.ui.alpha(),
-                pointer: if drag_frame.is_none() {
-                    self.pointer_pos
-                } else {
-                    None
-                },
+                pointer: mag_pointer,
                 bounce,
                 query: &self.search.query,
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
@@ -1970,6 +2046,8 @@ impl App {
                 apps_group: &self.apps_group_name(),
                 apps_slide: &self.apps_slide,
                 drag_hidden,
+                dock_hidden,
+                dock_slide: &self.dock_slide,
                 group_expand,
                 group_origin: self.group_origin,
             },

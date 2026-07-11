@@ -445,9 +445,6 @@ pub struct DragFrame {
     pub entry_idx: usize,
     /// Current pointer position in surface coordinates.
     pub pos: (f32, f32),
-    /// Target dock insertion slot (0 = before first, n = after last)
-    /// while hovering the dock band; `None` when outside the dock.
-    pub dock_insert: Option<usize>,
     /// Section that would accept this drop (install/uninstall target),
     /// washed with a highlight while hovered; `None` otherwise.
     pub drop_section: Option<usize>,
@@ -515,6 +512,11 @@ pub struct FrameInput<'a> {
     /// Entry whose grid cell is hidden (the drag's origin — the ghost
     /// is its visual while in flight).
     pub drag_hidden: Option<usize>,
+    /// Entry whose dock slot is hidden (a dock-origin drag).
+    pub dock_hidden: Option<usize>,
+    /// Animated displacement per dock slot, in slot units: the dock's
+    /// make-room glide while a drag hovers it. Empty = at rest.
+    pub dock_slide: &'a [f32],
     /// Open/close progress of the app-group expand animation (eased,
     /// 0 = collapsed into the tile, 1 = settled). Cells of an open
     /// group scale/glide out of `group_origin`.
@@ -556,6 +558,8 @@ pub fn scene(
         apps_group,
         apps_slide,
         drag_hidden,
+        dock_hidden,
+        dock_slide,
         group_expand,
         group_origin,
     } = *frame;
@@ -623,13 +627,18 @@ pub fn scene(
             }
         }
     }
-    // Dock icons: slot index → entry index via dock_order.
+    // Dock icons: slot index → entry index via dock_order. `dock_slide`
+    // parts the row around a hovering drag; a dock-origin drag's own
+    // icon is hidden (its ghost is in hand).
     for slot in 0..layout.dock_slots.len() {
         let Some(&entry_idx) = dock_order.get(slot) else {
             break;
         };
+        if dock_hidden == Some(entry_idx) {
+            continue;
+        }
         let slot_rect = &layout.dock_slots[slot];
-        let vcx = dock_vcx[slot];
+        let vcx = dock_vcx[slot] + dock_slide.get(slot).copied().unwrap_or(0.0) * DOCK_SLOT;
         let baseline = slot_rect.y + slot_rect.h;
         let scale = dock_scales[slot];
         let size = (DOCK_ICON * scale).min(slot_rect.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
@@ -662,7 +671,8 @@ pub fn scene(
             }
         }
     }
-    // Drag-and-drop visuals: insertion bar + ghost.
+    // Drag-and-drop visuals: the ghost (the dock parts via dock_slide
+    // instead of drawing an insertion bar).
     if let Some(df) = drag {
         // Wash the section that would accept this drop.
         if let Some(target) = df.drop_section {
@@ -673,25 +683,6 @@ pub fn scene(
                 radius: 14.0,
                 color: [hl[0], hl[1], hl[2], (hl[3] * 1.4).min(0.3)],
             });
-        }
-        // Thin vertical bar at the would-be insertion point.
-        if let Some(insert_slot) = df.dock_insert {
-            if let Some(first) = layout.dock_slots.first() {
-                let n = layout.dock_slots.len();
-                let bar_x = if insert_slot >= n {
-                    layout.dock_slots[n - 1].x + layout.dock_slots[n - 1].w
-                } else {
-                    layout.dock_slots[insert_slot].x
-                };
-                let bar_h = DOCK_ICON * 0.85;
-                let bar_y = first.y + (first.h - bar_h) / 2.0;
-                let hl = config.theme.highlight_rgba();
-                scene.rects.push(RectInst {
-                    rect: Rect::new(bar_x - 2.0, bar_y, 4.0, bar_h),
-                    radius: 2.0,
-                    color: [hl[0], hl[1], hl[2], 0.9],
-                });
-            }
         }
         // Ghost following the pointer, topmost: the dragged icon, or a
         // box's mini stack. Slightly enlarged — it's "in hand".
