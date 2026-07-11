@@ -100,6 +100,19 @@ impl GroupDb {
         self.save();
     }
 
+    /// Move a whole group to position `to` in the group list (manual
+    /// reordering of the leading box cells).
+    pub fn move_group(&mut self, from: usize, to: usize) {
+        if from >= self.groups.len() {
+            return;
+        }
+        let group = self.groups.remove(from);
+        let to = to.min(self.groups.len());
+        self.groups.insert(to, group);
+        info!("group moved: {from} -> {to}");
+        self.save();
+    }
+
     /// Move a member to sit before member position `before` within its
     /// group (manual reordering inside an open box).
     pub fn move_member(&mut self, index: usize, id: &str, before: usize) {

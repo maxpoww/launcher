@@ -370,15 +370,6 @@ pub struct App {
     exit: bool,
 }
 
-/// What a grid drop at a given position would do (see
-/// `App::grid_drop_target`).
-enum GridDrop {
-    /// Fold into the cell at this index (create or join a box).
-    Fold(usize),
-    /// Move to sit before this insertion slot (full-list coords).
-    Reorder(usize),
-}
-
 /// Readiness of the nixpkgs package index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PkgIndexState {
@@ -1309,15 +1300,21 @@ impl App {
             }
             _ => {
                 // Grid gestures first: a grid-origin app dropped on
-                // another app creates a box, on a box joins it, on a
-                // cell edge reorders, and a member dragged out of the
-                // open box leaves it. Else fall through to pinning.
+                // another app creates a box, on a box joins it, in the
+                // gap reorders (boxes reorder too), and a member
+                // dragged out of the open box leaves it. Else fall
+                // through to pinning (never for boxes — they don't
+                // pin).
                 let boxed = released
                     && !drag.from_dock
                     && insert.is_none()
-                    && kind == Some(apps::EntryKind::App)
+                    && matches!(
+                        kind,
+                        Some(apps::EntryKind::App) | Some(apps::EntryKind::Group)
+                    )
+                    && self.search.query.is_empty()
                     && self.handle_grid_drop(drag.entry_idx, &id, drag.pos);
-                if !boxed {
+                if !boxed && kind != Some(apps::EntryKind::Group) {
                     match insert {
                         Some(slot) => self.pins.pin_at(&id, slot),
                         None if drag.from_dock => self.pins.exclude(&id),
@@ -1326,135 +1323,212 @@ impl App {
                 }
             }
         }
+        self.reorder_slot = None;
         self.recompute_dock_order();
         self.update_hover();
         self.schedule_frame();
     }
 
-    /// What a grid-origin app drag over the Apps section would do if
-    /// dropped at `pos`: fold into a cell (create/join a box — the
-    /// center band of a valid target) or reorder to an insertion slot
-    /// (cell edges, gaps, and the space past the last cell).
-    fn grid_drop_target(
+    /// The Apps display cell under `pos` plus the within-cell
+    /// fractions, from static slot geometry (display slots never move;
+    /// only items glide between them — that's what keeps targeting
+    /// stable while everything animates).
+    fn apps_display_cell(
         &self,
         layout: &content::Layout,
         pos: (f32, f32),
-        entry_idx: usize,
-        from_dock: bool,
-    ) -> Option<GridDrop> {
-        if from_dock
-            || !self.search.query.is_empty()
-            || self.kinds.get(entry_idx) != Some(&apps::EntryKind::App)
-        {
-            return None;
-        }
+    ) -> Option<(usize, f32, f32)> {
         let sec = &layout.sections[content::SECTION_APPS];
         if !sec.viewport.contains(pos) || sec.n_pages == 0 {
             return None;
         }
-        let visible = &self.search.visible[content::SECTION_APPS];
-        // Cell-space position (the hit-test math, kept fractional).
         let page_w = sec.viewport.w.max(1.0);
-        let adjusted_x = (pos.0 - sec.viewport.x + sec.scroll).max(0.0);
-        let page = ((adjusted_x / page_w).floor() as usize) % sec.n_pages.max(1);
-        let col_f = (adjusted_x.rem_euclid(page_w)) / content::GRID_CELL_W;
-        let row = (((pos.1 - sec.viewport.y) / content::GRID_CELL_H).floor() as usize)
-            .min(sec.rows.saturating_sub(1));
-        let col = (col_f.floor() as usize).min(sec.cols.saturating_sub(1));
-        let cell = page * sec.cols * sec.rows + row * sec.cols + col;
-        let frac = col_f.fract();
-
-        // Center band of a valid fold target folds; edges reorder.
-        if (0.30..0.70).contains(&frac) {
-            if let Some(&target_idx) = visible.get(cell) {
-                let foldable = target_idx != entry_idx
-                    && match self.kinds.get(target_idx) {
-                        Some(apps::EntryKind::Group) => true,
-                        Some(apps::EntryKind::App) => self.app_group.is_none(),
-                        _ => false,
-                    };
-                if foldable {
-                    return Some(GridDrop::Fold(cell));
-                }
-            }
-        }
-        let mut slot = (cell + usize::from(frac >= 0.5)).min(visible.len());
-        // Reordering happens among apps: never before the leading box
-        // cells of the loose grid.
-        if self.app_group.is_none() {
-            let n_boxes = self.groups.groups().len();
-            slot = slot.max(n_boxes.min(visible.len()));
-        }
-        Some(GridDrop::Reorder(slot))
+        let ax = (pos.0 - sec.viewport.x + sec.scroll).max(0.0);
+        let page = ((ax / page_w).floor() as usize) % sec.n_pages.max(1);
+        let fx = (ax.rem_euclid(page_w)) / content::GRID_CELL_W;
+        let fy = (pos.1 - sec.viewport.y) / content::GRID_CELL_H;
+        let col = (fx.floor() as usize).min(sec.cols.saturating_sub(1));
+        let row = (fy.floor() as usize).min(sec.rows.saturating_sub(1));
+        let d = page * sec.cols * sec.rows + row * sec.cols + col;
+        Some((d, fx.fract(), fy.fract().clamp(0.0, 1.0)))
     }
 
-    /// Resolve a grid-origin app drop; true when it was a grid gesture
+    /// The display-slot range the dragged kind may occupy: boxes stay
+    /// leading, loose apps stay behind them, box members span the box.
+    fn drag_slot_range(&self, kind: Option<apps::EntryKind>, len: usize) -> (usize, usize) {
+        let last = len.saturating_sub(1);
+        if self.app_group.is_some() {
+            (0, last)
+        } else if kind == Some(apps::EntryKind::Group) {
+            (0, self.groups.groups().len().saturating_sub(1).min(last))
+        } else {
+            (self.groups.groups().len().min(last), last)
+        }
+    }
+
+    /// Track the drag's grid target in display space. The make-room
+    /// gap starts at the pickup slot (nothing moves on pickup) and
+    /// follows the pointer cell by cell — with dead margins against
+    /// boundary jitter — so the gap under the pointer is exactly where
+    /// the drop will land. Returns the fold target (ring), if any;
+    /// the gap itself lives in `self.reorder_slot`.
+    fn update_grid_target(&mut self, layout: &content::Layout) -> Option<(usize, usize)> {
+        let Some(drag) = self.gesture.dragging.as_ref() else {
+            self.reorder_slot = None;
+            return None;
+        };
+        let kind = self.kinds.get(drag.entry_idx).copied();
+        let grid_drag = !drag.from_dock
+            && self.search.query.is_empty()
+            && matches!(
+                kind,
+                Some(apps::EntryKind::App) | Some(apps::EntryKind::Group)
+            );
+        let visible = &self.search.visible[content::SECTION_APPS];
+        let (len, pos) = (visible.len(), drag.pos);
+        let Some(orig) = visible.iter().position(|&v| v == drag.entry_idx) else {
+            self.reorder_slot = None;
+            return None;
+        };
+        if !grid_drag || len == 0 {
+            self.reorder_slot = None;
+            return None;
+        }
+        let (lo, hi) = self.drag_slot_range(kind, len);
+        let slot = (*self.reorder_slot.get_or_insert(orig)).clamp(lo, hi);
+        self.reorder_slot = Some(slot);
+
+        // Outside the grid the gap simply stays where it was.
+        let (d, fx, fy) = self.apps_display_cell(layout, pos)?;
+        let d = d.min(len.saturating_sub(1)).clamp(lo, hi);
+        if d == slot {
+            return None; // hovering the gap: stable
+        }
+        // Dead margins: retarget only once the pointer is decisively
+        // inside the neighboring cell.
+        if !(0.12..0.88).contains(&fx) || !(0.08..0.92).contains(&fy) {
+            return None;
+        }
+        // The item shown at display cell `d`.
+        let compact = d - usize::from(d > slot);
+        let full = compact + usize::from(compact >= orig);
+        // Center band of a foldable item folds (apps only; boxes never
+        // nest); everything else slides the gap here.
+        if kind == Some(apps::EntryKind::App) && (0.34..0.66).contains(&fx) {
+            let foldable = self.search.visible[content::SECTION_APPS]
+                .get(full)
+                .is_some_and(|&t| match self.kinds.get(t) {
+                    Some(apps::EntryKind::Group) => true,
+                    Some(apps::EntryKind::App) => self.app_group.is_none(),
+                    _ => false,
+                });
+            if foldable {
+                return Some((content::SECTION_APPS, full));
+            }
+        }
+        self.reorder_slot = Some(d);
+        self.dirty = true;
+        None
+    }
+
+    /// Resolve a grid-origin drop; true when it was a grid gesture
     /// (fold / reorder / leave-box), false to fall through to pinning.
     fn handle_grid_drop(&mut self, entry_idx: usize, id: &str, pos: (f32, f32)) -> bool {
         let layout = self.current_layout();
-        match self.grid_drop_target(&layout, pos, entry_idx, false) {
-            Some(GridDrop::Fold(cell)) => {
-                let Some(&target_idx) = self.search.visible[content::SECTION_APPS].get(cell) else {
-                    return false;
-                };
-                let target_id = self.entries[target_idx].id.clone();
-                match self.kinds.get(target_idx) {
-                    Some(apps::EntryKind::Group) => {
-                        let Some(g) = target_id
-                            .strip_prefix("group:")
-                            .and_then(|n| n.parse::<usize>().ok())
-                        else {
-                            return false;
-                        };
-                        self.groups.add(g, id);
-                    }
-                    Some(apps::EntryKind::App) => {
-                        self.groups.create(&target_id, id);
-                    }
-                    _ => return false,
-                }
-                self.refilter();
-                true
-            }
-            Some(GridDrop::Reorder(slot)) => {
-                if let Some(g) = self.app_group {
-                    self.groups.move_member(g, id, slot);
-                } else {
-                    let n_boxes = self.groups.groups().len();
-                    let ids: Vec<String> = self.search.visible[content::SECTION_APPS]
-                        .iter()
-                        .skip(n_boxes)
-                        .map(|&idx| self.entries[idx].id.clone())
-                        .collect();
-                    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-                    self.order
-                        .move_within(id, &refs, slot.saturating_sub(n_boxes));
-                }
-                self.refilter();
-                true
-            }
-            None => {
-                // Inside an open box (not searching), dropping a member
-                // anywhere that isn't a cell (and isn't the dock —
-                // handled by the caller) moves it back out.
-                if self.app_group.is_some()
-                    && self.search.query.is_empty()
-                    && self.groups.remove_member(id)
+        let kind = self.kinds.get(entry_idx).copied();
+        let visible = &self.search.visible[content::SECTION_APPS];
+        let len = visible.len();
+        let Some(orig) = visible.iter().position(|&v| v == entry_idx) else {
+            return false;
+        };
+        let inside = layout.sections[content::SECTION_APPS]
+            .viewport
+            .contains(pos);
+        if !inside {
+            // Inside an open box (not searching), dropping a member
+            // outside the grid (and not on the dock — handled by the
+            // caller) moves it back out to the loose grid.
+            if self.app_group.is_some()
+                && self.search.query.is_empty()
+                && self.groups.remove_member(id)
+            {
+                if self
+                    .app_group
+                    .is_some_and(|g| g >= self.groups.groups().len())
                 {
-                    if self
-                        .app_group
-                        .is_some_and(|g| g >= self.groups.groups().len())
-                    {
-                        // The open box dissolved with the move.
-                        self.app_group = None;
-                        self.group_origin = None;
-                    }
-                    self.refilter();
-                    return true;
+                    // The open box dissolved with the move.
+                    self.app_group = None;
+                    self.group_origin = None;
                 }
-                false
+                self.refilter();
+                return true;
+            }
+            return false;
+        }
+        let slot = self.reorder_slot.unwrap_or(orig);
+        // Fold wins when the pointer sits on a foldable item's center.
+        if kind == Some(apps::EntryKind::App) {
+            if let Some((d, fx, _)) = self.apps_display_cell(&layout, pos) {
+                let d = d.min(len.saturating_sub(1));
+                if d != slot && (0.34..0.66).contains(&fx) {
+                    let compact = d - usize::from(d > slot);
+                    let full = compact + usize::from(compact >= orig);
+                    if let Some(&target_idx) = self.search.visible[content::SECTION_APPS].get(full)
+                    {
+                        let target_id = self.entries[target_idx].id.clone();
+                        match self.kinds.get(target_idx) {
+                            Some(apps::EntryKind::Group) => {
+                                if let Some(g) = target_id
+                                    .strip_prefix("group:")
+                                    .and_then(|n| n.parse::<usize>().ok())
+                                {
+                                    self.groups.add(g, id);
+                                    self.refilter();
+                                    return true;
+                                }
+                            }
+                            Some(apps::EntryKind::App) if self.app_group.is_none() => {
+                                self.groups.create(&target_id, id);
+                                self.refilter();
+                                return true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
+        // Otherwise the drop lands in the gap, wherever it is now.
+        if let Some(g) = self.app_group {
+            let n_members = self.groups.groups()[g].members.len();
+            let full_before = (slot + usize::from(slot >= orig)).min(n_members);
+            self.groups.move_member(g, id, full_before);
+        } else if kind == Some(apps::EntryKind::Group) {
+            if let Some(from) = id
+                .strip_prefix("group:")
+                .and_then(|n| n.parse::<usize>().ok())
+            {
+                self.groups.move_group(from, slot);
+                if self.app_group == Some(from) {
+                    self.app_group = Some(slot.min(self.groups.groups().len() - 1));
+                }
+            }
+        } else {
+            // Anchor on the compacted list (dragged removed): the item
+            // currently displayed at the gap.
+            let n_boxes = self.groups.groups().len();
+            let compact_ids: Vec<String> = self.search.visible[content::SECTION_APPS]
+                .iter()
+                .filter(|&&idx| idx != entry_idx)
+                .skip(n_boxes)
+                .map(|&idx| self.entries[idx].id.clone())
+                .collect();
+            let refs: Vec<&str> = compact_ids.iter().map(String::as_str).collect();
+            self.order
+                .move_within(id, &refs, slot.saturating_sub(n_boxes));
+        }
+        self.refilter();
+        true
     }
 
     /// The section that would accept the dragged entry if dropped at
@@ -1717,26 +1791,22 @@ impl App {
         let layout = self.current_layout();
         // (layout.scroll is the cyclic-wrapped image of list_scroll; the
         // raw value is what animates, so never sync it back from layout.)
-        // Grid drag: resolve the fold/reorder target under the pointer
-        // and remember which cell to hide (the ghost is its visual).
-        let grid_target = self.gesture.dragging.as_ref().and_then(|drag| {
-            self.grid_drop_target(&layout, drag.pos, drag.entry_idx, drag.from_dock)
-        });
-        self.reorder_slot = match grid_target {
-            Some(GridDrop::Reorder(slot)) => Some(slot),
-            _ => None,
-        };
-        let over_cell = match grid_target {
-            Some(GridDrop::Fold(cell)) => Some((content::SECTION_APPS, cell)),
-            _ => None,
-        };
+        // Grid drag: track the make-room gap under the pointer and the
+        // fold target (ring); remember which cell to hide (the ghost
+        // is its visual).
+        let over_cell = self.update_grid_target(&layout);
         let drag_hidden = self.gesture.dragging.as_ref().and_then(|drag| {
-            (!drag.from_dock && self.kinds.get(drag.entry_idx) == Some(&apps::EntryKind::App))
-                .then_some(drag.entry_idx)
+            (!drag.from_dock
+                && matches!(
+                    self.kinds.get(drag.entry_idx),
+                    Some(apps::EntryKind::App) | Some(apps::EntryKind::Group)
+                ))
+            .then_some(drag.entry_idx)
         });
         // Make-room glide: each Apps cell eases toward its display
-        // slot (origin gap closes, insertion gap opens). ~80 ms
-        // exponential ease-out — crisp, no overshoot.
+        // slot (the gap starts at the pickup slot, so nothing moves
+        // until the pointer asks for room). ~90 ms exponential
+        // ease-out — crisp, no overshoot.
         let apps_len = self.search.visible[content::SECTION_APPS].len();
         if self.apps_slide.len() != apps_len {
             self.apps_slide = (0..apps_len).map(|i| i as f32).collect();
@@ -1747,19 +1817,16 @@ impl App {
                 .position(|&v| v == e)
         });
         let mut slide_animating = false;
-        let k = 1.0 - (-dt * 22.0f32).exp();
+        let k = 1.0 - (-dt * 18.0f32).exp();
         for i in 0..apps_len {
             let mut target = i as f32;
             if let Some(op) = orig_pos {
-                if i > op {
-                    target -= 1.0; // the origin's gap closes
-                }
-                if let Some(slot) = self.reorder_slot {
+                if i != op {
+                    // Items display at their compacted index, stepping
+                    // over the gap wherever it currently sits.
                     let compact = if i > op { i - 1 } else { i };
-                    let slot_c = slot - usize::from(op < slot);
-                    if compact >= slot_c {
-                        target += 1.0; // the insertion gap opens
-                    }
+                    let gap = self.reorder_slot.unwrap_or(op);
+                    target = (compact + usize::from(compact >= gap)) as f32;
                 }
             }
             let cur = self.apps_slide[i];
@@ -2419,14 +2486,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 Hit::GridCell(s, cell) => app.search.visible[s].get(cell).copied(),
                                 Hit::SearchButton | Hit::FilesBack | Hit::AppsBack => None,
                             };
-                            // Cells with a profile mutation in flight can't
-                            // start a new drag; boxes open on click and
-                            // aren't draggable themselves.
+                            // Cells with a profile mutation in flight
+                            // can't start a new drag.
                             let undraggable = entry_idx.is_some_and(|i| {
                                 app.entries
                                     .get(i)
                                     .is_some_and(|e| app.busy_ids.contains(&e.id))
-                                    || app.kinds.get(i) == Some(&apps::EntryKind::Group)
                             });
                             if let (Some(entry_idx), false) = (entry_idx, undraggable) {
                                 let from_dock = matches!(hit, Hit::DockIcon(_));

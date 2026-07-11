@@ -529,6 +529,10 @@ impl Renderer {
                 (grid.clip, r0..rects.len() as u32, i0..icons.len() as u32)
             })
             .collect();
+        // Overlay icons (drag ghost) ride the same buffer, drawn last.
+        let o0 = icons.len() as u32;
+        icons.extend(scene.overlay.iter().map(icon_instance));
+        let overlay_range = o0..icons.len() as u32;
         let rect_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -743,6 +747,16 @@ impl Renderer {
                 self.text_renderer
                     .render(&self.text_atlas, &self.text_viewport, &mut pass)
                     .context("glyphon render failed")?;
+            }
+
+            // Topmost: the drag ghost — above grids and labels alike.
+            if !overlay_range.is_empty() {
+                if let Some(icon_bind) = &self.icon_bind {
+                    pass.set_pipeline(&self.icon_pipeline);
+                    pass.set_bind_group(1, icon_bind, &[]);
+                    pass.set_vertex_buffer(0, icon_buf.slice(..));
+                    pass.draw(0..4, overlay_range.clone());
+                }
             }
         }
 

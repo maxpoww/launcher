@@ -87,6 +87,9 @@ pub struct Scene {
     /// Section grids (Apps / Install / Files), each clipped to its own
     /// viewport by the renderer.
     pub grids: Vec<GridContent>,
+    /// Topmost icon quads, drawn over everything (the drag ghost —
+    /// what's in your hand must never hide behind the grid).
+    pub overlay: Vec<IconInst>,
 }
 
 /// What the pointer is over.
@@ -690,13 +693,33 @@ pub fn scene(
                 });
             }
         }
-        // Ghost icon following the pointer.
-        let size = DOCK_ICON * 1.05;
+        // Ghost following the pointer, topmost: the dragged icon, or a
+        // box's mini stack. Slightly enlarged — it's "in hand".
+        let size = DOCK_ICON * 1.25;
         let (gx, gy) = df.pos;
-        scene.icons.push(IconInst {
-            rect: Rect::new(gx - size / 2.0, gy - size / 2.0, size, size),
-            layer: layer_of(df.entry_idx),
-        });
+        if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == df.entry_idx) {
+            let m = size * 0.46;
+            let gap = size * 0.08;
+            for (k, layer) in minis.iter().enumerate() {
+                let Some(layer) = layer else { continue };
+                let col_k = (k % 2) as f32;
+                let row_k = (k / 2) as f32;
+                scene.overlay.push(IconInst {
+                    rect: Rect::new(
+                        gx - m - gap / 2.0 + col_k * (m + gap),
+                        gy - m - gap / 2.0 + row_k * (m + gap),
+                        m,
+                        m,
+                    ),
+                    layer: *layer,
+                });
+            }
+        } else {
+            scene.overlay.push(IconInst {
+                rect: Rect::new(gx - size / 2.0, gy - size / 2.0, size, size),
+                layer: layer_of(df.entry_idx),
+            });
+        }
     }
 
     // Search widget: "Filter" pill button that morphs into an expanding
