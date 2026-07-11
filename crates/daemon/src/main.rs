@@ -794,6 +794,17 @@ impl App {
     /// entries borrowing a generic icon); without one it shows the
     /// top-level home folders, most-used first.
     fn refilter(&mut self) {
+        // Snapshot the Apps cells' animated display positions (by
+        // entry id — indices won't survive the rebuild) so the new
+        // list can pick them up seamlessly below.
+        let old_slide: Vec<(String, f32)> = self.search.visible[content::SECTION_APPS]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &e)| {
+                let d = self.apps_slide.get(i).copied()?;
+                Some((self.entries.get(e)?.id.clone(), d))
+            })
+            .collect();
         // Drop the previous query's transient file-result entries.
         self.entries.truncate(self.base_len);
         self.kinds.truncate(self.base_len);
@@ -861,9 +872,26 @@ impl App {
             }
         }
         self.search.visible = visible;
-        // The list changed shape: any in-flight make-room glide is
-        // meaningless against the new indices.
-        self.apps_slide.clear();
+        // Visual continuity: every surviving cell keeps its current
+        // animated display position and eases to its new seat from
+        // there — a rebuilt list never snaps icons, not even for the
+        // one synchronous frame this refilter may draw. New entries
+        // start at rest.
+        let vis = &self.search.visible[content::SECTION_APPS];
+        let mut slide: Vec<f32> = (0..vis.len()).map(|i| i as f32).collect();
+        if !searching {
+            // (Ranked search results churn per keystroke; gliding
+            // between ranks would be noise, so carry-over is for the
+            // loose grid and box views only.)
+            for (i, &e) in vis.iter().enumerate() {
+                if let Some(entry) = self.entries.get(e) {
+                    if let Some(&(_, d)) = old_slide.iter().find(|(oid, _)| *oid == entry.id) {
+                        slide[i] = d;
+                    }
+                }
+            }
+        }
+        self.apps_slide = slide;
         self.search.selected = if self.search.query.is_empty() || self.flat_len() == 0 {
             None
         } else {
@@ -1333,12 +1361,6 @@ impl App {
                 (e, slot.x + slot.w / 2.0 + shift * slot.w)
             })
             .collect();
-        let grid_vis: Vec<(usize, f32)> = self.search.visible[content::SECTION_APPS]
-            .iter()
-            .enumerate()
-            .filter(|(_, &e)| e != drag.entry_idx)
-            .map(|(i, &e)| (e, self.apps_slide.get(i).copied().unwrap_or(i as f32)))
-            .collect();
         debug!(
             "drop: id={id} kind={kind:?} from_dock={} insert={insert:?} section={section:?}",
             drag.from_dock
@@ -1431,7 +1453,6 @@ impl App {
                                 to_dock: true,
                                 started: Instant::now(),
                             });
-                            self.refilter();
                         }
                         None if drag.from_dock => {
                             self.pins.exclude(&id);
@@ -1444,7 +1465,6 @@ impl App {
                                     started: Instant::now(),
                                 });
                             }
-                            self.refilter();
                         }
                         None => {}
                     }
@@ -1454,10 +1474,11 @@ impl App {
         self.reorder_slot = None;
         self.reorder_dwell = None;
         self.recompute_dock_order();
-        // Remap the glide state onto the new arrangement: every icon
-        // keeps its exact current visual position and eases to rest —
-        // nothing snaps at the drop, and icons already at their seat
-        // (the common case) don't move at all.
+        // Remap the dock glide onto the new arrangement *before*
+        // anything draws: every icon keeps its exact current visual
+        // position and eases to rest — nothing snaps at the drop, and
+        // icons already at their seat (the common case) don't move at
+        // all. (The grid gets the same continuity inside refilter.)
         let new_layout = self.current_layout();
         let n_dock = new_layout.dock_slots.len();
         self.dock_slide = vec![0.0; n_dock];
@@ -1467,18 +1488,10 @@ impl App {
                 self.dock_slide[k] = (cx - (slot.x + slot.w / 2.0)) / slot.w;
             }
         }
-        let vis = &self.search.visible[content::SECTION_APPS];
-        self.apps_slide = (0..vis.len()).map(|i| i as f32).collect();
-        for (i, &e) in vis.iter().enumerate() {
-            if let Some(&(_, d)) = grid_vis.iter().find(|&&(ve, _)| ve == e) {
-                self.apps_slide[i] = d;
-            }
-        }
         // Magnification sleeps a full second so the icon simply *is*
         // placed before any wave returns.
         self.mag_sleep = Some(Instant::now() + MAG_SLEEP_AFTER_DROP);
-        self.update_hover();
-        self.schedule_frame();
+        self.refilter();
     }
 
     /// The Apps display cell under `pos` plus the within-cell
