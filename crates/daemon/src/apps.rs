@@ -601,7 +601,7 @@ fn cache_base() -> PathBuf {
 }
 
 /// Read and rasterize one icon file to `ICON_SIZE`² premultiplied RGBA.
-fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
+pub(crate) fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
     let path = std::path::Path::new(path);
     let data = std::fs::read(path).ok()?;
     let pixmap = match path.extension().and_then(|e| e.to_str()) {

@@ -280,10 +280,16 @@ systematic end of guessing — the dump queries the prebuilt
 authoritative icon-name hints from its own desktop files (TSV cache
 v4, `icons` column; 2 930 of 24 010 curated packages are GUI apps with
 hints). The sweep re-runs lazily when older than 5 min, so a
-drag-install's bundled icon appears in search without a restart. The
-remaining gap is GUI apps whose art exists only inside their
-uninstalled package — coverable later by fetching from Flathub's CDN
-keyed by the (now known) reverse-DNS ids. Measured: 2 960 of 24 004 curated packages resolve
+drag-install's bundled icon appears in search without a restart.
+Finally (pass six), GUI apps whose art exists nowhere locally fetch it
+the way distro app centers do: from Flathub's AppStream icon catalog
+(pre-extracted server-side, served per app id), keyed by the
+desktop-file id — disk-cached forever under
+`$XDG_CACHE_HOME/waverunner/flathub-icons/`, 404s remembered as miss
+markers (retried monthly), network failures retried next batch, and at
+most `FLATHUB_FETCH_BUDGET` (6) new downloads per icon batch so an
+all-new page never stalls on the network. Sources compose: local
+themes → Flathub catalog → installer box. Measured: 2 960 of 24 004 curated packages resolve
 a real themed icon (1 439 → 2 588 → 2 960); everything else shows the
 theme's standard installer box (`system-software-install`, falling
 back through `package-x-generic` / `package` /

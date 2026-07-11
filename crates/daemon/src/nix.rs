@@ -277,18 +277,20 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
         if icon_names.is_stale() {
             icon_names = IconNames::sweep(loader.themes());
         }
-        // Most package names double as theme icon names (firefox, vlc,
-        // gimp, …) — Papirus and friends ship icons for far more apps
-        // than are installed; installed apps hide behind reverse-DNS
-        // vendor ids. Names that exist nowhere get the installer box.
+        // Local themes first (Papirus and friends ship icons for far
+        // more apps than are installed); GUI apps missing locally are
+        // fetched from Flathub's icon catalog by their desktop-file id
+        // — the same pre-extracted metadata distro app centers pull.
+        // What exists nowhere gets the installer box.
+        let mut fetch_budget = FLATHUB_FETCH_BUDGET;
         let (icons, placeholders): (Vec<_>, Vec<_>) = hits
             .iter()
             .map(|p| {
                 let icon = icon_candidates(p)
                     .into_iter()
                     .find_map(|c| icon_names.resolve(&c));
-                match icon {
-                    Some(icon) => loader.icon_for(&waverunner_core::index::AppEntry {
+                if let Some(icon) = icon {
+                    return loader.icon_for(&waverunner_core::index::AppEntry {
                         id: format!("pkg-{}", p.attr),
                         name: p.name.clone(),
                         description: None,
@@ -296,9 +298,14 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
                         icon: Some(icon),
                         needs_terminal: false,
                         path: None,
-                    }),
-                    None => generic.clone(),
+                    });
                 }
+                p.icons
+                    .iter()
+                    .filter(|hint| hint.contains('.'))
+                    .find_map(|id| fetch_flathub_icon(id, &mut fetch_budget))
+                    .map(|pixels| (pixels, false))
+                    .unwrap_or_else(|| generic.clone())
             })
             .unzip();
         loader.save_resolutions();
@@ -361,6 +368,16 @@ const GENERIC_PKG_ICONS: [&str; 4] = [
 /// search should pick it up without a daemon restart.
 const ICON_SWEEP_MAX_AGE: Duration = Duration::from_secs(300);
 
+/// Flathub's AppStream icon CDN — the same pre-extracted icon catalog
+/// every distro app center downloads, keyed by the reverse-DNS app id.
+const FLATHUB_ICON_BASE: &str = "https://dl.flathub.org/repo/appstream/x86_64/icons/64x64";
+/// Retry a recorded Flathub miss (404) after this long.
+const FLATHUB_MISS_RETRY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// New downloads allowed per icon batch: keeps a page of all-new hits
+/// from stalling the batch on the network; the rest catch up on later
+/// queries (everything fetched is cached forever).
+const FLATHUB_FETCH_BUDGET: u32 = 6;
+
 /// The icon names installed on this system, from one readdir sweep:
 /// lowercased stem → actual lookup name, plus reverse-DNS aliases —
 /// apps ship their icons under vendor ids no pname can guess
@@ -412,6 +429,56 @@ impl IconNames {
             .or_else(|| self.aliases.get(&lower))
             .cloned()
     }
+}
+
+/// Fetch a package icon from Flathub's AppStream CDN, disk-cached
+/// under `$XDG_CACHE_HOME/waverunner/flathub-icons/` (misses recorded
+/// as `.miss` markers and retried monthly; network errors leave no
+/// marker so the next batch retries). `budget` caps new downloads per
+/// batch. Returns rasterized `ICON_SIZE`² pixels.
+fn fetch_flathub_icon(id: &str, budget: &mut u32) -> Option<Vec<u8>> {
+    // Ids are reverse-DNS ([A-Za-z0-9._-]); anything else stays off
+    // the filesystem and the URL.
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return None;
+    }
+    let dir = cache_path().parent()?.join("flathub-icons");
+    let png = dir.join(format!("{id}.png"));
+    if png.exists() {
+        return crate::apps::rasterize_icon_file(png.to_str()?, id);
+    }
+    let miss = dir.join(format!("{id}.miss"));
+    if cache_age(&miss).is_some_and(|age| age < FLATHUB_MISS_RETRY) {
+        return None;
+    }
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    std::fs::create_dir_all(&dir).ok()?;
+    let tmp = dir.join(format!("{id}.part"));
+    let status = Command::new("curl")
+        .args(["-fsSL", "--max-time", "5"])
+        .arg(format!("{FLATHUB_ICON_BASE}/{id}.png"))
+        .arg("-o")
+        .arg(&tmp)
+        .status()
+        .ok()?;
+    if status.success() {
+        std::fs::rename(&tmp, &png).ok()?;
+        debug!("flathub icon fetched: {id}");
+        return crate::apps::rasterize_icon_file(png.to_str()?, id);
+    }
+    let _ = std::fs::remove_file(&tmp);
+    // curl exits 22 on HTTP errors (404 = not on Flathub): remember
+    // that; anything else (offline, timeout) retries next batch.
+    if status.code() == Some(22) {
+        let _ = std::fs::write(&miss, b"");
+    }
+    None
 }
 
 /// Icon names worth trying for a package, best first: the package's
@@ -956,6 +1023,27 @@ mod tests {
                 started.elapsed()
             );
         }
+    }
+
+    /// Manual check of the Flathub icon fetch (network + disk cache):
+    /// `cargo test -p waverunner-daemon flathub -- --ignored --nocapture`
+    #[test]
+    #[ignore = "touches the network"]
+    fn flathub_icon_fetch_and_cache() {
+        let mut budget = 2;
+        let first = fetch_flathub_icon("dev.zed.Zed", &mut budget);
+        assert!(first.is_some(), "Zed is on Flathub");
+        // Second call must come from the disk cache, not the budget.
+        let mut none = 0;
+        let again = fetch_flathub_icon("dev.zed.Zed", &mut none);
+        assert!(again.is_some(), "cached icon must not need budget");
+        // A 404 leaves a miss marker and consumes budget once.
+        let mut budget = 2;
+        assert!(fetch_flathub_icon("not.a.realapp", &mut budget).is_none());
+        assert_eq!(budget, 1);
+        let mut budget = 2;
+        assert!(fetch_flathub_icon("not.a.realapp", &mut budget).is_none());
+        assert_eq!(budget, 2, "recorded miss must not refetch");
     }
 
     /// Manual check of theme-icon coverage for package names:
