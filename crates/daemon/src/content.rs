@@ -464,6 +464,9 @@ pub struct FrameInput<'a> {
     /// swell under the cursor with cosine falloff; purely visual,
     /// hit-boxes stay fixed).
     pub pointer: Option<(f32, f32)>,
+    /// Magnification amplitude (0..1): the caller fades it around
+    /// drags and drops so the wave never pops in or out.
+    pub mag_amount: f32,
     /// Launch bounce: (entry index, upward offset in px).
     pub bounce: Option<(usize, f32)>,
     /// Live search query (empty shows the placeholder).
@@ -542,6 +545,7 @@ pub fn scene(
         hover,
         alpha,
         pointer,
+        mag_amount,
         bounce,
         query,
         selected,
@@ -593,7 +597,10 @@ pub fn scene(
                 Some((px, py)) => {
                     let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
                     let fy = falloff(d_out, DOCK_MAG_VRADIUS);
-                    1.0 + (DOCK_MAGNIFY - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy
+                    1.0 + (DOCK_MAGNIFY - 1.0)
+                        * falloff(px - cx, DOCK_MAG_RADIUS)
+                        * fy
+                        * mag_amount.clamp(0.0, 1.0)
                 }
                 None => 1.0,
             }
@@ -1004,7 +1011,9 @@ pub fn scene(
             let scale = match pointer {
                 Some((px, py)) if expand >= 1.0 => {
                     let d = ((px - cx).powi(2) + (py - icon_cy).powi(2)).sqrt();
-                    1.0 + (GRID_MAGNIFY - 1.0) * falloff(d, GRID_MAG_RADIUS)
+                    1.0 + (GRID_MAGNIFY - 1.0)
+                        * falloff(d, GRID_MAG_RADIUS)
+                        * mag_amount.clamp(0.0, 1.0)
                 }
                 _ => 1.0,
             };

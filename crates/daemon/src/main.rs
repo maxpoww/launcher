@@ -164,6 +164,7 @@ fn main() -> anyhow::Result<()> {
         apps_slide: Vec::new(),
         dock_slide: Vec::new(),
         mag_sleep: None,
+        mag_amount: 1.0,
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
@@ -343,6 +344,9 @@ pub struct App {
     /// Magnification sleeps until this instant after a drop (the
     /// landing must be still; the magnify wave returns a beat later).
     mag_sleep: Option<Instant>,
+    /// Magnification amplitude envelope (0 = off, 1 = full): fades out
+    /// around drags/drops and fades back in — never pops.
+    mag_amount: f32,
     /// Group-open transition: raw progress (0..1), its target, and the
     /// surface point the group expands from (the clicked tile).
     group_anim: f32,
@@ -1955,6 +1959,8 @@ impl App {
         }
         // Magnification is dead while dragging and stays dead for a
         // beat after a drop — the landing must be perfectly still.
+        // It never pops back either: an amplitude envelope fades it
+        // in over ~350 ms once the sleep ends (and out on drag start).
         if let Some(until) = self.mag_sleep {
             if Instant::now() >= until {
                 self.mag_sleep = None;
@@ -1963,7 +1969,24 @@ impl App {
                 self.dirty = true;
             }
         }
-        let mag_pointer = if self.gesture.dragging.is_none() && self.mag_sleep.is_none() {
+        let mag_target = if self.gesture.dragging.is_none() && self.mag_sleep.is_none() {
+            1.0f32
+        } else {
+            0.0
+        };
+        if (self.mag_amount - mag_target).abs() > 0.005 {
+            let step = dt / 0.35;
+            self.mag_amount = if mag_target > self.mag_amount {
+                (self.mag_amount + step).min(1.0)
+            } else {
+                // Fading out fast keeps drag starts crisp.
+                (self.mag_amount - step * 3.0).max(0.0)
+            };
+            self.dirty = true;
+        } else {
+            self.mag_amount = mag_target;
+        }
+        let mag_pointer = if self.mag_amount > 0.0 {
             self.pointer_pos
         } else {
             None
@@ -2035,6 +2058,7 @@ impl App {
                 },
                 alpha: self.ui.alpha(),
                 pointer: mag_pointer,
+                mag_amount: self.mag_amount,
                 bounce,
                 query: &self.search.query,
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
