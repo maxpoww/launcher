@@ -21,7 +21,7 @@ mod state;
 mod surface;
 mod usage;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -150,6 +150,7 @@ fn main() -> anyhow::Result<()> {
         pkg_layer_base: 0,
         pkg_state: PkgIndexState::Loading,
         busy_ids: HashSet::new(),
+        failed_ids: HashMap::new(),
         file_index: Vec::new(),
         files_dir: None,
         pending_icons: None,
@@ -296,6 +297,9 @@ pub struct App {
     /// Entry ids (package attrs / desktop ids) with a profile mutation
     /// in flight; their cells render dimmed and ignore input.
     busy_ids: HashSet<String>,
+    /// Recently failed mutations: their cells flash "Failed" for
+    /// [`FAIL_FLASH`] (details go to the log).
+    failed_ids: HashMap<String, Instant>,
     /// Home-tree file index the search ranks against (fresh per rescan).
     file_index: Vec<apps::FileEntry>,
     /// Directory the Files section is navigated into (`None` = the
@@ -456,6 +460,9 @@ const FILE_RESULTS_MAX: usize = 24;
 /// character matches half of nixpkgs and helps no one.
 const PKG_QUERY_MIN: usize = 2;
 
+/// How long a failed install/remove flashes "Failed" on its cell.
+const FAIL_FLASH: Duration = Duration::from_secs(5);
+
 /// Cap on entries listed when navigated into a directory.
 const FILES_LIST_MAX: usize = 300;
 
@@ -606,6 +613,20 @@ impl App {
                     // The profile changed under us: rescan so the Apps
                     // grid gains/loses the entry.
                     self.indexer.request_rescan();
+                } else {
+                    // Flash "Failed" on the cell; a timer clears it.
+                    self.failed_ids.insert(id, Instant::now());
+                    let timer = Timer::from_duration(FAIL_FLASH);
+                    if let Err(e) = self
+                        .loop_handle
+                        .insert_source(timer, |_, _, app: &mut App| {
+                            app.failed_ids.retain(|_, t| t.elapsed() < FAIL_FLASH);
+                            app.schedule_frame();
+                            TimeoutAction::Drop
+                        })
+                    {
+                        warn!("cannot arm fail-flash timer: {e}");
+                    }
                 }
                 self.update_hover();
                 self.schedule_frame();
@@ -1401,6 +1422,15 @@ impl App {
             .iter()
             .map(|e| self.busy_ids.contains(&e.id))
             .collect();
+        let failed: Vec<bool> = self
+            .entries
+            .iter()
+            .map(|e| {
+                self.failed_ids
+                    .get(&e.id)
+                    .is_some_and(|t| t.elapsed() < FAIL_FLASH)
+            })
+            .collect();
         let scene = content::scene(
             &self.config,
             &layout,
@@ -1431,6 +1461,7 @@ impl App {
                 drag: drag_frame,
                 install_hint: self.install_hint(),
                 busy: &busy,
+                failed: &failed,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {

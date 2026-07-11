@@ -466,6 +466,9 @@ pub struct FrameInput<'a> {
     /// `entries`: their cells swap the name for an "Installing…" /
     /// "Removing…" note. Empty slice = nothing busy.
     pub busy: &'a [bool],
+    /// Entries whose last mutation failed (flash), aligned with
+    /// `entries`: their cells swap the name for "Failed".
+    pub failed: &'a [bool],
 }
 
 /// Assemble the draw scene for one frame.
@@ -496,6 +499,7 @@ pub fn scene(
         drag,
         install_hint,
         busy,
+        failed,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     let (w, h) = surface;
@@ -865,14 +869,18 @@ pub fn scene(
                         }
                     }
                     // A profile mutation in flight swaps the name for a
-                    // progress note (dimmed).
+                    // progress note (dimmed); a failed one flashes
+                    // "Failed" (details in the daemon log).
                     let is_busy = busy.get(entry_idx).copied().unwrap_or(false);
-                    let name = if !is_busy {
-                        truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
-                    } else if s == SECTION_INSTALL {
+                    let is_failed = failed.get(entry_idx).copied().unwrap_or(false);
+                    let name = if is_busy && s == SECTION_INSTALL {
                         "Installing…".to_string()
-                    } else {
+                    } else if is_busy {
                         "Removing…".to_string()
+                    } else if is_failed {
+                        "Failed".to_string()
+                    } else {
+                        truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
                     };
                     grid.labels.push(Label {
                         text: name,

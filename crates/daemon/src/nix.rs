@@ -194,6 +194,12 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                     }
                     Request::Rank { .. } => continue, // routed elsewhere
                 };
+                if ok {
+                    // Every mutation adds a profile generation that pins
+                    // store paths against GC forever; a month of
+                    // rollback is plenty.
+                    trim_history();
+                }
                 if events.send(Event::Done { id, ok }).is_err() {
                     return;
                 }
@@ -650,9 +656,26 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
     candidates
 }
 
-/// `nix profile install nixpkgs#<attr>`; true on success. Unfree
-/// packages (spotify, discord, steam, …) install like any other — a
-/// user dragging one into Apps has consented to its license.
+/// Drop profile generations older than a month (non-fatal cleanup).
+fn trim_history() {
+    match Command::new("nix")
+        .args(["profile", "wipe-history", "--older-than", "30d"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => debug!(
+            "wipe-history failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => debug!("cannot run nix wipe-history: {e}"),
+    }
+}
+
+/// `nix profile install nixpkgs#<attr>`; true on success — including
+/// the "already installed" case, which nix treats as a warning-only
+/// no-op (verified: exit 0, profile unchanged). Unfree packages
+/// (spotify, discord, steam, …) install like any other — a user
+/// dragging one into Apps has consented to its license.
 fn install(attr: &str) -> bool {
     info!("nix profile install nixpkgs#{attr}");
     match Command::new("nix")
@@ -1289,6 +1312,41 @@ mod tests {
                 started.elapsed()
             );
         }
+    }
+
+    /// Full mutation round-trip through the production code paths,
+    /// against the real profile (expects `xterm` installed, leaves it
+    /// installed):
+    /// `cargo test -p waverunner-daemon profile_round -- --ignored --nocapture`
+    #[test]
+    #[ignore = "mutates the real nix profile"]
+    fn profile_round_trip_remove_and_install() {
+        let home = std::env::var("HOME").unwrap();
+        let desktop = format!("{home}/.nix-profile/share/applications/xterm.desktop");
+        assert!(
+            std::path::Path::new(&desktop).exists(),
+            "test needs xterm in the profile"
+        );
+        // The daemon's remove(): canonicalize -> match profile element
+        // -> nix profile remove.
+        assert!(remove(&desktop), "remove must succeed");
+        assert!(
+            !std::path::Path::new(&desktop).exists(),
+            "desktop file must be gone after remove"
+        );
+        // Removing an app that is NOT from the profile must refuse.
+        assert!(
+            !remove("/run/current-system/sw/share/applications/nonexistent.desktop"),
+            "non-profile paths must be refused"
+        );
+        // The daemon's install() puts it back.
+        assert!(install("xterm"), "install must succeed");
+        assert!(
+            std::path::Path::new(&desktop).exists(),
+            "desktop file must be back after install"
+        );
+        // Idempotence: installing again succeeds without duplicating.
+        assert!(install("xterm"), "duplicate install must be a no-op ok");
     }
 
     /// Manual check of the Flathub icon fetch (network + disk cache):

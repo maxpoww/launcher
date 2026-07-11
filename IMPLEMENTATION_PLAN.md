@@ -252,6 +252,22 @@ drag-and-drop package management:
 - Drop-target sections get a highlight wash while a matching drag
   hovers them; busy cells can't start new drags; pointer-leave cancels
   a drag without installing/uninstalling anything.
+- **Mutation-path audit (2026-07-11), verified live:** duplicate
+  installs are idempotent (nix warns, exit 0, profile unchanged);
+  unfree installs work (`NIXPKGS_ALLOW_UNFREE` + `--impure`; built
+  from source since unfree isn't binary-cached — slower, expected);
+  the full remove→install round-trip passes through the production
+  functions (ignored test `profile_round_trip_remove_and_install`);
+  non-profile desktop paths are structurally un-removable (`remove`
+  only matches `nix profile list` store paths, so system-config and
+  home-manager apps can never be touched — worst case is a logged
+  no-op); `~/.nix-profile/bin` is in the session PATH so bare `Exec=`
+  lines launch after install; mutations are serialized on one worker;
+  a killed daemon mid-install leaves at most GC-able store paths
+  (profile switches are atomic). Hardened: successful mutations run
+  `nix profile wipe-history --older-than 30d` so generations (which
+  pin store paths against GC) stay bounded; failed mutations flash
+  "Failed" on the cell for 5 s (details in the log).
 
 Package cells show real icons: the rank thread owns its own
 `IconLoader` (firefox/vlc/gimp/xterm all resolve; CLI-only tools fall
