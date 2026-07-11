@@ -99,6 +99,8 @@ pub enum Hit {
     SearchButton,
     /// The "‹ Back" button beside the Files title (navigated dirs only).
     FilesBack,
+    /// The "‹ Back" button beside the Apps title (open group only).
+    AppsBack,
 }
 
 /// Popup sections, top to bottom: the app grid, the (future) install
@@ -223,6 +225,9 @@ pub struct Layout {
     /// "‹ Back" button beside the Files title; present only while the
     /// Files section is navigated into a directory.
     pub files_back: Option<Rect>,
+    /// "‹ Back" button beside the Apps title; present only while an
+    /// app group is open.
+    pub apps_back: Option<Rect>,
 }
 
 /// Compute the layout for the current animation state.
@@ -238,7 +243,9 @@ pub fn layout(
     n_entries: usize,
     n_visible: [usize; N_SECTIONS],
     scroll: [f32; N_SECTIONS],
-    files_navigated: bool,
+    // Which sections are navigated into a sub-view (open app group,
+    // entered directory) and get a "‹ Back" pill by their title.
+    navigated: [bool; N_SECTIONS],
 ) -> Layout {
     let (w, h) = surface;
     let card_top = h - extent;
@@ -292,6 +299,7 @@ pub fn layout(
 
     let mut y = grid_top;
     let mut files_back = None;
+    let mut apps_back = None;
     let sections = std::array::from_fn(|s| {
         let rows = if s == SECTION_APPS {
             apps_rows
@@ -299,14 +307,19 @@ pub fn layout(
             SECTION_ROWS[s]
         };
         let mut title_pos = (grid_x0 + 8.0, y);
-        if s == SECTION_FILES && files_navigated {
+        if navigated[s] {
             // "‹ Back" pill sits where the title starts; title shifts right.
-            files_back = Some(Rect::new(
+            let back = Rect::new(
                 title_pos.0,
                 y + (SECTION_TITLE_H - BACK_H) / 2.0 - 1.0,
                 BACK_W,
                 BACK_H,
-            ));
+            );
+            if s == SECTION_FILES {
+                files_back = Some(back);
+            } else {
+                apps_back = Some(back);
+            }
             title_pos.0 += BACK_W + 10.0;
         }
         y += SECTION_TITLE_H;
@@ -350,6 +363,7 @@ pub fn layout(
         search_box,
         search_btn,
         files_back,
+        apps_back,
     }
 }
 
@@ -388,6 +402,9 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<H
     if layout.files_back.is_some_and(|b| b.contains(pos)) {
         return Some(Hit::FilesBack);
     }
+    if layout.apps_back.is_some_and(|b| b.contains(pos)) {
+        return Some(Hit::AppsBack);
+    }
     for (s, sec) in layout.sections.iter().enumerate() {
         if sec.n_pages > 0 && sec.viewport.contains(pos) {
             // Adjust for horizontal page scroll; pages wrap cyclically.
@@ -422,6 +439,9 @@ pub struct DragFrame {
     /// Section that would accept this drop (install/uninstall target),
     /// washed with a highlight while hovered; `None` otherwise.
     pub drop_section: Option<usize>,
+    /// Grid cell that would accept this drop (group create/add),
+    /// ringed with a highlight while hovered; `None` otherwise.
+    pub over_cell: Option<(usize, usize)>,
 }
 
 /// Per-frame dynamic inputs to scene assembly.
@@ -469,6 +489,13 @@ pub struct FrameInput<'a> {
     /// Entries whose last mutation failed (flash), aligned with
     /// `entries`: their cells swap the name for "Failed".
     pub failed: &'a [bool],
+    /// Group cells: (entry index of the transient group entry, up to
+    /// four member texture layers for the 2×2 mini preview). Cells
+    /// listed here draw the tile + minis instead of a single icon.
+    pub group_minis: &'a [(usize, [Option<u32>; 4])],
+    /// Name of the open app group, shown in the Apps title ("Apps —
+    /// name"); empty when no group is open.
+    pub apps_group: &'a str,
 }
 
 /// Assemble the draw scene for one frame.
@@ -500,6 +527,8 @@ pub fn scene(
         install_hint,
         busy,
         failed,
+        group_minis,
+        apps_group,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     let (w, h) = surface;
@@ -711,10 +740,17 @@ pub fn scene(
         }
     }
 
-    // "‹ Back" pill beside the Files title while navigated.
-    if let Some(back) = layout.files_back {
+    // "‹ Back" pills beside navigated section titles (Files dirs, open
+    // app groups).
+    for (back, hit) in [
+        (layout.files_back, Hit::FilesBack),
+        (layout.apps_back, Hit::AppsBack),
+    ] {
+        let Some(back) = back else {
+            continue;
+        };
         let hl = config.theme.highlight_rgba();
-        let a = if hover == Some(Hit::FilesBack) {
+        let a = if hover == Some(hit) {
             hl[3].min(1.0)
         } else {
             (hl[3] * 0.6).min(1.0)
@@ -745,6 +781,8 @@ pub fn scene(
     for (s, sec) in layout.sections.iter().enumerate() {
         let title = if s == SECTION_FILES && !files_path.is_empty() {
             format!("{} — {}", SECTION_TITLES[s], files_path)
+        } else if s == SECTION_APPS && !apps_group.is_empty() {
+            format!("{} — {}", SECTION_TITLES[s], apps_group)
         } else {
             SECTION_TITLES[s].to_string()
         };
@@ -831,8 +869,57 @@ pub fn scene(
                             color: config.theme.highlight_rgba(),
                         });
                     }
+                    // A drag hovering a cell that would take the drop
+                    // (group create/add) rings it brightly.
+                    if drag.and_then(|d| d.over_cell) == Some((s, i)) {
+                        let hl = config.theme.highlight_rgba();
+                        grid.rects.push(RectInst {
+                            rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
+                            radius: 16.0,
+                            color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
+                        });
+                    }
                     let cx = cell.x + cell.w / 2.0;
                     let icon_cy = cell.y + 12.0 + GRID_ICON / 2.0;
+                    if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
+                        // Group cell: folder-style tile with a 2×2 mini
+                        // preview of the first members.
+                        let hl = config.theme.highlight_rgba();
+                        let tile = GRID_ICON * 1.15;
+                        grid.rects.push(RectInst {
+                            rect: Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile),
+                            radius: 14.0,
+                            color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
+                        });
+                        let m = GRID_ICON * 0.42;
+                        let gap = GRID_ICON * 0.10;
+                        for (k, layer) in minis.iter().enumerate() {
+                            let Some(layer) = layer else { continue };
+                            let col_k = (k % 2) as f32;
+                            let row_k = (k / 2) as f32;
+                            grid.icons.push(IconInst {
+                                rect: Rect::new(
+                                    cx - m - gap / 2.0 + col_k * (m + gap),
+                                    icon_cy - m - gap / 2.0 + row_k * (m + gap),
+                                    m,
+                                    m,
+                                ),
+                                layer: *layer,
+                            });
+                        }
+                        grid.labels.push(Label {
+                            text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
+                            pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
+                            max_w: cell.w - 12.0,
+                            font_px: LABEL_FONT_PX,
+                            line_px: LABEL_LINE_PX,
+                            centered: true,
+                            dim: false,
+                            cache: true,
+                            clip: None,
+                        });
+                        continue;
+                    }
                     let scale = match pointer {
                         Some((px, py)) => {
                             let d = ((px - cx).powi(2) + (py - icon_cy).powi(2)).sqrt();
@@ -957,7 +1044,15 @@ mod tests {
     const OPEN: f32 = 692.0;
 
     fn open_layout(cfg: &Config, n: usize, scroll: f32) -> Layout {
-        layout(cfg, SURFACE, OPEN, n, [n, 0, 0], [scroll, 0.0, 0.0], false)
+        layout(
+            cfg,
+            SURFACE,
+            OPEN,
+            n,
+            [n, 0, 0],
+            [scroll, 0.0, 0.0],
+            [false; N_SECTIONS],
+        )
     }
 
     #[test]
@@ -970,7 +1065,7 @@ mod tests {
             20,
             [20, 0, 6],
             [0.0; N_SECTIONS],
-            false,
+            [false; N_SECTIONS],
         );
         assert!(!l.dock_slots.is_empty());
         // Sections exist geometrically but lie below the surface
@@ -1024,7 +1119,15 @@ mod tests {
     #[test]
     fn files_section_shows_its_own_entries() {
         let cfg = config();
-        let l = layout(&cfg, SURFACE, OPEN, 10, [4, 0, 6], [0.0; N_SECTIONS], false);
+        let l = layout(
+            &cfg,
+            SURFACE,
+            OPEN,
+            10,
+            [4, 0, 6],
+            [0.0; N_SECTIONS],
+            [false; N_SECTIONS],
+        );
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
         let s = scene(
             &cfg,
@@ -1074,7 +1177,7 @@ mod tests {
             10,
             [10, 0, 6],
             [0.0; N_SECTIONS],
-            false,
+            [false; N_SECTIONS],
         );
         let slot = l.dock_slots[0];
         assert_eq!(
@@ -1121,10 +1224,18 @@ mod tests {
             10,
             [10, 0, 6],
             [0.0; N_SECTIONS],
-            false,
+            [false; N_SECTIONS],
         );
         assert!(flat.files_back.is_none());
-        let nav = layout(&cfg, SURFACE, OPEN, 10, [10, 0, 6], [0.0; N_SECTIONS], true);
+        let nav = layout(
+            &cfg,
+            SURFACE,
+            OPEN,
+            10,
+            [10, 0, 6],
+            [0.0; N_SECTIONS],
+            [false, false, true],
+        );
         let back = nav.files_back.expect("navigated layout has a back button");
         let center = (back.x + back.w / 2.0, back.y + back.h / 2.0);
         assert_eq!(hit_test(&nav, center, false), Some(Hit::FilesBack));
@@ -1142,7 +1253,7 @@ mod tests {
             10,
             [10, 0, 6],
             [0.0; N_SECTIONS],
-            false,
+            [false; N_SECTIONS],
         );
         let apps = &l.sections[SECTION_APPS];
         let mid = (

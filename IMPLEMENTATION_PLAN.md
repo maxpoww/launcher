@@ -338,6 +338,37 @@ subject for drag-to-uninstall. Follow-ups: pkg index RSS is ~50 MB
 (could pack into one string arena), and installed-state could be shown
 on package cells.
 
+## P4.7 — App groups ("boxes", 2026-07-11)
+
+macOS/GNOME-style groups in the Apps grid, persisted in
+`$XDG_DATA_HOME/waverunner/groups.json` (`groups.rs`, pins-style
+atomic writes):
+
+- Dragging one loose app onto another creates a box `[target,
+  dragged]`; dragging an app onto a box joins it (stealing it from any
+  other box, with index-shift handling when the old box dissolves).
+  The would-be target cell rings while the drag hovers it.
+- Box cells are transient entries (kind `Group`, id `group:<idx>`,
+  generated label "<First> +N") leading the loose grid; they render a
+  folder tile with a 2×2 mini preview of member icons and open on
+  click. Grouped apps disappear from the loose grid but still rank in
+  search results.
+- An open box reuses the Files navigation pattern: Apps title becomes
+  "Apps — <name>" with a "‹ Back" pill (layout's per-section
+  `navigated` array); Escape steps out of the box before dismissing.
+  Dragging a member anywhere that isn't a cell or the dock moves it
+  back to the loose grid; a box left with fewer than two members
+  dissolves (a dissolved open box closes itself).
+- Boxes aren't draggable and never enter the dock; dock pinning,
+  install/uninstall drops and dock-origin unpinning are untouched
+  (group gestures only claim grid-origin app drops on Apps cells).
+
+Unit-tested (create/join/dissolve, index-shift on mid-flight
+dissolves, labels); tile rendering verified live via a seeded
+groups.json (screenshot: "Foot +3" tile with 2×2 minis). The drag
+gestures need a human hand; a demo box with foot/footclient/xterm/
+codium is seeded on the VM to play with.
+
 ## P5 — Polish
 
 - Icons: `freedesktop-icons` lookup + texture atlas.

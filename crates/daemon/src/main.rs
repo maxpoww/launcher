@@ -11,6 +11,7 @@
 mod animation;
 mod apps;
 mod content;
+mod groups;
 mod hypr;
 mod ipc;
 mod launch;
@@ -153,6 +154,9 @@ fn main() -> anyhow::Result<()> {
         failed_ids: HashMap::new(),
         file_index: Vec::new(),
         files_dir: None,
+        groups: groups::GroupDb::load(),
+        app_group: None,
+        group_minis: Vec::new(),
         pending_icons: None,
         hover: None,
         pointer_pos: None,
@@ -305,6 +309,13 @@ pub struct App {
     /// Directory the Files section is navigated into (`None` = the
     /// top-level home-folder strip).
     files_dir: Option<std::path::PathBuf>,
+    /// Persistent app groups ("boxes") shown in the Apps grid.
+    groups: groups::GroupDb,
+    /// Group the Apps section is navigated into (index into `groups`).
+    app_group: Option<usize>,
+    /// Group cells for the renderer: (transient entry index, member
+    /// texture layers for the 2×2 mini preview). Rebuilt per refilter.
+    group_minis: Vec<(usize, [Option<u32>; 4])>,
     /// Icons that arrived before the renderer existed.
     pending_icons: Option<Vec<Vec<u8>>>,
     /// Item currently under the pointer.
@@ -733,13 +744,37 @@ impl App {
         // The Install section fills with or without a query (live
         // search vs the recommendations storefront).
         visible[content::SECTION_INSTALL] = self.pkg_results();
+        self.group_minis.clear();
         if searching {
             visible[content::SECTION_FILES] = self.file_results();
         } else {
             // Hide pinned apps from the grid when the search box is
-            // empty — they're already visible on the dock.
-            visible[content::SECTION_APPS]
-                .retain(|&idx| !self.pins.is_pinned(&self.entries[idx].id));
+            // empty — they're already visible on the dock. Grouped
+            // apps live inside their box, not loose in the grid.
+            visible[content::SECTION_APPS].retain(|&idx| {
+                let id = &self.entries[idx].id;
+                !self.pins.is_pinned(id) && !self.groups.is_grouped(id)
+            });
+            // A dissolved group can't stay open.
+            if self
+                .app_group
+                .is_some_and(|g| g >= self.groups.groups().len())
+            {
+                self.app_group = None;
+            }
+            if let Some(g) = self.app_group {
+                // Inside a box: its members are the whole Apps grid.
+                let members = self.groups.groups()[g].members.clone();
+                visible[content::SECTION_APPS] = members
+                    .iter()
+                    .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
+                    .collect();
+            } else {
+                // Boxes lead the grid, loose apps follow.
+                let mut cells = self.group_cells();
+                cells.append(&mut visible[content::SECTION_APPS]);
+                visible[content::SECTION_APPS] = cells;
+            }
             if self.files_dir.is_some() {
                 // Navigated into a folder: list its contents instead of
                 // the top-level home strip.
@@ -862,6 +897,67 @@ impl App {
             .enumerate()
             .map(|(i, p)| self.push_transient_pkg(p, i))
             .collect()
+    }
+
+    /// Build one transient Apps-grid cell per group (id `group:<idx>`,
+    /// kind Group) and record the member texture layers for the 2×2
+    /// mini preview. Returns the cells' entry indices, group order.
+    fn group_cells(&mut self) -> Vec<usize> {
+        // Snapshot first: labels and member layers read groups+entries
+        // while pushing mutates the entry arrays.
+        let snapshot: Vec<(String, [Option<u32>; 4])> = (0..self.groups.groups().len())
+            .map(|g| {
+                let label = self.groups.label(g, |id| {
+                    self.entries
+                        .iter()
+                        .find(|e| e.id == id)
+                        .map(|e| e.name.clone())
+                });
+                let mut minis = [None; 4];
+                for (k, member) in self.groups.groups()[g].members.iter().take(4).enumerate() {
+                    minis[k] = self
+                        .entries
+                        .iter()
+                        .position(|e| &e.id == member)
+                        .and_then(|idx| self.icon_layers.get(idx).copied());
+                }
+                (label, minis)
+            })
+            .collect();
+        snapshot
+            .into_iter()
+            .enumerate()
+            .map(|(g, (label, minis))| {
+                self.entries.push(AppEntry {
+                    id: format!("group:{g}"),
+                    name: label,
+                    description: None,
+                    exec: String::new(),
+                    icon: None,
+                    needs_terminal: false,
+                    path: None,
+                });
+                self.kinds.push(apps::EntryKind::Group);
+                self.placeholders.push(false);
+                self.icon_layers.push(0);
+                let idx = self.entries.len() - 1;
+                self.group_minis.push((idx, minis));
+                idx
+            })
+            .collect()
+    }
+
+    /// Display name of the open group, for the Apps section title.
+    fn apps_group_name(&self) -> String {
+        let Some(g) = self.app_group else {
+            return String::new();
+        };
+        self.groups.label(g, |id| {
+            self.entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.name.clone())
+        })
     }
 
     /// Hint shown centered in an empty Install section.
@@ -1044,7 +1140,7 @@ impl App {
             self.dock_order.len(),
             std::array::from_fn(|s| self.search.visible[s].len()),
             std::array::from_fn(|s| self.scroll.per[s].pos),
-            self.files_dir.is_some(),
+            [self.app_group.is_some(), false, self.files_dir.is_some()],
         )
     }
 
@@ -1143,15 +1239,110 @@ impl App {
                     debug!("{id} has no desktop path; cannot uninstall");
                 }
             }
-            _ => match insert {
-                Some(slot) => self.pins.pin_at(&id, slot),
-                None if drag.from_dock => self.pins.exclude(&id),
-                None => {}
-            },
+            _ => {
+                // Box gestures first: a grid-origin app dropped on
+                // another app creates a box, dropped on a box joins
+                // it, and a member dragged out of the open box leaves
+                // it. Anything else falls through to the pin logic.
+                let boxed = released
+                    && !drag.from_dock
+                    && insert.is_none()
+                    && kind == Some(apps::EntryKind::App)
+                    && self.try_group_drop(&id, drag.pos);
+                if !boxed {
+                    match insert {
+                        Some(slot) => self.pins.pin_at(&id, slot),
+                        None if drag.from_dock => self.pins.exclude(&id),
+                        None => {}
+                    }
+                }
+            }
         }
         self.recompute_dock_order();
         self.update_hover();
         self.schedule_frame();
+    }
+
+    /// Resolve a grid-origin app drop as a group gesture; true when it
+    /// was one (create / join / leave), false to fall through.
+    fn try_group_drop(&mut self, id: &str, pos: (f32, f32)) -> bool {
+        let layout = self.current_layout();
+        if let Some(Hit::GridCell(content::SECTION_APPS, cell)) =
+            content::hit_test(&layout, pos, self.search.open)
+        {
+            let Some(&target_idx) = self.search.visible[content::SECTION_APPS].get(cell) else {
+                return false;
+            };
+            let target_id = self.entries[target_idx].id.clone();
+            if target_id == id {
+                return false;
+            }
+            match self.kinds.get(target_idx) {
+                Some(apps::EntryKind::Group) => {
+                    let Some(g) = target_id
+                        .strip_prefix("group:")
+                        .and_then(|n| n.parse::<usize>().ok())
+                    else {
+                        return false;
+                    };
+                    self.groups.add(g, id);
+                }
+                // No nesting: inside an open box, member-on-member
+                // does nothing.
+                Some(apps::EntryKind::App) if self.app_group.is_none() => {
+                    self.groups.create(&target_id, id);
+                }
+                _ => return false,
+            }
+            self.refilter();
+            return true;
+        }
+        // Inside an open box (not searching), dropping a member
+        // anywhere that isn't a cell (and isn't the dock — handled by
+        // the caller) moves it back out to the loose grid.
+        if self.app_group.is_some() && self.search.query.is_empty() && self.groups.remove_member(id)
+        {
+            if self
+                .app_group
+                .is_some_and(|g| g >= self.groups.groups().len())
+            {
+                // The open box dissolved with the move.
+                self.app_group = None;
+            }
+            self.refilter();
+            return true;
+        }
+        false
+    }
+
+    /// The grid cell a dragged app would group with if dropped at
+    /// `pos` (drop-target ring): another loose app or a box.
+    fn drag_over_cell(
+        &self,
+        layout: &content::Layout,
+        pos: (f32, f32),
+        entry_idx: usize,
+        from_dock: bool,
+    ) -> Option<(usize, usize)> {
+        if from_dock || self.kinds.get(entry_idx) != Some(&apps::EntryKind::App) {
+            return None;
+        }
+        let Some(Hit::GridCell(content::SECTION_APPS, cell)) =
+            content::hit_test(layout, pos, self.search.open)
+        else {
+            return None;
+        };
+        let &target_idx = self.search.visible[content::SECTION_APPS].get(cell)?;
+        if target_idx == entry_idx {
+            return None;
+        }
+        match self.kinds.get(target_idx) {
+            Some(apps::EntryKind::Group) => Some((content::SECTION_APPS, cell)),
+            Some(apps::EntryKind::App) if self.app_group.is_none() => {
+                Some((content::SECTION_APPS, cell))
+            }
+            _ => None,
+        }
     }
 
     /// The section that would accept the dragged entry if dropped at
@@ -1204,8 +1395,18 @@ impl App {
             Hit::GridCell(s, i) => {
                 if let Some(entry_idx) = self.search.visible[s].get(i).copied() {
                     // Folders in the Files section navigate instead of
-                    // launching (the popup stays open).
+                    // launching (the popup stays open); boxes in the
+                    // Apps grid open the same way.
                     if s == content::SECTION_FILES && self.try_navigate(entry_idx) {
+                        return;
+                    }
+                    if self.kinds.get(entry_idx) == Some(&apps::EntryKind::Group) {
+                        self.app_group = self
+                            .entries
+                            .get(entry_idx)
+                            .and_then(|e| e.id.strip_prefix("group:"))
+                            .and_then(|n| n.parse::<usize>().ok());
+                        self.refilter();
                         return;
                     }
                     self.activate(entry_idx);
@@ -1220,6 +1421,10 @@ impl App {
                 self.schedule_frame();
             }
             Hit::FilesBack => self.files_nav_up(),
+            Hit::AppsBack => {
+                self.app_group = None;
+                self.refilter();
+            }
         }
     }
 
@@ -1416,6 +1621,7 @@ impl App {
                     self.drag_dock_insert(&layout, drag.pos)
                 },
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
+                over_cell: self.drag_over_cell(&layout, drag.pos, drag.entry_idx, drag.from_dock),
             });
         let busy: Vec<bool> = self
             .entries
@@ -1462,6 +1668,8 @@ impl App {
                 install_hint: self.install_hint(),
                 busy: &busy,
                 failed: &failed,
+                group_minis: &self.group_minis,
+                apps_group: &self.apps_group_name(),
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -1637,6 +1845,12 @@ impl App {
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
         match keysym {
             Keysym::Escape => {
+                // Step out of an open box first; dismiss on the next.
+                if self.app_group.is_some() && self.search.query.is_empty() {
+                    self.app_group = None;
+                    self.refilter();
+                    return;
+                }
                 self.search.query.clear();
                 self.search.open = false;
                 self.refilter();
@@ -2008,16 +2222,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             let entry_idx = match hit {
                                 Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
                                 Hit::GridCell(s, cell) => app.search.visible[s].get(cell).copied(),
-                                Hit::SearchButton | Hit::FilesBack => None,
+                                Hit::SearchButton | Hit::FilesBack | Hit::AppsBack => None,
                             };
-                            // Cells with a profile mutation in flight
-                            // can't start a new drag.
-                            let busy = entry_idx.is_some_and(|i| {
+                            // Cells with a profile mutation in flight can't
+                            // start a new drag; boxes open on click and
+                            // aren't draggable themselves.
+                            let undraggable = entry_idx.is_some_and(|i| {
                                 app.entries
                                     .get(i)
                                     .is_some_and(|e| app.busy_ids.contains(&e.id))
+                                    || app.kinds.get(i) == Some(&apps::EntryKind::Group)
                             });
-                            if let (Some(entry_idx), false) = (entry_idx, busy) {
+                            if let (Some(entry_idx), false) = (entry_idx, undraggable) {
                                 let from_dock = matches!(hit, Hit::DockIcon(_));
                                 app.gesture.dragging = Some(DragState {
                                     entry_idx,

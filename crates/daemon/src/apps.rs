@@ -38,6 +38,9 @@ pub enum EntryKind {
     /// A nixpkgs package search result in the Install section
     /// (transient, not launchable; drag to Apps installs it).
     Package,
+    /// An app-group cell in the Apps grid (transient; opens on click,
+    /// renders a mini preview of its members).
+    Group,
     Asset,
 }
 
