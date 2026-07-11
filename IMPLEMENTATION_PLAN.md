@@ -369,6 +369,33 @@ groups.json (screenshot: "Foot +3" tile with 2×2 minis). The drag
 gestures need a human hand; a demo box with foot/footclient/xterm/
 codium is seeded on the VM to play with.
 
+### Order + motion pass (2026-07-11)
+
+- **Grid order is install date with manual override** (`order.rs`,
+  `apps-order.json`): nix store mtimes are epoch-normalized, so "date"
+  is first-seen order — every scan appends unseen ids at the end
+  (macOS rule: new apps land last, nothing moves). Dragging an app to
+  a cell edge or gap reorders (`move_within` anchors on the visible
+  neighbor), which is the manual override. The first sync seeds the
+  baseline in the then-current usage order.
+- **Fold vs reorder zones:** the center band (30–70 %) of a valid
+  target cell folds (box create/join, bright ring); edges and gaps
+  reorder (insertion slot). Reordering also works inside an open box
+  (`GroupDb::move_member`); loose-grid slots clamp past the leading
+  box cells.
+- **Make-room glide:** while a drag is in flight its origin cell
+  disappears (the ghost is its visual), the origin gap closes and the
+  insertion gap opens — every other cell eases toward its display
+  slot (fractional grid indices in the scene, ~80 ms exponential
+  ease-out, dt-based, no overshoot). The cell loop was rewritten flat
+  (per-cell cyclic-page position closure) to support fractional
+  positions.
+- **Box open/close animation:** members scale/glide out of the
+  clicked tile (ease-out cubic, ~180 ms) into a centered **3×3 folder
+  grid** (GROUP_COLS; pages + dots as everywhere); labels pop in at
+  85 %, hover/magnify suspend until settled. Closing (Back/Escape)
+  reverses the motion back into the tile before the view switches.
+
 ## P5 — Polish
 
 - Icons: `freedesktop-icons` lookup + texture atlas.

@@ -119,13 +119,15 @@ const SECTION_GAP: f32 = 14.0;
 /// Size of the "‹ Back" pill beside the Files title.
 const BACK_W: f32 = 52.0;
 const BACK_H: f32 = 18.0;
+/// Columns of the compact grid an open app group shows (3×3 pages).
+const GROUP_COLS: usize = 3;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
 const DOCK_ICON: f32 = 40.0;
 const DOCK_SLOT: f32 = 44.0;
 const DOCK_PAD_X: f32 = 10.0;
-const GRID_CELL_W: f32 = 104.0;
+pub const GRID_CELL_W: f32 = 104.0;
 pub const GRID_CELL_H: f32 = 96.0;
 const GRID_ICON: f32 = 54.0;
 const GRID_PAD_X: f32 = 14.0;
@@ -286,7 +288,6 @@ pub fn layout(
     let grid_bottom = (search_box.y - SEARCH_GAP).min(h);
     let inner_w = (w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
     let cols = ((inner_w / GRID_CELL_W).floor() as usize).max(1);
-    let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
 
     // Apps takes whatever rows fit after the fixed single-row sections
     // and the three title lines, capped at its design height (6×3 at
@@ -306,6 +307,14 @@ pub fn layout(
         } else {
             SECTION_ROWS[s]
         };
+        // An open app group shows a compact, centered 3-wide folder
+        // grid (3×3 pages) instead of the full-width strip.
+        let cols = if s == SECTION_APPS && navigated[s] {
+            GROUP_COLS.min(cols)
+        } else {
+            cols
+        };
+        let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
         let mut title_pos = (grid_x0 + 8.0, y);
         if navigated[s] {
             // "‹ Back" pill sits where the title starts; title shifts right.
@@ -496,6 +505,19 @@ pub struct FrameInput<'a> {
     /// Name of the open app group, shown in the Apps title ("Apps —
     /// name"); empty when no group is open.
     pub apps_group: &'a str,
+    /// Animated display index per Apps cell (make-room reordering):
+    /// cells glide toward these fractional grid positions. Empty =
+    /// identity (every cell at its own index).
+    pub apps_slide: &'a [f32],
+    /// Entry whose cell is hidden (the drag's origin — the ghost is
+    /// its visual while in flight).
+    pub drag_hidden: Option<usize>,
+    /// Open/close progress of the app-group expand animation (eased,
+    /// 0 = collapsed into the tile, 1 = settled). Cells of an open
+    /// group scale/glide out of `group_origin`.
+    pub group_expand: f32,
+    /// Surface point the open group expands from (the clicked tile).
+    pub group_origin: Option<(f32, f32)>,
 }
 
 /// Assemble the draw scene for one frame.
@@ -529,6 +551,10 @@ pub fn scene(
         failed,
         group_minis,
         apps_group,
+        apps_slide,
+        drag_hidden,
+        group_expand,
+        group_origin,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     let (w, h) = surface;
@@ -834,154 +860,196 @@ pub fn scene(
         let page_w = sec.viewport.w;
         let cells_per_page = (sec.cols * sec.rows).max(1);
         let total_w = (sec.n_pages as f32 * page_w).max(1.0);
-        // Paging wraps cyclically: place every page at its nearest wrapped
-        // offset relative to the viewport and cull the off-screen ones (at
-        // most two pages remain visible during a slide).
-        for page in 0..sec.n_pages {
-            let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
-            let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
-            if rel <= -page_w || rel >= page_w {
+        // A cell's place comes from its display index — fractional
+        // while reorder-gliding, so cells ease between grid slots.
+        // Pages wrap cyclically; off-screen cells cull.
+        let cell_pos = |idx: f32| -> (f32, f32) {
+            let i0 = idx.max(0.0).floor() as usize;
+            let frac = (idx - i0 as f32).clamp(0.0, 1.0);
+            let corner = |i: usize| -> (f32, f32) {
+                let page = i / cells_per_page;
+                let within = i % cells_per_page;
+                let (row, col) = (within / sec.cols, within % sec.cols);
+                let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
+                let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
+                (
+                    sec.viewport.x + rel + col as f32 * GRID_CELL_W,
+                    sec.viewport.y + row as f32 * GRID_CELL_H,
+                )
+            };
+            let (x0, y0) = corner(i0);
+            if frac <= f32::EPSILON {
+                return (x0, y0);
+            }
+            let (x1, y1) = corner(i0 + 1);
+            (lerp(x0, x1, frac), lerp(y0, y1, frac))
+        };
+        // Group-open transition progress for this section (1 = settled).
+        let expand = if s == SECTION_APPS && group_origin.is_some() {
+            group_expand.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        for i in 0..sec.cells {
+            let Some(&entry_idx) = visible[s].get(i) else {
+                break;
+            };
+            let Some(entry) = entries.get(entry_idx) else {
+                break;
+            };
+            // The drag's origin cell vanishes; its ghost is in flight.
+            if drag_hidden == Some(entry_idx) {
                 continue;
             }
-            for row in 0..sec.rows {
-                for col in 0..sec.cols {
-                    let i = page * cells_per_page + row * sec.cols + col;
-                    let Some(&entry_idx) = visible[s].get(i) else {
-                        break;
-                    };
-                    let Some(entry) = entries.get(entry_idx) else {
-                        break;
-                    };
-                    let cell_x = sec.viewport.x + rel + col as f32 * GRID_CELL_W;
-                    let cell_y = sec.viewport.y + row as f32 * GRID_CELL_H;
-                    let cell = Rect::new(cell_x, cell_y, GRID_CELL_W, GRID_CELL_H);
-                    if selected == Some((s, i)) {
-                        let hl = config.theme.highlight_rgba();
-                        grid.rects.push(RectInst {
-                            rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
-                            radius: 14.0,
-                            color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
-                        });
-                    } else if hover == Some(Hit::GridCell(s, i)) {
-                        grid.rects.push(RectInst {
-                            rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
-                            radius: 14.0,
-                            color: config.theme.highlight_rgba(),
-                        });
-                    }
-                    // A drag hovering a cell that would take the drop
-                    // (group create/add) rings it brightly.
-                    if drag.and_then(|d| d.over_cell) == Some((s, i)) {
-                        let hl = config.theme.highlight_rgba();
-                        grid.rects.push(RectInst {
-                            rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
-                            radius: 16.0,
-                            color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
-                        });
-                    }
-                    let cx = cell.x + cell.w / 2.0;
-                    let icon_cy = cell.y + 12.0 + GRID_ICON / 2.0;
-                    if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
-                        // Group cell: folder-style tile with a 2×2 mini
-                        // preview of the first members.
-                        let hl = config.theme.highlight_rgba();
-                        let tile = GRID_ICON * 1.15;
-                        grid.rects.push(RectInst {
-                            rect: Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile),
-                            radius: 14.0,
-                            color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
-                        });
-                        let m = GRID_ICON * 0.42;
-                        let gap = GRID_ICON * 0.10;
-                        for (k, layer) in minis.iter().enumerate() {
-                            let Some(layer) = layer else { continue };
-                            let col_k = (k % 2) as f32;
-                            let row_k = (k / 2) as f32;
-                            grid.icons.push(IconInst {
-                                rect: Rect::new(
-                                    cx - m - gap / 2.0 + col_k * (m + gap),
-                                    icon_cy - m - gap / 2.0 + row_k * (m + gap),
-                                    m,
-                                    m,
-                                ),
-                                layer: *layer,
-                            });
-                        }
-                        grid.labels.push(Label {
-                            text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
-                            pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
-                            max_w: cell.w - 12.0,
-                            font_px: LABEL_FONT_PX,
-                            line_px: LABEL_LINE_PX,
-                            centered: true,
-                            dim: false,
-                            cache: true,
-                            clip: None,
-                        });
-                        continue;
-                    }
-                    let scale = match pointer {
-                        Some((px, py)) => {
-                            let d = ((px - cx).powi(2) + (py - icon_cy).powi(2)).sqrt();
-                            1.0 + (GRID_MAGNIFY - 1.0) * falloff(d, GRID_MAG_RADIUS)
-                        }
-                        None => 1.0,
-                    };
-                    let size = GRID_ICON * scale;
+            let di = if s == SECTION_APPS {
+                apps_slide.get(i).copied().unwrap_or(i as f32)
+            } else {
+                i as f32
+            };
+            let (mut cell_x, mut cell_y) = cell_pos(di);
+            if cell_x - sec.viewport.x <= -GRID_CELL_W || cell_x - sec.viewport.x >= page_w {
+                continue;
+            }
+            // Opening a box: cells scale/glide out of the clicked tile
+            // (and back into it while closing).
+            if expand < 1.0 {
+                if let Some((ox, oy)) = group_origin {
+                    cell_x = lerp(ox - GRID_CELL_W / 2.0, cell_x, expand);
+                    cell_y = lerp(oy - GRID_CELL_H / 2.0, cell_y, expand);
+                }
+            }
+            let cell = Rect::new(cell_x, cell_y, GRID_CELL_W, GRID_CELL_H);
+            if expand >= 1.0 {
+                if selected == Some((s, i)) {
+                    let hl = config.theme.highlight_rgba();
+                    grid.rects.push(RectInst {
+                        rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                        radius: 14.0,
+                        color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
+                    });
+                } else if hover == Some(Hit::GridCell(s, i)) {
+                    grid.rects.push(RectInst {
+                        rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                        radius: 14.0,
+                        color: config.theme.highlight_rgba(),
+                    });
+                }
+                // A drag hovering a cell that would take the drop
+                // (group create/add) rings it brightly.
+                if drag.and_then(|d| d.over_cell) == Some((s, i)) {
+                    let hl = config.theme.highlight_rgba();
+                    grid.rects.push(RectInst {
+                        rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
+                        radius: 16.0,
+                        color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
+                    });
+                }
+            }
+            let cx = cell.x + cell.w / 2.0;
+            let icon_cy = cell.y + 12.0 + GRID_ICON / 2.0;
+            let grow = lerp(0.35, 1.0, expand);
+            if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
+                // Group cell: folder-style tile with a 2×2 mini
+                // preview of the first members.
+                let hl = config.theme.highlight_rgba();
+                let tile = GRID_ICON * 1.15;
+                grid.rects.push(RectInst {
+                    rect: Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile),
+                    radius: 14.0,
+                    color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
+                });
+                let m = GRID_ICON * 0.42;
+                let gap = GRID_ICON * 0.10;
+                for (k, layer) in minis.iter().enumerate() {
+                    let Some(layer) = layer else { continue };
+                    let col_k = (k % 2) as f32;
+                    let row_k = (k / 2) as f32;
                     grid.icons.push(IconInst {
                         rect: Rect::new(
-                            cx - size / 2.0,
-                            icon_cy - size / 2.0 - lift(entry_idx),
-                            size,
-                            size,
+                            cx - m - gap / 2.0 + col_k * (m + gap),
+                            icon_cy - m - gap / 2.0 + row_k * (m + gap),
+                            m,
+                            m,
                         ),
-                        layer: layer_of(entry_idx),
+                        layer: *layer,
                     });
-                    if placeholders.get(entry_idx).copied().unwrap_or(false) {
-                        if let Some(ch) = entry.name.chars().next() {
-                            let letter: String = ch.to_uppercase().collect();
-                            let font_px = (size * 0.46).clamp(10.0, 30.0);
-                            let line_px = font_px * 1.3;
-                            grid.labels.push(Label {
-                                text: letter,
-                                pos: (cx, icon_cy - lift(entry_idx) - line_px / 2.0),
-                                max_w: size,
-                                font_px,
-                                line_px,
-                                centered: true,
-                                dim: false,
-                                cache: true,
-                                clip: None,
-                            });
-                        }
-                    }
-                    // A profile mutation in flight swaps the name for a
-                    // progress note (dimmed); a failed one flashes
-                    // "Failed" (details in the daemon log).
-                    let is_busy = busy.get(entry_idx).copied().unwrap_or(false);
-                    let is_failed = failed.get(entry_idx).copied().unwrap_or(false);
-                    let name = if is_busy && s == SECTION_INSTALL {
-                        "Installing…".to_string()
-                    } else if is_busy {
-                        "Removing…".to_string()
-                    } else if is_failed {
-                        "Failed".to_string()
-                    } else {
-                        truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
-                    };
+                }
+                grid.labels.push(Label {
+                    text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
+                    pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
+                    max_w: cell.w - 12.0,
+                    font_px: LABEL_FONT_PX,
+                    line_px: LABEL_LINE_PX,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    clip: None,
+                });
+                continue;
+            }
+            let scale = match pointer {
+                Some((px, py)) if expand >= 1.0 => {
+                    let d = ((px - cx).powi(2) + (py - icon_cy).powi(2)).sqrt();
+                    1.0 + (GRID_MAGNIFY - 1.0) * falloff(d, GRID_MAG_RADIUS)
+                }
+                _ => 1.0,
+            };
+            let size = GRID_ICON * scale * grow;
+            grid.icons.push(IconInst {
+                rect: Rect::new(
+                    cx - size / 2.0,
+                    icon_cy - size / 2.0 - lift(entry_idx),
+                    size,
+                    size,
+                ),
+                layer: layer_of(entry_idx),
+            });
+            if placeholders.get(entry_idx).copied().unwrap_or(false) {
+                if let Some(ch) = entry.name.chars().next() {
+                    let letter: String = ch.to_uppercase().collect();
+                    let font_px = (size * 0.46).clamp(10.0, 30.0);
+                    let line_px = font_px * 1.3;
                     grid.labels.push(Label {
-                        text: name,
-                        pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
-                        max_w: cell.w - 12.0,
-                        font_px: LABEL_FONT_PX,
-                        line_px: LABEL_LINE_PX,
+                        text: letter,
+                        pos: (cx, icon_cy - lift(entry_idx) - line_px / 2.0),
+                        max_w: size,
+                        font_px,
+                        line_px,
                         centered: true,
-                        dim: is_busy,
+                        dim: false,
                         cache: true,
                         clip: None,
                     });
                 }
             }
+            // Names pop in at the end of the expand; a profile
+            // mutation in flight swaps the name for a progress note
+            // (dimmed); a failed one flashes "Failed".
+            if expand < 0.85 {
+                continue;
+            }
+            let is_busy = busy.get(entry_idx).copied().unwrap_or(false);
+            let is_failed = failed.get(entry_idx).copied().unwrap_or(false);
+            let name = if is_busy && s == SECTION_INSTALL {
+                "Installing…".to_string()
+            } else if is_busy {
+                "Removing…".to_string()
+            } else if is_failed {
+                "Failed".to_string()
+            } else {
+                truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
+            };
+            grid.labels.push(Label {
+                text: name,
+                pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
+                max_w: cell.w - 12.0,
+                font_px: LABEL_FONT_PX,
+                line_px: LABEL_LINE_PX,
+                centered: true,
+                dim: is_busy,
+                cache: true,
+                clip: None,
+            });
         }
         scene.grids.push(grid);
 

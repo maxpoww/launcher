@@ -100,6 +100,24 @@ impl GroupDb {
         self.save();
     }
 
+    /// Move a member to sit before member position `before` within its
+    /// group (manual reordering inside an open box).
+    pub fn move_member(&mut self, index: usize, id: &str, before: usize) {
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        if group.members.get(before).map(String::as_str) == Some(id) {
+            return; // its own slot: no-op
+        }
+        let anchor = group.members.get(before).cloned();
+        group.members.retain(|m| m != id);
+        let at = anchor
+            .and_then(|a| group.members.iter().position(|m| *m == a))
+            .unwrap_or(group.members.len());
+        group.members.insert(at, id.to_owned());
+        self.save();
+    }
+
     /// Remove `id` from whatever group holds it; a group left with
     /// fewer than two members dissolves. Returns true if anything
     /// changed.

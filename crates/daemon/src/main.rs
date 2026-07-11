@@ -16,6 +16,7 @@ mod hypr;
 mod ipc;
 mod launch;
 mod nix;
+mod order;
 mod pins;
 mod renderer;
 mod state;
@@ -157,6 +158,12 @@ fn main() -> anyhow::Result<()> {
         groups: groups::GroupDb::load(),
         app_group: None,
         group_minis: Vec::new(),
+        order: order::OrderDb::load(),
+        reorder_slot: None,
+        apps_slide: Vec::new(),
+        group_anim: 1.0,
+        group_anim_target: 1.0,
+        group_origin: None,
         pending_icons: None,
         hover: None,
         pointer_pos: None,
@@ -316,6 +323,19 @@ pub struct App {
     /// Group cells for the renderer: (transient entry index, member
     /// texture layers for the 2×2 mini preview). Rebuilt per refilter.
     group_minis: Vec<(usize, [Option<u32>; 4])>,
+    /// Persistent Apps-grid order (install date + manual overrides).
+    order: order::OrderDb,
+    /// Drag-to-reorder: the insertion slot under the pointer, in full
+    /// visible-list coordinates (`None` = no reorder pending).
+    reorder_slot: Option<usize>,
+    /// Per-cell animated display indices for the Apps grid (the
+    /// make-room glide); identity when nothing is in flight.
+    apps_slide: Vec<f32>,
+    /// Group-open transition: raw progress (0..1), its target, and the
+    /// surface point the group expands from (the clicked tile).
+    group_anim: f32,
+    group_anim_target: f32,
+    group_origin: Option<(f32, f32)>,
     /// Icons that arrived before the renderer existed.
     pending_icons: Option<Vec<Vec<u8>>>,
     /// Item currently under the pointer.
@@ -348,6 +368,15 @@ pub struct App {
     zone_free: bool,
 
     exit: bool,
+}
+
+/// What a grid drop at a given position would do (see
+/// `App::grid_drop_target`).
+enum GridDrop {
+    /// Fold into the cell at this index (create or join a box).
+    Fold(usize),
+    /// Move to sit before this insertion slot (full-list coords).
+    Reorder(usize),
 }
 
 /// Readiness of the nixpkgs package index.
@@ -694,6 +723,17 @@ impl App {
         self.asset_file = asset("asset-file");
         self.asset_pkg = asset("asset-pkg");
 
+        // Record first-seen order (install date): new apps append at
+        // the end of the grid, macOS-style. The very first sync seeds
+        // the baseline in the current (usage) order.
+        self.order.sync(
+            self.entries
+                .iter()
+                .zip(&self.kinds)
+                .filter(|(_, k)| **k == apps::EntryKind::App)
+                .map(|(e, _)| e.id.as_str()),
+        );
+
         self.pkg_layer_base = icons.len() as u32;
         match self.renderer.as_mut() {
             Some(renderer) => {
@@ -755,6 +795,9 @@ impl App {
                 let id = &self.entries[idx].id;
                 !self.pins.is_pinned(id) && !self.groups.is_grouped(id)
             });
+            // Grid order: install date, with manual drags on top.
+            visible[content::SECTION_APPS]
+                .sort_by_key(|&idx| self.order.index_of(&self.entries[idx].id));
             // A dissolved group can't stay open.
             if self
                 .app_group
@@ -782,6 +825,9 @@ impl App {
             }
         }
         self.search.visible = visible;
+        // The list changed shape: any in-flight make-room glide is
+        // meaningless against the new indices.
+        self.apps_slide.clear();
         self.search.selected = if self.search.query.is_empty() || self.flat_len() == 0 {
             None
         } else {
@@ -945,6 +991,28 @@ impl App {
                 idx
             })
             .collect()
+    }
+
+    /// Open a box: its members expand out of the clicked tile.
+    fn open_group(&mut self, g: usize) {
+        self.group_origin = self.pointer_pos;
+        self.group_anim = 0.0;
+        self.group_anim_target = 1.0;
+        self.app_group = Some(g);
+        self.refilter();
+    }
+
+    /// Close the open box: members glide back into the tile; the view
+    /// actually switches once the animation lands (see `draw`).
+    fn close_group(&mut self) {
+        if self.app_group.is_none() {
+            return;
+        }
+        if self.group_origin.is_none() {
+            self.group_origin = self.pointer_pos;
+        }
+        self.group_anim_target = 0.0;
+        self.schedule_frame();
     }
 
     /// Display name of the open group, for the Apps section title.
@@ -1240,15 +1308,15 @@ impl App {
                 }
             }
             _ => {
-                // Box gestures first: a grid-origin app dropped on
-                // another app creates a box, dropped on a box joins
-                // it, and a member dragged out of the open box leaves
-                // it. Anything else falls through to the pin logic.
+                // Grid gestures first: a grid-origin app dropped on
+                // another app creates a box, on a box joins it, on a
+                // cell edge reorders, and a member dragged out of the
+                // open box leaves it. Else fall through to pinning.
                 let boxed = released
                     && !drag.from_dock
                     && insert.is_none()
                     && kind == Some(apps::EntryKind::App)
-                    && self.try_group_drop(&id, drag.pos);
+                    && self.handle_grid_drop(drag.entry_idx, &id, drag.pos);
                 if !boxed {
                     match insert {
                         Some(slot) => self.pins.pin_at(&id, slot),
@@ -1263,85 +1331,129 @@ impl App {
         self.schedule_frame();
     }
 
-    /// Resolve a grid-origin app drop as a group gesture; true when it
-    /// was one (create / join / leave), false to fall through.
-    fn try_group_drop(&mut self, id: &str, pos: (f32, f32)) -> bool {
-        let layout = self.current_layout();
-        if let Some(Hit::GridCell(content::SECTION_APPS, cell)) =
-            content::hit_test(&layout, pos, self.search.open)
-        {
-            let Some(&target_idx) = self.search.visible[content::SECTION_APPS].get(cell) else {
-                return false;
-            };
-            let target_id = self.entries[target_idx].id.clone();
-            if target_id == id {
-                return false;
-            }
-            match self.kinds.get(target_idx) {
-                Some(apps::EntryKind::Group) => {
-                    let Some(g) = target_id
-                        .strip_prefix("group:")
-                        .and_then(|n| n.parse::<usize>().ok())
-                    else {
-                        return false;
-                    };
-                    self.groups.add(g, id);
-                }
-                // No nesting: inside an open box, member-on-member
-                // does nothing.
-                Some(apps::EntryKind::App) if self.app_group.is_none() => {
-                    self.groups.create(&target_id, id);
-                }
-                _ => return false,
-            }
-            self.refilter();
-            return true;
-        }
-        // Inside an open box (not searching), dropping a member
-        // anywhere that isn't a cell (and isn't the dock — handled by
-        // the caller) moves it back out to the loose grid.
-        if self.app_group.is_some() && self.search.query.is_empty() && self.groups.remove_member(id)
-        {
-            if self
-                .app_group
-                .is_some_and(|g| g >= self.groups.groups().len())
-            {
-                // The open box dissolved with the move.
-                self.app_group = None;
-            }
-            self.refilter();
-            return true;
-        }
-        false
-    }
-
-    /// The grid cell a dragged app would group with if dropped at
-    /// `pos` (drop-target ring): another loose app or a box.
-    fn drag_over_cell(
+    /// What a grid-origin app drag over the Apps section would do if
+    /// dropped at `pos`: fold into a cell (create/join a box — the
+    /// center band of a valid target) or reorder to an insertion slot
+    /// (cell edges, gaps, and the space past the last cell).
+    fn grid_drop_target(
         &self,
         layout: &content::Layout,
         pos: (f32, f32),
         entry_idx: usize,
         from_dock: bool,
-    ) -> Option<(usize, usize)> {
-        if from_dock || self.kinds.get(entry_idx) != Some(&apps::EntryKind::App) {
+    ) -> Option<GridDrop> {
+        if from_dock
+            || !self.search.query.is_empty()
+            || self.kinds.get(entry_idx) != Some(&apps::EntryKind::App)
+        {
             return None;
         }
-        let Some(Hit::GridCell(content::SECTION_APPS, cell)) =
-            content::hit_test(layout, pos, self.search.open)
-        else {
-            return None;
-        };
-        let &target_idx = self.search.visible[content::SECTION_APPS].get(cell)?;
-        if target_idx == entry_idx {
+        let sec = &layout.sections[content::SECTION_APPS];
+        if !sec.viewport.contains(pos) || sec.n_pages == 0 {
             return None;
         }
-        match self.kinds.get(target_idx) {
-            Some(apps::EntryKind::Group) => Some((content::SECTION_APPS, cell)),
-            Some(apps::EntryKind::App) if self.app_group.is_none() => {
-                Some((content::SECTION_APPS, cell))
+        let visible = &self.search.visible[content::SECTION_APPS];
+        // Cell-space position (the hit-test math, kept fractional).
+        let page_w = sec.viewport.w.max(1.0);
+        let adjusted_x = (pos.0 - sec.viewport.x + sec.scroll).max(0.0);
+        let page = ((adjusted_x / page_w).floor() as usize) % sec.n_pages.max(1);
+        let col_f = (adjusted_x.rem_euclid(page_w)) / content::GRID_CELL_W;
+        let row = (((pos.1 - sec.viewport.y) / content::GRID_CELL_H).floor() as usize)
+            .min(sec.rows.saturating_sub(1));
+        let col = (col_f.floor() as usize).min(sec.cols.saturating_sub(1));
+        let cell = page * sec.cols * sec.rows + row * sec.cols + col;
+        let frac = col_f.fract();
+
+        // Center band of a valid fold target folds; edges reorder.
+        if (0.30..0.70).contains(&frac) {
+            if let Some(&target_idx) = visible.get(cell) {
+                let foldable = target_idx != entry_idx
+                    && match self.kinds.get(target_idx) {
+                        Some(apps::EntryKind::Group) => true,
+                        Some(apps::EntryKind::App) => self.app_group.is_none(),
+                        _ => false,
+                    };
+                if foldable {
+                    return Some(GridDrop::Fold(cell));
+                }
             }
-            _ => None,
+        }
+        let mut slot = (cell + usize::from(frac >= 0.5)).min(visible.len());
+        // Reordering happens among apps: never before the leading box
+        // cells of the loose grid.
+        if self.app_group.is_none() {
+            let n_boxes = self.groups.groups().len();
+            slot = slot.max(n_boxes.min(visible.len()));
+        }
+        Some(GridDrop::Reorder(slot))
+    }
+
+    /// Resolve a grid-origin app drop; true when it was a grid gesture
+    /// (fold / reorder / leave-box), false to fall through to pinning.
+    fn handle_grid_drop(&mut self, entry_idx: usize, id: &str, pos: (f32, f32)) -> bool {
+        let layout = self.current_layout();
+        match self.grid_drop_target(&layout, pos, entry_idx, false) {
+            Some(GridDrop::Fold(cell)) => {
+                let Some(&target_idx) = self.search.visible[content::SECTION_APPS].get(cell) else {
+                    return false;
+                };
+                let target_id = self.entries[target_idx].id.clone();
+                match self.kinds.get(target_idx) {
+                    Some(apps::EntryKind::Group) => {
+                        let Some(g) = target_id
+                            .strip_prefix("group:")
+                            .and_then(|n| n.parse::<usize>().ok())
+                        else {
+                            return false;
+                        };
+                        self.groups.add(g, id);
+                    }
+                    Some(apps::EntryKind::App) => {
+                        self.groups.create(&target_id, id);
+                    }
+                    _ => return false,
+                }
+                self.refilter();
+                true
+            }
+            Some(GridDrop::Reorder(slot)) => {
+                if let Some(g) = self.app_group {
+                    self.groups.move_member(g, id, slot);
+                } else {
+                    let n_boxes = self.groups.groups().len();
+                    let ids: Vec<String> = self.search.visible[content::SECTION_APPS]
+                        .iter()
+                        .skip(n_boxes)
+                        .map(|&idx| self.entries[idx].id.clone())
+                        .collect();
+                    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                    self.order
+                        .move_within(id, &refs, slot.saturating_sub(n_boxes));
+                }
+                self.refilter();
+                true
+            }
+            None => {
+                // Inside an open box (not searching), dropping a member
+                // anywhere that isn't a cell (and isn't the dock —
+                // handled by the caller) moves it back out.
+                if self.app_group.is_some()
+                    && self.search.query.is_empty()
+                    && self.groups.remove_member(id)
+                {
+                    if self
+                        .app_group
+                        .is_some_and(|g| g >= self.groups.groups().len())
+                    {
+                        // The open box dissolved with the move.
+                        self.app_group = None;
+                        self.group_origin = None;
+                    }
+                    self.refilter();
+                    return true;
+                }
+                false
+            }
         }
     }
 
@@ -1401,12 +1513,14 @@ impl App {
                         return;
                     }
                     if self.kinds.get(entry_idx) == Some(&apps::EntryKind::Group) {
-                        self.app_group = self
+                        let g = self
                             .entries
                             .get(entry_idx)
                             .and_then(|e| e.id.strip_prefix("group:"))
                             .and_then(|n| n.parse::<usize>().ok());
-                        self.refilter();
+                        if let Some(g) = g {
+                            self.open_group(g);
+                        }
                         return;
                     }
                     self.activate(entry_idx);
@@ -1421,10 +1535,7 @@ impl App {
                 self.schedule_frame();
             }
             Hit::FilesBack => self.files_nav_up(),
-            Hit::AppsBack => {
-                self.app_group = None;
-                self.refilter();
-            }
+            Hit::AppsBack => self.close_group(),
         }
     }
 
@@ -1606,6 +1717,87 @@ impl App {
         let layout = self.current_layout();
         // (layout.scroll is the cyclic-wrapped image of list_scroll; the
         // raw value is what animates, so never sync it back from layout.)
+        // Grid drag: resolve the fold/reorder target under the pointer
+        // and remember which cell to hide (the ghost is its visual).
+        let grid_target = self.gesture.dragging.as_ref().and_then(|drag| {
+            self.grid_drop_target(&layout, drag.pos, drag.entry_idx, drag.from_dock)
+        });
+        self.reorder_slot = match grid_target {
+            Some(GridDrop::Reorder(slot)) => Some(slot),
+            _ => None,
+        };
+        let over_cell = match grid_target {
+            Some(GridDrop::Fold(cell)) => Some((content::SECTION_APPS, cell)),
+            _ => None,
+        };
+        let drag_hidden = self.gesture.dragging.as_ref().and_then(|drag| {
+            (!drag.from_dock && self.kinds.get(drag.entry_idx) == Some(&apps::EntryKind::App))
+                .then_some(drag.entry_idx)
+        });
+        // Make-room glide: each Apps cell eases toward its display
+        // slot (origin gap closes, insertion gap opens). ~80 ms
+        // exponential ease-out — crisp, no overshoot.
+        let apps_len = self.search.visible[content::SECTION_APPS].len();
+        if self.apps_slide.len() != apps_len {
+            self.apps_slide = (0..apps_len).map(|i| i as f32).collect();
+        }
+        let orig_pos = drag_hidden.and_then(|e| {
+            self.search.visible[content::SECTION_APPS]
+                .iter()
+                .position(|&v| v == e)
+        });
+        let mut slide_animating = false;
+        let k = 1.0 - (-dt * 22.0f32).exp();
+        for i in 0..apps_len {
+            let mut target = i as f32;
+            if let Some(op) = orig_pos {
+                if i > op {
+                    target -= 1.0; // the origin's gap closes
+                }
+                if let Some(slot) = self.reorder_slot {
+                    let compact = if i > op { i - 1 } else { i };
+                    let slot_c = slot - usize::from(op < slot);
+                    if compact >= slot_c {
+                        target += 1.0; // the insertion gap opens
+                    }
+                }
+            }
+            let cur = self.apps_slide[i];
+            if (cur - target).abs() > 0.005 {
+                self.apps_slide[i] = cur + (target - cur) * k;
+                slide_animating = true;
+            } else {
+                self.apps_slide[i] = target;
+            }
+        }
+        if slide_animating {
+            self.dirty = true;
+        }
+
+        // Box open/close transition (~180 ms, eased below).
+        if self.group_anim != self.group_anim_target {
+            let step = dt / 0.18;
+            if self.group_anim_target > self.group_anim {
+                self.group_anim = (self.group_anim + step).min(self.group_anim_target);
+            } else {
+                self.group_anim = (self.group_anim - step).max(self.group_anim_target);
+            }
+            if self.group_anim <= 0.0 && self.group_anim_target <= 0.0 {
+                // Fully collapsed back into the tile: leave the box.
+                self.app_group = None;
+                self.group_origin = None;
+                self.group_anim = 1.0;
+                self.group_anim_target = 1.0;
+                self.refilter();
+            } else {
+                self.dirty = true;
+            }
+        }
+        let group_expand = {
+            let t = self.group_anim.clamp(0.0, 1.0);
+            1.0 - (1.0 - t).powi(3) // ease-out cubic
+        };
+
         let drag_frame = self
             .gesture
             .dragging
@@ -1621,7 +1813,7 @@ impl App {
                     self.drag_dock_insert(&layout, drag.pos)
                 },
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
-                over_cell: self.drag_over_cell(&layout, drag.pos, drag.entry_idx, drag.from_dock),
+                over_cell,
             });
         let busy: Vec<bool> = self
             .entries
@@ -1670,6 +1862,10 @@ impl App {
                 failed: &failed,
                 group_minis: &self.group_minis,
                 apps_group: &self.apps_group_name(),
+                apps_slide: &self.apps_slide,
+                drag_hidden,
+                group_expand,
+                group_origin: self.group_origin,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -1847,8 +2043,7 @@ impl App {
             Keysym::Escape => {
                 // Step out of an open box first; dismiss on the next.
                 if self.app_group.is_some() && self.search.query.is_empty() {
-                    self.app_group = None;
-                    self.refilter();
+                    self.close_group();
                     return;
                 }
                 self.search.query.clear();
