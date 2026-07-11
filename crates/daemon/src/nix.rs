@@ -194,6 +194,19 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
 
     let mut searcher = waverunner_core::Searcher::new();
     let mut loader = crate::apps::IconLoader::new(icon_theme);
+    // One sweep over the theme dirs collects every icon name that
+    // exists at all: hits get a real lookup, everything else becomes a
+    // letter tile instantly instead of paying a full (negative) theme
+    // walk per new name — that walk was why a repeated search felt so
+    // much faster than a first one.
+    let started = std::time::Instant::now();
+    let available = crate::apps::available_icon_names(loader.themes());
+    debug!(
+        "icon availability: {} names from {:?} in {:?}",
+        available.len(),
+        loader.themes(),
+        started.elapsed()
+    );
     let mut pending: Option<String> = None;
     loop {
         let mut query = match pending.take() {
@@ -239,19 +252,26 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
         }
         // Most package names double as theme icon names (firefox, vlc,
         // gimp, …) — Papirus and friends ship icons for far more apps
-        // than are installed. Misses become letter tiles.
+        // than are installed; KDE/GNOME apps hide behind reverse-DNS
+        // aliases. Names that exist nowhere become letter tiles.
         let (icons, placeholders): (Vec<_>, Vec<_>) = hits
             .iter()
             .map(|p| {
-                loader.icon_for(&waverunner_core::index::AppEntry {
-                    id: format!("pkg-{}", p.attr),
-                    name: p.name.clone(),
-                    description: None,
-                    exec: String::new(),
-                    icon: Some(p.name.clone()),
-                    needs_terminal: false,
-                    path: None,
-                })
+                let icon = icon_candidates(p)
+                    .into_iter()
+                    .find(|c| available.contains(c));
+                match icon {
+                    Some(icon) => loader.icon_for(&waverunner_core::index::AppEntry {
+                        id: format!("pkg-{}", p.attr),
+                        name: p.name.clone(),
+                        description: None,
+                        exec: String::new(),
+                        icon: Some(icon),
+                        needs_terminal: false,
+                        path: None,
+                    }),
+                    None => (crate::apps::placeholder_icon(&p.name), true),
+                }
             })
             .unzip();
         loader.save_resolutions();
@@ -298,6 +318,31 @@ fn rank_hits(
         }
     }
     hits
+}
+
+/// Icon names worth trying for a package, best first: the pname
+/// itself, then the reverse-DNS aliases KDE and GNOME apps publish
+/// their icons under (`kdePackages.kate` → `org.kde.kate`,
+/// `gnome-calculator` → `org.gnome.Calculator`).
+fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
+    let mut candidates = vec![pkg.name.clone()];
+    if let Some(rest) = pkg.attr.strip_prefix("kdePackages.") {
+        candidates.push(format!("org.kde.{rest}"));
+    }
+    if let Some(rest) = pkg.name.strip_prefix("gnome-") {
+        let camel: String = rest
+            .split('-')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                    None => String::new(),
+                }
+            })
+            .collect();
+        candidates.push(format!("org.gnome.{camel}"));
+    }
+    candidates
 }
 
 /// `nix profile install nixpkgs#<attr>`; true on success.
@@ -575,6 +620,24 @@ mod tests {
     }
 
     #[test]
+    fn icon_candidates_cover_reverse_dns_aliases() {
+        let kate = entry("kdePackages.kate".into(), "kate".into(), "1".into(), "");
+        assert_eq!(icon_candidates(&kate), vec!["kate", "org.kde.kate"]);
+        let calc = entry(
+            "gnome-calculator".into(),
+            "gnome-calculator".into(),
+            "1".into(),
+            "",
+        );
+        assert_eq!(
+            icon_candidates(&calc),
+            vec!["gnome-calculator", "org.gnome.Calculator"]
+        );
+        let plain = entry("cowsay".into(), "cowsay".into(), "1".into(), "");
+        assert_eq!(icon_candidates(&plain), vec!["cowsay"]);
+    }
+
+    #[test]
     fn name_matches_outrank_description_mentions() {
         // Alphabetically before "firefox" AND mentioning it in the
         // description — the exact trap that buried the real package.
@@ -651,24 +714,42 @@ mod tests {
     #[test]
     #[ignore = "needs the machine's icon theme"]
     fn pkg_icon_lookup_coverage() {
-        let mut loader = crate::apps::IconLoader::new("Papirus-Dark".into());
-        for name in ["firefox", "vlc", "gimp", "cowsay", "ripgrep", "xterm"] {
-            let (_, placeholder) = loader.icon_for(&waverunner_core::index::AppEntry {
-                id: format!("pkg-{name}"),
-                name: name.into(),
-                description: None,
-                exec: String::new(),
-                icon: Some(name.into()),
-                needs_terminal: false,
-                path: None,
-            });
+        let loader = crate::apps::IconLoader::new("Papirus-Dark".into());
+        let started = std::time::Instant::now();
+        let available = crate::apps::available_icon_names(loader.themes());
+        eprintln!(
+            "sweep: {} icon names from {:?} in {:?}",
+            available.len(),
+            loader.themes(),
+            started.elapsed()
+        );
+        for probe in [
+            "firefox",
+            "vlc",
+            "gimp",
+            "cowsay",
+            "ripgrep",
+            "xterm",
+            "org.kde.kate",
+            "org.gnome.Calculator",
+        ] {
             eprintln!(
-                "{name}: {}",
-                if placeholder {
-                    "letter tile"
+                "{probe}: {}",
+                if available.contains(probe) {
+                    "available"
                 } else {
-                    "themed icon"
+                    "missing"
                 }
+            );
+        }
+        if let Ok(pkgs) = load_cache(&cache_path()) {
+            let covered = pkgs
+                .iter()
+                .filter(|p| icon_candidates(p).iter().any(|c| available.contains(c)))
+                .count();
+            eprintln!(
+                "index coverage: {covered} of {} packages have a real icon",
+                pkgs.len()
             );
         }
     }

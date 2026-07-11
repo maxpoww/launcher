@@ -247,17 +247,29 @@ drag-and-drop package management:
   a drag without installing/uninstalling anything.
 
 Package cells show real icons: the rank thread owns its own
-`IconLoader` and resolves each hit's pname against the configured icon
-theme (Papirus ships icons for far more apps than are installed —
-firefox/vlc/gimp/xterm all resolve; CLI-only tools fall back to the
-colored letter tile). Icons are the slow part (cold negative theme
-lookups walk every theme dir), so they never delay results: `Ranked`
-is sent the moment ranking finishes and the icons follow as a separate
-`HitIcons` event — skipped entirely when a newer query is already
-waiting. The renderer reserves `RANK_HITS_MAX` texture layers past the
-app icons; each icon batch uploads into that tail
-(`update_icon_layer`), and rescans re-upload after `set_icons` rebuilds
-the array.
+`IconLoader` (firefox/vlc/gimp/xterm all resolve; CLI-only tools fall
+back to the colored letter tile). Icons are the slow part (cold
+negative theme lookups walk every theme dir), so they never delay
+results: `Ranked` is sent the moment ranking finishes and the icons
+follow as a separate `HitIcons` event — skipped entirely when a newer
+query is already waiting. The renderer reserves `RANK_HITS_MAX`
+texture layers past the app icons; each icon batch uploads into that
+tail (`update_icon_layer`), and rescans re-upload after `set_icons`
+rebuilds the array.
+
+Icon lookups (2026-07-10, second pass) are chain- and
+availability-based: `IconLoader` searches a theme fallback chain
+(configured theme, then Papirus-Dark/Papirus/breeze when installed —
+the chain is part of the resolution-cache fence), packages also try
+their reverse-DNS aliases (`kdePackages.kate` → `org.kde.kate`,
+`gnome-calculator` → `org.gnome.Calculator`), and one 200 ms readdir
+sweep at startup collects every icon name that exists
+(`available_icon_names`, 21 006 on this VM) so names that exist
+nowhere become letter tiles instantly instead of paying a negative
+theme walk per name — that walk was why a first search felt slower
+than a repeat. Measured coverage: 1 439 of 24 004 curated packages
+have a real themed icon (the rest are CLI tools with no icon in any
+pack; GUI apps — what searches actually surface — resolve well).
 
 Verified on the VM: index dump + cache round-trip (unit-tested), cache
 load on start (instant), the Install hint states ("Indexing nixpkgs…" /

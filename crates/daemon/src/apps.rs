@@ -250,7 +250,8 @@ fn scan_home_files() -> Vec<FileEntry> {
 /// resolutions get their own persistent cache because the theme
 /// directory walk — not rasterization — dominates index time.
 pub(crate) struct IconLoader {
-    theme: String,
+    /// Theme fallback chain, best first (see [`theme_chain`]).
+    themes: Vec<String>,
     rasters: HashMap<String, (Vec<u8>, bool)>,
     disk: DiskCache,
     resolutions: ResolutionCache,
@@ -258,12 +259,18 @@ pub(crate) struct IconLoader {
 
 impl IconLoader {
     pub(crate) fn new(theme: String) -> Self {
+        let themes = theme_chain(&theme);
         Self {
-            resolutions: ResolutionCache::load(&theme),
+            resolutions: ResolutionCache::load(&themes.join("+")),
             rasters: HashMap::new(),
             disk: DiskCache::new(),
-            theme,
+            themes,
         }
+    }
+
+    /// The theme fallback chain this loader searches, best first.
+    pub(crate) fn themes(&self) -> &[String] {
+        &self.themes
     }
 
     /// Persist newly learned icon-name resolutions (no-op when clean).
@@ -309,7 +316,7 @@ impl IconLoader {
         if name.starts_with('/') {
             return Some(name.to_owned());
         }
-        self.resolutions.resolve(name, &self.theme)
+        self.resolutions.resolve(name, &self.themes)
     }
 }
 
@@ -416,17 +423,21 @@ impl ResolutionCache {
     }
 
     /// Resolve `name` via the cache, falling back to the theme walk.
-    fn resolve(&mut self, name: &str, theme: &str) -> Option<String> {
+    fn resolve(&mut self, name: &str, themes: &[String]) -> Option<String> {
         match self.map.get(name) {
             Some(None) => return None,
             Some(Some(path)) if std::path::Path::new(path).exists() => return Some(path.clone()),
             // Cached path vanished (theme update): re-walk below.
             _ => {}
         }
-        let found = freedesktop_icons::lookup(name)
-            .with_size(ICON_SIZE as u16)
-            .with_theme(theme)
-            .find()
+        let found = themes
+            .iter()
+            .find_map(|theme| {
+                freedesktop_icons::lookup(name)
+                    .with_size(ICON_SIZE as u16)
+                    .with_theme(theme)
+                    .find()
+            })
             .or_else(|| {
                 freedesktop_icons::lookup(name)
                     .with_size(ICON_SIZE as u16)
@@ -485,19 +496,87 @@ fn parse_resolutions(s: &str, fence: &str) -> Option<HashMap<String, Option<Stri
 /// configured theme or any nix store path in `XDG_DATA_DIRS` changes
 /// the string; either drops the resolution cache wholesale.
 fn fence(theme: &str) -> String {
+    let mut parts = format!("{theme}|{ICON_SIZE}");
+    for dir in icon_dirs() {
+        parts.push_str(&format!("|{dir}:{}", mtime_secs(&dir)));
+    }
+    format!("{:016x}", fnv1a64(&parts))
+}
+
+/// Every directory icon themes may live in, per the freedesktop icon
+/// spec (data home, data dirs, `~/.icons`, plus flat pixmaps).
+fn icon_dirs() -> impl Iterator<Item = String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let data_home =
         std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
     let data_dirs =
         std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
-    let mut parts = format!("{theme}|{ICON_SIZE}");
-    let icon_dirs = std::iter::once(format!("{data_home}/icons"))
-        .chain(data_dirs.split(':').map(|d| format!("{d}/icons")))
-        .chain([format!("{home}/.icons"), "/usr/share/pixmaps".to_owned()]);
-    for dir in icon_dirs {
-        parts.push_str(&format!("|{dir}:{}", mtime_secs(&dir)));
+    std::iter::once(format!("{data_home}/icons"))
+        .chain(
+            data_dirs
+                .split(':')
+                .map(|d| format!("{d}/icons"))
+                .collect::<Vec<_>>(),
+        )
+        .chain([format!("{home}/.icons"), "/usr/share/pixmaps".to_owned()])
+}
+
+/// The theme fallback chain for icon lookups: the configured theme
+/// first, then the highest-coverage packs installed on this system.
+/// (Papirus ships icons for thousands of apps; breeze fills in KDE's
+/// `org.kde.*` names.) The bare spec lookup at the end of `resolve`
+/// covers hicolor and pixmaps.
+fn theme_chain(configured: &str) -> Vec<String> {
+    let mut chain = vec![configured.to_owned()];
+    for fallback in ["Papirus-Dark", "Papirus", "breeze"] {
+        if chain.iter().any(|t| t == fallback) {
+            continue;
+        }
+        let installed = icon_dirs().any(|d| std::path::Path::new(&d).join(fallback).is_dir());
+        if installed {
+            chain.push(fallback.to_owned());
+        }
     }
-    format!("{:016x}", fnv1a64(&parts))
+    chain
+}
+
+/// Every icon name (file stem) available in `themes` or the flat
+/// pixmaps dirs — one recursive readdir sweep. Lets callers skip the
+/// expensive per-name theme walk entirely for names that exist
+/// nowhere (the common case for CLI-only packages).
+pub(crate) fn available_icon_names(themes: &[String]) -> std::collections::HashSet<String> {
+    fn collect(dir: &std::path::Path, depth: u8, names: &mut std::collections::HashSet<String>) {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() && depth > 0 {
+                collect(&path, depth - 1, names);
+            } else if kind.is_file() || kind.is_symlink() {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    names.insert(stem.to_owned());
+                }
+            }
+        }
+    }
+    let mut names = std::collections::HashSet::new();
+    for dir in icon_dirs() {
+        let dir = std::path::PathBuf::from(dir);
+        if dir.ends_with("pixmaps") {
+            collect(&dir, 0, &mut names);
+            continue;
+        }
+        for theme in themes.iter().map(String::as_str).chain(["hicolor"]) {
+            // Theme layouts nest either <size>/<category>/ or
+            // <category>/<size>/ — two directory levels above files.
+            collect(&dir.join(theme), 2, &mut names);
+        }
+    }
+    names
 }
 
 /// A path's mtime in unix seconds; 0 if it cannot be stat'ed.
@@ -576,7 +655,7 @@ fn fit_pixmap(src: tiny_skia::Pixmap) -> tiny_skia::Pixmap {
 
 /// Deterministic colored tile for apps without a resolvable icon,
 /// so every entry stays clickable and visually distinct.
-fn placeholder_icon(name: &str) -> Vec<u8> {
+pub(crate) fn placeholder_icon(name: &str) -> Vec<u8> {
     let hash = name
         .bytes()
         .fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
