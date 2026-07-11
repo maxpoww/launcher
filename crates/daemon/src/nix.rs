@@ -22,7 +22,14 @@ use tracing::{debug, info, warn};
 /// Re-dump the package index when the cache is older than this.
 const REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// Cache format marker (first line); bump to invalidate old caches.
-const CACHE_HEADER: &str = "waverunner-nixpkgs-v3";
+const CACHE_HEADER: &str = "waverunner-nixpkgs-v4";
+/// Prebuilt nix-index file database (weekly, ~100 MB): the file
+/// listing of every nixpkgs package, without downloading any of them.
+const FILE_INDEX_URL: &str =
+    "https://github.com/nix-community/nix-index-database/releases/latest/download/index-x86_64-linux";
+/// Re-download the file database when older than this (upstream
+/// publishes weekly).
+const FILE_INDEX_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Rank-haystack cap on the description, keeping per-keystroke fuzzy
 /// scoring over ~110k packages cheap.
 const HAYSTACK_DESC_MAX: usize = 80;
@@ -41,6 +48,10 @@ pub struct PkgEntry {
     /// Pre-built fuzzy-match target: name, attr and a clipped
     /// description.
     pub haystack: String,
+    /// Icon-name hints from the package's own `.desktop` file names
+    /// (via the nix-index file database) — authoritative, no guessing:
+    /// `ghostty` ships `com.mitchellh.ghostty.desktop`.
+    pub icons: Vec<String>,
 }
 
 /// Thread → daemon notifications.
@@ -403,15 +414,17 @@ impl IconNames {
     }
 }
 
-/// Icon names worth trying for a package, best first: the pname
-/// itself, the reverse-DNS aliases KDE and GNOME apps publish their
-/// icons under (`kdePackages.kate` → `org.kde.kate`,
+/// Icon names worth trying for a package, best first: the package's
+/// own `.desktop` stems (authoritative, from the nix-index file
+/// database), the pname, the reverse-DNS aliases KDE and GNOME apps
+/// publish their icons under (`kdePackages.kate` → `org.kde.kate`,
 /// `gnome-calculator` → `org.gnome.Calculator`), then the pname with
 /// trailing `-segments` progressively stripped so variants inherit the
 /// family icon (`firefox-bin` → `firefox`, `telegram-desktop-bin` →
 /// `telegram-desktop`).
 fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
-    let mut candidates = vec![pkg.name.clone()];
+    let mut candidates = pkg.icons.clone();
+    candidates.push(pkg.name.clone());
     if let Some(rest) = pkg.attr.strip_prefix("kdePackages.") {
         candidates.push(format!("org.kde.{rest}"));
     }
@@ -569,11 +582,86 @@ fn keep_attr(attr: &str) -> bool {
     }
 }
 
+/// Make sure the prebuilt nix-index file database is present and
+/// reasonably fresh at `~/.cache/nix-index/files` (where `nix-locate`
+/// expects it).
+fn ensure_file_index() -> anyhow::Result<()> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = PathBuf::from(home).join(".cache").join("nix-index");
+    let path = dir.join("files");
+    if cache_age(&path).is_some_and(|age| age < FILE_INDEX_MAX_AGE) {
+        return Ok(());
+    }
+    info!("downloading nix-index file database…");
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join("files.part");
+    let out = Command::new("curl")
+        .args(["-fsSL", FILE_INDEX_URL, "-o"])
+        .arg(&tmp)
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "curl failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim().to_owned()
+    );
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Every package's `.desktop` file stems (attr → stems), from one
+/// `nix-locate` sweep over the file database. The stem doubles as the
+/// app id and icon name for reverse-DNS-named apps — the authoritative
+/// pname → icon mapping nothing else provides for uninstalled
+/// packages.
+fn desktop_icon_hints() -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
+    ensure_file_index()?;
+    let out = Command::new("nix")
+        .args([
+            "shell",
+            "nixpkgs#nix-index",
+            "-c",
+            "nix-locate",
+            "--regex",
+            r"share/applications/[^/]*\.desktop$",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "nix-locate failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim().to_owned()
+    );
+    let mut hints: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut cols = line.split_whitespace();
+        let (Some(attr_out), Some(path)) = (cols.next(), cols.next_back()) else {
+            continue;
+        };
+        if !path.contains("/share/applications/") {
+            continue;
+        }
+        // `<attr>.<output>` — the store output suffix is always there.
+        let attr = attr_out.rsplit_once('.').map_or(attr_out, |(a, _)| a);
+        let Some(stem) = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        else {
+            continue;
+        };
+        let stems = hints.entry(attr.to_owned()).or_default();
+        if stems.len() < 4 && !stems.iter().any(|s| s == stem) {
+            stems.push(stem.to_owned());
+        }
+    }
+    Ok(hints)
+}
+
 /// Run the full `nix search` dump and slim it into our own curated
 /// database: junk package sets filtered out ([`keep_attr`]), sorted so
 /// shallow/alphabetical attrs come first (ties in fuzzy score then
 /// resolve to the likelier candidate), duplicate pname+version pairs
-/// collapsed onto that first attr.
+/// collapsed onto that first attr. Each package carries the icon-name
+/// hints from its `.desktop` files.
 fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
     let started = std::time::Instant::now();
     let out = Command::new("nix")
@@ -584,6 +672,10 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
         "nix search failed: {}",
         String::from_utf8_lossy(&out.stderr).trim().to_owned()
     );
+    let mut desktops = desktop_icon_hints().unwrap_or_else(|e| {
+        warn!("desktop-file hints unavailable: {e:#}");
+        Default::default()
+    });
     let raw: std::collections::HashMap<String, SearchMeta> = serde_json::from_slice(&out.stdout)?;
     let total = raw.len();
     let mut pkgs: Vec<PkgEntry> = raw
@@ -594,7 +686,14 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
             if !keep_attr(&attr) || meta.pname.is_empty() {
                 return None;
             }
-            Some(entry(attr, meta.pname, meta.version, &meta.description))
+            let icons = desktops.remove(&attr).unwrap_or_default();
+            Some(entry_with_icons(
+                attr,
+                meta.pname,
+                meta.version,
+                &meta.description,
+                icons,
+            ))
         })
         .collect();
     pkgs.sort_by(|a, b| {
@@ -612,7 +711,19 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
 }
 
 /// Build one entry with its pre-computed rank haystack.
+/// [`entry_with_icons`] without hints — the common shape in tests.
+#[cfg(test)]
 fn entry(attr: String, name: String, version: String, description: &str) -> PkgEntry {
+    entry_with_icons(attr, name, version, description, Vec::new())
+}
+
+fn entry_with_icons(
+    attr: String,
+    name: String,
+    version: String,
+    description: &str,
+    icons: Vec<String>,
+) -> PkgEntry {
     let clipped: String = description
         .chars()
         .take(HAYSTACK_DESC_MAX)
@@ -624,6 +735,7 @@ fn entry(attr: String, name: String, version: String, description: &str) -> PkgE
         name,
         version,
         haystack,
+        icons,
     }
 }
 
@@ -643,7 +755,8 @@ fn cache_age(path: &Path) -> Option<Duration> {
         .and_then(|t| t.elapsed().ok())
 }
 
-/// TSV cache: header line, then `attr\tversion\tname\tdescription`.
+/// TSV cache: header line, then
+/// `attr\tversion\tname\ticon;hints\tdescription`.
 fn save_cache(path: &Path, pkgs: &[PkgEntry]) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -658,8 +771,12 @@ fn save_cache(path: &Path, pkgs: &[PkgEntry]) -> anyhow::Result<()> {
             .get(p.name.len() + p.attr.len() + 2..)
             .unwrap_or("");
         text.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            p.attr, p.version, p.name, desc
+            "{}\t{}\t{}\t{}\t{}\n",
+            p.attr,
+            p.version,
+            p.name,
+            p.icons.join(";"),
+            desc
         ));
     }
     let tmp = path.with_extension("tsv.tmp");
@@ -678,12 +795,18 @@ fn load_cache(path: &Path) -> anyhow::Result<Vec<PkgEntry>> {
     );
     Ok(lines
         .filter_map(|line| {
-            let mut cols = line.splitn(4, '\t');
+            let mut cols = line.splitn(5, '\t');
             let attr = cols.next()?.to_owned();
             let version = cols.next()?.to_owned();
             let name = cols.next()?.to_owned();
+            let icons: Vec<String> = cols
+                .next()?
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
             let desc = cols.next().unwrap_or("");
-            Some(entry(attr, name, version, desc))
+            Some(entry_with_icons(attr, name, version, desc, icons))
         })
         .collect())
 }
@@ -697,11 +820,12 @@ mod tests {
         let dir = std::env::temp_dir().join("waverunner-nix-test");
         let path = dir.join("nixpkgs-index.tsv");
         let pkgs = vec![
-            entry(
+            entry_with_icons(
                 "cowsay".into(),
                 "cowsay".into(),
                 "3.8.4".into(),
                 "ASCII cow\twith\nnewline",
+                vec!["org.example.Cowsay".into(), "cowsay-alt".into()],
             ),
             entry("a.b.c".into(), "c".into(), String::new(), ""),
         ];
@@ -712,8 +836,25 @@ mod tests {
         assert_eq!(loaded[0].version, "3.8.4");
         assert_eq!(loaded[0].haystack, pkgs[0].haystack);
         assert!(!loaded[0].haystack.contains('\t'));
+        assert_eq!(loaded[0].icons, pkgs[0].icons);
         assert_eq!(loaded[1].name, "c");
+        assert!(loaded[1].icons.is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn icon_candidates_prefer_desktop_hints() {
+        let ghostty = entry_with_icons(
+            "ghostty".into(),
+            "ghostty".into(),
+            "1.3".into(),
+            "",
+            vec!["com.mitchellh.ghostty".into()],
+        );
+        assert_eq!(
+            icon_candidates(&ghostty),
+            vec!["com.mitchellh.ghostty", "ghostty"]
+        );
     }
 
     #[test]

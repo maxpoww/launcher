@@ -267,16 +267,23 @@ sweep at startup collects every icon name that exists
 (`available_icon_names`, 21 006 on this VM) so names that exist
 nowhere become letter tiles instantly instead of paying a negative
 theme walk per name — that walk was why a first search felt slower
-than a repeat. Coverage maximized (third + fourth pass): the
+than a repeat. Coverage maximized (passes three–five): the
 availability map is case-insensitive (lowercased stem → actual name,
 so `qbittorrent` finds `qBittorrent.svg`), candidates include
 progressive trailing `-segment` strips so variants inherit the family
-icon (`firefox-bin` → `firefox`), and a reverse-DNS alias map reaches
-icons published under vendor ids no pname can guess (`ghostty` →
-`com.mitchellh.ghostty`, which Papirus ships; installed apps' bundled
-hicolor icons link up the same way). The sweep re-runs lazily when
-older than 5 min, so a drag-install's bundled icon appears in search
-without a restart. Measured: 2 960 of 24 004 curated packages resolve
+icon (`firefox-bin` → `firefox`), a reverse-DNS alias map reaches
+icons published under vendor ids (`com.mitchellh.ghostty`), and — the
+systematic end of guessing — the dump queries the prebuilt
+**nix-index file database** (downloaded to `~/.cache/nix-index/files`,
+~100 MB, weekly refresh; one `nix-locate` sweep over
+`share/applications/*.desktop`) so every package carries the
+authoritative icon-name hints from its own desktop files (TSV cache
+v4, `icons` column; 2 930 of 24 010 curated packages are GUI apps with
+hints). The sweep re-runs lazily when older than 5 min, so a
+drag-install's bundled icon appears in search without a restart. The
+remaining gap is GUI apps whose art exists only inside their
+uninstalled package — coverable later by fetching from Flathub's CDN
+keyed by the (now known) reverse-DNS ids. Measured: 2 960 of 24 004 curated packages resolve
 a real themed icon (1 439 → 2 588 → 2 960); everything else shows the
 theme's standard installer box (`system-software-install`, falling
 back through `package-x-generic` / `package` /
