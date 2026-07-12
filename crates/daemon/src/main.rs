@@ -165,6 +165,7 @@ fn main() -> anyhow::Result<()> {
         reorder_slot: None,
         reorder_dwell: None,
         apps_slide: Vec::new(),
+        just_dropped: None,
         dock_slide: Vec::new(),
         mag_sleep: None,
         mag_amount: 1.0,
@@ -341,6 +342,11 @@ pub struct App {
     /// Per-cell animated display indices for the Apps grid (the
     /// make-room glide); identity when nothing is in flight.
     apps_slide: Vec<f32>,
+    /// The id of an app just dropped by a drag: on the next refilter it
+    /// starts at rest in its chosen cell instead of carrying its old
+    /// animated position, so the icon lands where it was dropped rather
+    /// than gliding there from its origin. One-shot (cleared on use).
+    just_dropped: Option<String>,
     /// Animated displacement per dock slot, in slot units (the dock's
     /// make-room glide during drags).
     dock_slide: Vec<f32>,
@@ -881,12 +887,19 @@ impl App {
             // loose grid and box views only.)
             for (i, &e) in vis.iter().enumerate() {
                 if let Some(entry) = self.entries.get(e) {
+                    // The just-dropped icon keeps its rest position (`i`)
+                    // so it appears in the chosen cell — never glides in
+                    // from where it was picked up.
+                    if self.just_dropped.as_deref() == Some(entry.id.as_str()) {
+                        continue;
+                    }
                     if let Some(&(_, d)) = old_slide.iter().find(|(oid, _)| *oid == entry.id) {
                         slide[i] = d;
                     }
                 }
             }
         }
+        self.just_dropped = None;
         self.apps_slide = slide;
         self.search.selected = if self.search.query.is_empty() || self.flat_len() == 0 {
             None
@@ -1336,6 +1349,10 @@ impl App {
         };
         let (id, path) = (entry.id.clone(), entry.path.clone());
         let kind = self.kinds.get(drag.entry_idx).copied();
+        // Whatever this drop rearranges, the dragged icon itself must
+        // land in its chosen cell, not glide there from its origin: the
+        // next refilter places it at rest (self-clears after use).
+        self.just_dropped = Some(id.clone());
         let layout = self.current_layout();
         let section = if released {
             content::section_at(&layout, drag.pos)
