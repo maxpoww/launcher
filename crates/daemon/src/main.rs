@@ -166,6 +166,7 @@ fn main() -> anyhow::Result<()> {
         reorder_dwell: None,
         apps_slide: Vec::new(),
         just_dropped: None,
+        prev_searching: false,
         dock_slide: Vec::new(),
         mag_sleep: None,
         mag_amount: 1.0,
@@ -347,6 +348,10 @@ pub struct App {
     /// animated position, so the icon lands where it was dropped rather
     /// than gliding there from its origin. One-shot (cleared on use).
     just_dropped: Option<String>,
+    /// Whether the previous refilter was showing search results, so the
+    /// grid can tell when the query was just cleared — leaving a search
+    /// reshuffles wholesale and must not glide the icons back.
+    prev_searching: bool,
     /// Animated displacement per dock slot, in slot units (the dock's
     /// make-room glide during drags).
     dock_slide: Vec<f32>,
@@ -814,6 +819,11 @@ impl App {
         self.icon_layers.truncate(self.base_len);
 
         let searching = !self.search.query.is_empty();
+        // Clearing the query snaps the grid from ranked order back to
+        // its resting order — a wholesale reshuffle the carry-over must
+        // skip, or every icon glides back to its cell.
+        let leaving_search = self.prev_searching && !searching;
+        self.prev_searching = searching;
         let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
         let ranked = self.search.matcher.rank(&self.search.query, &names);
         let mut visible: [Vec<usize>; content::N_SECTIONS] = Default::default();
@@ -881,7 +891,7 @@ impl App {
         // start at rest.
         let vis = &self.search.visible[content::SECTION_APPS];
         let mut slide: Vec<f32> = (0..vis.len()).map(|i| i as f32).collect();
-        if !searching {
+        if !searching && !leaving_search {
             // (Ranked search results churn per keystroke; gliding
             // between ranks would be noise, so carry-over is for the
             // loose grid and box views only.)
