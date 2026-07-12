@@ -112,6 +112,9 @@ fn main() -> anyhow::Result<()> {
     // over this channel.
     let (nix_tx, nix_rx) = channel::channel::<nix::Event>();
     let nix = nix::spawn(nix_tx, config.theme.icon_theme.clone());
+    // Learn which installed apps live in the imperative profile (so only
+    // those offer uninstall); refreshed after every mutation.
+    nix.request(nix::Request::ProfilePaths);
 
     let mut app = App {
         registry_state: RegistryState::new(&globals),
@@ -156,6 +159,8 @@ fn main() -> anyhow::Result<()> {
         pkg_state: PkgIndexState::Loading,
         busy_ids: HashSet::new(),
         failed_ids: HashMap::new(),
+        profile_paths: HashSet::new(),
+        removable_ids: HashSet::new(),
         file_index: Vec::new(),
         files_dir: None,
         groups: groups::GroupDb::load(),
@@ -320,6 +325,14 @@ pub struct App {
     /// Recently failed mutations: their cells flash "Failed" for
     /// [`FAIL_FLASH`] (details go to the log).
     failed_ids: HashMap<String, Instant>,
+    /// Store-path closure of the imperative `nix profile` (async from
+    /// the nix thread). An app whose resolved `.desktop` path lands in
+    /// here was installed via the profile and can be uninstalled.
+    profile_paths: HashSet<String>,
+    /// Ids of the currently-indexed apps that are removable — derived
+    /// from `profile_paths` whenever apps or the profile change. Only
+    /// these offer the Install section as an uninstall drop target.
+    removable_ids: HashSet<String>,
     /// Home-tree file index the search ranks against (fresh per rescan).
     file_index: Vec<apps::FileEntry>,
     /// Directory the Files section is navigated into (`None` = the
@@ -712,7 +725,32 @@ impl App {
                 self.update_hover();
                 self.schedule_frame();
             }
+            nix::Event::ProfilePaths(paths) => {
+                self.profile_paths = paths.into_iter().collect();
+                self.recompute_removable();
+                self.schedule_frame();
+            }
         }
+    }
+
+    /// Recompute which indexed apps are removable: an app is removable
+    /// when its `.desktop` file resolves into the imperative profile's
+    /// store-path closure. Cheap filesystem canonicalization per app,
+    /// run when either the apps or the profile change.
+    fn recompute_removable(&mut self) {
+        let profile = &self.profile_paths;
+        self.removable_ids = self
+            .entries
+            .iter()
+            .zip(&self.kinds)
+            .take(self.base_len)
+            .filter(|(_, &k)| k == apps::EntryKind::App)
+            .filter_map(|(e, _)| {
+                let canon = std::fs::canonicalize(e.path.as_ref()?).ok()?;
+                let root = nix::store_path_root(&canon)?;
+                profile.contains(root.to_str()?).then(|| e.id.clone())
+            })
+            .collect();
     }
 
     /// The indexer thread finished: adopt the entries and upload icons
@@ -790,6 +828,7 @@ impl App {
         self.gesture.pressed = None;
         self.gesture.dragging = None;
         self.recompute_dock_order();
+        self.recompute_removable();
         self.refilter();
         self.schedule_frame();
     }
@@ -1399,10 +1438,13 @@ impl App {
                 }
             }
             Some(apps::EntryKind::App)
-                if section == Some(content::SECTION_INSTALL) && !self.busy_ids.contains(&id) =>
+                if section == Some(content::SECTION_INSTALL)
+                    && self.removable_ids.contains(&id)
+                    && !self.busy_ids.contains(&id) =>
             {
-                // Uninstall — the nix thread checks whether the app
-                // really came from the profile and refuses otherwise.
+                // Uninstall — gated to profile-managed apps, so this only
+                // runs for something `nix profile remove` can actually
+                // remove (non-removable apps fall through and snap back).
                 if let Some(path) = path.map(|p| p.to_string_lossy().into_owned()) {
                     info!("uninstalling {id}");
                     self.busy_ids.insert(id.clone());
@@ -1710,7 +1752,18 @@ impl App {
         let section = content::section_at(layout, pos)?;
         match self.kinds.get(entry_idx) {
             Some(apps::EntryKind::Package) if section == content::SECTION_APPS => Some(section),
-            Some(apps::EntryKind::App) if section == content::SECTION_INSTALL => Some(section),
+            // Only apps installed via the imperative profile can be
+            // uninstalled here — home-manager / system apps don't offer
+            // the target at all (dropping there just snaps back).
+            Some(apps::EntryKind::App)
+                if section == content::SECTION_INSTALL
+                    && self
+                        .entries
+                        .get(entry_idx)
+                        .is_some_and(|e| self.removable_ids.contains(&e.id)) =>
+            {
+                Some(section)
+            }
             _ => None,
         }
     }

@@ -82,6 +82,11 @@ pub enum Event {
     /// An install/remove finished. `id` echoes the entry id the request
     /// carried (package attr / desktop-entry id).
     Done { id: String, ok: bool },
+    /// The full store-path closure of the imperative `nix profile` — an
+    /// app whose resolved `.desktop` path lives in this set was
+    /// installed here and can be removed here (others are managed by
+    /// home-manager / the system and must not offer uninstall).
+    ProfilePaths(Vec<String>),
 }
 
 /// Daemon → thread requests.
@@ -95,6 +100,9 @@ pub enum Request {
     /// Remove the profile element that provides `desktop_path`.
     /// Answered with `Done { id, .. }`.
     Remove { id: String, desktop_path: String },
+    /// Recompute the imperative profile's store-path closure. Answered
+    /// with `ProfilePaths`. Sent at startup and after every mutation.
+    ProfilePaths,
 }
 
 /// How many top-ranked packages a `Ranked` reply carries. The renderer
@@ -192,6 +200,13 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                         let ok = remove(&desktop_path);
                         (id, ok)
                     }
+                    Request::ProfilePaths => {
+                        let paths = profile_store_paths().unwrap_or_default();
+                        if events.send(Event::ProfilePaths(paths)).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     Request::Rank { .. } => continue, // routed elsewhere
                 };
                 if ok {
@@ -199,6 +214,12 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                     // store paths against GC forever; a month of
                     // rollback is plenty.
                     trim_history();
+                    // The profile changed: refresh which apps are
+                    // removable before Done triggers the app rescan.
+                    let paths = profile_store_paths().unwrap_or_default();
+                    if events.send(Event::ProfilePaths(paths)).is_err() {
+                        return;
+                    }
                 }
                 if events.send(Event::Done { id, ok }).is_err() {
                     return;
@@ -788,9 +809,45 @@ fn profile_element_for(canonical: &Path) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
+/// The store-path closure of the imperative profile's elements (their
+/// outputs plus every dependency, so a wrapper package's inner output
+/// counts). Empty when nothing is installed there or nix is unavailable.
+fn profile_store_paths() -> anyhow::Result<Vec<String>> {
+    let out = Command::new("nix")
+        .args(["profile", "list", "--json"])
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr).trim().to_owned()
+    );
+    let list: ProfileList = serde_json::from_slice(&out.stdout)?;
+    let roots: Vec<String> = list
+        .elements
+        .values()
+        .flat_map(|e| e.store_paths.iter().cloned())
+        .collect();
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let out = Command::new("nix-store")
+        .args(["--query", "--requisites"])
+        .args(&roots)
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr).trim().to_owned()
+    );
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_owned())
+        .collect())
+}
+
 /// The `/nix/store/<hash>-<name>` root of a deeper store path, or `None`
 /// if `p` is not under `/nix/store`.
-fn store_path_root(p: &Path) -> Option<PathBuf> {
+pub fn store_path_root(p: &Path) -> Option<PathBuf> {
     use std::path::Component;
     let mut comps = p.components();
     let (root, nix, store, name) = (comps.next()?, comps.next()?, comps.next()?, comps.next()?);
