@@ -76,10 +76,12 @@ impl UiState {
         }
     }
 
-    /// Overall opacity: fades in over the first dock-height of travel,
-    /// fully opaque from dock level upward.
+    /// Overall opacity: flat. The card is revealed by sliding out of the
+    /// screen edge (which clips it), not by fading, so it holds one
+    /// opacity the whole way. Hidden is invisible because it sits fully
+    /// below the edge, not because it is transparent.
     pub fn alpha(&self) -> f32 {
-        (self.extent / self.dock_extent).clamp(0.0, 1.0)
+        1.0
     }
 
     /// Whether the surface should accept keyboard input right now.
@@ -116,16 +118,22 @@ impl UiState {
         }
     }
 
-    /// Retarget the animation. Growing transitions use the open curve,
-    /// shrinking ones the (faster) close curve.
+    /// Retarget the animation. A slide that stays between Hidden and
+    /// Dock (the autohide reveal/hide) uses the dock curves; anything
+    /// involving the open box uses the box open/close curves. Within
+    /// each, growing picks the up curve and shrinking the down curve.
     fn set_target(&mut self, target: Target) -> bool {
         if target == self.target {
             return false;
         }
-        let curve = if self.extent_of(target) > self.extent {
-            &self.animation.open
-        } else {
-            &self.animation.close
+        let growing = self.extent_of(target) > self.extent;
+        // Neither endpoint is Open ⇒ a dock-only slide (Hidden↔Dock).
+        let dock_slide = target != Target::Open && self.target != Target::Open;
+        let curve = match (dock_slide, growing) {
+            (true, true) => &self.animation.dock_reveal,
+            (true, false) => &self.animation.dock_hide,
+            (false, true) => &self.animation.open,
+            (false, false) => &self.animation.close,
         };
         self.animator = Some(Animator::new(curve));
         self.start_extent = self.extent;
@@ -186,7 +194,6 @@ mod tests {
         assert_eq!(s.target(), Target::Hidden);
         settle(&mut s);
         assert_eq!(s.extent(), 0.0);
-        assert_eq!(s.alpha(), 0.0);
     }
 
     #[test]
@@ -255,15 +262,17 @@ mod tests {
     }
 
     #[test]
-    fn alpha_fades_only_below_dock_level() {
+    fn opacity_is_flat_while_revealing() {
         let mut s = state();
         s.apply(Command::Show);
-        settle(&mut s);
-        s.apply(Command::Expand);
-        // While expanding above dock height, alpha must stay pinned at 1.
-        for _ in 0..30 {
-            s.tick(1.0 / 144.0);
+        // The dock reveals by sliding out of the edge, not fading:
+        // opacity stays pinned at 1 the whole way up, edge included.
+        for _ in 0..400 {
             assert_eq!(s.alpha(), 1.0);
+            if !s.tick(1.0 / 144.0) {
+                break;
+            }
         }
+        assert_eq!(s.alpha(), 1.0);
     }
 }

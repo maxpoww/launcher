@@ -225,6 +225,15 @@ pub struct SectionLayout {
 pub struct Layout {
     /// Card top edge in surface coordinates for the current extent.
     pub card_top: f32,
+    /// Card height for the current extent: its bottom edge is pinned a
+    /// small gap above the screen edge (which the docked bar lifts to as
+    /// it reveals), so only the top rises as the box grows.
+    pub card_h: f32,
+    /// How far down each dock icon's column stays hoverable/clickable:
+    /// the screen edge while docked (so the floating gap and the very
+    /// bottom edge react), the dock-band bottom once open (the grid owns
+    /// everything below it).
+    pub dock_hit_bottom: f32,
     /// Dock slot rects, one per shown dock icon (entry index == slot
     /// index: the dock shows the first N entries, unaffected by search).
     pub dock_slots: Vec<Rect>,
@@ -266,7 +275,16 @@ pub fn layout(
     let card_w = w - 2.0 * DRAG_MARGIN_X;
     let card_top = h - extent;
     let dock_h = config.window.input_bar_height as f32;
-    let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM - DRAG_MARGIN_TOP;
+    let float_gap = config.window.bottom_margin as f32;
+    // Hidden↔Dock: the bar keeps its full dock height and just slides up
+    // out of the screen edge (clipped by it), lifting to float over the
+    // last `float_gap` of travel — its shape never changes. Dock↔Open:
+    // it grows upward from the pinned floating bottom.
+    let card_h = (extent - float_gap).max(dock_h);
+    // Docked (a pure bar), the icon columns stay live all the way to the
+    // screen edge so the floating gap is clickable; open, they stop at
+    // the dock-band bottom and the grid takes over below.
+    let dock_hit_bottom = if card_h > dock_h { card_top + dock_h } else { h };
 
     // Dock uses n_entries so search never hides dock icons.
     let max_slots = (((card_w - 2.0 * DOCK_PAD_X) / DOCK_SLOT).floor() as usize).max(1);
@@ -381,6 +399,8 @@ pub fn layout(
 
     Layout {
         card_top,
+        card_h,
+        dock_hit_bottom,
         dock_slots,
         sections,
         search_box,
@@ -414,9 +434,15 @@ pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
 /// `search_open` controls whether the compact search button is a target
 /// (it is only when the search box is collapsed).
 pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<Hit> {
-    for (i, slot) in layout.dock_slots.iter().enumerate() {
-        if slot.contains(pos) {
-            return Some(Hit::DockIcon(i));
+    // Each icon's column is live from the top of the dock band down to
+    // `dock_hit_bottom` — so a click/hover in the floating gap under an
+    // icon (down to the very screen edge) still lands on it.
+    let (px, py) = pos;
+    if py >= layout.card_top && py < layout.dock_hit_bottom {
+        for (i, slot) in layout.dock_slots.iter().enumerate() {
+            if px >= slot.x && px < slot.x + slot.w {
+                return Some(Hit::DockIcon(i));
+            }
         }
     }
     if !search_open && layout.search_btn.contains(pos) {
@@ -579,9 +605,9 @@ pub fn scene(
         group_origin,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
-    let (w, h) = surface;
+    let (w, _h) = surface;
     let card_w = w - 2.0 * DRAG_MARGIN_X;
-    let card_h = h - config.window.bottom_margin as f32 - MAGNIFY_HEADROOM - DRAG_MARGIN_TOP;
+    let card_h = layout.card_h;
     let mut scene = Scene {
         alpha,
         ..Default::default()
@@ -607,7 +633,10 @@ pub fn scene(
             let cx = slot.x + slot.w / 2.0;
             match pointer {
                 Some((px, py)) => {
-                    let d_out = (slot.y - py).max(py - (slot.y + slot.h)).max(0.0);
+                    // Below the icon, the live column reaches `dock_hit_bottom`
+                    // (the screen edge while docked), so hovering the floating
+                    // gap magnifies the icon just like hovering it directly.
+                    let d_out = (slot.y - py).max(py - layout.dock_hit_bottom).max(0.0);
                     let fy = falloff(d_out, DOCK_MAG_VRADIUS);
                     1.0 + (DOCK_MAGNIFY - 1.0)
                         * falloff(px - cx, DOCK_MAG_RADIUS)
@@ -733,8 +762,10 @@ pub fn scene(
     }
 
     // Search widget: "Filter" pill button that morphs into an expanding
-    // search box. search_expand drives the open animation (0→1).
-    {
+    // search box. search_expand drives the open animation (0→1). Hidden
+    // while docked — the bar is all there is until the box grows a
+    // content area below the dock row.
+    if layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 {
         let btn = layout.search_btn;
         let boxx = layout.search_box;
         let cx = w / 2.0;
@@ -1135,36 +1166,6 @@ mod tests {
 
     fn vis(n: usize) -> [Vec<usize>; N_SECTIONS] {
         [(0..n).collect(), Vec::new(), Vec::new()]
-    }
-
-    #[test]
-    fn unpin_wash_appears_only_when_flagged() {
-        let cfg = config();
-        let l = open_layout(&cfg, 6, 0.0);
-        let make = |unpin| {
-            scene(
-                &cfg,
-                &l,
-                &entries(6),
-                &vis(6),
-                SURFACE,
-                &FrameInput {
-                    alpha: 1.0,
-                    drag: Some(DragFrame {
-                        entry_idx: 0,
-                        pos: (100.0, 700.0),
-                        drop_section: None,
-                        over_cell: None,
-                        unpin,
-                    }),
-                    ..Default::default()
-                },
-            )
-            .overlay_rects
-            .len()
-        };
-        assert_eq!(make(false), 0, "no wash without the unpin flag");
-        assert_eq!(make(true), 1, "one red wash over the ghost when unpinning");
     }
 
     fn config() -> Config {

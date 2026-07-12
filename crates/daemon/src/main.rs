@@ -128,7 +128,9 @@ fn main() -> anyhow::Result<()> {
         renderer: None,
         ui: UiState::new(
             config.animation.clone(),
-            config.window.input_bar_height as f32,
+            // Docked, the card is a floating bar: dock height plus the
+            // bottom gap it now hovers above the screen edge.
+            (config.window.input_bar_height + config.window.bottom_margin) as f32,
             // Fully open, the card has risen its own height plus the gap.
             full_extent as f32,
         ),
@@ -1958,7 +1960,16 @@ impl App {
             self.interactive = interactive;
         }
 
-        let mut extent = self.ui.extent_of(self.ui.target()).round() as u32;
+        // Size the input region to whatever is currently visible, not
+        // just the target rest point: while a hide slides the dock down,
+        // the still-visible bar must keep taking pointer input, or the
+        // region would collapse to the reveal strip under it and the
+        // dock could not be caught on the way out (only its bottom edge).
+        let mut extent = self
+            .ui
+            .extent_of(self.ui.target())
+            .max(self.ui.extent())
+            .round() as u32;
         // While hidden, keep a thin strip alive at the bottom edge so
         // touching it with the pointer can reveal the dock.
         if self.ui.target() == Target::Hidden && self.config.input.edge_reveal {
@@ -2545,9 +2556,14 @@ impl App {
             .insert_source(timer, move |_, _, app: &mut App| {
                 if app.hide_deadline == Some(deadline) {
                     app.hide_deadline = None;
-                    // Fully hide, or just fall back to the parked dock
-                    // when the zone is free (intellihide).
-                    app.dismiss();
+                    // The pointer may be back on the dock without a fresh
+                    // Enter to have cancelled us (stale focus) — don't hide
+                    // out from under it.
+                    if !matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))) {
+                        // Fully hide, or just fall back to the parked dock
+                        // when the zone is free (intellihide).
+                        app.dismiss();
+                    }
                 }
                 TimeoutAction::Drop
             })
@@ -2836,7 +2852,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 // the reveal strip. Treat in-strip motion as the edge
                 // touch it is, or the strip stays dead until the pointer
                 // fully leaves and returns.
-                if app.ui.target() == Target::Hidden && app.pointer_on_reveal_strip() {
+                // Summon back from the reveal strip, or from the dock
+                // itself while it is mid-hide: as the input region shrinks
+                // during a hide this Hyprland keeps stale pointer focus and
+                // sends motion, never a fresh Enter, so a pointer wandering
+                // back onto the sliding dock would otherwise be ignored and
+                // it would vanish out from under the cursor.
+                if app.ui.target() == Target::Hidden
+                    && (app.pointer_on_reveal_strip()
+                        || matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))))
+                {
                     app.hide_deadline = None;
                     app.handle_command(Command::Show);
                 }

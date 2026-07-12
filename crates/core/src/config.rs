@@ -123,7 +123,7 @@ impl Default for WindowConfig {
             // grid plus the single-row Install and Files strips.
             height: 680,
             input_bar_height: 42,
-            bottom_margin: 12,
+            bottom_margin: 8,
         }
     }
 }
@@ -132,10 +132,14 @@ impl Default for WindowConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AnimationConfig {
-    /// Curve used while opening (Hidden -> Open).
+    /// Curve for the box growing (Dock -> Open, or straight to Open).
     pub open: CurveConfig,
-    /// Curve used while closing (Open -> Hidden).
+    /// Curve for the box shrinking (Open -> Dock/Hidden).
     pub close: CurveConfig,
+    /// Curve for the autohide dock sliding up (Hidden -> Dock).
+    pub dock_reveal: CurveConfig,
+    /// Curve for the autohide dock sliding down (Dock -> Hidden).
+    pub dock_hide: CurveConfig,
 }
 
 /// The shape of a single animation curve.
@@ -185,6 +189,20 @@ impl Default for AnimationConfig {
         Self {
             open: CurveConfig::default(),
             close: CurveConfig::default_close(),
+            // Dock autohide slide, tuned independently of the box —
+            // about halfway between the slow tuning speed and normal.
+            dock_reveal: CurveConfig {
+                kind: CurveKind::Spring,
+                spring_stiffness: 30.0,
+                spring_damping: 9.0,
+                spring_mass: 1.0,
+                ..CurveConfig::default()
+            },
+            dock_hide: CurveConfig {
+                kind: CurveKind::EaseInCubic,
+                duration_ms: 1800,
+                ..CurveConfig::default()
+            },
         }
     }
 }
@@ -265,7 +283,7 @@ impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
             background: "#1e1e2ecc".to_owned(),
-            corner_radius: 24.0,
+            corner_radius: 14.0,
             text: "#e6e6efff".to_owned(),
             highlight: "#ffffff26".to_owned(),
             icon_theme: "hicolor".to_owned(),

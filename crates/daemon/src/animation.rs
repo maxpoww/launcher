@@ -193,7 +193,15 @@ mod tests {
 
     #[test]
     fn spring_settles_near_one_without_big_overshoot() {
-        let mut a = Animator::new(&CurveConfig::default());
+        // Fixed engine params — independent of the tunable config default.
+        let cfg = CurveConfig {
+            kind: CurveKind::Spring,
+            spring_stiffness: 550.0,
+            spring_damping: 42.0,
+            spring_mass: 1.0,
+            ..CurveConfig::default()
+        };
+        let mut a = Animator::new(&cfg);
         let mut max_p: f32 = 0.0;
         for _ in 0..(2.0 * 144.0) as usize {
             max_p = max_p.max(a.step(1.0 / 144.0));
