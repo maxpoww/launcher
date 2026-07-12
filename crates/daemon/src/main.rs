@@ -161,6 +161,8 @@ fn main() -> anyhow::Result<()> {
         failed_ids: HashMap::new(),
         profile_paths: HashSet::new(),
         removable_ids: HashSet::new(),
+        profile_elements: HashSet::new(),
+        installed_app_ids: HashSet::new(),
         file_index: Vec::new(),
         files_dir: None,
         groups: groups::GroupDb::load(),
@@ -333,6 +335,14 @@ pub struct App {
     /// from `profile_paths` whenever apps or the profile change. Only
     /// these offer the Install section as an uninstall drop target.
     removable_ids: HashSet<String>,
+    /// Imperative `nix profile` element names (== install attrs) — one
+    /// of the signals for hiding already-installed packages from the
+    /// Install list.
+    profile_elements: HashSet<String>,
+    /// Desktop ids of every installed app, refreshed on rescan — matched
+    /// against a package's `.desktop` stems / attr to drop it from the
+    /// Install list once it's installed.
+    installed_app_ids: HashSet<String>,
     /// Home-tree file index the search ranks against (fresh per rescan).
     file_index: Vec<apps::FileEntry>,
     /// Directory the Files section is navigated into (`None` = the
@@ -725,8 +735,9 @@ impl App {
                 self.update_hover();
                 self.schedule_frame();
             }
-            nix::Event::ProfilePaths(paths) => {
-                self.profile_paths = paths.into_iter().collect();
+            nix::Event::ProfilePaths { closure, elements } => {
+                self.profile_paths = closure.into_iter().collect();
+                self.profile_elements = elements.into_iter().collect();
                 self.recompute_removable();
                 self.schedule_frame();
             }
@@ -736,8 +747,17 @@ impl App {
     /// Recompute which indexed apps are removable: an app is removable
     /// when its `.desktop` file resolves into the imperative profile's
     /// store-path closure. Cheap filesystem canonicalization per app,
-    /// run when either the apps or the profile change.
+    /// run when either the apps or the profile change; also refreshes
+    /// the set of installed desktop ids used to hide installed packages.
     fn recompute_removable(&mut self) {
+        self.installed_app_ids = self
+            .entries
+            .iter()
+            .zip(&self.kinds)
+            .take(self.base_len)
+            .filter(|(_, &k)| k == apps::EntryKind::App)
+            .map(|(e, _)| e.id.clone())
+            .collect();
         let profile = &self.profile_paths;
         self.removable_ids = self
             .entries
@@ -751,6 +771,17 @@ impl App {
                 profile.contains(root.to_str()?).then(|| e.id.clone())
             })
             .collect();
+    }
+
+    /// Whether a nixpkgs package is already installed on the system —
+    /// matched to an installed app by the `.desktop` ids it ships, by
+    /// its attr used as a desktop id, or by its attr as an imperative
+    /// profile element name. Such packages are hidden from the Install
+    /// list (you can't install what's already there).
+    fn pkg_installed(&self, p: &nix::PkgEntry) -> bool {
+        p.icons.iter().any(|s| self.installed_app_ids.contains(s))
+            || self.installed_app_ids.contains(&p.attr)
+            || self.profile_elements.contains(&p.attr)
     }
 
     /// The indexer thread finished: adopt the entries and upload icons
@@ -1061,9 +1092,16 @@ impl App {
             self.nix.request(nix::Request::Rank { query });
         }
         let hits = self.pkg_hits.clone();
-        hits.iter()
+        // Already-installed packages drop out of the list; the original
+        // hit index is kept so each shown package keeps its own icon.
+        let shown: Vec<(usize, nix::PkgEntry)> = hits
+            .into_iter()
             .enumerate()
-            .map(|(i, p)| self.push_transient_pkg(p, i))
+            .filter(|(_, p)| !self.pkg_installed(p))
+            .collect();
+        shown
+            .into_iter()
+            .map(|(i, p)| self.push_transient_pkg(&p, i))
             .collect()
     }
 

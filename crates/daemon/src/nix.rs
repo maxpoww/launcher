@@ -82,11 +82,16 @@ pub enum Event {
     /// An install/remove finished. `id` echoes the entry id the request
     /// carried (package attr / desktop-entry id).
     Done { id: String, ok: bool },
-    /// The full store-path closure of the imperative `nix profile` — an
-    /// app whose resolved `.desktop` path lives in this set was
-    /// installed here and can be removed here (others are managed by
-    /// home-manager / the system and must not offer uninstall).
-    ProfilePaths(Vec<String>),
+    /// Imperative `nix profile` membership, refreshed at startup and
+    /// after each mutation. `closure` is the profile's full store-path
+    /// closure — an app whose resolved `.desktop` path lives in it was
+    /// installed here and can be removed here. `elements` are the
+    /// profile element names (== install attrs) — used to tell which
+    /// packages are already installed.
+    ProfilePaths {
+        closure: Vec<String>,
+        elements: Vec<String>,
+    },
 }
 
 /// Daemon → thread requests.
@@ -201,8 +206,11 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                         (id, ok)
                     }
                     Request::ProfilePaths => {
-                        let paths = profile_store_paths().unwrap_or_default();
-                        if events.send(Event::ProfilePaths(paths)).is_err() {
+                        let (closure, elements) = profile_membership().unwrap_or_default();
+                        if events
+                            .send(Event::ProfilePaths { closure, elements })
+                            .is_err()
+                        {
                             return;
                         }
                         continue;
@@ -214,10 +222,13 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                     // store paths against GC forever; a month of
                     // rollback is plenty.
                     trim_history();
-                    // The profile changed: refresh which apps are
-                    // removable before Done triggers the app rescan.
-                    let paths = profile_store_paths().unwrap_or_default();
-                    if events.send(Event::ProfilePaths(paths)).is_err() {
+                    // The profile changed: refresh membership before Done
+                    // triggers the app rescan.
+                    let (closure, elements) = profile_membership().unwrap_or_default();
+                    if events
+                        .send(Event::ProfilePaths { closure, elements })
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -809,10 +820,11 @@ fn profile_element_for(canonical: &Path) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
-/// The store-path closure of the imperative profile's elements (their
-/// outputs plus every dependency, so a wrapper package's inner output
-/// counts). Empty when nothing is installed there or nix is unavailable.
-fn profile_store_paths() -> anyhow::Result<Vec<String>> {
+/// Imperative-profile membership: the element names (== install attrs)
+/// and the full store-path closure of their outputs (outputs plus every
+/// dependency, so a wrapper package's inner output counts). Both empty
+/// when nothing is installed there or nix is unavailable.
+fn profile_membership() -> anyhow::Result<(Vec<String>, Vec<String>)> {
     let out = Command::new("nix")
         .args(["profile", "list", "--json"])
         .output()?;
@@ -822,13 +834,14 @@ fn profile_store_paths() -> anyhow::Result<Vec<String>> {
         String::from_utf8_lossy(&out.stderr).trim().to_owned()
     );
     let list: ProfileList = serde_json::from_slice(&out.stdout)?;
+    let elements: Vec<String> = list.elements.keys().cloned().collect();
     let roots: Vec<String> = list
         .elements
         .values()
         .flat_map(|e| e.store_paths.iter().cloned())
         .collect();
     if roots.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), elements));
     }
     let out = Command::new("nix-store")
         .args(["--query", "--requisites"])
@@ -839,10 +852,11 @@ fn profile_store_paths() -> anyhow::Result<Vec<String>> {
         "{}",
         String::from_utf8_lossy(&out.stderr).trim().to_owned()
     );
-    Ok(String::from_utf8_lossy(&out.stdout)
+    let closure = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(|l| l.trim().to_owned())
-        .collect())
+        .collect();
+    Ok((closure, elements))
 }
 
 /// The `/nix/store/<hash>-<name>` root of a deeper store path, or `None`
