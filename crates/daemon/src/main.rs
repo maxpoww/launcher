@@ -168,7 +168,6 @@ fn main() -> anyhow::Result<()> {
         dock_slide: Vec::new(),
         mag_sleep: None,
         mag_amount: 1.0,
-        landing: None,
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
@@ -346,13 +345,11 @@ pub struct App {
     /// make-room glide during drags).
     dock_slide: Vec<f32>,
     /// Magnification sleeps until this instant after a drop (the
-    /// landing must be still; the magnify wave returns a beat later).
+    /// placement must be still; the magnify wave returns a beat later).
     mag_sleep: Option<Instant>,
     /// Magnification amplitude envelope (0 = off, 1 = full): fades out
     /// around drags/drops and fades back in — never pops.
     mag_amount: f32,
-    /// A just-dropped icon still flying to its seat.
-    landing: Option<Landing>,
     /// Group-open transition: raw progress (0..1), its target, and the
     /// surface point the group expands from (the clicked tile).
     group_anim: f32,
@@ -521,24 +518,20 @@ const FAIL_FLASH: Duration = Duration::from_secs(5);
 /// deliberate — that split keeps side-neighbor folds reachable.
 const REORDER_DWELL: Duration = Duration::from_millis(180);
 
-/// Magnification blackout after a drop: the landing stays perfectly
+/// Horizontal band within a cell (fraction of its width) where hovering
+/// an app rings a fold target and a drop makes/joins a box. Kept fairly
+/// narrow so folding is deliberate — outside it the pointer makes room
+/// to reorder — but wide enough that folding onto a side-by-side
+/// neighbour stays easy.
+const FOLD_BAND: std::ops::Range<f32> = 0.30..0.70;
+
+/// Exponential make-room glide rate (per second) for the grid and dock
+/// reflow while dragging — higher is snappier, lower is slower.
+const MAKEROOM_RATE: f32 = 18.0;
+
+/// Magnification blackout after a drop: the placement stays perfectly
 /// still for this long before the magnify wave may return.
 const MAG_SLEEP_AFTER_DROP: Duration = Duration::from_secs(1);
-
-/// Flight time of a dropped icon gliding into its seat.
-/// Deliberately very slow while the animation is being tuned.
-const LANDING_SECS: f32 = 1.5;
-
-/// A dropped icon flying from the release point to its resting cell.
-struct Landing {
-    /// Entry id (survives the reindexing a refilter causes).
-    id: String,
-    /// Where the drop released it (the ghost's last position).
-    from: (f32, f32),
-    /// Whether it lands on the dock (else: its Apps-grid cell).
-    to_dock: bool,
-    started: Instant,
-}
 
 /// Cap on entries listed when navigated into a directory.
 const FILES_LIST_MAX: usize = 300;
@@ -1395,14 +1388,12 @@ impl App {
                 }
             }
             _ => {
-                // Grid gestures first: a grid-origin app dropped on
-                // another app creates a box, on a box joins it, in the
-                // gap reorders (boxes reorder too), and a member
-                // dragged out of the open box leaves it. Else fall
-                // through to pinning (never for boxes — they don't
-                // pin).
+                // Grid gestures: an app dropped on another app creates a
+                // box, on a box joins it, in a gap reorders (boxes too).
+                // A dock app dragged into the grid unpins and lands there
+                // the same way. Dropping out of the grid (and off the
+                // dock) is a no-op — the icon snaps back to its place.
                 let boxed = released
-                    && !drag.from_dock
                     && insert.is_none()
                     && matches!(
                         kind,
@@ -1410,67 +1401,36 @@ impl App {
                     )
                     && self.search.query.is_empty()
                     && self.handle_grid_drop(drag.entry_idx, &id, drag.pos);
-                if boxed && released && kind == Some(apps::EntryKind::App) {
-                    // Reordered/unboxed apps fly to their new seat.
-                    self.landing = Some(Landing {
-                        id: id.clone(),
-                        from: drag.pos,
-                        to_dock: false,
-                        started: Instant::now(),
-                    });
-                }
                 if !boxed && kind != Some(apps::EntryKind::Group) {
-                    match insert {
-                        Some(slot) => {
-                            // The dock parts in compact coordinates
-                            // (origin removed): translate the raw slot
-                            // so the drop lands in the visible gap,
-                            // not one past it.
-                            let slot = if drag.from_dock {
-                                let origin =
-                                    self.dock_order.iter().position(|&e| e == drag.entry_idx);
-                                slot - usize::from(origin.is_some_and(|o| o < slot))
-                            } else {
-                                slot
-                            };
-                            // Everything left of the drop keeps its
-                            // exact place: usage-filled slots there
-                            // become explicit pins first — pin_at's
-                            // index is pins-relative, and without this
-                            // a drop beyond the pinned prefix would
-                            // land elsewhere and reshuffle the fill.
-                            let prefix: Vec<String> = self
-                                .dock_order
-                                .iter()
-                                .filter(|&&e| e != drag.entry_idx)
-                                .take(slot)
-                                .map(|&e| self.entries[e].id.clone())
-                                .collect();
-                            for (k, pid) in prefix.iter().enumerate() {
-                                self.pins.pin_at(pid, k);
-                            }
-                            self.pins.pin_at(&id, slot);
-                            self.landing = Some(Landing {
-                                id: id.clone(),
-                                from: drag.pos,
-                                to_dock: true,
-                                started: Instant::now(),
-                            });
+                    if let Some(slot) = insert {
+                        // Dock reorder. Drop in the visible gap: the
+                        // dock parts in compact coordinates (origin
+                        // removed), so translate the raw slot.
+                        let slot = if drag.from_dock {
+                            let origin =
+                                self.dock_order.iter().position(|&e| e == drag.entry_idx);
+                            slot - usize::from(origin.is_some_and(|o| o < slot))
+                        } else {
+                            slot
+                        };
+                        // Everything left of the drop keeps its exact
+                        // place: usage-filled slots there become
+                        // explicit pins first (pin_at's index is
+                        // pins-relative).
+                        let prefix: Vec<String> = self
+                            .dock_order
+                            .iter()
+                            .filter(|&&e| e != drag.entry_idx)
+                            .take(slot)
+                            .map(|&e| self.entries[e].id.clone())
+                            .collect();
+                        for (k, pid) in prefix.iter().enumerate() {
+                            self.pins.pin_at(pid, k);
                         }
-                        None if drag.from_dock => {
-                            self.pins.exclude(&id);
-                            if released {
-                                // Unpinned: it flies back to its grid cell.
-                                self.landing = Some(Landing {
-                                    id: id.clone(),
-                                    from: drag.pos,
-                                    to_dock: false,
-                                    started: Instant::now(),
-                                });
-                            }
-                        }
-                        None => {}
+                        self.pins.pin_at(&id, slot);
                     }
+                    // insert == None: dropped outside the dock band —
+                    // no unpin, the icon just returns to the dock.
                 }
             }
         }
@@ -1536,28 +1496,46 @@ impl App {
             return None;
         };
         let kind = self.kinds.get(drag.entry_idx).copied();
-        let grid_drag = !drag.from_dock
-            && self.search.query.is_empty()
-            && matches!(
-                kind,
-                Some(apps::EntryKind::App) | Some(apps::EntryKind::Group)
-            );
         let visible = &self.search.visible[content::SECTION_APPS];
         let (len, pos) = (visible.len(), drag.pos);
         let orig = visible.iter().position(|&v| v == drag.entry_idx);
-        let (Some(orig), true) = (orig, grid_drag && len > 0) else {
+        // Two ways to target the grid: a grid-origin app/box reordering
+        // itself, or a dock-origin app dragged in to unpin it. The dock
+        // app owns no cell, so its gap is a brand-new slot (nothing to
+        // vacate) and it may land one past the end (append).
+        let inserting = drag.from_dock;
+        let grid_drag = self.search.query.is_empty()
+            && if inserting {
+                kind == Some(apps::EntryKind::App)
+            } else {
+                orig.is_some()
+                    && len > 0
+                    && matches!(
+                        kind,
+                        Some(apps::EntryKind::App) | Some(apps::EntryKind::Group)
+                    )
+            };
+        if !grid_drag {
             self.reorder_slot = None;
             self.reorder_dwell = None;
             return None;
-        };
-        let slot = *self.reorder_slot.get_or_insert(orig);
+        }
+        // The gap rests at the app's own cell (reorder — nothing moves
+        // on pickup) or past the end (insert — the grid stays whole
+        // until the pointer asks for a slot).
+        let slot = *self.reorder_slot.get_or_insert(orig.unwrap_or(len));
 
-        // Outside the grid the gap simply stays where it was.
+        // Off the grid: a reorder leaves the gap where it was (you may
+        // be reaching for the dock); an insert closes the grid back up.
         let Some((d, fx, fy)) = self.apps_display_cell(layout, pos) else {
+            if inserting {
+                self.reorder_slot = None;
+            }
             self.reorder_dwell = None;
             return None;
         };
-        let d = d.min(len.saturating_sub(1));
+        let max_d = if inserting { len } else { len.saturating_sub(1) };
+        let d = d.min(max_d);
         if d == slot {
             self.reorder_dwell = None;
             return None; // hovering the gap: stable
@@ -1565,9 +1543,9 @@ impl App {
         // The item shown at display cell `d`: hovering it rings a fold
         // target immediately (apps only; boxes never fold or nest).
         let compact = d - usize::from(d > slot);
-        let full = compact + usize::from(compact >= orig);
+        let full = compact + orig.map_or(0, |o| usize::from(compact >= o));
         if kind == Some(apps::EntryKind::App)
-            && (0.15..0.85).contains(&fx)
+            && FOLD_BAND.contains(&fx)
             && (0.08..0.92).contains(&fy)
         {
             let foldable = self.search.visible[content::SECTION_APPS]
@@ -1582,9 +1560,13 @@ impl App {
                 return Some((content::SECTION_APPS, full));
             }
         }
-        // Reordering: move the gap only after a dwell.
-        let want = if fx >= 0.85 {
-            (d + 1).min(len.saturating_sub(1))
+        // Reordering: move the gap only after a dwell. Only a dock
+        // insert gets the right-edge nudge (so it can append past the
+        // last icon); a reorder moves the gap straight to the hovered
+        // cell. The old unconditional nudge could leap the gap over a
+        // neighbour, sliding two icons for a single step.
+        let want = if inserting && fx >= 0.85 {
+            (d + 1).min(max_d)
         } else {
             d
         };
@@ -1616,41 +1598,29 @@ impl App {
         let kind = self.kinds.get(entry_idx).copied();
         let visible = &self.search.visible[content::SECTION_APPS];
         let len = visible.len();
-        let Some(orig) = visible.iter().position(|&v| v == entry_idx) else {
-            return false;
-        };
+        // A grid app/box knows its own cell; a dock app dragged in to
+        // unpin has none (`orig` == None) and lands as a fresh insert.
+        let orig = visible.iter().position(|&v| v == entry_idx);
         let inside = layout.sections[content::SECTION_APPS]
             .viewport
             .contains(pos);
         if !inside {
-            // Inside an open box (not searching), dropping a member
-            // outside the grid (and not on the dock — handled by the
-            // caller) moves it back out to the loose grid.
-            if self.app_group.is_some()
-                && self.search.query.is_empty()
-                && self.groups.remove_member(id)
-            {
-                if self
-                    .app_group
-                    .is_some_and(|g| g >= self.groups.groups().len())
-                {
-                    // The open box dissolved with the move.
-                    self.app_group = None;
-                    self.group_origin = None;
-                }
-                self.refilter();
-                return true;
-            }
+            // Dropped outside the grid (a dock app snaps back and stays
+            // pinned; a grid member dragged out just returns): no-op.
             return false;
         }
-        let slot = self.reorder_slot.unwrap_or(orig);
+        // A dock app that lands in the grid unpins as it does.
+        if orig.is_none() {
+            self.pins.exclude(id);
+        }
+        let slot = self.reorder_slot.unwrap_or(orig.unwrap_or(len));
         // Fold wins when the pointer sits on a foldable item's center.
         if kind == Some(apps::EntryKind::App) {
             if let Some((d, fx, _)) = self.apps_display_cell(&layout, pos) {
                 let d = d.min(len.saturating_sub(1));
-                if d != slot && (0.34..0.66).contains(&fx) {
+                if d != slot && FOLD_BAND.contains(&fx) {
                     let compact = d - usize::from(d > slot);
-                    let full = compact + usize::from(compact >= orig);
+                    let full = compact + orig.map_or(0, |o| usize::from(compact >= o));
                     if let Some(&target_idx) = self.search.visible[content::SECTION_APPS].get(full)
                     {
                         let target_id = self.entries[target_idx].id.clone();
@@ -1683,7 +1653,8 @@ impl App {
         // Otherwise the drop lands in the gap, wherever it is now.
         if let Some(g) = self.app_group {
             let n_members = self.groups.groups()[g].members.len();
-            let full_before = (slot + usize::from(slot >= orig)).min(n_members);
+            let full_before =
+                (slot + usize::from(orig.is_some_and(|o| slot >= o))).min(n_members);
             self.groups.move_member(g, id, full_before);
         } else {
             // Boxes and apps share one order: anchor on the compacted
@@ -1999,8 +1970,20 @@ impl App {
                 .iter()
                 .position(|&v| v == e)
         });
+        // A dock app dragged into the grid opens a brand-new slot (it
+        // has no cell to vacate): cells at or past the gap slide down
+        // one to make room — like a reorder, but leaving no hole behind.
+        let insert_gap = self
+            .gesture
+            .dragging
+            .as_ref()
+            .filter(|d| {
+                d.from_dock
+                    && matches!(self.kinds.get(d.entry_idx), Some(apps::EntryKind::App))
+            })
+            .and(self.reorder_slot);
         let mut slide_animating = false;
-        let k = 1.0 - (-dt * 18.0f32).exp();
+        let k = 1.0 - (-dt * MAKEROOM_RATE).exp();
         for i in 0..apps_len {
             let mut target = i as f32;
             if let Some(op) = orig_pos {
@@ -2011,6 +1994,8 @@ impl App {
                     let gap = self.reorder_slot.unwrap_or(op);
                     target = (compact + usize::from(compact >= gap)) as f32;
                 }
+            } else if let Some(gap) = insert_gap {
+                target = (i + usize::from(i >= gap)) as f32;
             }
             let cur = self.apps_slide[i];
             if (cur - target).abs() > 0.005 {
@@ -2088,64 +2073,7 @@ impl App {
                 self.dirty = true;
             }
         }
-        // Landing flight: the dropped icon glides from the release
-        // point into its seat; the seat stays empty until it arrives.
-        let mut landing_frame: Option<(usize, (f32, f32), f32)> = None;
-        let mut landing_done = false;
-        if let Some(l) = &self.landing {
-            let t = (l.started.elapsed().as_secs_f32() / LANDING_SECS).clamp(0.0, 1.0);
-            let dest = self
-                .entries
-                .iter()
-                .position(|e| e.id == l.id)
-                .and_then(|idx| {
-                    if l.to_dock {
-                        let slot = self.dock_order.iter().position(|&e| e == idx)?;
-                        let rect = layout.dock_slots.get(slot)?;
-                        Some((
-                            idx,
-                            (
-                                rect.x + rect.w / 2.0,
-                                rect.y + rect.h - content::DOCK_ICON / 2.0,
-                            ),
-                            content::DOCK_ICON,
-                        ))
-                    } else {
-                        let cell = self.search.visible[content::SECTION_APPS]
-                            .iter()
-                            .position(|&v| v == idx)?;
-                        Some((
-                            idx,
-                            content::cell_icon_center(&layout, content::SECTION_APPS, cell),
-                            content::GRID_ICON,
-                        ))
-                    }
-                });
-            match dest {
-                Some((idx, to, end_size)) if t < 1.0 => {
-                    let e = 1.0 - (1.0 - t).powi(3); // ease-out cubic
-                    let start_size = content::DOCK_ICON * 1.25; // the ghost's size
-                    landing_frame = Some((
-                        idx,
-                        (
-                            animation::lerp(l.from.0, to.0, e),
-                            animation::lerp(l.from.1, to.1, e),
-                        ),
-                        animation::lerp(start_size, end_size, e),
-                    ));
-                    self.dirty = true;
-                }
-                _ => landing_done = true,
-            }
-        }
-        if landing_done {
-            self.landing = None;
-        }
-
-        let mag_target = if self.gesture.dragging.is_none()
-            && self.mag_sleep.is_none()
-            && self.landing.is_none()
-        {
+        let mag_target = if self.gesture.dragging.is_none() && self.mag_sleep.is_none() {
             1.0f32
         } else {
             0.0
@@ -2201,11 +2129,6 @@ impl App {
                 pos: drag.pos,
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
                 over_cell,
-                // A dock-origin app dragged off the dock band (and not
-                // over Install) will be unpinned on drop: warn in red.
-                unpin: drag.from_dock
-                    && self.drag_dock_insert(&layout, drag.pos).is_none()
-                    && content::section_at(&layout, drag.pos) != Some(content::SECTION_INSTALL),
             });
         let busy: Vec<bool> = self
             .entries
@@ -2255,8 +2178,6 @@ impl App {
                 drag_hidden,
                 dock_hidden,
                 dock_slide: &self.dock_slide,
-                landing: landing_frame,
-                landing_hidden: landing_frame.map(|(idx, _, _)| idx),
                 group_expand,
                 group_origin: self.group_origin,
             },
@@ -2822,9 +2743,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             });
                             if let (Some(entry_idx), false) = (entry_idx, undraggable) {
                                 let from_dock = matches!(hit, Hit::DockIcon(_));
-                                // Picking something up interrupts any
-                                // landing still in flight.
-                                app.landing = None;
                                 app.gesture.dragging = Some(DragState {
                                     entry_idx,
                                     from_dock,
