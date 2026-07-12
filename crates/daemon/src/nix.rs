@@ -763,16 +763,60 @@ fn profile_element_for(canonical: &Path) -> anyhow::Result<Option<String>> {
         String::from_utf8_lossy(&out.stderr).trim().to_owned()
     );
     let list: ProfileList = serde_json::from_slice(&out.stdout)?;
-    for (name, element) in list.elements {
-        if element
-            .store_paths
-            .iter()
-            .any(|sp| canonical.starts_with(sp))
-        {
-            return Ok(Some(name));
+    // Common case: the desktop file lives directly under the element's
+    // own output.
+    for (name, element) in &list.elements {
+        if element.store_paths.iter().any(|sp| canonical.starts_with(sp)) {
+            return Ok(Some(name.clone()));
+        }
+    }
+    // Wrapper packages (chromium → chromium-unwrapped, firefox → …)
+    // re-export the inner package's desktop file, so the profile symlink
+    // resolves to a store path that is only a *dependency* of the
+    // element, not its listed output. Trace it back through the
+    // referrers closure: whichever element's output pulls that path in
+    // is the one to remove.
+    let Some(root) = store_path_root(canonical) else {
+        return Ok(None);
+    };
+    let refs = referrers_closure(&root)?;
+    for (name, element) in &list.elements {
+        if element.store_paths.iter().any(|sp| refs.contains(sp.as_str())) {
+            return Ok(Some(name.clone()));
         }
     }
     Ok(None)
+}
+
+/// The `/nix/store/<hash>-<name>` root of a deeper store path, or `None`
+/// if `p` is not under `/nix/store`.
+fn store_path_root(p: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut comps = p.components();
+    let (root, nix, store, name) = (comps.next()?, comps.next()?, comps.next()?, comps.next()?);
+    (matches!(root, Component::RootDir)
+        && nix.as_os_str() == "nix"
+        && store.as_os_str() == "store")
+    .then(|| Path::new("/nix/store").join(name.as_os_str()))
+}
+
+/// Every store path that transitively refers to `root` (itself
+/// included) — traces a wrapped package's inner output back to the
+/// profile element whose output provides it.
+fn referrers_closure(root: &Path) -> anyhow::Result<std::collections::HashSet<String>> {
+    let out = Command::new("nix-store")
+        .args(["--query", "--referrers-closure"])
+        .arg(root)
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr).trim().to_owned()
+    );
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_owned())
+        .collect())
 }
 
 #[derive(Deserialize)]
