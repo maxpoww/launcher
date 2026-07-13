@@ -166,19 +166,27 @@ impl Default for CurveConfig {
         Self {
             kind: CurveKind::Spring,
             duration_ms: 220,
-            spring_stiffness: 550.0,
-            spring_damping: 42.0,
+            // Box open: lightly underdamped (ζ≈0.85) so it overshoots the
+            // top a touch and settles back — a subtle bounce. (Damping 40
+            // vs a critical ~46 at this stiffness gives the overshoot.)
+            spring_stiffness: 3200.0,
+            spring_damping: 96.0,
             spring_mass: 1.0,
         }
     }
 }
 
 impl CurveConfig {
-    /// Default close curve: faster, ease-in-cubic, per the design notes.
+    /// Default close curve: a lightly-underdamped spring so the box dips
+    /// a touch past the dock rest before settling — a subtle bounce.
     pub fn default_close() -> Self {
         Self {
-            kind: CurveKind::EaseInCubic,
-            duration_ms: 140,
+            // Box close: a snappy, lightly-underdamped spring (ζ≈0.85, ~130
+            // ms) so it dips a touch past the dock rest before settling.
+            kind: CurveKind::Spring,
+            spring_stiffness: 9200.0,
+            spring_damping: 164.0,
+            spring_mass: 1.0,
             ..Self::default()
         }
     }
@@ -189,18 +197,19 @@ impl Default for AnimationConfig {
         Self {
             open: CurveConfig::default(),
             close: CurveConfig::default_close(),
-            // Dock autohide slide, tuned independently of the box —
-            // about halfway between the slow tuning speed and normal.
+            // Dock autohide slide, tuned independently of the box: a
+            // crisp spring up (small settle), a quick ease down. Same
+            // feel as the earlier 30/9 · 1800ms tuning, at real speed.
             dock_reveal: CurveConfig {
                 kind: CurveKind::Spring,
-                spring_stiffness: 30.0,
-                spring_damping: 9.0,
+                spring_stiffness: 2250.0,
+                spring_damping: 75.0,
                 spring_mass: 1.0,
                 ..CurveConfig::default()
             },
             dock_hide: CurveConfig {
                 kind: CurveKind::EaseInCubic,
-                duration_ms: 1800,
+                duration_ms: 95,
                 ..CurveConfig::default()
             },
         }

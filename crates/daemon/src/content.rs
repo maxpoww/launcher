@@ -281,6 +281,12 @@ pub fn layout(
     // last `float_gap` of travel — its shape never changes. Dock↔Open:
     // it grows upward from the pinned floating bottom.
     let card_h = (extent - float_gap).max(dock_h);
+    // The box content is laid out once at its fully-open position and
+    // never moves — the opening card just uncovers it. `content_top` is
+    // where the grid begins when open; `content_bottom` the pinned card
+    // bottom. Only the card rect and the dock ride `card_top`/`extent`.
+    let content_top = h - (config.window.height + config.window.bottom_margin) as f32;
+    let content_bottom = h - float_gap;
     // Docked (a pure bar), the icon columns stay live all the way to the
     // screen edge so the floating gap is clickable; open, they stop at
     // the dock-band bottom and the grid takes over below.
@@ -305,7 +311,7 @@ pub fn layout(
     // box dynamically with the query so layout just anchors the y position.
     let search_box = Rect::new(
         (w - SEARCH_W_MIN) / 2.0,
-        card_top + card_h - GRID_BOTTOM_PAD - SEARCH_H,
+        content_bottom - GRID_BOTTOM_PAD - SEARCH_H,
         SEARCH_W_MIN,
         SEARCH_H,
     );
@@ -316,7 +322,7 @@ pub fn layout(
         SEARCH_H,
     );
 
-    let grid_top = card_top + dock_h + GRID_TOP_GAP;
+    let grid_top = content_top + dock_h + GRID_TOP_GAP;
     let grid_bottom = (search_box.y - SEARCH_GAP).min(h);
     let inner_w = (card_w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
     let cols = ((inner_w / GRID_CELL_W).floor() as usize).max(1);
@@ -608,6 +614,24 @@ pub fn scene(
     let (w, _h) = surface;
     let card_w = w - 2.0 * DRAG_MARGIN_X;
     let card_h = layout.card_h;
+    // The box content sits at fixed positions; the opening card uncovers
+    // it from the bottom up. Everything below the dock band is clipped to
+    // this reveal region, whose top (the dock's underside) rises as the
+    // box grows — so rows are exposed in place, never moved.
+    let dock_h = config.window.input_bar_height as f32;
+    let reveal_top = layout.card_top + dock_h;
+    let reveal_bottom = layout.card_top + card_h;
+    let reveal_rect = Rect::new(
+        DRAG_MARGIN_X,
+        reveal_top,
+        card_w,
+        (reveal_bottom - reveal_top).max(0.0),
+    );
+    let reveal_clip = |r: Rect| -> Rect {
+        let top = r.y.max(reveal_top);
+        let bottom = (r.y + r.h).min(reveal_bottom);
+        Rect::new(r.x, top, r.w, (bottom - top).max(0.0))
+    };
     let mut scene = Scene {
         alpha,
         ..Default::default()
@@ -885,11 +909,11 @@ pub fn scene(
             centered: false,
             dim: true,
             cache: true,
-            clip: None,
+            clip: Some(reveal_rect),
         });
 
         let mut grid = GridContent {
-            clip: sec.viewport,
+            clip: reveal_clip(sec.viewport),
             ..Default::default()
         };
         if sec.cells == 0 {
@@ -915,7 +939,7 @@ pub fn scene(
                 centered: true,
                 dim: true,
                 cache: true,
-                clip: None,
+                clip: Some(reveal_rect),
             });
             scene.grids.push(grid);
             continue;
@@ -1119,13 +1143,15 @@ pub fn scene(
         }
         scene.grids.push(grid);
 
-        // Page indicator dots in the gap beneath the section.
-        if sec.n_pages > 1 {
+        // Page indicator dots in the gap beneath the section — gated by
+        // the reveal edge (they ride the same fixed layout as the grid,
+        // so unclipped they would linger as a ghost once the box hides).
+        let dot_y = sec.viewport.y + sec.viewport.h + SECTION_GAP / 2.0;
+        if sec.n_pages > 1 && (reveal_top..=reveal_bottom).contains(&dot_y) {
             let dot_r = 3.0;
             let dot_spacing = 10.0;
             let total_dots_w = sec.n_pages as f32 * dot_spacing - (dot_spacing - dot_r * 2.0);
             let dot_cx = sec.viewport.x + sec.viewport.w / 2.0;
-            let dot_y = sec.viewport.y + sec.viewport.h + SECTION_GAP / 2.0;
             let page_frac = sec.scroll / page_w;
             let hl = config.theme.highlight_rgba();
             for p in 0..sec.n_pages {
@@ -1204,8 +1230,9 @@ mod tests {
             [false; N_SECTIONS],
         );
         assert!(!l.dock_slots.is_empty());
-        // Sections exist geometrically but lie below the surface
-        // bottom, so no cells are visible while docked.
+        // Content sits at its fixed open position; while docked the
+        // reveal region (below the dock band) is empty, so every grid
+        // clips to nothing and no cells show.
         let s = scene(
             &cfg,
             &l,
@@ -1217,7 +1244,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(s.grids.iter().all(|g| g.clip.y >= SURFACE.1));
+        assert!(s.grids.iter().all(|g| g.clip.h <= 0.0));
     }
 
     #[test]

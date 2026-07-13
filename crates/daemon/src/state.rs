@@ -249,14 +249,20 @@ mod tests {
         let mid = s.extent();
         assert!(mid > DOCK && mid < FULL, "test needs a mid-flight state");
 
-        // Change of plan: hide while expanding.
+        // Change of plan: hide while expanding. The reversal must be
+        // continuous — the close resumes from the current extent and heads
+        // toward Hidden, never teleporting. It can move quickly (the close
+        // spring is stiff), so we assert direction and bounds, not a small
+        // per-tick step: stay within [Hidden, mid] (a jump would land above
+        // where expand left off or past the target).
         s.apply(Command::Hide);
         s.tick(1.0 / 144.0);
         let after = s.extent();
         assert!(
-            (after - mid).abs() < FULL * 0.05,
+            after <= mid + 1.0 && after >= 0.0,
             "extent jumped on interrupt: {mid} -> {after}"
         );
+        assert!(after < mid, "close did not begin reversing: {mid} -> {after}");
         settle(&mut s);
         assert_eq!(s.extent(), 0.0);
     }

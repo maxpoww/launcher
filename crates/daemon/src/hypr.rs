@@ -56,6 +56,61 @@ fn request(cmd: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
+/// Fire a Hyprland dispatch (this Hyprland's Lua form) over the control
+/// socket. Best effort: failures are logged, never fatal — focus
+/// niceties must not crash the dock, and everything degrades to plain
+/// layer behavior without Hyprland.
+pub fn dispatch(lua: &str) {
+    match request(&format!("dispatch {lua}")) {
+        Ok(reply) if reply.trim() == "ok" => {}
+        Ok(reply) => debug!("Hyprland dispatch {lua:?} replied: {}", reply.trim()),
+        Err(e) => debug!("Hyprland dispatch {lua:?} failed: {e:#}"),
+    }
+}
+
+/// Address (`0x…`) of the currently-focused window, if any.
+pub fn active_window() -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    json["address"].as_str().map(str::to_owned)
+}
+
+/// Give keyboard focus back to a window by address.
+///
+/// After our layer releases its exclusive keyboard grab the window we
+/// opened over is still `activewindow`, so focusing it directly is a
+/// no-op that leaves the keyboard seat stranded on the (now dead) layer.
+/// The compositor only actually moves the seat when focus *changes*
+/// between windows — so we bounce focus through another window on the
+/// same workspace and back. The detour is what re-routes the keyboard.
+pub fn focus_window(addr: &str) {
+    if let Some(other) = same_workspace_neighbor(addr) {
+        dispatch(&format!("hl.dsp.focus({{ window = \"address:{other}\" }})"));
+    }
+    dispatch(&format!("hl.dsp.focus({{ window = \"address:{addr}\" }})"));
+}
+
+/// Address of another mapped window sharing `addr`'s workspace, if any —
+/// a detour target for [`focus_window`]. Restricted to the same
+/// workspace so the bounce never triggers a workspace switch.
+fn same_workspace_neighbor(addr: &str) -> Option<String> {
+    let clients: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    let arr = clients.as_array()?;
+    let ws = arr
+        .iter()
+        .find(|c| c["address"].as_str() == Some(addr))
+        .and_then(|c| c["workspace"]["id"].as_i64())?;
+    arr.iter()
+        .filter(|c| {
+            c["mapped"].as_bool().unwrap_or(false)
+                && !c["hidden"].as_bool().unwrap_or(false)
+                && c["workspace"]["id"].as_i64() == Some(ws)
+        })
+        .find_map(|c| {
+            let a = c["address"].as_str()?;
+            (a != addr).then(|| a.to_owned())
+        })
+}
+
 /// Subscribe to Hyprland's event socket; relevant events re-evaluate
 /// the dock zone via [`App::on_layout_changed`].
 pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
@@ -92,6 +147,21 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                     let line: Vec<u8> = pending.drain(..=nl).collect();
                     if let Ok(line) = std::str::from_utf8(&line) {
                         let name = line.split(">>").next().unwrap_or("");
+                        // `openwindow>>ADDR,workspace,class,title` — focus a
+                        // just-launched app the instant its window maps.
+                        if name.starts_with("openwindow") {
+                            if let Some(addr) =
+                                line.split(">>").nth(1).and_then(|d| d.split(',').next())
+                            {
+                                let addr = addr.trim();
+                                let addr = if addr.starts_with("0x") {
+                                    addr.to_owned()
+                                } else {
+                                    format!("0x{addr}")
+                                };
+                                app.on_window_opened(&addr);
+                            }
+                        }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());
                             relevant = true;

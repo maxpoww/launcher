@@ -143,6 +143,10 @@ fn main() -> anyhow::Result<()> {
         keyboard: None,
         pointer: None,
         hide_deadline: None,
+        rest_hide_pending: false,
+        restore_window: None,
+        pending_refocus: None,
+        focus_launched: None,
         interactive: false,
         input_extent: None,
         entries: Vec::new(),
@@ -284,6 +288,23 @@ pub struct App {
     /// Deadline of the pending auto-hide, if the pointer has left the
     /// dock. Re-entry clears it, invalidating the in-flight timer.
     hide_deadline: Option<Instant>,
+    /// A box close is settling to the dock and should rest a beat, then
+    /// hide, once the collapse animation finishes.
+    rest_hide_pending: bool,
+    /// Window that had focus when the box grabbed the keyboard — focus
+    /// returns here on a plain close. Cleared on launch (the app takes
+    /// focus) and on external focus loss (the user chose another window).
+    restore_window: Option<String>,
+    /// Refocus deferred until the box settles. Under `follow_mouse` the
+    /// compositor won't route the keyboard to a window while our layer
+    /// still covers the pointer, and it only re-evaluates on real pointer
+    /// motion — so we dispatch the focus only once the card has shrunk out
+    /// from under the cursor and stopped committing frames.
+    pending_refocus: Option<String>,
+    /// Set when we just launched an app: the next window to map (within a
+    /// grace window) is focused, since focus-follows-mouse won't hand
+    /// keyboard focus to an app whose window opens away from the cursor.
+    focus_launched: Option<Instant>,
     /// Last keyboard-interactivity value sent to the compositor.
     interactive: bool,
     /// Last input-region extent sent to the compositor.
@@ -549,6 +570,10 @@ const PKG_QUERY_MIN: usize = 2;
 /// How long a failed install/remove flashes "Failed" on its cell.
 const FAIL_FLASH: Duration = Duration::from_secs(5);
 
+/// After the box closes, the dock rests this long before it hides — a
+/// brief beat parked as a dock instead of vanishing straight away.
+const DOCK_REST_AFTER_CLOSE: Duration = Duration::from_millis(200);
+
 /// How long the pointer must linger over a new grid slot before the
 /// make-room gap moves there. Folding is immediate; reordering is
 /// deliberate — that split keeps side-neighbor folds reachable.
@@ -609,8 +634,20 @@ impl App {
         if matches!(command, Command::Toggle | Command::Expand) {
             self.maybe_rescan();
         }
+        let prev = self.ui.target();
         if self.ui.apply(command) {
             self.sync_surface_state();
+            // A box close (Open→Dock) parks as a dock, then hides after a
+            // beat (armed once the collapse settles, in the frame loop).
+            // Rising back to Open cancels that.
+            match self.ui.target() {
+                Target::Dock if prev == Target::Open => self.rest_hide_pending = true,
+                Target::Open => {
+                    self.rest_hide_pending = false;
+                    self.hide_deadline = None;
+                }
+                _ => {}
+            }
             self.schedule_frame();
         }
     }
@@ -658,6 +695,17 @@ impl App {
         } else if self.ui.target() == Target::Dock && self.pointer_pos.is_none() {
             // A window moved in and the user isn't on the dock: dodge.
             self.handle_command(Command::Hide);
+        }
+    }
+
+    /// A window just mapped: if we launched an app moments ago, give it
+    /// keyboard focus (once). With focus-follows-mouse the compositor
+    /// otherwise leaves it in the background when it opens off the cursor.
+    fn on_window_opened(&mut self, addr: &str) {
+        const FOCUS_LAUNCH_GRACE: Duration = Duration::from_secs(10);
+        if self.focus_launched.is_some_and(|t| t.elapsed() < FOCUS_LAUNCH_GRACE) {
+            self.focus_launched = None;
+            hypr::focus_window(addr);
         }
     }
 
@@ -1808,6 +1856,27 @@ impl App {
         }
     }
 
+    /// Drop a pointer position left stale above the collapsed dock.
+    ///
+    /// When our input region shrinks out from under a motionless cursor
+    /// this Hyprland sends no `wl_pointer.leave` (verified quirk), so a
+    /// cursor parked over the open card is still reported as being on the
+    /// dock after it collapses. That suppresses both the auto-hide guard
+    /// and intellihide's dodge (`pointer_pos.is_none()`), leaving the dock
+    /// parked visible until a real mouse motion. On settle, if the last
+    /// known pointer sits above the live input region, treat it as gone.
+    fn reconcile_stale_pointer(&mut self) {
+        let (Some((_, y)), Some(extent)) = (self.pointer_pos, self.input_extent) else {
+            return;
+        };
+        let region_top = self.buffer_size.1 as f32 - extent as f32;
+        if y >= region_top {
+            return; // genuinely within the dock's live region
+        }
+        self.pointer_pos = None;
+        self.hover = None;
+    }
+
     /// What the pointer is over right now (`None` when outside).
     fn hover_at_pointer(&self) -> Option<Hit> {
         self.pointer_pos
@@ -1873,10 +1942,12 @@ impl App {
         }
     }
 
-    /// Get out of the way: fully hide, or just collapse to the dock when
-    /// nothing overlaps its zone (intellihide keeps the dock parked).
+    /// Get out of the way. From the open box, retreat to the dock first
+    /// so it rests a beat there before hiding (the rest-then-hide timer
+    /// finishes the job); from the dock, hide outright — unless nothing
+    /// overlaps the zone, where intellihide keeps the dock parked.
     fn dismiss(&mut self) {
-        let command = if self.zone_free {
+        let command = if self.ui.target() == Target::Open || self.zone_free {
             Command::Collapse
         } else {
             Command::Hide
@@ -1901,6 +1972,18 @@ impl App {
             error!("launch failed for {id}: {e:#}");
         }
         self.usage.increment(&id);
+        // Hand keyboard focus to the launched app. Drop our exclusive
+        // grab now (before its window maps) and clear the return-focus
+        // target so we don't pull focus back to the window we came from;
+        // then focus the app's window the moment it opens — the
+        // compositor won't with focus-follows-mouse if the cursor is
+        // parked off it (Chrome and other slow starters especially).
+        self.restore_window = None;
+        self.focus_launched = Some(Instant::now());
+        if self.interactive {
+            surface::set_interactive(&self.layer, false);
+            self.interactive = false;
+        }
         self.bounce = Some((index, Instant::now()));
         self.schedule_frame();
         let timer = Timer::from_duration(BOUNCE_DURATION);
@@ -1956,15 +2039,34 @@ impl App {
         }
         let interactive = self.ui.wants_keyboard();
         if interactive != self.interactive {
-            surface::set_interactive(&self.layer, interactive);
+            if interactive {
+                // Grabbing the keyboard for type-to-search steals focus
+                // from whatever window has it — remember it so a plain
+                // close can hand focus back.
+                self.restore_window = hypr::active_window();
+                debug!("grab keyboard; restore target = {:?}", self.restore_window);
+                surface::set_interactive(&self.layer, true);
+            } else {
+                // Release the grab. Handing focus back to where we came
+                // from happens in the keyboard `leave` handler, which
+                // fires once the compositor has actually taken our
+                // keyboard away — dispatching a focus before that races
+                // the release and Hyprland drops it.
+                surface::set_interactive(&self.layer, false);
+            }
             self.interactive = interactive;
         }
 
-        // Size the input region to whatever is currently visible, not
-        // just the target rest point: while a hide slides the dock down,
-        // the still-visible bar must keep taking pointer input, or the
-        // region would collapse to the reveal strip under it and the
-        // dock could not be caught on the way out (only its bottom edge).
+        self.sync_input_region();
+    }
+
+    /// Size the pointer input region to whatever is currently visible,
+    /// not just the target rest point: while a hide slides the dock down
+    /// the still-visible bar must keep taking input (so returning to it
+    /// re-summons), and once it settles the region must shrink back to
+    /// the reveal strip. Run every frame while animating *and* on target
+    /// change, since the visible extent moves between those.
+    fn sync_input_region(&mut self) {
         let mut extent = self
             .ui
             .extent_of(self.ui.target())
@@ -2021,12 +2123,41 @@ impl App {
             .unwrap_or(1.0 / 60.0);
         self.last_frame = Some(now);
 
+        let was_animating = self.ui.is_animating();
         let animating = self.ui.tick(dt);
         if animating {
             // The card is moving under a possibly stationary pointer:
             // keep the hover highlight glued to what is really beneath it.
             // (Not update_hover(): its schedule_frame would recurse here.)
             self.hover = self.hover_at_pointer();
+        }
+        if was_animating && !animating {
+            // Settled: correct the input region to the final rest point.
+            // Doing this only on settle (not every frame) avoids a
+            // set-region + surface commit per frame of the slide, which
+            // stuttered the animation; the region set at the transition
+            // start already covers the visible card for the whole move.
+            self.sync_input_region();
+            // The region just shrank; a cursor parked over the old card
+            // gets no leave from this compositor, so clear it now or the
+            // dock stays stuck visible (no dodge / no auto-hide) until the
+            // mouse moves.
+            self.reconcile_stale_pointer();
+            // The layer just shrank off the cursor and stopped committing
+            // frames. Force focus back to the window we opened over now:
+            // this is the quiet moment where a forced re-bind of the
+            // keyboard seat won't be clobbered by follow_mouse or an
+            // in-flight surface commit.
+            if let Some(addr) = self.pending_refocus.take() {
+                debug!("settled ({:?}); forcing focus to {addr}", self.ui.target());
+                hypr::focus_window(&addr);
+            }
+            // A box close settling to the dock rests a beat, then hides
+            // (the timer's guard keeps it if the pointer is on the dock).
+            if self.rest_hide_pending && self.ui.target() == Target::Dock {
+                self.rest_hide_pending = false;
+                self.schedule_hide_after(DOCK_REST_AFTER_CLOSE);
+            }
         }
 
         // Advance search-box expand animation (200 ms).
@@ -2548,6 +2679,12 @@ impl App {
 
     fn schedule_autohide(&mut self) {
         let delay = Duration::from_millis(u64::from(self.config.input.autohide_delay_ms));
+        self.schedule_hide_after(delay);
+    }
+
+    /// Arm a one-shot hide after `delay` (unless the pointer is back on
+    /// the dock when it fires). A later call supersedes an earlier one.
+    fn schedule_hide_after(&mut self, delay: Duration) {
         let deadline = Instant::now() + delay;
         self.hide_deadline = Some(deadline);
         let timer = Timer::from_duration(delay);
@@ -2768,10 +2905,25 @@ impl KeyboardHandler for App {
         _surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
-        // Focus loss (alt-tab, click elsewhere) collapses the open popup
-        // back to the dock; the dock itself persists until toggled away.
-        debug!("keyboard focus lost");
-        self.handle_command(Command::Collapse);
+        debug!(
+            "keyboard focus lost; target={:?}, restore={:?}",
+            self.ui.target(),
+            self.restore_window
+        );
+        if self.ui.target() == Target::Open {
+            // Still open when the keyboard left us: the user focused
+            // another window (alt-tab, click elsewhere). Respect their
+            // choice — drop the return target and collapse to the dock.
+            self.restore_window = None;
+            self.handle_command(Command::Collapse);
+        } else {
+            // We initiated the close. Don't refocus yet: the card is
+            // still a full-size layer over the cursor and mid-animation,
+            // so a focus now gets clobbered by follow_mouse. Defer it to
+            // the settle, when the layer has shrunk out from under the
+            // pointer and gone quiet.
+            self.pending_refocus = self.restore_window.take();
+        }
     }
 
     fn press_key(
@@ -2927,7 +3079,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             // no grace period needed (the card is fully open,
                             // not just a slim dock sliver to accidentally graze).
                             app.dismiss();
-                        } else {
+                        } else if !app.rest_hide_pending {
+                            // A close settling to the dock owns the hide
+                            // (its rest); don't undercut it with the
+                            // shorter autohide grace.
                             app.schedule_autohide();
                         }
                     }
