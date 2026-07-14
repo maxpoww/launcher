@@ -378,12 +378,15 @@ impl Renderer {
 
     /// Upload the icon texture array delivered by the indexer thread.
     /// `icons` holds one premultiplied RGBA8 `ICON_SIZE`² image per app.
-    /// `RANK_HITS_MAX` extra layers are reserved past the end for the
-    /// dynamic package-search icons ([`Renderer::update_icon_layer`]).
+    /// `RANK_HITS_MAX` + `PENDING_INSTALL_CAP` extra layers are reserved
+    /// past the end: the first block for the dynamic package-search icons,
+    /// the second for packages installing in the grid
+    /// ([`Renderer::update_icon_layer`]).
     pub fn set_icons(&mut self, icons: &[Vec<u8>]) {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
-        let layers = (icons.len() + crate::nix::RANK_HITS_MAX).max(1) as u32;
+        let layers = (icons.len() + crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP)
+            .max(1) as u32;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("waverunner.icons"),
             size: wgpu::Extent3d {

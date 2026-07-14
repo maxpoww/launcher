@@ -79,19 +79,9 @@ pub enum Event {
         icons: Vec<Vec<u8>>,
         placeholders: Vec<bool>,
     },
-    /// An install/remove finished. `id` echoes the entry id the request
-    /// carried (package attr / desktop-entry id).
+    /// A `home-manager switch` finished. `id` echoes the request's cell
+    /// id (package attr on install, app id on uninstall).
     Done { id: String, ok: bool },
-    /// Imperative `nix profile` membership, refreshed at startup and
-    /// after each mutation. `closure` is the profile's full store-path
-    /// closure — an app whose resolved `.desktop` path lives in it was
-    /// installed here and can be removed here. `elements` are the
-    /// profile element names (== install attrs) — used to tell which
-    /// packages are already installed.
-    ProfilePaths {
-        closure: Vec<String>,
-        elements: Vec<String>,
-    },
 }
 
 /// Daemon → thread requests.
@@ -99,20 +89,23 @@ pub enum Request {
     /// Fuzzy-rank the index against a query; answered with `Ranked`.
     /// Queued queries coalesce to the newest one.
     Rank { query: String },
-    /// `nix profile install nixpkgs#<attr>`. Answered with
-    /// `Done { id: attr, .. }`.
-    Install { attr: String },
-    /// Remove the profile element that provides `desktop_path`.
-    /// Answered with `Done { id, .. }`.
-    Remove { id: String, desktop_path: String },
-    /// Recompute the imperative profile's store-path closure. Answered
-    /// with `ProfilePaths`. Sent at startup and after every mutation.
-    ProfilePaths,
+    /// Apply the standalone home-manager generation (`home-manager
+    /// switch`) after the daemon has rewritten `waverunner-packages.nix`
+    /// for an install or uninstall. `id` echoes to `Done { id, .. }` —
+    /// the grid cell (package attr on install, app id on uninstall) whose
+    /// busy / failed state the switch resolves.
+    Switch { id: String },
 }
 
 /// How many top-ranked packages a `Ranked` reply carries. The renderer
 /// reserves this many texture-array layers for their icons.
 pub const RANK_HITS_MAX: usize = 24;
+
+/// How many packages can be mid-install *in the grid* at once. The
+/// renderer reserves this many more texture-array layers (past the
+/// ranked-hit tail) so a dropped package keeps its own icon while it
+/// installs, independent of what the live Install search is showing.
+pub const PENDING_INSTALL_CAP: usize = 8;
 
 /// The Install section's storefront: household names shown before any
 /// query is typed, best-known first. Attrs missing from the index
@@ -196,42 +189,14 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
         .name("waverunner-nix-mut".into())
         .spawn(move || {
             while let Ok(request) = mutations_rx.recv() {
-                let (id, ok) = match request {
-                    Request::Install { attr } => {
-                        let ok = install(&attr);
-                        (attr, ok)
-                    }
-                    Request::Remove { id, desktop_path } => {
-                        let ok = remove(&desktop_path);
-                        (id, ok)
-                    }
-                    Request::ProfilePaths => {
-                        let (closure, elements) = profile_membership().unwrap_or_default();
-                        if events
-                            .send(Event::ProfilePaths { closure, elements })
-                            .is_err()
-                        {
-                            return;
-                        }
-                        continue;
-                    }
+                let id = match request {
+                    Request::Switch { id } => id,
                     Request::Rank { .. } => continue, // routed elsewhere
                 };
-                if ok {
-                    // Every mutation adds a profile generation that pins
-                    // store paths against GC forever; a month of
-                    // rollback is plenty.
-                    trim_history();
-                    // The profile changed: refresh membership before Done
-                    // triggers the app rescan.
-                    let (closure, elements) = profile_membership().unwrap_or_default();
-                    if events
-                        .send(Event::ProfilePaths { closure, elements })
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
+                // The daemon has already rewritten waverunner-packages.nix;
+                // apply it. Switches run one at a time on this worker, so
+                // two quick installs never race the same generation.
+                let ok = home_manager_switch();
                 if events.send(Event::Done { id, ok }).is_err() {
                     return;
                 }
@@ -688,206 +653,28 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
     candidates
 }
 
-/// Drop profile generations older than a month (non-fatal cleanup).
-fn trim_history() {
-    match Command::new("nix")
-        .args(["profile", "wipe-history", "--older-than", "30d"])
-        .output()
-    {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => debug!(
-            "wipe-history failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-        Err(e) => debug!("cannot run nix wipe-history: {e}"),
-    }
-}
-
-/// `nix profile install nixpkgs#<attr>`; true on success — including
-/// the "already installed" case, which nix treats as a warning-only
-/// no-op (verified: exit 0, profile unchanged). Unfree packages
-/// (spotify, discord, steam, …) install like any other — a user
-/// dragging one into Apps has consented to its license.
-fn install(attr: &str) -> bool {
-    info!("nix profile install nixpkgs#{attr}");
-    match Command::new("nix")
-        .args(["profile", "install", "--impure", &format!("nixpkgs#{attr}")])
-        .env("NIXPKGS_ALLOW_UNFREE", "1")
-        .output()
-    {
+/// `home-manager switch` — apply the current standalone home-manager
+/// generation, which imports the freshly rewritten
+/// `waverunner-packages.nix`. True on success. Runs on the mutation
+/// worker because a switch builds a generation and can take a while. A
+/// failing attr never touches the live profile (the switch is atomic);
+/// the daemon rolls the bad attr back out of the `.nix` on failure.
+fn home_manager_switch() -> bool {
+    info!("home-manager switch");
+    match Command::new("home-manager").arg("switch").output() {
         Ok(out) if out.status.success() => true,
         Ok(out) => {
             warn!(
-                "install of {attr} failed: {}",
+                "home-manager switch failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
             false
         }
         Err(e) => {
-            warn!("cannot run nix: {e}");
+            warn!("cannot run home-manager: {e}");
             false
         }
     }
-}
-
-/// Remove the profile element whose store paths provide `desktop_path`
-/// (resolved through the profile symlinks); true on success. An app not
-/// installed via `nix profile` matches nothing and fails harmlessly.
-fn remove(desktop_path: &str) -> bool {
-    let canonical = match std::fs::canonicalize(desktop_path) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("cannot resolve {desktop_path}: {e}");
-            return false;
-        }
-    };
-    let element = match profile_element_for(&canonical) {
-        Ok(Some(name)) => name,
-        Ok(None) => {
-            info!("{desktop_path} is not from the nix profile; not removing");
-            return false;
-        }
-        Err(e) => {
-            warn!("nix profile list failed: {e:#}");
-            return false;
-        }
-    };
-    info!("nix profile remove {element}");
-    match Command::new("nix")
-        .args(["profile", "remove", &element])
-        .output()
-    {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            warn!(
-                "remove of {element} failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            false
-        }
-        Err(e) => {
-            warn!("cannot run nix: {e}");
-            false
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct ProfileList {
-    elements: std::collections::HashMap<String, ProfileElement>,
-}
-
-#[derive(Deserialize)]
-struct ProfileElement {
-    #[serde(rename = "storePaths", default)]
-    store_paths: Vec<String>,
-}
-
-/// Name of the profile element one of whose store paths contains
-/// `canonical` (a fully resolved path inside /nix/store).
-fn profile_element_for(canonical: &Path) -> anyhow::Result<Option<String>> {
-    let out = Command::new("nix")
-        .args(["profile", "list", "--json"])
-        .output()?;
-    anyhow::ensure!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr).trim().to_owned()
-    );
-    let list: ProfileList = serde_json::from_slice(&out.stdout)?;
-    // Common case: the desktop file lives directly under the element's
-    // own output.
-    for (name, element) in &list.elements {
-        if element.store_paths.iter().any(|sp| canonical.starts_with(sp)) {
-            return Ok(Some(name.clone()));
-        }
-    }
-    // Wrapper packages (chromium → chromium-unwrapped, firefox → …)
-    // re-export the inner package's desktop file, so the profile symlink
-    // resolves to a store path that is only a *dependency* of the
-    // element, not its listed output. Trace it back through the
-    // referrers closure: whichever element's output pulls that path in
-    // is the one to remove.
-    let Some(root) = store_path_root(canonical) else {
-        return Ok(None);
-    };
-    let refs = referrers_closure(&root)?;
-    for (name, element) in &list.elements {
-        if element.store_paths.iter().any(|sp| refs.contains(sp.as_str())) {
-            return Ok(Some(name.clone()));
-        }
-    }
-    Ok(None)
-}
-
-/// Imperative-profile membership: the element names (== install attrs)
-/// and the full store-path closure of their outputs (outputs plus every
-/// dependency, so a wrapper package's inner output counts). Both empty
-/// when nothing is installed there or nix is unavailable.
-fn profile_membership() -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let out = Command::new("nix")
-        .args(["profile", "list", "--json"])
-        .output()?;
-    anyhow::ensure!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr).trim().to_owned()
-    );
-    let list: ProfileList = serde_json::from_slice(&out.stdout)?;
-    let elements: Vec<String> = list.elements.keys().cloned().collect();
-    let roots: Vec<String> = list
-        .elements
-        .values()
-        .flat_map(|e| e.store_paths.iter().cloned())
-        .collect();
-    if roots.is_empty() {
-        return Ok((Vec::new(), elements));
-    }
-    let out = Command::new("nix-store")
-        .args(["--query", "--requisites"])
-        .args(&roots)
-        .output()?;
-    anyhow::ensure!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr).trim().to_owned()
-    );
-    let closure = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim().to_owned())
-        .collect();
-    Ok((closure, elements))
-}
-
-/// The `/nix/store/<hash>-<name>` root of a deeper store path, or `None`
-/// if `p` is not under `/nix/store`.
-pub fn store_path_root(p: &Path) -> Option<PathBuf> {
-    use std::path::Component;
-    let mut comps = p.components();
-    let (root, nix, store, name) = (comps.next()?, comps.next()?, comps.next()?, comps.next()?);
-    (matches!(root, Component::RootDir)
-        && nix.as_os_str() == "nix"
-        && store.as_os_str() == "store")
-    .then(|| Path::new("/nix/store").join(name.as_os_str()))
-}
-
-/// Every store path that transitively refers to `root` (itself
-/// included) — traces a wrapped package's inner output back to the
-/// profile element whose output provides it.
-fn referrers_closure(root: &Path) -> anyhow::Result<std::collections::HashSet<String>> {
-    let out = Command::new("nix-store")
-        .args(["--query", "--referrers-closure"])
-        .arg(root)
-        .output()?;
-    anyhow::ensure!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr).trim().to_owned()
-    );
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim().to_owned())
-        .collect())
 }
 
 #[derive(Deserialize)]
@@ -1427,41 +1214,6 @@ mod tests {
                 started.elapsed()
             );
         }
-    }
-
-    /// Full mutation round-trip through the production code paths,
-    /// against the real profile (expects `xterm` installed, leaves it
-    /// installed):
-    /// `cargo test -p waverunner-daemon profile_round -- --ignored --nocapture`
-    #[test]
-    #[ignore = "mutates the real nix profile"]
-    fn profile_round_trip_remove_and_install() {
-        let home = std::env::var("HOME").unwrap();
-        let desktop = format!("{home}/.nix-profile/share/applications/xterm.desktop");
-        assert!(
-            std::path::Path::new(&desktop).exists(),
-            "test needs xterm in the profile"
-        );
-        // The daemon's remove(): canonicalize -> match profile element
-        // -> nix profile remove.
-        assert!(remove(&desktop), "remove must succeed");
-        assert!(
-            !std::path::Path::new(&desktop).exists(),
-            "desktop file must be gone after remove"
-        );
-        // Removing an app that is NOT from the profile must refuse.
-        assert!(
-            !remove("/run/current-system/sw/share/applications/nonexistent.desktop"),
-            "non-profile paths must be refused"
-        );
-        // The daemon's install() puts it back.
-        assert!(install("xterm"), "install must succeed");
-        assert!(
-            std::path::Path::new(&desktop).exists(),
-            "desktop file must be back after install"
-        );
-        // Idempotence: installing again succeeds without duplicating.
-        assert!(install("xterm"), "duplicate install must be a no-op ok");
     }
 
     /// Manual check of the Flathub icon fetch (network + disk cache):

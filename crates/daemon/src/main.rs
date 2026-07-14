@@ -15,6 +15,7 @@ mod groups;
 mod hypr;
 mod ipc;
 mod launch;
+mod managed;
 mod nix;
 mod order;
 mod pins;
@@ -112,9 +113,6 @@ fn main() -> anyhow::Result<()> {
     // over this channel.
     let (nix_tx, nix_rx) = channel::channel::<nix::Event>();
     let nix = nix::spawn(nix_tx, config.theme.icon_theme.clone());
-    // Learn which installed apps live in the imperative profile (so only
-    // those offer uninstall); refreshed after every mutation.
-    nix.request(nix::Request::ProfilePaths);
 
     let mut app = App {
         registry_state: RegistryState::new(&globals),
@@ -165,9 +163,8 @@ fn main() -> anyhow::Result<()> {
         pkg_state: PkgIndexState::Loading,
         busy_ids: HashSet::new(),
         failed_ids: HashMap::new(),
-        profile_paths: HashSet::new(),
+        managed: managed::ManagedDb::load(),
         removable_ids: HashSet::new(),
-        profile_elements: HashSet::new(),
         installed_app_ids: HashSet::new(),
         file_index: Vec::new(),
         files_dir: None,
@@ -175,6 +172,9 @@ fn main() -> anyhow::Result<()> {
         app_group: None,
         group_minis: Vec::new(),
         order: order::OrderDb::load(),
+        pending_installs: Vec::new(),
+        known_app_ids: HashSet::new(),
+        just_installed: None,
         reorder_slot: None,
         reorder_dwell: None,
         apps_slide: Vec::new(),
@@ -350,18 +350,15 @@ pub struct App {
     /// Recently failed mutations: their cells flash "Failed" for
     /// [`FAIL_FLASH`] (details go to the log).
     failed_ids: HashMap<String, Instant>,
-    /// Store-path closure of the imperative `nix profile` (async from
-    /// the nix thread). An app whose resolved `.desktop` path lands in
-    /// here was installed via the profile and can be uninstalled.
-    profile_paths: HashSet<String>,
-    /// Ids of the currently-indexed apps that are removable — derived
-    /// from `profile_paths` whenever apps or the profile change. Only
-    /// these offer the Install section as an uninstall drop target.
+    /// The waverunner-managed home-manager package list (source of truth
+    /// for what the launcher installed, and the generator of
+    /// `waverunner-packages.nix`). Drives removable/installed detection.
+    managed: managed::ManagedDb,
+    /// Ids of the currently-indexed apps that are removable — the apps
+    /// whose attr is in [`Self::managed`], recomputed whenever apps or
+    /// the managed list change. Only these offer the Install section as
+    /// an uninstall drop target.
     removable_ids: HashSet<String>,
-    /// Imperative `nix profile` element names (== install attrs) — one
-    /// of the signals for hiding already-installed packages from the
-    /// Install list.
-    profile_elements: HashSet<String>,
     /// Desktop ids of every installed app, refreshed on rescan — matched
     /// against a package's `.desktop` stems / attr to drop it from the
     /// Install list once it's installed.
@@ -380,6 +377,19 @@ pub struct App {
     group_minis: Vec<(usize, [Option<u32>; 4])>,
     /// Persistent Apps-grid order (install date + manual overrides).
     order: order::OrderDb,
+    /// Packages dropped into the grid and installing in place. Rendered
+    /// as grid tiles at their drop slots; finalized (or retried) when the
+    /// install resolves.
+    pending_installs: Vec<PendingInstall>,
+    /// App ids present at the last app rescan — diffed against the next
+    /// scan so a pending install can resolve to the app that *newly
+    /// appeared*, even when its desktop id differs from the attr and the
+    /// package index carried no desktop hints (e.g. `chromium`).
+    known_app_ids: HashSet<String>,
+    /// An app that just resolved from a pending install: it gets a
+    /// launch-style bounce as it lands in the grid (set during rescan,
+    /// consumed once its cell index is known).
+    just_installed: Option<String>,
     /// Drag-to-reorder: the make-room gap's display slot (`None` = no
     /// grid drag in flight).
     reorder_slot: Option<usize>,
@@ -549,6 +559,35 @@ struct DragState {
     pos: (f32, f32),
 }
 
+/// A package dropped into the Apps grid and now installing in place. It
+/// renders as a grid tile (dimmed, "Installing…") at the slot it was
+/// dropped on, and — once `nix profile install` succeeds — is replaced
+/// there by the real app. A failure keeps the tile (flashing "Failed");
+/// clicking it retries.
+struct PendingInstall {
+    /// nixpkgs attribute — the install target and the tile's grid id.
+    attr: String,
+    /// Display name / version for the tile label.
+    name: String,
+    version: String,
+    /// Desktop ids the package ships: when one appears as a real app
+    /// after install, that app takes this tile's slot.
+    desktop_ids: Vec<String>,
+    /// Grid id the installed app should land *before* (`None` = end) —
+    /// the app displayed at the drop slot when it was let go.
+    anchor: Option<String>,
+    /// Reserved-tail icon slot (`0..PENDING_INSTALL_CAP`); its texture
+    /// layer is `pkg_layer_base + RANK_HITS_MAX + slot`.
+    icon_slot: usize,
+    /// Snapshot of the package's rasterized icon, re-uploaded after every
+    /// rescan (which rebuilds the texture array). Empty = letter tile.
+    icon_pixels: Vec<u8>,
+    /// True when the icon is a generated letter tile, not a real icon.
+    placeholder: bool,
+    /// Last attempt failed; the tile shows "Failed" and a click retries.
+    failed: bool,
+}
+
 /// Accumulated scroll (in wl_pointer axis units; one wheel notch ≈ 15)
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
@@ -623,6 +662,20 @@ const ZONE_POLL_INTERVAL: Duration = Duration::from_millis(800);
 const BOUNCE_DURATION: Duration = Duration::from_millis(550);
 /// Peak height of the launch bounce, in logical pixels.
 const BOUNCE_HEIGHT: f32 = 18.0;
+/// How long the dock flashes into view when a just-installed app lands
+/// (while auto-hidden): the landing bounce plays, then the dock rests 2s
+/// so the arrival registers, before it slides back away.
+/// (= `BOUNCE_DURATION` + 2s.)
+const INSTALL_REVEAL: Duration = Duration::from_millis(550 + 2000);
+
+/// Lowercase alphanumerics only — used to loosely relate a package attr
+/// to the desktop id it installs (`chromium` ~ `chromium-browser`).
+fn normalize_id(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
 
 impl App {
     /// Entry point for IPC commands (called from ipc.rs) and for
@@ -761,44 +814,55 @@ impl App {
                 }
             }
             nix::Event::Done { id, ok } => {
-                debug!("profile mutation for {id}: ok={ok}");
+                debug!("home-manager switch for {id}: ok={ok}");
                 self.busy_ids.remove(&id);
                 if ok {
                     // The profile changed under us: rescan so the Apps
                     // grid gains/loses the entry.
                     self.indexer.request_rescan();
                 } else {
-                    // Flash "Failed" on the cell; a timer clears it.
-                    self.failed_ids.insert(id, Instant::now());
-                    let timer = Timer::from_duration(FAIL_FLASH);
-                    if let Err(e) = self
-                        .loop_handle
-                        .insert_source(timer, |_, _, app: &mut App| {
-                            app.failed_ids.retain(|_, t| t.elapsed() < FAIL_FLASH);
-                            app.schedule_frame();
-                            TimeoutAction::Drop
-                        })
-                    {
-                        warn!("cannot arm fail-flash timer: {e}");
+                    // A failed switch never activated (it's atomic), but a
+                    // bad attr left in waverunner-packages.nix would wedge
+                    // every future switch — roll it back out. (`contains`
+                    // is only true for a freshly-added install attr; an
+                    // uninstall already removed its attr before switching.)
+                    if self.managed.contains(&id) {
+                        self.managed.remove(&id);
+                        self.recompute_removable();
+                    }
+                    if let Some(p) = self.pending_installs.iter_mut().find(|p| p.attr == id) {
+                        // A drag-to-install tile stays put as a persistent
+                        // "Failed" cell (click retries, drag-off dismisses)
+                        // rather than flashing and vanishing.
+                        p.failed = true;
+                    } else {
+                        // Flash "Failed" on the cell; a timer clears it.
+                        self.failed_ids.insert(id, Instant::now());
+                        let timer = Timer::from_duration(FAIL_FLASH);
+                        if let Err(e) = self
+                            .loop_handle
+                            .insert_source(timer, |_, _, app: &mut App| {
+                                app.failed_ids.retain(|_, t| t.elapsed() < FAIL_FLASH);
+                                app.schedule_frame();
+                                TimeoutAction::Drop
+                            })
+                        {
+                            warn!("cannot arm fail-flash timer: {e}");
+                        }
                     }
                 }
                 self.update_hover();
-                self.schedule_frame();
-            }
-            nix::Event::ProfilePaths { closure, elements } => {
-                self.profile_paths = closure.into_iter().collect();
-                self.profile_elements = elements.into_iter().collect();
-                self.recompute_removable();
                 self.schedule_frame();
             }
         }
     }
 
     /// Recompute which indexed apps are removable: an app is removable
-    /// when its `.desktop` file resolves into the imperative profile's
-    /// store-path closure. Cheap filesystem canonicalization per app,
-    /// run when either the apps or the profile change; also refreshes
-    /// the set of installed desktop ids used to hide installed packages.
+    /// when its id maps to an attr in the waverunner-managed list (i.e.
+    /// the launcher installed it — base/system apps are never removable).
+    /// Run when either the apps or the managed list change; also
+    /// refreshes the set of installed desktop ids used to hide installed
+    /// packages.
     fn recompute_removable(&mut self) {
         self.installed_app_ids = self
             .entries
@@ -808,30 +872,27 @@ impl App {
             .filter(|(_, &k)| k == apps::EntryKind::App)
             .map(|(e, _)| e.id.clone())
             .collect();
-        let profile = &self.profile_paths;
+        let managed = self.managed.removable_ids();
         self.removable_ids = self
             .entries
             .iter()
             .zip(&self.kinds)
             .take(self.base_len)
             .filter(|(_, &k)| k == apps::EntryKind::App)
-            .filter_map(|(e, _)| {
-                let canon = std::fs::canonicalize(e.path.as_ref()?).ok()?;
-                let root = nix::store_path_root(&canon)?;
-                profile.contains(root.to_str()?).then(|| e.id.clone())
-            })
+            .filter(|(e, _)| managed.contains(&e.id))
+            .map(|(e, _)| e.id.clone())
             .collect();
     }
 
     /// Whether a nixpkgs package is already installed on the system —
-    /// matched to an installed app by the `.desktop` ids it ships, by
-    /// its attr used as a desktop id, or by its attr as an imperative
-    /// profile element name. Such packages are hidden from the Install
-    /// list (you can't install what's already there).
+    /// its attr is in the managed list, or an installed app already
+    /// ships one of its `.desktop` ids (base/system apps). Such packages
+    /// are hidden from the Install list (you can't install what's already
+    /// there).
     fn pkg_installed(&self, p: &nix::PkgEntry) -> bool {
-        p.icons.iter().any(|s| self.installed_app_ids.contains(s))
+        self.managed.contains(&p.attr)
+            || p.icons.iter().any(|s| self.installed_app_ids.contains(s))
             || self.installed_app_ids.contains(&p.attr)
-            || self.profile_elements.contains(&p.attr)
     }
 
     /// The indexer thread finished: adopt the entries and upload icons
@@ -893,14 +954,20 @@ impl App {
                 .filter(|(_, k)| **k == apps::EntryKind::App)
                 .map(|(e, _)| e.id.as_str()),
         );
+        // A drag-to-install app that has now landed: reposition it into
+        // its tile's slot and retire the tile (before the refilter below
+        // reads the order).
+        self.resolve_pending_installs();
 
         self.pkg_layer_base = icons.len() as u32;
         match self.renderer.as_mut() {
             Some(renderer) => {
                 renderer.set_icons(&icons);
                 // set_icons rebuilt the array: restore the package-hit
-                // icons into its reserved tail.
+                // icons into its reserved tail, then the still-pending
+                // install icons into theirs.
                 self.upload_pkg_icons();
+                self.reupload_pending_icons();
             }
             None => self.pending_icons = Some(icons),
         }
@@ -911,6 +978,18 @@ impl App {
         self.recompute_dock_order();
         self.recompute_removable();
         self.refilter();
+        // A just-installed app lands in the dock: bounce its icon in
+        // (same as a launch), and if the dock was auto-hidden, flash it
+        // into view for a beat so the arrival is seen, then let it hide.
+        if let Some(app_id) = self.just_installed.take() {
+            if let Some(idx) = self.entries.iter().position(|e| e.id == app_id) {
+                self.bounce = Some((idx, Instant::now()));
+            }
+            if self.ui.target() == Target::Hidden {
+                self.handle_command(Command::Show);
+                self.schedule_hide_after(INSTALL_REVEAL);
+            }
+        }
         self.schedule_frame();
     }
 
@@ -995,6 +1074,9 @@ impl App {
                 let ids: Vec<String> = cells.iter().map(|&i| self.entries[i].id.clone()).collect();
                 self.order.sync(ids.iter().map(String::as_str));
                 cells.sort_by_key(|&idx| self.order.index_of(&self.entries[idx].id));
+                // Packages installing in place ride the loose grid at
+                // their drop slot until the real app replaces them.
+                self.insert_pending_cells(&mut cells);
                 visible[content::SECTION_APPS] = cells;
             }
             if self.files_dir.is_some() {
@@ -1437,7 +1519,16 @@ impl App {
     fn recompute_dock_order(&mut self) {
         self.dock_order.clear();
         for pin_id in self.pins.pins() {
-            if let Some(idx) = self.entries.iter().position(|e| &e.id == pin_id) {
+            // Match only real App entries — never the transient Package /
+            // File entries a search leaves in `entries`, or a stale pin
+            // for an uninstalled app would ghost onto its same-named
+            // package search result.
+            let idx = self
+                .entries
+                .iter()
+                .zip(&self.kinds)
+                .position(|(e, k)| &e.id == pin_id && *k == apps::EntryKind::App);
+            if let Some(idx) = idx {
                 if !self.dock_order.contains(&idx) {
                     self.dock_order.push(idx);
                 }
@@ -1484,7 +1575,12 @@ impl App {
         let Some(entry) = self.entries.get(drag.entry_idx) else {
             return; // entries were replaced mid-drag
         };
-        let (id, path) = (entry.id.clone(), entry.path.clone());
+        let id = entry.id.clone();
+        // A package's label / version, needed if this drop starts a
+        // drag-to-install grid tile (the entry vanishes on the next
+        // refilter, so snapshot them now).
+        let pkg_name = entry.name.clone();
+        let pkg_version = entry.description.clone().unwrap_or_default();
         let kind = self.kinds.get(drag.entry_idx).copied();
         // Whatever this drop rearranges, the dragged icon itself must
         // land in its chosen cell, not glide there from its origin: the
@@ -1517,12 +1613,30 @@ impl App {
         );
         match kind {
             Some(apps::EntryKind::Package) => {
-                if (section == Some(content::SECTION_APPS) || insert.is_some())
-                    && !self.busy_ids.contains(&id)
+                // An existing pending tile being re-dragged: only a
+                // *failed* one can be dismissed by dragging it clear of
+                // the grid (a still-installing tile snaps back — the
+                // install can't be cancelled). Never on the pointer-left
+                // path (`released` false), which must not touch it.
+                if let Some(failed) = self
+                    .pending_installs
+                    .iter()
+                    .find(|p| p.attr == id)
+                    .map(|p| p.failed)
                 {
-                    info!("installing {id}");
-                    self.busy_ids.insert(id.clone());
-                    self.nix.request(nix::Request::Install { attr: id });
+                    let off_grid =
+                        released && section != Some(content::SECTION_APPS) && insert.is_none();
+                    if failed && off_grid {
+                        self.remove_pending(&id);
+                    }
+                } else if section == Some(content::SECTION_APPS) {
+                    // Fresh package dropped into the grid: place it as a
+                    // tile at the drop slot and install it in place.
+                    self.start_pending_install(&id, pkg_name, pkg_version);
+                } else if insert.is_some() && !self.busy_ids.contains(&id) {
+                    // Dropped on the dock band: plain install (no tile),
+                    // the app appears wherever its grid order puts it.
+                    self.start_managed_install(&id, Vec::new());
                 }
             }
             Some(apps::EntryKind::App)
@@ -1530,18 +1644,21 @@ impl App {
                     && self.removable_ids.contains(&id)
                     && !self.busy_ids.contains(&id) =>
             {
-                // Uninstall — gated to profile-managed apps, so this only
-                // runs for something `nix profile remove` can actually
-                // remove (non-removable apps fall through and snap back).
-                if let Some(path) = path.map(|p| p.to_string_lossy().into_owned()) {
-                    info!("uninstalling {id}");
+                // Uninstall — gated to managed apps, so this only runs for
+                // something the launcher installed (non-removable apps
+                // fall through and snap back). Remove the attr from the
+                // list, then switch; the busy id is the app cell.
+                if let Some(attr) = self.managed.attr_for_app(&id) {
+                    info!("uninstalling {id} (attr {attr})");
+                    self.managed.remove(&attr);
+                    // The install pinned it onto the dock; drop that pin so
+                    // it doesn't linger once the app is gone.
+                    self.pins.unpin(&id);
+                    self.recompute_removable();
                     self.busy_ids.insert(id.clone());
-                    self.nix.request(nix::Request::Remove {
-                        id,
-                        desktop_path: path,
-                    });
+                    self.nix.request(nix::Request::Switch { id });
                 } else {
-                    debug!("{id} has no desktop path; cannot uninstall");
+                    debug!("{id} is not waverunner-managed; cannot uninstall");
                 }
             }
             _ => {
@@ -1614,6 +1731,246 @@ impl App {
         self.refilter();
     }
 
+    /// Record `attr` in the managed home-manager list (with the desktop
+    /// ids it ships, for later uninstall mapping) and fire the switch
+    /// that installs it — no grid tile. Used for the dock-drop path and
+    /// the pending-tile slots-full fallback.
+    fn start_managed_install(&mut self, attr: &str, desktop_ids: Vec<String>) {
+        if self.busy_ids.contains(attr) {
+            return;
+        }
+        self.managed.add(attr, desktop_ids);
+        self.recompute_removable();
+        self.busy_ids.insert(attr.to_owned());
+        self.nix.request(nix::Request::Switch {
+            id: attr.to_owned(),
+        });
+    }
+
+    /// Begin a drag-to-install: reserve a grid tile at the drop slot for
+    /// `attr`, upload its icon into the pending-install texture block,
+    /// record the package in the managed list, and fire the switch. The
+    /// tile shows "Installing…" until the rescan swaps in the real app
+    /// (see [`Self::resolve_pending_installs`]), or "Failed" (retry on
+    /// click) if the switch fails.
+    fn start_pending_install(&mut self, attr: &str, name: String, version: String) {
+        if self.busy_ids.contains(attr) || self.pending_installs.iter().any(|p| p.attr == attr) {
+            return;
+        }
+        // The desktop ids the package ships (uninstall mapping + resolve
+        // matching), recovered from the live package hits by attr. The
+        // attr itself is a valid match key (some apps' id == attr).
+        let hit = self.pkg_hits.iter().position(|p| p.attr == attr);
+        let mut desktop_ids = hit
+            .map(|h| self.pkg_hits[h].icons.clone())
+            .unwrap_or_default();
+        desktop_ids.push(attr.to_owned());
+        // Reserve an icon slot in the pending-install texture block. If
+        // every slot is taken, fall back to a plain install (the app still
+        // lands, just without a placeheld tile).
+        let Some(icon_slot) = (0..nix::PENDING_INSTALL_CAP)
+            .find(|s| !self.pending_installs.iter().any(|p| &p.icon_slot == s))
+        else {
+            info!("pending-install slots full; installing {attr} without a tile");
+            self.start_managed_install(attr, desktop_ids);
+            return;
+        };
+        // The grid id the tile should sit before: whatever the drop slot
+        // (the make-room gap) currently displays. Past the end → append.
+        let anchor = self.reorder_slot.and_then(|slot| {
+            self.search.visible[content::SECTION_APPS]
+                .get(slot)
+                .and_then(|&e| self.entries.get(e))
+                .map(|e| e.id.clone())
+        });
+        // The package's own icon, recovered from the hits by attr; no
+        // rasterized hit icon falls back to the generic package tile.
+        let (icon_pixels, placeholder) = match hit {
+            Some(h) => (
+                self.pkg_hit_icons.get(h).cloned().unwrap_or_default(),
+                self.pkg_hit_placeholders.get(h).copied().unwrap_or(true),
+            ),
+            None => (Vec::new(), true),
+        };
+        if !icon_pixels.is_empty() {
+            let layer = self.pkg_layer_base + nix::RANK_HITS_MAX as u32 + icon_slot as u32;
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.update_icon_layer(layer, &icon_pixels);
+            }
+        }
+        info!("installing {attr} in place (slot {icon_slot}, anchor {anchor:?})");
+        self.pending_installs.push(PendingInstall {
+            attr: attr.to_owned(),
+            name,
+            version,
+            desktop_ids: desktop_ids.clone(),
+            anchor,
+            icon_slot,
+            icon_pixels,
+            placeholder,
+            failed: false,
+        });
+        self.managed.add(attr, desktop_ids);
+        self.recompute_removable();
+        self.busy_ids.insert(attr.to_owned());
+        self.nix.request(nix::Request::Switch {
+            id: attr.to_owned(),
+        });
+        self.refilter();
+    }
+
+    /// Drop a pending-install tile (dismissed by the user, or resolved),
+    /// freeing its icon slot and clearing any lingering busy mark.
+    fn remove_pending(&mut self, attr: &str) {
+        self.pending_installs.retain(|p| p.attr != attr);
+        self.busy_ids.remove(attr);
+        self.refilter();
+    }
+
+    /// Append a transient Apps-grid cell for each pending install and slot
+    /// it into `cells` just before its anchor id (end if the anchor is
+    /// gone). Mirrors [`Self::push_transient_pkg`]: the entry id is the
+    /// attr, so the busy / failed / installing flags and retry-on-click
+    /// all key off it.
+    fn insert_pending_cells(&mut self, cells: &mut Vec<usize>) {
+        for i in 0..self.pending_installs.len() {
+            let p = &self.pending_installs[i];
+            let (attr, name, version, anchor, slot, has_icon, ph) = (
+                p.attr.clone(),
+                p.name.clone(),
+                p.version.clone(),
+                p.anchor.clone(),
+                p.icon_slot,
+                !p.icon_pixels.is_empty(),
+                p.placeholder,
+            );
+            let (layer, placeholder) = if has_icon {
+                (
+                    self.pkg_layer_base + nix::RANK_HITS_MAX as u32 + slot as u32,
+                    ph,
+                )
+            } else {
+                self.asset_pkg.unwrap_or((0, true))
+            };
+            self.entries.push(AppEntry {
+                id: attr,
+                name,
+                description: Some(version),
+                exec: String::new(),
+                icon: None,
+                needs_terminal: false,
+                path: None,
+            });
+            self.kinds.push(apps::EntryKind::Package);
+            self.placeholders.push(placeholder);
+            self.icon_layers.push(layer);
+            let idx = self.entries.len() - 1;
+            let at = anchor
+                .as_ref()
+                .and_then(|a| cells.iter().position(|&e| self.entries[e].id == *a))
+                .unwrap_or(cells.len());
+            cells.insert(at, idx);
+        }
+    }
+
+    /// After a profile rescan, retire any pending install whose app has
+    /// now appeared: land the real app in the tile's grid slot (before
+    /// its captured anchor), keep it in the box rather than the dock, and
+    /// bounce it in. Failed tiles are left for the user to retry/dismiss.
+    ///
+    /// Matching an install to its app is deliberately layered, because a
+    /// package's attr often differs from the desktop id it ships and the
+    /// index may carry no desktop hints at all (`chromium` installs
+    /// `chromium-browser`): (1) an exact desktop-id hit, then (2) an app
+    /// that *newly appeared* since the last scan whose name relates to
+    /// the attr, then (3) the lone new app when a single install is
+    /// outstanding.
+    fn resolve_pending_installs(&mut self) {
+        let current: HashSet<String> = self
+            .entries
+            .iter()
+            .zip(&self.kinds)
+            .take(self.base_len)
+            .filter(|(_, k)| **k == apps::EntryKind::App)
+            .map(|(e, _)| e.id.clone())
+            .collect();
+        let newly: Vec<String> = current.difference(&self.known_app_ids).cloned().collect();
+
+        let pending: Vec<(String, Vec<String>, Option<String>)> = self
+            .pending_installs
+            .iter()
+            .filter(|p| !p.failed)
+            .map(|p| (p.attr.clone(), p.desktop_ids.clone(), p.anchor.clone()))
+            .collect();
+        let mut resolved: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut claimed: HashSet<String> = HashSet::new();
+        for (attr, desktop_ids, anchor) in &pending {
+            let hit = desktop_ids
+                .iter()
+                .find(|d| current.contains(d.as_str()) && !claimed.contains(d.as_str()))
+                .cloned()
+                .or_else(|| {
+                    // A freshly-appeared app whose name relates to the attr.
+                    let key = normalize_id(attr);
+                    newly
+                        .iter()
+                        .find(|id| {
+                            !claimed.contains(id.as_str()) && {
+                                let n = normalize_id(id);
+                                n.contains(&key) || key.contains(&n)
+                            }
+                        })
+                        .cloned()
+                });
+            if let Some(app_id) = hit {
+                claimed.insert(app_id.clone());
+                resolved.push((attr.clone(), app_id, anchor.clone()));
+            }
+        }
+        // Last resort: a single outstanding install ↔ a single new app
+        // (covers reverse-DNS ids that share no substring with the attr).
+        let still: Vec<&(String, Vec<String>, Option<String>)> = pending
+            .iter()
+            .filter(|(a, _, _)| !resolved.iter().any(|(ra, _, _)| ra == a))
+            .collect();
+        let leftover: Vec<&String> = newly.iter().filter(|id| !claimed.contains(*id)).collect();
+        if let ([(attr, _, anchor)], [app_id]) = (still.as_slice(), leftover.as_slice()) {
+            resolved.push((attr.clone(), (*app_id).clone(), anchor.clone()));
+        }
+
+        for (attr, app_id, anchor) in resolved {
+            if let Some(anchor) = anchor {
+                self.order.insert_before(&app_id, &anchor);
+            }
+            // Record the real app id (uninstall/removable mapping), pin
+            // the app onto the dock so it lands there (a fresh install is
+            // usage-0 and would otherwise sort off the end of the dock),
+            // and mark it for the landing flash once its cell is known.
+            self.managed.link_app(&attr, &app_id);
+            let slot = self.pins.pins().len();
+            self.pins.pin_at(&app_id, slot);
+            self.just_installed = Some(app_id.clone());
+            info!("pending install {attr} resolved as app {app_id}");
+            self.pending_installs.retain(|p| p.attr != attr);
+            self.busy_ids.remove(&attr);
+        }
+        self.known_app_ids = current;
+    }
+
+    /// Re-upload every pending install's icon into its reserved texture
+    /// slot after `set_icons` rebuilt the array (which wiped the tail).
+    fn reupload_pending_icons(&mut self) {
+        let base = self.pkg_layer_base + nix::RANK_HITS_MAX as u32;
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        for p in self.pending_installs.iter() {
+            if !p.icon_pixels.is_empty() {
+                renderer.update_icon_layer(base + p.icon_slot as u32, &p.icon_pixels);
+            }
+        }
+    }
+
     /// The Apps display cell under `pos` plus the within-cell
     /// fractions, from static slot geometry (display slots never move;
     /// only items glide between them — that's what keeps targeting
@@ -1656,14 +2013,18 @@ impl App {
         let visible = &self.search.visible[content::SECTION_APPS];
         let (len, pos) = (visible.len(), drag.pos);
         let orig = visible.iter().position(|&v| v == drag.entry_idx);
-        // Two ways to target the grid: a grid-origin app/box reordering
-        // itself, or a dock-origin app dragged in to unpin it. The dock
-        // app owns no cell, so its gap is a brand-new slot (nothing to
-        // vacate) and it may land one past the end (append).
-        let inserting = drag.from_dock;
+        // Three ways to target the grid: a grid-origin app/box reordering
+        // itself, a dock-origin app dragged in to unpin it, or a package
+        // dragged up from Install to be placed as it installs. The latter
+        // two own no cell, so the gap is a brand-new slot (nothing to
+        // vacate) and may land one past the end (append).
+        let inserting = drag.from_dock || kind == Some(apps::EntryKind::Package);
         let grid_drag = self.search.query.is_empty()
             && if inserting {
-                kind == Some(apps::EntryKind::App)
+                matches!(
+                    kind,
+                    Some(apps::EntryKind::App) | Some(apps::EntryKind::Package)
+                )
             } else {
                 orig.is_some()
                     && len > 0
@@ -1962,8 +2323,26 @@ impl App {
             return;
         };
         // Packages aren't launchable — installing is a drag to the Apps
-        // section, not a click.
+        // section, not a click. The one exception is a failed
+        // drag-to-install tile: clicking it retries the install.
         if self.kinds.get(index) == Some(&apps::EntryKind::Package) {
+            let attr = entry.id.clone();
+            let desktop_ids = self
+                .pending_installs
+                .iter_mut()
+                .find(|p| p.attr == attr && p.failed)
+                .map(|p| {
+                    p.failed = false;
+                    p.desktop_ids.clone()
+                });
+            if let Some(desktop_ids) = desktop_ids {
+                info!("retrying install of {attr}");
+                self.managed.add(&attr, desktop_ids);
+                self.recompute_removable();
+                self.busy_ids.insert(attr.clone());
+                self.nix.request(nix::Request::Switch { id: attr });
+                self.refilter();
+            }
             return;
         }
         let (exec, id) = (entry.exec.clone(), entry.id.clone());
@@ -2390,10 +2769,24 @@ impl App {
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
                 over_cell,
             });
+        // A pending drag-to-install tile counts as busy (its "Installing…"
+        // note holds from the drop until the rescan swaps in the real app)
+        // unless the install failed, when it flashes "Failed" and awaits a
+        // retry click.
+        let installing: Vec<bool> = self
+            .entries
+            .iter()
+            .map(|e| {
+                self.pending_installs
+                    .iter()
+                    .any(|p| p.attr == e.id && !p.failed)
+            })
+            .collect();
         let busy: Vec<bool> = self
             .entries
             .iter()
-            .map(|e| self.busy_ids.contains(&e.id))
+            .zip(&installing)
+            .map(|(e, &inst)| inst || self.busy_ids.contains(&e.id))
             .collect();
         let failed: Vec<bool> = self
             .entries
@@ -2402,6 +2795,10 @@ impl App {
                 self.failed_ids
                     .get(&e.id)
                     .is_some_and(|t| t.elapsed() < FAIL_FLASH)
+                    || self
+                        .pending_installs
+                        .iter()
+                        .any(|p| p.attr == e.id && p.failed)
             })
             .collect();
         let scene = content::scene(
@@ -2432,6 +2829,7 @@ impl App {
                 install_hint: self.install_hint(),
                 busy: &busy,
                 failed: &failed,
+                installing: &installing,
                 group_minis: &self.group_minis,
                 apps_group: &self.apps_group_name(),
                 apps_slide: &self.apps_slide,

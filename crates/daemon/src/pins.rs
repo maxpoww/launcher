@@ -56,6 +56,18 @@ impl PinDb {
         self.save();
     }
 
+    /// Remove `app_id` from the pins *without* excluding it — used when
+    /// the app a pin points at is uninstalled, so a dead pin can't linger
+    /// and later latch onto a same-named package search result.
+    pub fn unpin(&mut self, app_id: &str) {
+        let before = self.pins.len();
+        self.pins.retain(|p| p != app_id);
+        if self.pins.len() != before {
+            info!("unpin: {} → pins={:?}", app_id, self.pins);
+            self.save();
+        }
+    }
+
     /// Remove from dock entirely: unpins and excludes from usage-sort fill.
     /// Drag-from-dock drops here. Pinning (drag-to-dock) reverses it.
     pub fn exclude(&mut self, app_id: &str) {

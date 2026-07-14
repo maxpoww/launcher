@@ -544,6 +544,10 @@ pub struct FrameInput<'a> {
     /// Entries whose last mutation failed (flash), aligned with
     /// `entries`: their cells swap the name for "Failed".
     pub failed: &'a [bool],
+    /// Busy entries that are *installing* rather than removing, aligned
+    /// with `entries`: their cells say "Installing…" even outside the
+    /// Install section (drag-to-install tiles live in the Apps grid).
+    pub installing: &'a [bool],
     /// Group cells: (entry index of the transient group entry, up to
     /// four member texture layers for the 2×2 mini preview). Cells
     /// listed here draw the tile + minis instead of a single icon.
@@ -601,6 +605,7 @@ pub fn scene(
         install_hint,
         busy,
         failed,
+        installing,
         group_minis,
         apps_group,
         apps_slide,
@@ -1120,7 +1125,8 @@ pub fn scene(
             }
             let is_busy = busy.get(entry_idx).copied().unwrap_or(false);
             let is_failed = failed.get(entry_idx).copied().unwrap_or(false);
-            let name = if is_busy && s == SECTION_INSTALL {
+            let is_installing = installing.get(entry_idx).copied().unwrap_or(false);
+            let name = if is_busy && (s == SECTION_INSTALL || is_installing) {
                 "Installing…".to_string()
             } else if is_busy {
                 "Removing…".to_string()
