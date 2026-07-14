@@ -552,6 +552,9 @@ pub struct FrameInput<'a> {
     /// with `entries`: their cells say "Installing…" even outside the
     /// Install section (drag-to-install tiles live in the Apps grid).
     pub installing: &'a [bool],
+    /// Entries being realized for an ephemeral "try it" run, aligned with
+    /// `entries`: their cells say "Launching…".
+    pub launching: &'a [bool],
     /// Group cells: (entry index of the transient group entry, up to
     /// four member texture layers for the 2×2 mini preview). Cells
     /// listed here draw the tile + minis instead of a single icon.
@@ -611,6 +614,7 @@ pub fn scene(
         busy,
         failed,
         installing,
+        launching,
         group_minis,
         apps_group,
         apps_slide,
@@ -1171,7 +1175,10 @@ pub fn scene(
             let is_busy = busy.get(entry_idx).copied().unwrap_or(false);
             let is_failed = failed.get(entry_idx).copied().unwrap_or(false);
             let is_installing = installing.get(entry_idx).copied().unwrap_or(false);
-            let name = if is_busy && (s == SECTION_INSTALL || is_installing) {
+            let is_launching = launching.get(entry_idx).copied().unwrap_or(false);
+            let name = if is_busy && is_launching {
+                "Launching…".to_string()
+            } else if is_busy && (s == SECTION_INSTALL || is_installing) {
                 "Installing…".to_string()
             } else if is_busy {
                 "Removing…".to_string()

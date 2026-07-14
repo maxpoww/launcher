@@ -82,6 +82,15 @@ pub enum Event {
     /// A `home-manager switch` finished. `id` echoes the request's cell
     /// id (package attr on install, app id on uninstall).
     Done { id: String, ok: bool },
+    /// A `nix build` for an ephemeral "try it" run finished. `terminal`
+    /// is read from the built package (a `.desktop` with `Terminal=true`,
+    /// or no `.desktop` at all → a CLI tool) so the daemon runs it in a
+    /// terminal vs headless.
+    Realized {
+        attr: String,
+        ok: bool,
+        terminal: bool,
+    },
 }
 
 /// Daemon → thread requests.
@@ -95,6 +104,12 @@ pub enum Request {
     /// the grid cell (package attr on install, app id on uninstall) whose
     /// busy / failed state the switch resolves.
     Switch { id: String },
+    /// Realize (`nix build`) a package so it can be run ephemerally
+    /// ("try it" — drag a package out of the box). Answered with
+    /// `Done { id: attr, .. }`; the daemon spawns the actual run once the
+    /// build lands. This is the slow, cacheable part — the "Launching…"
+    /// note covers it.
+    Realize { attr: String },
 }
 
 /// How many top-ranked packages a `Ranked` reply carries. The renderer
@@ -189,15 +204,22 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
         .name("waverunner-nix-mut".into())
         .spawn(move || {
             while let Ok(request) = mutations_rx.recv() {
-                let id = match request {
-                    Request::Switch { id } => id,
+                // Both run one at a time on this worker: a switch never
+                // races the generation it applies, and a realize can't
+                // stampede the profile.
+                let event = match request {
+                    // The daemon has already rewritten waverunner-packages.nix.
+                    Request::Switch { id } => {
+                        let ok = home_manager_switch();
+                        Event::Done { id, ok }
+                    }
+                    Request::Realize { attr } => {
+                        let (ok, terminal) = realize(&attr);
+                        Event::Realized { attr, ok, terminal }
+                    }
                     Request::Rank { .. } => continue, // routed elsewhere
                 };
-                // The daemon has already rewritten waverunner-packages.nix;
-                // apply it. Switches run one at a time on this worker, so
-                // two quick installs never race the same generation.
-                let ok = home_manager_switch();
-                if events.send(Event::Done { id, ok }).is_err() {
+                if events.send(event).is_err() {
                     return;
                 }
             }
@@ -675,6 +697,71 @@ fn home_manager_switch() -> bool {
             false
         }
     }
+}
+
+/// `nix build` a package into the store so a following `nix run` /
+/// `nix shell` starts it instantly (the slow, cacheable part of a
+/// "try it" launch). Returns `(ok, terminal)` — `terminal` read from the
+/// built outputs so the daemon knows whether to run it in a terminal.
+fn realize(attr: &str) -> (bool, bool) {
+    info!("nix build nixpkgs#{attr}");
+    match Command::new("nix")
+        .args([
+            "build",
+            "--no-link",
+            "--print-out-paths",
+            "--impure",
+            &format!("nixpkgs#{attr}"),
+        ])
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let paths = String::from_utf8_lossy(&out.stdout);
+            (true, wants_terminal(paths.lines()))
+        }
+        Ok(out) => {
+            warn!(
+                "realize of {attr} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            (false, false)
+        }
+        Err(e) => {
+            warn!("cannot run nix: {e}");
+            (false, false)
+        }
+    }
+}
+
+/// Whether a built package should be run in a terminal: it ships a
+/// `.desktop` with `Terminal=true` (a TUI like btop/htop), or it ships
+/// no `.desktop` at all (a plain CLI). A `.desktop` without `Terminal=true`
+/// is a GUI app — run it headless.
+fn wants_terminal<'a>(store_paths: impl Iterator<Item = &'a str>) -> bool {
+    let mut saw_desktop = false;
+    for path in store_paths {
+        let apps = Path::new(path.trim()).join("share/applications");
+        let Ok(entries) = std::fs::read_dir(&apps) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            saw_desktop = true;
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if text
+                    .lines()
+                    .any(|l| l.trim().eq_ignore_ascii_case("terminal=true"))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    !saw_desktop
 }
 
 #[derive(Deserialize)]

@@ -163,6 +163,7 @@ fn main() -> anyhow::Result<()> {
         pkg_state: PkgIndexState::Loading,
         busy_ids: HashSet::new(),
         failed_ids: HashMap::new(),
+        launching: HashSet::new(),
         managed: managed::ManagedDb::load(),
         removable_ids: HashSet::new(),
         installed_app_ids: HashSet::new(),
@@ -351,6 +352,11 @@ pub struct App {
     /// Recently failed mutations: their cells flash "Failed" for
     /// [`FAIL_FLASH`] (details go to the log).
     failed_ids: HashMap<String, Instant>,
+    /// Attrs being realized for an ephemeral "try it" run (drag a package
+    /// out of the box). Their Install cell shows "Launching…" until the
+    /// build lands; terminal-vs-GUI is decided from the built package
+    /// (see [`nix::Event::Realized`]), then the run is spawned.
+    launching: HashSet<String>,
     /// The waverunner-managed home-manager package list (source of truth
     /// for what the launcher installed, and the generator of
     /// `waverunner-packages.nix`). Drives removable/installed detection.
@@ -820,6 +826,34 @@ impl App {
                     }
                 }
             }
+            nix::Event::Realized { attr, ok, terminal } => {
+                // A "try it" build finished: run it now that it's built
+                // (instant), or flash "Failed" if the build died.
+                debug!("realize {attr}: ok={ok} terminal={terminal}");
+                self.busy_ids.remove(&attr);
+                self.launching.remove(&attr);
+                if ok {
+                    // Both run the tool directly via `nix run` (it resolves
+                    // the package's main program). A terminal app runs
+                    // inside the terminal and then drops into a shell so a
+                    // one-shot tool's output (e.g. fastfetch) stays on
+                    // screen until the window is closed; a GUI app runs
+                    // headless and shows its window on the workspace.
+                    let run = format!("NIXPKGS_ALLOW_UNFREE=1 nix run --impure nixpkgs#{attr}");
+                    let exec = if terminal {
+                        format!("{run}; exec \"${{SHELL:-bash}}\"")
+                    } else {
+                        run
+                    };
+                    if let Err(e) = launch::launch(&exec, terminal, &self.config.launch.terminal) {
+                        error!("try-launch of {attr} failed: {e:#}");
+                    }
+                } else {
+                    self.flash_failed(attr);
+                }
+                self.update_hover();
+                self.schedule_frame();
+            }
             nix::Event::Done { id, ok } => {
                 debug!("home-manager switch for {id}: ok={ok}");
                 self.busy_ids.remove(&id);
@@ -844,18 +878,7 @@ impl App {
                         p.failed = true;
                     } else {
                         // Flash "Failed" on the cell; a timer clears it.
-                        self.failed_ids.insert(id, Instant::now());
-                        let timer = Timer::from_duration(FAIL_FLASH);
-                        if let Err(e) = self
-                            .loop_handle
-                            .insert_source(timer, |_, _, app: &mut App| {
-                                app.failed_ids.retain(|_, t| t.elapsed() < FAIL_FLASH);
-                                app.schedule_frame();
-                                TimeoutAction::Drop
-                            })
-                        {
-                            warn!("cannot arm fail-flash timer: {e}");
-                        }
+                        self.flash_failed(id);
                     }
                 }
                 self.update_hover();
@@ -1629,17 +1652,26 @@ impl App {
                 // the grid (a still-installing tile snaps back — the
                 // install can't be cancelled). Never on the pointer-left
                 // path (`released` false), which must not touch it.
+                let outside = released && self.outside_card(&layout, drag.pos);
                 if let Some(failed) = self
                     .pending_installs
                     .iter()
                     .find(|p| p.attr == id)
                     .map(|p| p.failed)
                 {
-                    let off_grid =
-                        released && section != Some(content::SECTION_APPS) && insert.is_none();
-                    if failed && off_grid {
+                    // A re-dragged tile is dismissed by dropping it clear
+                    // of the box (only a failed one — a running install
+                    // can't be cancelled).
+                    if failed && outside {
                         self.remove_pending(&id);
                     }
+                } else if outside && !self.busy_ids.contains(&id) {
+                    // Dropped clear of the box: run it ephemerally without
+                    // installing (terminal-vs-GUI decided after the build).
+                    // Checked before the install cases because `section_at`
+                    // is Y-only — a margin drop at grid altitude still
+                    // reports SECTION_APPS and would otherwise install.
+                    self.start_launch(&id);
                 } else if section == Some(content::SECTION_APPS) {
                     // Fresh package dropped into the grid: place it as a
                     // tile at the drop slot and install it in place.
@@ -1740,6 +1772,50 @@ impl App {
         // placed before any wave returns.
         self.mag_sleep = Some(Instant::now() + MAG_SLEEP_AFTER_DROP);
         self.refilter();
+    }
+
+    /// Begin an ephemeral "try it" launch: realize the package
+    /// (`nix build`, shown as "Launching…"), then — once it lands (see the
+    /// `Realized` handler) — run it without installing. Whether it runs in
+    /// a terminal (TUI/CLI) or headless (GUI) is decided from the built
+    /// package, not guessed here.
+    fn start_launch(&mut self, attr: &str) {
+        if self.busy_ids.contains(attr) || self.launching.contains(attr) {
+            return;
+        }
+        info!("try-launching {attr}");
+        self.busy_ids.insert(attr.to_owned());
+        self.launching.insert(attr.to_owned());
+        self.nix.request(nix::Request::Realize {
+            attr: attr.to_owned(),
+        });
+        self.refilter();
+    }
+
+    /// Flash "Failed" on `id`'s cell for [`FAIL_FLASH`], then clear it.
+    fn flash_failed(&mut self, id: String) {
+        self.failed_ids.insert(id, Instant::now());
+        let timer = Timer::from_duration(FAIL_FLASH);
+        if let Err(e) = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.failed_ids.retain(|_, t| t.elapsed() < FAIL_FLASH);
+                app.schedule_frame();
+                TimeoutAction::Drop
+            })
+        {
+            warn!("cannot arm fail-flash timer: {e}");
+        }
+    }
+
+    /// Whether `pos` is outside the popup card entirely — the drop zone
+    /// for a "try it" launch (a package dragged clear of the box).
+    fn outside_card(&self, layout: &content::Layout, pos: (f32, f32)) -> bool {
+        let right = self.buffer_size.0 as f32 - content::DRAG_MARGIN_X;
+        pos.0 < content::DRAG_MARGIN_X
+            || pos.0 > right
+            || pos.1 < layout.card_top
+            || pos.1 > layout.card_top + layout.card_h
     }
 
     /// Record `attr` in the managed home-manager list (with the desktop
@@ -2209,6 +2285,12 @@ impl App {
         pos: (f32, f32),
         entry_idx: usize,
     ) -> Option<usize> {
+        // Out in the margin the drop is a "try it" launch, not an install
+        // — don't highlight the grid. `section_at` is Y-only, so at grid
+        // altitude it still reports SECTION_APPS without this guard.
+        if self.outside_card(layout, pos) {
+            return None;
+        }
         let section = content::section_at(layout, pos)?;
         match self.kinds.get(entry_idx) {
             Some(apps::EntryKind::Package) if section == content::SECTION_APPS => Some(section),
@@ -2809,7 +2891,19 @@ impl App {
             .as_ref()
             .map(|drag| content::DragFrame {
                 entry_idx: drag.entry_idx,
-                pos: drag.pos,
+                // A dock-origin drag is locked inside the box: the ghost
+                // can reorder or drop into the grid, but never follows the
+                // pointer up/out of the card (dropping outside just snaps
+                // back). Grid/Install drags are unclamped.
+                pos: if drag.from_dock {
+                    let right = self.buffer_size.0 as f32 - content::DRAG_MARGIN_X;
+                    (
+                        drag.pos.0.clamp(content::DRAG_MARGIN_X, right),
+                        drag.pos.1.clamp(layout.card_top, layout.card_top + layout.card_h),
+                    )
+                } else {
+                    drag.pos
+                },
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
                 over_cell,
             });
@@ -2825,6 +2919,12 @@ impl App {
                     .iter()
                     .any(|p| p.attr == e.id && !p.failed)
             })
+            .collect();
+        // Packages being realized for an ephemeral run show "Launching…".
+        let launching: Vec<bool> = self
+            .entries
+            .iter()
+            .map(|e| self.launching.contains(&e.id))
             .collect();
         let busy: Vec<bool> = self
             .entries
@@ -2879,6 +2979,7 @@ impl App {
                 busy: &busy,
                 failed: &failed,
                 installing: &installing,
+                launching: &launching,
                 group_minis: &self.group_minis,
                 apps_group: &self.apps_group_name(),
                 apps_slide: &self.apps_slide,
