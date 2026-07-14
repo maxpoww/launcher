@@ -12,7 +12,7 @@
 //! files. Results are handed to the event loop over a calloop channel;
 //! nothing here touches Wayland or wgpu.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -102,6 +102,16 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let scanned = std::time::Instant::now();
                 let mut entries = index.entries;
                 let mut kinds = vec![EntryKind::App; entries.len()];
+                // Installed CLI tools (fastfetch, htop, …) ship no
+                // `.desktop`, so the scan above misses them. Synthesize a
+                // tile for every waverunner-managed package not already
+                // represented by an installed app, so it can be launched
+                // (in a terminal) and dragged out to uninstall like any
+                // app. Rebuilt on every rescan, so it tracks install/
+                // uninstall.
+                let cli = managed_cli_tiles(&entries);
+                kinds.extend(std::iter::repeat_n(EntryKind::App, cli.len()));
+                entries.extend(cli);
                 let folders = home_folders();
                 kinds.extend(std::iter::repeat_n(EntryKind::File, folders.len()));
                 entries.extend(folders);
@@ -196,6 +206,33 @@ fn icon_assets() -> Vec<AppEntry> {
         path: None,
     })
     .collect()
+}
+
+/// Synthetic Apps-grid tiles for waverunner-managed packages that ship no
+/// installed `.desktop` — CLI tools like fastfetch. Without these an
+/// installed CLI tool would be invisible (nothing to click, nothing to
+/// drag out to uninstall). A tile carries the attr as its id (so
+/// removable/uninstall detection maps straight back to the managed list),
+/// the generic package icon, and a terminal launch that stays open so a
+/// one-shot tool's output doesn't flash and vanish. Skips any package a
+/// real `.desktop` already covers (`apps` = the scanned entries).
+fn managed_cli_tiles(apps: &[AppEntry]) -> Vec<AppEntry> {
+    let app_ids: HashSet<&str> = apps.iter().map(|e| e.id.as_str()).collect();
+    crate::managed::snapshot()
+        .into_iter()
+        .filter(|(_, desktop_ids)| !desktop_ids.iter().any(|d| app_ids.contains(d.as_str())))
+        .map(|(attr, _)| AppEntry {
+            id: attr.clone(),
+            name: attr.clone(),
+            description: Some("Command-line tool".to_owned()),
+            // attr ≈ the package's main program; run it in a terminal
+            // that drops to a shell afterwards so its output stays up.
+            exec: format!("{attr}; exec \"${{SHELL:-bash}}\""),
+            icon: Some("package-x-generic".to_owned()),
+            needs_terminal: true,
+            path: None,
+        })
+        .collect()
 }
 
 /// Cap on the home-file index: keeps per-keystroke ranking and memory

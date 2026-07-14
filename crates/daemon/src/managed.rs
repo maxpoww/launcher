@@ -157,6 +157,26 @@ impl ManagedDb {
     }
 }
 
+/// A read-only snapshot of the managed packages — each attr with the
+/// desktop ids it ships — read straight from disk. Lets the indexer thread
+/// (which has no [`ManagedDb`]) synthesize tiles for installed CLI tools
+/// that ship no `.desktop`. Falls back to the `.nix` for a hand-copied
+/// list that has no sidecar yet.
+pub fn snapshot() -> Vec<(String, Vec<String>)> {
+    let json_path = crate::usage::data_path("managed.json");
+    let pkgs: Vec<ManagedPkg> = std::fs::read_to_string(&json_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if !pkgs.is_empty() {
+        return pkgs.into_iter().map(|p| (p.attr, p.desktop_ids)).collect();
+    }
+    parse_nix_attrs(&home_manager_dir().join("waverunner-packages.nix"))
+        .into_iter()
+        .map(|attr| (attr.clone(), vec![attr]))
+        .collect()
+}
+
 /// `~/.config/home-manager` (respecting `XDG_CONFIG_HOME`).
 fn home_manager_dir() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")

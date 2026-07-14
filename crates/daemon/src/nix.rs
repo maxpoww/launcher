@@ -114,7 +114,7 @@ pub enum Request {
 
 /// How many top-ranked packages a `Ranked` reply carries. The renderer
 /// reserves this many texture-array layers for their icons.
-pub const RANK_HITS_MAX: usize = 24;
+pub const RANK_HITS_MAX: usize = 25;
 
 /// How many packages can be mid-install *in the grid* at once. The
 /// renderer reserves this many more texture-array layers (past the
@@ -125,7 +125,7 @@ pub const PENDING_INSTALL_CAP: usize = 8;
 /// The Install section's storefront: household names shown before any
 /// query is typed, best-known first. Attrs missing from the index
 /// (renames, channel drift) are skipped silently.
-const RECOMMENDED: [&str; 24] = [
+const RECOMMENDED: [&str; 25] = [
     "firefox",
     "chromium",
     "brave",
@@ -148,6 +148,7 @@ const RECOMMENDED: [&str; 24] = [
     "vscode",
     "ghostty",
     "alacritty",
+    "fastfetch",
     "obsidian",
     "darktable",
 ];
