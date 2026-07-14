@@ -1548,13 +1548,17 @@ impl App {
     /// Which dock slot a drag should insert before, given the pointer
     /// position.  Returns `None` when the pointer is outside the dock band.
     fn drag_dock_insert(&self, layout: &content::Layout, pos: (f32, f32)) -> Option<usize> {
-        let slots = &layout.dock_slots;
-        if slots.is_empty() {
-            return None;
-        }
         let (x, y) = pos;
+        let slots = &layout.dock_slots;
         let dock_top = layout.card_top;
-        let dock_bottom = slots[0].y + slots[0].h;
+        // An empty dock has no slots to measure against, but the band is
+        // still there — fall back to its height so a drop anywhere in it
+        // pins at the front (slot 0). Without this the user can never
+        // re-pin an app once the dock has been cleared.
+        let dock_bottom = match slots.first() {
+            Some(s) => s.y + s.h,
+            None => dock_top + self.config.window.input_bar_height as f32,
+        };
         if y < dock_top || y > dock_bottom {
             return None;
         }
@@ -2201,9 +2205,9 @@ impl App {
         let section = content::section_at(layout, pos)?;
         match self.kinds.get(entry_idx) {
             Some(apps::EntryKind::Package) if section == content::SECTION_APPS => Some(section),
-            // Only apps installed via the imperative profile can be
-            // uninstalled here — home-manager / system apps don't offer
-            // the target at all (dropping there just snaps back).
+            // Only apps waverunner installed (i.e. in the managed
+            // home-manager list) can be uninstalled here — base / system
+            // apps don't offer the target at all (a drop just snaps back).
             Some(apps::EntryKind::App)
                 if section == content::SECTION_INSTALL
                     && self
