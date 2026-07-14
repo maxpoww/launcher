@@ -175,6 +175,7 @@ fn main() -> anyhow::Result<()> {
         pending_installs: Vec::new(),
         known_app_ids: HashSet::new(),
         just_installed: None,
+        dock_hover_since: None,
         reorder_slot: None,
         reorder_dwell: None,
         apps_slide: Vec::new(),
@@ -390,6 +391,10 @@ pub struct App {
     /// launch-style bounce as it lands in the grid (set during rescan,
     /// consumed once its cell index is known).
     just_installed: Option<String>,
+    /// When the pointer settled onto the current dock icon — the name
+    /// tooltip appears once this passes [`DOCK_TOOLTIP_DELAY`]. `None`
+    /// when the pointer isn't on a dock icon.
+    dock_hover_since: Option<Instant>,
     /// Drag-to-reorder: the make-room gap's display slot (`None` = no
     /// grid drag in flight).
     reorder_slot: Option<usize>,
@@ -662,6 +667,8 @@ const ZONE_POLL_INTERVAL: Duration = Duration::from_millis(800);
 const BOUNCE_DURATION: Duration = Duration::from_millis(550);
 /// Peak height of the launch bounce, in logical pixels.
 const BOUNCE_HEIGHT: f32 = 18.0;
+/// Hover dwell before a dock icon's name tooltip appears.
+const DOCK_TOOLTIP_DELAY: Duration = Duration::from_millis(600);
 /// How long the dock flashes into view when a just-installed app lands
 /// (while auto-hidden): the landing bounce plays, then the dock rests 2s
 /// so the arrival registers, before it slides back away.
@@ -2260,7 +2267,40 @@ impl App {
                 self.ui.extent()
             );
             self.hover = hover;
+            // Dock name tooltip: (re)start the dwell when the pointer
+            // lands on a dock icon, and wake once to draw it when the
+            // dwell elapses (a stationary pointer emits no more frames).
+            if matches!(hover, Some(Hit::DockIcon(_))) {
+                self.dock_hover_since = Some(Instant::now());
+                let timer = Timer::from_duration(DOCK_TOOLTIP_DELAY);
+                if let Err(e) = self
+                    .loop_handle
+                    .insert_source(timer, |_, _, app: &mut App| {
+                        app.schedule_frame();
+                        TimeoutAction::Drop
+                    })
+                {
+                    warn!("cannot arm dock-tooltip timer: {e}");
+                }
+            } else {
+                self.dock_hover_since = None;
+            }
             self.schedule_frame();
+        }
+    }
+
+    /// The dock slot whose name tooltip should show: the hovered dock
+    /// icon, but only once the pointer has dwelt [`DOCK_TOOLTIP_DELAY`].
+    fn dock_tooltip(&self) -> Option<usize> {
+        match self.hover {
+            Some(Hit::DockIcon(slot))
+                if self
+                    .dock_hover_since
+                    .is_some_and(|t| t.elapsed() >= DOCK_TOOLTIP_DELAY) =>
+            {
+                Some(slot)
+            }
+            _ => None,
         }
     }
 
@@ -2815,6 +2855,11 @@ impl App {
                 // Suppress hover highlight and magnification while dragging.
                 hover: if drag_frame.is_none() {
                     self.hover
+                } else {
+                    None
+                },
+                dock_tooltip: if drag_frame.is_none() {
+                    self.dock_tooltip()
                 } else {
                     None
                 },

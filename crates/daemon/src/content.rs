@@ -501,6 +501,10 @@ pub struct DragFrame {
 pub struct FrameInput<'a> {
     /// Item under the pointer (hover highlight).
     pub hover: Option<Hit>,
+    /// Dock slot whose name tooltip should show — gated behind a hover
+    /// dwell (the highlight is immediate; the tooltip waits). `None`
+    /// while the dwell hasn't elapsed or the pointer is elsewhere.
+    pub dock_tooltip: Option<usize>,
     /// Card opacity from the animation.
     pub alpha: f32,
     /// Pointer position driving the macOS-style magnification (icons
@@ -590,6 +594,7 @@ pub fn scene(
 ) -> Scene {
     let FrameInput {
         hover,
+        dock_tooltip,
         alpha,
         pointer,
         mag_amount,
@@ -745,6 +750,46 @@ pub fn scene(
                     cache: true,
                     clip: None,
                 });
+            }
+        }
+    }
+    // Hover tooltip: the hovered dock icon's app name in a pill above it
+    // (dock icons carry no label of their own, unlike grid cells). Gated
+    // behind a hover dwell by the caller (`dock_tooltip`).
+    if drag.is_none() {
+        if let Some(i) = dock_tooltip {
+            if let (Some(&entry_idx), Some(slot), Some(&vcx)) =
+                (dock_order.get(i), layout.dock_slots.get(i), dock_vcx.get(i))
+            {
+                if let Some(name) = entries.get(entry_idx).map(|e| e.name.clone()) {
+                    let font_px = LABEL_FONT_PX;
+                    let line_px = font_px * 1.3;
+                    let scale = dock_scales.get(i).copied().unwrap_or(1.0);
+                    let size = (DOCK_ICON * scale).min(slot.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
+                    let icon_top = slot.y + slot.h - size - lift(entry_idx);
+                    // Width from the same glyph-advance model truncate_label uses.
+                    let pill_w = name.chars().count() as f32 * font_px * 0.52 + 16.0;
+                    let pill_h = line_px + 6.0;
+                    let pill_y = (icon_top - 6.0 - pill_h).max(2.0);
+                    let mut bg = config.theme.background_rgba();
+                    bg[3] = bg[3].max(0.92);
+                    scene.rects.push(RectInst {
+                        rect: Rect::new(vcx - pill_w / 2.0, pill_y, pill_w, pill_h),
+                        radius: pill_h / 2.0,
+                        color: bg,
+                    });
+                    scene.labels.push(Label {
+                        text: name,
+                        pos: (vcx, pill_y + (pill_h - line_px) / 2.0),
+                        max_w: pill_w,
+                        font_px,
+                        line_px,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        clip: None,
+                    });
+                }
             }
         }
     }
