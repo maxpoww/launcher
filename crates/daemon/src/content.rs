@@ -144,7 +144,7 @@ const GRID_LABEL_GAP: f32 = 5.0;
 pub const BOX_TILE: f32 = GRID_ICON * 1.15;
 /// Columns/rows of the magnified open box's inner app grid (3×3 = up to
 /// nine members shown).
-const OPEN_BOX_COLS: usize = 3;
+pub const OPEN_BOX_COLS: usize = 3;
 const GRID_PAD_X: f32 = 14.0;
 const GRID_TOP_GAP: f32 = 5.0;
 const GRID_BOTTOM_PAD: f32 = 6.0;
@@ -637,6 +637,10 @@ pub struct FrameInput<'a> {
     /// Horizontal page-scroll offset of the open box (px): members are laid
     /// out in a strip of 3×3 pages shifted by this, so pages slide.
     pub box_scroll: f32,
+    /// In-box member reorder: (dragged member entry index, gap slot index in
+    /// the dragged-removed order, pointer pos). The dragged member is hidden
+    /// and drawn as a ghost; the rest reflow to open the gap.
+    pub box_drag: Option<(usize, usize, (f32, f32))>,
 }
 
 /// Local member index shown in 3×3 slot `slot` (row-major) of an open box
@@ -697,6 +701,7 @@ pub fn scene(
         open_box_hidden,
         open_box_pages,
         box_scroll,
+        box_drag,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     // The magnified open box's current rect (grows from the tile into its
@@ -1405,20 +1410,28 @@ pub fn scene(
         // `box_scroll`, so paging slides. Everything clips to the box.
         let page_w = layout.open_box.map_or(box_rect.w, |b| b.w);
         boxgrid.clip = box_rect;
-        for (m, &idx) in open_box_members.iter().enumerate() {
-            let slot = member_slot[m % 9];
+        // `display` is the member's on-screen order with the dragged member
+        // removed; `d` shifts it past the reorder gap so a slot opens there.
+        let mut display = 0usize;
+        for &idx in open_box_members.iter() {
+            if box_drag.is_some_and(|(h, _, _)| h == idx) {
+                continue; // dragged member: a ghost, not in the grid
+            }
+            let d = display + box_drag.map_or(0, |(_, gap, _)| usize::from(display >= gap));
+            display += 1;
+            let slot = member_slot[d % 9];
             let (row, col) = (slot / OPEN_BOX_COLS, slot % OPEN_BOX_COLS);
-            let page_x = (m / 9) as f32 * page_w - box_scroll;
+            let page_x = (d / 9) as f32 * page_w - box_scroll;
             let open_cx = box_rect.x + page_x + (col as f32 + 0.5) * cell;
             let open_cy = box_rect.y + (row as f32 + 0.5) * cell;
             // Cull members more than a page off either side of the box.
             if open_cx < box_rect.x - cell || open_cx > box_rect.x + box_rect.w + cell {
                 continue;
             }
-            let (cx, cy, size) = if m < 4 {
+            let (cx, cy, size) = if d < 4 {
                 // Page-0 preview icons flow from the closed 2×2 into place.
-                let sx = if m == 0 || m == 2 { -1.0 } else { 1.0 };
-                let sy = if m < 2 { -1.0 } else { 1.0 };
+                let sx = if d == 0 || d == 2 { -1.0 } else { 1.0 };
+                let sy = if d < 2 { -1.0 } else { 1.0 };
                 (
                     lerp(ox + sx * mini_offset, open_cx, t),
                     lerp(oy + sy * mini_offset, open_cy, t),
@@ -1492,6 +1505,15 @@ pub fn scene(
             }
             scene.grids.push(dots);
         }
+    }
+
+    // Ghost of a box member being reordered, following the pointer (topmost).
+    if let Some((entry, _, pos)) = box_drag {
+        let s = GRID_ICON * 1.1;
+        scene.overlay.push(IconInst {
+            rect: Rect::new(pos.0 - s / 2.0, pos.1 - s / 2.0, s, s),
+            layer: layer_of(entry),
+        });
     }
 
     scene

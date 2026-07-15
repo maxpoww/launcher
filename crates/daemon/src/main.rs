@@ -172,6 +172,8 @@ fn main() -> anyhow::Result<()> {
         groups: groups::GroupDb::load(),
         app_group: None,
         dock_stack: None,
+        box_drag: None,
+        box_drag_page_at: None,
         box_page: 0,
         box_scroll: 0.0,
         box_scroll_target: 0.0,
@@ -386,6 +388,12 @@ pub struct App {
     app_group: Option<usize>,
     /// Group whose dock-folder stack popover is open (index into `groups`).
     dock_stack: Option<usize>,
+    /// In-box member reorder drag: the dragged member's entry index and the
+    /// pointer position. The box stays open; drop reorders it (or, dragged
+    /// out of the box, it converts to a pull-out into the grid).
+    box_drag: Option<(usize, (f32, f32))>,
+    /// Dwell timer for edge-paging while reordering in the box.
+    box_drag_page_at: Option<Instant>,
     /// Which 3×3 page of the open box is the scroll target.
     box_page: usize,
     /// Horizontal page-scroll offset of the open box (px), easing toward
@@ -2718,30 +2726,133 @@ impl App {
     /// leaves the box (which closes, and dissolves if left with fewer than
     /// two members) and rides the drag into the loose grid — from there
     /// the normal make-room/drop path organizes it onto the grid or dock.
-    fn start_box_member_drag(&mut self, k: usize, pos: (f32, f32)) {
-        // A dock stack has no grid to drop into — its members only launch.
-        let Some(g) = self.app_group else { return };
+    /// Start reordering a box member: it lifts out as a ghost but the box
+    /// stays open, so it can be moved between slots and pages — or dragged
+    /// out of the box to pull it into the grid.
+    fn begin_box_drag(&mut self, k: usize, pos: (f32, f32)) {
         let Some(member_id) = self.open_box_member_id(k) else {
-            return;
-        };
-        let Some(entry_idx) = self.entries.iter().position(|e| e.id == member_id) else {
             return;
         };
         if self.busy_ids.contains(&member_id) {
             return;
         }
+        let Some(entry_idx) = self.entries.iter().position(|e| e.id == member_id) else {
+            return;
+        };
+        self.box_drag = Some((entry_idx, pos));
+        self.box_drag_page_at = None;
+        self.gesture.pressed = None;
+        self.schedule_frame();
+    }
+
+    /// Move the in-box drag: page at the edges, or — for a grid box dragged
+    /// out of the box — convert to a pull-out into the loose grid.
+    fn update_box_drag(&mut self, pos: (f32, f32)) {
+        let Some((entry_idx, _)) = self.box_drag else {
+            return;
+        };
+        let Some(box_rect) = self.current_layout().open_box else {
+            return;
+        };
+        // Pull out only when dragged a clear margin past the box, so a
+        // reorder toward the edge (to page) doesn't accidentally pull out.
+        let m = content::GRID_CELL_H;
+        let clear_out = pos.0 < box_rect.x - m
+            || pos.0 > box_rect.x + box_rect.w + m
+            || pos.1 < box_rect.y - m
+            || pos.1 > box_rect.y + box_rect.h + m;
+        if clear_out && self.app_group.is_some() {
+            // A grid box pulls the member into the loose grid; a dock stack
+            // has no grid to drop into, so it just holds it.
+            let id = self.entries[entry_idx].id.clone();
+            self.box_drag = None;
+            self.box_drag_page_at = None;
+            self.pull_box_member_out(&id, pos);
+            return;
+        }
+        self.box_drag = Some((entry_idx, pos));
+        // Edge paging: hover the left/right edge to turn the page.
+        let edge = box_rect.w * 0.14;
+        let dir: i64 = if pos.0 < box_rect.x + edge {
+            -1
+        } else if pos.0 > box_rect.x + box_rect.w - edge {
+            1
+        } else {
+            0
+        };
+        if dir == 0 {
+            self.box_drag_page_at = None;
+        } else {
+            match self.box_drag_page_at {
+                Some(t) if t.elapsed() >= PAGE_COOLDOWN => {
+                    self.turn_box_page(dir);
+                    self.box_drag_page_at = Some(Instant::now());
+                }
+                None => self.box_drag_page_at = Some(Instant::now()),
+                _ => {}
+            }
+        }
+        self.schedule_frame();
+    }
+
+    /// Drop the in-box drag: reorder the member to the slot under the pointer.
+    fn drop_box_drag(&mut self) {
+        let Some((entry_idx, pos)) = self.box_drag.take() else {
+            return;
+        };
+        self.box_drag_page_at = None;
+        let Some(g) = self.open_box_group() else {
+            return;
+        };
+        let member_id = self.entries[entry_idx].id.clone();
+        if let Some(before) = self.box_drag_before(pos, &member_id) {
+            self.groups.move_member(g, &member_id, before);
+            self.refilter();
+        }
+        self.schedule_frame();
+    }
+
+    /// Target position under the pointer (member index, dragged removed):
+    /// the 3×3 slot resolved to a member index on the current page.
+    fn box_drag_slot_target(&self, pos: (f32, f32)) -> Option<usize> {
+        let box_rect = self.current_layout().open_box?;
+        let cols = content::OPEN_BOX_COLS;
+        let cell = box_rect.w / cols as f32;
+        let col = (((pos.0 - box_rect.x) / cell).floor() as usize).min(cols - 1);
+        let row = (((pos.1 - box_rect.y) / cell).floor() as usize).min(cols - 1);
+        let slot = row * cols + col;
+        let local = content::open_box_slot_member(self.box_is_left(), slot);
+        Some(self.box_page * 9 + local)
+    }
+
+    /// The `move_member` anchor index (in the group's member list) for a
+    /// drop at `pos`: the member currently sitting at the target position.
+    fn box_drag_before(&self, pos: (f32, f32), member_id: &str) -> Option<usize> {
+        let target = self.box_drag_slot_target(pos)?;
+        let members = &self.groups.groups().get(self.open_box_group()?)?.members;
+        // `target` indexes the list with the dragged member removed.
+        let mut reduced = members.iter().filter(|m| m.as_str() != member_id);
+        match reduced.nth(target) {
+            Some(anchor) => members.iter().position(|m| m == anchor),
+            None => Some(members.len()),
+        }
+    }
+
+    /// Pull a box member out into the loose grid (the box shrinks closed).
+    fn pull_box_member_out(&mut self, member_id: &str, pos: (f32, f32)) {
+        let Some(g) = self.app_group else { return };
+        let Some(entry_idx) = self.entries.iter().position(|e| e.id == member_id) else {
+            return;
+        };
         // The box's remaining members feed the shrinking-closed overlay.
         let remaining: Vec<usize> = self.groups.groups()[g]
             .members
             .iter()
-            .filter(|id| **id != member_id)
+            .filter(|id| id.as_str() != member_id)
             .take(9)
             .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
             .collect();
-        self.groups.remove_member(&member_id);
-        // Drop the logical open state so the grid comes alive and the app
-        // is loose, but keep animating the box shut (shrinking toward its
-        // origin) over the live grid — `group_anim` 1 → 0.
+        self.groups.remove_member(member_id);
         self.app_group = None;
         self.closing_members = Some(remaining);
         self.group_anim_target = 0.0;
@@ -3317,6 +3428,11 @@ impl App {
             .collect();
         // While a box is open (or shrinking closed after a drag-out), its
         // members (up to nine) fill the magnified box's 3×3 app grid.
+        // An in-box reorder drag: hide the dragged member and open a gap at
+        // the slot under the pointer (rendered by `scene`).
+        let box_drag = self.box_drag.and_then(|(entry, pos)| {
+            self.box_drag_slot_target(pos).map(|gap| (entry, gap, pos))
+        });
         let open_box_members: Vec<usize> = self
             .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
@@ -3391,6 +3507,7 @@ impl App {
                 open_box_hidden,
                 open_box_pages,
                 box_scroll: self.box_scroll,
+                box_drag,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -4041,14 +4158,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 }
                 // Detect drag start: press armed and pointer moved beyond
                 // the 6-px threshold (distinguishes drag from sloppy click).
-                if app.gesture.dragging.is_none() {
+                if app.box_drag.is_some() {
+                    app.update_box_drag(pos);
+                } else if app.gesture.dragging.is_none() {
                     if let (Some(pp), Some(hit)) = (app.gesture.press_pos, app.gesture.pressed) {
                         let dx = pos.0 - pp.0;
                         let dy = pos.1 - pp.1;
                         if dx * dx + dy * dy > 6.0 * 6.0 {
                             if let Hit::OpenBoxCell(k) = hit {
-                                // Dragging a member pulls it out of the box.
-                                app.start_box_member_drag(k, pos);
+                                // Reorder the member within the box (drag it
+                                // out to pull it into the grid instead).
+                                app.begin_box_drag(k, pos);
                             } else {
                                 let entry_idx = match hit {
                                     Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
@@ -4093,6 +4213,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 app.pointer_pos = None;
                 app.gesture.pressed = None;
                 app.gesture.press_pos = None;
+                // An in-box reorder drag drops where it is (the box stays).
+                if app.box_drag.is_some() {
+                    app.drop_box_drag();
+                    return;
+                }
                 // If a dock drag is in flight when the pointer leaves the
                 // surface, treat it as a drop outside the dock: unpin and
                 // leave the popup open (don't autohide).
@@ -4128,8 +4253,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
                         app.gesture.press_pos = None;
-                        // Drag drop: pin/unpin and never treat as a click.
-                        if let Some(drag) = app.gesture.dragging.take() {
+                        // An in-box reorder drop: move the member, no click.
+                        if app.box_drag.is_some() {
+                            app.drop_box_drag();
+                        } else if let Some(drag) = app.gesture.dragging.take() {
                             let insert = app.drag_dock_insert(&app.current_layout(), drag.pos);
                             app.drop_drag(drag, insert, true);
                         } else {
