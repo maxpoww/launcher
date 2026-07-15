@@ -826,24 +826,49 @@ impl App {
                     }
                 }
             }
-            nix::Event::Realized { attr, ok, terminal } => {
+            nix::Event::Realized {
+                attr,
+                ok,
+                terminal,
+                program,
+                version,
+            } => {
                 // A "try it" build finished: run it now that it's built
                 // (instant), or flash "Failed" if the build died.
-                debug!("realize {attr}: ok={ok} terminal={terminal}");
+                debug!("realize {attr}: ok={ok} terminal={terminal} program={program:?}");
                 self.busy_ids.remove(&attr);
                 self.launching.remove(&attr);
                 if ok {
-                    // Both run the tool directly via `nix run` (it resolves
-                    // the package's main program). A terminal app runs
-                    // inside the terminal and then drops into a shell so a
-                    // one-shot tool's output (e.g. fastfetch) stays on
-                    // screen until the window is closed; a GUI app runs
-                    // headless and shows its window on the workspace.
-                    let run = format!("NIXPKGS_ALLOW_UNFREE=1 nix run --impure nixpkgs#{attr}");
                     let exec = if terminal {
-                        format!("{run}; exec \"${{SHELL:-bash}}\"")
+                        // Drop into a `nix shell` with the tool on PATH so
+                        // it can be run repeatedly, with any arguments,
+                        // behind a StandardOS banner naming the command to
+                        // run. (A bare `nix run` would run it once into a
+                        // shell where it isn't on PATH.) The banner names
+                        // the package (its version) and the command to type.
+                        let pkg = attr.rsplit('.').next().unwrap_or(&attr);
+                        let prog = program.as_deref().unwrap_or(pkg);
+                        let ver = version.as_deref().unwrap_or("?");
+                        // StandardOS in the zsh comment grey (#928374); the
+                        // package (bold) + version + run lines in white; and
+                        // "is ready" in the same green zsh paints a valid
+                        // command (#6abf69). Colors live in the printf format;
+                        // package/version/program arrive as %s args so an odd
+                        // char can't be read as an escape.
+                        format!(
+                            "export NIXPKGS_ALLOW_UNFREE=1; \
+                             printf '\\n\\033[38;2;146;131;116mStandardOS\\033[0m\\n\
+                             \\033[1;97m%s\\033[0m\\033[97m version: %s - \\033[38;2;106;191;105mis ready\\033[0m\\n\
+                             \\033[97mrun: %s\\033[0m\\n' \
+                             {} {} {}; \
+                             exec nix shell --impure nixpkgs#{attr}",
+                            launch::shell_quote(pkg),
+                            launch::shell_quote(ver),
+                            launch::shell_quote(prog),
+                        )
                     } else {
-                        run
+                        // A GUI app runs headless and shows its window.
+                        format!("NIXPKGS_ALLOW_UNFREE=1 nix run --impure nixpkgs#{attr}")
                     };
                     if let Err(e) = launch::launch(&exec, terminal, &self.config.launch.terminal) {
                         error!("try-launch of {attr} failed: {e:#}");

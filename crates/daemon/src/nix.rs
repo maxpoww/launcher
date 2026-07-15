@@ -85,11 +85,15 @@ pub enum Event {
     /// A `nix build` for an ephemeral "try it" run finished. `terminal`
     /// is read from the built package (a `.desktop` with `Terminal=true`,
     /// or no `.desktop` at all → a CLI tool) so the daemon runs it in a
-    /// terminal vs headless.
+    /// terminal vs headless. For a terminal tool, `program` (the main
+    /// binary in `bin/`) and `version` (from the store path) name the
+    /// command in the "try it" shell banner.
     Realized {
         attr: String,
         ok: bool,
         terminal: bool,
+        program: Option<String>,
+        version: Option<String>,
     },
 }
 
@@ -215,8 +219,14 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                         Event::Done { id, ok }
                     }
                     Request::Realize { attr } => {
-                        let (ok, terminal) = realize(&attr);
-                        Event::Realized { attr, ok, terminal }
+                        let r = realize(&attr);
+                        Event::Realized {
+                            attr,
+                            ok: r.ok,
+                            terminal: r.terminal,
+                            program: r.program,
+                            version: r.version,
+                        }
                     }
                     Request::Rank { .. } => continue, // routed elsewhere
                 };
@@ -700,13 +710,23 @@ fn home_manager_switch() -> bool {
     }
 }
 
+/// What a `realize` produced: whether the build succeeded, whether the
+/// package is a terminal tool, and (for a terminal tool) its main program
+/// name and version for the "try it" shell banner.
+#[derive(Default)]
+struct Realized {
+    ok: bool,
+    terminal: bool,
+    program: Option<String>,
+    version: Option<String>,
+}
+
 /// `nix build` a package into the store so a following `nix run` /
 /// `nix shell` starts it instantly (the slow, cacheable part of a
-/// "try it" launch). Returns `(ok, terminal)` — `terminal` read from the
-/// built outputs so the daemon knows whether to run it in a terminal.
-fn realize(attr: &str) -> (bool, bool) {
+/// "try it" launch), and read back what the daemon needs to present it.
+fn realize(attr: &str) -> Realized {
     info!("nix build nixpkgs#{attr}");
-    match Command::new("nix")
+    let out = match Command::new("nix")
         .args([
             "build",
             "--no-link",
@@ -717,22 +737,79 @@ fn realize(attr: &str) -> (bool, bool) {
         .env("NIXPKGS_ALLOW_UNFREE", "1")
         .output()
     {
-        Ok(out) if out.status.success() => {
-            let paths = String::from_utf8_lossy(&out.stdout);
-            (true, wants_terminal(paths.lines()))
-        }
+        Ok(out) if out.status.success() => out,
         Ok(out) => {
             warn!(
                 "realize of {attr} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
-            (false, false)
+            return Realized::default();
         }
         Err(e) => {
             warn!("cannot run nix: {e}");
-            (false, false)
+            return Realized::default();
         }
+    };
+    let paths = String::from_utf8_lossy(&out.stdout);
+    let terminal = wants_terminal(paths.lines());
+    // Only a terminal tool needs a program/version for its shell banner;
+    // a GUI app just launches its window.
+    let (program, version) = if terminal {
+        main_program(attr, paths.lines())
+    } else {
+        (None, None)
+    };
+    Realized {
+        ok: true,
+        terminal,
+        program,
+        version,
     }
+}
+
+/// The package's main program and version, read from its built outputs:
+/// the output carrying a `bin/` dir names the binary (preferring one that
+/// matches the attr, e.g. `ripgrep`→`rg` falls through to the lone entry),
+/// and that output's store-path name carries the version.
+fn main_program<'a>(attr: &str, store_paths: impl Iterator<Item = &'a str>) -> (Option<String>, Option<String>) {
+    // The install handle's leaf (`kdePackages.kdenlive` → `kdenlive`) is
+    // the best guess at the primary binary's name.
+    let leaf = attr.rsplit('.').next().unwrap_or(attr);
+    for path in store_paths {
+        let path = path.trim();
+        let Ok(entries) = std::fs::read_dir(Path::new(path).join("bin")) else {
+            continue; // -man / -dev / -lib outputs have no bin/
+        };
+        let mut bins: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        if bins.is_empty() {
+            continue;
+        }
+        bins.sort_unstable();
+        // Prefer the binary named like the package; else the shortest
+        // name (usually the primary command among helpers).
+        let program = bins
+            .iter()
+            .find(|b| b.as_str() == leaf)
+            .cloned()
+            .or_else(|| bins.iter().min_by_key(|b| b.len()).cloned());
+        return (program, version_from_store_path(path));
+    }
+    (None, None)
+}
+
+/// Parse the version out of a `/nix/store/<hash>-<name>-<version>` path:
+/// strip the 32-char hash, then take everything from the first
+/// digit-leading dash-component on (`fastfetch-2.65.2` → `2.65.2`).
+fn version_from_store_path(path: &str) -> Option<String> {
+    let base = Path::new(path).file_name()?.to_str()?;
+    let name_ver = base.get(33..)?; // 32-char hash + '-'
+    let idx = name_ver
+        .split('-')
+        .position(|c| c.starts_with(|ch: char| ch.is_ascii_digit()))?;
+    name_ver.splitn(idx + 1, '-').last().map(str::to_owned)
 }
 
 /// Whether a built package should be run in a terminal: it ships a
