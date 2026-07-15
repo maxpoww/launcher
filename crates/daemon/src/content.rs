@@ -105,7 +105,8 @@ pub enum Hit {
     /// A member cell of the magnified open box: the 3×3 slot index under
     /// the pointer (0..9). Clicking a filled slot launches it; dragging
     /// pulls the app out of the box. A click on an empty slot is inert —
-    /// only a click *outside* the box closes it.
+    /// only a click *outside* the box closes it. Also used for a dock
+    /// folder's stack (the same box, anchored above the dock).
     OpenBoxCell(usize),
 }
 
@@ -160,6 +161,11 @@ const SEARCH_PAD_X: f32 = 14.0;
 const SEARCH_GAP: f32 = 7.0;
 const SEARCH_FONT_PX: f32 = 15.0;
 const SEARCH_LINE_PX: f32 = 20.0;
+
+/// Gap between an open dock-folder box and the dock icon it springs from.
+const DOCK_BOX_GAP: f32 = 12.0;
+/// Rest size of a dock folder's open box (a square, ~matching a grid box).
+pub const DOCK_BOX_SIDE: f32 = 340.0;
 
 /// Space kept above the fully risen card so magnified dock icons can
 /// swell past the card edge (macOS-style). The wl surface is this much
@@ -257,8 +263,9 @@ pub struct Layout {
     /// "‹ Back" button beside the Files title; present only while the
     /// Files section is navigated into a directory.
     pub files_back: Option<Rect>,
-    /// The Apps-grid rectangle the magnified box fills; present only while
-    /// a box is open. A click inside is inert (only outside closes).
+    /// The rectangle the magnified box fills — the Apps grid for a grid box,
+    /// or a square above the dock for a dock folder's stack. Present only
+    /// while a box is open. A click inside is inert (only outside closes).
     pub open_box: Option<Rect>,
 }
 
@@ -451,6 +458,18 @@ pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
     })
 }
 
+/// The resting square of a dock folder's open box: a `side`-sized square
+/// centered over `dock_icon` and floating `DOCK_BOX_GAP` above it, clamped
+/// within `surface_w`.
+pub fn dock_box_rect(dock_icon: Rect, side: f32, surface_w: f32) -> Rect {
+    let cx = dock_icon.x + dock_icon.w / 2.0;
+    let x = (cx - side / 2.0).clamp(
+        DRAG_MARGIN_X,
+        (surface_w - DRAG_MARGIN_X - side).max(DRAG_MARGIN_X),
+    );
+    Rect::new(x, dock_icon.y - DOCK_BOX_GAP - side, side, side)
+}
+
 /// Which item (if any) the pointer is over.
 ///
 /// `search_open` controls whether the compact search button is a target
@@ -517,6 +536,9 @@ pub struct DragFrame {
     /// Grid cell that would accept this drop (group create/add),
     /// ringed with a highlight while hovered; `None` otherwise.
     pub over_cell: Option<(usize, usize)>,
+    /// Dock slot that would accept this drop as a fold (join/create a box),
+    /// ringed while hovered; `None` otherwise.
+    pub over_dock: Option<usize>,
 }
 
 /// Per-frame dynamic inputs to scene assembly.
@@ -796,13 +818,54 @@ pub fn scene(
         let baseline = slot_rect.y + slot_rect.h;
         let scale = dock_scales[slot];
         let size = (DOCK_ICON * scale).min(slot_rect.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
+        let icon_rect = Rect::new(
+            vcx - size / 2.0,
+            baseline - size - lift(entry_idx),
+            size,
+            size,
+        );
+        // A drag hovering this icon's center (a fold target) rings it.
+        if drag.and_then(|d| d.over_dock) == Some(slot) {
+            let hl = config.theme.highlight_rgba();
+            scene.rects.push(RectInst {
+                rect: Rect::new(
+                    icon_rect.x - 4.0,
+                    icon_rect.y - 4.0,
+                    icon_rect.w + 8.0,
+                    icon_rect.h + 8.0,
+                ),
+                radius: 14.0,
+                color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
+            });
+        }
+        if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
+            // A pinned box: a folder tile with a 2×2 mini preview.
+            let hl = config.theme.highlight_rgba();
+            scene.rects.push(RectInst {
+                rect: icon_rect,
+                radius: size * 0.22,
+                color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
+            });
+            let (cx, cy) = (icon_rect.x + size / 2.0, icon_rect.y + size / 2.0);
+            let m = size * 0.40;
+            let gap = size * 0.08;
+            for (k, layer) in minis.iter().enumerate() {
+                let Some(layer) = layer else { continue };
+                let (col, row) = ((k % 2) as f32, (k / 2) as f32);
+                scene.icons.push(IconInst {
+                    rect: Rect::new(
+                        cx - m - gap / 2.0 + col * (m + gap),
+                        cy - m - gap / 2.0 + row * (m + gap),
+                        m,
+                        m,
+                    ),
+                    layer: *layer,
+                });
+            }
+            continue;
+        }
         scene.icons.push(IconInst {
-            rect: Rect::new(
-                vcx - size / 2.0,
-                baseline - size - lift(entry_idx),
-                size,
-                size,
-            ),
+            rect: icon_rect,
             layer: layer_of(entry_idx),
         });
         if placeholders.get(entry_idx).copied().unwrap_or(false) {

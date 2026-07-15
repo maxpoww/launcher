@@ -171,6 +171,7 @@ fn main() -> anyhow::Result<()> {
         files_dir: None,
         groups: groups::GroupDb::load(),
         app_group: None,
+        dock_stack: None,
         box_page: 0,
         box_scroll: 0.0,
         box_scroll_target: 0.0,
@@ -383,6 +384,8 @@ pub struct App {
     groups: groups::GroupDb,
     /// Group the Apps section is navigated into (index into `groups`).
     app_group: Option<usize>,
+    /// Group whose dock-folder stack popover is open (index into `groups`).
+    dock_stack: Option<usize>,
     /// Which 3×3 page of the open box is the scroll target.
     box_page: usize,
     /// Horizontal page-scroll offset of the open box (px), easing toward
@@ -1125,6 +1128,10 @@ impl App {
         // search vs the recommendations storefront).
         visible[content::SECTION_INSTALL] = self.pkg_results();
         self.group_minis.clear();
+        // Every box gets a transient Group entry each refilter (indices
+        // shift), used by both the grid and the dock; a box pinned to the
+        // dock is hidden from the grid, like a pinned app.
+        let group_cells = self.group_cells();
         if searching {
             visible[content::SECTION_FILES] = self.file_results();
         } else {
@@ -1147,7 +1154,12 @@ impl App {
             // unseen ids append at the end). The grid stays put even with a
             // box open — the magnified box draws as an overlay on top of it.
             {
-                let mut cells = self.group_cells();
+                // Loose (dock-unpinned) boxes join the grid.
+                let mut cells: Vec<usize> = group_cells
+                    .iter()
+                    .copied()
+                    .filter(|&i| !self.pins.is_pinned(&self.entries[i].id))
+                    .collect();
                 cells.append(&mut visible[content::SECTION_APPS]);
                 let ids: Vec<String> = cells.iter().map(|&i| self.entries[i].id.clone()).collect();
                 self.order.sync(ids.iter().map(String::as_str));
@@ -1164,6 +1176,8 @@ impl App {
             }
         }
         self.search.visible = visible;
+        // Boxes' entry indices just changed — re-resolve pinned dock items.
+        self.recompute_dock_order();
         // Visual continuity: every surviving cell keeps its current
         // animated display position and eases to its new seat from
         // there — a rebuilt list never snaps icons, not even for the
@@ -1395,10 +1409,10 @@ impl App {
         self.refilter();
     }
 
-    /// Close the open box: members glide back into the tile; the view
-    /// actually switches once the animation lands (see `draw`).
+    /// Close the open box (grid or dock stack): it shrinks back into its
+    /// tile; the state clears once the animation lands (see `draw`).
     fn close_group(&mut self) {
-        if self.app_group.is_none() {
+        if self.open_box_group().is_none() {
             return;
         }
         if self.group_origin.is_none() {
@@ -1406,6 +1420,43 @@ impl App {
         }
         self.group_anim_target = 0.0;
         self.schedule_frame();
+    }
+
+    /// The group whose magnified box is open — in the grid (`app_group`) or
+    /// as a dock folder stack (`dock_stack`). They're mutually exclusive and
+    /// drive the same box overlay; only the box's resting position differs.
+    fn open_box_group(&self) -> Option<usize> {
+        self.app_group.or(self.dock_stack)
+    }
+
+    /// Center of a box's dock folder icon (its grow origin), by the box id.
+    fn dock_folder_center(&self, g: usize) -> Option<(f32, f32)> {
+        let layout = self.current_layout();
+        let gid = format!("group:{}", self.groups.groups()[g].id);
+        self.dock_order
+            .iter()
+            .position(|&e| self.entries.get(e).is_some_and(|x| x.id == gid))
+            .and_then(|slot| layout.dock_slots.get(slot))
+            .map(|r| (r.x + r.w / 2.0, r.y + r.h / 2.0))
+    }
+
+    /// Open a dock folder. With the grid up, the box grows out of its dock
+    /// icon into the grid (a normal grid box); docked, it opens as a stack
+    /// above the icon. Either way it's the same magnified box.
+    fn open_dock_folder(&mut self, g: usize) {
+        self.group_origin = self.dock_folder_center(g);
+        if self.ui.target() == Target::Open {
+            self.app_group = Some(g);
+        } else {
+            self.dock_stack = Some(g);
+        }
+        self.group_anim = 0.0;
+        self.group_anim_target = 1.0;
+        self.box_page = 0;
+        self.box_scroll = 0.0;
+        self.box_scroll_target = 0.0;
+        self.sync_input_region();
+        self.refilter();
     }
 
     /// Display name of the open group, for the Apps section title.
@@ -1602,31 +1653,49 @@ impl App {
             std::array::from_fn(|s| self.search.visible[s].len()),
             std::array::from_fn(|s| self.scroll.per[s].pos),
             [
-                self.app_group.is_some() || self.closing_members.is_some(),
+                self.open_box_group().is_some() || self.closing_members.is_some(),
                 false,
                 self.files_dir.is_some(),
             ],
         );
-        // Anchor the open box to the side of the grid it sits on, so the
-        // pinned preview icon (top-left on the left, top-right on the right)
-        // lands exactly on its closed position and the box unfolds away
-        // from it into open space.
+        // Position the open box's rest square. A grid box anchors to the
+        // side of the grid it sits on (pinned preview icon lands on its
+        // closed spot); a dock stack floats the same-size square above its
+        // dock folder icon.
         if let (Some(base), Some((ox, oy))) = (layout.open_box, self.group_origin) {
             let vp = layout.sections[content::SECTION_APPS].viewport;
             let s = base.h;
-            let half_cell = s / 6.0; // half a 3×3 cell
-            let mini_off = content::GRID_ICON * 0.26; // 2×2 mini offset from center
-            let left = ox < vp.x + vp.w / 2.0;
-            // Place the near-corner cell center on the pinned icon's spot.
-            let x = if left {
-                ox - mini_off - half_cell
+            if let Some(g) = self.dock_stack {
+                let gid = format!("group:{}", self.groups.groups()[g].id);
+                let dock = self
+                    .dock_order
+                    .iter()
+                    .position(|&e| self.entries.get(e).is_some_and(|x| x.id == gid))
+                    .and_then(|sl| layout.dock_slots.get(sl));
+                if let Some(&dock_rect) = dock {
+                    // Fixed size (the card may be collapsed, so `s` is
+                    // degenerate here).
+                    layout.open_box = Some(content::dock_box_rect(
+                        dock_rect,
+                        content::DOCK_BOX_SIDE,
+                        self.buffer_size.0 as f32,
+                    ));
+                }
             } else {
-                ox + mini_off - (s - half_cell)
-            };
-            let y = oy - mini_off - half_cell;
-            let x = x.clamp(vp.x, (vp.x + vp.w - s).max(vp.x));
-            let y = y.clamp(vp.y, (vp.y + vp.h - s).max(vp.y));
-            layout.open_box = Some(content::Rect::new(x, y, s, s));
+                let half_cell = s / 6.0; // half a 3×3 cell
+                let mini_off = content::GRID_ICON * 0.26; // 2×2 mini offset
+                let left = ox < vp.x + vp.w / 2.0;
+                // Place the near-corner cell center on the pinned icon's spot.
+                let x = if left {
+                    ox - mini_off - half_cell
+                } else {
+                    ox + mini_off - (s - half_cell)
+                };
+                let y = oy - mini_off - half_cell;
+                let x = x.clamp(vp.x, (vp.x + vp.w - s).max(vp.x));
+                let y = y.clamp(vp.y, (vp.y + vp.h - s).max(vp.y));
+                layout.open_box = Some(content::Rect::new(x, y, s, s));
+            }
         }
         layout
     }
@@ -1642,15 +1711,14 @@ impl App {
     fn recompute_dock_order(&mut self) {
         self.dock_order.clear();
         for pin_id in self.pins.pins() {
-            // Match only real App entries — never the transient Package /
-            // File entries a search leaves in `entries`, or a stale pin
-            // for an uninstalled app would ghost onto its same-named
-            // package search result.
-            let idx = self
-                .entries
-                .iter()
-                .zip(&self.kinds)
-                .position(|(e, k)| &e.id == pin_id && *k == apps::EntryKind::App);
+            // Match a real App entry or a box's Group entry — never the
+            // transient Package / File entries a search leaves in `entries`,
+            // or a stale pin for an uninstalled app would ghost onto its
+            // same-named package search result.
+            let idx = self.entries.iter().zip(&self.kinds).position(|(e, k)| {
+                &e.id == pin_id
+                    && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
+            });
             if let Some(idx) = idx {
                 if !self.dock_order.contains(&idx) {
                     self.dock_order.push(idx);
@@ -1684,6 +1752,68 @@ impl App {
             .position(|s| x < s.x + s.w / 2.0)
             .unwrap_or(slots.len());
         Some(insert)
+    }
+
+    /// The dock slot whose icon the pointer is centered over — a fold
+    /// target (drop an app on it to join/create a box). `None` between
+    /// icons or off the dock.
+    fn dock_fold_target(&self, layout: &content::Layout, pos: (f32, f32)) -> Option<usize> {
+        let (x, y) = pos;
+        if y < layout.card_top || y > layout.dock_hit_bottom {
+            return None;
+        }
+        layout.dock_slots.iter().position(|s| {
+            let fx = (x - s.x) / s.w;
+            (0.25..0.75).contains(&fx)
+        })
+    }
+
+    /// Drop an app centered on a dock icon: add it to a folder there, or
+    /// create a new folder (pinned in the target app's slot) from the two
+    /// apps. Returns whether it folded.
+    fn handle_dock_fold(&mut self, dragged_idx: usize, dragged_id: &str, pos: (f32, f32)) -> bool {
+        let layout = self.current_layout();
+        let Some(slot) = self.dock_fold_target(&layout, pos) else {
+            return false;
+        };
+        let Some(&target_idx) = self.dock_order.get(slot) else {
+            return false;
+        };
+        if target_idx == dragged_idx {
+            return false; // dropped on itself
+        }
+        let target_id = self.entries[target_idx].id.clone();
+        match self.kinds.get(target_idx) {
+            // Join the folder.
+            Some(apps::EntryKind::Group) => {
+                let Some(g) = target_id
+                    .strip_prefix("group:")
+                    .and_then(|gid| self.groups.index_by_id(gid))
+                else {
+                    return false;
+                };
+                self.groups.add(g, dragged_id);
+                self.pins.unpin(dragged_id); // if it rode the dock
+                self.refilter();
+                true
+            }
+            // Create a folder of [target, dragged], pinned where target sat.
+            Some(apps::EntryKind::App) => {
+                let box_pin = format!("group:{}", self.groups.create(&target_id, dragged_id));
+                let at = self
+                    .pins
+                    .pins()
+                    .iter()
+                    .position(|p| p == &target_id)
+                    .unwrap_or(self.pins.pins().len());
+                self.pins.pin_at(&box_pin, at);
+                self.pins.unpin(&target_id);
+                self.pins.unpin(dragged_id);
+                self.refilter();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Finish a drag. Apps pin at the dock slot they were dropped on
@@ -1805,7 +1935,15 @@ impl App {
                     )
                     && self.search.query.is_empty()
                     && self.handle_grid_drop(drag.entry_idx, &id, drag.pos);
-                if !boxed && kind != Some(apps::EntryKind::Group) {
+                // Dropped centered on a dock icon: join/create a folder on
+                // the dock (an app onto a folder joins; onto an app boxes).
+                let dock_folded = !boxed
+                    && released
+                    && self.search.query.is_empty()
+                    && kind == Some(apps::EntryKind::App)
+                    && self.handle_dock_fold(drag.entry_idx, &id, drag.pos);
+                if !boxed && !dock_folded {
+                    // Dropped on the dock pins the item (app or box) there.
                     if let Some(slot) = insert {
                         // Dock reorder. Drop in the visible gap: the
                         // dock parts in compact coordinates (origin
@@ -2194,9 +2332,13 @@ impl App {
         let inserting = drag.from_dock || kind == Some(apps::EntryKind::Package);
         let grid_drag = self.search.query.is_empty()
             && if inserting {
+                // A dock box dragged into the grid inserts too (it unpins
+                // and lands there).
                 matches!(
                     kind,
-                    Some(apps::EntryKind::App) | Some(apps::EntryKind::Package)
+                    Some(apps::EntryKind::App)
+                        | Some(apps::EntryKind::Package)
+                        | Some(apps::EntryKind::Group)
                 )
             } else {
                 orig.is_some()
@@ -2480,13 +2622,27 @@ impl App {
         // While a box is open, the grid behind is just context: a click
         // anywhere but the box itself closes the box (and does nothing
         // else this click).
-        if self.app_group.is_some() && !matches!(hit, Hit::OpenBoxCell(_)) {
+        if self.open_box_group().is_some() && !matches!(hit, Hit::OpenBoxCell(_)) {
             self.close_group();
             return;
         }
         match hit {
             Hit::DockIcon(slot) => {
                 if let Some(&entry_idx) = self.dock_order.get(slot) {
+                    // A pinned box opens its folder as a stack above the dock
+                    // (the same magnified box, anchored to the icon); an app
+                    // launches.
+                    if self.kinds.get(entry_idx) == Some(&apps::EntryKind::Group) {
+                        if let Some(g) = self
+                            .entries
+                            .get(entry_idx)
+                            .and_then(|e| e.id.strip_prefix("group:"))
+                            .and_then(|gid| self.groups.index_by_id(gid))
+                        {
+                            self.open_dock_folder(g);
+                        }
+                        return;
+                    }
                     self.activate(entry_idx);
                 }
             }
@@ -2542,7 +2698,7 @@ impl App {
     /// The open box member id shown in 3×3 slot `k` on the current page, if
     /// that slot is filled (maps slot → member via the side layout + page).
     fn open_box_member_id(&self, k: usize) -> Option<String> {
-        let g = self.app_group?;
+        let g = self.open_box_group()?;
         let local = content::open_box_slot_member(self.box_is_left(), k);
         self.groups
             .groups()
@@ -2563,6 +2719,7 @@ impl App {
     /// two members) and rides the drag into the loose grid — from there
     /// the normal make-room/drop path organizes it onto the grid or dock.
     fn start_box_member_drag(&mut self, k: usize, pos: (f32, f32)) {
+        // A dock stack has no grid to drop into — its members only launch.
         let Some(g) = self.app_group else { return };
         let Some(member_id) = self.open_box_member_id(k) else {
             return;
@@ -2603,6 +2760,8 @@ impl App {
     /// finishes the job); from the dock, hide outright — unless nothing
     /// overlaps the zone, where intellihide keeps the dock parked.
     fn dismiss(&mut self) {
+        // A dock stack closes with the launcher.
+        self.dock_stack = None;
         let command = if self.ui.target() == Target::Open || self.zone_free {
             Command::Collapse
         } else {
@@ -2751,6 +2910,14 @@ impl App {
         if self.ui.target() == Target::Hidden && self.config.input.edge_reveal {
             extent = extent.max(self.config.input.edge_reveal_px);
         }
+        // An open dock stack (a box floating above the dock) must be
+        // interactive, so the input band reaches up to it.
+        if self.dock_stack.is_some() {
+            if let Some(b) = self.current_layout().open_box {
+                let needed = (self.buffer_size.1 as f32 - b.y).ceil().max(0.0) as u32;
+                extent = extent.max(needed);
+            }
+        }
         if self.input_extent != Some(extent) {
             match surface::set_input_extent(
                 &self.compositor,
@@ -2882,6 +3049,15 @@ impl App {
         // fold target (ring); remember which cell to hide (the ghost
         // is its visual).
         let over_cell = self.update_grid_target(&layout);
+        // Dock fold target: an app dragged over another dock icon's center
+        // (not its own) will join/create a box there.
+        let over_dock = self.gesture.dragging.as_ref().and_then(|d| {
+            if self.kinds.get(d.entry_idx) != Some(&apps::EntryKind::App) {
+                return None;
+            }
+            let slot = self.dock_fold_target(&layout, d.pos)?;
+            (self.dock_order.get(slot) != Some(&d.entry_idx)).then_some(slot)
+        });
         // The icon in hand is the ghost: hide its resting cell — the
         // grid cell for grid-origin drags, the dock slot for
         // dock-origin ones.
@@ -2912,15 +3088,19 @@ impl App {
                 .iter()
                 .position(|&v| v == e)
         });
-        // A dock app dragged into the grid opens a brand-new slot (it
-        // has no cell to vacate): cells at or past the gap slide down
+        // A dock app or box dragged into the grid opens a brand-new slot
+        // (it has no cell to vacate): cells at or past the gap slide down
         // one to make room — like a reorder, but leaving no hole behind.
         let insert_gap = self
             .gesture
             .dragging
             .as_ref()
             .filter(|d| {
-                d.from_dock && matches!(self.kinds.get(d.entry_idx), Some(apps::EntryKind::App))
+                d.from_dock
+                    && matches!(
+                        self.kinds.get(d.entry_idx),
+                        Some(apps::EntryKind::App | apps::EntryKind::Group)
+                    )
             })
             .and(self.reorder_slot);
         let mut slide_animating = false;
@@ -2953,10 +3133,11 @@ impl App {
             self.gesture
                 .dragging
                 .as_ref()
+                .filter(|_| over_dock.is_none()) // folding onto an icon: don't part
                 .and_then(|d| match self.kinds.get(d.entry_idx) {
-                    Some(apps::EntryKind::App) | Some(apps::EntryKind::File) => {
-                        self.drag_dock_insert(&layout, d.pos)
-                    }
+                    Some(
+                        apps::EntryKind::App | apps::EntryKind::File | apps::EntryKind::Group,
+                    ) => self.drag_dock_insert(&layout, d.pos),
                     _ => None,
                 });
         let n_dock = layout.dock_slots.len();
@@ -3047,13 +3228,18 @@ impl App {
                 self.group_anim = (self.group_anim - step).max(self.group_anim_target);
             }
             if self.group_anim <= 0.0 && self.group_anim_target <= 0.0 {
-                // Fully collapsed back into the tile: leave the box (and
-                // end any drag-out shrink).
+                // Fully collapsed back into the tile: leave the box (grid or
+                // dock stack) and end any drag-out shrink.
+                let was_dock = self.dock_stack.is_some();
                 self.app_group = None;
+                self.dock_stack = None;
                 self.closing_members = None;
                 self.group_origin = None;
                 self.group_anim = 1.0;
                 self.group_anim_target = 1.0;
+                if was_dock {
+                    self.sync_input_region();
+                }
                 self.refilter();
             } else {
                 self.dirty = true;
@@ -3089,6 +3275,7 @@ impl App {
                 },
                 drop_section: self.drag_drop_section(&layout, drag.pos, drag.entry_idx),
                 over_cell,
+                over_dock,
             });
         // A pending drag-to-install tile counts as busy (its "Installing…"
         // note holds from the drop until the rescan swaps in the real app)
@@ -3131,7 +3318,7 @@ impl App {
         // While a box is open (or shrinking closed after a drag-out), its
         // members (up to nine) fill the magnified box's 3×3 app grid.
         let open_box_members: Vec<usize> = self
-            .app_group
+            .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
             .map(|group| {
                 // All members; the box overlay pages them 3×3 via box_scroll.
@@ -3150,7 +3337,7 @@ impl App {
             self.entries.iter().position(|e| e.id == gid)
         });
         let open_box_pages = self
-            .app_group
+            .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
             .map(|grp| {
                 let pages = grp.members.len().div_ceil(9).max(1);
@@ -3216,13 +3403,16 @@ impl App {
             self.dirty = true;
         }
         if scroll_animating
-            && self.ui.target() == Target::Open
-            && (self
-                .scroll
-                .per
-                .iter()
-                .any(|sec| (sec.target - sec.pos).abs() > 0.5)
-                || (self.box_scroll_target - self.box_scroll).abs() > 0.5)
+            && ((self.ui.target() == Target::Open
+                && self
+                    .scroll
+                    .per
+                    .iter()
+                    .any(|sec| (sec.target - sec.pos).abs() > 0.5))
+                // A box page-slide keeps animating whatever the card state
+                // (a dock stack lives in the Dock state, not Open).
+                || (self.open_box_group().is_some()
+                    && (self.box_scroll_target - self.box_scroll).abs() > 0.5))
         {
             self.dirty = true;
         }
@@ -3238,6 +3428,12 @@ impl App {
     /// the grid (down = next, up = previous) and never collapses the
     /// popup — dismissal is Escape / pointer-leave / toggle only.
     fn on_scroll(&mut self, value: f64) {
+        // An open box (grid box or dock stack) captures scroll to page its
+        // members, whatever the card state (a dock stack opens over the bar).
+        if self.open_box_group().is_some() {
+            self.box_page_scroll(value);
+            return;
+        }
         let target = self.ui.target();
         match target {
             Target::Hidden | Target::Dock => {
@@ -3280,12 +3476,9 @@ impl App {
                 {
                     return;
                 }
-                // An open box captures scroll to page its members; the
-                // grid underneath doesn't scroll. Otherwise page the
-                // section under the pointer (each scrolls independently).
-                if self.app_group.is_some() {
-                    self.box_page_scroll(value);
-                } else if let Some(section) = self
+                // Page the section under the pointer (each scrolls
+                // independently). An open box was already handled above.
+                if let Some(section) = self
                     .pointer_pos
                     .and_then(|pos| content::section_at(&self.current_layout(), pos))
                 {
@@ -3322,7 +3515,7 @@ impl App {
     /// with a horizontal slide (mirrors `page_by`).
     fn turn_box_page(&mut self, dir: i64) {
         let Some(n) = self
-            .app_group
+            .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
             .map(|grp| grp.members.len())
         else {
@@ -3369,7 +3562,7 @@ impl App {
     /// axis; verify on real hardware.)
     fn on_hscroll(&mut self, value: f64) {
         if self.ui.target() == Target::Open {
-            if self.app_group.is_some() {
+            if self.open_box_group().is_some() {
                 self.box_page_scroll(value);
             } else if let Some(section) = self
                 .pointer_pos
@@ -3445,7 +3638,7 @@ impl App {
         match keysym {
             Keysym::Escape => {
                 // Step out of an open box first; dismiss on the next.
-                if self.app_group.is_some() && self.search.query.is_empty() {
+                if self.open_box_group().is_some() && self.search.query.is_empty() {
                     self.close_group();
                     return;
                 }
@@ -3862,9 +4055,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     Hit::GridCell(s, cell) => {
                                         app.search.visible[s].get(cell).copied()
                                     }
-                                    Hit::SearchButton | Hit::FilesBack | Hit::OpenBoxCell(_) => {
-                                        None
-                                    }
+                                    Hit::SearchButton
+                                    | Hit::FilesBack
+                                    | Hit::OpenBoxCell(_) => None,
                                 };
                                 // Cells with a profile mutation in flight
                                 // can't start a new drag.
@@ -3949,10 +4142,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     app.activate_hit(hit);
                                 }
                                 // else: drag-cancel — do nothing.
-                            } else if app.app_group.is_some() {
-                                // A box is open: a click off any member is a
-                                // click-outside gesture that shrinks the box
-                                // back into the grid (not a launcher dismiss).
+                            } else if app.open_box_group().is_some() {
+                                // A box (grid or dock stack) is open: a click
+                                // off it closes the box, not the launcher.
                                 app.close_group();
                             } else if app.ui.target() == Target::Open {
                                 // Press started on no interactive element (card
