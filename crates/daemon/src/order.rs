@@ -53,6 +53,18 @@ impl OrderDb {
         }
     }
 
+    /// Forget the grid slot of any box no longer alive: a `group:` id not
+    /// in `live` is dropped (a deleted box keeps nothing). App ids are
+    /// always kept — a vanished app returns to its slot on reinstall.
+    pub fn forget_dead_boxes(&mut self, live: &std::collections::HashSet<String>) {
+        let before = self.order.len();
+        self.order
+            .retain(|id| !id.starts_with("group:") || live.contains(id));
+        if self.order.len() != before {
+            self.save();
+        }
+    }
+
     /// Sort position of `id`; unknown ids sort last (stable).
     pub fn index_of(&self, id: &str) -> usize {
         self.order

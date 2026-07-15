@@ -1,13 +1,16 @@
 //! Persistent app groups ("boxes", macOS/GNOME style): dropping one
 //! Apps-grid app onto another creates a group; dropping an app onto a
-//! group cell adds it; dragging a member out removes it. Groups with
-//! fewer than two members dissolve back into loose apps.
+//! group cell adds it; dragging a member out removes it. A box needs at
+//! least two members: the moment it drops below two it's deleted entirely
+//! (its lone app returns to the loose grid, and nothing about the box is
+//! kept).
 //!
 //! Stored in `$XDG_DATA_HOME/waverunner/groups.json` as
 //! `{ "groups": [ { "name": null, "members": ["id", ...] }, ... ] }`.
 //! Writes are best-effort; a failed write is logged but never fatal.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
@@ -139,8 +142,8 @@ impl GroupDb {
         self.save();
     }
 
-    /// Remove `id` from whatever group holds it; a group left with
-    /// fewer than two members dissolves. Returns true if anything
+    /// Remove `id` from whatever group holds it; a group left with fewer
+    /// than two members is deleted entirely. Returns true if anything
     /// changed.
     pub fn remove_member(&mut self, id: &str) -> bool {
         let Some(index) = self.group_of(id) else {
@@ -148,13 +151,33 @@ impl GroupDb {
         };
         self.groups[index].members.retain(|m| m != id);
         if self.groups[index].members.len() < 2 {
-            info!("group {index} dissolved (fewer than two members)");
+            info!("group {index} removed (fewer than two members)");
             self.groups.remove(index);
         } else {
             info!("group {index}: removed {id}");
         }
         self.save();
         true
+    }
+
+    /// Drop members whose app no longer exists (per `exists`), then delete
+    /// any box left with fewer than two members — nothing about a removed
+    /// box is kept. Returns whether anything changed. Run after an app
+    /// rescan so uninstalling a box's members makes it vanish on its own.
+    pub fn prune(&mut self, exists: &HashSet<String>) -> bool {
+        let members_before: usize = self.groups.iter().map(|g| g.members.len()).sum();
+        for g in &mut self.groups {
+            g.members.retain(|m| exists.contains(m.as_str()));
+        }
+        let groups_before = self.groups.len();
+        self.groups.retain(|g| g.members.len() >= 2);
+        let changed = self.groups.len() != groups_before
+            || self.groups.iter().map(|g| g.members.len()).sum::<usize>() != members_before;
+        if changed {
+            info!("pruned dead members / undersized boxes");
+            self.save();
+        }
+        changed
     }
 
     /// Display label: the custom name, or "<First member's name> +N".
@@ -243,7 +266,7 @@ mod tests {
         assert!(g.remove_member("vlc"));
         assert_eq!(g.groups()[idx].members.len(), 2);
 
-        // Dropping to one member dissolves the group.
+        // Dropping below two members deletes the box; its lone app goes loose.
         g.remove_member("firefox");
         assert!(g.groups().is_empty());
         assert!(!g.is_grouped("gimp"));
@@ -253,7 +276,7 @@ mod tests {
     fn create_steals_members_from_other_groups() {
         let mut g = db();
         let first = g.create("a", "b");
-        let second = g.create("c", "b"); // b moves; [a] dissolves
+        let second = g.create("c", "b"); // b moves; first drops to [a] and is deleted
         assert_eq!(g.groups().len(), 1);
         assert!(g.index_by_id(&first).is_none());
         let idx = g.index_by_id(&second).unwrap();
@@ -262,15 +285,35 @@ mod tests {
     }
 
     #[test]
-    fn add_survives_a_dissolve_shifting_indices() {
+    fn add_below_two_shifts_indices() {
         let mut g = db();
-        g.create("a", "b"); // group 0
-        g.create("c", "d"); // group 1
-                            // Moving `b` into group 1 dissolves group 0 mid-flight.
+        g.create("a", "b"); // group 0 [a, b]
+        g.create("c", "d"); // group 1 [c, d]
+                            // Moving `b` into group 1 drops group 0 to [a] (< 2), deleting it
+                            // mid-add and shifting group 1's index down.
         g.add(1, "b");
         assert_eq!(g.groups().len(), 1);
         assert_eq!(g.groups()[0].members, vec!["c", "d", "b"]);
         assert!(!g.is_grouped("a"));
+    }
+
+    #[test]
+    fn prune_drops_dead_members_and_undersized_boxes() {
+        let mut g = db();
+        let id = g.create("a", "b");
+        let idx = g.index_by_id(&id).unwrap();
+        g.add(idx, "c"); // box [a, b, c]
+        g.create("x", "y"); // second box [x, y]
+                            // c, x, y were uninstalled; a and b remain.
+        let exists: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        assert!(g.prune(&exists));
+        // First box keeps [a, b]; the second (both gone) is deleted.
+        assert_eq!(g.groups().len(), 1);
+        assert_eq!(g.groups()[0].members, vec!["a", "b"]);
+        // Losing one more member drops it below two → the box is removed.
+        let exists2: HashSet<String> = ["a".to_string()].into_iter().collect();
+        assert!(g.prune(&exists2));
+        assert!(g.groups().is_empty());
     }
 
     #[test]

@@ -262,7 +262,10 @@ mod tests {
             after <= mid + 1.0 && after >= 0.0,
             "extent jumped on interrupt: {mid} -> {after}"
         );
-        assert!(after < mid, "close did not begin reversing: {mid} -> {after}");
+        assert!(
+            after < mid,
+            "close did not begin reversing: {mid} -> {after}"
+        );
         settle(&mut s);
         assert_eq!(s.extent(), 0.0);
     }

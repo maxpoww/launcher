@@ -771,7 +771,10 @@ fn realize(attr: &str) -> Realized {
 /// the output carrying a `bin/` dir names the binary (preferring one that
 /// matches the attr, e.g. `ripgrep`→`rg` falls through to the lone entry),
 /// and that output's store-path name carries the version.
-fn main_program<'a>(attr: &str, store_paths: impl Iterator<Item = &'a str>) -> (Option<String>, Option<String>) {
+fn main_program<'a>(
+    attr: &str,
+    store_paths: impl Iterator<Item = &'a str>,
+) -> (Option<String>, Option<String>) {
     // The install handle's leaf (`kdePackages.kdenlive` → `kdenlive`) is
     // the best guess at the primary binary's name.
     let leaf = attr.rsplit('.').next().unwrap_or(attr);

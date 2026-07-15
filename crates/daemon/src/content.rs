@@ -17,7 +17,7 @@ pub struct Rect {
 }
 
 impl Rect {
-    fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }
 
@@ -102,8 +102,11 @@ pub enum Hit {
     SearchButton,
     /// The "‹ Back" button beside the Files title (navigated dirs only).
     FilesBack,
-    /// The "‹ Back" button beside the Apps title (open group only).
-    AppsBack,
+    /// A member cell of the magnified open box: the 3×3 slot index under
+    /// the pointer (0..9). Clicking a filled slot launches it; dragging
+    /// pulls the app out of the box. A click on an empty slot is inert —
+    /// only a click *outside* the box closes it.
+    OpenBoxCell(usize),
 }
 
 /// Popup sections, top to bottom: the app grid, the (future) install
@@ -114,16 +117,14 @@ pub const SECTION_FILES: usize = 2;
 pub const N_SECTIONS: usize = 3;
 const SECTION_TITLES: [&str; N_SECTIONS] = ["Apps", "Install", "Files"];
 /// Grid rows per section (Apps is a cap; it shrinks on short cards).
-const SECTION_ROWS: [usize; N_SECTIONS] = [3, 1, 1];
+const SECTION_ROWS: [usize; N_SECTIONS] = [4, 1, 1];
 /// Height of a section's title line above its grid.
-const SECTION_TITLE_H: f32 = 22.0;
+const SECTION_TITLE_H: f32 = 17.0;
 /// Vertical gap beneath each section (page dots live here).
-const SECTION_GAP: f32 = 14.0;
+const SECTION_GAP: f32 = 8.0;
 /// Size of the "‹ Back" pill beside the Files title.
 const BACK_W: f32 = 52.0;
 const BACK_H: f32 = 18.0;
-/// Columns of the compact grid an open app group shows (3×3 pages).
-const GROUP_COLS: usize = 3;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
@@ -131,11 +132,21 @@ pub const DOCK_ICON: f32 = 40.0;
 const DOCK_SLOT: f32 = 44.0;
 const DOCK_PAD_X: f32 = 10.0;
 pub const GRID_CELL_W: f32 = 104.0;
-pub const GRID_CELL_H: f32 = 96.0;
+pub const GRID_CELL_H: f32 = 86.0;
 pub const GRID_ICON: f32 = 54.0;
+/// Vertical padding inside a grid cell: from the cell top to the icon,
+/// and from the icon bottom to its label. Kept tight so more rows fit.
+pub const GRID_ICON_TOP: f32 = 9.0;
+const GRID_LABEL_GAP: f32 = 5.0;
+/// A closed box tile's side (the folder-style square that holds the 2×2
+/// mini preview) — the size the magnified box grows out of / collapses to.
+pub const BOX_TILE: f32 = GRID_ICON * 1.15;
+/// Columns/rows of the magnified open box's inner app grid (3×3 = up to
+/// nine members shown).
+const OPEN_BOX_COLS: usize = 3;
 const GRID_PAD_X: f32 = 14.0;
-const GRID_TOP_GAP: f32 = 8.0;
-const GRID_BOTTOM_PAD: f32 = 10.0;
+const GRID_TOP_GAP: f32 = 5.0;
+const GRID_BOTTOM_PAD: f32 = 6.0;
 /// Text metrics for the app-name labels.
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
@@ -146,7 +157,7 @@ const SEARCH_BTN_W: f32 = 80.0;
 /// Minimum expanded width; grows with content beyond this.
 const SEARCH_W_MIN: f32 = 160.0;
 const SEARCH_PAD_X: f32 = 14.0;
-const SEARCH_GAP: f32 = 10.0;
+const SEARCH_GAP: f32 = 7.0;
 const SEARCH_FONT_PX: f32 = 15.0;
 const SEARCH_LINE_PX: f32 = 20.0;
 
@@ -246,9 +257,9 @@ pub struct Layout {
     /// "‹ Back" button beside the Files title; present only while the
     /// Files section is navigated into a directory.
     pub files_back: Option<Rect>,
-    /// "‹ Back" button beside the Apps title; present only while an
-    /// app group is open.
-    pub apps_back: Option<Rect>,
+    /// The Apps-grid rectangle the magnified box fills; present only while
+    /// a box is open. A click inside is inert (only outside closes).
+    pub open_box: Option<Rect>,
 }
 
 /// Compute the layout for the current animation state.
@@ -290,7 +301,11 @@ pub fn layout(
     // Docked (a pure bar), the icon columns stay live all the way to the
     // screen edge so the floating gap is clickable; open, they stop at
     // the dock-band bottom and the grid takes over below.
-    let dock_hit_bottom = if card_h > dock_h { card_top + dock_h } else { h };
+    let dock_hit_bottom = if card_h > dock_h {
+        card_top + dock_h
+    } else {
+        h
+    };
 
     // Dock uses n_entries so search never hides dock icons.
     let max_slots = (((card_w - 2.0 * DOCK_PAD_X) / DOCK_SLOT).floor() as usize).max(1);
@@ -338,23 +353,19 @@ pub fn layout(
 
     let mut y = grid_top;
     let mut files_back = None;
-    let mut apps_back = None;
     let sections = std::array::from_fn(|s| {
         let rows = if s == SECTION_APPS {
             apps_rows
         } else {
             SECTION_ROWS[s]
         };
-        // An open app group shows a compact, centered 3-wide folder
-        // grid (3×3 pages) instead of the full-width strip.
-        let cols = if s == SECTION_APPS && navigated[s] {
-            GROUP_COLS.min(cols)
-        } else {
-            cols
-        };
+        // Apps stays full-width even with a box open (the magnified box
+        // fills the whole grid, drawn as an overlay in `scene`).
         let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
         let mut title_pos = (grid_x0 + 8.0, y);
-        if navigated[s] {
+        // Files navigation keeps a "‹ Back" pill; an open app box does not
+        // (it's dismissed by clicking outside it).
+        if navigated[s] && s == SECTION_FILES {
             // "‹ Back" pill sits where the title starts; title shifts right.
             let back = Rect::new(
                 title_pos.0,
@@ -362,11 +373,7 @@ pub fn layout(
                 BACK_W,
                 BACK_H,
             );
-            if s == SECTION_FILES {
-                files_back = Some(back);
-            } else {
-                apps_back = Some(back);
-            }
+            files_back = Some(back);
             title_pos.0 += BACK_W + 10.0;
         }
         y += SECTION_TITLE_H;
@@ -403,6 +410,15 @@ pub fn layout(
         }
     });
 
+    // A box open shows a square as tall as the whole Apps grid (top to
+    // bottom edges), centered horizontally — its rest rect, which the
+    // magnified box grows into and which swallows clicks.
+    let open_box = navigated[SECTION_APPS].then(|| {
+        let vp = sections[SECTION_APPS].viewport;
+        let side = vp.h.min(vp.w);
+        Rect::new(vp.x + (vp.w - side) / 2.0, vp.y, side, side)
+    });
+
     Layout {
         card_top,
         card_h,
@@ -412,7 +428,7 @@ pub fn layout(
         search_box,
         search_btn,
         files_back,
-        apps_back,
+        open_box,
     }
 }
 
@@ -457,8 +473,15 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<H
     if layout.files_back.is_some_and(|b| b.contains(pos)) {
         return Some(Hit::FilesBack);
     }
-    if layout.apps_back.is_some_and(|b| b.contains(pos)) {
-        return Some(Hit::AppsBack);
+    // The magnified open box: resolve the 3×3 member slot under the
+    // pointer (clicks inside are inert/launch; only outside closes).
+    if let Some(b) = layout.open_box {
+        if b.contains(pos) {
+            let cols = OPEN_BOX_COLS as f32;
+            let col = (((px - b.x) / (b.w / cols)).floor() as usize).min(OPEN_BOX_COLS - 1);
+            let row = (((py - b.y) / (b.h / cols)).floor() as usize).min(OPEN_BOX_COLS - 1);
+            return Some(Hit::OpenBoxCell(row * OPEN_BOX_COLS + col));
+        }
     }
     for (s, sec) in layout.sections.iter().enumerate() {
         if sec.n_pages > 0 && sec.viewport.contains(pos) {
@@ -575,11 +598,36 @@ pub struct FrameInput<'a> {
     /// make-room glide while a drag hovers it. Empty = at rest.
     pub dock_slide: &'a [f32],
     /// Open/close progress of the app-group expand animation (eased,
-    /// 0 = collapsed into the tile, 1 = settled). Cells of an open
-    /// group scale/glide out of `group_origin`.
+    /// 0 = collapsed into the tile, 1 = settled). The magnified box
+    /// grows from `group_origin` to fill the Apps grid.
     pub group_expand: f32,
-    /// Surface point the open group expands from (the clicked tile).
+    /// Surface point the open box grows from (the clicked tile).
     pub group_origin: Option<(f32, f32)>,
+    /// While a box is open: entry indices of its members (up to nine) for
+    /// the magnified 3×3 app grid. Empty when no box is open.
+    pub open_box_members: &'a [usize],
+    /// The open box's own grid cell (its tile), hidden from the grid
+    /// behind while the magnified box stands in for it.
+    pub open_box_hidden: Option<usize>,
+    /// Open box paging: (current page, total pages). Page dots show when
+    /// there is more than one.
+    pub open_box_pages: (usize, usize),
+    /// Horizontal page-scroll offset of the open box (px): members are laid
+    /// out in a strip of 3×3 pages shifted by this, so pages slide.
+    pub box_scroll: f32,
+}
+
+/// Local member index shown in 3×3 slot `slot` (row-major) of an open box
+/// on the `left` (or right) side of the grid — the inverse of the
+/// member→slot placement used when drawing. Lets a click on a slot resolve
+/// to the member under it.
+pub fn open_box_slot_member(left: bool, slot: usize) -> usize {
+    let slot_member: [usize; 9] = if left {
+        [0, 1, 3, 2, 4, 5, 6, 7, 8]
+    } else {
+        [2, 0, 1, 4, 5, 3, 6, 7, 8]
+    };
+    slot_member.get(slot).copied().unwrap_or(slot)
 }
 
 /// Assemble the draw scene for one frame.
@@ -623,8 +671,28 @@ pub fn scene(
         dock_slide,
         group_expand,
         group_origin,
+        open_box_members,
+        open_box_hidden,
+        open_box_pages,
+        box_scroll,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
+    // The magnified open box's current rect (grows from the tile into its
+    // rest square). Used to draw the box and to hide the grid labels it
+    // covers — otherwise those names paint over it in the later text pass.
+    let open_box_rect = match (open_box_members.is_empty(), group_origin, layout.open_box) {
+        (false, Some((ox, oy)), Some(to)) => {
+            let t = group_expand.clamp(0.0, 1.0);
+            let from = Rect::new(ox - BOX_TILE / 2.0, oy - BOX_TILE / 2.0, BOX_TILE, BOX_TILE);
+            Some(Rect::new(
+                lerp(from.x, to.x, t),
+                lerp(from.y, to.y, t),
+                lerp(from.w, to.w, t),
+                lerp(from.h, to.h, t),
+            ))
+        }
+        _ => None,
+    };
     let (w, _h) = surface;
     let card_w = w - 2.0 * DRAG_MARGIN_X;
     let card_h = layout.card_h;
@@ -908,12 +976,8 @@ pub fn scene(
         }
     }
 
-    // "‹ Back" pills beside navigated section titles (Files dirs, open
-    // app groups).
-    for (back, hit) in [
-        (layout.files_back, Hit::FilesBack),
-        (layout.apps_back, Hit::AppsBack),
-    ] {
+    // "‹ Back" pill beside a navigated Files directory title.
+    for (back, hit) in [(layout.files_back, Hit::FilesBack)] {
         let Some(back) = back else {
             continue;
         };
@@ -1026,12 +1090,6 @@ pub fn scene(
             let (x1, y1) = corner(i0 + 1);
             (lerp(x0, x1, frac), lerp(y0, y1, frac))
         };
-        // Group-open transition progress for this section (1 = settled).
-        let expand = if s == SECTION_APPS && group_origin.is_some() {
-            group_expand.clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
         for i in 0..sec.cells {
             let Some(&entry_idx) = visible[s].get(i) else {
                 break;
@@ -1039,8 +1097,9 @@ pub fn scene(
             let Some(entry) = entries.get(entry_idx) else {
                 break;
             };
-            // The drag's origin cell vanishes (its ghost is in hand).
-            if drag_hidden == Some(entry_idx) {
+            // The drag's origin cell vanishes (its ghost is in hand); the
+            // open box's own tile vanishes (the magnified box replaces it).
+            if drag_hidden == Some(entry_idx) || open_box_hidden == Some(entry_idx) {
                 continue;
             }
             let di = if s == SECTION_APPS {
@@ -1048,53 +1107,56 @@ pub fn scene(
             } else {
                 i as f32
             };
-            let (mut cell_x, mut cell_y) = cell_pos(di);
+            let (cell_x, cell_y) = cell_pos(di);
             if cell_x - sec.viewport.x <= -GRID_CELL_W || cell_x - sec.viewport.x >= page_w {
                 continue;
             }
-            // Opening a box: cells scale/glide out of the clicked tile
-            // (and back into it while closing).
-            if expand < 1.0 {
-                if let Some((ox, oy)) = group_origin {
-                    cell_x = lerp(ox - GRID_CELL_W / 2.0, cell_x, expand);
-                    cell_y = lerp(oy - GRID_CELL_H / 2.0, cell_y, expand);
-                }
-            }
             let cell = Rect::new(cell_x, cell_y, GRID_CELL_W, GRID_CELL_H);
-            if expand >= 1.0 {
-                if selected == Some((s, i)) {
-                    let hl = config.theme.highlight_rgba();
-                    grid.rects.push(RectInst {
-                        rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
-                        radius: 14.0,
-                        color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
-                    });
-                } else if hover == Some(Hit::GridCell(s, i)) {
-                    grid.rects.push(RectInst {
-                        rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
-                        radius: 14.0,
-                        color: config.theme.highlight_rgba(),
-                    });
-                }
-                // A drag hovering a cell that would take the drop
-                // (group create/add) rings it brightly.
-                if drag.and_then(|d| d.over_cell) == Some((s, i)) {
-                    let hl = config.theme.highlight_rgba();
-                    grid.rects.push(RectInst {
-                        rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
-                        radius: 16.0,
-                        color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
-                    });
-                }
+            if selected == Some((s, i)) {
+                let hl = config.theme.highlight_rgba();
+                grid.rects.push(RectInst {
+                    rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                    radius: 14.0,
+                    color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
+                });
+            } else if hover == Some(Hit::GridCell(s, i)) {
+                grid.rects.push(RectInst {
+                    rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                    radius: 14.0,
+                    color: config.theme.highlight_rgba(),
+                });
+            }
+            // A drag hovering a cell that would take the drop
+            // (group create/add) rings it brightly.
+            if drag.and_then(|d| d.over_cell) == Some((s, i)) {
+                let hl = config.theme.highlight_rgba();
+                grid.rects.push(RectInst {
+                    rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
+                    radius: 16.0,
+                    color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
+                });
             }
             let cx = cell.x + cell.w / 2.0;
-            let icon_cy = cell.y + 12.0 + GRID_ICON / 2.0;
-            let grow = lerp(0.35, 1.0, expand);
+            let icon_cy = cell.y + GRID_ICON_TOP + GRID_ICON / 2.0;
+            // Drop a cell's label when its *rect* overlaps the open box —
+            // not just when the icon center is inside it. Labels are wider
+            // than icons and sit below them, so an edge cell just outside
+            // the box can still have its label reach under the box and draw
+            // over it in the later text pass. (The icon itself is fine — the
+            // opaque panel covers it.)
+            let covered = open_box_rect.is_some_and(|b| {
+                let half = (cell.w - 12.0) / 2.0;
+                let ly = cell.y + GRID_ICON_TOP + GRID_ICON + GRID_LABEL_GAP;
+                cx + half > b.x
+                    && cx - half < b.x + b.w
+                    && ly + LABEL_LINE_PX > b.y
+                    && ly < b.y + b.h
+            });
             if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
                 // Group cell: folder-style tile with a 2×2 mini
                 // preview of the first members.
                 let hl = config.theme.highlight_rgba();
-                let tile = GRID_ICON * 1.15;
+                let tile = BOX_TILE;
                 grid.rects.push(RectInst {
                     rect: Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile),
                     radius: 14.0,
@@ -1116,29 +1178,31 @@ pub fn scene(
                         layer: *layer,
                     });
                 }
-                grid.labels.push(Label {
-                    text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
-                    pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
-                    max_w: cell.w - 12.0,
-                    font_px: LABEL_FONT_PX,
-                    line_px: LABEL_LINE_PX,
-                    centered: true,
-                    dim: false,
-                    cache: true,
-                    clip: None,
-                });
+                if !covered {
+                    grid.labels.push(Label {
+                        text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
+                        pos: (cx, cell.y + GRID_ICON_TOP + GRID_ICON + GRID_LABEL_GAP),
+                        max_w: cell.w - 12.0,
+                        font_px: LABEL_FONT_PX,
+                        line_px: LABEL_LINE_PX,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        clip: None,
+                    });
+                }
                 continue;
             }
             let scale = match pointer {
-                Some((px, py)) if expand >= 1.0 => {
+                Some((px, py)) => {
                     let d = ((px - cx).powi(2) + (py - icon_cy).powi(2)).sqrt();
                     1.0 + (GRID_MAGNIFY - 1.0)
                         * falloff(d, GRID_MAG_RADIUS)
                         * mag_amount.clamp(0.0, 1.0)
                 }
-                _ => 1.0,
+                None => 1.0,
             };
-            let size = GRID_ICON * scale * grow;
+            let size = GRID_ICON * scale;
             grid.icons.push(IconInst {
                 rect: Rect::new(
                     cx - size / 2.0,
@@ -1148,7 +1212,7 @@ pub fn scene(
                 ),
                 layer: layer_of(entry_idx),
             });
-            if placeholders.get(entry_idx).copied().unwrap_or(false) {
+            if !covered && placeholders.get(entry_idx).copied().unwrap_or(false) {
                 if let Some(ch) = entry.name.chars().next() {
                     let letter: String = ch.to_uppercase().collect();
                     let font_px = (size * 0.46).clamp(10.0, 30.0);
@@ -1166,12 +1230,8 @@ pub fn scene(
                     });
                 }
             }
-            // Names pop in at the end of the expand; a profile
-            // mutation in flight swaps the name for a progress note
-            // (dimmed); a failed one flashes "Failed".
-            if expand < 0.85 {
-                continue;
-            }
+            // A profile mutation in flight swaps the name for a progress
+            // note (dimmed); a failed one flashes "Failed".
             let is_busy = busy.get(entry_idx).copied().unwrap_or(false);
             let is_failed = failed.get(entry_idx).copied().unwrap_or(false);
             let is_installing = installing.get(entry_idx).copied().unwrap_or(false);
@@ -1187,17 +1247,19 @@ pub fn scene(
             } else {
                 truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
             };
-            grid.labels.push(Label {
-                text: name,
-                pos: (cx, cell.y + 12.0 + GRID_ICON + 8.0),
-                max_w: cell.w - 12.0,
-                font_px: LABEL_FONT_PX,
-                line_px: LABEL_LINE_PX,
-                centered: true,
-                dim: is_busy,
-                cache: true,
-                clip: None,
-            });
+            if !covered {
+                grid.labels.push(Label {
+                    text: name,
+                    pos: (cx, cell.y + GRID_ICON_TOP + GRID_ICON + GRID_LABEL_GAP),
+                    max_w: cell.w - 12.0,
+                    font_px: LABEL_FONT_PX,
+                    line_px: LABEL_LINE_PX,
+                    centered: true,
+                    dim: is_busy,
+                    cache: true,
+                    clip: None,
+                });
+            }
         }
         scene.grids.push(grid);
 
@@ -1224,6 +1286,148 @@ pub fn scene(
                     color: [hl[0], hl[1], hl[2], hl[3] * alpha],
                 });
             }
+        }
+    }
+
+    // Magnified open box: a rounded panel that grows from the clicked tile
+    // (`group_origin`) to fill the Apps grid, with the member icons in a
+    // big centered 3×3 and the box name as a title. Drawn last so it sits
+    // opaquely over the loose grid behind it.
+    if let (Some(box_rect), Some((ox, oy))) = (open_box_rect, group_origin) {
+        let t = group_expand.clamp(0.0, 1.0);
+        let radius = lerp(14.0, 22.0, t);
+        // Built as its own grid pushed last, so it draws over the loose
+        // grid behind it (section grids draw in order).
+        let mut boxgrid = GridContent {
+            clip: reveal_rect,
+            ..Default::default()
+        };
+        // The opaque card fades in from nothing, so at t=0 only the folder's
+        // highlight tint shows — matching the closed tile exactly.
+        let mut panel = config.theme.background_rgba();
+        panel[3] = 0.95 * t;
+        boxgrid.rects.push(RectInst {
+            rect: box_rect,
+            radius,
+            color: panel,
+        });
+        let hl = config.theme.highlight_rgba();
+        boxgrid.rects.push(RectInst {
+            rect: box_rect,
+            radius,
+            color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
+        });
+        // The 3×3 slot each member takes, by the grid side the box sits on:
+        // left pins member 0 (A) top-left and fills row-major; right pins
+        // member 1 (B) top-right. The rest keep their drag order.
+        let vp = layout.sections[SECTION_APPS].viewport;
+        let member_slot: [usize; 9] = if ox < vp.x + vp.w / 2.0 {
+            // Left: A pinned top-left; D takes top-right, C the middle-left.
+            [0, 1, 3, 2, 4, 5, 6, 7, 8]
+        } else {
+            // Right: B pinned top-right; C takes top-left, D the middle-right.
+            [1, 2, 0, 5, 3, 4, 6, 7, 8]
+        };
+        let cell = box_rect.w / OPEN_BOX_COLS as f32;
+        // Closed 2×2 mini geometry (matches the closed tile), centered on the
+        // tile — the preview four flow from here into their open slots.
+        let mini = GRID_ICON * 0.42;
+        let mini_offset = (mini + GRID_ICON * 0.10) / 2.0;
+        // The extra members reveal as the box unfolds past the 2×2.
+        let reveal = {
+            let u = ((t - 0.15) / 0.55).clamp(0.0, 1.0);
+            u * u * (3.0 - 2.0 * u)
+        };
+        // Members lay out in a horizontal strip of 3×3 pages shifted by
+        // `box_scroll`, so paging slides. Everything clips to the box.
+        let page_w = layout.open_box.map_or(box_rect.w, |b| b.w);
+        boxgrid.clip = box_rect;
+        for (m, &idx) in open_box_members.iter().enumerate() {
+            let slot = member_slot[m % 9];
+            let (row, col) = (slot / OPEN_BOX_COLS, slot % OPEN_BOX_COLS);
+            let page_x = (m / 9) as f32 * page_w - box_scroll;
+            let open_cx = box_rect.x + page_x + (col as f32 + 0.5) * cell;
+            let open_cy = box_rect.y + (row as f32 + 0.5) * cell;
+            // Cull members more than a page off either side of the box.
+            if open_cx < box_rect.x - cell || open_cx > box_rect.x + box_rect.w + cell {
+                continue;
+            }
+            let (cx, cy, size) = if m < 4 {
+                // Page-0 preview icons flow from the closed 2×2 into place.
+                let sx = if m == 0 || m == 2 { -1.0 } else { 1.0 };
+                let sy = if m < 2 { -1.0 } else { 1.0 };
+                (
+                    lerp(ox + sx * mini_offset, open_cx, t),
+                    lerp(oy + sy * mini_offset, open_cy, t),
+                    lerp(mini, GRID_ICON, t),
+                )
+            } else {
+                (open_cx, open_cy, lerp(mini, GRID_ICON, t) * reveal)
+            };
+            if size <= 0.5 {
+                continue;
+            }
+            boxgrid.icons.push(IconInst {
+                rect: Rect::new(cx - size / 2.0, cy - size / 2.0, size, size),
+                layer: layer_of(idx),
+            });
+            if placeholders.get(idx).copied().unwrap_or(false) {
+                if let Some(ch) = entries.get(idx).and_then(|e| e.name.chars().next()) {
+                    let font_px = (size * 0.46).clamp(8.0, 30.0);
+                    boxgrid.labels.push(Label {
+                        text: ch.to_uppercase().collect(),
+                        pos: (cx, cy - font_px * 1.3 / 2.0),
+                        max_w: size,
+                        font_px,
+                        line_px: font_px * 1.3,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        clip: Some(box_rect),
+                    });
+                }
+            }
+            // Member names pop in near the end of the open, below each icon.
+            if t > 0.85 {
+                if let Some(entry) = entries.get(idx) {
+                    boxgrid.labels.push(Label {
+                        text: truncate_label(&entry.name, cell - 8.0, LABEL_FONT_PX),
+                        pos: (cx, cy + size / 2.0 + 3.0),
+                        max_w: cell - 8.0,
+                        font_px: LABEL_FONT_PX,
+                        line_px: LABEL_LINE_PX,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        clip: Some(box_rect),
+                    });
+                }
+            }
+        }
+        scene.grids.push(boxgrid);
+        // Page dots beneath the box (own grid so they aren't clipped to it).
+        let (page, pages) = open_box_pages;
+        if pages > 1 && t > 0.6 {
+            let mut dots = GridContent {
+                clip: reveal_rect,
+                ..Default::default()
+            };
+            let dot_r = 3.0;
+            let spacing = 12.0;
+            let total_w = pages as f32 * spacing - (spacing - dot_r * 2.0);
+            let dy = box_rect.y + box_rect.h + 12.0;
+            let x0 = box_rect.x + box_rect.w / 2.0 - total_w / 2.0;
+            let hl = config.theme.highlight_rgba();
+            for p in 0..pages {
+                let x = x0 + p as f32 * spacing + dot_r;
+                let a = if p == page { hl[3] } else { hl[3] * 0.35 };
+                dots.rects.push(RectInst {
+                    rect: Rect::new(x - dot_r, dy - dot_r, dot_r * 2.0, dot_r * 2.0),
+                    radius: dot_r,
+                    color: [hl[0], hl[1], hl[2], a],
+                });
+            }
+            scene.grids.push(dots);
         }
     }
 
@@ -1311,7 +1515,7 @@ mod tests {
         let l = open_layout(&cfg, 40, 1e9);
         let apps = &l.sections[SECTION_APPS];
         assert_eq!(apps.cols, 6, "720px card fits exactly 6 columns");
-        assert_eq!(apps.rows, 3, "default card height fits the 6×3 grid");
+        assert_eq!(apps.rows, 4, "tightened gaps let the default card fit 6×4");
         assert_eq!(l.sections[SECTION_INSTALL].rows, 1);
         assert_eq!(l.sections[SECTION_FILES].rows, 1);
         // Sections stack without overlap and fit above the search box.

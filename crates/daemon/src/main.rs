@@ -171,6 +171,9 @@ fn main() -> anyhow::Result<()> {
         files_dir: None,
         groups: groups::GroupDb::load(),
         app_group: None,
+        box_page: 0,
+        box_scroll: 0.0,
+        box_scroll_target: 0.0,
         group_minis: Vec::new(),
         order: order::OrderDb::load(),
         pending_installs: Vec::new(),
@@ -188,6 +191,7 @@ fn main() -> anyhow::Result<()> {
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
+        closing_members: None,
         pending_icons: None,
         hover: None,
         pointer_pos: None,
@@ -379,6 +383,12 @@ pub struct App {
     groups: groups::GroupDb,
     /// Group the Apps section is navigated into (index into `groups`).
     app_group: Option<usize>,
+    /// Which 3×3 page of the open box is the scroll target.
+    box_page: usize,
+    /// Horizontal page-scroll offset of the open box (px), easing toward
+    /// `box_scroll_target` — the same slide the grid sections use.
+    box_scroll: f32,
+    box_scroll_target: f32,
     /// Group cells for the renderer: (transient entry index, member
     /// texture layers for the 2×2 mini preview). Rebuilt per refilter.
     group_minis: Vec<(usize, [Option<u32>; 4])>,
@@ -433,6 +443,11 @@ pub struct App {
     group_anim: f32,
     group_anim_target: f32,
     group_origin: Option<(f32, f32)>,
+    /// Members (entry indices) of a box that's animating closed after a
+    /// member was dragged out: the box keeps shrinking (via `group_anim`
+    /// toward 0) over the live grid even though `app_group` is already
+    /// cleared. Cleared when the shrink lands.
+    closing_members: Option<Vec<usize>>,
     /// Icons that arrived before the renderer existed.
     pending_icons: Option<Vec<Vec<u8>>>,
     /// Item currently under the pointer.
@@ -630,11 +645,10 @@ const DOCK_REST_AFTER_CLOSE: Duration = Duration::from_millis(200);
 const REORDER_DWELL: Duration = Duration::from_millis(180);
 
 /// Horizontal band within a cell (fraction of its width) where hovering
-/// an app rings a fold target and a drop makes/joins a box. Kept fairly
-/// narrow so folding is deliberate — outside it the pointer makes room
-/// to reorder — but wide enough that folding onto a side-by-side
-/// neighbour stays easy.
-const FOLD_BAND: std::ops::Range<f32> = 0.30..0.70;
+/// an app rings a fold target and a drop makes/joins a box. Wide enough
+/// that folding onto a side-by-side neighbour is easy — only the narrow
+/// edges (aim at the gap between icons) make room to reorder instead.
+const FOLD_BAND: std::ops::Range<f32> = 0.225..0.775;
 
 /// Exponential make-room glide rate (per second) for the grid and dock
 /// reflow while dragging — higher is snappier, lower is slower.
@@ -769,7 +783,10 @@ impl App {
     /// otherwise leaves it in the background when it opens off the cursor.
     fn on_window_opened(&mut self, addr: &str) {
         const FOCUS_LAUNCH_GRACE: Duration = Duration::from_secs(10);
-        if self.focus_launched.is_some_and(|t| t.elapsed() < FOCUS_LAUNCH_GRACE) {
+        if self
+            .focus_launched
+            .is_some_and(|t| t.elapsed() < FOCUS_LAUNCH_GRACE)
+        {
             self.focus_launched = None;
             hypr::focus_window(addr);
         }
@@ -1032,6 +1049,18 @@ impl App {
         self.gesture.dragging = None;
         self.recompute_dock_order();
         self.recompute_removable();
+        // Boxes left with fewer than two members after uninstalls are
+        // deleted (and their grid slot forgotten) so nothing undersized
+        // lingers. Guarded against a degenerate empty scan wiping every box.
+        if !self.installed_app_ids.is_empty() && self.groups.prune(&self.installed_app_ids) {
+            let live: std::collections::HashSet<String> = self
+                .groups
+                .groups()
+                .iter()
+                .map(|g| format!("group:{}", g.id))
+                .collect();
+            self.order.forget_dead_boxes(&live);
+        }
         self.refilter();
         // A just-installed app lands in the dock: bounce its icon in
         // (same as a launch), and if the dock was auto-hidden, flash it
@@ -1113,17 +1142,11 @@ impl App {
             {
                 self.app_group = None;
             }
-            if let Some(g) = self.app_group {
-                // Inside a box: its members are the whole Apps grid.
-                let members = self.groups.groups()[g].members.clone();
-                visible[content::SECTION_APPS] = members
-                    .iter()
-                    .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
-                    .collect();
-            } else {
-                // Boxes and loose apps share one grid order: install
-                // date with manual drags on top (new boxes take their
-                // target's slot; unseen ids append at the end).
+            // Boxes and loose apps share one grid order: install date with
+            // manual drags on top (new boxes take their target's slot;
+            // unseen ids append at the end). The grid stays put even with a
+            // box open — the magnified box draws as an overlay on top of it.
+            {
                 let mut cells = self.group_cells();
                 cells.append(&mut visible[content::SECTION_APPS]);
                 let ids: Vec<String> = cells.iter().map(|&i| self.entries[i].id.clone()).collect();
@@ -1344,12 +1367,31 @@ impl App {
             .collect()
     }
 
-    /// Open a box: its members expand out of the clicked tile.
+    /// Open a box: the magnified box grows out of the tile's cell. The
+    /// origin is snapped to the tile's cell *center* (not the click point)
+    /// so the box collapses back exactly onto the resting tile — no jump.
     fn open_group(&mut self, g: usize) {
-        self.group_origin = self.pointer_pos;
+        let layout = self.current_layout();
+        self.group_origin = self.pointer_pos.map(|pos| {
+            match self.apps_display_cell(&layout, pos) {
+                // Snap to the tile's center: cell center horizontally, and
+                // the icon center vertically (the tile sits high in the cell).
+                Some((_, fx, fy)) => {
+                    let cell_top = pos.1 - fy * content::GRID_CELL_H;
+                    (
+                        pos.0 - (fx - 0.5) * content::GRID_CELL_W,
+                        cell_top + content::GRID_ICON_TOP + content::GRID_ICON / 2.0,
+                    )
+                }
+                None => pos,
+            }
+        });
         self.group_anim = 0.0;
         self.group_anim_target = 1.0;
         self.app_group = Some(g);
+        self.box_page = 0;
+        self.box_scroll = 0.0;
+        self.box_scroll_target = 0.0;
         self.refilter();
     }
 
@@ -1552,15 +1594,41 @@ impl App {
 
     /// Layout for an arbitrary card extent at the current scroll offsets.
     fn layout_at(&self, extent: f32) -> content::Layout {
-        content::layout(
+        let mut layout = content::layout(
             &self.config,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             extent,
             self.dock_order.len(),
             std::array::from_fn(|s| self.search.visible[s].len()),
             std::array::from_fn(|s| self.scroll.per[s].pos),
-            [self.app_group.is_some(), false, self.files_dir.is_some()],
-        )
+            [
+                self.app_group.is_some() || self.closing_members.is_some(),
+                false,
+                self.files_dir.is_some(),
+            ],
+        );
+        // Anchor the open box to the side of the grid it sits on, so the
+        // pinned preview icon (top-left on the left, top-right on the right)
+        // lands exactly on its closed position and the box unfolds away
+        // from it into open space.
+        if let (Some(base), Some((ox, oy))) = (layout.open_box, self.group_origin) {
+            let vp = layout.sections[content::SECTION_APPS].viewport;
+            let s = base.h;
+            let half_cell = s / 6.0; // half a 3×3 cell
+            let mini_off = content::GRID_ICON * 0.26; // 2×2 mini offset from center
+            let left = ox < vp.x + vp.w / 2.0;
+            // Place the near-corner cell center on the pinned icon's spot.
+            let x = if left {
+                ox - mini_off - half_cell
+            } else {
+                ox + mini_off - (s - half_cell)
+            };
+            let y = oy - mini_off - half_cell;
+            let x = x.clamp(vp.x, (vp.x + vp.w - s).max(vp.x));
+            let y = y.clamp(vp.y, (vp.y + vp.h - s).max(vp.y));
+            layout.open_box = Some(content::Rect::new(x, y, s, s));
+        }
+        layout
     }
 
     /// Layout for the current animation extent.
@@ -1589,14 +1657,8 @@ impl App {
                 }
             }
         }
-        for idx in 0..self.entries.len() {
-            if self.kinds.get(idx) != Some(&apps::EntryKind::App) {
-                continue;
-            }
-            if !self.dock_order.contains(&idx) && !self.pins.is_excluded(&self.entries[idx].id) {
-                self.dock_order.push(idx);
-            }
-        }
+        // Only pinned apps ride the dock; everything else lives in the Apps
+        // grid (so an app is in exactly one place, never both).
         // No truncation here — layout() clamps to the available width.
     }
 
@@ -1749,8 +1811,7 @@ impl App {
                         // dock parts in compact coordinates (origin
                         // removed), so translate the raw slot.
                         let slot = if drag.from_dock {
-                            let origin =
-                                self.dock_order.iter().position(|&e| e == drag.entry_idx);
+                            let origin = self.dock_order.iter().position(|&e| e == drag.entry_idx);
                             slot - usize::from(origin.is_some_and(|o| o < slot))
                         } else {
                             slot
@@ -2164,7 +2225,11 @@ impl App {
             self.reorder_dwell = None;
             return None;
         };
-        let max_d = if inserting { len } else { len.saturating_sub(1) };
+        let max_d = if inserting {
+            len
+        } else {
+            len.saturating_sub(1)
+        };
         let d = d.min(max_d);
         if d == slot {
             self.reorder_dwell = None;
@@ -2241,7 +2306,7 @@ impl App {
         }
         // A dock app that lands in the grid unpins as it does.
         if orig.is_none() {
-            self.pins.exclude(id);
+            self.pins.unpin(id);
         }
         let slot = self.reorder_slot.unwrap_or(orig.unwrap_or(len));
         // Fold wins when the pointer sits on a foldable item's center.
@@ -2283,8 +2348,7 @@ impl App {
         // Otherwise the drop lands in the gap, wherever it is now.
         if let Some(g) = self.app_group {
             let n_members = self.groups.groups()[g].members.len();
-            let full_before =
-                (slot + usize::from(orig.is_some_and(|o| slot >= o))).min(n_members);
+            let full_before = (slot + usize::from(orig.is_some_and(|o| slot >= o))).min(n_members);
             self.groups.move_member(g, id, full_before);
         } else {
             // Boxes and apps share one order: anchor on the compacted
@@ -2413,6 +2477,13 @@ impl App {
 
     /// Resolve a hit to an action: launch an entry or toggle the search box.
     fn activate_hit(&mut self, hit: Hit) {
+        // While a box is open, the grid behind is just context: a click
+        // anywhere but the box itself closes the box (and does nothing
+        // else this click).
+        if self.app_group.is_some() && !matches!(hit, Hit::OpenBoxCell(_)) {
+            self.close_group();
+            return;
+        }
         match hit {
             Hit::DockIcon(slot) => {
                 if let Some(&entry_idx) = self.dock_order.get(slot) {
@@ -2450,8 +2521,81 @@ impl App {
                 self.schedule_frame();
             }
             Hit::FilesBack => self.files_nav_up(),
-            Hit::AppsBack => self.close_group(),
+            // Click a filled box slot to launch it; an empty slot is inert
+            // (the box stays open — only a click outside it closes it).
+            Hit::OpenBoxCell(k) => {
+                if let Some(idx) = self.open_box_member_idx(k) {
+                    self.activate(idx);
+                }
+            }
         }
+    }
+
+    /// Whether the open box sits on the left half of the Apps grid (which
+    /// side it's on decides the member→slot layout).
+    fn box_is_left(&self) -> bool {
+        let vp = self.current_layout().sections[content::SECTION_APPS].viewport;
+        self.group_origin
+            .is_none_or(|(ox, _)| ox < vp.x + vp.w / 2.0)
+    }
+
+    /// The open box member id shown in 3×3 slot `k` on the current page, if
+    /// that slot is filled (maps slot → member via the side layout + page).
+    fn open_box_member_id(&self, k: usize) -> Option<String> {
+        let g = self.app_group?;
+        let local = content::open_box_slot_member(self.box_is_left(), k);
+        self.groups
+            .groups()
+            .get(g)?
+            .members
+            .get(self.box_page * 9 + local)
+            .cloned()
+    }
+
+    /// Entry index of the member in the open box's slot `k`, if filled.
+    fn open_box_member_idx(&self, k: usize) -> Option<usize> {
+        let id = self.open_box_member_id(k)?;
+        self.entries.iter().position(|e| e.id == id)
+    }
+
+    /// Begin dragging the open box's `k`-th member out of the box: the app
+    /// leaves the box (which closes, and dissolves if left with fewer than
+    /// two members) and rides the drag into the loose grid — from there
+    /// the normal make-room/drop path organizes it onto the grid or dock.
+    fn start_box_member_drag(&mut self, k: usize, pos: (f32, f32)) {
+        let Some(g) = self.app_group else { return };
+        let Some(member_id) = self.open_box_member_id(k) else {
+            return;
+        };
+        let Some(entry_idx) = self.entries.iter().position(|e| e.id == member_id) else {
+            return;
+        };
+        if self.busy_ids.contains(&member_id) {
+            return;
+        }
+        // The box's remaining members feed the shrinking-closed overlay.
+        let remaining: Vec<usize> = self.groups.groups()[g]
+            .members
+            .iter()
+            .filter(|id| **id != member_id)
+            .take(9)
+            .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
+            .collect();
+        self.groups.remove_member(&member_id);
+        // Drop the logical open state so the grid comes alive and the app
+        // is loose, but keep animating the box shut (shrinking toward its
+        // origin) over the live grid — `group_anim` 1 → 0.
+        self.app_group = None;
+        self.closing_members = Some(remaining);
+        self.group_anim_target = 0.0;
+        self.refilter();
+        self.gesture.dragging = Some(DragState {
+            entry_idx,
+            from_dock: false,
+            pos,
+        });
+        self.gesture.pressed = None;
+        self.schedule_frame();
     }
 
     /// Get out of the way. From the open box, retreat to the dock first
@@ -2715,6 +2859,14 @@ impl App {
                 sec.pos = sec.target;
             }
         }
+        // The open box's page slide eases the same way.
+        let box_delta = self.box_scroll_target - self.box_scroll;
+        if box_delta.abs() > 0.5 {
+            scroll_animating = true;
+            self.box_scroll += box_delta * (1.0 - (-dt * 12.0f32).exp());
+        } else if box_delta != 0.0 {
+            self.box_scroll = self.box_scroll_target;
+        }
 
         self.dirty = false;
 
@@ -2768,8 +2920,7 @@ impl App {
             .dragging
             .as_ref()
             .filter(|d| {
-                d.from_dock
-                    && matches!(self.kinds.get(d.entry_idx), Some(apps::EntryKind::App))
+                d.from_dock && matches!(self.kinds.get(d.entry_idx), Some(apps::EntryKind::App))
             })
             .and(self.reorder_slot);
         let mut slide_animating = false;
@@ -2886,17 +3037,20 @@ impl App {
             None
         };
 
-        // Box open/close transition (~180 ms, eased below).
+        // Box open/close transition (duration from config, eased below).
         if self.group_anim != self.group_anim_target {
-            let step = dt / 0.18;
+            let secs = (self.config.animation.group_expand_ms as f32 / 1000.0).max(0.001);
+            let step = dt / secs;
             if self.group_anim_target > self.group_anim {
                 self.group_anim = (self.group_anim + step).min(self.group_anim_target);
             } else {
                 self.group_anim = (self.group_anim - step).max(self.group_anim_target);
             }
             if self.group_anim <= 0.0 && self.group_anim_target <= 0.0 {
-                // Fully collapsed back into the tile: leave the box.
+                // Fully collapsed back into the tile: leave the box (and
+                // end any drag-out shrink).
                 self.app_group = None;
+                self.closing_members = None;
                 self.group_origin = None;
                 self.group_anim = 1.0;
                 self.group_anim_target = 1.0;
@@ -2907,7 +3061,9 @@ impl App {
         }
         let group_expand = {
             let t = self.group_anim.clamp(0.0, 1.0);
-            1.0 - (1.0 - t).powi(3) // ease-out cubic
+            // Smootheststep (7th order): zero velocity, acceleration *and*
+            // jerk at both ends — an extra-gentle takeoff and landing.
+            t * t * t * t * (35.0 + t * (-84.0 + t * (70.0 + t * -20.0)))
         };
 
         let drag_frame = self
@@ -2924,7 +3080,9 @@ impl App {
                     let right = self.buffer_size.0 as f32 - content::DRAG_MARGIN_X;
                     (
                         drag.pos.0.clamp(content::DRAG_MARGIN_X, right),
-                        drag.pos.1.clamp(layout.card_top, layout.card_top + layout.card_h),
+                        drag.pos
+                            .1
+                            .clamp(layout.card_top, layout.card_top + layout.card_h),
                     )
                 } else {
                     drag.pos
@@ -2970,6 +3128,35 @@ impl App {
                         .any(|p| p.attr == e.id && p.failed)
             })
             .collect();
+        // While a box is open (or shrinking closed after a drag-out), its
+        // members (up to nine) fill the magnified box's 3×3 app grid.
+        let open_box_members: Vec<usize> = self
+            .app_group
+            .and_then(|g| self.groups.groups().get(g))
+            .map(|group| {
+                // All members; the box overlay pages them 3×3 via box_scroll.
+                group
+                    .members
+                    .iter()
+                    .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
+                    .collect()
+            })
+            .or_else(|| self.closing_members.clone())
+            .unwrap_or_default();
+        // Hide the open box's own tile from the grid behind — the magnified
+        // box stands in for it.
+        let open_box_hidden = self.app_group.and_then(|g| {
+            let gid = format!("group:{}", self.groups.groups().get(g)?.id);
+            self.entries.iter().position(|e| e.id == gid)
+        });
+        let open_box_pages = self
+            .app_group
+            .and_then(|g| self.groups.groups().get(g))
+            .map(|grp| {
+                let pages = grp.members.len().div_ceil(9).max(1);
+                (self.box_page.min(pages - 1), pages)
+            })
+            .unwrap_or((0, 1));
         let scene = content::scene(
             &self.config,
             &layout,
@@ -3013,6 +3200,10 @@ impl App {
                 dock_slide: &self.dock_slide,
                 group_expand,
                 group_origin: self.group_origin,
+                open_box_members: &open_box_members,
+                open_box_hidden,
+                open_box_pages,
+                box_scroll: self.box_scroll,
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -3025,12 +3216,13 @@ impl App {
             self.dirty = true;
         }
         if scroll_animating
-            && self
+            && self.ui.target() == Target::Open
+            && (self
                 .scroll
                 .per
                 .iter()
                 .any(|sec| (sec.target - sec.pos).abs() > 0.5)
-            && self.ui.target() == Target::Open
+                || (self.box_scroll_target - self.box_scroll).abs() > 0.5)
         {
             self.dirty = true;
         }
@@ -3088,9 +3280,12 @@ impl App {
                 {
                     return;
                 }
-                // Page the section under the pointer; each section
-                // scrolls independently.
-                if let Some(section) = self
+                // An open box captures scroll to page its members; the
+                // grid underneath doesn't scroll. Otherwise page the
+                // section under the pointer (each scrolls independently).
+                if self.app_group.is_some() {
+                    self.box_page_scroll(value);
+                } else if let Some(section) = self
                     .pointer_pos
                     .and_then(|pos| content::section_at(&self.current_layout(), pos))
                 {
@@ -3098,6 +3293,65 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Accumulate scroll toward turning the open box's 3×3 page — same
+    /// threshold/cooldown as grid paging, but it moves `box_page` instead
+    /// of a section.
+    fn box_page_scroll(&mut self, value: f64) {
+        let sec = &mut self.scroll.per[content::SECTION_APPS];
+        if sec
+            .page_turned_at
+            .is_some_and(|t| t.elapsed() < PAGE_COOLDOWN)
+        {
+            return;
+        }
+        if value * sec.page_accum < 0.0 {
+            sec.page_accum = 0.0;
+        }
+        sec.page_accum += value;
+        if sec.page_accum.abs() >= PAGE_SCROLL_THRESHOLD {
+            let dir: i64 = if sec.page_accum > 0.0 { 1 } else { -1 };
+            sec.page_accum = 0.0;
+            sec.page_turned_at = Some(Instant::now());
+            self.turn_box_page(dir);
+        }
+    }
+
+    /// Turn the open box a page (+1 next, -1 previous), wrapping cyclically
+    /// with a horizontal slide (mirrors `page_by`).
+    fn turn_box_page(&mut self, dir: i64) {
+        let Some(n) = self
+            .app_group
+            .and_then(|g| self.groups.groups().get(g))
+            .map(|grp| grp.members.len())
+        else {
+            return;
+        };
+        let pages = n.div_ceil(9).max(1) as i64;
+        if pages <= 1 {
+            return;
+        }
+        let page_w = self
+            .layout_at(self.ui.extent_of(Target::Open))
+            .open_box
+            .map_or(1.0, |b| b.w);
+        let total_w = pages as f32 * page_w;
+        let current = (self.box_scroll_target / page_w).round() as i64;
+        let next = current + dir;
+        if next < 0 {
+            self.box_scroll += total_w;
+            self.box_scroll_target = (pages - 1) as f32 * page_w;
+            self.box_page = (pages - 1) as usize;
+        } else if next >= pages {
+            self.box_scroll -= total_w;
+            self.box_scroll_target = 0.0;
+            self.box_page = 0;
+        } else {
+            self.box_scroll_target = next as f32 * page_w;
+            self.box_page = next as usize;
+        }
+        self.schedule_frame();
     }
 
     /// Whether the pointer is on the edge-reveal strip (the bottom
@@ -3115,7 +3369,9 @@ impl App {
     /// axis; verify on real hardware.)
     fn on_hscroll(&mut self, value: f64) {
         if self.ui.target() == Target::Open {
-            if let Some(section) = self
+            if self.app_group.is_some() {
+                self.box_page_scroll(value);
+            } else if let Some(section) = self
                 .pointer_pos
                 .and_then(|pos| content::section_at(&self.current_layout(), pos))
             {
@@ -3597,26 +3853,35 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         let dx = pos.0 - pp.0;
                         let dy = pos.1 - pp.1;
                         if dx * dx + dy * dy > 6.0 * 6.0 {
-                            let entry_idx = match hit {
-                                Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
-                                Hit::GridCell(s, cell) => app.search.visible[s].get(cell).copied(),
-                                Hit::SearchButton | Hit::FilesBack | Hit::AppsBack => None,
-                            };
-                            // Cells with a profile mutation in flight
-                            // can't start a new drag.
-                            let undraggable = entry_idx.is_some_and(|i| {
-                                app.entries
-                                    .get(i)
-                                    .is_some_and(|e| app.busy_ids.contains(&e.id))
-                            });
-                            if let (Some(entry_idx), false) = (entry_idx, undraggable) {
-                                let from_dock = matches!(hit, Hit::DockIcon(_));
-                                app.gesture.dragging = Some(DragState {
-                                    entry_idx,
-                                    from_dock,
-                                    pos,
+                            if let Hit::OpenBoxCell(k) = hit {
+                                // Dragging a member pulls it out of the box.
+                                app.start_box_member_drag(k, pos);
+                            } else {
+                                let entry_idx = match hit {
+                                    Hit::DockIcon(slot) => app.dock_order.get(slot).copied(),
+                                    Hit::GridCell(s, cell) => {
+                                        app.search.visible[s].get(cell).copied()
+                                    }
+                                    Hit::SearchButton | Hit::FilesBack | Hit::OpenBoxCell(_) => {
+                                        None
+                                    }
+                                };
+                                // Cells with a profile mutation in flight
+                                // can't start a new drag.
+                                let undraggable = entry_idx.is_some_and(|i| {
+                                    app.entries
+                                        .get(i)
+                                        .is_some_and(|e| app.busy_ids.contains(&e.id))
                                 });
-                                app.gesture.pressed = None;
+                                if let (Some(entry_idx), false) = (entry_idx, undraggable) {
+                                    let from_dock = matches!(hit, Hit::DockIcon(_));
+                                    app.gesture.dragging = Some(DragState {
+                                        entry_idx,
+                                        from_dock,
+                                        pos,
+                                    });
+                                    app.gesture.pressed = None;
+                                }
                             }
                         }
                     }
@@ -3684,6 +3949,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     app.activate_hit(hit);
                                 }
                                 // else: drag-cancel — do nothing.
+                            } else if app.app_group.is_some() {
+                                // A box is open: a click off any member is a
+                                // click-outside gesture that shrinks the box
+                                // back into the grid (not a launcher dismiss).
+                                app.close_group();
                             } else if app.ui.target() == Target::Open {
                                 // Press started on no interactive element (card
                                 // background / transparent area): treat as a

@@ -140,6 +140,9 @@ pub struct AnimationConfig {
     pub dock_reveal: CurveConfig,
     /// Curve for the autohide dock sliding down (Dock -> Hidden).
     pub dock_hide: CurveConfig,
+    /// Duration in milliseconds of the app-box open/close grow (eased);
+    /// deliberately slow so the box is seen expanding to fill the grid.
+    pub group_expand_ms: u32,
 }
 
 /// The shape of a single animation curve.
@@ -212,6 +215,7 @@ impl Default for AnimationConfig {
                 duration_ms: 95,
                 ..CurveConfig::default()
             },
+            group_expand_ms: 190,
         }
     }
 }
