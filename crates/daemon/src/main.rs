@@ -644,7 +644,7 @@ const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
 /// Minimum time between page turns while *holding a drag* at the grid /
 /// box edge — slower than the scroll cooldown so held-edge paging steps
 /// one page at a controllable pace instead of rapid-firing past them.
-const DRAG_PAGE_COOLDOWN: Duration = Duration::from_millis(500);
+const DRAG_PAGE_COOLDOWN: Duration = Duration::from_millis(700);
 
 /// Cap on file-search results shown in the Files section.
 const FILE_RESULTS_MAX: usize = 24;
