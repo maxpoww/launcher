@@ -30,6 +30,7 @@ mod pins;
 mod renderer;
 mod state;
 mod surface;
+mod thumbs;
 mod usage;
 
 use std::collections::{HashMap, HashSet};
@@ -124,6 +125,10 @@ fn main() -> anyhow::Result<()> {
     let (nix_tx, nix_rx) = channel::channel::<nix::Event>();
     let nix = nix::spawn(nix_tx, config.theme.icon_theme.clone());
 
+    // File thumbnails arrive from their own worker as they render.
+    let (thumb_tx, thumb_rx) = channel::channel::<thumbs::Event>();
+    let thumbs = thumbs::spawn(thumb_tx);
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -162,6 +167,10 @@ fn main() -> anyhow::Result<()> {
         icon_layers: Vec::new(),
         base_len: 0,
         assets: HashMap::new(),
+        thumbs,
+        thumb_map: HashMap::new(),
+        thumb_next: 0,
+        thumb_pending: HashSet::new(),
         nix,
         pkg_hits: Vec::new(),
         pkg_hits_query: None,
@@ -246,6 +255,15 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("registering nix channel: {e}"))?;
+
+    event_loop
+        .handle()
+        .insert_source(thumb_rx, |event, _, app| {
+            if let channel::Event::Msg(event) = event {
+                app.on_thumb(event);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering thumbs channel: {e}"))?;
 
     // Intellihide: watch Hyprland window events so the dock can stay
     // up while nothing overlaps its zone, plus a steady poll — this
@@ -349,6 +367,15 @@ pub struct App {
     /// Icon-carrier assets by id ("asset-folder", "asset-audio", …):
     /// (texture layer, letter-tile placeholder flag), one per scan.
     assets: HashMap<String, (u32, bool)>,
+    /// Thumbnailer thread handle.
+    thumbs: thumbs::Thumbs,
+    /// Finished thumbnails by path: reserved-slot index + pixels (kept
+    /// for re-upload after a rescan rebuilds the texture array).
+    thumb_map: HashMap<String, (usize, Vec<u8>)>,
+    /// Round-robin cursor over the reserved thumbnail slots.
+    thumb_next: usize,
+    /// Paths with a thumbnail job in flight (request deduplication).
+    thumb_pending: HashSet<String>,
     /// Handle to the nix threads (package index + profile mutations).
     nix: nix::Nix,
     /// Top-ranked packages for `pkg_hits_query`, delivered async by the
@@ -828,6 +855,7 @@ impl App {
                 // install icons into theirs.
                 self.upload_pkg_icons();
                 self.reupload_pending_icons();
+                self.reupload_thumb_icons();
             }
             None => self.pending_icons = Some(icons),
         }

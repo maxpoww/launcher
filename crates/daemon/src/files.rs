@@ -62,7 +62,17 @@ impl App {
             file_asset_name(name)
         };
         // Without an asset icon, fall back to a letter-tile placeholder.
-        let (layer, placeholder) = self.asset(asset).unwrap_or((0, true));
+        let (mut layer, mut placeholder) = self.asset(asset).unwrap_or((0, true));
+        // A finished thumbnail overrides the type icon; a thumbable file
+        // without one queues a job (the worker answers via `on_thumb`).
+        if !is_dir {
+            if let Some(&(slot, _)) = self.thumb_map.get(id) {
+                layer = self.thumb_layer_base() + slot as u32;
+                placeholder = false;
+            } else if crate::thumbs::thumbable(name) && self.thumb_pending.insert(id.to_owned()) {
+                self.thumbs.request(id);
+            }
+        }
         let entry = AppEntry {
             id: id.to_owned(),
             name: name.to_owned(),
@@ -118,6 +128,54 @@ impl App {
             out.push(self.push_transient_file(&path, &name, exec, is_dir));
         }
         out
+    }
+
+    /// Base texture layer of the reserved thumbnail block (past the app
+    /// icons and both package blocks).
+    pub(crate) fn thumb_layer_base(&self) -> u32 {
+        self.pkg_layer_base + (crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP) as u32
+    }
+
+    /// A finished thumbnail: park it in a reserved slot (round-robin,
+    /// recycling the oldest), upload it, and repoint every entry for
+    /// that path at it.
+    pub(crate) fn on_thumb(&mut self, ev: crate::thumbs::Event) {
+        self.thumb_pending.remove(&ev.path);
+        let slot = match self.thumb_map.get(&ev.path) {
+            Some(&(slot, _)) => slot,
+            None => {
+                let slot = self.thumb_next % crate::thumbs::THUMB_CAP;
+                self.thumb_next += 1;
+                // Recycled: the evicted path falls back to its type icon
+                // (and re-queues if it comes on screen again).
+                self.thumb_map.retain(|_, v| v.0 != slot);
+                slot
+            }
+        };
+        let layer = self.thumb_layer_base() + slot as u32;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.update_icon_layer(layer, &ev.pixels);
+        }
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.id == ev.path {
+                self.icon_layers[i] = layer;
+                self.placeholders[i] = false;
+            }
+        }
+        self.thumb_map.insert(ev.path, (slot, ev.pixels));
+        self.schedule_frame();
+    }
+
+    /// Re-upload every retained thumbnail after a rescan rebuilt the
+    /// icon texture array.
+    pub(crate) fn reupload_thumb_icons(&mut self) {
+        let base = self.thumb_layer_base();
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        for (slot, pixels) in self.thumb_map.values() {
+            renderer.update_icon_layer(base + *slot as u32, pixels);
+        }
     }
 
     /// Synthesize dock entries for pinned filesystem paths (dirs or files

@@ -29,6 +29,8 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 freedesktop-icons = { workspace = true }
 resvg = { workspace = true }
+image = { workspace = true }
+md5 = { workspace = true }
 glyphon = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
