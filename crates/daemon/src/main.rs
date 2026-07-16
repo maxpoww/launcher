@@ -18,6 +18,7 @@ mod launch;
 mod managed;
 mod nix;
 mod order;
+mod pager;
 mod pages;
 mod persist;
 mod pins;
@@ -177,8 +178,8 @@ fn main() -> anyhow::Result<()> {
         box_drag: None,
         box_drag_page_at: None,
         box_page: 0,
-        box_scroll: 0.0,
-        box_scroll_target: 0.0,
+        box_pager: pager::Pager::default(),
+        box_slide: Vec::new(),
         group_minis: Vec::new(),
         order: order::OrderDb::load(),
         pending_installs: Vec::new(),
@@ -403,10 +404,13 @@ pub struct App {
     box_drag_page_at: Option<Instant>,
     /// Which 3×3 page of the open box is the scroll target.
     box_page: usize,
-    /// Horizontal page-scroll offset of the open box (px), easing toward
-    /// `box_scroll_target` — the same slide the grid sections use.
-    box_scroll: f32,
-    box_scroll_target: f32,
+    /// Horizontal page-scroll of the open box — the same [`pager::Pager`]
+    /// the grid sections use (slide, wheel accumulation, page turns).
+    box_pager: pager::Pager,
+    /// Per-member animated display slots of the open box (entry index →
+    /// display position, the box's make-room glide — the counterpart of
+    /// `apps_slide`); pruned to the current members each frame.
+    box_slide: Vec<(usize, f32)>,
     /// Group cells for the renderer: (transient entry index, member
     /// texture layers for the 2×2 mini preview). Rebuilt per refilter.
     group_minis: Vec<(usize, [Option<u32>; 4])>,
@@ -540,8 +544,8 @@ struct ScrollState {
     /// keyboard Toggle has zero cooldown.
     open_at: Option<Instant>,
     /// Per-section paging state — every popup section scrolls
-    /// independently.
-    per: [SectionScroll; content::N_SECTIONS],
+    /// independently (the open box carries its own [`pager::Pager`]).
+    per: [pager::Pager; content::N_SECTIONS],
 }
 
 impl ScrollState {
@@ -549,20 +553,6 @@ impl ScrollState {
     fn reset_sections(&mut self) {
         self.per = Default::default();
     }
-}
-
-/// One section's horizontal paging state.
-#[derive(Default)]
-struct SectionScroll {
-    /// Scroll offset in pixels (visual, lags behind `target`).
-    pos: f32,
-    /// Scroll animation target; `pos` eases toward this each frame.
-    target: f32,
-    /// Accumulated scroll toward the next page turn (resets on direction
-    /// change and after each turn).
-    page_accum: f64,
-    /// When the last page turn happened, for PAGE_COOLDOWN.
-    page_turned_at: Option<Instant>,
 }
 
 /// Press-and-drag gesture state.
@@ -653,13 +643,6 @@ struct PendingInstall {
 /// Accumulated scroll (in wl_pointer axis units; one wheel notch ≈ 15)
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
-
-/// Accumulated scroll needed to turn one grid page (≈ two wheel notches).
-const PAGE_SCROLL_THRESHOLD: f64 = 30.0;
-
-/// Minimum time between page turns, so a fast flick moves exactly one
-/// page instead of spinning the (cyclic) grid.
-const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
 
 /// Minimum time between page turns while *holding a drag* at the grid /
 /// box edge — slower than the scroll cooldown so held-edge paging steps
@@ -1549,8 +1532,8 @@ impl App {
         self.group_anim_target = 1.0;
         self.app_group = Some(g);
         self.box_page = 0;
-        self.box_scroll = 0.0;
-        self.box_scroll_target = 0.0;
+        self.box_pager.reset();
+        self.box_slide.clear();
         self.refilter();
     }
 
@@ -1598,8 +1581,8 @@ impl App {
         self.group_anim = 0.0;
         self.group_anim_target = 1.0;
         self.box_page = 0;
-        self.box_scroll = 0.0;
-        self.box_scroll_target = 0.0;
+        self.box_pager.reset();
+        self.box_slide.clear();
         self.sync_input_region();
         self.refilter();
     }
@@ -2738,30 +2721,25 @@ impl App {
             let full_before = (slot + usize::from(orig.is_some_and(|o| slot >= o))).min(n_members);
             self.groups.move_member(g, id, full_before);
         } else {
-            // Resolve the gap slot on its display page: before the first
-            // item at-or-past the gap (same page), or — hovering a page's
-            // empty tail, or the ghost page — append to that page (the
-            // ghost drop creates it: the drag-to-new-page gesture).
+            // Resolve the gap via the shared drop rule: before the item
+            // at-or-past the gap on its page, or — a page's empty tail,
+            // or the ghost page — append to that page (the ghost drop
+            // creates it: the drag-to-new-page gesture).
             let cap = self.apps_cap.max(1);
-            let dp = slot / cap;
-            let anchor = self.search.visible[content::SECTION_APPS]
+            let items = self.search.visible[content::SECTION_APPS]
                 .iter()
                 .enumerate()
-                .filter(|&(j, &e)| {
-                    e != entry_idx
-                        && self
-                            .apps_slots
-                            .get(j)
-                            .is_some_and(|&s| s >= slot && s / cap == dp)
-                })
-                .min_by_key(|&(j, _)| self.apps_slots[j])
-                .map(|(_, &e)| self.entries[e].id.clone());
-            match anchor {
-                Some(a) => self.order.move_before(id, &a),
+                .filter(|&(_, &e)| e != entry_idx)
+                .filter_map(|(j, &e)| self.apps_slots.get(j).map(|&s| (s, e)));
+            match pages::drop_anchor(items, slot, cap) {
+                Some(e) => {
+                    let a = self.entries[e].id.clone();
+                    self.order.move_before(id, &a);
+                }
                 None => {
                     let sp = self
                         .apps_page_map
-                        .get(dp)
+                        .get(slot / cap)
                         .copied()
                         .unwrap_or_else(|| self.order.pages().len());
                     self.order.move_to_page_end(id, sp);
@@ -3081,25 +3059,29 @@ impl App {
             self.schedule_frame();
             return;
         };
-        let (page, local) = (target / groups::PAGE_CAP, target % groups::PAGE_CAP);
-        // The member displayed at the drop position on that page, with
-        // the dragged member excluded (it's the ghost in hand).
-        let anchor = self
-            .groups
-            .groups()
-            .get(g)
-            .and_then(|grp| grp.members.pages().get(page))
-            .and_then(|p| {
-                p.iter()
+        let page = target / groups::PAGE_CAP;
+        // The member displayed at the drop position, resolved by the
+        // shared drop rule over the compacted display slots (dragged
+        // member excluded — it's the ghost in hand, and its page packs
+        // dense around the hole).
+        let anchor = self.groups.groups().get(g).and_then(|grp| {
+            let items = grp.members.pages().iter().enumerate().flat_map(|(p, pg)| {
+                pg.iter()
                     .filter(|m| m.as_str() != member_id)
-                    .nth(local)
-                    .cloned()
+                    .enumerate()
+                    .map(move |(w, m)| (p * groups::PAGE_CAP + w, m))
             });
-        info!("box drop: {member_id} -> page {page} local {local} anchor {anchor:?}");
+            pages::drop_anchor(items, target, groups::PAGE_CAP).cloned()
+        });
+        info!("box drop: {member_id} -> slot {target} anchor {anchor:?}");
         match anchor {
             Some(a) => self.groups.move_member_before(g, &member_id, &a),
             None => self.groups.move_member_to_page_end(g, &member_id, page),
         }
+        // The dropped member re-enters the glide at rest in its new slot
+        // (it was the ghost in hand — gliding in from its old slot would
+        // look like a bounce).
+        self.box_slide.retain(|(e, _)| *e != entry_idx);
         self.refilter();
         self.schedule_frame();
     }
@@ -3404,27 +3386,12 @@ impl App {
             };
         }
 
-        // Smooth-scroll each section: pos eases toward target with an
-        // exponential decay (~200 ms to settle at 60 fps).
+        // Smooth-scroll each section and the open box — one Pager slide.
         let mut scroll_animating = false;
         for sec in &mut self.scroll.per {
-            let delta = sec.target - sec.pos;
-            if delta.abs() > 0.5 {
-                scroll_animating = true;
-                let k = 1.0 - (-dt * 12.0f32).exp();
-                sec.pos += delta * k;
-            } else if delta != 0.0 {
-                sec.pos = sec.target;
-            }
+            scroll_animating |= sec.ease(dt);
         }
-        // The open box's page slide eases the same way.
-        let box_delta = self.box_scroll_target - self.box_scroll;
-        if box_delta.abs() > 0.5 {
-            scroll_animating = true;
-            self.box_scroll += box_delta * (1.0 - (-dt * 12.0f32).exp());
-        } else if box_delta != 0.0 {
-            self.box_scroll = self.box_scroll_target;
-        }
+        scroll_animating |= self.box_pager.ease(dt);
 
         self.dirty = false;
 
@@ -3756,6 +3723,49 @@ impl App {
                 })
             })
             .unwrap_or_default();
+        // Box make-room glide (the counterpart of `apps_slide`): each
+        // member eases toward its display slot — shifted page-locally
+        // around the drag gap by the same shared reflow the grid uses —
+        // so reorders glide instead of snapping. Carried by entry index,
+        // so a drop's refilter keeps every icon's visual position.
+        let box_gap = box_drag.map(|(_, g, _)| g);
+        let box_hidden = box_drag.map(|(h, _, _)| h);
+        let box_origin = box_hidden.and_then(|h| {
+            open_box_members
+                .iter()
+                .position(|&e| e == h)
+                .and_then(|m| open_box_slots.get(m).copied())
+        });
+        let mut box_sliding = false;
+        let mut open_box_disp: Vec<f32> = Vec::with_capacity(open_box_members.len());
+        let mut new_box_slide: Vec<(usize, f32)> = Vec::with_capacity(open_box_members.len());
+        for (m, &e) in open_box_members.iter().enumerate() {
+            let s = open_box_slots.get(m).copied().unwrap_or(m);
+            let target = match box_gap {
+                Some(g) if Some(e) != box_hidden => {
+                    pages::shifted_slot(s, box_origin, g, groups::PAGE_CAP) as f32
+                }
+                _ => s as f32,
+            };
+            let cur = self
+                .box_slide
+                .iter()
+                .find(|(ee, _)| *ee == e)
+                .map(|&(_, d)| d)
+                .unwrap_or(target);
+            let next = if (cur - target).abs() > 0.005 {
+                box_sliding = true;
+                cur + (target - cur) * k
+            } else {
+                target
+            };
+            new_box_slide.push((e, next));
+            open_box_disp.push(next);
+        }
+        self.box_slide = new_box_slide;
+        if box_sliding {
+            self.dirty = true;
+        }
         // Hide the open box's own tile from the grid behind — the magnified
         // box stands in for it.
         let open_box_hidden = self.app_group.and_then(|g| {
@@ -3815,10 +3825,10 @@ impl App {
                 group_expand,
                 group_origin: self.group_origin,
                 open_box_members: &open_box_members,
-                open_box_slots: &open_box_slots,
+                open_box_disp: &open_box_disp,
                 open_box_hidden,
                 open_box_pages,
-                box_scroll: self.box_scroll,
+                box_scroll: self.box_pager.pos,
                 box_drag,
             },
         );
@@ -3833,15 +3843,10 @@ impl App {
         }
         if scroll_animating
             && ((self.ui.target() == Target::Open
-                && self
-                    .scroll
-                    .per
-                    .iter()
-                    .any(|sec| (sec.target - sec.pos).abs() > 0.5))
+                && self.scroll.per.iter().any(pager::Pager::is_settling))
                 // A box page-slide keeps animating whatever the card state
                 // (a dock stack lives in the Dock state, not Open).
-                || (self.open_box_group().is_some()
-                    && (self.box_scroll_target - self.box_scroll).abs() > 0.5))
+                || (self.open_box_group().is_some() && self.box_pager.is_settling()))
         {
             self.dirty = true;
         }
@@ -3917,31 +3922,18 @@ impl App {
         }
     }
 
-    /// Accumulate scroll toward turning the open box's 3×3 page — same
-    /// threshold/cooldown as grid paging, but it moves `box_page` instead
-    /// of a section.
+    /// Accumulate scroll toward turning the open box's 3×3 page — the
+    /// box pager's own wheel accumulator (it no longer borrows the Apps
+    /// section's, so box scrolling can't contaminate grid paging).
     fn box_page_scroll(&mut self, value: f64) {
-        let sec = &mut self.scroll.per[content::SECTION_APPS];
-        if sec
-            .page_turned_at
-            .is_some_and(|t| t.elapsed() < PAGE_COOLDOWN)
-        {
-            return;
-        }
-        if value * sec.page_accum < 0.0 {
-            sec.page_accum = 0.0;
-        }
-        sec.page_accum += value;
-        if sec.page_accum.abs() >= PAGE_SCROLL_THRESHOLD {
-            let dir: i64 = if sec.page_accum > 0.0 { 1 } else { -1 };
-            sec.page_accum = 0.0;
-            sec.page_turned_at = Some(Instant::now());
+        if let Some(dir) = self.box_pager.wheel(value) {
             self.turn_box_page(dir, true);
         }
     }
 
-    /// Turn the open box a page (+1 next, -1 previous), wrapping cyclically
-    /// with a horizontal slide (mirrors `page_by`).
+    /// Turn the open box a page (+1 next, -1 previous): wheel paging
+    /// wraps cyclically, drag paging clamps at the ends (see
+    /// [`pager::Pager::turn`]).
     fn turn_box_page(&mut self, dir: i64, wrap: bool) {
         let Some(n) = self
             .open_box_group()
@@ -3952,36 +3944,15 @@ impl App {
         };
         // While reordering a member, one extra empty page is reachable
         // at the end — drop there to park the member on a fresh page.
-        let pages = (n.max(1) + usize::from(self.box_drag.is_some())) as i64;
-        if pages <= 1 {
-            return;
-        }
+        let pages = n.max(1) + usize::from(self.box_drag.is_some());
         let page_w = self
             .layout_at(self.ui.extent_of(Target::Open))
             .open_box
             .map_or(1.0, |b| b.w);
-        let total_w = pages as f32 * page_w;
-        let current = (self.box_scroll_target / page_w).round() as i64;
-        let next = current + dir;
-        if next < 0 {
-            if !wrap {
-                return; // dragging: stop at the first page, don't cycle
-            }
-            self.box_scroll += total_w;
-            self.box_scroll_target = (pages - 1) as f32 * page_w;
-            self.box_page = (pages - 1) as usize;
-        } else if next >= pages {
-            if !wrap {
-                return; // dragging: stop at the last page, don't cycle
-            }
-            self.box_scroll -= total_w;
-            self.box_scroll_target = 0.0;
-            self.box_page = 0;
-        } else {
-            self.box_scroll_target = next as f32 * page_w;
-            self.box_page = next as usize;
+        if self.box_pager.turn(dir, wrap, pages, page_w) {
+            self.box_page = self.box_pager.page(page_w).min(pages - 1);
+            self.schedule_frame();
         }
-        self.schedule_frame();
     }
 
     /// Whether the pointer is on the edge-reveal strip (the bottom
@@ -4010,73 +3981,28 @@ impl App {
         }
     }
 
-    /// Accumulate scroll toward a page turn of `section`: turning
-    /// requires PAGE_SCROLL_THRESHOLD worth of travel, and successive
-    /// turns are at least PAGE_COOLDOWN apart — so one notch nudges, a
-    /// deliberate scroll turns one page, and a fast flick can't spin
-    /// the wheel.
+    /// Accumulate wheel scroll toward a page turn of `section` (the
+    /// pager's threshold + cooldown: one notch nudges, a deliberate
+    /// scroll turns one page, a fast flick can't spin the wheel).
     fn page_scroll(&mut self, section: usize, value: f64) {
-        let sec = &mut self.scroll.per[section];
-        if sec
-            .page_turned_at
-            .is_some_and(|t| t.elapsed() < PAGE_COOLDOWN)
-        {
-            return;
-        }
-        // A direction change discards progress toward the old direction.
-        if value * sec.page_accum < 0.0 {
-            sec.page_accum = 0.0;
-        }
-        sec.page_accum += value;
-        if sec.page_accum.abs() >= PAGE_SCROLL_THRESHOLD {
-            let dir = if sec.page_accum > 0.0 { 1 } else { -1 };
-            sec.page_accum = 0.0;
-            sec.page_turned_at = Some(Instant::now());
+        if let Some(dir) = self.scroll.per[section].wheel(value) {
             self.page_by(section, dir, true);
         }
     }
 
     /// Slide one section's grid a page in `dir` (+1 = next, -1 =
-    /// previous). `wrap` cycles past either end (wheel infinite scroll);
-    /// without it the slide stops at the ends (drag paging — cycling
-    /// mid-drag silently teleports past the page you were aiming for).
+    /// previous): wheel paging wraps cyclically, drag paging clamps at
+    /// the ends (see [`pager::Pager::turn`]).
     fn page_by(&mut self, section: usize, dir: i64, wrap: bool) {
         // Use the SETTLED (full-extent) layout: mid-open-animation the
         // current layout has a tiny viewport and a bogus page count.
         let settled = self.layout_at(self.ui.extent_of(Target::Open));
         let sec_layout = &settled.sections[section];
         let page_w = sec_layout.viewport.w.max(1.0);
-        let n_pages = sec_layout.n_pages;
-        if n_pages <= 1 {
-            return;
+        if self.scroll.per[section].turn(dir, wrap, sec_layout.n_pages, page_w) {
+            self.update_hover();
+            self.schedule_frame();
         }
-        let total_w = n_pages as f32 * page_w;
-        let sec = &mut self.scroll.per[section];
-        // Use the target (intended page) not the animated position so
-        // mid-animation events don't mis-compute the page.
-        let current_page = (sec.target / page_w).round() as i64;
-        let next_page = current_page + dir;
-        if next_page < 0 {
-            if !wrap {
-                return;
-            }
-            // Wrap to the last page. Shift the animated position one full
-            // strip right so the slide still moves in the gesture
-            // direction; rendering is cyclic, so the shift is invisible.
-            sec.pos += total_w;
-            sec.target = (n_pages - 1) as f32 * page_w;
-        } else if next_page >= n_pages as i64 {
-            if !wrap {
-                return;
-            }
-            // Wrap to the first page (shift one strip left, as above).
-            sec.pos -= total_w;
-            sec.target = 0.0;
-        } else {
-            sec.target = next_page as f32 * page_w;
-        }
-        self.update_hover();
-        self.schedule_frame();
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {

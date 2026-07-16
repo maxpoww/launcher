@@ -631,10 +631,12 @@ pub struct FrameInput<'a> {
     /// While a box is open: entry indices of its members for the
     /// magnified 3×3 app grid. Empty when no box is open.
     pub open_box_members: &'a [usize],
-    /// Display slot of each member (`page * OPEN_BOX_CAP + within`,
-    /// parallel to `open_box_members`): box pages may be under-full, so
-    /// slots — not list positions — decide which page a member draws on.
-    pub open_box_slots: &'a [usize],
+    /// Animated display slot of each member (`page * OPEN_BOX_CAP +
+    /// within`, parallel to `open_box_members`): box pages may be
+    /// under-full, so slots — not list positions — decide where a member
+    /// draws. Fractional mid-glide (the box's make-room reflow, computed
+    /// in `draw` like the grid's `apps_slide`).
+    pub open_box_disp: &'a [f32],
     /// The open box's own grid cell (its tile), hidden from the grid
     /// behind while the magnified box stands in for it.
     pub open_box_hidden: Option<usize>,
@@ -705,7 +707,7 @@ pub fn scene(
         group_expand,
         group_origin,
         open_box_members,
-        open_box_slots,
+        open_box_disp,
         open_box_hidden,
         open_box_pages,
         box_scroll,
@@ -1418,38 +1420,40 @@ pub fn scene(
         // `box_scroll`, so paging slides. Everything clips to the box.
         let page_w = layout.open_box.map_or(box_rect.w, |b| b.w);
         boxgrid.clip = box_rect;
-        // Members draw at their display slot (page * OPEN_BOX_CAP +
-        // within — pages may be under-full). Mid-drag the shared
-        // page-local reflow ([`crate::pages::shifted_slot`], same as the
-        // Apps grid) opens the gap and compacts the dragged member's page.
-        let origin_slot = box_drag.and_then(|(h, _, _)| {
-            open_box_members
-                .iter()
-                .position(|&i| i == h)
-                .and_then(|mh| open_box_slots.get(mh).copied())
-        });
+        // Members draw at their animated display slot (fractional
+        // mid-glide — the reflow itself is computed in `draw`, shared
+        // with the grid): positions lerp between the cell centers of the
+        // two neighboring slots, pages included.
+        let place = |di: usize| -> (f32, f32) {
+            let slot = member_slot[di % OPEN_BOX_CAP];
+            let (row, col) = (slot / OPEN_BOX_COLS, slot % OPEN_BOX_COLS);
+            let page_x = (di / OPEN_BOX_CAP) as f32 * page_w - box_scroll;
+            (
+                box_rect.x + page_x + (col as f32 + 0.5) * cell,
+                box_rect.y + (row as f32 + 0.5) * cell,
+            )
+        };
         for (m, &idx) in open_box_members.iter().enumerate() {
             if box_drag.is_some_and(|(h, _, _)| h == idx) {
                 continue; // dragged member: a ghost, not in the grid
             }
-            let s = open_box_slots.get(m).copied().unwrap_or(m);
-            let d = match box_drag {
-                Some((_, gap, _)) => crate::pages::shifted_slot(s, origin_slot, gap, OPEN_BOX_CAP),
-                None => s,
-            };
-            let slot = member_slot[d % OPEN_BOX_CAP];
-            let (row, col) = (slot / OPEN_BOX_COLS, slot % OPEN_BOX_COLS);
-            let page_x = (d / OPEN_BOX_CAP) as f32 * page_w - box_scroll;
-            let open_cx = box_rect.x + page_x + (col as f32 + 0.5) * cell;
-            let open_cy = box_rect.y + (row as f32 + 0.5) * cell;
+            let d = open_box_disp.get(m).copied().unwrap_or(m as f32);
+            let d0 = d.max(0.0).floor() as usize;
+            let frac = (d - d0 as f32).clamp(0.0, 1.0);
+            let (mut open_cx, mut open_cy) = place(d0);
+            if frac > f32::EPSILON {
+                let (x1, y1) = place(d0 + 1);
+                open_cx = lerp(open_cx, x1, frac);
+                open_cy = lerp(open_cy, y1, frac);
+            }
             // Cull members more than a page off either side of the box.
             if open_cx < box_rect.x - cell || open_cx > box_rect.x + box_rect.w + cell {
                 continue;
             }
-            let (cx, cy, size) = if d < 4 {
+            let (cx, cy, size) = if frac <= f32::EPSILON && d0 < 4 {
                 // Page-0 preview icons flow from the closed 2×2 into place.
-                let sx = if d == 0 || d == 2 { -1.0 } else { 1.0 };
-                let sy = if d < 2 { -1.0 } else { 1.0 };
+                let sx = if d0 == 0 || d0 == 2 { -1.0 } else { 1.0 };
+                let sy = if d0 < 2 { -1.0 } else { 1.0 };
                 (
                     lerp(ox + sx * mini_offset, open_cx, t),
                     lerp(oy + sy * mini_offset, open_cy, t),

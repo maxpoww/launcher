@@ -208,6 +208,25 @@ impl PagedList {
     }
 }
 
+/// Resolve a drop: among `items` — (display slot, payload) pairs with
+/// the dragged item excluded — the anchor is the item at-or-past the
+/// `gap` slot on the gap's page (the drop lands *before* it). `None`
+/// means the gap sits past the page's items (its empty tail, or a ghost
+/// page): the drop appends to that page. One rule for the Apps grid and
+/// the open box.
+pub fn drop_anchor<T>(
+    items: impl Iterator<Item = (usize, T)>,
+    gap: usize,
+    cap: usize,
+) -> Option<T> {
+    let cap = cap.max(1);
+    let dp = gap / cap;
+    items
+        .filter(|(s, _)| *s >= gap && *s / cap == dp)
+        .min_by_key(|(s, _)| *s)
+        .map(|(_, t)| t)
+}
+
 /// Display slot of an undragged item while a drag is in flight — the
 /// make-room reflow shared by the Apps grid and the open box. Shifts are
 /// page-local (Launchpad): the dragged item's page compacts to close the
