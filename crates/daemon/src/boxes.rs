@@ -215,16 +215,15 @@ impl App {
         // Pull the member out when the drag exits a clear margin past the
         // box — half a cell beyond, so the paging band (which is forgiving:
         // anywhere at-or-past the box edge pages) keeps working while a
-        // deliberate sideways drag onto the visible main grid, or up/down
-        // out of the box, ejects the member into the loose grid.
+        // deliberate drag out of the box ejects the member: from a grid
+        // box into the loose grid, from a dock stack down onto the dock
+        // (drop there pins it) or into the grid.
         let m = content::GRID_CELL_H * 0.5;
         let clear_out = pos.0 < box_rect.x - m
             || pos.0 > box_rect.x + box_rect.w + m
             || pos.1 < box_rect.y - m
             || pos.1 > box_rect.y + box_rect.h + m;
-        if clear_out && self.app_group.is_some() {
-            // A grid box pulls the member into the loose grid; a dock stack
-            // has no grid to drop into, so it just holds it.
+        if clear_out {
             let id = self.entries[entry_idx].id.clone();
             self.box_drag = None;
             self.box_drag_page_at = None;
@@ -312,23 +311,64 @@ impl App {
 
     /// Pull a box member out into the loose grid (the box shrinks closed).
     pub(crate) fn pull_box_member_out(&mut self, member_id: &str, pos: (f32, f32)) {
-        let Some(g) = self.app_group else { return };
-        info!("box pull-out: {member_id} leaves the box into the grid");
+        let Some(g) = self.open_box_group() else {
+            return;
+        };
+        info!("box pull-out: {member_id} leaves the box, riding the drag");
         let Some(entry_idx) = self.entries.iter().position(|e| e.id == member_id) else {
             return;
         };
+        let group = &self.groups.groups()[g];
+        let gid = format!("group:{}", group.id);
+        // A two-member box dissolves the moment one leaves. If it was a
+        // dock stack, its lone survivor inherits the folder's dock pin so
+        // it doesn't silently fall into the grid.
+        let survivor = (group.members.len() == 2)
+            .then(|| {
+                group
+                    .members
+                    .iter()
+                    .find(|m| m.as_str() != member_id)
+                    .cloned()
+            })
+            .flatten();
         // The box's remaining members feed the shrinking-closed overlay.
-        let remaining: Vec<usize> = self.groups.groups()[g]
+        let remaining: Vec<usize> = group
             .members
             .iter()
             .filter(|id| id.as_str() != member_id)
             .take(groups::PAGE_CAP)
             .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
             .collect();
+        let from_dock_stack = self.dock_stack.is_some();
         self.groups.remove_member(member_id);
-        self.app_group = None;
-        self.closing_members = Some(remaining);
-        self.group_anim_target = 0.0;
+        match (from_dock_stack, survivor) {
+            (true, Some(surv)) => {
+                // The dock stack dissolved: hand its pin slot to the
+                // survivor and drop the box instantly (its group — the
+                // shrink anchor — no longer exists).
+                if let Some(slot) = self.pins.pins().iter().position(|p| *p == gid) {
+                    self.pins.pin_at(&surv, slot);
+                }
+                self.pins.unpin(&gid);
+                self.dock_stack = None;
+                self.closing_members = None;
+                self.group_anim = 0.0;
+                self.group_anim_target = 0.0;
+            }
+            (true, None) => {
+                // The stack lives on: keep it as the shrink anchor above
+                // the dock; the settle in `draw` clears it.
+                self.group_anim_target = 0.0;
+            }
+            (false, _) => {
+                // Grid box: drop the logical open state so the grid comes
+                // alive, but keep the shrink animating over it.
+                self.app_group = None;
+                self.closing_members = Some(remaining);
+                self.group_anim_target = 0.0;
+            }
+        }
         self.refilter();
         self.gesture.dragging = Some(DragState {
             entry_idx,
