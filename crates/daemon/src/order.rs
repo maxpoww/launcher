@@ -122,6 +122,27 @@ impl OrderDb {
             }
             i += 1;
         }
+        // A page with no visible ids displays as nothing: fold its
+        // (hidden / uninstalled) ids into the previous page's tail so
+        // they can't fragment the grid when they come back to life.
+        let mut i = 1;
+        while i < self.pages.len() {
+            if self.pages[i].iter().any(|id| visible(id)) {
+                i += 1;
+            } else {
+                let orphan = self.pages.remove(i);
+                self.pages[i - 1].extend(orphan);
+                changed = true;
+            }
+        }
+        // Same for a hidden-only FIRST page: fold into the next head.
+        while self.pages.len() > 1 && !self.pages[0].iter().any(|id| visible(id)) {
+            let orphan = self.pages.remove(0);
+            for (k, id) in orphan.into_iter().enumerate() {
+                self.pages[0].insert(k, id);
+            }
+            changed = true;
+        }
         changed |= self.drop_empty_pages();
         if changed {
             self.save();
@@ -307,6 +328,21 @@ mod tests {
             .collect()];
         d.normalize(3, |id| !id.starts_with('h'));
         assert_eq!(d.pages(), &[vec!["a", "h1", "b", "h2", "c"], vec!["d"]]);
+    }
+
+    #[test]
+    fn normalize_folds_hidden_only_pages_into_neighbors() {
+        let mut d = db();
+        // Pages 0 and 2 hold only hidden ids: 0 folds into the next
+        // page's head, 2 into the previous page's tail — the visible
+        // page's own layout is untouched.
+        d.pages = vec![
+            vec!["h1".to_string(), "h2".to_string()],
+            vec!["a".to_string(), "b".to_string()],
+            vec!["h3".to_string()],
+        ];
+        d.normalize(3, |id| !id.starts_with('h'));
+        assert_eq!(d.pages(), &[vec!["h1", "h2", "a", "b", "h3"]]);
     }
 
     #[test]

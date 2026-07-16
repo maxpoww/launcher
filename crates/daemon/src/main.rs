@@ -1305,7 +1305,28 @@ impl App {
         } else {
             Some(0)
         };
-        self.scroll.reset_sections();
+        if searching || leaving_search {
+            // Entering / leaving search replaces the content wholesale:
+            // start every section back at its first page.
+            self.scroll.reset_sections();
+        } else {
+            // A grid mutation (drop, rescan, box open/close, pin change)
+            // must NOT yank the Apps view off the page the user is on —
+            // a drop would otherwise teleport away from where it landed.
+            // Other sections still reset; Apps only clamps to the
+            // (possibly shrunken) page range.
+            self.scroll.per[content::SECTION_INSTALL] = Default::default();
+            self.scroll.per[content::SECTION_FILES] = Default::default();
+            if self.renderer.is_some() {
+                let settled = self.layout_at(self.ui.extent_of(Target::Open));
+                let sec_l = &settled.sections[content::SECTION_APPS];
+                let pages = self.apps_span.div_ceil(self.apps_cap.max(1)).max(1);
+                let max_scroll = (pages - 1) as f32 * sec_l.viewport.w.max(1.0);
+                let sec = &mut self.scroll.per[content::SECTION_APPS];
+                sec.target = sec.target.clamp(0.0, max_scroll);
+                sec.pos = sec.pos.clamp(0.0, max_scroll);
+            }
+        }
         self.update_hover();
         self.schedule_frame();
     }
