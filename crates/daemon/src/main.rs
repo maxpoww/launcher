@@ -1181,6 +1181,15 @@ impl App {
                 cells.append(&mut visible[content::SECTION_APPS]);
                 let ids: Vec<String> = cells.iter().map(|&i| self.entries[i].id.clone()).collect();
                 self.order.sync(ids.iter().map(String::as_str));
+                // Cascade over-full pages by the real capacity (a legacy
+                // flat order loads as one big page; inserts can overfill).
+                // Skip before the first configure — a degenerate 0-size
+                // layout would shred the pages into capacity-1 confetti.
+                if self.renderer.is_some() {
+                    let settled = self.layout_at(self.ui.extent_of(Target::Open));
+                    let sec = &settled.sections[content::SECTION_APPS];
+                    self.order.normalize(sec.cols * sec.rows);
+                }
                 cells.sort_by_key(|&idx| self.order.index_of(&self.entries[idx].id));
                 // Packages installing in place ride the loose grid at
                 // their drop slot until the real app replaces them.
