@@ -55,7 +55,7 @@ impl App {
             ],
             std::array::from_fn(|s| self.scroll.per[s].pos),
             [
-                self.open_box_group().is_some() || self.closing_members.is_some(),
+                self.stack_open() || self.closing_members.is_some(),
                 false,
                 self.files_dir.is_some(),
             ],
@@ -67,12 +67,18 @@ impl App {
         if let (Some(base), Some((ox, oy))) = (layout.open_box, self.group_origin) {
             let vp = layout.sections[content::SECTION_APPS].viewport;
             let s = base.h;
-            if let Some(g) = self.dock_stack {
-                let gid = format!("group:{}", self.groups.groups()[g].id);
+            // The dock icon a dock-anchored stack grows out of: a folder's
+            // box id, or a pinned directory's entry id.
+            let dock_anchor: Option<String> = if let Some(g) = self.dock_stack {
+                Some(format!("group:{}", self.groups.groups()[g].id))
+            } else {
+                self.dir_stack.as_ref().map(|ds| ds.id.clone())
+            };
+            if let Some(aid) = dock_anchor {
                 let dock = self
                     .dock_order
                     .iter()
-                    .position(|&e| self.entries.get(e).is_some_and(|x| x.id == gid))
+                    .position(|&e| self.entries.get(e).is_some_and(|x| x.id == aid))
                     .and_then(|sl| layout.dock_slots.get(sl));
                 if let Some(&dock_rect) = dock {
                     // Fixed size (the card may be collapsed, so `s` is
@@ -390,9 +396,10 @@ impl App {
             if self.group_anim <= 0.0 && self.group_anim_target <= 0.0 {
                 // Fully collapsed back into the tile: leave the box (grid or
                 // dock stack) and end any drag-out shrink.
-                let was_dock = self.dock_stack.is_some();
+                let was_dock = self.dock_stack.is_some() || self.dir_stack.is_some();
                 self.app_group = None;
                 self.dock_stack = None;
+                self.dir_stack = None;
                 self.closing_members = None;
                 self.group_origin = None;
                 self.group_anim = 1.0;
@@ -483,14 +490,12 @@ impl App {
             .box_drag
             .and_then(|(entry, pos)| self.box_drag_slot_target(pos).map(|gap| (entry, gap, pos)));
         let (open_box_members, open_box_slots): (Vec<usize>, Vec<usize>) = self
-            .open_box_group()
-            .and_then(|g| self.groups.groups().get(g))
-            .map(|group| {
+            .stack_members()
+            .map(|members| {
                 // All members with their display slots (page * PAGE_CAP
                 // + within — pages may be under-full); the box overlay
                 // pages them 3×3 via box_scroll.
-                group
-                    .members
+                members
                     .pages()
                     .iter()
                     .enumerate()
@@ -561,11 +566,10 @@ impl App {
             self.entries.iter().position(|e| e.id == gid)
         });
         let open_box_pages = self
-            .open_box_group()
-            .and_then(|g| self.groups.groups().get(g))
-            .map(|grp| {
+            .stack_members()
+            .map(|members| {
                 // One reachable ghost page while a member is in hand.
-                let pages = grp.members.pages().len().max(1) + usize::from(self.box_drag.is_some());
+                let pages = members.pages().len().max(1) + usize::from(self.box_drag.is_some());
                 (self.box_page.min(pages - 1), pages)
             })
             .unwrap_or((0, 1));
@@ -634,7 +638,7 @@ impl App {
                 && self.scroll.per.iter().any(pager::Pager::is_settling))
                 // A box page-slide keeps animating whatever the card state
                 // (a dock stack lives in the Dock state, not Open).
-                || (self.open_box_group().is_some() && self.box_pager.is_settling()))
+                || (self.stack_open() && self.box_pager.is_settling()))
         {
             self.dirty = true;
         }

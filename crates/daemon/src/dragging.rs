@@ -319,9 +319,15 @@ impl App {
                             self.pins.pin_at(pid, k);
                         }
                         self.pins.pin_at(&id, slot);
+                    } else if drag.from_dock && released && kind == Some(apps::EntryKind::File) {
+                        // A pinned path (dir/file from the Files section)
+                        // has no grid home to land in: dropping it
+                        // anywhere off the dock unpins it.
+                        info!("unpinning path {id} (dropped off the dock)");
+                        self.pins.unpin(&id);
                     }
-                    // insert == None: dropped outside the dock band —
-                    // no unpin, the icon just returns to the dock.
+                    // insert == None otherwise: dropped outside the dock
+                    // band — no unpin, the icon just returns to the dock.
                 }
             }
         }

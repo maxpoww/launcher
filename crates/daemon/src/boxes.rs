@@ -1,6 +1,7 @@
 //! The open box (magnified app group) — opening/closing, the in-box
 //! member reorder drag with its edge paging and ghost page, pulling a
-//! member out into the loose grid, and the dock folder stack variant.
+//! member out into the loose grid, and the dock stack variants (a group
+//! folder, or a pinned directory's content stack).
 
 use tracing::info;
 use waverunner_core::index::AppEntry;
@@ -9,6 +10,20 @@ use crate::dragging::{edge_page_dir, edge_page_due};
 use crate::state::Target;
 use crate::{apps, content, groups, pages};
 use crate::{App, DragState};
+
+/// A pinned directory's open dock stack: the same magnified box a dock
+/// folder uses, fed by the directory's listing instead of a group. The
+/// members are file paths (ids of the transient listing entries the
+/// refilter rebuilds while the stack is open); clicking one opens it.
+pub(crate) struct DirStack {
+    /// The pinned dock entry's id (the stack's grow anchor) — a path for
+    /// pins dragged from a listing, `folder-<name>` for home-strip pins.
+    pub(crate) id: String,
+    /// The directory whose contents the stack shows.
+    pub(crate) path: String,
+    /// The listing, paged 3×3 like group members.
+    pub(crate) members: pages::PagedList,
+}
 
 impl App {
     /// Build one transient Apps-grid cell per group (id
@@ -88,10 +103,11 @@ impl App {
         self.refilter();
     }
 
-    /// Close the open box (grid or dock stack): it shrinks back into its
-    /// tile; the state clears once the animation lands (see `draw`).
+    /// Close the open box (grid box, dock stack, or directory stack): it
+    /// shrinks back into its tile; the state clears once the animation
+    /// lands (see `draw`).
     pub(crate) fn close_group(&mut self) {
-        if self.open_box_group().is_none() {
+        if !self.stack_open() {
             return;
         }
         if self.group_origin.is_none() {
@@ -108,15 +124,61 @@ impl App {
         self.app_group.or(self.dock_stack)
     }
 
-    /// Center of a box's dock folder icon (its grow origin), by the box id.
-    pub(crate) fn dock_folder_center(&self, g: usize) -> Option<(f32, f32)> {
+    /// Whether any stack is open: a group box (grid or dock) or a pinned
+    /// directory's content stack.
+    pub(crate) fn stack_open(&self) -> bool {
+        self.open_box_group().is_some() || self.dir_stack.is_some()
+    }
+
+    /// The open stack's member ids — a group's members, or the listing of
+    /// an open pinned-directory stack. One paged list feeds the box
+    /// overlay either way.
+    pub(crate) fn stack_members(&self) -> Option<&pages::PagedList> {
+        if let Some(ds) = &self.dir_stack {
+            return Some(&ds.members);
+        }
+        self.open_box_group()
+            .and_then(|g| self.groups.groups().get(g))
+            .map(|grp| &grp.members)
+    }
+
+    /// Center of the dock icon whose entry has `id` (a stack's grow origin).
+    pub(crate) fn dock_slot_center(&self, id: &str) -> Option<(f32, f32)> {
         let layout = self.current_layout();
-        let gid = format!("group:{}", self.groups.groups()[g].id);
         self.dock_order
             .iter()
-            .position(|&e| self.entries.get(e).is_some_and(|x| x.id == gid))
+            .position(|&e| self.entries.get(e).is_some_and(|x| x.id == id))
             .and_then(|slot| layout.dock_slots.get(slot))
             .map(|r| (r.x + r.w / 2.0, r.y + r.h / 2.0))
+    }
+
+    /// Center of a box's dock folder icon (its grow origin), by the box id.
+    pub(crate) fn dock_folder_center(&self, g: usize) -> Option<(f32, f32)> {
+        let gid = format!("group:{}", self.groups.groups()[g].id);
+        self.dock_slot_center(&gid)
+    }
+
+    /// Open a pinned directory's content stack above its dock icon — the
+    /// same magnified box a dock folder uses, fed by the directory
+    /// listing (built by the refilter). `id` is the pinned entry's id
+    /// (its dock anchor); `path` the directory it stands for.
+    pub(crate) fn open_dir_stack(&mut self, id: String, path: String) {
+        info!("dir stack: {path}");
+        self.group_origin = self.dock_slot_center(&id);
+        self.app_group = None;
+        self.dock_stack = None;
+        self.dir_stack = Some(DirStack {
+            id,
+            path,
+            members: pages::PagedList::default(),
+        });
+        self.group_anim = 0.0;
+        self.group_anim_target = 1.0;
+        self.box_page = 0;
+        self.box_pager.reset();
+        self.box_slide.clear();
+        self.sync_input_region();
+        self.refilter();
     }
 
     /// Open a dock folder. With the grid up, the box grows out of its dock
@@ -162,12 +224,8 @@ impl App {
     /// The open box member id shown in 3×3 slot `k` on the current page, if
     /// that slot is filled (maps slot → member via the side layout + page).
     pub(crate) fn open_box_member_id(&self, k: usize) -> Option<String> {
-        let g = self.open_box_group()?;
         let local = content::open_box_slot_member(self.box_is_left(), k);
-        self.groups
-            .groups()
-            .get(g)?
-            .members
+        self.stack_members()?
             .pages()
             .get(self.box_page)?
             .get(local)
@@ -188,6 +246,11 @@ impl App {
     /// stays open, so it can be moved between slots and pages — or dragged
     /// out of the box to pull it into the grid.
     pub(crate) fn begin_box_drag(&mut self, k: usize, pos: (f32, f32)) {
+        // A directory stack mirrors the filesystem: its listing has no
+        // order or membership of ours to edit, so members don't drag.
+        if self.dir_stack.is_some() {
+            return;
+        }
         let Some(member_id) = self.open_box_member_id(k) else {
             return;
         };
@@ -390,14 +453,10 @@ impl App {
     }
 
     /// Turn the open box a page (+1 next, -1 previous): wheel paging
-    /// wraps cyclically, drag paging clamps at the ends (see
-    /// [`pager::Pager::turn`]).
+    /// wraps cyclically; drag paging cycles too (with its single ghost
+    /// page — see [`pager::Pager::turn`]).
     pub(crate) fn turn_box_page(&mut self, dir: i64, wrap: bool) {
-        let Some(n) = self
-            .open_box_group()
-            .and_then(|g| self.groups.groups().get(g))
-            .map(|grp| grp.members.pages().len())
-        else {
+        let Some(n) = self.stack_members().map(|m| m.pages().len()) else {
             return;
         };
         // While reordering a member, one extra empty page is reachable

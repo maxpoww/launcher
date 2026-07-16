@@ -18,6 +18,9 @@ pub(crate) const FILE_RESULTS_MAX: usize = 24;
 /// Cap on entries listed when navigated into a directory.
 pub(crate) const FILES_LIST_MAX: usize = 300;
 
+/// Cap on a pinned directory's dock-stack listing (five 3×3 pages).
+pub(crate) const DIR_STACK_MAX: usize = 45;
+
 impl App {
     /// Append one transient Files-section entry (kind File, generic
     /// folder/file icon layer) and return its index. `id` is the path.
@@ -90,6 +93,66 @@ impl App {
             out.push(self.push_transient_file(&path, &name, exec, is_dir));
         }
         out
+    }
+
+    /// Synthesize dock entries for pinned filesystem paths (dirs or files
+    /// dragged from the Files section onto the dock): a path pin has no
+    /// scanned entry behind it — listings are transient — so each
+    /// refilter recreates one (folder/file icon, xdg-open exec) for the
+    /// dock to render. Ids already covered by a live entry are skipped.
+    pub(crate) fn pinned_path_entries(&mut self) {
+        let paths: Vec<String> = self
+            .pins
+            .pins()
+            .iter()
+            .filter(|p| p.starts_with('/') && !self.entries.iter().any(|e| &e.id == *p))
+            .cloned()
+            .collect();
+        for path in paths {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let exec = format!("xdg-open {}", launch::shell_quote(&path));
+            let is_dir = std::fs::metadata(&path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            self.push_transient_file(&path, &name, exec, is_dir);
+        }
+    }
+
+    /// Rebuild an open directory stack's listing: transient entries for
+    /// the box overlay to render, and the paged member list (folders
+    /// first, alphabetical — the same order the Files section uses).
+    pub(crate) fn rebuild_dir_stack(&mut self) {
+        let Some(path) = self.dir_stack.as_ref().map(|ds| ds.path.clone()) else {
+            return;
+        };
+        let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    return None;
+                }
+                let is_dir = e.file_type().ok()?.is_dir();
+                Some((is_dir, name, e.path().to_string_lossy().into_owned()))
+            })
+            .collect();
+        children.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut ids = Vec::with_capacity(children.len().min(DIR_STACK_MAX));
+        for (is_dir, name, cpath) in children.into_iter().take(DIR_STACK_MAX) {
+            let exec = format!("xdg-open {}", launch::shell_quote(&cpath));
+            self.push_transient_file(&cpath, &name, exec, is_dir);
+            ids.push(cpath);
+        }
+        let mut members = crate::pages::PagedList::from_flat(ids);
+        members.normalize(crate::groups::PAGE_CAP, |_| true);
+        if let Some(ds) = &mut self.dir_stack {
+            ds.members = members;
+        }
     }
 
     /// Files-section navigation: returns true when the hit was a folder

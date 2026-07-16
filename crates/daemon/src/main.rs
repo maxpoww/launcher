@@ -182,6 +182,7 @@ fn main() -> anyhow::Result<()> {
         groups: groups::GroupDb::load(),
         app_group: None,
         dock_stack: None,
+        dir_stack: None,
         box_drag: None,
         box_drag_page_at: None,
         box_page: 0,
@@ -403,6 +404,8 @@ pub struct App {
     app_group: Option<usize>,
     /// Group whose dock-folder stack popover is open (index into `groups`).
     dock_stack: Option<usize>,
+    /// A pinned directory whose content stack is open above the dock.
+    dir_stack: Option<boxes::DirStack>,
     /// In-box member reorder drag: the dragged member's entry index and the
     /// pointer position. The box stays open; drop reorders it (or, dragged
     /// out of the box, it converts to a pull-out into the grid).
@@ -1007,6 +1010,10 @@ impl App {
                 visible[content::SECTION_FILES] = self.dir_listing();
             }
         }
+        // Pinned filesystem paths render on the dock through transient
+        // entries; an open directory stack lists its contents the same way.
+        self.pinned_path_entries();
+        self.rebuild_dir_stack();
         self.search.visible = visible;
         // Search results are a flat ranked list: dense identity slots.
         if searching {
@@ -1258,7 +1265,7 @@ impl App {
         // While a box is open, the grid behind is just context: a click
         // anywhere but the box itself closes the box (and does nothing
         // else this click).
-        if self.open_box_group().is_some() && !matches!(hit, Hit::OpenBoxCell(_)) {
+        if self.stack_open() && !matches!(hit, Hit::OpenBoxCell(_)) {
             self.close_group();
             return;
         }
@@ -1278,6 +1285,21 @@ impl App {
                             self.open_dock_folder(g);
                         }
                         return;
+                    }
+                    // A pinned directory opens its content stack the same
+                    // way (a pinned plain file falls through and opens).
+                    if self.kinds.get(entry_idx) == Some(&apps::EntryKind::File) {
+                        let dir = self.entries.get(entry_idx).and_then(|e| {
+                            let path = e.description.clone()?;
+                            std::fs::metadata(&path)
+                                .ok()?
+                                .is_dir()
+                                .then(|| (e.id.clone(), path))
+                        });
+                        if let Some((id, path)) = dir {
+                            self.open_dir_stack(id, path);
+                            return;
+                        }
                     }
                     self.activate(entry_idx);
                 }
@@ -1328,8 +1350,9 @@ impl App {
     /// finishes the job); from the dock, hide outright — unless nothing
     /// overlaps the zone, where intellihide keeps the dock parked.
     fn dismiss(&mut self) {
-        // A dock stack closes with the launcher.
+        // A dock stack (group or directory) closes with the launcher.
         self.dock_stack = None;
+        self.dir_stack = None;
         let command = if self.ui.target() == Target::Open || self.zone_free {
             Command::Collapse
         } else {
@@ -1467,7 +1490,7 @@ impl App {
         }
         // An open dock stack (a box floating above the dock) must be
         // interactive, so the input band reaches up to it.
-        if self.dock_stack.is_some() {
+        if self.dock_stack.is_some() || self.dir_stack.is_some() {
             if let Some(b) = self.current_layout().open_box {
                 let needed = (self.buffer_size.1 as f32 - b.y).ceil().max(0.0) as u32;
                 extent = extent.max(needed);
@@ -1521,7 +1544,7 @@ impl App {
         }
         // An open box (grid box or dock stack) captures scroll to page its
         // members, whatever the card state (a dock stack opens over the bar).
-        if self.open_box_group().is_some() {
+        if self.stack_open() {
             self.box_page_scroll(value);
             return;
         }
@@ -1598,7 +1621,7 @@ impl App {
             return;
         }
         if self.ui.target() == Target::Open {
-            if self.open_box_group().is_some() {
+            if self.stack_open() {
                 self.box_page_scroll(value);
             } else if let Some(section) = self
                 .pointer_pos
@@ -1638,7 +1661,7 @@ impl App {
         match keysym {
             Keysym::Escape => {
                 // Step out of an open box first; dismiss on the next.
-                if self.open_box_group().is_some() && self.search.query.is_empty() {
+                if self.stack_open() && self.search.query.is_empty() {
                     self.close_group();
                     return;
                 }
@@ -2159,7 +2182,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     app.activate_hit(hit);
                                 }
                                 // else: drag-cancel — do nothing.
-                            } else if app.open_box_group().is_some() {
+                            } else if app.stack_open() {
                                 // A box (grid or dock stack) is open: a click
                                 // off it closes the box, not the launcher.
                                 app.close_group();
