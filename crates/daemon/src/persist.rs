@@ -8,11 +8,23 @@
 //! swallowed — the in-memory state is always correct for the running
 //! session.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::warn;
+
+/// Path of a file in the daemon's XDG data directory
+/// (`$XDG_DATA_HOME/waverunner/`, falling back to `~/.local/share/...`).
+/// Every on-disk store keys its file off this.
+pub fn data_path(file_name: &str) -> PathBuf {
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
+        });
+    base.join("waverunner").join(file_name)
+}
 
 /// Parse `path` as JSON, or `None` if it's missing or malformed.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {

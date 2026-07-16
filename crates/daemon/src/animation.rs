@@ -14,6 +14,20 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+/// Frame-rate-independent exponential approach: step `current` toward
+/// `target` by the decay factor `1 − exp(−dt·rate)`, snapping onto the
+/// target once within `snap`. Returns the new value and whether it is
+/// still moving — the shared ease behind every "glide to rest" in the
+/// daemon (page slides, the make-room reflows, the dock parting).
+pub fn ease_toward(current: f32, target: f32, dt: f32, rate: f32, snap: f32) -> (f32, bool) {
+    let delta = target - current;
+    if delta.abs() > snap {
+        (current + delta * (1.0 - (-dt * rate).exp()), true)
+    } else {
+        (target, false)
+    }
+}
+
 /// Progress below which a settled animator snaps to its endpoint.
 const SETTLE_EPSILON: f32 = 1e-3;
 
@@ -141,6 +155,23 @@ impl Animator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ease_toward_steps_and_snaps() {
+        let (v, moving) = ease_toward(0.0, 10.0, 1.0 / 60.0, 12.0, 0.5);
+        assert!(moving && v > 0.0 && v < 10.0);
+        // Within snap distance: lands exactly, reports settled.
+        assert_eq!(ease_toward(9.8, 10.0, 1.0 / 60.0, 12.0, 0.5), (10.0, false));
+        // Framerate independence: 60 Hz and 144 Hz land together.
+        let run = |hz: f32| {
+            let (mut v, dt) = (0.0, 1.0 / hz);
+            for _ in 0..hz as usize {
+                v = ease_toward(v, 10.0, dt, 12.0, 0.001).0;
+            }
+            v
+        };
+        assert!((run(60.0) - run(144.0)).abs() < 0.05);
+    }
 
     fn run(mut animator: Animator, hz: f32, seconds: f32) -> f32 {
         let dt = 1.0 / hz;

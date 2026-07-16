@@ -20,7 +20,7 @@ pub struct UsageDb {
 impl UsageDb {
     /// Load from disk, or start empty if the file doesn't exist yet.
     pub fn load() -> Self {
-        let path = data_path("usage.json");
+        let path = crate::persist::data_path("usage.json");
         let counts = crate::persist::read_json(&path).unwrap_or_default();
         Self { counts, path }
     }
@@ -35,16 +35,4 @@ impl UsageDb {
     pub fn count(&self, app_id: &str) -> u32 {
         self.counts.get(app_id).copied().unwrap_or(0)
     }
-}
-
-/// Path of a file in the daemon's XDG data directory
-/// (`$XDG_DATA_HOME/waverunner/`, falling back to `~/.local/share/...`).
-/// Shared with the pin database.
-pub fn data_path(file_name: &str) -> PathBuf {
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
-        });
-    base.join("waverunner").join(file_name)
 }

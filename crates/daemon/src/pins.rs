@@ -23,7 +23,7 @@ pub struct PinDb {
 impl PinDb {
     /// Load from disk, or start empty if the file doesn't exist yet.
     pub fn load() -> Self {
-        let path = crate::usage::data_path("pins.json");
+        let path = crate::persist::data_path("pins.json");
         let pins = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| parse_file(&s))

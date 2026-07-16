@@ -40,7 +40,7 @@ impl ManagedDb {
     /// in the `.nix` (so a hand-copied list from another machine still
     /// works — its attrs map by their own name until an app resolves).
     pub fn load() -> Self {
-        let json_path = crate::usage::data_path("managed.json");
+        let json_path = crate::persist::data_path("managed.json");
         let nix_path = home_manager_dir().join("waverunner-packages.nix");
         let mut pkgs: Vec<ManagedPkg> = crate::persist::read_json(&json_path).unwrap_or_default();
         // Adopt any attr present in the .nix but missing from the sidecar.
@@ -157,7 +157,7 @@ impl ManagedDb {
 /// that ship no `.desktop`. Falls back to the `.nix` for a hand-copied
 /// list that has no sidecar yet.
 pub fn snapshot() -> Vec<(String, Vec<String>)> {
-    let json_path = crate::usage::data_path("managed.json");
+    let json_path = crate::persist::data_path("managed.json");
     let pkgs: Vec<ManagedPkg> = crate::persist::read_json(&json_path).unwrap_or_default();
     if !pkgs.is_empty() {
         return pkgs.into_iter().map(|p| (p.attr, p.desktop_ids)).collect();

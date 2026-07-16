@@ -38,7 +38,7 @@ impl OrderDb {
     /// A legacy flat `order` list becomes one big page (normalize
     /// splits it once the real page capacity is known).
     pub fn load() -> Self {
-        let path = crate::usage::data_path("apps-order.json");
+        let path = crate::persist::data_path("apps-order.json");
         let f: FileFormat = crate::persist::read_json(&path).unwrap_or_default();
         let list = if !f.pages.is_empty() {
             f.pages

@@ -3482,7 +3482,6 @@ impl App {
         let cap = self.apps_cap.max(1);
         let orig_slot = orig_pos.and_then(|op| self.apps_slots.get(op).copied());
         let mut slide_animating = false;
-        let k = 1.0 - (-dt * MAKEROOM_RATE).exp();
         for i in 0..apps_len {
             let s = self.apps_slots.get(i).copied().unwrap_or(i);
             let mut target = s as f32;
@@ -3494,13 +3493,10 @@ impl App {
             } else if let Some(g) = insert_gap {
                 target = pages::shifted_slot(s, None, g, cap) as f32;
             }
-            let cur = self.apps_slide[i];
-            if (cur - target).abs() > 0.005 {
-                self.apps_slide[i] = cur + (target - cur) * k;
-                slide_animating = true;
-            } else {
-                self.apps_slide[i] = target;
-            }
+            let (v, moving) =
+                animation::ease_toward(self.apps_slide[i], target, dt, MAKEROOM_RATE, 0.005);
+            self.apps_slide[i] = v;
+            slide_animating |= moving;
         }
         // Dock make-room glide, same idea in dock-slot units: dragging
         // over the dock parts the icons around the insertion point;
@@ -3548,13 +3544,10 @@ impl App {
                 }
                 _ => 0.0,
             };
-            let cur = self.dock_slide[kk];
-            if (cur - target).abs() > 0.005 {
-                self.dock_slide[kk] = cur + (target - cur) * k;
-                slide_animating = true;
-            } else {
-                self.dock_slide[kk] = target;
-            }
+            let (v, moving) =
+                animation::ease_toward(self.dock_slide[kk], target, dt, MAKEROOM_RATE, 0.005);
+            self.dock_slide[kk] = v;
+            slide_animating |= moving;
         }
         if slide_animating {
             self.dirty = true;
@@ -3761,12 +3754,8 @@ impl App {
                 .find(|(ee, _)| *ee == e)
                 .map(|&(_, d)| d)
                 .unwrap_or(target);
-            let next = if (cur - target).abs() > 0.005 {
-                box_sliding = true;
-                cur + (target - cur) * k
-            } else {
-                target
-            };
+            let (next, moving) = animation::ease_toward(cur, target, dt, MAKEROOM_RATE, 0.005);
+            box_sliding |= moving;
             new_box_slide.push((e, next));
             open_box_disp.push(next);
         }

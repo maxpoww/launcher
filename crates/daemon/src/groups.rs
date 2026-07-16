@@ -55,7 +55,7 @@ impl GroupDb {
     /// Load from disk, or start empty if the file doesn't exist yet.
     /// Boxes from before stable ids get one assigned (and saved).
     pub fn load() -> Self {
-        let path = crate::usage::data_path("groups.json");
+        let path = crate::persist::data_path("groups.json");
         let groups = crate::persist::read_json::<FileFormat>(&path)
             .map(|f| f.groups)
             .unwrap_or_default();

@@ -44,16 +44,10 @@ impl Pager {
     /// Ease `pos` toward `target` (exponential decay, dt-based). Returns
     /// true while still moving — the caller keeps frames coming.
     pub fn ease(&mut self, dt: f32) -> bool {
-        let delta = self.target - self.pos;
-        if delta.abs() > 0.5 {
-            self.pos += delta * (1.0 - (-dt * SLIDE_RATE).exp());
-            true
-        } else {
-            if delta != 0.0 {
-                self.pos = self.target;
-            }
-            false
-        }
+        let (pos, moving) =
+            crate::animation::ease_toward(self.pos, self.target, dt, SLIDE_RATE, 0.5);
+        self.pos = pos;
+        moving
     }
 
     /// Whether `pos` still has distance to cover toward `target`.
