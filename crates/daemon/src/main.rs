@@ -187,6 +187,10 @@ fn main() -> anyhow::Result<()> {
         reorder_dwell: None,
         grid_drag_page_at: None,
         apps_slide: Vec::new(),
+        apps_slots: Vec::new(),
+        apps_page_map: Vec::new(),
+        apps_cap: 24,
+        apps_span: 0,
         just_dropped: None,
         prev_searching: false,
         dock_slide: Vec::new(),
@@ -436,6 +440,20 @@ pub struct App {
     /// Per-cell animated display indices for the Apps grid (the
     /// make-room glide); identity when nothing is in flight.
     apps_slide: Vec<f32>,
+    /// Display slot of each visible Apps item (parallel to
+    /// `search.visible[SECTION_APPS]`): `page * cap + within`. Within a
+    /// page slots are dense from the page start; gaps only exist at page
+    /// tails (Launchpad model). Identity while searching.
+    apps_slots: Vec<usize>,
+    /// Display page → storage page (index into `order.pages()`); pages
+    /// whose members are all hidden are skipped on screen.
+    apps_page_map: Vec<usize>,
+    /// Cells per Apps page (cols × rows) as of the last refilter.
+    apps_cap: usize,
+    /// One past the last occupied display slot (0 = empty grid) — the
+    /// Apps page count is derived from this, not the item count, so
+    /// tail gaps still count toward their page.
+    apps_span: usize,
     /// The id of an app just dropped by a drag: on the next refilter it
     /// starts at rest in its chosen cell instead of carrying its old
     /// animated position, so the icon lands where it was dropped rather
@@ -1181,20 +1199,61 @@ impl App {
                 cells.append(&mut visible[content::SECTION_APPS]);
                 let ids: Vec<String> = cells.iter().map(|&i| self.entries[i].id.clone()).collect();
                 self.order.sync(ids.iter().map(String::as_str));
-                // Cascade over-full pages by the real capacity (a legacy
-                // flat order loads as one big page; inserts can overfill).
-                // Skip before the first configure — a degenerate 0-size
-                // layout would shred the pages into capacity-1 confetti.
+                let by_id: std::collections::HashMap<&str, usize> = ids
+                    .iter()
+                    .map(String::as_str)
+                    .zip(cells.iter().copied())
+                    .collect();
+                // Cascade over-full pages by the real capacity, counting
+                // only visible ids (hidden pinned/grouped ids occupy no
+                // cell) — a legacy flat order loads as one big page and
+                // splits here; inserts can overfill a page. Skip before
+                // the first configure — a degenerate 0-size layout would
+                // shred the pages into capacity-1 confetti.
                 if self.renderer.is_some() {
                     let settled = self.layout_at(self.ui.extent_of(Target::Open));
                     let sec = &settled.sections[content::SECTION_APPS];
-                    self.order.normalize(sec.cols * sec.rows);
+                    self.apps_cap = (sec.cols * sec.rows).max(1);
+                    self.order
+                        .normalize(self.apps_cap, |id| by_id.contains_key(id));
                 }
-                cells.sort_by_key(|&idx| self.order.index_of(&self.entries[idx].id));
+                // Page-major arrangement with display slots: each storage
+                // page's visible members sit dense from its page start;
+                // an under-full page keeps its tail gap on screen. Pages
+                // whose members are all hidden are skipped entirely.
+                let cap = self.apps_cap.max(1);
+                let mut arranged: Vec<usize> = Vec::with_capacity(cells.len());
+                let mut slots: Vec<usize> = Vec::with_capacity(cells.len());
+                let mut page_map: Vec<usize> = Vec::new();
+                for (sp, page) in self.order.pages().iter().enumerate() {
+                    let members: Vec<usize> = page
+                        .iter()
+                        .filter_map(|id| by_id.get(id.as_str()).copied())
+                        .collect();
+                    if members.is_empty() {
+                        continue;
+                    }
+                    let dp = page_map.len();
+                    page_map.push(sp);
+                    for (w, e) in members.into_iter().enumerate() {
+                        arranged.push(e);
+                        slots.push(dp * cap + w);
+                    }
+                }
+                // Safety net: a cell sync somehow missed still shows.
+                for &e in &cells {
+                    if !arranged.contains(&e) {
+                        slots.push(slots.last().map_or(0, |s| s + 1));
+                        arranged.push(e);
+                    }
+                }
                 // Packages installing in place ride the loose grid at
                 // their drop slot until the real app replaces them.
-                self.insert_pending_cells(&mut cells);
-                visible[content::SECTION_APPS] = cells;
+                self.insert_pending_cells(&mut arranged, &mut slots);
+                self.apps_page_map = page_map;
+                self.apps_span = slots.last().map_or(0, |s| s + 1);
+                self.apps_slots = slots;
+                visible[content::SECTION_APPS] = arranged;
             }
             if self.files_dir.is_some() {
                 // Navigated into a folder: list its contents instead of
@@ -1203,15 +1262,24 @@ impl App {
             }
         }
         self.search.visible = visible;
+        // Search results are a flat ranked list: dense identity slots.
+        if searching {
+            let n = self.search.visible[content::SECTION_APPS].len();
+            self.apps_slots = (0..n).collect();
+            self.apps_page_map.clear();
+            self.apps_span = n;
+        }
         // Boxes' entry indices just changed — re-resolve pinned dock items.
         self.recompute_dock_order();
         // Visual continuity: every surviving cell keeps its current
         // animated display position and eases to its new seat from
         // there — a rebuilt list never snaps icons, not even for the
         // one synchronous frame this refilter may draw. New entries
-        // start at rest.
+        // start at rest (their display slot).
         let vis = &self.search.visible[content::SECTION_APPS];
-        let mut slide: Vec<f32> = (0..vis.len()).map(|i| i as f32).collect();
+        let mut slide: Vec<f32> = (0..vis.len())
+            .map(|i| self.apps_slots.get(i).copied().unwrap_or(i) as f32)
+            .collect();
         if !searching && !leaving_search {
             // (Ranked search results churn per keystroke; gliding
             // between ranks would be noise, so carry-over is for the
@@ -1671,13 +1739,41 @@ impl App {
     }
 
     /// Layout for an arbitrary card extent at the current scroll offsets.
+    /// Whether a drag that can land on the Apps grid is in flight — the
+    /// grid then offers one extra empty page at its end (the Launchpad
+    /// gesture: drag to the edge to park an app on a fresh page).
+    fn ghost_page_active(&self) -> bool {
+        self.search.query.is_empty()
+            && self.gesture.dragging.as_ref().is_some_and(|d| {
+                matches!(
+                    self.kinds.get(d.entry_idx),
+                    Some(apps::EntryKind::App)
+                        | Some(apps::EntryKind::Group)
+                        | Some(apps::EntryKind::Package)
+                )
+            })
+    }
+
     fn layout_at(&self, extent: f32) -> content::Layout {
+        // The Apps section is paged by display *span* (tail gaps count
+        // toward their page), not item count; a qualifying drag adds one
+        // ghost page to drag onto.
+        let apps_cells = if self.ghost_page_active() {
+            self.apps_span + self.apps_cap.max(1)
+        } else {
+            self.apps_span
+                .max(self.search.visible[content::SECTION_APPS].len())
+        };
         let mut layout = content::layout(
             &self.config,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             extent,
             self.dock_order.len(),
-            std::array::from_fn(|s| self.search.visible[s].len()),
+            [
+                apps_cells,
+                self.search.visible[content::SECTION_INSTALL].len(),
+                self.search.visible[content::SECTION_FILES].len(),
+            ],
             std::array::from_fn(|s| self.scroll.per[s].pos),
             [
                 self.open_box_group().is_some() || self.closing_members.is_some(),
@@ -1743,8 +1839,7 @@ impl App {
             // or a stale pin for an uninstalled app would ghost onto its
             // same-named package search result.
             let idx = self.entries.iter().zip(&self.kinds).position(|(e, k)| {
-                &e.id == pin_id
-                    && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
+                &e.id == pin_id && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
             });
             if let Some(idx) = idx {
                 if !self.dock_order.contains(&idx) {
@@ -2114,11 +2209,18 @@ impl App {
             self.start_managed_install(attr, desktop_ids);
             return;
         };
-        // The grid id the tile should sit before: whatever the drop slot
-        // (the make-room gap) currently displays. Past the end → append.
+        // The grid id the tile should sit before: the first item at or
+        // past the drop slot (the make-room gap) on its display page.
+        // A page-tail / ghost-page drop → append (no anchor).
         let anchor = self.reorder_slot.and_then(|slot| {
-            self.search.visible[content::SECTION_APPS]
-                .get(slot)
+            let cap = self.apps_cap.max(1);
+            let dp = slot / cap;
+            self.apps_slots
+                .iter()
+                .enumerate()
+                .filter(|&(_, &s)| s >= slot && s / cap == dp)
+                .min_by_key(|&(_, &s)| s)
+                .and_then(|(j, _)| self.search.visible[content::SECTION_APPS].get(j))
                 .and_then(|&e| self.entries.get(e))
                 .map(|e| e.id.clone())
         });
@@ -2168,10 +2270,13 @@ impl App {
 
     /// Append a transient Apps-grid cell for each pending install and slot
     /// it into `cells` just before its anchor id (end if the anchor is
-    /// gone). Mirrors [`Self::push_transient_pkg`]: the entry id is the
-    /// attr, so the busy / failed / installing flags and retry-on-click
-    /// all key off it.
-    fn insert_pending_cells(&mut self, cells: &mut Vec<usize>) {
+    /// gone), keeping `slots` parallel: the tile takes the anchor's display
+    /// slot and the rest of that page shifts one right (a full page's last
+    /// item may transiently spill onto the next page start; the resolve
+    /// refilter settles it). Mirrors [`Self::push_transient_pkg`]: the
+    /// entry id is the attr, so the busy / failed / installing flags and
+    /// retry-on-click all key off it.
+    fn insert_pending_cells(&mut self, cells: &mut Vec<usize>, slots: &mut Vec<usize>) {
         for i in 0..self.pending_installs.len() {
             let p = &self.pending_installs[i];
             let (attr, name, version, anchor, slot, has_icon, ph) = (
@@ -2204,11 +2309,31 @@ impl App {
             self.placeholders.push(placeholder);
             self.icon_layers.push(layer);
             let idx = self.entries.len() - 1;
-            let at = anchor
+            let cap = self.apps_cap.max(1);
+            match anchor
                 .as_ref()
                 .and_then(|a| cells.iter().position(|&e| self.entries[e].id == *a))
-                .unwrap_or(cells.len());
-            cells.insert(at, idx);
+            {
+                Some(at) => {
+                    let s = slots.get(at).copied().unwrap_or(at);
+                    let page = s / cap;
+                    cells.insert(at, idx);
+                    slots.insert(at, s);
+                    // Shift the rest of the anchor's page one right
+                    // (within-page slots are dense, so stop at the first
+                    // slot on another page).
+                    for sk in slots[at + 1..].iter_mut() {
+                        if *sk / cap != page {
+                            break;
+                        }
+                        *sk += 1;
+                    }
+                }
+                None => {
+                    slots.push(slots.last().map_or(0, |s| s + 1));
+                    cells.push(idx);
+                }
+            }
         }
     }
 
@@ -2415,10 +2540,13 @@ impl App {
         } else {
             self.grid_drag_page_at = None;
         }
-        // The gap rests at the app's own cell (reorder — nothing moves
-        // on pickup) or past the end (insert — the grid stays whole
-        // until the pointer asks for a slot).
-        let slot = *self.reorder_slot.get_or_insert(orig.unwrap_or(len));
+        // The gap rests at the app's own display slot (reorder — nothing
+        // moves on pickup) or past everything (insert — the grid stays
+        // whole until the pointer asks for a slot).
+        let orig_slot = orig.and_then(|o| self.apps_slots.get(o).copied());
+        let slot = *self
+            .reorder_slot
+            .get_or_insert(orig_slot.unwrap_or(self.apps_span));
 
         // Off the grid: a reorder leaves the gap where it was (you may
         // be reaching for the dock); an insert closes the grid back up.
@@ -2429,45 +2557,58 @@ impl App {
             self.reorder_dwell = None;
             return None;
         };
-        let max_d = if inserting {
-            len
-        } else {
-            len.saturating_sub(1)
-        };
-        let d = d.min(max_d);
+        // The hovered page's append position: one past its last occupied
+        // slot (the dragged item's own slot is the hole in hand, not an
+        // obstacle). An empty page — the ghost page — appends at its
+        // first cell.
+        let cap = self.apps_cap.max(1);
+        let page_start = (d / cap) * cap;
+        let append = self
+            .apps_slots
+            .iter()
+            .enumerate()
+            .filter(|&(j, &s)| Some(j) != orig && s >= page_start && s < page_start + cap)
+            .map(|(_, &s)| s + 1)
+            .max()
+            .unwrap_or(page_start);
         if d == slot {
             self.reorder_dwell = None;
             return None; // hovering the gap: stable
         }
-        // The item shown at display cell `d`: hovering it rings a fold
-        // target immediately (apps only; boxes never fold or nest).
-        let compact = d - usize::from(d > slot);
-        let full = compact + orig.map_or(0, |o| usize::from(compact >= o));
+        // The item at the hovered slot rings a fold target immediately
+        // (apps only; boxes never fold or nest). Empty slots don't fold.
         if kind == Some(apps::EntryKind::App)
             && FOLD_BAND.contains(&fx)
             && (0.08..0.92).contains(&fy)
         {
-            let foldable = self.search.visible[content::SECTION_APPS]
-                .get(full)
-                .is_some_and(|&t| match self.kinds.get(t) {
+            let full = self
+                .apps_slots
+                .iter()
+                .position(|&s| s == d)
+                .filter(|&j| Some(j) != orig);
+            let foldable = full.and_then(|j| self.search.visible[content::SECTION_APPS].get(j));
+            if let (Some(full), Some(&t)) = (full, foldable) {
+                let ok = match self.kinds.get(t) {
                     Some(apps::EntryKind::Group) => true,
                     Some(apps::EntryKind::App) => self.app_group.is_none(),
                     _ => false,
-                });
-            if foldable {
-                self.reorder_dwell = None;
-                return Some((content::SECTION_APPS, full));
+                };
+                if ok {
+                    self.reorder_dwell = None;
+                    return Some((content::SECTION_APPS, full));
+                }
             }
         }
-        // Reordering: move the gap only after a dwell. Only a dock
-        // insert gets the right-edge nudge (so it can append past the
-        // last icon); a reorder moves the gap straight to the hovered
-        // cell. The old unconditional nudge could leap the gap over a
-        // neighbour, sliding two icons for a single step.
+        // Reordering: move the gap only after a dwell. A hover past a
+        // page's items snaps to its append slot (tail gaps and the ghost
+        // page land there). Only a dock insert gets the right-edge nudge
+        // (so it can append past the last icon); a reorder moves the gap
+        // straight to the hovered cell. The old unconditional nudge could
+        // leap the gap over a neighbour, sliding two icons for one step.
         let want = if inserting && fx >= 0.85 {
-            (d + 1).min(max_d)
+            (d + 1).min(append)
         } else {
-            d
+            d.min(append)
         };
         if want == slot {
             self.reorder_dwell = None;
@@ -2496,7 +2637,6 @@ impl App {
         let layout = self.current_layout();
         let kind = self.kinds.get(entry_idx).copied();
         let visible = &self.search.visible[content::SECTION_APPS];
-        let len = visible.len();
         // A grid app/box knows its own cell; a dock app dragged in to
         // unpin has none (`orig` == None) and lands as a fresh insert.
         let orig = visible.iter().position(|&v| v == entry_idx);
@@ -2512,15 +2652,22 @@ impl App {
         if orig.is_none() {
             self.pins.unpin(id);
         }
-        let slot = self.reorder_slot.unwrap_or(orig.unwrap_or(len));
+        let orig_slot = orig.and_then(|o| self.apps_slots.get(o).copied());
+        let slot = self
+            .reorder_slot
+            .unwrap_or(orig_slot.unwrap_or(self.apps_span));
         // Fold wins when the pointer sits on a foldable item's center.
         if kind == Some(apps::EntryKind::App) {
             if let Some((d, fx, _)) = self.apps_display_cell(&layout, pos) {
-                let d = d.min(len.saturating_sub(1));
                 if d != slot && FOLD_BAND.contains(&fx) {
-                    let compact = d - usize::from(d > slot);
-                    let full = compact + orig.map_or(0, |o| usize::from(compact >= o));
-                    if let Some(&target_idx) = self.search.visible[content::SECTION_APPS].get(full)
+                    // The item occupying the hovered display slot.
+                    let full = self
+                        .apps_slots
+                        .iter()
+                        .position(|&s| s == d)
+                        .filter(|&j| Some(j) != orig);
+                    if let Some(&target_idx) =
+                        full.and_then(|j| self.search.visible[content::SECTION_APPS].get(j))
                     {
                         let target_id = self.entries[target_idx].id.clone();
                         match self.kinds.get(target_idx) {
@@ -2551,19 +2698,40 @@ impl App {
         }
         // Otherwise the drop lands in the gap, wherever it is now.
         if let Some(g) = self.app_group {
+            // Legacy in-open-box path: gap slots are member positions.
             let n_members = self.groups.groups()[g].members.len();
             let full_before = (slot + usize::from(orig.is_some_and(|o| slot >= o))).min(n_members);
             self.groups.move_member(g, id, full_before);
         } else {
-            // Boxes and apps share one order: anchor on the compacted
-            // list (dragged removed) — the item displayed at the gap.
-            let compact_ids: Vec<String> = self.search.visible[content::SECTION_APPS]
+            // Resolve the gap slot on its display page: before the first
+            // item at-or-past the gap (same page), or — hovering a page's
+            // empty tail, or the ghost page — append to that page (the
+            // ghost drop creates it: the drag-to-new-page gesture).
+            let cap = self.apps_cap.max(1);
+            let dp = slot / cap;
+            let anchor = self.search.visible[content::SECTION_APPS]
                 .iter()
-                .filter(|&&idx| idx != entry_idx)
-                .map(|&idx| self.entries[idx].id.clone())
-                .collect();
-            let refs: Vec<&str> = compact_ids.iter().map(String::as_str).collect();
-            self.order.move_within(id, &refs, slot);
+                .enumerate()
+                .filter(|&(j, &e)| {
+                    e != entry_idx
+                        && self
+                            .apps_slots
+                            .get(j)
+                            .is_some_and(|&s| s >= slot && s / cap == dp)
+                })
+                .min_by_key(|&(j, _)| self.apps_slots[j])
+                .map(|(_, &e)| self.entries[e].id.clone());
+            match anchor {
+                Some(a) => self.order.move_before(id, &a),
+                None => {
+                    let sp = self
+                        .apps_page_map
+                        .get(dp)
+                        .copied()
+                        .unwrap_or_else(|| self.order.pages().len());
+                    self.order.move_to_page_end(id, sp);
+                }
+            }
         }
         self.refilter();
         true
@@ -2625,9 +2793,19 @@ impl App {
     }
 
     /// What the pointer is over right now (`None` when outside).
+    ///
+    /// `hit_test` reports Apps cells as display *slots* (the grid is
+    /// paged by span, so a slot may be an empty tail gap); remap to the
+    /// item occupying the slot — an empty slot is no hit at all.
     fn hover_at_pointer(&self) -> Option<Hit> {
-        self.pointer_pos
-            .and_then(|pos| content::hit_test(&self.current_layout(), pos, self.search.open))
+        let hit = self
+            .pointer_pos
+            .and_then(|pos| content::hit_test(&self.current_layout(), pos, self.search.open))?;
+        if let Hit::GridCell(content::SECTION_APPS, slot) = hit {
+            let i = self.apps_slots.iter().position(|&s| s == slot)?;
+            return Some(Hit::GridCell(content::SECTION_APPS, i));
+        }
+        Some(hit)
     }
 
     /// Recompute which item the pointer is over; redraw on change.
@@ -3264,7 +3442,9 @@ impl App {
         // ease-out — crisp, no overshoot.
         let apps_len = self.search.visible[content::SECTION_APPS].len();
         if self.apps_slide.len() != apps_len {
-            self.apps_slide = (0..apps_len).map(|i| i as f32).collect();
+            self.apps_slide = (0..apps_len)
+                .map(|i| self.apps_slots.get(i).copied().unwrap_or(i) as f32)
+                .collect();
         }
         let orig_pos = drag_hidden.and_then(|e| {
             self.search.visible[content::SECTION_APPS]
@@ -3286,20 +3466,38 @@ impl App {
                     )
             })
             .and(self.reorder_slot);
+        // Shifts happen in slot space, page-locally (Launchpad): the gap
+        // page parts around the gap; a cross-page drag also compacts the
+        // origin page to close the hole left behind.
+        let cap = self.apps_cap.max(1);
+        let orig_slot = orig_pos.and_then(|op| self.apps_slots.get(op).copied());
         let mut slide_animating = false;
         let k = 1.0 - (-dt * MAKEROOM_RATE).exp();
         for i in 0..apps_len {
-            let mut target = i as f32;
-            if let Some(op) = orig_pos {
+            let s = self.apps_slots.get(i).copied().unwrap_or(i);
+            let mut target = s as f32;
+            if let (Some(op), Some(o)) = (orig_pos, orig_slot) {
                 if i != op {
-                    // Items display at their compacted index, stepping
-                    // over the gap wherever it currently sits.
-                    let compact = if i > op { i - 1 } else { i };
-                    let gap = self.reorder_slot.unwrap_or(op);
-                    target = (compact + usize::from(compact >= gap)) as f32;
+                    let g = self.reorder_slot.unwrap_or(o);
+                    let (sp, gp, hp) = (s / cap, g / cap, o / cap);
+                    if sp == hp && sp == gp {
+                        // Same-page reorder: the classic two-way shift
+                        // between the hole and the gap.
+                        if o < s && s <= g {
+                            target = (s - 1) as f32;
+                        } else if g <= s && s < o {
+                            target = (s + 1) as f32;
+                        }
+                    } else if sp == hp && s > o {
+                        target = (s - 1) as f32; // close the origin hole
+                    } else if sp == gp && s >= g {
+                        target = (s + 1) as f32; // open the gap
+                    }
                 }
-            } else if let Some(gap) = insert_gap {
-                target = (i + usize::from(i >= gap)) as f32;
+            } else if let Some(g) = insert_gap {
+                if s / cap == g / cap && s >= g {
+                    target = (s + 1) as f32;
+                }
             }
             let cur = self.apps_slide[i];
             if (cur - target).abs() > 0.005 {
@@ -3312,17 +3510,17 @@ impl App {
         // Dock make-room glide, same idea in dock-slot units: dragging
         // over the dock parts the icons around the insertion point;
         // a dock-origin drag's gap rests at its old slot meanwhile.
-        let dock_insert_now =
-            self.gesture
-                .dragging
-                .as_ref()
-                .filter(|_| over_dock.is_none()) // folding onto an icon: don't part
-                .and_then(|d| match self.kinds.get(d.entry_idx) {
-                    Some(
-                        apps::EntryKind::App | apps::EntryKind::File | apps::EntryKind::Group,
-                    ) => self.drag_dock_insert(&layout, d.pos),
-                    _ => None,
-                });
+        let dock_insert_now = self
+            .gesture
+            .dragging
+            .as_ref()
+            .filter(|_| over_dock.is_none()) // folding onto an icon: don't part
+            .and_then(|d| match self.kinds.get(d.entry_idx) {
+                Some(apps::EntryKind::App | apps::EntryKind::File | apps::EntryKind::Group) => {
+                    self.drag_dock_insert(&layout, d.pos)
+                }
+                _ => None,
+            });
         let n_dock = layout.dock_slots.len();
         if self.dock_slide.len() != n_dock {
             self.dock_slide = vec![0.0; n_dock];
@@ -3502,9 +3700,9 @@ impl App {
         // members (up to nine) fill the magnified box's 3×3 app grid.
         // An in-box reorder drag: hide the dragged member and open a gap at
         // the slot under the pointer (rendered by `scene`).
-        let box_drag = self.box_drag.and_then(|(entry, pos)| {
-            self.box_drag_slot_target(pos).map(|gap| (entry, gap, pos))
-        });
+        let box_drag = self
+            .box_drag
+            .and_then(|(entry, pos)| self.box_drag_slot_target(pos).map(|gap| (entry, gap, pos)));
         let open_box_members: Vec<usize> = self
             .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
@@ -3869,8 +4067,15 @@ impl App {
                     };
                     self.search.selected = Some(next);
                     if let Some((s, cell)) = self.flat_to_pos(next) {
+                        // Apps cells scroll by display slot (pages may
+                        // have tail gaps), other sections by index.
+                        let at = if s == content::SECTION_APPS {
+                            self.apps_slots.get(cell).copied().unwrap_or(cell)
+                        } else {
+                            cell
+                        };
                         self.scroll.per[s].target =
-                            content::scroll_to_reveal(&layout.sections[s], cell);
+                            content::scroll_to_reveal(&layout.sections[s], at);
                     }
                     self.schedule_frame();
                 }
@@ -4247,9 +4452,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     Hit::GridCell(s, cell) => {
                                         app.search.visible[s].get(cell).copied()
                                     }
-                                    Hit::SearchButton
-                                    | Hit::FilesBack
-                                    | Hit::OpenBoxCell(_) => None,
+                                    Hit::SearchButton | Hit::FilesBack | Hit::OpenBoxCell(_) => {
+                                        None
+                                    }
                                 };
                                 // Cells with a profile mutation in flight
                                 // can't start a new drag.
