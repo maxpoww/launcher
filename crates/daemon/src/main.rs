@@ -1513,6 +1513,12 @@ impl App {
     /// the grid (down = next, up = previous) and never collapses the
     /// popup — dismissal is Escape / pointer-leave / toggle only.
     fn on_scroll(&mut self, value: f64) {
+        // A drag in flight owns paging (the clamped edge bands): wheel
+        // events mid-drag — real or a trackpad's spurious axis noise —
+        // must not wrap-cycle the pages out from under the drag.
+        if self.gesture.dragging.is_some() || self.box_drag.is_some() {
+            return;
+        }
         // An open box (grid box or dock stack) captures scroll to page its
         // members, whatever the card state (a dock stack opens over the bar).
         if self.open_box_group().is_some() {
@@ -1587,6 +1593,10 @@ impl App {
     /// (Untestable in the dev VM — its virtual pointer has no horizontal
     /// axis; verify on real hardware.)
     fn on_hscroll(&mut self, value: f64) {
+        // Mid-drag wheel events must not page (see `on_scroll`).
+        if self.gesture.dragging.is_some() || self.box_drag.is_some() {
+            return;
+        }
         if self.ui.target() == Target::Open {
             if self.open_box_group().is_some() {
                 self.box_page_scroll(value);
@@ -1604,6 +1614,7 @@ impl App {
     /// scroll turns one page, a fast flick can't spin the wheel).
     fn page_scroll(&mut self, section: usize, value: f64) {
         if let Some(dir) = self.scroll.per[section].wheel(value) {
+            info!("wheel page turn: section {section} dir {dir}");
             self.page_by(section, dir, true);
         }
     }

@@ -432,6 +432,7 @@ impl App {
         if layout.sections[content::SECTION_APPS].n_pages > 1 {
             let dir = edge_page_dir(vp.x, vp.w, pos.0);
             if edge_page_due(&mut self.grid_drag_page_at, dir) {
+                info!("drag page turn: dir {dir}");
                 self.page_by(content::SECTION_APPS, dir, false);
             }
             if dir != 0 {
