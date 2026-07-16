@@ -112,12 +112,8 @@ impl App {
         let Some(dir) = self.files_dir.clone() else {
             return Vec::new();
         };
-        // Children per page: the page's cells minus the ".." slot.
-        let settled = self.layout_at(self.ui.extent_of(crate::state::Target::Open));
-        let sec = &settled.sections[crate::content::SECTION_FILES];
-        let per_page = (sec.cols * sec.rows).saturating_sub(1).max(1);
         let up = self.push_transient_file(FILES_UP_ID, "..", "true".to_owned(), true);
-        let mut out = Vec::new();
+        let mut out = vec![up];
         let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -131,20 +127,13 @@ impl App {
                 Some((is_dir, name, e.path().to_string_lossy().into_owned()))
             })
             .collect();
-        // Folders first, then files, each alphabetical — with the same
-        // ".." entry re-inserted at every page boundary so it renders
-        // in each page's first cell (duplicate indices are fine: hit,
-        // hover and activation all resolve through the entry).
+        // Folders first, then files, each alphabetical. The ".." tile is
+        // cell 0; the layout pins it as a static lead cell (the rest of
+        // the listing pages beside it — see `SectionLayout::lead`).
         children.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        for (i, (is_dir, name, path)) in children.into_iter().take(FILES_LIST_MAX).enumerate() {
-            if i % per_page == 0 {
-                out.push(up);
-            }
+        for (is_dir, name, path) in children.into_iter().take(FILES_LIST_MAX) {
             let exec = format!("xdg-open {}", launch::shell_quote(&path));
             out.push(self.push_transient_file(&path, &name, exec, is_dir));
-        }
-        if out.is_empty() {
-            out.push(up); // an empty directory still offers the way out
         }
         out
     }

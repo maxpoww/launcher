@@ -234,6 +234,10 @@ pub struct SectionLayout {
     pub scroll: f32,
     /// Total number of grid cells (the *visible*, filtered entries).
     pub cells: usize,
+    /// Static lead cells pinned at the viewport's start (the navigated
+    /// Files listing's ".." tile): they ignore the scroll, and the
+    /// remaining cells page in the strip beside them.
+    pub lead: usize,
 }
 
 /// Geometry shared by scene assembly and hit-testing.
@@ -378,10 +382,14 @@ pub fn layout(
         // cyclically (infinite scroll), so the offset is normalized into
         // [0, n_pages * viewport.w) rather than clamped.
         let cells_per_page = cols * rows;
+        // A navigated Files listing pins its ".." as a static lead cell;
+        // only the strip beside it pages.
+        let lead = usize::from(navigated[s] && s == SECTION_FILES);
         let n_pages = if n_visible[s] == 0 {
             0
         } else {
-            n_visible[s].div_ceil(cells_per_page)
+            let strip_cpp = cells_per_page.saturating_sub(lead).max(1);
+            n_visible[s].saturating_sub(lead).div_ceil(strip_cpp).max(1)
         };
         let total_w = n_pages as f32 * viewport.w;
         let scroll = if total_w > 0.0 {
@@ -397,6 +405,7 @@ pub fn layout(
             n_pages,
             scroll,
             cells: n_visible[s],
+            lead,
         }
     });
 
@@ -425,7 +434,12 @@ pub fn layout(
 /// `cell` visible in its section, snapping to the page containing it.
 pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
     let cells_per_page = (section.cols * section.rows).max(1);
-    let page = cell / cells_per_page;
+    // Lead cells are static (page 0); strip cells page past the lead.
+    let page = if cell < section.lead {
+        0
+    } else {
+        (cell - section.lead) / cells_per_page.saturating_sub(section.lead).max(1)
+    };
     let max_page = section.n_pages.saturating_sub(1);
     (page.min(max_page) as f32 * section.viewport.w).max(0.0)
 }
@@ -500,9 +514,25 @@ pub fn hit_test(
             let col_f = (adjusted_x - page as f32 * page_w) / GRID_CELL_W;
             let row = ((pos.1 - sec.viewport.y) / GRID_CELL_H).floor() as usize;
             let col = col_f.floor() as usize;
+            // Static lead cells claim the viewport's first columns on
+            // every page (the strip slides beneath them).
+            if sec.lead > 0 {
+                let screen_col = ((pos.0 - sec.viewport.x) / GRID_CELL_W).floor() as usize;
+                if pos.0 >= sec.viewport.x && screen_col < sec.lead {
+                    return (screen_col < sec.cells).then_some(Hit::GridCell(s, screen_col));
+                }
+            }
             if col_f >= 0.0 && col < sec.cols && row < sec.rows {
                 let cells_per_page = sec.cols * sec.rows;
-                let i = page * cells_per_page + row * sec.cols + col;
+                let i = if sec.lead > 0 {
+                    if col < sec.lead {
+                        return None; // page-space under the lead: nothing
+                    }
+                    let strip_cpp = cells_per_page.saturating_sub(sec.lead).max(1);
+                    sec.lead + page * strip_cpp + (row * sec.cols + col - sec.lead)
+                } else {
+                    page * cells_per_page + row * sec.cols + col
+                };
                 if i < sec.cells {
                     // Apps cells are display slots: resolve to the item
                     // occupying the slot (an empty tail cell is no hit).
@@ -1106,6 +1136,25 @@ pub fn scene(
         let page_w = sec.viewport.w;
         let cells_per_page = (sec.cols * sec.rows).max(1);
         let total_w = (sec.n_pages as f32 * page_w).max(1.0);
+        // Static lead cells (the navigated Files ".."): pinned at the
+        // viewport start; the strip beside them pages. They render in
+        // their own grid so the strip can clip against their columns
+        // (paging cells slide *under* the lead, not across it).
+        let lead = sec.lead;
+        let strip_cpp = cells_per_page.saturating_sub(lead).max(1);
+        let strip_cols = sec.cols.saturating_sub(lead).max(1);
+        let mut leadgrid = GridContent {
+            clip: reveal_clip(sec.viewport),
+            ..Default::default()
+        };
+        if lead > 0 {
+            grid.clip = reveal_clip(Rect::new(
+                sec.viewport.x + lead as f32 * GRID_CELL_W,
+                sec.viewport.y,
+                sec.viewport.w - lead as f32 * GRID_CELL_W,
+                sec.viewport.h,
+            ));
+        }
         // A cell's place comes from its display index — fractional
         // while reorder-gliding, so cells ease between grid slots.
         // Pages wrap cyclically; off-screen cells cull.
@@ -1113,9 +1162,14 @@ pub fn scene(
             let i0 = idx.max(0.0).floor() as usize;
             let frac = (idx - i0 as f32).clamp(0.0, 1.0);
             let corner = |i: usize| -> (f32, f32) {
-                let page = i / cells_per_page;
-                let within = i % cells_per_page;
-                let (row, col) = (within / sec.cols, within % sec.cols);
+                if i < lead {
+                    // A lead cell ignores the scroll entirely.
+                    return (sec.viewport.x + i as f32 * GRID_CELL_W, sec.viewport.y);
+                }
+                let j = i - lead;
+                let page = j / strip_cpp;
+                let within = j % strip_cpp;
+                let (row, col) = (within / strip_cols, lead + within % strip_cols);
                 let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
                 let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
                 (
@@ -1142,6 +1196,9 @@ pub fn scene(
             if drag_hidden == Some(entry_idx) || open_box_hidden == Some(entry_idx) {
                 continue;
             }
+            // Lead cells draw in their own (unclipped) grid, above the
+            // strip sliding beneath them.
+            let g = if i < lead { &mut leadgrid } else { &mut grid };
             let di = if s == SECTION_APPS {
                 apps_slide.get(i).copied().unwrap_or(i as f32)
             } else {
@@ -1154,13 +1211,13 @@ pub fn scene(
             let cell = Rect::new(cell_x, cell_y, GRID_CELL_W, GRID_CELL_H);
             if selected == Some((s, i)) {
                 let hl = config.theme.highlight_rgba();
-                grid.rects.push(RectInst {
+                g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                     radius: 14.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
                 });
             } else if hover == Some(Hit::GridCell(s, i)) {
-                grid.rects.push(RectInst {
+                g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                     radius: 14.0,
                     color: config.theme.highlight_rgba(),
@@ -1170,7 +1227,7 @@ pub fn scene(
             // (group create/add) rings it brightly.
             if drag.and_then(|d| d.over_cell) == Some((s, i)) {
                 let hl = config.theme.highlight_rgba();
-                grid.rects.push(RectInst {
+                g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
                     radius: 16.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
@@ -1197,7 +1254,7 @@ pub fn scene(
                 // preview of the first members.
                 let hl = config.theme.highlight_rgba();
                 let tile = BOX_TILE;
-                grid.rects.push(RectInst {
+                g.rects.push(RectInst {
                     rect: Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile),
                     radius: 14.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
@@ -1208,7 +1265,7 @@ pub fn scene(
                     let Some(layer) = layer else { continue };
                     let col_k = (k % 2) as f32;
                     let row_k = (k / 2) as f32;
-                    grid.icons.push(IconInst {
+                    g.icons.push(IconInst {
                         rect: Rect::new(
                             cx - m - gap / 2.0 + col_k * (m + gap),
                             icon_cy - m - gap / 2.0 + row_k * (m + gap),
@@ -1219,7 +1276,7 @@ pub fn scene(
                     });
                 }
                 if !covered {
-                    grid.labels.push(Label {
+                    g.labels.push(Label {
                         text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
                         pos: (cx, cell.y + GRID_ICON_TOP + GRID_ICON + GRID_LABEL_GAP),
                         max_w: cell.w - 12.0,
@@ -1243,7 +1300,7 @@ pub fn scene(
                 None => 1.0,
             };
             let size = GRID_ICON * scale;
-            grid.icons.push(IconInst {
+            g.icons.push(IconInst {
                 rect: Rect::new(
                     cx - size / 2.0,
                     icon_cy - size / 2.0 - lift(entry_idx),
@@ -1257,7 +1314,7 @@ pub fn scene(
                     let letter: String = ch.to_uppercase().collect();
                     let font_px = (size * 0.46).clamp(10.0, 30.0);
                     let line_px = font_px * 1.3;
-                    grid.labels.push(Label {
+                    g.labels.push(Label {
                         text: letter,
                         pos: (cx, icon_cy - lift(entry_idx) - line_px / 2.0),
                         max_w: size,
@@ -1288,7 +1345,7 @@ pub fn scene(
                 truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
             };
             if !covered {
-                grid.labels.push(Label {
+                g.labels.push(Label {
                     text: name,
                     pos: (cx, cell.y + GRID_ICON_TOP + GRID_ICON + GRID_LABEL_GAP),
                     max_w: cell.w - 12.0,
@@ -1302,6 +1359,9 @@ pub fn scene(
             }
         }
         scene.grids.push(grid);
+        if lead > 0 {
+            scene.grids.push(leadgrid);
+        }
 
         // Page indicator dots in the gap beneath the section — gated by
         // the reveal edge (they ride the same fixed layout as the grid,
