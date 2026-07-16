@@ -173,7 +173,7 @@ fn main() -> anyhow::Result<()> {
         app_group: None,
         dock_stack: None,
         box_drag: None,
-        box_edge_scrolling: false,
+        box_drag_page_at: None,
         box_page: 0,
         box_scroll: 0.0,
         box_scroll_target: 0.0,
@@ -185,7 +185,7 @@ fn main() -> anyhow::Result<()> {
         dock_hover_since: None,
         reorder_slot: None,
         reorder_dwell: None,
-        grid_edge_scrolling: false,
+        grid_drag_page_at: None,
         apps_slide: Vec::new(),
         just_dropped: None,
         prev_searching: false,
@@ -393,9 +393,8 @@ pub struct App {
     /// pointer position. The box stays open; drop reorders it (or, dragged
     /// out of the box, it converts to a pull-out into the grid).
     box_drag: Option<(usize, (f32, f32))>,
-    /// Whether an in-box drag is currently edge-scrolling (pointer held at
-    /// the box's left/right edge). Drives snap-to-page when it ends.
-    box_edge_scrolling: bool,
+    /// Dwell timer for edge-paging while reordering in the box.
+    box_drag_page_at: Option<Instant>,
     /// Which 3×3 page of the open box is the scroll target.
     box_page: usize,
     /// Horizontal page-scroll offset of the open box (px), easing toward
@@ -430,10 +429,10 @@ pub struct App {
     /// Pending gap move: the wanted slot and when the pointer started
     /// hovering it (the gap moves after [`REORDER_DWELL`]).
     reorder_dwell: Option<(usize, Instant)>,
-    /// Whether a grid drag is currently edge-scrolling (pointer held at the
-    /// Apps grid's left/right edge). Continuous velocity scroll carries the
-    /// dragged icon across pages; this flag drives snap-to-page when it ends.
-    grid_edge_scrolling: bool,
+    /// Dwell timer for edge-paging the Apps grid while a drag hovers its
+    /// left/right edge — carries the dragged icon to another page (same
+    /// feel as the open-box drag paging).
+    grid_drag_page_at: Option<Instant>,
     /// Per-cell animated display indices for the Apps grid (the
     /// make-room glide); identity when nothing is in flight.
     apps_slide: Vec<f32>,
@@ -642,17 +641,10 @@ const PAGE_SCROLL_THRESHOLD: f64 = 30.0;
 /// page instead of spinning the (cyclic) grid.
 const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
 
-/// Fraction of the grid/box width at each side that forms the drag
-/// edge-scroll zone: holding a drag here glides the pages continuously.
-const EDGE_SCROLL_BAND: f32 = 0.14;
-
-/// Continuous edge-scroll speed, in pages per second, at the zone's inner
-/// boundary (`MIN`, a slow crawl for precise placement) ramping to its far
-/// edge (`MAX`). Pushing deeper scrolls faster, so the user modulates speed
-/// by how hard they lean into the edge — direct and controllable, unlike a
-/// fixed-cadence page flip.
-const EDGE_SCROLL_MIN: f32 = 0.22;
-const EDGE_SCROLL_MAX: f32 = 0.85;
+/// Minimum time between page turns while *holding a drag* at the grid /
+/// box edge — slower than the scroll cooldown so held-edge paging steps
+/// one page at a controllable pace instead of rapid-firing past them.
+const DRAG_PAGE_COOLDOWN: Duration = Duration::from_millis(700);
 
 /// Cap on file-search results shown in the Files section.
 const FILE_RESULTS_MAX: usize = 24;
@@ -1742,7 +1734,8 @@ impl App {
             // or a stale pin for an uninstalled app would ghost onto its
             // same-named package search result.
             let idx = self.entries.iter().zip(&self.kinds).position(|(e, k)| {
-                &e.id == pin_id && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
+                &e.id == pin_id
+                    && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
             });
             if let Some(idx) = idx {
                 if !self.dock_order.contains(&idx) {
@@ -2000,15 +1993,9 @@ impl App {
                 }
             }
         }
-        // Released mid-edge-scroll: settle the grid onto the nearest page.
-        if self.grid_edge_scrolling {
-            let sec = &mut self.scroll.per[content::SECTION_APPS];
-            let page_w = layout.sections[content::SECTION_APPS].viewport.w.max(1.0);
-            sec.target = (sec.pos / page_w).round() * page_w;
-        }
-        self.grid_edge_scrolling = false;
         self.reorder_slot = None;
         self.reorder_dwell = None;
+        self.grid_drag_page_at = None;
         self.recompute_dock_order();
         // Remap the dock glide onto the new arrangement *before*
         // anything draws: every icon keeps its exact current visual
@@ -2346,11 +2333,11 @@ impl App {
     /// way the moment you approach them. Hovering an item rings it as
     /// a fold target immediately. Returns the fold target, if any;
     /// the gap itself lives in `self.reorder_slot`.
-    fn update_grid_target(&mut self, layout: &content::Layout, dt: f32) -> Option<(usize, usize)> {
+    fn update_grid_target(&mut self, layout: &content::Layout) -> Option<(usize, usize)> {
         let Some(drag) = self.gesture.dragging.as_ref() else {
             self.reorder_slot = None;
             self.reorder_dwell = None;
-            self.grid_edge_scrolling = false;
+            self.grid_drag_page_at = None;
             return None;
         };
         let kind = self.kinds.get(drag.entry_idx).copied();
@@ -2384,47 +2371,40 @@ impl App {
         if !grid_drag {
             self.reorder_slot = None;
             self.reorder_dwell = None;
-            self.grid_edge_scrolling = false;
+            self.grid_drag_page_at = None;
             return None;
         }
-        // Edge-scroll: holding the drag near the grid's left/right edge
-        // glides the pages continuously (deeper = faster), carrying the icon
-        // across pages. While edge-scrolling the reorder gap is parked and no
-        // fold target rings — it's a pure paging gesture; pulling back inward
-        // snaps to the nearest page. This is `draw`-driven, so it keeps going
-        // while the pointer holds still (no motion events needed).
+        // Edge-paging: hovering the drag near the grid's left/right edge
+        // turns the page after a short dwell, carrying the icon across
+        // pages (and letting it fold onto an app on another page) — same
+        // dwell/cooldown feel as scroll paging and the open-box drag.
         let vp = layout.sections[content::SECTION_APPS].viewport;
-        let n_pages = layout.sections[content::SECTION_APPS].n_pages;
-        if n_pages > 1 {
-            let page_w = vp.w.max(1.0);
-            let edge = vp.w * EDGE_SCROLL_BAND;
-            let signed = if pos.0 < vp.x + edge {
-                (pos.0 - (vp.x + edge)) / edge // negative toward the left edge
-            } else if pos.0 > vp.x + vp.w - edge {
-                (pos.0 - (vp.x + vp.w - edge)) / edge // positive toward the right
+        if layout.sections[content::SECTION_APPS].n_pages > 1 {
+            let band = vp.w * 0.12;
+            let dir: i64 = if pos.0 < vp.x + band {
+                -1
+            } else if pos.0 > vp.x + vp.w - band {
+                1
             } else {
-                0.0
+                0
             };
-            if signed != 0.0 {
-                let depth = signed.abs().min(1.0);
-                let pps = EDGE_SCROLL_MIN + depth * (EDGE_SCROLL_MAX - EDGE_SCROLL_MIN);
-                let v = signed.signum() * pps * page_w;
-                let max_scroll = (n_pages - 1) as f32 * page_w;
-                let sec = &mut self.scroll.per[content::SECTION_APPS];
-                sec.pos = (sec.pos + v * dt).clamp(0.0, max_scroll);
-                sec.target = sec.pos;
-                self.grid_edge_scrolling = true;
-                self.reorder_dwell = None; // park the gap; no reflow while paging
-                self.dirty = true; // keep frames coming while held at the edge
-                return None; // paging gesture: no fold target
-            } else if self.grid_edge_scrolling {
-                // Pulled back inward: settle onto the nearest page.
-                let sec = &mut self.scroll.per[content::SECTION_APPS];
-                sec.target = (sec.pos / page_w).round() * page_w;
-                self.grid_edge_scrolling = false;
+            if dir == 0 {
+                self.grid_drag_page_at = None;
+            } else {
+                match self.grid_drag_page_at {
+                    Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
+                        self.page_by(content::SECTION_APPS, dir);
+                        self.grid_drag_page_at = Some(Instant::now());
+                    }
+                    None => self.grid_drag_page_at = Some(Instant::now()),
+                    _ => {}
+                }
+                // Keep frames coming while the dwell clock runs (a
+                // stationary pointer at the edge emits no motion).
+                self.dirty = true;
             }
         } else {
-            self.grid_edge_scrolling = false;
+            self.grid_drag_page_at = None;
         }
         // The gap rests at the app's own cell (reorder — nothing moves
         // on pickup) or past the end (insert — the grid stays whole
@@ -2805,14 +2785,13 @@ impl App {
             return;
         };
         self.box_drag = Some((entry_idx, pos));
-        self.box_edge_scrolling = false;
+        self.box_drag_page_at = None;
         self.gesture.pressed = None;
         self.schedule_frame();
     }
 
-    /// Move the in-box drag: update the pointer, and — for a grid box dragged
-    /// vertically out of the box — convert to a pull-out into the loose grid.
-    /// Edge-scroll paging is driven from `draw` (frame-based), not here.
+    /// Move the in-box drag: page at the edges, or — for a grid box dragged
+    /// out of the box — convert to a pull-out into the loose grid.
     fn update_box_drag(&mut self, pos: (f32, f32)) {
         let Some((entry_idx, _)) = self.box_drag else {
             return;
@@ -2833,55 +2812,44 @@ impl App {
             // has no grid to drop into, so it just holds it.
             let id = self.entries[entry_idx].id.clone();
             self.box_drag = None;
-            self.box_edge_scrolling = false;
+            self.box_drag_page_at = None;
             self.pull_box_member_out(&id, pos);
             return;
         }
         self.box_drag = Some((entry_idx, pos));
+        self.box_drag_edge_page(box_rect, pos);
         self.schedule_frame();
     }
 
-    /// Continuous edge-scroll paging for an in-box reorder drag: holding the
-    /// drag near the box's left/right edge glides its pages (deeper = faster);
-    /// pulling back inward snaps to the nearest page. Frame-driven from `draw`
-    /// so it keeps going while the pointer holds still. Mirrors the Apps grid.
-    fn box_drag_edge_scroll(&mut self, box_rect: content::Rect, pos: (f32, f32), dt: f32) {
-        let pages = self
-            .open_box_group()
-            .and_then(|g| self.groups.groups().get(g))
-            .map_or(1, |grp| grp.members.len().div_ceil(9).max(1));
-        if pages <= 1 {
-            self.box_edge_scrolling = false;
+    /// Edge-paging for an in-box reorder drag: hovering the box's left/right
+    /// edge turns the page after a [`PAGE_COOLDOWN`] dwell, carrying the
+    /// dragged member to another page. Called on motion *and* every frame
+    /// from `draw` (via the stored drag pos) so paging keeps going while the
+    /// pointer holds still at the edge — motion alone would stall the dwell.
+    fn box_drag_edge_page(&mut self, box_rect: content::Rect, pos: (f32, f32)) {
+        let edge = box_rect.w * 0.14;
+        let dir: i64 = if pos.0 < box_rect.x + edge {
+            -1
+        } else if pos.0 > box_rect.x + box_rect.w - edge {
+            1
+        } else {
+            0
+        };
+        if dir == 0 {
+            self.box_drag_page_at = None;
             return;
         }
-        let page_w = box_rect.w.max(1.0);
-        let max_scroll = (pages - 1) as f32 * page_w;
-        let edge = box_rect.w * EDGE_SCROLL_BAND;
-        let signed = if pos.0 < box_rect.x + edge {
-            (pos.0 - (box_rect.x + edge)) / edge
-        } else if pos.0 > box_rect.x + box_rect.w - edge {
-            (pos.0 - (box_rect.x + box_rect.w - edge)) / edge
-        } else {
-            0.0
-        };
-        if signed != 0.0 {
-            let depth = signed.abs().min(1.0);
-            let pps = EDGE_SCROLL_MIN + depth * (EDGE_SCROLL_MAX - EDGE_SCROLL_MIN);
-            let v = signed.signum() * pps * page_w;
-            self.box_scroll = (self.box_scroll + v * dt).clamp(0.0, max_scroll);
-            self.box_scroll_target = self.box_scroll;
-            self.box_page = ((self.box_scroll / page_w).round() as usize).min(pages - 1);
-            self.box_edge_scrolling = true;
-            self.dirty = true; // keep frames coming while held at the edge
-        } else if self.box_edge_scrolling {
-            // Pulled back inward: settle onto the nearest page.
-            let page = (self.box_scroll / page_w)
-                .round()
-                .clamp(0.0, (pages - 1) as f32);
-            self.box_scroll_target = page * page_w;
-            self.box_page = page as usize;
-            self.box_edge_scrolling = false;
+        match self.box_drag_page_at {
+            Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
+                self.turn_box_page(dir);
+                self.box_drag_page_at = Some(Instant::now());
+            }
+            None => self.box_drag_page_at = Some(Instant::now()),
+            _ => {}
         }
+        // Keep frames coming while the dwell clock runs (a stationary
+        // pointer at the edge emits no motion).
+        self.dirty = true;
     }
 
     /// Drop the in-box drag: reorder the member to the slot under the pointer.
@@ -2889,13 +2857,7 @@ impl App {
         let Some((entry_idx, pos)) = self.box_drag.take() else {
             return;
         };
-        // Settle onto the page under the pointer if released mid-edge-scroll
-        // (box_page tracks it live, so the drop targets the right page).
-        if self.box_edge_scrolling {
-            let page_w = self.current_layout().open_box.map_or(1.0, |b| b.w).max(1.0);
-            self.box_scroll_target = self.box_page as f32 * page_w;
-        }
-        self.box_edge_scrolling = false;
+        self.box_drag_page_at = None;
         let Some(g) = self.open_box_group() else {
             return;
         };
@@ -3254,12 +3216,12 @@ impl App {
         // Grid drag: track the make-room gap under the pointer and the
         // fold target (ring); remember which cell to hide (the ghost
         // is its visual).
-        let over_cell = self.update_grid_target(&layout, dt);
-        // In-box reorder drag: continuously edge-scroll the box's pages while
-        // the pointer holds at its edge (frame-driven, so it keeps going
-        // without motion). Pull-out stays motion-driven in update_box_drag.
+        let over_cell = self.update_grid_target(&layout);
+        // In-box reorder drag: keep paging while the pointer holds at the
+        // box edge (motion alone would stall the dwell). Pull-out stays
+        // motion-driven — a deliberate gesture always carries motion.
         if let (Some((_, pos)), Some(box_rect)) = (self.box_drag, layout.open_box) {
-            self.box_drag_edge_scroll(box_rect, pos, dt);
+            self.box_drag_edge_page(box_rect, pos);
         }
         // Dock fold target: an app dragged over another dock icon's center
         // (not its own) will join/create a box there.
@@ -3341,17 +3303,17 @@ impl App {
         // Dock make-room glide, same idea in dock-slot units: dragging
         // over the dock parts the icons around the insertion point;
         // a dock-origin drag's gap rests at its old slot meanwhile.
-        let dock_insert_now = self
-            .gesture
-            .dragging
-            .as_ref()
-            .filter(|_| over_dock.is_none()) // folding onto an icon: don't part
-            .and_then(|d| match self.kinds.get(d.entry_idx) {
-                Some(apps::EntryKind::App | apps::EntryKind::File | apps::EntryKind::Group) => {
-                    self.drag_dock_insert(&layout, d.pos)
-                }
-                _ => None,
-            });
+        let dock_insert_now =
+            self.gesture
+                .dragging
+                .as_ref()
+                .filter(|_| over_dock.is_none()) // folding onto an icon: don't part
+                .and_then(|d| match self.kinds.get(d.entry_idx) {
+                    Some(
+                        apps::EntryKind::App | apps::EntryKind::File | apps::EntryKind::Group,
+                    ) => self.drag_dock_insert(&layout, d.pos),
+                    _ => None,
+                });
         let n_dock = layout.dock_slots.len();
         if self.dock_slide.len() != n_dock {
             self.dock_slide = vec![0.0; n_dock];
@@ -3531,9 +3493,9 @@ impl App {
         // members (up to nine) fill the magnified box's 3×3 app grid.
         // An in-box reorder drag: hide the dragged member and open a gap at
         // the slot under the pointer (rendered by `scene`).
-        let box_drag = self
-            .box_drag
-            .and_then(|(entry, pos)| self.box_drag_slot_target(pos).map(|gap| (entry, gap, pos)));
+        let box_drag = self.box_drag.and_then(|(entry, pos)| {
+            self.box_drag_slot_target(pos).map(|gap| (entry, gap, pos))
+        });
         let open_box_members: Vec<usize> = self
             .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
@@ -4276,9 +4238,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     Hit::GridCell(s, cell) => {
                                         app.search.visible[s].get(cell).copied()
                                     }
-                                    Hit::SearchButton | Hit::FilesBack | Hit::OpenBoxCell(_) => {
-                                        None
-                                    }
+                                    Hit::SearchButton
+                                    | Hit::FilesBack
+                                    | Hit::OpenBoxCell(_) => None,
                                 };
                                 // Cells with a profile mutation in flight
                                 // can't start a new drag.
