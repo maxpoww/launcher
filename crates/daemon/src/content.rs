@@ -101,7 +101,6 @@ pub enum Hit {
     GridCell(usize, usize),
     SearchButton,
     /// The "‹ Back" button beside the Files title (navigated dirs only).
-    FilesBack,
     /// A member cell of the magnified open box: the 3×3 slot index under
     /// the pointer (0..9). Clicking a filled slot launches it; dragging
     /// pulls the app out of the box. A click on an empty slot is inert —
@@ -123,9 +122,6 @@ const SECTION_ROWS: [usize; N_SECTIONS] = [4, 1, 1];
 const SECTION_TITLE_H: f32 = 17.0;
 /// Vertical gap beneath each section (page dots live here).
 const SECTION_GAP: f32 = 8.0;
-/// Size of the "‹ Back" pill beside the Files title.
-const BACK_W: f32 = 52.0;
-const BACK_H: f32 = 18.0;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
@@ -264,8 +260,6 @@ pub struct Layout {
     /// Compact search button (circle, same center-x and y as search_box).
     pub search_btn: Rect,
     /// "‹ Back" button beside the Files title; present only while the
-    /// Files section is navigated into a directory.
-    pub files_back: Option<Rect>,
     /// The rectangle the magnified box fills — the Apps grid for a grid box,
     /// or a square above the dock for a dock folder's stack. Present only
     /// while a box is open. A click inside is inert (only outside closes).
@@ -362,7 +356,6 @@ pub fn layout(
     let apps_rows = ((avail / GRID_CELL_H) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
 
     let mut y = grid_top;
-    let mut files_back = None;
     let sections = std::array::from_fn(|s| {
         let rows = if s == SECTION_APPS {
             apps_rows
@@ -372,20 +365,7 @@ pub fn layout(
         // Apps stays full-width even with a box open (the magnified box
         // fills the whole grid, drawn as an overlay in `scene`).
         let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
-        let mut title_pos = (grid_x0 + 8.0, y);
-        // Files navigation keeps a "‹ Back" pill; an open app box does not
-        // (it's dismissed by clicking outside it).
-        if navigated[s] && s == SECTION_FILES {
-            // "‹ Back" pill sits where the title starts; title shifts right.
-            let back = Rect::new(
-                title_pos.0,
-                y + (SECTION_TITLE_H - BACK_H) / 2.0 - 1.0,
-                BACK_W,
-                BACK_H,
-            );
-            files_back = Some(back);
-            title_pos.0 += BACK_W + 10.0;
-        }
+        let title_pos = (grid_x0 + 8.0, y);
         y += SECTION_TITLE_H;
         let viewport = Rect::new(
             grid_x0,
@@ -437,7 +417,6 @@ pub fn layout(
         sections,
         search_box,
         search_btn,
-        files_back,
         open_box,
     }
 }
@@ -501,9 +480,6 @@ pub fn hit_test(
     }
     if !search_open && layout.search_btn.contains(pos) {
         return Some(Hit::SearchButton);
-    }
-    if layout.files_back.is_some_and(|b| b.contains(pos)) {
-        return Some(Hit::FilesBack);
     }
     // The magnified open box: resolve the 3×3 member slot under the
     // pointer (clicks inside are inert/launch; only outside closes).
@@ -1070,38 +1046,6 @@ pub fn scene(
                 clip: Some(draw_rect),
             });
         }
-    }
-
-    // "‹ Back" pill beside a navigated Files directory title.
-    for (back, hit) in [(layout.files_back, Hit::FilesBack)] {
-        let Some(back) = back else {
-            continue;
-        };
-        let hl = config.theme.highlight_rgba();
-        let a = if hover == Some(hit) {
-            hl[3].min(1.0)
-        } else {
-            (hl[3] * 0.6).min(1.0)
-        };
-        scene.rects.push(RectInst {
-            rect: back,
-            radius: back.h / 2.0,
-            color: [hl[0], hl[1], hl[2], a],
-        });
-        scene.labels.push(Label {
-            text: "‹ Back".to_string(),
-            pos: (
-                back.x + back.w / 2.0,
-                back.y + (back.h - LABEL_LINE_PX) / 2.0,
-            ),
-            max_w: back.w,
-            font_px: LABEL_FONT_PX - 1.0,
-            line_px: LABEL_LINE_PX,
-            centered: true,
-            dim: false,
-            cache: true,
-            clip: None,
-        });
     }
 
     // The three sections: title, grid cells with per-section horizontal
@@ -1770,7 +1714,9 @@ mod tests {
     }
 
     #[test]
-    fn back_button_appears_only_when_navigated() {
+    fn navigation_does_not_shift_the_files_title() {
+        // Browsing exits through the ".." tile (the listing's first
+        // cell), not a Back pill — the title stays put either way.
         let cfg = config();
         let flat = layout(
             &cfg,
@@ -1781,7 +1727,6 @@ mod tests {
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
         );
-        assert!(flat.files_back.is_none());
         let nav = layout(
             &cfg,
             SURFACE,
@@ -1791,11 +1736,10 @@ mod tests {
             [0.0; N_SECTIONS],
             [false, false, true],
         );
-        let back = nav.files_back.expect("navigated layout has a back button");
-        let center = (back.x + back.w / 2.0, back.y + back.h / 2.0);
-        assert_eq!(hit_test(&nav, center, false, &[]), Some(Hit::FilesBack));
-        // The title moved right to make room.
-        assert!(nav.sections[SECTION_FILES].title_pos.0 > flat.sections[SECTION_FILES].title_pos.0);
+        assert_eq!(
+            nav.sections[SECTION_FILES].title_pos,
+            flat.sections[SECTION_FILES].title_pos
+        );
     }
 
     #[test]

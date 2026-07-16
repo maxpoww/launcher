@@ -1371,7 +1371,6 @@ impl App {
                 }
                 self.schedule_frame();
             }
-            Hit::FilesBack => self.files_nav_up(),
             // Click a filled box slot to launch it; an empty slot is inert
             // (the box stays open — only a click outside it closes it).
             Hit::OpenBoxCell(k) => {
@@ -2125,9 +2124,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     Hit::GridCell(s, cell) => {
                                         app.search.visible[s].get(cell).copied()
                                     }
-                                    Hit::SearchButton | Hit::FilesBack | Hit::OpenBoxCell(_) => {
-                                        None
-                                    }
+                                    Hit::SearchButton | Hit::OpenBoxCell(_) => None,
                                 };
                                 // Cells with a profile mutation in flight
                                 // can't start a new drag.

@@ -21,6 +21,10 @@ pub(crate) const FILES_LIST_MAX: usize = 300;
 /// Cap on a pinned directory's dock-stack listing (five 3×3 pages).
 pub(crate) const DIR_STACK_MAX: usize = 45;
 
+/// Entry id of the ".." tile leading a navigated listing — clicking it
+/// goes up one level (back to the home strip from the top).
+pub(crate) const FILES_UP_ID: &str = "files-up";
+
 /// The icon-carrier asset for a file, by extension: media, documents,
 /// archives and code each get their own themed icon; everything else
 /// falls back to the generic file. (Thumbnails, where available,
@@ -101,13 +105,14 @@ impl App {
     }
 
     /// Transient listing of the navigated directory's visible children —
-    /// folders first, alphabetical. (Going up is the "‹ Back" button by
-    /// the section title; a terminal there is a right-click away.)
+    /// a ".." tile first (always the first cell: browsing exits through
+    /// it), then folders, then files, each alphabetical.
     pub(crate) fn dir_listing(&mut self) -> Vec<usize> {
         let Some(dir) = self.files_dir.clone() else {
             return Vec::new();
         };
         let mut out = Vec::new();
+        out.push(self.push_transient_file(FILES_UP_ID, "..", "true".to_owned(), true));
         let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -245,6 +250,15 @@ impl App {
     pub(crate) fn try_navigate(&mut self, entry_idx: usize) -> bool {
         if self.kinds.get(entry_idx) != Some(&apps::EntryKind::File) {
             return false;
+        }
+        // The ".." tile leads every navigated listing: go up a level.
+        if self
+            .entries
+            .get(entry_idx)
+            .is_some_and(|e| e.id == FILES_UP_ID)
+        {
+            self.files_nav_up();
+            return true;
         }
         let Some(path) = self
             .entries
