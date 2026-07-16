@@ -68,11 +68,16 @@ impl App {
             let vp = layout.sections[content::SECTION_APPS].viewport;
             let s = base.h;
             // The dock icon a dock-anchored stack grows out of: a folder's
-            // box id, or a pinned directory's entry id.
+            // box id, or a pinned directory's entry id. A dir stack opened
+            // with the card up anchors into the grid instead (the grid-box
+            // path below), like a dock folder does then.
             let dock_anchor: Option<String> = if let Some(g) = self.dock_stack {
                 Some(format!("group:{}", self.groups.groups()[g].id))
             } else {
-                self.dir_stack.as_ref().map(|ds| ds.id.clone())
+                self.dir_stack
+                    .as_ref()
+                    .filter(|ds| !ds.in_grid)
+                    .map(|ds| ds.id.clone())
             };
             if let Some(aid) = dock_anchor {
                 let dock = self

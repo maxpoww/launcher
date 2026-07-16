@@ -23,6 +23,9 @@ pub(crate) struct DirStack {
     pub(crate) path: String,
     /// The listing, paged 3×3 like group members.
     pub(crate) members: pages::PagedList,
+    /// Opened with the card up: the box anchors into the grid (like a
+    /// dock folder does then) instead of floating above the dock.
+    pub(crate) in_grid: bool,
 }
 
 impl App {
@@ -94,12 +97,20 @@ impl App {
                 None => pos,
             }
         });
+        self.app_group = Some(g);
+        self.reset_stack_view();
+    }
+
+    /// The shared tail of every stack open (grid box, dock folder,
+    /// directory stack): rewind the grow animation and box paging state,
+    /// refresh the input region, and rebuild the frame's inputs.
+    fn reset_stack_view(&mut self) {
         self.group_anim = 0.0;
         self.group_anim_target = 1.0;
-        self.app_group = Some(g);
         self.box_page = 0;
         self.box_pager.reset();
         self.box_slide.clear();
+        self.sync_input_region();
         self.refilter();
     }
 
@@ -158,10 +169,12 @@ impl App {
         self.dock_slot_center(&gid)
     }
 
-    /// Open a pinned directory's content stack above its dock icon — the
-    /// same magnified box a dock folder uses, fed by the directory
-    /// listing (built by the refilter). `id` is the pinned entry's id
-    /// (its dock anchor); `path` the directory it stands for.
+    /// Open a pinned directory's content stack — the same magnified box a
+    /// dock folder uses, fed by the directory listing (built by the
+    /// refilter), with the same dual anchoring: with the card open it
+    /// grows out of the dock icon into the grid; docked, it floats above
+    /// the icon. `id` is the pinned entry's id (its dock anchor); `path`
+    /// the directory it stands for.
     pub(crate) fn open_dir_stack(&mut self, id: String, path: String) {
         info!("dir stack: {path}");
         self.group_origin = self.dock_slot_center(&id);
@@ -171,14 +184,9 @@ impl App {
             id,
             path,
             members: pages::PagedList::default(),
+            in_grid: self.ui.target() == Target::Open,
         });
-        self.group_anim = 0.0;
-        self.group_anim_target = 1.0;
-        self.box_page = 0;
-        self.box_pager.reset();
-        self.box_slide.clear();
-        self.sync_input_region();
-        self.refilter();
+        self.reset_stack_view();
     }
 
     /// Open a dock folder. With the grid up, the box grows out of its dock
@@ -191,13 +199,7 @@ impl App {
         } else {
             self.dock_stack = Some(g);
         }
-        self.group_anim = 0.0;
-        self.group_anim_target = 1.0;
-        self.box_page = 0;
-        self.box_pager.reset();
-        self.box_slide.clear();
-        self.sync_input_region();
-        self.refilter();
+        self.reset_stack_view();
     }
 
     /// Display name of the open group, for the Apps section title.
