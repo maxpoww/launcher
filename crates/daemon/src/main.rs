@@ -185,6 +185,7 @@ fn main() -> anyhow::Result<()> {
         dock_hover_since: None,
         reorder_slot: None,
         reorder_dwell: None,
+        grid_drag_page_at: None,
         apps_slide: Vec::new(),
         just_dropped: None,
         prev_searching: false,
@@ -428,6 +429,10 @@ pub struct App {
     /// Pending gap move: the wanted slot and when the pointer started
     /// hovering it (the gap moves after [`REORDER_DWELL`]).
     reorder_dwell: Option<(usize, Instant)>,
+    /// Dwell timer for edge-paging the Apps grid while a drag hovers its
+    /// left/right edge — carries the dragged icon to another page (same
+    /// feel as the open-box drag paging).
+    grid_drag_page_at: Option<Instant>,
     /// Per-cell animated display indices for the Apps grid (the
     /// make-room glide); identity when nothing is in flight.
     apps_slide: Vec<f32>,
@@ -1985,6 +1990,7 @@ impl App {
         }
         self.reorder_slot = None;
         self.reorder_dwell = None;
+        self.grid_drag_page_at = None;
         self.recompute_dock_order();
         // Remap the dock glide onto the new arrangement *before*
         // anything draws: every icon keeps its exact current visual
@@ -2326,6 +2332,7 @@ impl App {
         let Some(drag) = self.gesture.dragging.as_ref() else {
             self.reorder_slot = None;
             self.reorder_dwell = None;
+            self.grid_drag_page_at = None;
             return None;
         };
         let kind = self.kinds.get(drag.entry_idx).copied();
@@ -2359,7 +2366,40 @@ impl App {
         if !grid_drag {
             self.reorder_slot = None;
             self.reorder_dwell = None;
+            self.grid_drag_page_at = None;
             return None;
+        }
+        // Edge-paging: hovering the drag near the grid's left/right edge
+        // turns the page after a short dwell, carrying the icon across
+        // pages (and letting it fold onto an app on another page) — same
+        // dwell/cooldown feel as scroll paging and the open-box drag.
+        let vp = layout.sections[content::SECTION_APPS].viewport;
+        if layout.sections[content::SECTION_APPS].n_pages > 1 {
+            let band = vp.w * 0.12;
+            let dir: i64 = if pos.0 < vp.x + band {
+                -1
+            } else if pos.0 > vp.x + vp.w - band {
+                1
+            } else {
+                0
+            };
+            if dir == 0 {
+                self.grid_drag_page_at = None;
+            } else {
+                match self.grid_drag_page_at {
+                    Some(t) if t.elapsed() >= PAGE_COOLDOWN => {
+                        self.page_by(content::SECTION_APPS, dir);
+                        self.grid_drag_page_at = Some(Instant::now());
+                    }
+                    None => self.grid_drag_page_at = Some(Instant::now()),
+                    _ => {}
+                }
+                // Keep frames coming while the dwell clock runs (a
+                // stationary pointer at the edge emits no motion).
+                self.dirty = true;
+            }
+        } else {
+            self.grid_drag_page_at = None;
         }
         // The gap rests at the app's own cell (reorder — nothing moves
         // on pickup) or past the end (insert — the grid stays whole
