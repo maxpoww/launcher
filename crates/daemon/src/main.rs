@@ -44,7 +44,11 @@ use calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
+use smithay_client_toolkit::globals::GlobalData;
+use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1};
+use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
+use smithay_client_toolkit::seat::pointer::cursor_shape::CursorShapeManager;
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{
     LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
@@ -62,7 +66,7 @@ use waverunner_core::{Config, Searcher};
 use waverunner_proto::Command;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface};
-use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 
 use crate::content::Hit;
 use crate::renderer::Renderer;
@@ -155,6 +159,10 @@ fn main() -> anyhow::Result<()> {
         dirty: false,
         keyboard: None,
         pointer: None,
+        cursor_shape: CursorShapeManager::bind(&globals, &qh).ok(),
+        cursor_device: None,
+        enter_serial: 0,
+        cursor_now: None,
         hide_deadline: None,
         rest_hide_pending: false,
         restore_window: None,
@@ -326,6 +334,13 @@ pub struct App {
     dirty: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
+    /// cursor-shape-v1: the manager (None when the compositor lacks the
+    /// protocol), the live pointer's shape device, the serial of its
+    /// last Enter, and the last shape sent (dedupe per change).
+    cursor_shape: Option<CursorShapeManager>,
+    cursor_device: Option<WpCursorShapeDeviceV1>,
+    enter_serial: u32,
+    cursor_now: Option<Shape>,
     /// Deadline of the pending auto-hide, if the pointer has left the
     /// dock. Re-entry clears it, invalidating the in-flight timer.
     hide_deadline: Option<Instant>,
@@ -1280,6 +1295,28 @@ impl App {
             }
             self.schedule_frame();
         }
+        self.apply_cursor();
+    }
+
+    /// Reflect what's under the pointer in its cursor: the pointing hand
+    /// over anything clickable, a grabbing hand mid-drag, the arrow
+    /// otherwise. One request per change (cursor-shape-v1; a compositor
+    /// without the protocol just keeps its default cursor).
+    fn apply_cursor(&mut self) {
+        let Some(device) = &self.cursor_device else {
+            return;
+        };
+        let shape = if self.gesture.dragging.is_some() || self.box_drag.is_some() {
+            Shape::Grabbing
+        } else if self.hover.is_some() {
+            Shape::Pointer
+        } else {
+            Shape::Default
+        };
+        if self.cursor_now != Some(shape) {
+            device.set_shape(self.enter_serial, shape);
+            self.cursor_now = Some(shape);
+        }
     }
 
     /// The dock slot whose name tooltip should show: the hovered dock
@@ -1944,7 +1981,13 @@ impl SeatHandler for App {
         if capability == Capability::Pointer && self.pointer.is_none() {
             // Raw wl_pointer (see the Dispatch impl below for why sctk's
             // frame-batched pointer helper is not used).
-            self.pointer = Some(seat.get_pointer(qh, ()));
+            let pointer = seat.get_pointer(qh, ());
+            // Its cursor-shape device (pointing hand over clickables).
+            self.cursor_device = self
+                .cursor_shape
+                .as_ref()
+                .map(|mgr| mgr.get_shape_device(&pointer, qh));
+            self.pointer = Some(pointer);
         }
     }
 
@@ -1961,6 +2004,9 @@ impl SeatHandler for App {
             }
         }
         if capability == Capability::Pointer {
+            if let Some(device) = self.cursor_device.take() {
+                device.destroy();
+            }
             if let Some(pointer) = self.pointer.take() {
                 pointer.release();
             }
@@ -2066,10 +2112,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
     ) {
         match event {
             wl_pointer::Event::Enter {
+                serial,
                 surface_x,
                 surface_y,
                 ..
             } => {
+                // A fresh enter: remember its serial and re-send the shape
+                // (the compositor forgot our cursor on leave).
+                app.enter_serial = serial;
+                app.cursor_now = None;
                 // Any pending auto-hide is off: the pointer is back.
                 app.hide_deadline = None;
                 app.pointer_pos = Some((surface_x as f32, surface_y as f32));
@@ -2156,6 +2207,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                     }
                     app.schedule_frame();
                 }
+                // Drags start/convert on motion: keep the cursor honest.
+                app.apply_cursor();
             }
             wl_pointer::Event::Leave { .. } => {
                 app.scroll.accum = 0.0;
@@ -2232,6 +2285,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                     }
                     _ => {}
                 }
+                // Presses arm drags and releases drop them: keep the
+                // cursor honest either way.
+                app.apply_cursor();
             }
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_RIGHT
@@ -2272,6 +2328,34 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
             }
             _ => {} // frame, axis metadata, other buttons/axes
         }
+    }
+}
+
+// cursor-shape-v1 has no events on either object; the impls exist only
+// to satisfy the binding bounds.
+impl Dispatch<WpCursorShapeManagerV1, GlobalData> for App {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeManagerV1,
+        _: <WpCursorShapeManagerV1 as Proxy>::Event,
+        _: &GlobalData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        unreachable!("wp_cursor_shape_manager_v1 has no events")
+    }
+}
+
+impl Dispatch<WpCursorShapeDeviceV1, GlobalData> for App {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeDeviceV1,
+        _: <WpCursorShapeDeviceV1 as Proxy>::Event,
+        _: &GlobalData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        unreachable!("wp_cursor_shape_device_v1 has no events")
     }
 }
 
