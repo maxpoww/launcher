@@ -105,14 +105,19 @@ impl App {
     }
 
     /// Transient listing of the navigated directory's visible children —
-    /// a ".." tile first (always the first cell: browsing exits through
-    /// it), then folders, then files, each alphabetical.
+    /// a ".." tile leading *every page* (the same entry interleaved at
+    /// each page's first slot, so it stays put while paging: browsing
+    /// exits through it), then folders, then files, each alphabetical.
     pub(crate) fn dir_listing(&mut self) -> Vec<usize> {
         let Some(dir) = self.files_dir.clone() else {
             return Vec::new();
         };
+        // Children per page: the page's cells minus the ".." slot.
+        let settled = self.layout_at(self.ui.extent_of(crate::state::Target::Open));
+        let sec = &settled.sections[crate::content::SECTION_FILES];
+        let per_page = (sec.cols * sec.rows).saturating_sub(1).max(1);
+        let up = self.push_transient_file(FILES_UP_ID, "..", "true".to_owned(), true);
         let mut out = Vec::new();
-        out.push(self.push_transient_file(FILES_UP_ID, "..", "true".to_owned(), true));
         let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -126,11 +131,20 @@ impl App {
                 Some((is_dir, name, e.path().to_string_lossy().into_owned()))
             })
             .collect();
-        // Folders first, then files, each alphabetical.
+        // Folders first, then files, each alphabetical — with the same
+        // ".." entry re-inserted at every page boundary so it renders
+        // in each page's first cell (duplicate indices are fine: hit,
+        // hover and activation all resolve through the entry).
         children.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        for (is_dir, name, path) in children.into_iter().take(FILES_LIST_MAX) {
+        for (i, (is_dir, name, path)) in children.into_iter().take(FILES_LIST_MAX).enumerate() {
+            if i % per_page == 0 {
+                out.push(up);
+            }
             let exec = format!("xdg-open {}", launch::shell_quote(&path));
             out.push(self.push_transient_file(&path, &name, exec, is_dir));
+        }
+        if out.is_empty() {
+            out.push(up); // an empty directory still offers the way out
         }
         out
     }

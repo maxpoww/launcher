@@ -2128,10 +2128,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 };
                                 // Cells with a profile mutation in flight
                                 // can't start a new drag.
+                                // Busy cells (mutation in flight) and the
+                                // ".." navigation tile never start a drag.
                                 let undraggable = entry_idx.is_some_and(|i| {
-                                    app.entries
-                                        .get(i)
-                                        .is_some_and(|e| app.busy_ids.contains(&e.id))
+                                    app.entries.get(i).is_some_and(|e| {
+                                        app.busy_ids.contains(&e.id) || e.id == files::FILES_UP_ID
+                                    })
                                 });
                                 if let (Some(entry_idx), false) = (entry_idx, undraggable) {
                                     let from_dock = matches!(hit, Hit::DockIcon(_));
