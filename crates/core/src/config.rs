@@ -352,7 +352,9 @@ mod tests {
     fn defaults_are_sane() {
         let c = Config::default();
         assert!(c.window.input_bar_height < c.window.height);
-        assert_eq!(c.animation.close.kind, CurveKind::EaseInCubic);
+        // Box close is a lightly-underdamped spring (subtle settle bounce)
+        // by design — see CurveConfig::default_close.
+        assert_eq!(c.animation.close.kind, CurveKind::Spring);
     }
 
     #[test]
