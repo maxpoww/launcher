@@ -1150,12 +1150,19 @@ impl App {
     fn recompute_dock_order(&mut self) {
         self.dock_order.clear();
         for pin_id in self.pins.pins() {
-            // Match a real App entry or a box's Group entry — never the
-            // transient Package / File entries a search leaves in `entries`,
-            // or a stale pin for an uninstalled app would ghost onto its
-            // same-named package search result.
+            // Match a real App entry, a box's Group entry, or — for
+            // filesystem pins only (path ids, home-strip `folder-<name>`
+            // ids) — a File entry. Other pins never match File/Package
+            // transients, or a stale pin for an uninstalled app would
+            // ghost onto its same-named search result.
+            let fs_pin = pin_id.starts_with('/') || pin_id.starts_with("folder-");
             let idx = self.entries.iter().zip(&self.kinds).position(|(e, k)| {
-                &e.id == pin_id && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
+                &e.id == pin_id
+                    && match k {
+                        apps::EntryKind::App | apps::EntryKind::Group => true,
+                        apps::EntryKind::File => fs_pin,
+                        _ => false,
+                    }
             });
             if let Some(idx) = idx {
                 if !self.dock_order.contains(&idx) {
