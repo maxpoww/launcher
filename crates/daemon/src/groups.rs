@@ -139,6 +139,7 @@ impl GroupDb {
             .and_then(|a| group.members.iter().position(|m| *m == a))
             .unwrap_or(group.members.len());
         group.members.insert(at, id.to_owned());
+        info!("group {index}: moved {id} to member position {at}");
         self.save();
     }
 

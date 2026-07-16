@@ -2548,7 +2548,7 @@ impl App {
             } else {
                 match self.grid_drag_page_at {
                     Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
-                        self.page_by(content::SECTION_APPS, dir);
+                        self.page_by(content::SECTION_APPS, dir, false);
                         self.grid_drag_page_at = Some(Instant::now());
                     }
                     None => self.grid_drag_page_at = Some(Instant::now()),
@@ -3007,14 +3007,16 @@ impl App {
         let Some(box_rect) = self.current_layout().open_box else {
             return;
         };
-        // Pull the member out only on a VERTICAL exit (drag it up out of
-        // the box toward the search list, or down toward the grid/dock).
-        // The left/right edges are reserved for paging, so a grid box pages
-        // like a dock stack when dragged to its side instead of ejecting the
-        // member (the box is a narrow square, so a sideways drag to the next
-        // page used to land in the old horizontal pull-out margin).
+        // Pull the member out when the drag exits a clear margin past the
+        // box — one cell beyond, so the paging band (which is forgiving:
+        // anywhere at-or-past the box edge pages) keeps working while a
+        // deliberate sideways drag onto the visible main grid, or up/down
+        // out of the box, ejects the member into the loose grid.
         let m = content::GRID_CELL_H;
-        let clear_out = pos.1 < box_rect.y - m || pos.1 > box_rect.y + box_rect.h + m;
+        let clear_out = pos.0 < box_rect.x - m
+            || pos.0 > box_rect.x + box_rect.w + m
+            || pos.1 < box_rect.y - m
+            || pos.1 > box_rect.y + box_rect.h + m;
         if clear_out && self.app_group.is_some() {
             // A grid box pulls the member into the loose grid; a dock stack
             // has no grid to drop into, so it just holds it.
@@ -3049,7 +3051,7 @@ impl App {
         }
         match self.box_drag_page_at {
             Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
-                self.turn_box_page(dir);
+                self.turn_box_page(dir, false);
                 self.box_drag_page_at = Some(Instant::now());
             }
             None => self.box_drag_page_at = Some(Instant::now()),
@@ -3070,7 +3072,16 @@ impl App {
             return;
         };
         let member_id = self.entries[entry_idx].id.clone();
-        if let Some(before) = self.box_drag_before(pos, &member_id) {
+        let before = self.box_drag_before(pos, &member_id);
+        info!(
+            "box drop: {member_id} -> before {before:?} (page {}, {} members)",
+            self.box_page,
+            self.groups
+                .groups()
+                .get(g)
+                .map_or(0, |grp| grp.members.len())
+        );
+        if let Some(before) = before {
             self.groups.move_member(g, &member_id, before);
             self.refilter();
         }
@@ -3106,6 +3117,7 @@ impl App {
     /// Pull a box member out into the loose grid (the box shrinks closed).
     fn pull_box_member_out(&mut self, member_id: &str, pos: (f32, f32)) {
         let Some(g) = self.app_group else { return };
+        info!("box pull-out: {member_id} leaves the box into the grid");
         let Some(entry_idx) = self.entries.iter().position(|e| e.id == member_id) else {
             return;
         };
@@ -3915,13 +3927,13 @@ impl App {
             let dir: i64 = if sec.page_accum > 0.0 { 1 } else { -1 };
             sec.page_accum = 0.0;
             sec.page_turned_at = Some(Instant::now());
-            self.turn_box_page(dir);
+            self.turn_box_page(dir, true);
         }
     }
 
     /// Turn the open box a page (+1 next, -1 previous), wrapping cyclically
     /// with a horizontal slide (mirrors `page_by`).
-    fn turn_box_page(&mut self, dir: i64) {
+    fn turn_box_page(&mut self, dir: i64, wrap: bool) {
         let Some(n) = self
             .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
@@ -3941,10 +3953,16 @@ impl App {
         let current = (self.box_scroll_target / page_w).round() as i64;
         let next = current + dir;
         if next < 0 {
+            if !wrap {
+                return; // dragging: stop at the first page, don't cycle
+            }
             self.box_scroll += total_w;
             self.box_scroll_target = (pages - 1) as f32 * page_w;
             self.box_page = (pages - 1) as usize;
         } else if next >= pages {
+            if !wrap {
+                return; // dragging: stop at the last page, don't cycle
+            }
             self.box_scroll -= total_w;
             self.box_scroll_target = 0.0;
             self.box_page = 0;
@@ -4003,13 +4021,15 @@ impl App {
             let dir = if sec.page_accum > 0.0 { 1 } else { -1 };
             sec.page_accum = 0.0;
             sec.page_turned_at = Some(Instant::now());
-            self.page_by(section, dir);
+            self.page_by(section, dir, true);
         }
     }
 
     /// Slide one section's grid a page in `dir` (+1 = next, -1 =
-    /// previous), wrapping past either end (infinite scroll).
-    fn page_by(&mut self, section: usize, dir: i64) {
+    /// previous). `wrap` cycles past either end (wheel infinite scroll);
+    /// without it the slide stops at the ends (drag paging — cycling
+    /// mid-drag silently teleports past the page you were aiming for).
+    fn page_by(&mut self, section: usize, dir: i64, wrap: bool) {
         // Use the SETTLED (full-extent) layout: mid-open-animation the
         // current layout has a tiny viewport and a bogus page count.
         let settled = self.layout_at(self.ui.extent_of(Target::Open));
@@ -4026,12 +4046,18 @@ impl App {
         let current_page = (sec.target / page_w).round() as i64;
         let next_page = current_page + dir;
         if next_page < 0 {
+            if !wrap {
+                return;
+            }
             // Wrap to the last page. Shift the animated position one full
             // strip right so the slide still moves in the gesture
             // direction; rendering is cyclic, so the shift is invisible.
             sec.pos += total_w;
             sec.target = (n_pages - 1) as f32 * page_w;
         } else if next_page >= n_pages as i64 {
+            if !wrap {
+                return;
+            }
             // Wrap to the first page (shift one strip left, as above).
             sec.pos -= total_w;
             sec.target = 0.0;
