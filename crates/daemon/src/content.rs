@@ -1416,9 +1416,9 @@ pub fn scene(
         let page_w = layout.open_box.map_or(box_rect.w, |b| b.w);
         boxgrid.clip = box_rect;
         // Members draw at their display slot (page * 9 + within — pages
-        // may be under-full). Mid-drag the shifts are page-local, like
-        // the grid: the dragged member's page compacts to close its
-        // hole, and the gap's page parts around the gap.
+        // may be under-full). Mid-drag the shared page-local reflow
+        // ([`crate::pages::shifted_slot`], same as the Apps grid) opens
+        // the gap and compacts the dragged member's page.
         let origin_slot = box_drag.and_then(|(h, _, _)| {
             open_box_members
                 .iter()
@@ -1430,32 +1430,10 @@ pub fn scene(
                 continue; // dragged member: a ghost, not in the grid
             }
             let s = open_box_slots.get(m).copied().unwrap_or(m);
-            let mut d = s;
-            if let Some((_, gap, _)) = box_drag {
-                let (sp, gp) = (s / 9, gap / 9);
-                match origin_slot {
-                    Some(o) => {
-                        let op = o / 9;
-                        if sp == op && sp == gp {
-                            // Same-page reorder: the classic two-way shift.
-                            if o < s && s <= gap {
-                                d = s - 1;
-                            } else if gap <= s && s < o {
-                                d = s + 1;
-                            }
-                        } else if sp == op && s > o {
-                            d = s - 1; // close the origin hole
-                        } else if sp == gp && s >= gap {
-                            d = s + 1; // open the gap
-                        }
-                    }
-                    None => {
-                        if sp == gp && s >= gap {
-                            d = s + 1;
-                        }
-                    }
-                }
-            }
+            let d = match box_drag {
+                Some((_, gap, _)) => crate::pages::shifted_slot(s, origin_slot, gap, 9),
+                None => s,
+            };
             let slot = member_slot[d % 9];
             let (row, col) = (slot / OPEN_BOX_COLS, slot % OPEN_BOX_COLS);
             let page_x = (d / 9) as f32 * page_w - box_scroll;

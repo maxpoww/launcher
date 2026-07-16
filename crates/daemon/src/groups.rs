@@ -19,8 +19,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::info;
-#[cfg(not(test))]
-use tracing::warn;
 
 /// Members shown per box page (the magnified box's 3×3 grid).
 pub const PAGE_CAP: usize = 9;
@@ -56,9 +54,7 @@ impl GroupDb {
     /// Boxes from before stable ids get one assigned (and saved).
     pub fn load() -> Self {
         let path = crate::usage::data_path("groups.json");
-        let groups = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<FileFormat>(&s).ok())
+        let groups = crate::persist::read_json::<FileFormat>(&path)
             .map(|f| f.groups)
             .unwrap_or_default();
         let mut db = Self { groups, path };
@@ -243,22 +239,13 @@ impl GroupDb {
 
     #[cfg(not(test))]
     fn save(&self) {
-        if let Some(dir) = self.path.parent() {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                warn!("groups: cannot create {dir:?}: {e}");
-                return;
-            }
-        }
-        let json = serde_json::json!(FileFormat {
-            groups: self.groups.clone()
-        });
-        let tmp = self.path.with_extension("json.tmp");
-        let write =
-            std::fs::write(&tmp, json.to_string()).and_then(|()| std::fs::rename(&tmp, &self.path));
-        if let Err(e) = write {
-            warn!("groups: cannot write {:?}: {e}", self.path);
-            let _ = std::fs::remove_file(&tmp);
-        }
+        crate::persist::write_json(
+            "groups",
+            &self.path,
+            &FileFormat {
+                groups: self.groups.clone(),
+            },
+        );
     }
 }
 

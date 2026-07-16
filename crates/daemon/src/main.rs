@@ -19,6 +19,7 @@ mod managed;
 mod nix;
 mod order;
 mod pages;
+mod persist;
 mod pins;
 mod renderer;
 mod state;
@@ -3489,9 +3490,8 @@ impl App {
                     )
             })
             .and(self.reorder_slot);
-        // Shifts happen in slot space, page-locally (Launchpad): the gap
-        // page parts around the gap; a cross-page drag also compacts the
-        // origin page to close the hole left behind.
+        // Shifts happen in slot space, page-locally (Launchpad), via the
+        // shared reflow ([`pages::shifted_slot`] — the box uses it too).
         let cap = self.apps_cap.max(1);
         let orig_slot = orig_pos.and_then(|op| self.apps_slots.get(op).copied());
         let mut slide_animating = false;
@@ -3502,25 +3502,10 @@ impl App {
             if let (Some(op), Some(o)) = (orig_pos, orig_slot) {
                 if i != op {
                     let g = self.reorder_slot.unwrap_or(o);
-                    let (sp, gp, hp) = (s / cap, g / cap, o / cap);
-                    if sp == hp && sp == gp {
-                        // Same-page reorder: the classic two-way shift
-                        // between the hole and the gap.
-                        if o < s && s <= g {
-                            target = (s - 1) as f32;
-                        } else if g <= s && s < o {
-                            target = (s + 1) as f32;
-                        }
-                    } else if sp == hp && s > o {
-                        target = (s - 1) as f32; // close the origin hole
-                    } else if sp == gp && s >= g {
-                        target = (s + 1) as f32; // open the gap
-                    }
+                    target = pages::shifted_slot(s, Some(o), g, cap) as f32;
                 }
             } else if let Some(g) = insert_gap {
-                if s / cap == g / cap && s >= g {
-                    target = (s + 1) as f32;
-                }
+                target = pages::shifted_slot(s, None, g, cap) as f32;
             }
             let cur = self.apps_slide[i];
             if (cur - target).abs() > 0.005 {

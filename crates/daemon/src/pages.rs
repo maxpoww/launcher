@@ -208,6 +208,44 @@ impl PagedList {
     }
 }
 
+/// Display slot of an undragged item while a drag is in flight — the
+/// make-room reflow shared by the Apps grid and the open box. Shifts are
+/// page-local (Launchpad): the dragged item's page compacts to close the
+/// hole it left (`origin`, its rest slot), the gap's page parts to open
+/// `gap`, and a same-page reorder does the classic two-way shift between
+/// them. `origin` is `None` for inserts (dock/package drags own no cell).
+pub fn shifted_slot(s: usize, origin: Option<usize>, gap: usize, cap: usize) -> usize {
+    let cap = cap.max(1);
+    let (sp, gp) = (s / cap, gap / cap);
+    match origin {
+        Some(o) => {
+            let op = o / cap;
+            if sp == op && sp == gp {
+                if o < s && s <= gap {
+                    s - 1
+                } else if gap <= s && s < o {
+                    s + 1
+                } else {
+                    s
+                }
+            } else if sp == op && s > o {
+                s - 1 // close the origin hole
+            } else if sp == gp && s >= gap {
+                s + 1 // open the gap
+            } else {
+                s
+            }
+        }
+        None => {
+            if sp == gp && s >= gap {
+                s + 1
+            } else {
+                s
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +287,22 @@ mod tests {
             l.pages(),
             &[vec!["a", "h1", "b", "h2", "c"], vec!["d", "h3"]]
         );
+    }
+
+    #[test]
+    fn shifted_slot_reflows_page_locally() {
+        // Same-page reorder (cap 3, page 0): hole at 0, gap at 2.
+        assert_eq!(shifted_slot(1, Some(0), 2, 3), 0);
+        assert_eq!(shifted_slot(2, Some(0), 2, 3), 1);
+        // Gap parked at the hole: identity.
+        assert_eq!(shifted_slot(1, Some(0), 0, 3), 1);
+        // Cross-page: origin page compacts, gap page parts.
+        assert_eq!(shifted_slot(2, Some(1), 4, 3), 1); // after the hole
+        assert_eq!(shifted_slot(4, Some(1), 4, 3), 5); // at the gap
+        assert_eq!(shifted_slot(0, Some(1), 4, 3), 0); // before the hole
+                                                       // Insert (no origin): only the gap's page shifts.
+        assert_eq!(shifted_slot(4, None, 4, 3), 5);
+        assert_eq!(shifted_slot(2, None, 4, 3), 2);
     }
 
     #[test]

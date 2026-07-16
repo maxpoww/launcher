@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use tracing::{info, warn};
+use tracing::info;
 
 /// Ordered list of explicitly pinned app IDs.
 pub struct PinDb {
@@ -61,16 +61,11 @@ impl PinDb {
     }
 
     fn save(&self) {
-        if let Some(parent) = self.path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                warn!("pins: cannot create data dir: {e}");
-                return;
-            }
-        }
-        let json = serde_json::json!({ "pins": self.pins });
-        if let Err(e) = std::fs::write(&self.path, json.to_string()) {
-            warn!("pins: write failed: {e}");
-        }
+        crate::persist::write_json(
+            "pins",
+            &self.path,
+            &serde_json::json!({ "pins": self.pins }),
+        );
     }
 }
 

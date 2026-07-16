@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 /// One waverunner-installed package.
 #[derive(Clone, Serialize, Deserialize)]
@@ -42,10 +42,7 @@ impl ManagedDb {
     pub fn load() -> Self {
         let json_path = crate::usage::data_path("managed.json");
         let nix_path = home_manager_dir().join("waverunner-packages.nix");
-        let mut pkgs: Vec<ManagedPkg> = std::fs::read_to_string(&json_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut pkgs: Vec<ManagedPkg> = crate::persist::read_json(&json_path).unwrap_or_default();
         // Adopt any attr present in the .nix but missing from the sidecar.
         let known: HashSet<String> = pkgs.iter().map(|p| p.attr.clone()).collect();
         let mut adopted = false;
@@ -148,12 +145,9 @@ impl ManagedDb {
             nix.push('\n');
         }
         nix.push_str("]\n");
-        write_file(&self.nix_path, &nix);
-
-        match serde_json::to_string_pretty(&self.pkgs) {
-            Ok(json) => write_file(&self.json_path, &json),
-            Err(e) => warn!("managed: serialize failed: {e}"),
-        }
+        crate::persist::write_text("managed", &self.nix_path, &nix);
+        info!("managed: wrote {:?}", self.nix_path);
+        crate::persist::write_json("managed", &self.json_path, &self.pkgs);
     }
 }
 
@@ -164,10 +158,7 @@ impl ManagedDb {
 /// list that has no sidecar yet.
 pub fn snapshot() -> Vec<(String, Vec<String>)> {
     let json_path = crate::usage::data_path("managed.json");
-    let pkgs: Vec<ManagedPkg> = std::fs::read_to_string(&json_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    let pkgs: Vec<ManagedPkg> = crate::persist::read_json(&json_path).unwrap_or_default();
     if !pkgs.is_empty() {
         return pkgs.into_iter().map(|p| (p.attr, p.desktop_ids)).collect();
     }
@@ -185,25 +176,6 @@ fn home_manager_dir() -> PathBuf {
             PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
         });
     base.join("home-manager")
-}
-
-/// Best-effort atomic write (temp + rename), creating parent dirs.
-fn write_file(path: &PathBuf, contents: &str) {
-    if let Some(dir) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            warn!("managed: cannot create {dir:?}: {e}");
-            return;
-        }
-    }
-    let tmp = path.with_extension("tmp");
-    let write = std::fs::write(&tmp, contents).and_then(|()| std::fs::rename(&tmp, path));
-    match write {
-        Ok(()) => info!("managed: wrote {path:?}"),
-        Err(e) => {
-            warn!("managed: cannot write {path:?}: {e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
 }
 
 /// Extract the bare attribute tokens from a `with pkgs; [ … ]` list — one

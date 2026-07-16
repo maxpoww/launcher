@@ -11,8 +11,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use tracing::warn;
-
 /// In-memory launch-frequency database, backed by a JSON file.
 pub struct UsageDb {
     counts: HashMap<String, u32>,
@@ -23,39 +21,19 @@ impl UsageDb {
     /// Load from disk, or start empty if the file doesn't exist yet.
     pub fn load() -> Self {
         let path = data_path("usage.json");
-        let counts = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let counts = crate::persist::read_json(&path).unwrap_or_default();
         Self { counts, path }
     }
 
     /// Increment the launch count for `app_id` and persist.
     pub fn increment(&mut self, app_id: &str) {
         *self.counts.entry(app_id.to_owned()).or_insert(0) += 1;
-        self.save();
+        crate::persist::write_json("usage", &self.path, &self.counts);
     }
 
     /// Return the number of times `app_id` has been launched (0 if unknown).
     pub fn count(&self, app_id: &str) -> u32 {
         self.counts.get(app_id).copied().unwrap_or(0)
-    }
-
-    fn save(&self) {
-        if let Some(parent) = self.path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                warn!("usage: cannot create data dir: {e}");
-                return;
-            }
-        }
-        match serde_json::to_string_pretty(&self.counts) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&self.path, json) {
-                    warn!("usage: write failed: {e}");
-                }
-            }
-            Err(e) => warn!("usage: serialize failed: {e}"),
-        }
     }
 }
 

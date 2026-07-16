@@ -16,7 +16,7 @@
 use crate::pages::PagedList;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Default, Serialize, Deserialize)]
 struct FileFormat {
@@ -39,10 +39,7 @@ impl OrderDb {
     /// splits it once the real page capacity is known).
     pub fn load() -> Self {
         let path = crate::usage::data_path("apps-order.json");
-        let f = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<FileFormat>(&s).ok())
-            .unwrap_or_default();
+        let f: FileFormat = crate::persist::read_json(&path).unwrap_or_default();
         let list = if !f.pages.is_empty() {
             f.pages
         } else {
@@ -120,23 +117,14 @@ impl OrderDb {
     }
 
     fn save(&self) {
-        if let Some(dir) = self.path.parent() {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                warn!("order: cannot create {dir:?}: {e}");
-                return;
-            }
-        }
-        let json = serde_json::json!(FileFormat {
-            pages: self.list.clone(),
-            order: Vec::new(),
-        });
-        let tmp = self.path.with_extension("json.tmp");
-        let write =
-            std::fs::write(&tmp, json.to_string()).and_then(|()| std::fs::rename(&tmp, &self.path));
-        if let Err(e) = write {
-            warn!("order: cannot write {:?}: {e}", self.path);
-            let _ = std::fs::remove_file(&tmp);
-        }
+        crate::persist::write_json(
+            "order",
+            &self.path,
+            &FileFormat {
+                pages: self.list.clone(),
+                order: Vec::new(),
+            },
+        );
     }
 }
 
