@@ -237,13 +237,14 @@ impl App {
 
     /// Edge-paging for an in-box reorder drag: holding the drag in the
     /// box's edge band turns the page every [`DRAG_PAGE_COOLDOWN`]
-    /// (shared band + dwell with the Apps grid). Called on motion *and*
+    /// (shared band + dwell with the Apps grid), cycling member pages →
+    /// the single ghost page → back to the first. Called on motion *and*
     /// every frame from `draw` (via the stored drag pos) so paging keeps
     /// going while the pointer holds still at the edge.
     pub(crate) fn box_drag_edge_page(&mut self, box_rect: content::Rect, pos: (f32, f32)) {
         let dir = edge_page_dir(box_rect.x, box_rect.w, pos.0);
         if edge_page_due(&mut self.box_drag_page_at, dir) {
-            self.turn_box_page(dir, false);
+            self.turn_box_page(dir, true);
         }
         if dir != 0 {
             // Keep frames coming while the dwell clock runs (a stationary

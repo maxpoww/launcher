@@ -427,13 +427,15 @@ impl App {
         }
         // Edge-paging: holding the drag in the grid's edge band turns
         // the page every DRAG_PAGE_COOLDOWN, carrying the icon across
-        // pages (shared band + dwell with the open-box drag).
+        // pages (shared band + dwell with the open-box drag). The cycle
+        // is: real pages, then the single ghost page, then back around
+        // to the first page — one empty page in the loop, never two.
         let vp = layout.sections[content::SECTION_APPS].viewport;
         if layout.sections[content::SECTION_APPS].n_pages > 1 {
             let dir = edge_page_dir(vp.x, vp.w, pos.0);
             if edge_page_due(&mut self.grid_drag_page_at, dir) {
                 info!("drag page turn: dir {dir}");
-                self.page_by(content::SECTION_APPS, dir, false);
+                self.page_by(content::SECTION_APPS, dir, true);
             }
             if dir != 0 {
                 // Keep frames coming while the dwell clock runs (a

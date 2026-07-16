@@ -81,12 +81,10 @@ impl Pager {
     }
 
     /// Slide one page in `dir` (+1 next, -1 previous). `wrap` cycles
-    /// past either end (wheel infinite scroll) by shifting the visual
-    /// position one full strip so the slide still moves in the gesture
-    /// direction — rendering is cyclic, so the shift is invisible;
-    /// without `wrap` the pager stops at the ends (drag paging, where
-    /// cycling mid-drag silently teleports past the aimed-for page).
-    /// Returns whether the target moved.
+    /// past either end (infinite scroll) by shifting the visual position
+    /// one full strip so the slide still moves in the gesture direction —
+    /// rendering is cyclic, so the shift is invisible; without `wrap`
+    /// the pager stops at the ends. Returns whether the target moved.
     pub fn turn(&mut self, dir: i64, wrap: bool, n_pages: usize, page_w: f32) -> bool {
         if n_pages <= 1 {
             return false;
