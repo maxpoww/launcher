@@ -451,6 +451,28 @@ impl Renderer {
         self.icon_texture = Some(texture);
     }
 
+    /// Width in pixels of `text` shaped at `font_px` — the same family
+    /// and shaping the labels render with, so the search caret can sit
+    /// exactly after the glyphs instead of guessing from char counts.
+    pub fn measure_text(&mut self, text: &str, font_px: f32) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let mut buffer =
+            TextBuffer::new(&mut self.font_system, Metrics::new(font_px, font_px * 1.3));
+        buffer.set_text(
+            &mut self.font_system,
+            text,
+            Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0, f32::max)
+    }
+
     /// Overwrite one icon texture-array layer (a dynamic package icon in
     /// the reserved tail of the array). Out-of-range layers and missing
     /// textures are ignored — a rescan re-uploads shortly anyway.

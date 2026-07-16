@@ -151,14 +151,17 @@ const GRID_BOTTOM_PAD: f32 = 6.0;
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
 /// Search box: height, inner padding, text metrics.
-const SEARCH_H: f32 = 32.0;
+const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
 const SEARCH_BTN_W: f32 = 80.0;
-/// Minimum expanded width; grows with content beyond this.
+/// Minimum expanded width (the pre-expand layout anchor).
 const SEARCH_W_MIN: f32 = 160.0;
+/// Expanded field width — fixed and generous (Spotlight-style), capped
+/// by the card's inner width.
+const SEARCH_W: f32 = 460.0;
 const SEARCH_PAD_X: f32 = 14.0;
 const SEARCH_GAP: f32 = 7.0;
-const SEARCH_FONT_PX: f32 = 15.0;
+pub(crate) const SEARCH_FONT_PX: f32 = 15.0;
 const SEARCH_LINE_PX: f32 = 20.0;
 
 /// Gap between an open dock-folder box and the dock icon it springs from.
@@ -573,6 +576,8 @@ pub struct DragFrame {
 pub struct FrameInput<'a> {
     /// Item under the pointer (hover highlight).
     pub hover: Option<Hit>,
+    /// Shaped pixel width of the live query (the caret anchor).
+    pub query_px: f32,
     /// Dock slot whose name tooltip should show — gated behind a hover
     /// dwell (the highlight is immediate; the tooltip waits). `None`
     /// while the dwell hasn't elapsed or the pointer is elsewhere.
@@ -704,6 +709,7 @@ pub fn scene(
 ) -> Scene {
     let FrameInput {
         hover,
+        query_px,
         dock_tooltip,
         alpha,
         pointer,
@@ -1027,14 +1033,9 @@ pub fn scene(
             };
             [hl[0], hl[1], hl[2], a]
         };
-        // Expanded width: SEARCH_W_MIN, or wider to snugly fit the query.
-        // 0.52 × font_px ≈ average proportional glyph width at this size.
-        // +1 for the cursor character shown when query is non-empty.
-        let content_w = {
-            let chars = if query.is_empty() { 0 } else { query.len() + 1 };
-            let text_px = chars as f32 * SEARCH_FONT_PX * 0.52 + 2.0 * SEARCH_PAD_X;
-            text_px.max(SEARCH_W_MIN).min(card_w - 2.0 * GRID_PAD_X)
-        };
+        // Expanded width: a fixed, generous field (Spotlight-style); the
+        // pill morphs between the compact button and it.
+        let content_w = SEARCH_W.min(card_w - 2.0 * GRID_PAD_X);
         let sw = lerp(btn.w, content_w, search_expand);
         let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
         scene.rects.push(RectInst {
@@ -1057,24 +1058,40 @@ pub fn scene(
                 clip: None,
             });
         } else {
-            // Expanded: show query text with a static cursor, or dim
-            // placeholder when the box is open but nothing typed yet.
+            // Expanded: a left-aligned text field — the query (or a dim
+            // placeholder) with a real caret, a thin bar sitting exactly
+            // after the shaped text (`query_px`, measured by the
+            // renderer, not estimated from character counts).
+            let text_left = draw_rect.x + SEARCH_PAD_X;
             let (text, dim) = if query.is_empty() {
                 ("Search".to_string(), true)
             } else {
-                (format!("{}│", query), false)
+                (query.to_string(), false)
             };
             scene.labels.push(Label {
                 text,
-                pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
+                pos: (text_left, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
                 max_w: sw - 2.0 * SEARCH_PAD_X,
                 font_px: SEARCH_FONT_PX,
                 line_px: SEARCH_LINE_PX,
-                centered: true,
+                centered: false,
                 dim,
                 cache: query.is_empty(),
                 clip: Some(draw_rect),
             });
+            // The caret parks at the field start while empty (softly),
+            // and rides the text end while typing. Only once the morph
+            // has (nearly) landed — it would drift during the stretch.
+            if search_expand > 0.9 {
+                let caret_x = (text_left + query_px + 1.0).min(draw_rect.x + sw - SEARCH_PAD_X);
+                let t = config.theme.text_rgba();
+                let a = if query.is_empty() { 0.45 } else { 0.9 };
+                scene.rects.push(RectInst {
+                    rect: Rect::new(caret_x, boxx.y + 6.0, 1.5, SEARCH_H - 12.0),
+                    radius: 0.75,
+                    color: [t[0], t[1], t[2], a],
+                });
+            }
         }
     }
 

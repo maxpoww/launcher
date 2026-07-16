@@ -211,6 +211,12 @@ impl App {
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
+        // The search caret anchors to the query's shaped width.
+        let query_px = self
+            .renderer
+            .as_mut()
+            .map(|r| r.measure_text(&self.search.query, content::SEARCH_FONT_PX))
+            .unwrap_or(0.0);
         // (layout.scroll is the cyclic-wrapped image of list_scroll; the
         // raw value is what animates, so never sync it back from layout.)
         // Grid drag: track the make-room gap under the pointer and the
@@ -591,6 +597,7 @@ impl App {
                 } else {
                     None
                 },
+                query_px,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()
                 } else {
