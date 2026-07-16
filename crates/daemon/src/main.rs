@@ -1146,11 +1146,8 @@ impl App {
                 Some((self.entries.get(e)?.id.clone(), d))
             })
             .collect();
-        // Drop the previous query's transient file-result entries.
-        self.entries.truncate(self.base_len);
-        self.kinds.truncate(self.base_len);
-        self.placeholders.truncate(self.base_len);
-        self.icon_layers.truncate(self.base_len);
+        // Drop the previous refilter's transient entries.
+        self.truncate_transients();
 
         let searching = !self.search.query.is_empty();
         // Clearing the query snaps the grid from ranked order back to
@@ -1343,6 +1340,33 @@ impl App {
         self.schedule_frame();
     }
 
+    /// Append one transient entry, keeping the four parallel metadata
+    /// arrays (`entries` / `kinds` / `placeholders` / `icon_layers`) in
+    /// lockstep — the only way transients are added, so they can't
+    /// desync. Returns the new entry's index.
+    fn push_transient(
+        &mut self,
+        entry: AppEntry,
+        kind: apps::EntryKind,
+        placeholder: bool,
+        layer: u32,
+    ) -> usize {
+        self.entries.push(entry);
+        self.kinds.push(kind);
+        self.placeholders.push(placeholder);
+        self.icon_layers.push(layer);
+        self.entries.len() - 1
+    }
+
+    /// Drop every transient entry (indices past `base_len`) — all four
+    /// parallel arrays together.
+    fn truncate_transients(&mut self) {
+        self.entries.truncate(self.base_len);
+        self.kinds.truncate(self.base_len);
+        self.placeholders.truncate(self.base_len);
+        self.icon_layers.truncate(self.base_len);
+    }
+
     /// Append one transient Files-section entry (kind File, generic
     /// folder/file icon layer) and return its index. `id` is the path.
     fn push_transient_file(&mut self, id: &str, name: &str, exec: String, is_dir: bool) -> usize {
@@ -1353,7 +1377,7 @@ impl App {
         };
         // Without an asset icon, fall back to a letter-tile placeholder.
         let (layer, placeholder) = asset.unwrap_or((0, true));
-        self.entries.push(AppEntry {
+        let entry = AppEntry {
             id: id.to_owned(),
             name: name.to_owned(),
             description: Some(id.to_owned()),
@@ -1361,11 +1385,8 @@ impl App {
             icon: None,
             needs_terminal: false,
             path: None,
-        });
-        self.kinds.push(apps::EntryKind::File);
-        self.placeholders.push(placeholder);
-        self.icon_layers.push(layer);
-        self.entries.len() - 1
+        };
+        self.push_transient(entry, apps::EntryKind::File, placeholder, layer)
     }
 
     /// Rank the home-tree file index against the query and append the
@@ -1411,7 +1432,7 @@ impl App {
             // package icon.
             self.asset_pkg.unwrap_or((0, true))
         };
-        self.entries.push(AppEntry {
+        let entry = AppEntry {
             id,
             name,
             description: Some(version),
@@ -1419,11 +1440,8 @@ impl App {
             icon: None,
             needs_terminal: false,
             path: None,
-        });
-        self.kinds.push(apps::EntryKind::Package);
-        self.placeholders.push(placeholder);
-        self.icon_layers.push(layer);
-        self.entries.len() - 1
+        };
+        self.push_transient(entry, apps::EntryKind::Package, placeholder, layer)
     }
 
     /// Rank the package index against the query and append the top
@@ -1490,7 +1508,7 @@ impl App {
         snapshot
             .into_iter()
             .map(|(gid, label, minis)| {
-                self.entries.push(AppEntry {
+                let entry = AppEntry {
                     id: gid,
                     name: label,
                     description: None,
@@ -1498,11 +1516,8 @@ impl App {
                     icon: None,
                     needs_terminal: false,
                     path: None,
-                });
-                self.kinds.push(apps::EntryKind::Group);
-                self.placeholders.push(false);
-                self.icon_layers.push(0);
-                let idx = self.entries.len() - 1;
+                };
+                let idx = self.push_transient(entry, apps::EntryKind::Group, false, 0);
                 self.group_minis.push((idx, minis));
                 idx
             })
@@ -2329,7 +2344,7 @@ impl App {
             } else {
                 self.asset_pkg.unwrap_or((0, true))
             };
-            self.entries.push(AppEntry {
+            let entry = AppEntry {
                 id: attr,
                 name,
                 description: Some(version),
@@ -2337,11 +2352,8 @@ impl App {
                 icon: None,
                 needs_terminal: false,
                 path: None,
-            });
-            self.kinds.push(apps::EntryKind::Package);
-            self.placeholders.push(placeholder);
-            self.icon_layers.push(layer);
-            let idx = self.entries.len() - 1;
+            };
+            let idx = self.push_transient(entry, apps::EntryKind::Package, placeholder, layer);
             let cap = self.apps_cap.max(1);
             match anchor
                 .as_ref()
@@ -2806,19 +2818,15 @@ impl App {
     }
 
     /// What the pointer is over right now (`None` when outside).
-    ///
-    /// `hit_test` reports Apps cells as display *slots* (the grid is
-    /// paged by span, so a slot may be an empty tail gap); remap to the
-    /// item occupying the slot — an empty slot is no hit at all.
     fn hover_at_pointer(&self) -> Option<Hit> {
-        let hit = self
-            .pointer_pos
-            .and_then(|pos| content::hit_test(&self.current_layout(), pos, self.search.open))?;
-        if let Hit::GridCell(content::SECTION_APPS, slot) = hit {
-            let i = self.apps_slots.iter().position(|&s| s == slot)?;
-            return Some(Hit::GridCell(content::SECTION_APPS, i));
-        }
-        Some(hit)
+        self.pointer_pos.and_then(|pos| {
+            content::hit_test(
+                &self.current_layout(),
+                pos,
+                self.search.open,
+                &self.apps_slots,
+            )
+        })
     }
 
     /// Recompute which item the pointer is over; redraw on change.

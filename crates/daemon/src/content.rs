@@ -477,7 +477,17 @@ pub fn dock_box_rect(dock_icon: Rect, side: f32, surface_w: f32) -> Rect {
 ///
 /// `search_open` controls whether the compact search button is a target
 /// (it is only when the search box is collapsed).
-pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<Hit> {
+/// What lives at `pos`. `apps_slots` maps the Apps section's display
+/// slots (its geometry — pages may have empty tail cells) back to item
+/// indices, so a `Hit::GridCell(section, i)` always carries a *list
+/// index* into `visible[section]`, never a raw slot: an empty Apps slot
+/// is no hit at all. Other sections are dense (slot == index).
+pub fn hit_test(
+    layout: &Layout,
+    pos: (f32, f32),
+    search_open: bool,
+    apps_slots: &[usize],
+) -> Option<Hit> {
     // Each icon's column is live from the top of the dock band down to
     // `dock_hit_bottom` — so a click/hover in the floating gap under an
     // icon (down to the very screen edge) still lands on it.
@@ -518,6 +528,14 @@ pub fn hit_test(layout: &Layout, pos: (f32, f32), search_open: bool) -> Option<H
                 let cells_per_page = sec.cols * sec.rows;
                 let i = page * cells_per_page + row * sec.cols + col;
                 if i < sec.cells {
+                    // Apps cells are display slots: resolve to the item
+                    // occupying the slot (an empty tail cell is no hit).
+                    if s == SECTION_APPS {
+                        return apps_slots
+                            .iter()
+                            .position(|&slot| slot == i)
+                            .map(|j| Hit::GridCell(s, j));
+                    }
                     return Some(Hit::GridCell(s, i));
                 }
             }
@@ -1563,6 +1581,11 @@ mod tests {
         [(0..n).collect(), Vec::new(), Vec::new()]
     }
 
+    /// Identity display slots (a dense grid: slot == list index).
+    fn idslots(n: usize) -> Vec<usize> {
+        (0..n).collect()
+    }
+
     fn config() -> Config {
         Config::default()
     }
@@ -1713,7 +1736,7 @@ mod tests {
         );
         let slot = l.dock_slots[0];
         assert_eq!(
-            hit_test(&l, (slot.x + 1.0, slot.y + 1.0), false),
+            hit_test(&l, (slot.x + 1.0, slot.y + 1.0), false, &idslots(10)),
             Some(Hit::DockIcon(0))
         );
         // Second cell of the apps section's first row.
@@ -1723,7 +1746,7 @@ mod tests {
             apps.viewport.y + GRID_CELL_H / 2.0,
         );
         assert_eq!(
-            hit_test(&l, cell1, false),
+            hit_test(&l, cell1, false, &idslots(10)),
             Some(Hit::GridCell(SECTION_APPS, 1))
         );
         // First cell of the files section.
@@ -1733,7 +1756,7 @@ mod tests {
             files.viewport.y + GRID_CELL_H / 2.0,
         );
         assert_eq!(
-            hit_test(&l, fcell, false),
+            hit_test(&l, fcell, false, &idslots(10)),
             Some(Hit::GridCell(SECTION_FILES, 0))
         );
         // The empty install section hits nothing.
@@ -1742,8 +1765,8 @@ mod tests {
             install.viewport.x + GRID_CELL_W / 2.0,
             install.viewport.y + GRID_CELL_H / 2.0,
         );
-        assert_eq!(hit_test(&l, icell, false), None);
-        assert_eq!(hit_test(&l, (1.0, 1.0), false), None);
+        assert_eq!(hit_test(&l, icell, false, &idslots(10)), None);
+        assert_eq!(hit_test(&l, (1.0, 1.0), false, &idslots(10)), None);
     }
 
     #[test]
@@ -1770,7 +1793,7 @@ mod tests {
         );
         let back = nav.files_back.expect("navigated layout has a back button");
         let center = (back.x + back.w / 2.0, back.y + back.h / 2.0);
-        assert_eq!(hit_test(&nav, center, false), Some(Hit::FilesBack));
+        assert_eq!(hit_test(&nav, center, false, &[]), Some(Hit::FilesBack));
         // The title moved right to make room.
         assert!(nav.sections[SECTION_FILES].title_pos.0 > flat.sections[SECTION_FILES].title_pos.0);
     }
@@ -1810,7 +1833,7 @@ mod tests {
         let pos = (apps.viewport.x + 2.0, apps.viewport.y + 2.0);
         let cells_per_page = apps.cols * apps.rows;
         assert_eq!(
-            hit_test(&l, pos, false),
+            hit_test(&l, pos, false, &idslots(18 * 3)),
             Some(Hit::GridCell(SECTION_APPS, cells_per_page))
         );
     }
@@ -1832,7 +1855,7 @@ mod tests {
                 apps.viewport.x + (beyond as f32 + 0.5) * GRID_CELL_W,
                 apps.viewport.y + (last_row as f32 + 0.5) * GRID_CELL_H,
             );
-            assert_eq!(hit_test(&l, pos, false), None);
+            assert_eq!(hit_test(&l, pos, false, &idslots(7)), None);
         }
     }
 }
