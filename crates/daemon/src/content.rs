@@ -625,9 +625,13 @@ pub struct FrameInput<'a> {
     pub group_expand: f32,
     /// Surface point the open box grows from (the clicked tile).
     pub group_origin: Option<(f32, f32)>,
-    /// While a box is open: entry indices of its members (up to nine) for
-    /// the magnified 3×3 app grid. Empty when no box is open.
+    /// While a box is open: entry indices of its members for the
+    /// magnified 3×3 app grid. Empty when no box is open.
     pub open_box_members: &'a [usize],
+    /// Display slot of each member (`page * 9 + within`, parallel to
+    /// `open_box_members`): box pages may be under-full, so slots — not
+    /// list positions — decide which page a member draws on.
+    pub open_box_slots: &'a [usize],
     /// The open box's own grid cell (its tile), hidden from the grid
     /// behind while the magnified box stands in for it.
     pub open_box_hidden: Option<usize>,
@@ -637,9 +641,9 @@ pub struct FrameInput<'a> {
     /// Horizontal page-scroll offset of the open box (px): members are laid
     /// out in a strip of 3×3 pages shifted by this, so pages slide.
     pub box_scroll: f32,
-    /// In-box member reorder: (dragged member entry index, gap slot index in
-    /// the dragged-removed order, pointer pos). The dragged member is hidden
-    /// and drawn as a ghost; the rest reflow to open the gap.
+    /// In-box member reorder: (dragged member entry index, gap display
+    /// slot, pointer pos). The dragged member is hidden and drawn as a
+    /// ghost; its page compacts and the gap's page parts around the gap.
     pub box_drag: Option<(usize, usize, (f32, f32))>,
 }
 
@@ -698,6 +702,7 @@ pub fn scene(
         group_expand,
         group_origin,
         open_box_members,
+        open_box_slots,
         open_box_hidden,
         open_box_pages,
         box_scroll,
@@ -1410,15 +1415,47 @@ pub fn scene(
         // `box_scroll`, so paging slides. Everything clips to the box.
         let page_w = layout.open_box.map_or(box_rect.w, |b| b.w);
         boxgrid.clip = box_rect;
-        // `display` is the member's on-screen order with the dragged member
-        // removed; `d` shifts it past the reorder gap so a slot opens there.
-        let mut display = 0usize;
-        for &idx in open_box_members.iter() {
+        // Members draw at their display slot (page * 9 + within — pages
+        // may be under-full). Mid-drag the shifts are page-local, like
+        // the grid: the dragged member's page compacts to close its
+        // hole, and the gap's page parts around the gap.
+        let origin_slot = box_drag.and_then(|(h, _, _)| {
+            open_box_members
+                .iter()
+                .position(|&i| i == h)
+                .and_then(|mh| open_box_slots.get(mh).copied())
+        });
+        for (m, &idx) in open_box_members.iter().enumerate() {
             if box_drag.is_some_and(|(h, _, _)| h == idx) {
                 continue; // dragged member: a ghost, not in the grid
             }
-            let d = display + box_drag.map_or(0, |(_, gap, _)| usize::from(display >= gap));
-            display += 1;
+            let s = open_box_slots.get(m).copied().unwrap_or(m);
+            let mut d = s;
+            if let Some((_, gap, _)) = box_drag {
+                let (sp, gp) = (s / 9, gap / 9);
+                match origin_slot {
+                    Some(o) => {
+                        let op = o / 9;
+                        if sp == op && sp == gp {
+                            // Same-page reorder: the classic two-way shift.
+                            if o < s && s <= gap {
+                                d = s - 1;
+                            } else if gap <= s && s < o {
+                                d = s + 1;
+                            }
+                        } else if sp == op && s > o {
+                            d = s - 1; // close the origin hole
+                        } else if sp == gp && s >= gap {
+                            d = s + 1; // open the gap
+                        }
+                    }
+                    None => {
+                        if sp == gp && s >= gap {
+                            d = s + 1;
+                        }
+                    }
+                }
+            }
             let slot = member_slot[d % 9];
             let (row, col) = (slot / OPEN_BOX_COLS, slot % OPEN_BOX_COLS);
             let page_x = (d / 9) as f32 * page_w - box_scroll;

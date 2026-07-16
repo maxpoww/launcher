@@ -18,6 +18,7 @@ mod launch;
 mod managed;
 mod nix;
 mod order;
+mod pages;
 mod pins;
 mod renderer;
 mod state;
@@ -2965,7 +2966,9 @@ impl App {
             .groups()
             .get(g)?
             .members
-            .get(self.box_page * 9 + local)
+            .pages()
+            .get(self.box_page)?
+            .get(local)
             .cloned()
     }
 
@@ -3008,11 +3011,11 @@ impl App {
             return;
         };
         // Pull the member out when the drag exits a clear margin past the
-        // box — one cell beyond, so the paging band (which is forgiving:
+        // box — half a cell beyond, so the paging band (which is forgiving:
         // anywhere at-or-past the box edge pages) keeps working while a
         // deliberate sideways drag onto the visible main grid, or up/down
         // out of the box, ejects the member into the loose grid.
-        let m = content::GRID_CELL_H;
+        let m = content::GRID_CELL_H * 0.5;
         let clear_out = pos.0 < box_rect.x - m
             || pos.0 > box_rect.x + box_rect.w + m
             || pos.1 < box_rect.y - m
@@ -3062,7 +3065,10 @@ impl App {
         self.dirty = true;
     }
 
-    /// Drop the in-box drag: reorder the member to the slot under the pointer.
+    /// Drop the in-box drag: the member lands on the box page under the
+    /// pointer — before the member displayed at that 3×3 position, or
+    /// appended to the page's tail. A ghost-page drop creates the page,
+    /// and the member *stays* there: box pages keep gaps like the grid.
     fn drop_box_drag(&mut self) {
         let Some((entry_idx, pos)) = self.box_drag.take() else {
             return;
@@ -3072,24 +3078,35 @@ impl App {
             return;
         };
         let member_id = self.entries[entry_idx].id.clone();
-        let before = self.box_drag_before(pos, &member_id);
-        info!(
-            "box drop: {member_id} -> before {before:?} (page {}, {} members)",
-            self.box_page,
-            self.groups
-                .groups()
-                .get(g)
-                .map_or(0, |grp| grp.members.len())
-        );
-        if let Some(before) = before {
-            self.groups.move_member(g, &member_id, before);
-            self.refilter();
+        let Some(target) = self.box_drag_slot_target(pos) else {
+            self.schedule_frame();
+            return;
+        };
+        let (page, local) = (target / 9, target % 9);
+        // The member displayed at the drop position on that page, with
+        // the dragged member excluded (it's the ghost in hand).
+        let anchor = self
+            .groups
+            .groups()
+            .get(g)
+            .and_then(|grp| grp.members.pages().get(page))
+            .and_then(|p| {
+                p.iter()
+                    .filter(|m| m.as_str() != member_id)
+                    .nth(local)
+                    .cloned()
+            });
+        info!("box drop: {member_id} -> page {page} local {local} anchor {anchor:?}");
+        match anchor {
+            Some(a) => self.groups.move_member_before(g, &member_id, &a),
+            None => self.groups.move_member_to_page_end(g, &member_id, page),
         }
+        self.refilter();
         self.schedule_frame();
     }
 
-    /// Target position under the pointer (member index, dragged removed):
-    /// the 3×3 slot resolved to a member index on the current page.
+    /// Display slot under the pointer: the 3×3 position on the current
+    /// box page, as `page * 9 + within`.
     fn box_drag_slot_target(&self, pos: (f32, f32)) -> Option<usize> {
         let box_rect = self.current_layout().open_box?;
         let cols = content::OPEN_BOX_COLS;
@@ -3099,19 +3116,6 @@ impl App {
         let slot = row * cols + col;
         let local = content::open_box_slot_member(self.box_is_left(), slot);
         Some(self.box_page * 9 + local)
-    }
-
-    /// The `move_member` anchor index (in the group's member list) for a
-    /// drop at `pos`: the member currently sitting at the target position.
-    fn box_drag_before(&self, pos: (f32, f32), member_id: &str) -> Option<usize> {
-        let target = self.box_drag_slot_target(pos)?;
-        let members = &self.groups.groups().get(self.open_box_group()?)?.members;
-        // `target` indexes the list with the dragged member removed.
-        let mut reduced = members.iter().filter(|m| m.as_str() != member_id);
-        match reduced.nth(target) {
-            Some(anchor) => members.iter().position(|m| m == anchor),
-            None => Some(members.len()),
-        }
     }
 
     /// Pull a box member out into the loose grid (the box shrinks closed).
@@ -3736,18 +3740,36 @@ impl App {
         let box_drag = self
             .box_drag
             .and_then(|(entry, pos)| self.box_drag_slot_target(pos).map(|gap| (entry, gap, pos)));
-        let open_box_members: Vec<usize> = self
+        let (open_box_members, open_box_slots): (Vec<usize>, Vec<usize>) = self
             .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
             .map(|group| {
-                // All members; the box overlay pages them 3×3 via box_scroll.
+                // All members with their display slots (page * 9 + within
+                // — pages may be under-full); the box overlay pages them
+                // 3×3 via box_scroll.
                 group
                     .members
+                    .pages()
                     .iter()
-                    .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
-                    .collect()
+                    .enumerate()
+                    .flat_map(|(p, page)| {
+                        page.iter().enumerate().map(move |(w, id)| (p * 9 + w, id))
+                    })
+                    .filter_map(|(slot, id)| {
+                        self.entries
+                            .iter()
+                            .position(|e| &e.id == id)
+                            .map(|e| (e, slot))
+                    })
+                    .unzip()
             })
-            .or_else(|| self.closing_members.clone())
+            .or_else(|| {
+                // The shrinking-closed overlay: sequential slots.
+                self.closing_members.clone().map(|m| {
+                    let n = m.len();
+                    (m, (0..n).collect())
+                })
+            })
             .unwrap_or_default();
         // Hide the open box's own tile from the grid behind — the magnified
         // box stands in for it.
@@ -3759,7 +3781,8 @@ impl App {
             .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
             .map(|grp| {
-                let pages = grp.members.len().div_ceil(9).max(1);
+                // One reachable ghost page while a member is in hand.
+                let pages = grp.members.pages().len().max(1) + usize::from(self.box_drag.is_some());
                 (self.box_page.min(pages - 1), pages)
             })
             .unwrap_or((0, 1));
@@ -3807,6 +3830,7 @@ impl App {
                 group_expand,
                 group_origin: self.group_origin,
                 open_box_members: &open_box_members,
+                open_box_slots: &open_box_slots,
                 open_box_hidden,
                 open_box_pages,
                 box_scroll: self.box_scroll,
@@ -3937,11 +3961,13 @@ impl App {
         let Some(n) = self
             .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
-            .map(|grp| grp.members.len())
+            .map(|grp| grp.members.pages().len())
         else {
             return;
         };
-        let pages = n.div_ceil(9).max(1) as i64;
+        // While reordering a member, one extra empty page is reachable
+        // at the end — drop there to park the member on a fresh page.
+        let pages = (n.max(1) + usize::from(self.box_drag.is_some())) as i64;
         if pages <= 1 {
             return;
         }

@@ -1,13 +1,6 @@
 //! Persistent Apps-grid order: install date by default, manual on top —
-//! organized as *pages* (macOS Launchpad model).
-//!
-//! The grid is a sequence of pages; each page holds ids in order and may
-//! be *under-full* (empty space at its tail). That's what lets a drag
-//! park an app alone on a fresh page: pages don't reflow into each other
-//! on their own. Only two things move ids across pages: an explicit drag
-//! (`move_before` / `move_to_page_end`) and `normalize`, which cascades
-//! over-full pages forward after the page capacity shrinks (or after an
-//! insert overfills a page).
+//! a thin persistence wrapper around the shared [`PagedList`] page model
+//! (see `pages.rs`; a box's members use the very same model).
 //!
 //! Nix store mtimes are normalized to the epoch, so "install date" is
 //! tracked as first-seen order: every scan appends ids it hasn't seen
@@ -20,6 +13,7 @@
 //! `{ "order": ["id", ...] }` format loads as a single page (a later
 //! `normalize` splits it by the real capacity). Writes are best-effort.
 
+use crate::pages::PagedList;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{info, warn};
@@ -27,7 +21,7 @@ use tracing::{info, warn};
 #[derive(Default, Serialize, Deserialize)]
 struct FileFormat {
     #[serde(default)]
-    pages: Vec<Vec<String>>,
+    pages: PagedList,
     /// Legacy flat order (pre-pages); read-only migration input.
     #[serde(default, skip_serializing)]
     order: Vec<String>,
@@ -35,7 +29,7 @@ struct FileFormat {
 
 /// The paged grid-order list, persisted like the pin db.
 pub struct OrderDb {
-    pages: Vec<Vec<String>>,
+    list: PagedList,
     path: PathBuf,
 }
 
@@ -49,20 +43,18 @@ impl OrderDb {
             .ok()
             .and_then(|s| serde_json::from_str::<FileFormat>(&s).ok())
             .unwrap_or_default();
-        let pages = if !f.pages.is_empty() {
+        let list = if !f.pages.is_empty() {
             f.pages
-        } else if !f.order.is_empty() {
-            vec![f.order]
         } else {
-            Vec::new()
+            PagedList::from_flat(f.order)
         };
-        Self { pages, path }
+        Self { list, path }
     }
 
     /// The pages, in grid order. Pages may be under-full; ids of hidden
     /// items (pinned / grouped) still occupy their stored position.
     pub fn pages(&self) -> &[Vec<String>] {
-        &self.pages
+        self.list.pages()
     }
 
     /// Record newly seen ids at the end of the last page (in the order
@@ -71,14 +63,8 @@ impl OrderDb {
     pub fn sync<'a>(&mut self, ids: impl Iterator<Item = &'a str>) {
         let mut added = false;
         for id in ids {
-            if !self.contains(id) {
-                if self.pages.is_empty() {
-                    self.pages.push(Vec::new());
-                }
-                self.pages
-                    .last_mut()
-                    .expect("just ensured")
-                    .push(id.to_owned());
+            if !self.list.contains(id) {
+                self.list.push(id);
                 added = true;
             }
         }
@@ -87,109 +73,29 @@ impl OrderDb {
         }
     }
 
-    /// Cascade over-full pages forward so every page shows at most
-    /// `cap` items: overflow moves to the head of the next page (keeping
-    /// global order), creating pages as needed. Only *visible* ids count
-    /// toward the capacity — hidden ones (pinned / grouped) occupy no
-    /// display cell and ride along with their page. Under-full pages are
-    /// left alone — their tail gaps are the point. Empty pages drop.
+    /// Cascade over-full pages by the display capacity, counting only
+    /// visible ids; fold hidden-only pages into a neighbor (see
+    /// [`PagedList::normalize`]).
     pub fn normalize(&mut self, cap: usize, visible: impl Fn(&str) -> bool) {
-        let cap = cap.max(1);
-        let mut changed = false;
-        let mut i = 0;
-        while i < self.pages.len() {
-            // Split where the (cap+1)-th visible id sits; trailing hidden
-            // ids between the cap-th and that point stay put.
-            let mut seen = 0usize;
-            let split_at = self.pages[i].iter().position(|id| {
-                if visible(id) {
-                    seen += 1;
-                    seen > cap
-                } else {
-                    false
-                }
-            });
-            if let Some(at) = split_at {
-                let overflow: Vec<String> = self.pages[i].split_off(at);
-                if i + 1 == self.pages.len() {
-                    self.pages.push(Vec::new());
-                }
-                // Prepend, preserving the overflow's order.
-                for (k, id) in overflow.into_iter().enumerate() {
-                    self.pages[i + 1].insert(k, id);
-                }
-                changed = true;
-            }
-            i += 1;
-        }
-        // A page with no visible ids displays as nothing: fold its
-        // (hidden / uninstalled) ids into the previous page's tail so
-        // they can't fragment the grid when they come back to life.
-        let mut i = 1;
-        while i < self.pages.len() {
-            if self.pages[i].iter().any(|id| visible(id)) {
-                i += 1;
-            } else {
-                let orphan = self.pages.remove(i);
-                self.pages[i - 1].extend(orphan);
-                changed = true;
-            }
-        }
-        // Same for a hidden-only FIRST page: fold into the next head.
-        while self.pages.len() > 1 && !self.pages[0].iter().any(|id| visible(id)) {
-            let orphan = self.pages.remove(0);
-            for (k, id) in orphan.into_iter().enumerate() {
-                self.pages[0].insert(k, id);
-            }
-            changed = true;
-        }
-        changed |= self.drop_empty_pages();
-        if changed {
+        if self.list.normalize(cap, visible) {
             self.save();
         }
-    }
-
-    fn contains(&self, id: &str) -> bool {
-        self.pages.iter().any(|p| p.iter().any(|o| o == id))
-    }
-
-    /// Storage position of `id`: (page, index within page).
-    fn slot_of(&self, id: &str) -> Option<(usize, usize)> {
-        self.pages
-            .iter()
-            .enumerate()
-            .find_map(|(p, page)| page.iter().position(|o| o == id).map(|i| (p, i)))
-    }
-
-    fn remove(&mut self, id: &str) {
-        for page in &mut self.pages {
-            page.retain(|o| o != id);
-        }
-    }
-
-    fn drop_empty_pages(&mut self) -> bool {
-        let before = self.pages.len();
-        self.pages.retain(|p| !p.is_empty());
-        self.pages.len() != before
     }
 
     /// Forget the grid slot of any box no longer alive: a `group:` id not
     /// in `live` is dropped (a deleted box keeps nothing). App ids are
     /// always kept — a vanished app returns to its slot on reinstall.
     pub fn forget_dead_boxes(&mut self, live: &std::collections::HashSet<String>) {
-        let before: usize = self.pages.iter().map(Vec::len).sum();
-        for page in &mut self.pages {
-            page.retain(|id| !id.starts_with("group:") || live.contains(id));
-        }
-        let changed = self.pages.iter().map(Vec::len).sum::<usize>() != before;
-        if self.drop_empty_pages() || changed {
+        let before = self.list.len();
+        self.list
+            .retain(|id| !id.starts_with("group:") || live.contains(id));
+        if self.list.len() != before {
             self.save();
         }
     }
 
     /// Place `id` immediately before `anchor`, inside the anchor's page
-    /// (a newly created box takes its target app's grid position; a page
-    /// overfilled by the insert cascades on the next `normalize`).
+    /// (a newly created box takes its target app's grid position).
     /// Unknown anchors append to the last page.
     pub fn insert_before(&mut self, id: &str, anchor: &str) {
         self.move_before(id, anchor);
@@ -201,34 +107,15 @@ impl OrderDb {
             return;
         }
         info!("reorder: {id} -> before {anchor}");
-        self.remove(id);
-        match self.slot_of(anchor) {
-            Some((p, i)) => self.pages[p].insert(i, id.to_owned()),
-            None => {
-                if self.pages.is_empty() {
-                    self.pages.push(Vec::new());
-                }
-                self.pages
-                    .last_mut()
-                    .expect("just ensured")
-                    .push(id.to_owned());
-            }
-        }
-        self.drop_empty_pages();
+        self.list.move_before(id, anchor);
         self.save();
     }
 
-    /// Move `id` to the end of `page`, creating intermediate pages as
-    /// needed — the drop-on-a-fresh-page mutation (`page` one past the
-    /// last existing page starts a new one).
+    /// Move `id` to the end of `page`, creating it as needed — the
+    /// drop-on-a-fresh-page mutation.
     pub fn move_to_page_end(&mut self, id: &str, page: usize) {
         info!("reorder: {id} -> end of page {page}");
-        self.remove(id);
-        while self.pages.len() <= page {
-            self.pages.push(Vec::new());
-        }
-        self.pages[page].push(id.to_owned());
-        self.drop_empty_pages();
+        self.list.move_to_page_end(id, page);
         self.save();
     }
 
@@ -240,7 +127,7 @@ impl OrderDb {
             }
         }
         let json = serde_json::json!(FileFormat {
-            pages: self.pages.clone(),
+            pages: self.list.clone(),
             order: Vec::new(),
         });
         let tmp = self.path.with_extension("json.tmp");
@@ -259,7 +146,7 @@ mod tests {
 
     fn db() -> OrderDb {
         OrderDb {
-            pages: Vec::new(),
+            list: PagedList::default(),
             path: std::env::temp_dir().join("waverunner-order-test.json"),
         }
     }
@@ -276,7 +163,6 @@ mod tests {
     fn move_before_reorders_within_a_page() {
         let mut d = db();
         d.sync(["a", "b", "c", "d"].into_iter());
-        // Drag d before b (b's page position, even with hidden ids around).
         d.move_before("d", "b");
         assert_eq!(d.pages(), &[vec!["a", "d", "b", "c"]]);
         // An unknown anchor appends to the last page.
@@ -288,84 +174,17 @@ mod tests {
     fn legacy_flat_order_loads_as_one_page() {
         let f: FileFormat = serde_json::from_str(r#"{"order":["a","b"]}"#).unwrap();
         assert!(f.pages.is_empty());
-        assert_eq!(f.order, vec!["a", "b"]);
-        // load() maps this to a single page — mirror that mapping here.
-        let pages = if !f.pages.is_empty() {
-            f.pages
-        } else {
-            vec![f.order]
-        };
-        assert_eq!(pages, vec![vec!["a", "b"]]);
+        let list = PagedList::from_flat(f.order);
+        assert_eq!(list.pages(), &[vec!["a", "b"]]);
     }
 
     #[test]
-    fn normalize_cascades_overflow_and_keeps_gaps() {
+    fn forget_dead_boxes_drops_only_dead_group_ids() {
         let mut d = db();
-        d.pages = vec![
-            vec!["a", "b", "c", "d"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            vec!["e"].into_iter().map(String::from).collect(),
-        ];
-        d.normalize(3, |_| true);
-        // Page 0 overflowed: d cascades to the head of page 1.
-        assert_eq!(d.pages(), &[vec!["a", "b", "c"], vec!["d", "e"]]);
-        // Under-full pages stay under-full (the gap is the feature).
-        d.normalize(3, |_| true);
-        assert_eq!(d.pages(), &[vec!["a", "b", "c"], vec!["d", "e"]]);
-    }
-
-    #[test]
-    fn normalize_counts_only_visible_ids() {
-        let mut d = db();
-        // h* are hidden (pinned/grouped): they occupy no display cell,
-        // so a page with 3 visible ids among hidden ones is NOT over-full
-        // at cap 3 — the 4th visible id is what cascades.
-        d.pages = vec![["a", "h1", "b", "h2", "c", "d"]
-            .into_iter()
-            .map(String::from)
-            .collect()];
-        d.normalize(3, |id| !id.starts_with('h'));
-        assert_eq!(d.pages(), &[vec!["a", "h1", "b", "h2", "c"], vec!["d"]]);
-    }
-
-    #[test]
-    fn normalize_folds_hidden_only_pages_into_neighbors() {
-        let mut d = db();
-        // Pages 0 and 2 hold only hidden ids: 0 folds into the next
-        // page's head, 2 into the previous page's tail — the visible
-        // page's own layout is untouched.
-        d.pages = vec![
-            vec!["h1".to_string(), "h2".to_string()],
-            vec!["a".to_string(), "b".to_string()],
-            vec!["h3".to_string()],
-        ];
-        d.normalize(3, |id| !id.starts_with('h'));
-        assert_eq!(d.pages(), &[vec!["h1", "h2", "a", "b", "h3"]]);
-    }
-
-    #[test]
-    fn move_to_page_end_creates_the_page_and_leaves_a_gap() {
-        let mut d = db();
-        d.sync(["a", "b", "c"].into_iter());
-        d.normalize(3, |_| true);
-        // Drag c onto a fresh page 1: page 0 keeps a tail gap.
-        d.move_to_page_end("c", 1);
-        assert_eq!(d.pages(), &[vec!["a", "b"], vec!["c"]]);
-        // Dragging the last member out of a page drops the empty page.
-        d.move_to_page_end("c", 0);
-        assert_eq!(d.pages(), &[vec!["a", "b", "c"]]);
-    }
-
-    #[test]
-    fn move_before_crosses_pages() {
-        let mut d = db();
-        d.pages = vec![
-            vec!["a".to_string(), "b".to_string()],
-            vec!["c".to_string()],
-        ];
-        d.move_before("c", "a");
-        assert_eq!(d.pages(), &[vec!["c", "a", "b"]]);
+        d.sync(["a", "group:box-1", "b", "group:box-2"].into_iter());
+        let live: std::collections::HashSet<String> =
+            ["group:box-2".to_string()].into_iter().collect();
+        d.forget_dead_boxes(&live);
+        assert_eq!(d.pages(), &[vec!["a", "b", "group:box-2"]]);
     }
 }

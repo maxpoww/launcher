@@ -5,14 +5,25 @@
 //! (its lone app returns to the loose grid, and nothing about the box is
 //! kept).
 //!
+//! Members are a [`PagedList`] — the same paged model as the Apps grid —
+//! so a member dragged onto a fresh 3×3 page *stays* there (pages may be
+//! under-full; they never reflow on their own).
+//!
 //! Stored in `$XDG_DATA_HOME/waverunner/groups.json` as
-//! `{ "groups": [ { "name": null, "members": ["id", ...] }, ... ] }`.
-//! Writes are best-effort; a failed write is logged but never fatal.
+//! `{ "groups": [ { "name": null, "members": [["id", ...], ...] }, ... ] }`
+//! (legacy flat member lists load as a single page). Writes are
+//! best-effort; a failed write is logged but never fatal.
 
+use crate::pages::PagedList;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::info;
+#[cfg(not(test))]
+use tracing::warn;
+
+/// Members shown per box page (the magnified box's 3×3 grid).
+pub const PAGE_CAP: usize = 9;
 
 /// One app group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,8 +34,8 @@ pub struct Group {
     pub id: String,
     /// Custom name; `None` renders a generated "<First> +N" label.
     pub name: Option<String>,
-    /// Member desktop-file ids, in insertion order.
-    pub members: Vec<String>,
+    /// Member desktop-file ids, paged (3×3 per page, tail gaps kept).
+    pub members: PagedList,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -35,6 +46,8 @@ struct FileFormat {
 /// The group list, persisted like the pin db.
 pub struct GroupDb {
     groups: Vec<Group>,
+    /// Save target (unused under test, where `save` is a no-op).
+    #[cfg_attr(test, allow(dead_code))]
     path: PathBuf,
 }
 
@@ -57,6 +70,15 @@ impl GroupDb {
             }
             db.save();
         }
+        // A legacy flat member list loads as one big page: split it by
+        // the box capacity or members past the ninth are unreachable.
+        let mut split = false;
+        for g in &mut db.groups {
+            split |= g.members.normalize(PAGE_CAP, |_| true);
+        }
+        if split {
+            db.save();
+        }
         db
     }
 
@@ -71,9 +93,7 @@ impl GroupDb {
 
     /// Index of the group containing `id`, if any.
     pub fn group_of(&self, id: &str) -> Option<usize> {
-        self.groups
-            .iter()
-            .position(|g| g.members.iter().any(|m| m == id))
+        self.groups.iter().position(|g| g.members.contains(id))
     }
 
     /// Whether `id` lives inside any group (hidden from the loose grid).
@@ -91,7 +111,7 @@ impl GroupDb {
         self.groups.push(Group {
             id: id.clone(),
             name: None,
-            members: vec![target.to_owned(), dragged.to_owned()],
+            members: PagedList::from_flat(vec![target.to_owned(), dragged.to_owned()]),
         });
         info!("group created: [{target}, {dragged}] as {id}");
         self.save();
@@ -111,7 +131,7 @@ impl GroupDb {
             if from == index {
                 return; // already a member
             }
-            self.groups[from].members.retain(|m| m != id);
+            self.groups[from].members.remove(id);
             if self.groups[from].members.len() < 2 {
                 self.groups.remove(from);
                 if from < index {
@@ -119,27 +139,44 @@ impl GroupDb {
                 }
             }
         }
-        self.groups[index].members.push(id.to_owned());
+        self.groups[index].members.push(id);
+        self.groups[index].members.normalize(PAGE_CAP, |_| true);
         info!("group {index}: added {id}");
         self.save();
     }
 
-    /// Move a member to sit before member position `before` within its
-    /// group (manual reordering inside an open box).
+    /// Move a member to sit before flat member position `before` within
+    /// its group (legacy flat-position reordering).
     pub fn move_member(&mut self, index: usize, id: &str, before: usize) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
         };
-        if group.members.get(before).map(String::as_str) == Some(id) {
-            return; // its own slot: no-op
-        }
-        let anchor = group.members.get(before).cloned();
-        group.members.retain(|m| m != id);
-        let at = anchor
-            .and_then(|a| group.members.iter().position(|m| *m == a))
-            .unwrap_or(group.members.len());
-        group.members.insert(at, id.to_owned());
-        info!("group {index}: moved {id} to member position {at}");
+        group.members.move_before_flat(id, before);
+        group.members.normalize(PAGE_CAP, |_| true);
+        info!("group {index}: moved {id} before position {before}");
+        self.save();
+    }
+
+    /// Move a member immediately before `anchor` on the anchor's page.
+    pub fn move_member_before(&mut self, index: usize, id: &str, anchor: &str) {
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        group.members.move_before(id, anchor);
+        group.members.normalize(PAGE_CAP, |_| true);
+        info!("group {index}: moved {id} before {anchor}");
+        self.save();
+    }
+
+    /// Move a member to the end of the box page `page`, creating it as
+    /// needed — the drop-on-a-fresh-box-page mutation.
+    pub fn move_member_to_page_end(&mut self, index: usize, id: &str, page: usize) {
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        group.members.move_to_page_end(id, page);
+        group.members.normalize(PAGE_CAP, |_| true);
+        info!("group {index}: moved {id} to end of box page {page}");
         self.save();
     }
 
@@ -150,7 +187,7 @@ impl GroupDb {
         let Some(index) = self.group_of(id) else {
             return false;
         };
-        self.groups[index].members.retain(|m| m != id);
+        self.groups[index].members.remove(id);
         if self.groups[index].members.len() < 2 {
             info!("group {index} removed (fewer than two members)");
             self.groups.remove(index);
@@ -168,7 +205,7 @@ impl GroupDb {
     pub fn prune(&mut self, exists: &HashSet<String>) -> bool {
         let members_before: usize = self.groups.iter().map(|g| g.members.len()).sum();
         for g in &mut self.groups {
-            g.members.retain(|m| exists.contains(m.as_str()));
+            g.members.retain(|m| exists.contains(m));
         }
         let groups_before = self.groups.len();
         self.groups.retain(|g| g.members.len() >= 2);
@@ -249,12 +286,16 @@ mod tests {
         }
     }
 
+    fn flat(g: &GroupDb, idx: usize) -> Vec<String> {
+        g.groups()[idx].members.iter().cloned().collect()
+    }
+
     #[test]
     fn create_add_and_dissolve() {
         let mut g = db();
         let id = g.create("firefox", "gimp");
         let idx = g.index_by_id(&id).unwrap();
-        assert_eq!(g.groups()[idx].members, vec!["firefox", "gimp"]);
+        assert_eq!(flat(&g, idx), vec!["firefox", "gimp"]);
         assert!(g.is_grouped("gimp"));
 
         g.add(idx, "vlc");
@@ -281,7 +322,7 @@ mod tests {
         assert_eq!(g.groups().len(), 1);
         assert!(g.index_by_id(&first).is_none());
         let idx = g.index_by_id(&second).unwrap();
-        assert_eq!(g.groups()[idx].members, vec!["c", "b"]);
+        assert_eq!(flat(&g, idx), vec!["c", "b"]);
         assert!(!g.is_grouped("a"));
     }
 
@@ -294,8 +335,27 @@ mod tests {
                             // mid-add and shifting group 1's index down.
         g.add(1, "b");
         assert_eq!(g.groups().len(), 1);
-        assert_eq!(g.groups()[0].members, vec!["c", "d", "b"]);
+        assert_eq!(flat(&g, 0), vec!["c", "d", "b"]);
         assert!(!g.is_grouped("a"));
+    }
+
+    #[test]
+    fn members_parked_on_a_page_stay_there() {
+        let mut g = db();
+        let id = g.create("a", "b");
+        let idx = g.index_by_id(&id).unwrap();
+        for m in ["c", "d"] {
+            g.add(idx, m);
+        }
+        // Drag c onto a fresh box page 1: it stays; d JOINS it there
+        // instead of displacing it (the old dense list could only ever
+        // hold one member past a full page).
+        g.move_member_to_page_end(idx, "c", 1);
+        g.move_member_to_page_end(idx, "d", 1);
+        assert_eq!(
+            g.groups()[idx].members.pages(),
+            &[vec!["a", "b"], vec!["c", "d"]]
+        );
     }
 
     #[test]
@@ -310,7 +370,7 @@ mod tests {
         assert!(g.prune(&exists));
         // First box keeps [a, b]; the second (both gone) is deleted.
         assert_eq!(g.groups().len(), 1);
-        assert_eq!(g.groups()[0].members, vec!["a", "b"]);
+        assert_eq!(flat(&g, 0), vec!["a", "b"]);
         // Losing one more member drops it below two → the box is removed.
         let exists2: HashSet<String> = ["a".to_string()].into_iter().collect();
         assert!(g.prune(&exists2));
