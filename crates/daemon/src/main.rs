@@ -666,6 +666,47 @@ const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
 /// one page at a controllable pace instead of rapid-firing past them.
 const DRAG_PAGE_COOLDOWN: Duration = Duration::from_millis(700);
 
+/// Fraction of a pageable surface's width at each side that forms the
+/// drag edge-paging band. One knob for the Apps grid and the open box.
+const EDGE_PAGE_BAND: f32 = 0.14;
+
+/// Which way an edge-held drag should page: -1 / +1 when `x` sits inside
+/// the left / right [`EDGE_PAGE_BAND`] of the surface spanning
+/// `rect_x..rect_x + rect_w`, else 0. The bands are forgiving: anything
+/// at-or-past an edge counts (mid-drag overshoot still pages).
+fn edge_page_dir(rect_x: f32, rect_w: f32, x: f32) -> i64 {
+    let band = rect_w * EDGE_PAGE_BAND;
+    if x < rect_x + band {
+        -1
+    } else if x > rect_x + rect_w - band {
+        1
+    } else {
+        0
+    }
+}
+
+/// Drive a hold-at-the-edge dwell clock (shared by the grid and box drag
+/// paging): entering the band arms it, leaving disarms it, and while held
+/// it fires — returns true — every [`DRAG_PAGE_COOLDOWN`]. Callers keep
+/// frames coming while `dir != 0` (a stationary pointer emits no motion).
+fn edge_page_due(timer: &mut Option<Instant>, dir: i64) -> bool {
+    if dir == 0 {
+        *timer = None;
+        return false;
+    }
+    match timer {
+        Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
+            *timer = Some(Instant::now());
+            true
+        }
+        Some(_) => false,
+        None => {
+            *timer = Some(Instant::now());
+            false
+        }
+    }
+}
+
 /// Cap on file-search results shown in the Files section.
 const FILE_RESULTS_MAX: usize = 24;
 
@@ -2517,31 +2558,16 @@ impl App {
             self.grid_drag_page_at = None;
             return None;
         }
-        // Edge-paging: hovering the drag near the grid's left/right edge
-        // turns the page after a short dwell, carrying the icon across
-        // pages (and letting it fold onto an app on another page) — same
-        // dwell/cooldown feel as scroll paging and the open-box drag.
+        // Edge-paging: holding the drag in the grid's edge band turns
+        // the page every DRAG_PAGE_COOLDOWN, carrying the icon across
+        // pages (shared band + dwell with the open-box drag).
         let vp = layout.sections[content::SECTION_APPS].viewport;
         if layout.sections[content::SECTION_APPS].n_pages > 1 {
-            let band = vp.w * 0.12;
-            let dir: i64 = if pos.0 < vp.x + band {
-                -1
-            } else if pos.0 > vp.x + vp.w - band {
-                1
-            } else {
-                0
-            };
-            if dir == 0 {
-                self.grid_drag_page_at = None;
-            } else {
-                match self.grid_drag_page_at {
-                    Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
-                        self.page_by(content::SECTION_APPS, dir, false);
-                        self.grid_drag_page_at = Some(Instant::now());
-                    }
-                    None => self.grid_drag_page_at = Some(Instant::now()),
-                    _ => {}
-                }
+            let dir = edge_page_dir(vp.x, vp.w, pos.0);
+            if edge_page_due(&mut self.grid_drag_page_at, dir) {
+                self.page_by(content::SECTION_APPS, dir, false);
+            }
+            if dir != 0 {
                 // Keep frames coming while the dwell clock runs (a
                 // stationary pointer at the edge emits no motion).
                 self.dirty = true;
@@ -3021,35 +3047,21 @@ impl App {
         self.schedule_frame();
     }
 
-    /// Edge-paging for an in-box reorder drag: hovering the box's left/right
-    /// edge turns the page after a [`PAGE_COOLDOWN`] dwell, carrying the
-    /// dragged member to another page. Called on motion *and* every frame
-    /// from `draw` (via the stored drag pos) so paging keeps going while the
-    /// pointer holds still at the edge — motion alone would stall the dwell.
+    /// Edge-paging for an in-box reorder drag: holding the drag in the
+    /// box's edge band turns the page every [`DRAG_PAGE_COOLDOWN`]
+    /// (shared band + dwell with the Apps grid). Called on motion *and*
+    /// every frame from `draw` (via the stored drag pos) so paging keeps
+    /// going while the pointer holds still at the edge.
     fn box_drag_edge_page(&mut self, box_rect: content::Rect, pos: (f32, f32)) {
-        let edge = box_rect.w * 0.14;
-        let dir: i64 = if pos.0 < box_rect.x + edge {
-            -1
-        } else if pos.0 > box_rect.x + box_rect.w - edge {
-            1
-        } else {
-            0
-        };
-        if dir == 0 {
-            self.box_drag_page_at = None;
-            return;
+        let dir = edge_page_dir(box_rect.x, box_rect.w, pos.0);
+        if edge_page_due(&mut self.box_drag_page_at, dir) {
+            self.turn_box_page(dir, false);
         }
-        match self.box_drag_page_at {
-            Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
-                self.turn_box_page(dir, false);
-                self.box_drag_page_at = Some(Instant::now());
-            }
-            None => self.box_drag_page_at = Some(Instant::now()),
-            _ => {}
+        if dir != 0 {
+            // Keep frames coming while the dwell clock runs (a stationary
+            // pointer at the edge emits no motion).
+            self.dirty = true;
         }
-        // Keep frames coming while the dwell clock runs (a stationary
-        // pointer at the edge emits no motion).
-        self.dirty = true;
     }
 
     /// Drop the in-box drag: the member lands on the box page under the
@@ -3069,7 +3081,7 @@ impl App {
             self.schedule_frame();
             return;
         };
-        let (page, local) = (target / 9, target % 9);
+        let (page, local) = (target / groups::PAGE_CAP, target % groups::PAGE_CAP);
         // The member displayed at the drop position on that page, with
         // the dragged member excluded (it's the ghost in hand).
         let anchor = self
@@ -3093,7 +3105,7 @@ impl App {
     }
 
     /// Display slot under the pointer: the 3×3 position on the current
-    /// box page, as `page * 9 + within`.
+    /// box page, as `page * PAGE_CAP + within`.
     fn box_drag_slot_target(&self, pos: (f32, f32)) -> Option<usize> {
         let box_rect = self.current_layout().open_box?;
         let cols = content::OPEN_BOX_COLS;
@@ -3102,7 +3114,7 @@ impl App {
         let row = (((pos.1 - box_rect.y) / cell).floor() as usize).min(cols - 1);
         let slot = row * cols + col;
         let local = content::open_box_slot_member(self.box_is_left(), slot);
-        Some(self.box_page * 9 + local)
+        Some(self.box_page * groups::PAGE_CAP + local)
     }
 
     /// Pull a box member out into the loose grid (the box shrinks closed).
@@ -3117,7 +3129,7 @@ impl App {
             .members
             .iter()
             .filter(|id| id.as_str() != member_id)
-            .take(9)
+            .take(groups::PAGE_CAP)
             .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
             .collect();
         self.groups.remove_member(member_id);
@@ -3715,16 +3727,18 @@ impl App {
             .open_box_group()
             .and_then(|g| self.groups.groups().get(g))
             .map(|group| {
-                // All members with their display slots (page * 9 + within
-                // — pages may be under-full); the box overlay pages them
-                // 3×3 via box_scroll.
+                // All members with their display slots (page * PAGE_CAP
+                // + within — pages may be under-full); the box overlay
+                // pages them 3×3 via box_scroll.
                 group
                     .members
                     .pages()
                     .iter()
                     .enumerate()
                     .flat_map(|(p, page)| {
-                        page.iter().enumerate().map(move |(w, id)| (p * 9 + w, id))
+                        page.iter()
+                            .enumerate()
+                            .map(move |(w, id)| (p * groups::PAGE_CAP + w, id))
                     })
                     .filter_map(|(slot, id)| {
                         self.entries

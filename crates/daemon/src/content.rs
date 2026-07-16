@@ -143,8 +143,11 @@ const GRID_LABEL_GAP: f32 = 5.0;
 /// mini preview) — the size the magnified box grows out of / collapses to.
 pub const BOX_TILE: f32 = GRID_ICON * 1.15;
 /// Columns/rows of the magnified open box's inner app grid (3×3 = up to
-/// nine members shown).
+/// nine members shown per page).
 pub const OPEN_BOX_COLS: usize = 3;
+/// Members per open-box page — the box grid's capacity, and the page
+/// size of a group's member list (`groups::PAGE_CAP` re-exports it).
+pub const OPEN_BOX_CAP: usize = OPEN_BOX_COLS * OPEN_BOX_COLS;
 const GRID_PAD_X: f32 = 14.0;
 const GRID_TOP_GAP: f32 = 5.0;
 const GRID_BOTTOM_PAD: f32 = 6.0;
@@ -628,9 +631,9 @@ pub struct FrameInput<'a> {
     /// While a box is open: entry indices of its members for the
     /// magnified 3×3 app grid. Empty when no box is open.
     pub open_box_members: &'a [usize],
-    /// Display slot of each member (`page * 9 + within`, parallel to
-    /// `open_box_members`): box pages may be under-full, so slots — not
-    /// list positions — decide which page a member draws on.
+    /// Display slot of each member (`page * OPEN_BOX_CAP + within`,
+    /// parallel to `open_box_members`): box pages may be under-full, so
+    /// slots — not list positions — decide which page a member draws on.
     pub open_box_slots: &'a [usize],
     /// The open box's own grid cell (its tile), hidden from the grid
     /// behind while the magnified box stands in for it.
@@ -1415,10 +1418,10 @@ pub fn scene(
         // `box_scroll`, so paging slides. Everything clips to the box.
         let page_w = layout.open_box.map_or(box_rect.w, |b| b.w);
         boxgrid.clip = box_rect;
-        // Members draw at their display slot (page * 9 + within — pages
-        // may be under-full). Mid-drag the shared page-local reflow
-        // ([`crate::pages::shifted_slot`], same as the Apps grid) opens
-        // the gap and compacts the dragged member's page.
+        // Members draw at their display slot (page * OPEN_BOX_CAP +
+        // within — pages may be under-full). Mid-drag the shared
+        // page-local reflow ([`crate::pages::shifted_slot`], same as the
+        // Apps grid) opens the gap and compacts the dragged member's page.
         let origin_slot = box_drag.and_then(|(h, _, _)| {
             open_box_members
                 .iter()
@@ -1431,12 +1434,12 @@ pub fn scene(
             }
             let s = open_box_slots.get(m).copied().unwrap_or(m);
             let d = match box_drag {
-                Some((_, gap, _)) => crate::pages::shifted_slot(s, origin_slot, gap, 9),
+                Some((_, gap, _)) => crate::pages::shifted_slot(s, origin_slot, gap, OPEN_BOX_CAP),
                 None => s,
             };
-            let slot = member_slot[d % 9];
+            let slot = member_slot[d % OPEN_BOX_CAP];
             let (row, col) = (slot / OPEN_BOX_COLS, slot % OPEN_BOX_COLS);
-            let page_x = (d / 9) as f32 * page_w - box_scroll;
+            let page_x = (d / OPEN_BOX_CAP) as f32 * page_w - box_scroll;
             let open_cx = box_rect.x + page_x + (col as f32 + 0.5) * cell;
             let open_cy = box_rect.y + (row as f32 + 0.5) * cell;
             // Cull members more than a page off either side of the box.

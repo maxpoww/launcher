@@ -20,8 +20,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::info;
 
-/// Members shown per box page (the magnified box's 3×3 grid).
-pub const PAGE_CAP: usize = 9;
+/// Members shown per box page (the magnified box's 3×3 grid) — the
+/// content layer's [`crate::content::OPEN_BOX_CAP`], re-exported so the
+/// data model and the box geometry can't drift apart.
+pub const PAGE_CAP: usize = crate::content::OPEN_BOX_CAP;
 
 /// One app group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
