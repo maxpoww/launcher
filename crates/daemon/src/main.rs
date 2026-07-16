@@ -2794,13 +2794,14 @@ impl App {
         let Some(box_rect) = self.current_layout().open_box else {
             return;
         };
-        // Pull out only when dragged a clear margin past the box, so a
-        // reorder toward the edge (to page) doesn't accidentally pull out.
+        // Pull the member out only on a VERTICAL exit (drag it up out of
+        // the box toward the search list, or down toward the grid/dock).
+        // The left/right edges are reserved for paging, so a grid box pages
+        // like a dock stack when dragged to its side instead of ejecting the
+        // member (the box is a narrow square, so a sideways drag to the next
+        // page used to land in the old horizontal pull-out margin).
         let m = content::GRID_CELL_H;
-        let clear_out = pos.0 < box_rect.x - m
-            || pos.0 > box_rect.x + box_rect.w + m
-            || pos.1 < box_rect.y - m
-            || pos.1 > box_rect.y + box_rect.h + m;
+        let clear_out = pos.1 < box_rect.y - m || pos.1 > box_rect.y + box_rect.h + m;
         if clear_out && self.app_group.is_some() {
             // A grid box pulls the member into the loose grid; a dock stack
             // has no grid to drop into, so it just holds it.
@@ -2811,7 +2812,16 @@ impl App {
             return;
         }
         self.box_drag = Some((entry_idx, pos));
-        // Edge paging: hover the left/right edge to turn the page.
+        self.box_drag_edge_page(box_rect, pos);
+        self.schedule_frame();
+    }
+
+    /// Edge-paging for an in-box reorder drag: hovering the box's left/right
+    /// edge turns the page after a [`PAGE_COOLDOWN`] dwell, carrying the
+    /// dragged member to another page. Called on motion *and* every frame
+    /// from `draw` (via the stored drag pos) so paging keeps going while the
+    /// pointer holds still at the edge — motion alone would stall the dwell.
+    fn box_drag_edge_page(&mut self, box_rect: content::Rect, pos: (f32, f32)) {
         let edge = box_rect.w * 0.14;
         let dir: i64 = if pos.0 < box_rect.x + edge {
             -1
@@ -2822,17 +2832,19 @@ impl App {
         };
         if dir == 0 {
             self.box_drag_page_at = None;
-        } else {
-            match self.box_drag_page_at {
-                Some(t) if t.elapsed() >= PAGE_COOLDOWN => {
-                    self.turn_box_page(dir);
-                    self.box_drag_page_at = Some(Instant::now());
-                }
-                None => self.box_drag_page_at = Some(Instant::now()),
-                _ => {}
-            }
+            return;
         }
-        self.schedule_frame();
+        match self.box_drag_page_at {
+            Some(t) if t.elapsed() >= PAGE_COOLDOWN => {
+                self.turn_box_page(dir);
+                self.box_drag_page_at = Some(Instant::now());
+            }
+            None => self.box_drag_page_at = Some(Instant::now()),
+            _ => {}
+        }
+        // Keep frames coming while the dwell clock runs (a stationary
+        // pointer at the edge emits no motion).
+        self.dirty = true;
     }
 
     /// Drop the in-box drag: reorder the member to the slot under the pointer.
@@ -3200,6 +3212,12 @@ impl App {
         // fold target (ring); remember which cell to hide (the ghost
         // is its visual).
         let over_cell = self.update_grid_target(&layout);
+        // In-box reorder drag: keep paging while the pointer holds at the
+        // box edge (motion alone would stall the dwell). Pull-out stays
+        // motion-driven — a deliberate gesture always carries motion.
+        if let (Some((_, pos)), Some(box_rect)) = (self.box_drag, layout.open_box) {
+            self.box_drag_edge_page(box_rect, pos);
+        }
         // Dock fold target: an app dragged over another dock icon's center
         // (not its own) will join/create a box there.
         let over_dock = self.gesture.dragging.as_ref().and_then(|d| {
