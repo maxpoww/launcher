@@ -641,6 +641,11 @@ const PAGE_SCROLL_THRESHOLD: f64 = 30.0;
 /// page instead of spinning the (cyclic) grid.
 const PAGE_COOLDOWN: Duration = Duration::from_millis(250);
 
+/// Minimum time between page turns while *holding a drag* at the grid /
+/// box edge — slower than the scroll cooldown so held-edge paging steps
+/// one page at a controllable pace instead of rapid-firing past them.
+const DRAG_PAGE_COOLDOWN: Duration = Duration::from_millis(500);
+
 /// Cap on file-search results shown in the Files section.
 const FILE_RESULTS_MAX: usize = 24;
 
@@ -2387,7 +2392,7 @@ impl App {
                 self.grid_drag_page_at = None;
             } else {
                 match self.grid_drag_page_at {
-                    Some(t) if t.elapsed() >= PAGE_COOLDOWN => {
+                    Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
                         self.page_by(content::SECTION_APPS, dir);
                         self.grid_drag_page_at = Some(Instant::now());
                     }
@@ -2835,7 +2840,7 @@ impl App {
             return;
         }
         match self.box_drag_page_at {
-            Some(t) if t.elapsed() >= PAGE_COOLDOWN => {
+            Some(t) if t.elapsed() >= DRAG_PAGE_COOLDOWN => {
                 self.turn_box_page(dir);
                 self.box_drag_page_at = Some(Instant::now());
             }
