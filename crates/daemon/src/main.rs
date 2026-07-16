@@ -161,9 +161,7 @@ fn main() -> anyhow::Result<()> {
         kinds: Vec::new(),
         icon_layers: Vec::new(),
         base_len: 0,
-        asset_folder: None,
-        asset_file: None,
-        asset_pkg: None,
+        assets: HashMap::new(),
         nix,
         pkg_hits: Vec::new(),
         pkg_hits_query: None,
@@ -348,9 +346,9 @@ pub struct App {
     base_len: usize,
     /// Texture layers of the generic folder/file/package icons, with
     /// their placeholder flags.
-    asset_folder: Option<(u32, bool)>,
-    asset_file: Option<(u32, bool)>,
-    asset_pkg: Option<(u32, bool)>,
+    /// Icon-carrier assets by id ("asset-folder", "asset-audio", …):
+    /// (texture layer, letter-tile placeholder flag), one per scan.
+    assets: HashMap<String, (u32, bool)>,
     /// Handle to the nix threads (package index + profile mutations).
     nix: nix::Nix,
     /// Top-ranked packages for `pkg_hits_query`, delivered async by the
@@ -797,15 +795,14 @@ impl App {
         self.base_len = self.entries.len();
         self.icon_layers = (0..self.base_len as u32).collect();
         self.file_index = loaded.files;
-        let asset = |id: &str| {
-            self.entries
-                .iter()
-                .position(|e| e.id == id)
-                .map(|i| (i as u32, self.placeholders[i]))
-        };
-        self.asset_folder = asset("asset-folder");
-        self.asset_file = asset("asset-file");
-        self.asset_pkg = asset("asset-pkg");
+        // Resolve every icon-carrier asset once per scan.
+        self.assets = apps::ICON_ASSETS
+            .iter()
+            .filter_map(|(id, _)| {
+                let i = self.entries.iter().position(|e| &e.id == id)?;
+                Some((id.to_string(), (i as u32, self.placeholders[i])))
+            })
+            .collect();
 
         // Record first-seen order (install date): new apps append at
         // the end of the grid, macOS-style. The very first sync seeds
@@ -1147,6 +1144,11 @@ impl App {
     /// Rebuild `dock_order`: pinned entries first (in pin order), then
     /// most-used non-pinned apps (entries are already usage-sorted).
     /// Folders never auto-fill the dock, but an explicit pin works.
+    /// An icon-carrier asset's (texture layer, placeholder flag).
+    pub(crate) fn asset(&self, id: &str) -> Option<(u32, bool)> {
+        self.assets.get(id).copied()
+    }
+
     fn recompute_dock_order(&mut self) {
         self.dock_order.clear();
         for pin_id in self.pins.pins() {

@@ -243,7 +243,7 @@ impl App {
         } else {
             // No rasterized icon delivered (shouldn't happen): generic
             // package icon.
-            self.asset_pkg.unwrap_or((0, true))
+            self.asset("asset-pkg").unwrap_or((0, true))
         };
         let entry = AppEntry {
             id,
@@ -451,7 +451,7 @@ impl App {
                     ph,
                 )
             } else {
-                self.asset_pkg.unwrap_or((0, true))
+                self.asset("asset-pkg").unwrap_or((0, true))
             };
             let entry = AppEntry {
                 id: attr,

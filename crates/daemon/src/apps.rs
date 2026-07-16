@@ -186,26 +186,37 @@ fn home_folders() -> Vec<AppEntry> {
     folders
 }
 
+/// The invisible icon-carrier asset set: (asset id, themed icon name).
+/// File entries pick one by extension (see `files::file_asset_name`).
+pub(crate) const ICON_ASSETS: [(&str, &str); 10] = [
+    ("asset-folder", "folder"),
+    ("asset-file", "text-x-generic"),
+    ("asset-pkg", "package-x-generic"),
+    ("asset-audio", "audio-x-generic"),
+    ("asset-video", "video-x-generic"),
+    ("asset-image", "image-x-generic"),
+    ("asset-pdf", "application-pdf"),
+    ("asset-archive", "application-x-archive"),
+    ("asset-doc", "x-office-document"),
+    ("asset-code", "text-x-script"),
+];
+
 /// Invisible icon-carrier entries: dynamic file-search results borrow
 /// these texture layers (one per keystroke can't rasterize new icons).
 /// Empty names keep them out of every fuzzy match.
 fn icon_assets() -> Vec<AppEntry> {
-    [
-        ("asset-folder", "folder"),
-        ("asset-file", "text-x-generic"),
-        ("asset-pkg", "package-x-generic"),
-    ]
-    .into_iter()
-    .map(|(id, icon)| AppEntry {
-        id: id.to_owned(),
-        name: String::new(),
-        description: None,
-        exec: "true".to_owned(),
-        icon: Some(icon.to_owned()),
-        needs_terminal: false,
-        path: None,
-    })
-    .collect()
+    ICON_ASSETS
+        .into_iter()
+        .map(|(id, icon)| AppEntry {
+            id: id.to_owned(),
+            name: String::new(),
+            description: None,
+            exec: "true".to_owned(),
+            icon: Some(icon.to_owned()),
+            needs_terminal: false,
+            path: None,
+        })
+        .collect()
 }
 
 /// Synthetic Apps-grid tiles for waverunner-managed packages that ship no

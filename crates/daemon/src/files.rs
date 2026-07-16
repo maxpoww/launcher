@@ -21,9 +21,34 @@ pub(crate) const FILES_LIST_MAX: usize = 300;
 /// Cap on a pinned directory's dock-stack listing (five 3×3 pages).
 pub(crate) const DIR_STACK_MAX: usize = 45;
 
+/// The icon-carrier asset for a file, by extension: media, documents,
+/// archives and code each get their own themed icon; everything else
+/// falls back to the generic file. (Thumbnails, where available,
+/// override these — see `thumbs`.)
+pub(crate) fn file_asset_name(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "mp3" | "flac" | "ogg" | "opus" | "wav" | "m4a" | "aac" | "wma" | "mid" => "asset-audio",
+        "mp4" | "mkv" | "webm" | "avi" | "mov" | "m4v" | "wmv" | "flv" | "mpg" | "mpeg" => {
+            "asset-video"
+        }
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "svg" | "tif" | "tiff" | "avif"
+        | "heic" | "ico" | "xcf" | "kra" => "asset-image",
+        "pdf" | "epub" | "djvu" => "asset-pdf",
+        "zip" | "tar" | "gz" | "xz" | "zst" | "bz2" | "7z" | "rar" | "iso" => "asset-archive",
+        "doc" | "docx" | "odt" | "rtf" | "xls" | "xlsx" | "ods" | "csv" | "ppt" | "pptx"
+        | "odp" => "asset-doc",
+        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "hpp" | "go" | "sh" | "zsh" | "bash"
+        | "lua" | "nix" | "toml" | "yaml" | "yml" | "json" | "html" | "css" | "scss" | "sql"
+        | "vim" | "el" => "asset-code",
+        _ => "asset-file",
+    }
+}
+
 impl App {
-    /// Append one transient Files-section entry (kind File, generic
-    /// folder/file icon layer) and return its index. `id` is the path.
+    /// Append one transient Files-section entry (kind File, an icon by
+    /// type — or its thumbnail once one is ready) and return its index.
+    /// `id` is the path.
     pub(crate) fn push_transient_file(
         &mut self,
         id: &str,
@@ -32,12 +57,12 @@ impl App {
         is_dir: bool,
     ) -> usize {
         let asset = if is_dir {
-            self.asset_folder
+            "asset-folder"
         } else {
-            self.asset_file
+            file_asset_name(name)
         };
         // Without an asset icon, fall back to a letter-tile placeholder.
-        let (layer, placeholder) = asset.unwrap_or((0, true));
+        let (layer, placeholder) = self.asset(asset).unwrap_or((0, true));
         let entry = AppEntry {
             id: id.to_owned(),
             name: name.to_owned(),
