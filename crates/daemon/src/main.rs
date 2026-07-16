@@ -899,29 +899,15 @@ impl App {
                     let exec = if terminal {
                         // Drop into a `nix shell` with the tool on PATH so
                         // it can be run repeatedly, with any arguments,
-                        // behind a StandardOS banner naming the command to
-                        // run. (A bare `nix run` would run it once into a
-                        // shell where it isn't on PATH.) The banner names
-                        // the package (its version) and the command to type.
+                        // behind the shared StandardOS banner naming the
+                        // command to run. (A bare `nix run` would run it
+                        // once into a shell where it isn't on PATH.)
                         let pkg = attr.rsplit('.').next().unwrap_or(&attr);
                         let prog = program.as_deref().unwrap_or(pkg);
-                        let ver = version.as_deref().unwrap_or("?");
-                        // StandardOS in the zsh comment grey (#928374); the
-                        // package (bold) + version + run lines in white; and
-                        // "is ready" in the same green zsh paints a valid
-                        // command (#6abf69). Colors live in the printf format;
-                        // package/version/program arrive as %s args so an odd
-                        // char can't be read as an escape.
+                        let banner = launch::banner_cmd(pkg, version.as_deref(), prog);
                         format!(
-                            "export NIXPKGS_ALLOW_UNFREE=1; \
-                             printf '\\n\\033[38;2;146;131;116mStandardOS\\033[0m\\n\
-                             \\033[1;97m%s\\033[0m\\033[97m version: %s - \\033[38;2;106;191;105mis ready\\033[0m\\n\
-                             \\033[97mrun: %s\\033[0m\\n' \
-                             {} {} {}; \
-                             exec nix shell --impure nixpkgs#{attr}",
-                            launch::shell_quote(pkg),
-                            launch::shell_quote(ver),
-                            launch::shell_quote(prog),
+                            "export NIXPKGS_ALLOW_UNFREE=1; {banner} \
+                             exec nix shell --impure nixpkgs#{attr}"
                         )
                     } else {
                         // A GUI app runs headless and shows its window.

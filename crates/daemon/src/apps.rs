@@ -212,10 +212,12 @@ fn icon_assets() -> Vec<AppEntry> {
 /// installed `.desktop` — CLI tools like fastfetch. Without these an
 /// installed CLI tool would be invisible (nothing to click, nothing to
 /// drag out to uninstall). A tile carries the attr as its id (so
-/// removable/uninstall detection maps straight back to the managed list),
-/// the generic package icon, and a terminal launch that stays open so a
-/// one-shot tool's output doesn't flash and vanish. Skips any package a
-/// real `.desktop` already covers (`apps` = the scanned entries).
+/// removable/uninstall detection maps straight back to the managed list)
+/// and the generic package icon. Launching opens a terminal on the
+/// user's shell behind the same StandardOS banner as the "try it" nix
+/// shell — the tool is already on PATH (home-manager installed it), and
+/// the banner names the command to type. Skips any package a real
+/// `.desktop` already covers (`apps` = the scanned entries).
 fn managed_cli_tiles(apps: &[AppEntry]) -> Vec<AppEntry> {
     let app_ids: HashSet<&str> = apps.iter().map(|e| e.id.as_str()).collect();
     crate::managed::snapshot()
@@ -225,9 +227,11 @@ fn managed_cli_tiles(apps: &[AppEntry]) -> Vec<AppEntry> {
             id: attr.clone(),
             name: attr.clone(),
             description: Some("Command-line tool".to_owned()),
-            // attr ≈ the package's main program; run it in a terminal
-            // that drops to a shell afterwards so its output stays up.
-            exec: format!("{attr}; exec \"${{SHELL:-bash}}\""),
+            // attr ≈ the package's main program (the banner's "run:").
+            exec: format!(
+                "{} exec \"${{SHELL:-bash}}\"",
+                crate::launch::banner_cmd(&attr, None, &attr)
+            ),
             icon: Some("package-x-generic".to_owned()),
             needs_terminal: true,
             path: None,
