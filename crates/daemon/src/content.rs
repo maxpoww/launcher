@@ -177,8 +177,12 @@ pub(crate) const SQUASH_MAX: f32 = 0.05;
 pub(crate) const STRETCH_K: f32 = 120.0;
 pub(crate) const STRETCH_C: f32 = 6.5;
 /// Dock icons are small (a few dozen px), so their deformation gets a
-/// gain over the content's or it reads as nothing.
+/// gain over the raw factor or it reads as nothing.
 const DOCK_STRETCH_GAIN: f32 = 2.0;
+/// The box content spans hundreds of px, so it takes the raw factor
+/// *down* — tuned live: the dock at 2x is right, the content at 1x was
+/// too much water.
+const CONTENT_STRETCH_GAIN: f32 = 0.5;
 
 /// Gap between an open dock-folder box and the dock icon it springs from.
 const DOCK_BOX_GAP: f32 = 12.0;
@@ -339,7 +343,9 @@ pub fn layout(
     // AGUA: squash & stretch about the pinned card bottom — content
     // elongates upward while the card moves fast and relaxes to rest
     // as the spring settles (see frame::draw for the velocity link).
-    let agua = |y: f32| content_bottom - (content_bottom - y) * stretch;
+    // The content takes the factor at reduced gain (its span is large).
+    let cs = 1.0 + (stretch - 1.0) * CONTENT_STRETCH_GAIN;
+    let agua = |y: f32| content_bottom - (content_bottom - y) * cs;
     // Docked (a pure bar), the icon columns stay live all the way to the
     // screen edge so the floating gap is clickable; open, they stop at
     // the dock-band bottom and the grid takes over below.
