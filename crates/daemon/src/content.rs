@@ -178,15 +178,16 @@ const RIDE_PARALLAX: f32 = 1.18;
 pub(crate) const STRETCH_PER_VEL: f32 = 0.012;
 pub(crate) const STRETCH_MAX: f32 = 0.10;
 pub(crate) const SQUASH_MAX: f32 = 0.05;
-/// Card silhouette: ζ≈0.73 — the gentle swell Max signed off on.
+/// Card silhouette: ζ≈0.5 — swells and rebounds once or twice.
 pub(crate) const AGUA_CARD_K: f32 = 120.0;
-pub(crate) const AGUA_CARD_C: f32 = 16.0;
-/// Dock icons: fastest and bounciest (ζ≈0.44), clearly first to peak.
+pub(crate) const AGUA_CARD_C: f32 = 11.0;
+/// Dock icons: fastest and bounciest (ζ≈0.3), first to peak, a few
+/// visible sloshes.
 pub(crate) const AGUA_ICONS_K: f32 = 200.0;
-pub(crate) const AGUA_ICONS_C: f32 = 12.5;
-/// Box content: slowest and calm (ζ≈0.68), clearly trailing the card.
+pub(crate) const AGUA_ICONS_C: f32 = 8.5;
+/// Box content: slowest (ζ≈0.45), clearly trailing, sloshing softly.
 pub(crate) const AGUA_CONTENT_K: f32 = 65.0;
-pub(crate) const AGUA_CONTENT_C: f32 = 11.0;
+pub(crate) const AGUA_CONTENT_C: f32 = 7.3;
 /// Dock icons are small (a few dozen px), so their deformation gets a
 /// gain over the raw factor or it reads as nothing.
 const DOCK_STRETCH_GAIN: f32 = 1.6;
