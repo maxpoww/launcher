@@ -170,11 +170,11 @@ impl Default for CurveConfig {
             kind: CurveKind::Spring,
             duration_ms: 220,
             // Box open: lightly underdamped (ζ≈0.85) so it overshoots the
-            // top a touch and settles back — a subtle bounce. An eighth
-            // of the original tempo (stiffness ÷4, damping ÷2 per halving
-            // keeps ζ) so the content ride reads.
-            spring_stiffness: 50.0,
-            spring_damping: 12.0,
+            // top a touch and settles back — a subtle bounce. Tuned live
+            // to ~1.2s (between a quarter and an eighth of the original
+            // tempo) so the content ride reads without dragging.
+            spring_stiffness: 100.0,
+            spring_damping: 17.0,
             spring_mass: 1.0,
         }
     }
@@ -185,12 +185,12 @@ impl CurveConfig {
     /// a touch past the dock rest before settling — a subtle bounce.
     pub fn default_close() -> Self {
         Self {
-            // Box close: a lightly-underdamped spring (ζ≈0.85, ~1s — an
-            // eighth of the original tempo, matching the open) so it
-            // dips a touch past the dock rest before settling.
+            // Box close: a lightly-underdamped spring (ζ≈0.85, ~730ms,
+            // matching the open's tempo) so it dips a touch past the
+            // dock rest before settling.
             kind: CurveKind::Spring,
-            spring_stiffness: 144.0,
-            spring_damping: 20.5,
+            spring_stiffness: 288.0,
+            spring_damping: 29.0,
             spring_mass: 1.0,
             ..Self::default()
         }
