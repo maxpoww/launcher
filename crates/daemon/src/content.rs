@@ -154,11 +154,9 @@ pub const LABEL_LINE_PX: f32 = 16.0;
 const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
 const SEARCH_BTN_W: f32 = 80.0;
-/// Minimum expanded width (the pre-expand layout anchor).
+/// Minimum expanded width — the resting size; the pill grows from here
+/// with the shaped query.
 const SEARCH_W_MIN: f32 = 160.0;
-/// Expanded field width — fixed and generous (Spotlight-style), capped
-/// by the card's inner width.
-const SEARCH_W: f32 = 460.0;
 const SEARCH_PAD_X: f32 = 14.0;
 const SEARCH_GAP: f32 = 7.0;
 pub(crate) const SEARCH_FONT_PX: f32 = 15.0;
@@ -1033,9 +1031,11 @@ pub fn scene(
             };
             [hl[0], hl[1], hl[2], a]
         };
-        // Expanded width: a fixed, generous field (Spotlight-style); the
-        // pill morphs between the compact button and it.
-        let content_w = SEARCH_W.min(card_w - 2.0 * GRID_PAD_X);
+        // Expanded width: the resting SEARCH_W_MIN, growing snugly with
+        // the shaped query (measured, not estimated) plus caret room.
+        let content_w = (query_px + 2.0 * SEARCH_PAD_X + 8.0)
+            .max(SEARCH_W_MIN)
+            .min(card_w - 2.0 * GRID_PAD_X);
         let sw = lerp(btn.w, content_w, search_expand);
         let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
         scene.rects.push(RectInst {
@@ -1058,11 +1058,10 @@ pub fn scene(
                 clip: None,
             });
         } else {
-            // Expanded: a left-aligned text field — the query (or a dim
-            // placeholder) with a real caret, a thin bar sitting exactly
-            // after the shaped text (`query_px`, measured by the
-            // renderer, not estimated from character counts).
-            let text_left = draw_rect.x + SEARCH_PAD_X;
+            // Expanded: centered query (or dim placeholder) with a real
+            // caret — a thin bar sitting exactly after the shaped text
+            // (`query_px`, measured by the renderer, not estimated), so
+            // it hugs the last glyph as the pill grows around them.
             let (text, dim) = if query.is_empty() {
                 ("Search".to_string(), true)
             } else {
@@ -1070,26 +1069,25 @@ pub fn scene(
             };
             scene.labels.push(Label {
                 text,
-                pos: (text_left, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
+                pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
                 max_w: sw - 2.0 * SEARCH_PAD_X,
                 font_px: SEARCH_FONT_PX,
                 line_px: SEARCH_LINE_PX,
-                centered: false,
+                centered: true,
                 dim,
                 cache: query.is_empty(),
                 clip: Some(draw_rect),
             });
-            // The caret parks at the field start while empty (softly),
-            // and rides the text end while typing. Only once the morph
-            // has (nearly) landed — it would drift during the stretch.
-            if search_expand > 0.9 {
-                let caret_x = (text_left + query_px + 1.0).min(draw_rect.x + sw - SEARCH_PAD_X);
+            // The caret rides the centered text's right edge while
+            // typing — only once the morph has (nearly) landed, so it
+            // can't drift during the stretch.
+            if !query.is_empty() && search_expand > 0.9 {
+                let caret_x = (cx + query_px / 2.0 + 3.0).min(draw_rect.x + sw - 8.0);
                 let t = config.theme.text_rgba();
-                let a = if query.is_empty() { 0.45 } else { 0.9 };
                 scene.rects.push(RectInst {
                     rect: Rect::new(caret_x, boxx.y + 6.0, 1.5, SEARCH_H - 12.0),
                     radius: 0.75,
-                    color: [t[0], t[1], t[2], a],
+                    color: [t[0], t[1], t[2], 0.9],
                 });
             }
         }
