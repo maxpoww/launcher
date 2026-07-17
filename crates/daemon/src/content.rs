@@ -170,12 +170,12 @@ const RIDE_PARALLAX: f32 = 1.18;
 /// stretch spring anchored at the pinned bottom — content elongates
 /// while rising, keeps sloshing briefly after the card lands, and
 /// relaxes to exactly 1.0. Deformation per px/s of card speed, its
-/// caps, and the follower spring (ζ≈0.45: one clear wobble, then rest).
+/// caps, and the follower spring (ζ≈0.6: a soft single settle).
 pub(crate) const STRETCH_PER_VEL: f32 = 0.012;
 pub(crate) const STRETCH_MAX: f32 = 0.10;
 pub(crate) const SQUASH_MAX: f32 = 0.05;
 pub(crate) const STRETCH_K: f32 = 120.0;
-pub(crate) const STRETCH_C: f32 = 10.0;
+pub(crate) const STRETCH_C: f32 = 13.0;
 /// Dock icons are small (a few dozen px), so their deformation gets a
 /// gain over the raw factor or it reads as nothing.
 const DOCK_STRETCH_GAIN: f32 = 1.6;
