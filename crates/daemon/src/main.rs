@@ -1581,6 +1581,24 @@ impl App {
         }
         let (exec, id) = (entry.exec.clone(), entry.id.clone());
         let needs_terminal = entry.needs_terminal;
+        // macOS dock model: a running app activates (focus its
+        // most-recently-used window) instead of launching a duplicate.
+        // Ctrl-click forces a fresh instance (macOS's Cmd+click / New
+        // Window), falling through to the launch path below.
+        if !self.modifiers.ctrl {
+            if let Some(addr) = self.running.get(&index).and_then(|w| w.first()).cloned() {
+                info!("activating running app {id} -> window {addr}");
+                self.usage.increment(&id);
+                self.restore_window = None;
+                if self.interactive {
+                    surface::set_interactive(&self.layer, false);
+                    self.interactive = false;
+                }
+                hypr::focus_window(&addr);
+                self.dismiss();
+                return;
+            }
+        }
         if let Err(e) = launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
             error!("launch failed for {id}: {e:#}");
         }
