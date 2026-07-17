@@ -177,7 +177,6 @@ fn main() -> anyhow::Result<()> {
         agua_card: animation::Follower::new(content::AGUA_CARD_K, content::AGUA_CARD_C),
         agua_icons: animation::Follower::new(content::AGUA_ICONS_K, content::AGUA_ICONS_C),
         agua_content: animation::Follower::new(content::AGUA_CONTENT_K, content::AGUA_CONTENT_C),
-        dock_mag: Vec::new(),
         modifiers: Modifiers::default(),
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
         data_device: None,
@@ -375,9 +374,6 @@ pub struct App {
     agua_card: animation::Follower,
     agua_icons: animation::Follower,
     agua_content: animation::Follower,
-    /// Per-dock-icon magnification followers (the hover crest, trough
-    /// and wake); resized with the dock.
-    dock_mag: Vec<animation::Follower>,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
     /// Clipboard: the data-device manager and the seat's device (None

@@ -69,11 +69,6 @@ impl Follower {
         (self.pos - 1.0).abs() > 0.000_5 || self.vel.abs() > 0.005
     }
 
-    /// Landed on `target` and still — no more frames needed to chase it.
-    pub fn is_settled_at(&self, target: f32) -> bool {
-        (self.pos - target).abs() < 0.001 && self.vel.abs() < 0.01
-    }
-
     /// Land exactly on rest.
     pub fn snap(&mut self) {
         self.pos = 1.0;

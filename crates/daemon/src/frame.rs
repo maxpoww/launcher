@@ -409,41 +409,6 @@ impl App {
         } else {
             self.mag_amount = mag_target;
         }
-        // AGUA magnification: each dock icon's scale is a follower chasing
-        // the crest under the pointer minus the ring of displaced water
-        // around it — a sweep leaves a settling wake behind the pointer
-        // and a stop lands with a mini-slosh.
-        let mag_layout = self.current_layout();
-        let n_dock = mag_layout.dock_slots.len();
-        if self.dock_mag.len() != n_dock {
-            self.dock_mag = (0..n_dock)
-                .map(|_| animation::Follower::new(content::AGUA_MAG_K, content::AGUA_MAG_C))
-                .collect();
-        }
-        let mag = self.mag_amount.clamp(0.0, 1.0);
-        let mut mag_active = false;
-        for (i, slot) in mag_layout.dock_slots.iter().enumerate() {
-            let target = match self.pointer_pos {
-                Some((px, py)) if mag > 0.0 => {
-                    let cx = slot.x + slot.w / 2.0;
-                    let d_out = (slot.y - py).max(py - mag_layout.dock_hit_bottom).max(0.0);
-                    let fy = content::falloff(d_out, content::DOCK_MAG_VRADIUS);
-                    let crest = content::falloff(px - cx, content::DOCK_MAG_RADIUS);
-                    // Displaced water: the wide lobe minus the crest is a
-                    // ring just outside the swell, and it dips.
-                    let ring = (content::falloff(px - cx, content::DOCK_MAG_RADIUS * 2.2) - crest)
-                        .max(0.0);
-                    1.0 + ((content::DOCK_MAGNIFY - 1.0) * crest - content::DOCK_TROUGH * ring)
-                        * fy
-                        * mag
-                }
-                _ => 1.0,
-            };
-            let f = &mut self.dock_mag[i];
-            f.step(target, dt);
-            mag_active |= !f.is_settled_at(target);
-        }
-        let dock_mag_scales: Vec<f32> = self.dock_mag.iter().map(|f| f.pos).collect();
         let mag_pointer = if self.mag_amount > 0.0 {
             self.pointer_pos
         } else {
@@ -654,7 +619,6 @@ impl App {
                 },
                 query_px,
                 stretch: self.agua_icons.pos,
-                dock_mag: &dock_mag_scales,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()
                 } else {
@@ -712,9 +676,8 @@ impl App {
             self.dirty = true;
         }
         // AGUA: the water keeps sloshing briefly after the card lands —
-        // and the magnification wake keeps settling behind the pointer.
-        // Keep frames coming until every body rests.
-        if stretch_active || mag_active {
+        // keep frames coming until the stretch spring rests.
+        if stretch_active {
             self.dirty = true;
         }
     }
