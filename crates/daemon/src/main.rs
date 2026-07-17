@@ -179,6 +179,7 @@ fn main() -> anyhow::Result<()> {
         data_device: None,
         paste_tx,
         hide_deadline: None,
+        rest_hide_pending: false,
         restore_window: None,
         pending_refocus: None,
         focus_launched: None,
@@ -375,6 +376,9 @@ pub struct App {
     /// Deadline of the pending auto-hide, if the pointer has left the
     /// dock. Re-entry clears it, invalidating the in-flight timer.
     hide_deadline: Option<Instant>,
+    /// A box close is settling to the dock and should rest a beat, then
+    /// hide, once the collapse animation finishes.
+    rest_hide_pending: bool,
     /// Window that had focus when the box grabbed the keyboard — focus
     /// returns here on a plain close. Cleared on launch (the app takes
     /// focus) and on external focus loss (the user chose another window).
@@ -693,6 +697,10 @@ struct DragState {
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
 
+/// After the box closes, the dock rests this long before it hides — a
+/// brief beat parked as a dock instead of vanishing straight away.
+const DOCK_REST_AFTER_CLOSE: Duration = Duration::from_millis(200);
+
 /// Magnification blackout after a drop: the placement stays perfectly
 /// still for this long before the magnify wave may return.
 const MAG_SLEEP_AFTER_DROP: Duration = Duration::from_secs(1);
@@ -736,10 +744,19 @@ impl App {
         if matches!(command, Command::Toggle | Command::Expand) {
             self.maybe_rescan();
         }
+        let prev = self.ui.target();
         if self.ui.apply(command) {
             self.sync_surface_state();
-            if self.ui.target() == Target::Open {
-                self.hide_deadline = None;
+            // A box close (Open→Dock) parks as a dock, then hides after a
+            // beat (armed once the collapse settles, in the frame loop).
+            // Rising back to Open cancels that.
+            match self.ui.target() {
+                Target::Dock if prev == Target::Open => self.rest_hide_pending = true,
+                Target::Open => {
+                    self.rest_hide_pending = false;
+                    self.hide_deadline = None;
+                }
+                _ => {}
             }
             self.schedule_frame();
         }
@@ -1441,11 +1458,7 @@ impl App {
         // A dock stack (group or directory) closes with the launcher.
         self.dock_stack = None;
         self.dir_stack = None;
-        // One continuous exit: the close slides straight past the dock
-        // line and away (the content sinks into the bottom edge with
-        // it). Only intellihide parks as a dock — nothing overlaps the
-        // zone, so the bar is wanted.
-        let command = if self.zone_free {
+        let command = if self.ui.target() == Target::Open || self.zone_free {
             Command::Collapse
         } else {
             Command::Hide
@@ -2321,7 +2334,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             // no grace period needed (the card is fully open,
                             // not just a slim dock sliver to accidentally graze).
                             app.dismiss();
-                        } else {
+                        } else if !app.rest_hide_pending {
+                            // A close settling to the dock owns the hide
+                            // (its rest); don't undercut it with the
+                            // shorter autohide grace.
                             app.schedule_autohide();
                         }
                     }
