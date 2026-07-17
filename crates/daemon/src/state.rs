@@ -90,6 +90,15 @@ impl UiState {
         self.target == Target::Open
     }
 
+    /// Signed vertical speed of the card in px/s (positive = rising);
+    /// zero at rest. Drives the content's AGUA squash & stretch.
+    pub fn extent_velocity(&self) -> f32 {
+        match &self.animator {
+            Some(a) => a.velocity() * (self.extent_of(self.target) - self.start_extent),
+            None => 0.0,
+        }
+    }
+
     /// Whether a redraw/frame-callback cycle is needed.
     pub fn is_animating(&self) -> bool {
         self.animator.is_some()

@@ -174,6 +174,7 @@ fn main() -> anyhow::Result<()> {
         cursor_device: None,
         enter_serial: 0,
         cursor_now: None,
+        stretch: 1.0,
         modifiers: Modifiers::default(),
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
         data_device: None,
@@ -365,6 +366,9 @@ pub struct App {
     cursor_device: Option<WpCursorShapeDeviceV1>,
     enter_serial: u32,
     cursor_now: Option<Shape>,
+    /// AGUA: content squash & stretch factor for this frame (1.0 at
+    /// rest), derived from the card's live speed in `draw`.
+    stretch: f32,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
     /// Clipboard: the data-device manager and the seat's device (None

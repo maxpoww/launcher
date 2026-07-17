@@ -142,6 +142,16 @@ impl Animator {
         }
     }
 
+    /// Instantaneous progress velocity (per second): the spring's live
+    /// speed, zero for eased timelines — drives the AGUA squash &
+    /// stretch, which only springs deserve.
+    pub fn velocity(&self) -> f32 {
+        match self {
+            Animator::Spring(s) => s.velocity,
+            Animator::Timed(_) => 0.0,
+        }
+    }
+
     /// True once the animation has effectively reached its target; the
     /// caller should snap to the endpoint and stop requesting frames.
     pub fn is_settled(&self) -> bool {

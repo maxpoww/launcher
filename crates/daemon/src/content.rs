@@ -166,6 +166,13 @@ const SEARCH_LINE_PX: f32 = 20.0;
 /// it): the parallax depth of the rise-from-the-bottom-edge animation.
 const RIDE_PARALLAX: f32 = 1.18;
 
+/// AGUA squash & stretch: content deformation per px/s of card speed,
+/// and its caps (elongation while rising, compression while dropping).
+/// Anchored at the card's pinned bottom — like water in a glass.
+pub(crate) const STRETCH_PER_PXS: f32 = 0.000_01;
+pub(crate) const STRETCH_MAX: f32 = 0.05;
+pub(crate) const SQUASH_MAX: f32 = 0.03;
+
 /// Gap between an open dock-folder box and the dock icon it springs from.
 const DOCK_BOX_GAP: f32 = 12.0;
 /// Rest size of a dock folder's open box (a square, ~matching a grid box).
@@ -281,6 +288,9 @@ pub struct Layout {
 /// `n_entries` the total (unfiltered) entry count for the dock,
 /// `n_visible` the filtered count per section, `scroll` the unclamped
 /// per-section grid offsets.
+// Geometry naturally takes many independent inputs; a params struct
+// would just rename them.
+#[allow(clippy::too_many_arguments)]
 pub fn layout(
     config: &Config,
     surface: (f32, f32),
@@ -289,8 +299,10 @@ pub fn layout(
     n_visible: [usize; N_SECTIONS],
     scroll: [f32; N_SECTIONS],
     // Which sections are navigated into a sub-view (open app group,
-    // entered directory) and get a "‹ Back" pill by their title.
+    // entered directory).
     navigated: [bool; N_SECTIONS],
+    // AGUA deformation about the card bottom (1.0 = at rest).
+    stretch: f32,
 ) -> Layout {
     let (w, h) = surface;
     // The card is centered in the surface with transparent drag margin
@@ -317,6 +329,10 @@ pub fn layout(
     // the stack) and catches up exactly as the card lands — the offset
     // converges to zero at full extent either way.
     let y_off = (card_top - content_top).max(0.0) * RIDE_PARALLAX;
+    // AGUA: squash & stretch about the pinned card bottom — content
+    // elongates upward while the card moves fast and relaxes to rest
+    // as the spring settles (see frame::draw for the velocity link).
+    let agua = |y: f32| content_bottom - (content_bottom - y) * stretch;
     // Docked (a pure bar), the icon columns stay live all the way to the
     // screen edge so the floating gap is clickable; open, they stop at
     // the dock-band bottom and the grid takes over below.
@@ -345,7 +361,7 @@ pub fn layout(
     // box dynamically with the query so layout just anchors the y position.
     let search_box = Rect::new(
         (w - SEARCH_W_MIN) / 2.0,
-        content_bottom - GRID_BOTTOM_PAD - SEARCH_H + y_off,
+        agua(content_bottom - GRID_BOTTOM_PAD - SEARCH_H + y_off),
         SEARCH_W_MIN,
         SEARCH_H,
     );
@@ -380,11 +396,11 @@ pub fn layout(
         // Apps stays full-width even with a box open (the magnified box
         // fills the whole grid, drawn as an overlay in `scene`).
         let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
-        let title_pos = (grid_x0 + 8.0, y + y_off);
+        let title_pos = (grid_x0 + 8.0, agua(y + y_off));
         y += SECTION_TITLE_H;
         let viewport = Rect::new(
             grid_x0,
-            y + y_off,
+            agua(y + y_off),
             cols as f32 * GRID_CELL_W,
             rows as f32 * GRID_CELL_H,
         );
@@ -1646,6 +1662,7 @@ mod tests {
             [n, 0, 0],
             [scroll, 0.0, 0.0],
             [false; N_SECTIONS],
+            1.0,
         )
     }
 
@@ -1660,6 +1677,7 @@ mod tests {
             [20, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
+            1.0,
         );
         assert!(!l.dock_slots.is_empty());
         // Content sits at its fixed open position; while docked the
@@ -1724,6 +1742,7 @@ mod tests {
             [4, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
+            1.0,
         );
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
         let s = scene(
@@ -1775,6 +1794,7 @@ mod tests {
             [10, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
+            1.0,
         );
         let slot = l.dock_slots[0];
         assert_eq!(
@@ -1824,6 +1844,7 @@ mod tests {
             [10, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
+            1.0,
         );
         let nav = layout(
             &cfg,
@@ -1833,6 +1854,7 @@ mod tests {
             [10, 0, 6],
             [0.0; N_SECTIONS],
             [false, false, true],
+            1.0,
         );
         assert_eq!(
             nav.sections[SECTION_FILES].title_pos,
@@ -1851,6 +1873,7 @@ mod tests {
             [10, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
+            1.0,
         );
         let apps = &l.sections[SECTION_APPS];
         let mid = (

@@ -59,6 +59,7 @@ impl App {
                 false,
                 self.files_dir.is_some(),
             ],
+            self.stretch,
         );
         // Position the open box's rest square. A grid box anchors to the
         // side of the grid it sits on (pinned preview icon lands on its
@@ -149,6 +150,12 @@ impl App {
 
         let was_animating = self.ui.is_animating();
         let animating = self.ui.tick(dt);
+        // AGUA: the content deforms with the card's live speed — rising
+        // fast stretches it upward from the pinned bottom, dropping
+        // squashes it; at rest it is exactly 1.0.
+        self.stretch = 1.0
+            + (self.ui.extent_velocity() * content::STRETCH_PER_PXS)
+                .clamp(-content::SQUASH_MAX, content::STRETCH_MAX);
         if animating {
             // The card is moving under a possibly stationary pointer:
             // keep the hover highlight glued to what is really beneath it.
