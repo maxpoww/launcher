@@ -219,20 +219,27 @@ const BASIN_MARGIN_X: f32 = 16.0;
 const SPILL: f32 = 0.6;
 pub const DRAG_MARGIN_TOP: f32 = 56.0;
 /// Peak scale of a dock icon directly under the cursor.
-const DOCK_MAGNIFY: f32 = 1.5;
+pub(crate) const DOCK_MAGNIFY: f32 = 1.5;
 /// Horizontal falloff radius of dock magnification, in pixels.
-const DOCK_MAG_RADIUS: f32 = 120.0;
+pub(crate) const DOCK_MAG_RADIUS: f32 = 120.0;
 /// Vertical attenuation radius, measured from the dock band's edges
 /// (zero inside the band). Small on purpose: the effect must die out
 /// before the first grid row so hovering the grid never stirs the dock.
-const DOCK_MAG_VRADIUS: f32 = 28.0;
+pub(crate) const DOCK_MAG_VRADIUS: f32 = 28.0;
+/// AGUA magnification: the crest under the pointer displaces water —
+/// icons in a ring just outside the swell dip this far below rest.
+pub(crate) const DOCK_TROUGH: f32 = 0.05;
+/// Per-icon magnification followers: fast enough to track the pointer,
+/// loose enough (ζ≈0.49) that a sweep leaves a settling wake.
+pub(crate) const AGUA_MAG_K: f32 = 300.0;
+pub(crate) const AGUA_MAG_C: f32 = 17.0;
 /// Peak scale of a grid icon under the cursor.
 const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
 const GRID_MAG_RADIUS: f32 = 95.0;
 
 /// Cosine ease from 1.0 at `d == 0` to 0.0 at `d >= radius`.
-fn falloff(d: f32, radius: f32) -> f32 {
+pub(crate) fn falloff(d: f32, radius: f32) -> f32 {
     let t = (d.abs() / radius).min(1.0);
     0.5 * (1.0 + (std::f32::consts::PI * t).cos())
 }
@@ -654,6 +661,10 @@ pub struct FrameInput<'a> {
     /// about their baseline with the card's motion — on the dock
     /// reveal, and at the top of the card as an open lands.
     pub stretch: f32,
+    /// Per-slot magnification scales, already water-dynamic (the crest,
+    /// its displaced trough, and the settling wake are integrated by
+    /// per-icon followers in `draw`). Empty = all at rest.
+    pub dock_mag: &'a [f32],
     /// Dock slot whose name tooltip should show — gated behind a hover
     /// dwell (the highlight is immediate; the tooltip waits). `None`
     /// while the dwell hasn't elapsed or the pointer is elsewhere.
@@ -787,6 +798,7 @@ pub fn scene(
         hover,
         query_px,
         stretch,
+        dock_mag,
         dock_tooltip,
         alpha,
         pointer,
@@ -877,26 +889,10 @@ pub fn scene(
 
     // Dock row: per-icon magnification scales, then spread visual centers.
     // Hit-boxes stay at fixed slot positions; only drawn positions spread.
-    let dock_scales: Vec<f32> = layout
-        .dock_slots
-        .iter()
-        .map(|slot| {
-            let cx = slot.x + slot.w / 2.0;
-            match pointer {
-                Some((px, py)) => {
-                    // Below the icon, the live column reaches `dock_hit_bottom`
-                    // (the screen edge while docked), so hovering the floating
-                    // gap magnifies the icon just like hovering it directly.
-                    let d_out = (slot.y - py).max(py - layout.dock_hit_bottom).max(0.0);
-                    let fy = falloff(d_out, DOCK_MAG_VRADIUS);
-                    1.0 + (DOCK_MAGNIFY - 1.0)
-                        * falloff(px - cx, DOCK_MAG_RADIUS)
-                        * fy
-                        * mag_amount.clamp(0.0, 1.0)
-                }
-                None => 1.0,
-            }
-        })
+    // Scales come pre-integrated from the per-icon AGUA followers (the
+    // crest, the displaced trough, the settling wake — see frame::draw).
+    let dock_scales: Vec<f32> = (0..layout.dock_slots.len())
+        .map(|i| dock_mag.get(i).copied().unwrap_or(1.0))
         .collect();
     // Each magnified icon widens its visual slot by the extra pixels it
     // grew, pushing neighbours apart. Row stays centered as a whole.
