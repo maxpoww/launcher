@@ -181,6 +181,7 @@ fn main() -> anyhow::Result<()> {
         dock_wave_v: Vec::new(),
         dock_crest_prev: Vec::new(),
         modifiers: Modifiers::default(),
+        force_new_instance: false,
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
         data_device: None,
         paste_tx,
@@ -386,6 +387,10 @@ pub struct App {
     dock_crest_prev: Vec<f32>,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
+    /// Set only for the duration of a middle-click activation: force a
+    /// fresh instance of a running app instead of activating it (the
+    /// pointer-native equivalent of macOS's Cmd+click / Ctrl+click).
+    force_new_instance: bool,
     /// Clipboard: the data-device manager and the seat's device (None
     /// when the compositor lacks the protocol), plus the channel paste
     /// threads answer on.
@@ -739,6 +744,11 @@ const BTN_LEFT: u32 = 0x110;
 
 /// Linux evdev code for the right mouse button.
 const BTN_RIGHT: u32 = 0x111;
+
+/// Linux evdev code for the middle mouse button — the Linux-native
+/// "open a new instance" gesture (the dock is pointer-only, so a
+/// keyboard modifier like macOS's Cmd can't be read at click time).
+const BTN_MIDDLE: u32 = 0x112;
 
 /// Minimum time between app-index rescans. Summoning the dock checks
 /// freshness; mashing toggle does not scan repeatedly.
@@ -1585,7 +1595,8 @@ impl App {
         // most-recently-used window) instead of launching a duplicate.
         // Ctrl-click forces a fresh instance (macOS's Cmd+click / New
         // Window), falling through to the launch path below.
-        if !self.modifiers.ctrl {
+        let force_new = self.modifiers.ctrl || self.force_new_instance;
+        if !force_new {
             if let Some(addr) = self.running.get(&index).and_then(|w| w.first()).cloned() {
                 info!("activating running app {id} -> window {addr}");
                 self.usage.increment(&id);
@@ -2487,6 +2498,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 // Presses arm drags and releases drop them: keep the
                 // cursor honest either way.
                 app.apply_cursor();
+            }
+            wl_pointer::Event::Button { button, state, .. }
+                if button == BTN_MIDDLE
+                    && state == WEnum::Value(wl_pointer::ButtonState::Released) =>
+            {
+                // Middle-click a dock/grid app: force a fresh instance even
+                // if it is already running (Linux-native "new window").
+                app.update_hover();
+                if let Some(hit @ (Hit::DockIcon(_) | Hit::GridCell(..))) = app.hover {
+                    app.force_new_instance = true;
+                    app.activate_hit(hit);
+                    app.force_new_instance = false;
+                }
             }
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_RIGHT
