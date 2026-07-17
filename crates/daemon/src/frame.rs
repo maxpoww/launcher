@@ -10,7 +10,7 @@ use tracing::{debug, error};
 use crate::install::FAIL_FLASH;
 use crate::state::Target;
 use crate::{animation, apps, content, groups, hypr, pager, pages};
-use crate::{App, BOUNCE_DURATION, BOUNCE_HEIGHT, DOCK_REST_AFTER_CLOSE};
+use crate::{App, BOUNCE_DURATION, BOUNCE_HEIGHT};
 
 /// Exponential make-room glide rate (per second) for the grid and dock
 /// reflow while dragging — higher is snappier, lower is slower.
@@ -175,12 +175,6 @@ impl App {
             if let Some(addr) = self.pending_refocus.take() {
                 debug!("settled ({:?}); forcing focus to {addr}", self.ui.target());
                 hypr::focus_window(&addr);
-            }
-            // A box close settling to the dock rests a beat, then hides
-            // (the timer's guard keeps it if the pointer is on the dock).
-            if self.rest_hide_pending && self.ui.target() == Target::Dock {
-                self.rest_hide_pending = false;
-                self.schedule_hide_after(DOCK_REST_AFTER_CLOSE);
             }
         }
 
