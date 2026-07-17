@@ -1843,21 +1843,26 @@ impl App {
     /// thread; the text lands in `on_paste` via the paste channel.
     fn paste(&mut self) {
         let Some(device) = &self.data_device else {
+            info!("paste: no data device (compositor lacks wl_data_device?)");
             return;
         };
         let Some(offer) = device.data().selection_offer() else {
+            info!("paste: clipboard is empty (no selection offer)");
             return;
         };
         let mime = offer.with_mime_types(|mimes| {
+            info!("paste: selection offers {mimes:?}");
             ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"]
                 .iter()
                 .find(|want| mimes.iter().any(|m| m == *want))
                 .map(|s| s.to_string())
         });
         let Some(mime) = mime else {
+            info!("paste: no text mime in the selection");
             return;
         };
         let Ok(mut pipe) = offer.receive(mime) else {
+            info!("paste: receive failed");
             return;
         };
         // Flush so the selection owner sees the request before the read.
@@ -1876,6 +1881,7 @@ impl App {
     /// Clipboard text arrived: append its printable characters to the
     /// query, exactly like typing.
     fn on_paste(&mut self, text: &str) {
+        info!("paste: {} chars", text.chars().count());
         let printable: String = text.chars().filter(|c| !c.is_control()).collect();
         if printable.is_empty() {
             return;
@@ -2527,6 +2533,7 @@ impl DataDeviceHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
     ) {
+        debug!("clipboard: selection offer received");
     }
 
     fn drop_performed(
