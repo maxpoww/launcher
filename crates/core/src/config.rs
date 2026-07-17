@@ -184,12 +184,11 @@ impl CurveConfig {
     /// a touch past the dock rest before settling — a subtle bounce.
     pub fn default_close() -> Self {
         Self {
-            // Box close: a lightly-underdamped spring (ζ≈0.82, ~355ms
-            // tempo) so it dips a touch past the dock rest and settles —
-            // a whisper of a landing bounce.
+            // Box close: critically damped (ζ≈1, ~355ms tempo) — the card
+            // glides onto the dock rest and stops. No dip, no bounce.
             kind: CurveKind::Spring,
             spring_stiffness: 1245.0,
-            spring_damping: 58.0,
+            spring_damping: 71.0,
             spring_mass: 1.0,
             ..Self::default()
         }
