@@ -155,7 +155,7 @@ impl App {
         // elongates while rising and keeps sloshing briefly after the
         // card lands, relaxing to exactly 1.0.
         let stretch_target = 1.0
-            + (self.ui.extent_velocity() * content::STRETCH_PER_PXS)
+            + (self.ui.progress_velocity() * content::STRETCH_PER_VEL)
                 .clamp(-content::SQUASH_MAX, content::STRETCH_MAX);
         let mut remaining = dt.min(0.25);
         while remaining > 0.0 {

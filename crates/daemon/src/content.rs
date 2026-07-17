@@ -171,11 +171,14 @@ const RIDE_PARALLAX: f32 = 1.18;
 /// while rising, keeps sloshing briefly after the card lands, and
 /// relaxes to exactly 1.0. Deformation per px/s of card speed, its
 /// caps, and the follower spring (ζ≈0.3: a visible wobble or two).
-pub(crate) const STRETCH_PER_PXS: f32 = 0.000_02;
+pub(crate) const STRETCH_PER_VEL: f32 = 0.012;
 pub(crate) const STRETCH_MAX: f32 = 0.10;
 pub(crate) const SQUASH_MAX: f32 = 0.05;
 pub(crate) const STRETCH_K: f32 = 120.0;
 pub(crate) const STRETCH_C: f32 = 6.5;
+/// Dock icons are small (a few dozen px), so their deformation gets a
+/// gain over the content's or it reads as nothing.
+const DOCK_STRETCH_GAIN: f32 = 2.0;
 
 /// Gap between an open dock-folder box and the dock icon it springs from.
 const DOCK_BOX_GAP: f32 = 12.0;
@@ -897,12 +900,14 @@ pub fn scene(
         let scale = dock_scales[slot];
         let size = (DOCK_ICON * scale).min(slot_rect.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
         // AGUA: the icon elongates/compresses vertically about its
-        // baseline with the card's motion — a water drop on the bar.
+        // baseline with the card's motion — a water drop on the bar
+        // (amplified: at icon scale the raw factor reads as nothing).
+        let drop = 1.0 + (stretch - 1.0) * DOCK_STRETCH_GAIN;
         let icon_rect = Rect::new(
             vcx - size / 2.0,
-            baseline - (size + lift(entry_idx)) * stretch,
+            baseline - (size + lift(entry_idx)) * drop,
             size,
-            size * stretch,
+            size * drop,
         );
         // A drag hovering this icon's center (a fold target) rings it.
         if drag.and_then(|d| d.over_dock) == Some(slot) {

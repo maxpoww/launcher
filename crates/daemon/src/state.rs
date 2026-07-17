@@ -90,11 +90,18 @@ impl UiState {
         self.target == Target::Open
     }
 
-    /// Signed vertical speed of the card in px/s (positive = rising);
-    /// zero at rest. Drives the content's AGUA squash & stretch.
-    pub fn extent_velocity(&self) -> f32 {
+    /// Signed progress velocity of the running transition (per second,
+    /// positive = rising toward the target; zero at rest). Distance-
+    /// independent, so a short dock reveal sloshes as hard as a full
+    /// open — it drives the AGUA squash & stretch.
+    pub fn progress_velocity(&self) -> f32 {
+        let dir = if self.extent_of(self.target) >= self.start_extent {
+            1.0
+        } else {
+            -1.0
+        };
         match &self.animator {
-            Some(a) => a.velocity() * (self.extent_of(self.target) - self.start_extent),
+            Some(a) => a.velocity() * dir,
             None => 0.0,
         }
     }
