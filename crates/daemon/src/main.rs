@@ -699,7 +699,7 @@ const SCROLL_THRESHOLD: f64 = 10.0;
 
 /// After the box closes, the dock rests this long before it hides — a
 /// brief beat parked as a dock instead of vanishing straight away.
-const DOCK_REST_AFTER_CLOSE: Duration = Duration::from_millis(200);
+const DOCK_REST_AFTER_CLOSE: Duration = Duration::from_millis(400);
 
 /// Magnification blackout after a drop: the placement stays perfectly
 /// still for this long before the magnify wave may return.
