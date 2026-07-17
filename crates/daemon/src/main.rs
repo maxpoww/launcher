@@ -177,6 +177,9 @@ fn main() -> anyhow::Result<()> {
         agua_card: animation::Follower::new(content::AGUA_CARD_K, content::AGUA_CARD_C),
         agua_icons: animation::Follower::new(content::AGUA_ICONS_K, content::AGUA_ICONS_C),
         agua_content: animation::Follower::new(content::AGUA_CONTENT_K, content::AGUA_CONTENT_C),
+        dock_wave_h: Vec::new(),
+        dock_wave_v: Vec::new(),
+        dock_crest_prev: Vec::new(),
         modifiers: Modifiers::default(),
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
         data_device: None,
@@ -374,6 +377,12 @@ pub struct App {
     agua_card: animation::Follower,
     agua_icons: animation::Follower,
     agua_content: animation::Follower,
+    /// AGUA splash ripple surface across the dock: per-icon wave height
+    /// and velocity (0 = flat), plus last frame's per-icon crest so a
+    /// collapsing crest can splash the surface. Resized with the dock.
+    dock_wave_h: Vec<f32>,
+    dock_wave_v: Vec<f32>,
+    dock_crest_prev: Vec<f32>,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
     /// Clipboard: the data-device manager and the seat's device (None

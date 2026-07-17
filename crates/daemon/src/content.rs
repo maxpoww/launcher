@@ -219,20 +219,34 @@ const BASIN_MARGIN_X: f32 = 16.0;
 const SPILL: f32 = 0.6;
 pub const DRAG_MARGIN_TOP: f32 = 56.0;
 /// Peak scale of a dock icon directly under the cursor.
-const DOCK_MAGNIFY: f32 = 1.5;
+pub(crate) const DOCK_MAGNIFY: f32 = 1.5;
 /// Horizontal falloff radius of dock magnification, in pixels.
-const DOCK_MAG_RADIUS: f32 = 120.0;
+pub(crate) const DOCK_MAG_RADIUS: f32 = 120.0;
 /// Vertical attenuation radius, measured from the dock band's edges
 /// (zero inside the band). Small on purpose: the effect must die out
 /// before the first grid row so hovering the grid never stirs the dock.
-const DOCK_MAG_VRADIUS: f32 = 28.0;
+pub(crate) const DOCK_MAG_VRADIUS: f32 = 28.0;
+/// AGUA splash ripple (decoration only — hover magnification is
+/// untouched): when a crest collapses (the pointer leaves or jumps),
+/// the falling swell pushes the surface down and a small wave expands
+/// across the neighbors, reflecting off the dock ends and decaying.
+/// Neighbor coupling (ripple travel speed).
+pub(crate) const RIPPLE_COUPLE: f32 = 700.0;
+/// Pull of the surface back to flat.
+pub(crate) const RIPPLE_RETURN: f32 = 120.0;
+/// Damping: lower = the ripple travels farther and lives longer.
+pub(crate) const RIPPLE_DAMP: f32 = 5.5;
+/// How much of a collapsing crest's fall converts into splash velocity.
+pub(crate) const SPLASH_GAIN: f32 = 3.0;
+/// Cap on the ripple's contribution to an icon's scale (±).
+pub(crate) const RIPPLE_MAX: f32 = 0.04;
 /// Peak scale of a grid icon under the cursor.
 const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
 const GRID_MAG_RADIUS: f32 = 95.0;
 
 /// Cosine ease from 1.0 at `d == 0` to 0.0 at `d >= radius`.
-fn falloff(d: f32, radius: f32) -> f32 {
+pub(crate) fn falloff(d: f32, radius: f32) -> f32 {
     let t = (d.abs() / radius).min(1.0);
     0.5 * (1.0 + (std::f32::consts::PI * t).cos())
 }
@@ -667,6 +681,11 @@ pub struct FrameInput<'a> {
     /// Magnification amplitude (0..1): the caller fades it around
     /// drags and drops so the wave never pops in or out.
     pub mag_amount: f32,
+    /// AGUA splash ripple per dock slot (0 = flat): a decoration added
+    /// on top of the untouched hover magnification. Fed only when a
+    /// crest collapses, so hovering never dilutes the magnification.
+    /// Empty = no ripple.
+    pub dock_ripple: &'a [f32],
     /// Launch bounce: (entry index, upward offset in px).
     pub bounce: Option<(usize, f32)>,
     /// Live search query (empty shows the placeholder).
@@ -791,6 +810,7 @@ pub fn scene(
         alpha,
         pointer,
         mag_amount,
+        dock_ripple,
         bounce,
         query,
         selected,
@@ -880,9 +900,12 @@ pub fn scene(
     let dock_scales: Vec<f32> = layout
         .dock_slots
         .iter()
-        .map(|slot| {
+        .enumerate()
+        .map(|(i, slot)| {
             let cx = slot.x + slot.w / 2.0;
-            match pointer {
+            // Hover magnification — kept exactly as the original (crisp,
+            // full strength); the splash ripple is only ever added on top.
+            let crest = match pointer {
                 Some((px, py)) => {
                     // Below the icon, the live column reaches `dock_hit_bottom`
                     // (the screen edge while docked), so hovering the floating
@@ -895,7 +918,8 @@ pub fn scene(
                         * mag_amount.clamp(0.0, 1.0)
                 }
                 None => 1.0,
-            }
+            };
+            crest + dock_ripple.get(i).copied().unwrap_or(0.0)
         })
         .collect();
     // Each magnified icon widens its visual slot by the extra pixels it

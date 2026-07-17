@@ -415,6 +415,68 @@ impl App {
             None
         };
 
+        // AGUA splash ripple (decoration only — the hover magnification in
+        // scene() is untouched). The dock is a shallow 1-D water surface:
+        // one height per icon, coupled to its neighbors. Nothing feeds it
+        // while a crest simply sits under the pointer; only when a crest
+        // *collapses* (pointer leaves or jumps) does the falling swell push
+        // the surface down, and that dent propagates outward as an
+        // expanding ripple, reflecting off the dock ends and decaying.
+        let ripple_layout = self.current_layout();
+        let n_dock = ripple_layout.dock_slots.len();
+        if self.dock_wave_h.len() != n_dock {
+            self.dock_wave_h = vec![0.0; n_dock];
+            self.dock_wave_v = vec![0.0; n_dock];
+            self.dock_crest_prev = vec![0.0; n_dock];
+        }
+        let mag = self.mag_amount.clamp(0.0, 1.0);
+        for (i, slot) in ripple_layout.dock_slots.iter().enumerate() {
+            // Crest fraction (0..1) — the same falloff scene() uses, but
+            // read here only to detect its *fall*, never to magnify.
+            let crest = match self.pointer_pos {
+                Some((px, py)) if mag > 0.0 => {
+                    let cx = slot.x + slot.w / 2.0;
+                    let d_out = (slot.y - py)
+                        .max(py - ripple_layout.dock_hit_bottom)
+                        .max(0.0);
+                    let fy = content::falloff(d_out, content::DOCK_MAG_VRADIUS);
+                    content::falloff(px - cx, content::DOCK_MAG_RADIUS) * fy * mag
+                }
+                _ => 0.0,
+            };
+            let drop = (self.dock_crest_prev[i] - crest).max(0.0);
+            self.dock_wave_v[i] -= content::SPLASH_GAIN * drop;
+            self.dock_crest_prev[i] = crest;
+        }
+        let mut remaining = dt.min(0.25);
+        while remaining > 0.0 {
+            let h = remaining.min(1.0 / 240.0);
+            for i in 0..n_dock {
+                // Reflective ends: a missing neighbor mirrors the cell.
+                let left = self.dock_wave_h[i.saturating_sub(1)];
+                let right = self.dock_wave_h[(i + 1).min(n_dock - 1)];
+                let lap = left + right - 2.0 * self.dock_wave_h[i];
+                let accel = content::RIPPLE_COUPLE * lap
+                    - content::RIPPLE_RETURN * self.dock_wave_h[i]
+                    - content::RIPPLE_DAMP * self.dock_wave_v[i];
+                self.dock_wave_v[i] += accel * h;
+            }
+            for i in 0..n_dock {
+                self.dock_wave_h[i] += self.dock_wave_v[i] * h;
+            }
+            remaining -= h;
+        }
+        let mut ripple_active = false;
+        let dock_ripple: Vec<f32> = self
+            .dock_wave_h
+            .iter()
+            .zip(&self.dock_wave_v)
+            .map(|(&hh, &vv)| {
+                ripple_active |= hh.abs() > 0.001 || vv.abs() > 0.01;
+                hh.clamp(-content::RIPPLE_MAX, content::RIPPLE_MAX)
+            })
+            .collect();
+
         // Box open/close transition (duration from config, eased below).
         if self.group_anim != self.group_anim_target {
             let secs = (self.config.animation.group_expand_ms as f32 / 1000.0).max(0.001);
@@ -627,6 +689,7 @@ impl App {
                 alpha: self.ui.alpha(),
                 pointer: mag_pointer,
                 mag_amount: self.mag_amount,
+                dock_ripple: &dock_ripple,
                 bounce,
                 query: &self.search.query,
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
@@ -675,9 +738,10 @@ impl App {
         {
             self.dirty = true;
         }
-        // AGUA: the water keeps sloshing briefly after the card lands —
-        // keep frames coming until the stretch spring rests.
-        if stretch_active {
+        // AGUA: the water keeps sloshing briefly after the card lands, and
+        // a splash ripple keeps traveling the dock — keep frames coming
+        // until both rest.
+        if stretch_active || ripple_active {
             self.dirty = true;
         }
     }
