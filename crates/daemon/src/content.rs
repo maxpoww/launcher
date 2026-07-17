@@ -181,12 +181,12 @@ pub(crate) const SQUASH_MAX: f32 = 0.05;
 /// Card silhouette: ζ≈0.73 — the gentle swell Max signed off on.
 pub(crate) const AGUA_CARD_K: f32 = 120.0;
 pub(crate) const AGUA_CARD_C: f32 = 16.0;
-/// Dock icons: faster and bouncier (ζ≈0.45), peaking slightly early.
-pub(crate) const AGUA_ICONS_K: f32 = 150.0;
-pub(crate) const AGUA_ICONS_C: f32 = 11.0;
-/// Box content: slower and calmer (ζ≈0.69), trailing a breath behind.
-pub(crate) const AGUA_CONTENT_K: f32 = 95.0;
-pub(crate) const AGUA_CONTENT_C: f32 = 13.5;
+/// Dock icons: fastest and bounciest (ζ≈0.44), clearly first to peak.
+pub(crate) const AGUA_ICONS_K: f32 = 200.0;
+pub(crate) const AGUA_ICONS_C: f32 = 12.5;
+/// Box content: slowest and calm (ζ≈0.68), clearly trailing the card.
+pub(crate) const AGUA_CONTENT_K: f32 = 65.0;
+pub(crate) const AGUA_CONTENT_C: f32 = 11.0;
 /// Dock icons are small (a few dozen px), so their deformation gets a
 /// gain over the raw factor or it reads as nothing.
 const DOCK_STRETCH_GAIN: f32 = 1.6;
