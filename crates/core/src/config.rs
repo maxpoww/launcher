@@ -171,9 +171,9 @@ impl Default for CurveConfig {
             duration_ms: 220,
             // Box open: lightly underdamped (ζ≈0.85) so it overshoots the
             // top a touch and settles back — a subtle bounce. Tuned live
-            // to ~575ms so the content ride reads without dragging.
-            spring_stiffness: 432.0,
-            spring_damping: 35.0,
+            // to ~480ms so the content ride reads without dragging.
+            spring_stiffness: 622.0,
+            spring_damping: 42.0,
             spring_mass: 1.0,
         }
     }
@@ -184,11 +184,11 @@ impl CurveConfig {
     /// a touch past the dock rest before settling — a subtle bounce.
     pub fn default_close() -> Self {
         Self {
-            // Box close: critically damped (ζ≈1, ~355ms tempo) — the card
-            // glides onto the dock rest and stops. No dip, no bounce.
+            // Box close: critically damped and fast (ζ≈1, near-instant) —
+            // the card snaps onto the dock rest and stops. No dip.
             kind: CurveKind::Spring,
-            spring_stiffness: 1245.0,
-            spring_damping: 71.0,
+            spring_stiffness: 5000.0,
+            spring_damping: 141.0,
             spring_mass: 1.0,
             ..Self::default()
         }
