@@ -2516,15 +2516,23 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 if button == BTN_RIGHT
                     && state == WEnum::Value(wl_pointer::ButtonState::Released) =>
             {
-                // Right-click on a Files cell opens a terminal in that
-                // directory (a file's containing folder).
                 app.update_hover();
-                if let Some(Hit::GridCell(s, cell)) = app.hover {
-                    if s == content::SECTION_FILES {
+                match app.hover {
+                    // Right-click on a Files cell opens a terminal in that
+                    // directory (a file's containing folder).
+                    Some(Hit::GridCell(s, cell)) if s == content::SECTION_FILES => {
                         if let Some(entry_idx) = app.search.visible[s].get(cell).copied() {
                             app.open_terminal_at(entry_idx);
                         }
                     }
+                    // Right-click a dock or grid app: force a fresh instance
+                    // (the accessible, pointer-native "new window").
+                    Some(hit @ (Hit::DockIcon(_) | Hit::GridCell(..) | Hit::OpenBoxCell(_))) => {
+                        app.force_new_instance = true;
+                        app.activate_hit(hit);
+                        app.force_new_instance = false;
+                    }
+                    _ => {}
                 }
             }
             wl_pointer::Event::Axis {
