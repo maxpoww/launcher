@@ -42,6 +42,11 @@ use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, LoopHandle};
 use calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
+use smithay_client_toolkit::data_device_manager::data_device::{DataDevice, DataDeviceHandler};
+use smithay_client_toolkit::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
+use wayland_client::protocol::wl_data_device_manager::DndAction;
+use smithay_client_toolkit::data_device_manager::data_source::DataSourceHandler;
+use smithay_client_toolkit::data_device_manager::{DataDeviceManagerState, WritePipe};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::globals::GlobalData;
@@ -65,7 +70,9 @@ use crate::install::{PendingInstall, INSTALL_REVEAL, PKG_QUERY_MIN};
 use waverunner_core::{Config, Searcher};
 use waverunner_proto::Command;
 use wayland_client::globals::registry_queue_init;
-use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface};
+use wayland_client::protocol::{
+    wl_data_device, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface,
+};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 
 use crate::content::Hit;
@@ -133,6 +140,10 @@ fn main() -> anyhow::Result<()> {
     let (thumb_tx, thumb_rx) = channel::channel::<thumbs::Event>();
     let thumbs = thumbs::spawn(thumb_tx);
 
+    // Clipboard paste reads answer over this channel (each paste reads
+    // the selection pipe on a short-lived thread).
+    let (paste_tx, paste_rx) = channel::channel::<String>();
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -163,6 +174,10 @@ fn main() -> anyhow::Result<()> {
         cursor_device: None,
         enter_serial: 0,
         cursor_now: None,
+        modifiers: Modifiers::default(),
+        data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
+        data_device: None,
+        paste_tx,
         hide_deadline: None,
         rest_hide_pending: false,
         restore_window: None,
@@ -273,6 +288,15 @@ fn main() -> anyhow::Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering thumbs channel: {e}"))?;
 
+    event_loop
+        .handle()
+        .insert_source(paste_rx, |event, _, app| {
+            if let channel::Event::Msg(text) = event {
+                app.on_paste(&text);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering paste channel: {e}"))?;
+
     // Intellihide: watch Hyprland window events so the dock can stay
     // up while nothing overlaps its zone, plus a steady poll — this
     // Hyprland emits no event for float toggles or float moves/resizes,
@@ -341,6 +365,14 @@ pub struct App {
     cursor_device: Option<WpCursorShapeDeviceV1>,
     enter_serial: u32,
     cursor_now: Option<Shape>,
+    /// Held keyboard modifiers (Ctrl+V pastes into the query).
+    modifiers: Modifiers,
+    /// Clipboard: the data-device manager and the seat's device (None
+    /// when the compositor lacks the protocol), plus the channel paste
+    /// threads answer on.
+    data_device_manager: Option<DataDeviceManagerState>,
+    data_device: Option<DataDevice>,
+    paste_tx: channel::Sender<String>,
     /// Deadline of the pending auto-hide, if the pointer has left the
     /// dock. Re-entry clears it, invalidating the in-flight timer.
     hide_deadline: Option<Instant>,
@@ -1731,6 +1763,11 @@ impl App {
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // Ctrl+V pastes the clipboard into the query.
+        if self.modifiers.ctrl && matches!(keysym, Keysym::v | Keysym::V) {
+            self.paste();
+            return;
+        }
         match keysym {
             Keysym::Escape => {
                 // Step out of an open box first; dismiss on the next.
@@ -1800,6 +1837,52 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Read the clipboard selection (best-effort) on a short-lived
+    /// thread; the text lands in `on_paste` via the paste channel.
+    fn paste(&mut self) {
+        let Some(device) = &self.data_device else {
+            return;
+        };
+        let Some(offer) = device.data().selection_offer() else {
+            return;
+        };
+        let mime = offer.with_mime_types(|mimes| {
+            ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"]
+                .iter()
+                .find(|want| mimes.iter().any(|m| m == *want))
+                .map(|s| s.to_string())
+        });
+        let Some(mime) = mime else {
+            return;
+        };
+        let Ok(mut pipe) = offer.receive(mime) else {
+            return;
+        };
+        // Flush so the selection owner sees the request before the read.
+        let _ = self.conn.flush();
+        let tx = self.paste_tx.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            if !text.is_empty() {
+                let _ = tx.send(text);
+            }
+        });
+    }
+
+    /// Clipboard text arrived: append its printable characters to the
+    /// query, exactly like typing.
+    fn on_paste(&mut self, text: &str) {
+        let printable: String = text.chars().filter(|c| !c.is_control()).collect();
+        if printable.is_empty() {
+            return;
+        }
+        self.search.open = true;
+        self.search.query.push_str(&printable);
+        self.refilter();
     }
 
     fn schedule_autohide(&mut self) {
@@ -1978,6 +2061,13 @@ impl SeatHandler for App {
                 Err(e) => warn!("cannot get keyboard: {e}"),
             }
         }
+        if capability == Capability::Keyboard && self.data_device.is_none() {
+            // The clipboard rides the seat: create its data device once.
+            self.data_device = self
+                .data_device_manager
+                .as_ref()
+                .map(|mgr| mgr.get_data_device(qh, &seat));
+        }
         if capability == Capability::Pointer && self.pointer.is_none() {
             // Raw wl_pointer (see the Dispatch impl below for why sctk's
             // frame-batched pointer helper is not used).
@@ -2087,9 +2177,10 @@ impl KeyboardHandler for App {
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
-        _modifiers: Modifiers,
+        modifiers: Modifiers,
         _layout: u32,
     ) {
+        self.modifiers = modifiers;
     }
 }
 
@@ -2402,3 +2493,123 @@ delegate_seat!(App);
 delegate_keyboard!(App);
 delegate_layer!(App);
 delegate_registry!(App);
+
+// Clipboard plumbing: we only ever *read* the selection on Ctrl+V, so
+// every data-device / offer / source callback is a no-op — the paste
+// path pulls the current offer lazily instead of tracking events.
+impl DataDeviceHandler for App {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wl_surface::WlSurface,
+    ) {
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+
+    fn motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+    ) {
+    }
+
+    fn selection(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+    ) {
+    }
+
+    fn drop_performed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+    ) {
+    }
+}
+
+impl DataOfferHandler for App {
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+}
+
+impl DataSourceHandler for App {
+    fn accept_mime(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: Option<String>,
+    ) {
+    }
+
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: String,
+        _: WritePipe,
+    ) {
+    }
+
+    fn cancelled(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+
+    fn dnd_dropped(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+
+    fn dnd_finished(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+
+    fn action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: DndAction,
+    ) {
+    }
+}
+
+smithay_client_toolkit::delegate_data_device!(App);
