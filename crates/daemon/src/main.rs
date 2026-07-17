@@ -174,8 +174,9 @@ fn main() -> anyhow::Result<()> {
         cursor_device: None,
         enter_serial: 0,
         cursor_now: None,
-        stretch: 1.0,
-        stretch_vel: 0.0,
+        agua_card: animation::Follower::new(content::AGUA_CARD_K, content::AGUA_CARD_C),
+        agua_icons: animation::Follower::new(content::AGUA_ICONS_K, content::AGUA_ICONS_C),
+        agua_content: animation::Follower::new(content::AGUA_CONTENT_K, content::AGUA_CONTENT_C),
         modifiers: Modifiers::default(),
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
         data_device: None,
@@ -367,11 +368,12 @@ pub struct App {
     cursor_device: Option<WpCursorShapeDeviceV1>,
     enter_serial: u32,
     cursor_now: Option<Shape>,
-    /// AGUA: content squash & stretch factor (1.0 at rest) and its
-    /// follower-spring velocity — integrated in `draw` from the card's
-    /// live speed, sloshing briefly after the card lands.
-    stretch_vel: f32,
-    stretch: f32,
+    /// AGUA water bodies (1.0 at rest): the card silhouette, the dock
+    /// icons, and the box content each chase the card's motion at their
+    /// own tempo — integrated in `draw`, sloshing after the landing.
+    agua_card: animation::Follower,
+    agua_icons: animation::Follower,
+    agua_content: animation::Follower,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
     /// Clipboard: the data-device manager and the seat's device (None

@@ -170,12 +170,23 @@ const RIDE_PARALLAX: f32 = 1.18;
 /// stretch spring anchored at the pinned bottom — content elongates
 /// while rising, keeps sloshing briefly after the card lands, and
 /// relaxes to exactly 1.0. Deformation per px/s of card speed, its
-/// caps, and the follower spring (ζ≈0.73: a gentle swell that relaxes).
+/// caps, and the per-body followers. Each water body chases the same
+/// target at its own tempo — the icons a touch ahead and bouncier, the
+/// content a breath behind and calmer, the card silhouette in between
+/// (overlapping action: their swells peak at slightly different
+/// moments, like real water).
 pub(crate) const STRETCH_PER_VEL: f32 = 0.012;
 pub(crate) const STRETCH_MAX: f32 = 0.10;
 pub(crate) const SQUASH_MAX: f32 = 0.05;
-pub(crate) const STRETCH_K: f32 = 120.0;
-pub(crate) const STRETCH_C: f32 = 16.0;
+/// Card silhouette: ζ≈0.73 — the gentle swell Max signed off on.
+pub(crate) const AGUA_CARD_K: f32 = 120.0;
+pub(crate) const AGUA_CARD_C: f32 = 16.0;
+/// Dock icons: faster and bouncier (ζ≈0.45), peaking slightly early.
+pub(crate) const AGUA_ICONS_K: f32 = 150.0;
+pub(crate) const AGUA_ICONS_C: f32 = 11.0;
+/// Box content: slower and calmer (ζ≈0.69), trailing a breath behind.
+pub(crate) const AGUA_CONTENT_K: f32 = 95.0;
+pub(crate) const AGUA_CONTENT_C: f32 = 13.5;
 /// Dock icons are small (a few dozen px), so their deformation gets a
 /// gain over the raw factor or it reads as nothing.
 const DOCK_STRETCH_GAIN: f32 = 1.6;
@@ -323,8 +334,8 @@ pub fn layout(
     // Which sections are navigated into a sub-view (open app group,
     // entered directory).
     navigated: [bool; N_SECTIONS],
-    // AGUA deformation about the card bottom (1.0 = at rest).
-    stretch: f32,
+    // AGUA deformation, (card silhouette, content ride) — 1.0 = rest.
+    stretch: (f32, f32),
 ) -> Layout {
     let (w, h) = surface;
     // The card is centered in the surface with transparent drag margin
@@ -347,7 +358,7 @@ pub fn layout(
     let rise = ((extent - dock_extent) / (full_extent - dock_extent).max(1.0)).clamp(0.0, 1.0);
     let basin_w = w - 2.0 * BASIN_MARGIN_X;
     let gathered = basin_w + (card_w - basin_w) * rise;
-    let card_w_now = (gathered * (1.0 - (stretch - 1.0) * SPILL)).min(w);
+    let card_w_now = (gathered * (1.0 - (stretch.0 - 1.0) * SPILL)).min(w);
     let card_x = (w - card_w_now) / 2.0;
     // Content is SHAPED at its fully-open geometry (`content_top` is
     // where the grid begins when open; `content_bottom` the pinned card
@@ -365,7 +376,7 @@ pub fn layout(
     // elongates upward while the card moves fast and relaxes to rest
     // as the spring settles (see frame::draw for the velocity link).
     // The content takes the factor at reduced gain (its span is large).
-    let cs = 1.0 + (stretch - 1.0) * CONTENT_STRETCH_GAIN;
+    let cs = 1.0 + (stretch.1 - 1.0) * CONTENT_STRETCH_GAIN;
     let agua = |y: f32| content_bottom - (content_bottom - y) * cs;
     // Docked (a pure bar), the icon columns stay live all the way to the
     // screen edge so the floating gap is clickable; open, they stop at
@@ -1708,7 +1719,7 @@ mod tests {
             [n, 0, 0],
             [scroll, 0.0, 0.0],
             [false; N_SECTIONS],
-            1.0,
+            (1.0, 1.0),
         )
     }
 
@@ -1723,7 +1734,7 @@ mod tests {
             [20, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
-            1.0,
+            (1.0, 1.0),
         );
         assert!(!l.dock_slots.is_empty());
         // Content sits at its fixed open position; while docked the
@@ -1788,7 +1799,7 @@ mod tests {
             [4, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
-            1.0,
+            (1.0, 1.0),
         );
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
         let s = scene(
@@ -1840,7 +1851,7 @@ mod tests {
             [10, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
-            1.0,
+            (1.0, 1.0),
         );
         let slot = l.dock_slots[0];
         assert_eq!(
@@ -1890,7 +1901,7 @@ mod tests {
             [10, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
-            1.0,
+            (1.0, 1.0),
         );
         let nav = layout(
             &cfg,
@@ -1900,7 +1911,7 @@ mod tests {
             [10, 0, 6],
             [0.0; N_SECTIONS],
             [false, false, true],
-            1.0,
+            (1.0, 1.0),
         );
         assert_eq!(
             nav.sections[SECTION_FILES].title_pos,
@@ -1919,7 +1930,7 @@ mod tests {
             [10, 0, 6],
             [0.0; N_SECTIONS],
             [false; N_SECTIONS],
-            1.0,
+            (1.0, 1.0),
         );
         let apps = &l.sections[SECTION_APPS];
         let mid = (

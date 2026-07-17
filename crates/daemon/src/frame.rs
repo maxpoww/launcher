@@ -59,7 +59,7 @@ impl App {
                 false,
                 self.files_dir.is_some(),
             ],
-            self.stretch,
+            (self.agua_card.pos, self.agua_content.pos),
         );
         // Position the open box's rest square. A grid box anchors to the
         // side of the grid it sits on (pinned preview icon lands on its
@@ -150,26 +150,24 @@ impl App {
 
         let was_animating = self.ui.is_animating();
         let animating = self.ui.tick(dt);
-        // AGUA: the card's speed pours energy into a small underdamped
-        // stretch spring (anchored at the pinned bottom edge) — content
-        // elongates while rising and keeps sloshing briefly after the
-        // card lands, relaxing to exactly 1.0.
+        // AGUA: the card's speed pours energy into three water bodies —
+        // the silhouette, the dock icons, and the content — each chasing
+        // the same target at its own tempo, so their swells peak at
+        // slightly different moments and keep sloshing briefly after the
+        // card lands, all relaxing to exactly 1.0.
         let stretch_target = 1.0
             + (self.ui.progress_velocity() * content::STRETCH_PER_VEL)
                 .clamp(-content::SQUASH_MAX, content::STRETCH_MAX);
-        let mut remaining = dt.min(0.25);
-        while remaining > 0.0 {
-            let h = remaining.min(1.0 / 240.0);
-            let accel = -content::STRETCH_K * (self.stretch - stretch_target)
-                - content::STRETCH_C * self.stretch_vel;
-            self.stretch_vel += accel * h;
-            self.stretch += self.stretch_vel * h;
-            remaining -= h;
-        }
-        let stretch_active = (self.stretch - 1.0).abs() > 0.000_5 || self.stretch_vel.abs() > 0.005;
+        self.agua_card.step(stretch_target, dt);
+        self.agua_icons.step(stretch_target, dt);
+        self.agua_content.step(stretch_target, dt);
+        let stretch_active = self.agua_card.is_active()
+            || self.agua_icons.is_active()
+            || self.agua_content.is_active();
         if !stretch_active && !animating {
-            self.stretch = 1.0;
-            self.stretch_vel = 0.0;
+            self.agua_card.snap();
+            self.agua_icons.snap();
+            self.agua_content.snap();
         }
         if animating {
             // The card is moving under a possibly stationary pointer:
@@ -620,7 +618,7 @@ impl App {
                     None
                 },
                 query_px,
-                stretch: self.stretch,
+                stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()
                 } else {

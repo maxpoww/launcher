@@ -28,6 +28,54 @@ pub fn ease_toward(current: f32, target: f32, dt: f32, rate: f32, snap: f32) -> 
     }
 }
 
+/// A small underdamped follower chasing a moving target with its own
+/// tempo, carrying momentum between frames — an AGUA water body. Each
+/// body (card silhouette, dock icons, box content) runs its own
+/// follower with slightly different constants, so their swells peak at
+/// slightly different moments: overlapping action, not lockstep.
+#[derive(Debug, Clone)]
+pub struct Follower {
+    pub pos: f32,
+    vel: f32,
+    k: f32,
+    c: f32,
+}
+
+impl Follower {
+    /// A follower at rest on 1.0 with stiffness `k` and damping `c`.
+    pub fn new(k: f32, c: f32) -> Self {
+        Self {
+            pos: 1.0,
+            vel: 0.0,
+            k,
+            c,
+        }
+    }
+
+    /// Chase `target` for `dt` seconds (substepped for stability).
+    pub fn step(&mut self, target: f32, dt: f32) {
+        let mut remaining = dt.min(0.25);
+        while remaining > 0.0 {
+            let h = remaining.min(MAX_SUBSTEP);
+            let accel = -self.k * (self.pos - target) - self.c * self.vel;
+            self.vel += accel * h;
+            self.pos += self.vel * h;
+            remaining -= h;
+        }
+    }
+
+    /// Still meaningfully away from rest (1.0) or moving.
+    pub fn is_active(&self) -> bool {
+        (self.pos - 1.0).abs() > 0.000_5 || self.vel.abs() > 0.005
+    }
+
+    /// Land exactly on rest.
+    pub fn snap(&mut self) {
+        self.pos = 1.0;
+        self.vel = 0.0;
+    }
+}
+
 /// Progress below which a settled animator snaps to its endpoint.
 const SETTLE_EPSILON: f32 = 1e-3;
 
