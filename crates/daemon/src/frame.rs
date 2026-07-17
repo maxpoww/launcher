@@ -409,63 +409,41 @@ impl App {
         } else {
             self.mag_amount = mag_target;
         }
-        // AGUA magnification: the dock is a 1-D water surface — one
-        // height per icon, coupled to its neighbors. The pointer's crest
-        // presses the surface down the row; when it moves on, the
-        // stranded swell collapses and propagates outward as an
-        // expanding ripple (reflecting off the dock ends), neighbors
-        // squeezing together in its troughs and rebounding.
+        // AGUA magnification: each dock icon's scale is a follower chasing
+        // the crest under the pointer minus the ring of displaced water
+        // around it — a sweep leaves a settling wake behind the pointer
+        // and a stop lands with a mini-slosh.
         let mag_layout = self.current_layout();
         let n_dock = mag_layout.dock_slots.len();
-        if self.dock_wave_h.len() != n_dock {
-            self.dock_wave_h = vec![0.0; n_dock];
-            self.dock_wave_v = vec![0.0; n_dock];
+        if self.dock_mag.len() != n_dock {
+            self.dock_mag = (0..n_dock)
+                .map(|_| animation::Follower::new(content::AGUA_MAG_K, content::AGUA_MAG_C))
+                .collect();
         }
         let mag = self.mag_amount.clamp(0.0, 1.0);
-        // The pointer's target crest per icon (0 = untouched water).
-        let targets: Vec<f32> = mag_layout
-            .dock_slots
-            .iter()
-            .map(|slot| match self.pointer_pos {
+        let mut mag_active = false;
+        for (i, slot) in mag_layout.dock_slots.iter().enumerate() {
+            let target = match self.pointer_pos {
                 Some((px, py)) if mag > 0.0 => {
                     let cx = slot.x + slot.w / 2.0;
                     let d_out = (slot.y - py).max(py - mag_layout.dock_hit_bottom).max(0.0);
                     let fy = content::falloff(d_out, content::DOCK_MAG_VRADIUS);
-                    content::falloff(px - cx, content::DOCK_MAG_RADIUS) * fy * mag
+                    let crest = content::falloff(px - cx, content::DOCK_MAG_RADIUS);
+                    // Displaced water: the wide lobe minus the crest is a
+                    // ring just outside the swell, and it dips.
+                    let ring = (content::falloff(px - cx, content::DOCK_MAG_RADIUS * 2.2) - crest)
+                        .max(0.0);
+                    1.0 + ((content::DOCK_MAGNIFY - 1.0) * crest - content::DOCK_TROUGH * ring)
+                        * fy
+                        * mag
                 }
-                _ => 0.0,
-            })
-            .collect();
-        let mut remaining = dt.min(0.25);
-        while remaining > 0.0 {
-            let h = remaining.min(1.0 / 240.0);
-            for (i, target) in targets.iter().enumerate() {
-                // Reflective ends: a missing neighbor mirrors the cell.
-                let left = self.dock_wave_h[i.saturating_sub(1)];
-                let right = self.dock_wave_h[(i + 1).min(n_dock - 1)];
-                let lap = left + right - 2.0 * self.dock_wave_h[i];
-                let accel = content::WAVE_COUPLE * lap
-                    - content::WAVE_RETURN * self.dock_wave_h[i]
-                    - content::WAVE_DAMP * self.dock_wave_v[i]
-                    + content::WAVE_DRIVE * (target - self.dock_wave_h[i]).max(0.0);
-                self.dock_wave_v[i] += accel * h;
-            }
-            for i in 0..n_dock {
-                self.dock_wave_h[i] = (self.dock_wave_h[i] + self.dock_wave_v[i] * h)
-                    .clamp(content::WAVE_H_MIN, content::WAVE_H_MAX);
-            }
-            remaining -= h;
+                _ => 1.0,
+            };
+            let f = &mut self.dock_mag[i];
+            f.step(target, dt);
+            mag_active |= !f.is_settled_at(target);
         }
-        let mut mag_active = false;
-        let dock_mag_scales: Vec<f32> = self
-            .dock_wave_h
-            .iter()
-            .zip(&self.dock_wave_v)
-            .map(|(&hh, &vv)| {
-                mag_active |= hh.abs() > 0.002 || vv.abs() > 0.02;
-                1.0 + (content::DOCK_MAGNIFY - 1.0) * hh
-            })
-            .collect();
+        let dock_mag_scales: Vec<f32> = self.dock_mag.iter().map(|f| f.pos).collect();
         let mag_pointer = if self.mag_amount > 0.0 {
             self.pointer_pos
         } else {

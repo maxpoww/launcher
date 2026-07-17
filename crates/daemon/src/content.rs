@@ -226,23 +226,13 @@ pub(crate) const DOCK_MAG_RADIUS: f32 = 120.0;
 /// (zero inside the band). Small on purpose: the effect must die out
 /// before the first grid row so hovering the grid never stirs the dock.
 pub(crate) const DOCK_MAG_VRADIUS: f32 = 28.0;
-/// AGUA magnification is a real 1-D water surface across the dock: a
-/// height per icon, coupled to its neighbors (a discretized wave
-/// equation with reflective ends). The pointer's crest presses the
-/// surface; everything else — neighbors squeezing together and
-/// rebounding, the expanding ripple when a swell collapses, waves
-/// bouncing off the dock ends — emerges from the physics.
-/// Neighbor coupling (propagation speed between adjacent icons).
-pub(crate) const WAVE_COUPLE: f32 = 900.0;
-/// Pull of the surface back to flat.
-pub(crate) const WAVE_RETURN: f32 = 140.0;
-/// Damping: lower = ripples travel farther.
-pub(crate) const WAVE_DAMP: f32 = 7.0;
-/// How hard the pointer's crest presses into the surface.
-pub(crate) const WAVE_DRIVE: f32 = 260.0;
-/// Surface height clamp (crest / trough), in magnification units.
-pub(crate) const WAVE_H_MAX: f32 = 1.15;
-pub(crate) const WAVE_H_MIN: f32 = -0.35;
+/// AGUA magnification: the crest under the pointer displaces water —
+/// icons in a ring just outside the swell dip this far below rest.
+pub(crate) const DOCK_TROUGH: f32 = 0.05;
+/// Per-icon magnification followers: fast enough to track the pointer,
+/// loose enough (ζ≈0.49) that a sweep leaves a settling wake.
+pub(crate) const AGUA_MAG_K: f32 = 300.0;
+pub(crate) const AGUA_MAG_C: f32 = 17.0;
 /// Peak scale of a grid icon under the cursor.
 const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
