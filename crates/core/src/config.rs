@@ -204,13 +204,13 @@ impl Default for AnimationConfig {
             // crisp spring up (small settle), a quick ease down. Same
             // feel as the earlier 30/9 · 1800ms tuning, at real speed.
             dock_reveal: CurveConfig {
-                kind: CurveKind::Spring,
-                spring_stiffness: 2250.0,
-                // Slightly overdamped (ζ≈1.16): the dock bar slides up to
-                // rest and stops — no overshoot bounce on a plain summon.
-                // Only this curve changed; the box close bounce is untouched.
-                spring_damping: 110.0,
-                spring_mass: 1.0,
+                // Calling the dock is a plain eased rise — no spring, so it
+                // can never overshoot or bounce; the bar just slides up and
+                // stops. An eased curve also reports zero velocity, so the
+                // AGUA icon water stays flat on a summon (only the box
+                // open/close spring sloshes it).
+                kind: CurveKind::EaseOutCubic,
+                duration_ms: 200,
                 ..CurveConfig::default()
             },
             dock_hide: CurveConfig {
