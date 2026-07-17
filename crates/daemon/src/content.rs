@@ -178,11 +178,11 @@ pub(crate) const STRETCH_K: f32 = 120.0;
 pub(crate) const STRETCH_C: f32 = 6.5;
 /// Dock icons are small (a few dozen px), so their deformation gets a
 /// gain over the raw factor or it reads as nothing.
-const DOCK_STRETCH_GAIN: f32 = 2.0;
+const DOCK_STRETCH_GAIN: f32 = 1.6;
 /// The box content spans hundreds of px, so it takes the raw factor
-/// *down* — tuned live: the dock at 2x is right; the content stepped
-/// 1x -> 0.5x -> 0.3x.
-const CONTENT_STRETCH_GAIN: f32 = 0.3;
+/// *down* — tuned live: the dock landed at 1.6x; the content stepped
+/// 1x -> 0.5x -> 0.3x -> 0.22x.
+const CONTENT_STRETCH_GAIN: f32 = 0.22;
 
 /// Gap between an open dock-folder box and the dock icon it springs from.
 const DOCK_BOX_GAP: f32 = 12.0;
