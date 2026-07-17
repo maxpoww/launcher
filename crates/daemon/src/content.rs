@@ -301,12 +301,15 @@ pub fn layout(
     // last `float_gap` of travel — its shape never changes. Dock↔Open:
     // it grows upward from the pinned floating bottom.
     let card_h = (extent - float_gap).max(dock_h);
-    // The box content is laid out once at its fully-open position and
-    // never moves — the opening card just uncovers it. `content_top` is
+    // Content is SHAPED at its fully-open geometry (`content_top` is
     // where the grid begins when open; `content_bottom` the pinned card
-    // bottom. Only the card rect and the dock ride `card_top`/`extent`.
+    // bottom) so rows never reflow mid-animation — then translated by
+    // `y_off` so it rides the card: rising from the bottom edge as it
+    // opens, sinking back into it as it closes (the reveal band clips
+    // whatever sits past the card interior).
     let content_top = h - (config.window.height + config.window.bottom_margin) as f32;
     let content_bottom = h - float_gap;
+    let y_off = (card_top - content_top).max(0.0);
     // Docked (a pure bar), the icon columns stay live all the way to the
     // screen edge so the floating gap is clickable; open, they stop at
     // the dock-band bottom and the grid takes over below.
@@ -335,7 +338,7 @@ pub fn layout(
     // box dynamically with the query so layout just anchors the y position.
     let search_box = Rect::new(
         (w - SEARCH_W_MIN) / 2.0,
-        content_bottom - GRID_BOTTOM_PAD - SEARCH_H,
+        content_bottom - GRID_BOTTOM_PAD - SEARCH_H + y_off,
         SEARCH_W_MIN,
         SEARCH_H,
     );
@@ -370,11 +373,11 @@ pub fn layout(
         // Apps stays full-width even with a box open (the magnified box
         // fills the whole grid, drawn as an overlay in `scene`).
         let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
-        let title_pos = (grid_x0 + 8.0, y);
+        let title_pos = (grid_x0 + 8.0, y + y_off);
         y += SECTION_TITLE_H;
         let viewport = Rect::new(
             grid_x0,
-            y,
+            y + y_off,
             cols as f32 * GRID_CELL_W,
             rows as f32 * GRID_CELL_H,
         );
@@ -1014,10 +1017,17 @@ pub fn scene(
     }
 
     // Search widget: "Filter" pill button that morphs into an expanding
-    // search box. search_expand drives the open animation (0→1). Hidden
-    // while docked — the bar is all there is until the box grows a
-    // content area below the dock row.
+    // search box. search_expand drives the open animation (0→1). Rides
+    // the card with the rest of the content, clipped to the reveal band
+    // so it sinks into the card's bottom edge while closing.
+    // (Built here, pushed after the section grids so `scene.grids[s]`
+    // keeps indexing the sections.)
+    let mut search_grid: Option<GridContent> = None;
     if layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 {
+        let mut sgrid = GridContent {
+            clip: reveal_rect,
+            ..Default::default()
+        };
         let btn = layout.search_btn;
         let boxx = layout.search_box;
         let cx = w / 2.0;
@@ -1038,7 +1048,7 @@ pub fn scene(
             .min(card_w - 2.0 * GRID_PAD_X);
         let sw = lerp(btn.w, content_w, search_expand);
         let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
-        scene.rects.push(RectInst {
+        sgrid.rects.push(RectInst {
             rect: draw_rect,
             radius: SEARCH_H / 2.0,
             color: box_color,
@@ -1046,7 +1056,7 @@ pub fn scene(
 
         if search_expand < 0.5 {
             // Compact button: "Search" label.
-            scene.labels.push(Label {
+            sgrid.labels.push(Label {
                 text: "Search".to_string(),
                 pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
                 max_w: btn.w,
@@ -1055,7 +1065,7 @@ pub fn scene(
                 centered: true,
                 dim: false,
                 cache: true,
-                clip: None,
+                clip: Some(reveal_clip(draw_rect)),
             });
         } else {
             // Expanded: centered query (or dim placeholder) with a real
@@ -1067,7 +1077,7 @@ pub fn scene(
             } else {
                 (query.to_string(), false)
             };
-            scene.labels.push(Label {
+            sgrid.labels.push(Label {
                 text,
                 pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
                 max_w: sw - 2.0 * SEARCH_PAD_X,
@@ -1076,7 +1086,7 @@ pub fn scene(
                 centered: true,
                 dim,
                 cache: query.is_empty(),
-                clip: Some(draw_rect),
+                clip: Some(reveal_clip(draw_rect)),
             });
             // The caret rides the centered text's right edge while
             // typing — only once the morph has (nearly) landed, so it
@@ -1084,13 +1094,14 @@ pub fn scene(
             if !query.is_empty() && search_expand > 0.9 {
                 let caret_x = (cx + query_px / 2.0 + 3.0).min(draw_rect.x + sw - 8.0);
                 let t = config.theme.text_rgba();
-                scene.rects.push(RectInst {
+                sgrid.rects.push(RectInst {
                     rect: Rect::new(caret_x, boxx.y + 6.0, 1.5, SEARCH_H - 12.0),
                     radius: 0.75,
                     color: [t[0], t[1], t[2], 0.9],
                 });
             }
         }
+        search_grid = Some(sgrid);
     }
 
     // The three sections: title, grid cells with per-section horizontal
@@ -1403,6 +1414,9 @@ pub fn scene(
             }
         }
     }
+    if let Some(g) = search_grid {
+        scene.grids.push(g);
+    }
 
     // Magnified open box: a rounded panel that grows from the clicked tile
     // (`group_origin`) to fill the Apps grid, with the member icons in a
@@ -1684,7 +1698,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(s.grids.len(), N_SECTIONS);
+        // The section grids lead (indexable by section); the clipped
+        // search-widget grid follows them.
+        assert!(s.grids.len() >= N_SECTIONS);
         let apps_grid = &s.grids[SECTION_APPS];
         assert!(!apps_grid.icons.is_empty());
         assert_eq!(apps_grid.icons.len(), apps_grid.labels.len());
