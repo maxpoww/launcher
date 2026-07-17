@@ -240,6 +240,9 @@ pub(crate) const RIPPLE_DAMP: f32 = 5.5;
 pub(crate) const SPLASH_GAIN: f32 = 3.0;
 /// Cap on the ripple's contribution to an icon's scale (±).
 pub(crate) const RIPPLE_MAX: f32 = 0.04;
+/// Running-indicator dot radius (px) and its gap below the icon baseline.
+const DOCK_DOT_R: f32 = 2.0;
+const DOCK_DOT_GAP: f32 = 3.0;
 /// Peak scale of a grid icon under the cursor.
 const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
@@ -708,6 +711,10 @@ pub struct FrameInput<'a> {
     /// Dock display order: maps slot position → entry index. Empty slice
     /// renders no dock icons (safe default for tests / pre-load frames).
     pub dock_order: &'a [usize],
+    /// Per-slot running flag, aligned with `dock_order`: `true` draws the
+    /// macOS-style running indicator dot under that icon. Short/empty
+    /// slice ⇒ no dots.
+    pub dock_running: &'a [bool],
     /// Active drag for ghost icon and insertion indicator; `None` at rest.
     pub drag: Option<DragFrame>,
     /// Hint shown centered in an empty Install section (index state /
@@ -819,6 +826,7 @@ pub fn scene(
         layers,
         files_path,
         dock_order,
+        dock_running,
         drag,
         install_hint,
         busy,
@@ -963,6 +971,21 @@ pub fn scene(
         let slot_rect = &layout.dock_slots[slot];
         let vcx = dock_vcx[slot] + dock_slide.get(slot).copied().unwrap_or(0.0) * DOCK_SLOT;
         let baseline = slot_rect.y + slot_rect.h;
+        // Running indicator (macOS dot): a small dot beneath the icon.
+        // Drawn before the icon so a magnified icon never hides it.
+        if dock_running.get(slot).copied().unwrap_or(false) {
+            let fg = config.theme.text_rgba();
+            scene.rects.push(RectInst {
+                rect: Rect::new(
+                    vcx - DOCK_DOT_R,
+                    baseline - DOCK_DOT_GAP - DOCK_DOT_R,
+                    DOCK_DOT_R * 2.0,
+                    DOCK_DOT_R * 2.0,
+                ),
+                radius: DOCK_DOT_R,
+                color: [fg[0], fg[1], fg[2], 0.55],
+            });
+        }
         let scale = dock_scales[slot];
         let size = (DOCK_ICON * scale).min(slot_rect.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
         // AGUA: the icon elongates/compresses vertically about its
@@ -1709,6 +1732,7 @@ mod tests {
                 description: None,
                 exec: "true".into(),
                 icon: None,
+                startup_wm_class: None,
                 needs_terminal: false,
                 path: None,
             })

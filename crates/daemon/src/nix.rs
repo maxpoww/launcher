@@ -302,6 +302,7 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
                 description: None,
                 exec: String::new(),
                 icon: Some(actual),
+                startup_wm_class: None,
                 needs_terminal: false,
                 path: None,
             })
@@ -382,6 +383,7 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
                         description: None,
                         exec: String::new(),
                         icon: Some(icon),
+                        startup_wm_class: None,
                         needs_terminal: false,
                         path: None,
                     });

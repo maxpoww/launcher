@@ -666,6 +666,12 @@ impl App {
                 (self.box_page.min(pages - 1), pages)
             })
             .unwrap_or((0, 1));
+        // Per-slot running flags for the macOS indicator dot.
+        let dock_running: Vec<bool> = self
+            .dock_order
+            .iter()
+            .map(|e| self.running.contains_key(e))
+            .collect();
         let scene = content::scene(
             &self.config,
             &layout,
@@ -698,6 +704,7 @@ impl App {
                 layers: &self.icon_layers,
                 files_path: &self.files_path_display(),
                 dock_order: &self.dock_order,
+                dock_running: &dock_running,
                 drag: drag_frame,
                 install_hint: self.install_hint(),
                 busy: &busy,

@@ -25,6 +25,11 @@ pub struct AppEntry {
     pub exec: String,
     /// Icon name for lookup via `freedesktop-icons`.
     pub icon: Option<String>,
+    /// `StartupWMClass=` if set — the Wayland `app_id`/X11 class the app's
+    /// windows report, used to tell whether this app is running (matches a
+    /// live compositor window to this dock icon). Falls back to the
+    /// desktop-file id when absent.
+    pub startup_wm_class: Option<String>,
     /// Whether `Terminal=true` was set (needs a terminal emulator wrapper).
     pub needs_terminal: bool,
     /// Absolute path of the source `.desktop` file; `None` for synthetic
@@ -93,6 +98,7 @@ impl DesktopIndex {
                 description,
                 exec,
                 icon: entry.icon().map(str::to_string),
+                startup_wm_class: entry.startup_wm_class().map(str::to_string),
                 needs_terminal: entry.terminal(),
                 path: Some(entry.path.clone()),
                 id: id.clone(),

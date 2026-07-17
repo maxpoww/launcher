@@ -251,6 +251,7 @@ impl App {
             description: Some(version),
             exec: String::new(),
             icon: None,
+            startup_wm_class: None,
             needs_terminal: false,
             path: None,
         };
@@ -459,6 +460,7 @@ impl App {
                 description: Some(version),
                 exec: String::new(),
                 icon: None,
+                startup_wm_class: None,
                 needs_terminal: false,
                 path: None,
             };

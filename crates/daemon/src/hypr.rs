@@ -207,6 +207,53 @@ pub fn focused_monitor() -> anyhow::Result<MonitorInfo> {
         .ok_or_else(|| anyhow!("no focused monitor in Hyprland reply"))
 }
 
+/// One live compositor window, for matching against dock apps.
+pub struct RunningWindow {
+    /// Window address (`0x…`) — the focus/activate handle.
+    pub address: String,
+    /// The app_id/class the window reports. `initialClass` is preferred
+    /// (stable across title-driven class changes), falling back to
+    /// `class`.
+    pub class: String,
+}
+
+/// All mapped, non-hidden windows with their class and address. The
+/// currently-focused window is moved to the front so a click on a
+/// running app can activate the most-recently-used window first.
+/// Empty (not an error) when Hyprland is unreachable.
+pub fn running_windows() -> Vec<RunningWindow> {
+    let Ok(reply) = request("j/clients") else {
+        return Vec::new();
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+        return Vec::new();
+    };
+    let active = active_window();
+    let mut out: Vec<RunningWindow> = clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| {
+            c["mapped"].as_bool().unwrap_or(false) && !c["hidden"].as_bool().unwrap_or(false)
+        })
+        .filter_map(|c| {
+            let address = c["address"].as_str()?.to_owned();
+            let class = c["initialClass"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| c["class"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            (!class.is_empty()).then_some(RunningWindow { address, class })
+        })
+        .collect();
+    if let Some(active) = active {
+        // Stable partition: the focused window's app leads.
+        out.sort_by_key(|w| w.address != active);
+    }
+    out
+}
+
 /// Result of a dock-zone evaluation.
 pub struct ZoneState {
     /// A window overlaps the zone (or is fullscreen): the dock dodges.

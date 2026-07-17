@@ -83,6 +83,7 @@ impl App {
             description: Some(id.to_owned()),
             exec,
             icon: None,
+            startup_wm_class: None,
             needs_terminal: false,
             path: None,
         };

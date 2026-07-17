@@ -257,6 +257,7 @@ fn main() -> anyhow::Result<()> {
         usage: usage::UsageDb::load(),
         pins: pins::PinDb::load(),
         dock_order: Vec::new(),
+        running: HashMap::new(),
         last_rescan: Instant::now(),
         bounce: None,
         placeholders: Vec::new(),
@@ -609,6 +610,11 @@ pub struct App {
     /// Dock display order: maps slot index → entry index. Rebuilt
     /// whenever entries are loaded or pins change.
     dock_order: Vec<usize>,
+    /// Running apps (macOS dock model): entry index → its live window
+    /// addresses, most-recently-used first. Presence ⇒ the app is
+    /// running (shows the indicator dot; a click activates instead of
+    /// launching). Rebuilt from Hyprland on window open/close.
+    running: HashMap<usize, Vec<String>>,
     /// When the last rescan was requested, for the reveal cooldown.
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
@@ -786,6 +792,10 @@ impl App {
     /// and the re-tiling they cause all emit *no* Hyprland event
     /// (verified on socket2), so events alone can never be sufficient.
     fn on_layout_changed(&mut self) {
+        // Window open/close/move all land here — refresh the running set
+        // regardless of intellihide (the macOS dot + activate-on-click
+        // need it even when the dock never dodges).
+        self.refresh_running();
         if !self.config.input.intellihide {
             return;
         }
@@ -929,6 +939,8 @@ impl App {
         self.gesture.pressed = None;
         self.gesture.dragging = None;
         self.recompute_dock_order();
+        // Entry indices just changed — re-match live windows to them.
+        self.refresh_running();
         self.recompute_removable();
         // Boxes left with fewer than two members after uninstalls are
         // deleted (and their grid slot forgotten) so nothing undersized
@@ -1240,6 +1252,60 @@ impl App {
     /// An icon-carrier asset's (texture layer, placeholder flag).
     pub(crate) fn asset(&self, id: &str) -> Option<(u32, bool)> {
         self.assets.get(id).copied()
+    }
+
+    /// The keys a window class may match this entry by, lowercased: its
+    /// `StartupWMClass`, its desktop-file id and the id's last dotted
+    /// segment (`org.mozilla.firefox` → `firefox`), and the exec's
+    /// program basename. Only real apps can be running windows.
+    fn app_match_keys(entry: &AppEntry, kind: apps::EntryKind) -> Vec<String> {
+        if kind != apps::EntryKind::App {
+            return Vec::new();
+        }
+        let mut keys: Vec<String> = Vec::new();
+        let mut push = |s: &str| {
+            let s = s.trim().to_lowercase();
+            if !s.is_empty() && !keys.contains(&s) {
+                keys.push(s);
+            }
+        };
+        if let Some(wm) = &entry.startup_wm_class {
+            push(wm);
+        }
+        push(&entry.id);
+        if let Some(tail) = entry.id.rsplit('.').next() {
+            push(tail);
+        }
+        // First shell token of Exec, minus any path, minus a trailing
+        // extension (`/usr/bin/foo.sh` → `foo`).
+        if let Some(prog) = entry.exec.split_whitespace().next() {
+            let base = prog.rsplit('/').next().unwrap_or(prog);
+            push(base.split('.').next().unwrap_or(base));
+        }
+        keys
+    }
+
+    /// Rebuild [`Self::running`] from Hyprland's live window list, matching
+    /// each window's class to a dock/grid app. Cheap and best-effort: no
+    /// Hyprland ⇒ every app reads as not-running (plain launcher behavior).
+    fn refresh_running(&mut self) {
+        // class (lowercased) → entry index, from every real app once.
+        let mut by_class: HashMap<String, usize> = HashMap::new();
+        for (idx, (entry, &kind)) in self.entries.iter().zip(&self.kinds).enumerate() {
+            for key in Self::app_match_keys(entry, kind) {
+                by_class.entry(key).or_insert(idx);
+            }
+        }
+        let mut running: HashMap<usize, Vec<String>> = HashMap::new();
+        for win in hypr::running_windows() {
+            if let Some(&idx) = by_class.get(&win.class.to_lowercase()) {
+                running.entry(idx).or_default().push(win.address);
+            }
+        }
+        if running != self.running {
+            self.running = running;
+            self.schedule_frame();
+        }
     }
 
     fn recompute_dock_order(&mut self) {

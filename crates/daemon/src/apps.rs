@@ -177,6 +177,7 @@ fn home_folders() -> Vec<AppEntry> {
                 description: Some(path.clone()),
                 exec: format!("xdg-open {}", crate::launch::shell_quote(&path)),
                 icon: Some("folder".to_owned()),
+                startup_wm_class: None,
                 needs_terminal: false,
                 path: None,
             })
@@ -213,6 +214,7 @@ fn icon_assets() -> Vec<AppEntry> {
             description: None,
             exec: "true".to_owned(),
             icon: Some(icon.to_owned()),
+            startup_wm_class: None,
             needs_terminal: false,
             path: None,
         })
@@ -244,6 +246,7 @@ fn managed_cli_tiles(apps: &[AppEntry]) -> Vec<AppEntry> {
                 crate::launch::banner_cmd(&attr, None, &attr)
             ),
             icon: Some("package-x-generic".to_owned()),
+            startup_wm_class: None,
             needs_terminal: true,
             path: None,
         })
