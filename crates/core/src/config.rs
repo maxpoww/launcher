@@ -206,7 +206,10 @@ impl Default for AnimationConfig {
             dock_reveal: CurveConfig {
                 kind: CurveKind::Spring,
                 spring_stiffness: 2250.0,
-                spring_damping: 75.0,
+                // Slightly overdamped (ζ≈1.16): the dock bar slides up to
+                // rest and stops — no overshoot bounce on a plain summon.
+                // Only this curve changed; the box close bounce is untouched.
+                spring_damping: 110.0,
                 spring_mass: 1.0,
                 ..CurveConfig::default()
             },
