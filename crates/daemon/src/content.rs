@@ -199,6 +199,12 @@ pub const MAGNIFY_HEADROOM: f32 = 24.0;
 /// past the card edges before the surface boundary clips it. The card
 /// itself stays centered and unchanged.
 pub const DRAG_MARGIN_X: f32 = 80.0;
+/// AGUA silhouette: the docked basin keeps only this side margin, so
+/// the resting bar spreads wider than the risen box.
+const BASIN_MARGIN_X: f32 = 16.0;
+/// Volume conservation: how much of the vertical stretch converts to
+/// horizontal narrowing (and the landing squash to a widening spill).
+const SPILL: f32 = 0.6;
 pub const DRAG_MARGIN_TOP: f32 = 56.0;
 /// Peak scale of a dock icon directly under the cursor.
 const DOCK_MAGNIFY: f32 = 1.5;
@@ -266,6 +272,11 @@ pub struct SectionLayout {
 /// Geometry shared by scene assembly and hit-testing.
 #[derive(Debug)]
 pub struct Layout {
+    /// Card left edge / width for the current extent: the AGUA
+    /// silhouette — wide at rest in the dock basin, gathered to the box
+    /// width as it rises, spilling wider on the landing squash.
+    pub card_x: f32,
+    pub card_w: f32,
     /// Card top edge in surface coordinates for the current extent.
     pub card_top: f32,
     /// Card height for the current extent: its bottom edge is pinned a
@@ -328,6 +339,16 @@ pub fn layout(
     // last `float_gap` of travel — its shape never changes. Dock↔Open:
     // it grows upward from the pinned floating bottom.
     let card_h = (extent - float_gap).max(dock_h);
+    // AGUA silhouette: at rest the water spreads wide in its basin;
+    // rising gathers it to the box width; the live stretch conserves
+    // volume — taller is narrower, and the landing squash spills wider.
+    let full_extent = (config.window.height + config.window.bottom_margin) as f32;
+    let dock_extent = dock_h + float_gap;
+    let rise = ((extent - dock_extent) / (full_extent - dock_extent).max(1.0)).clamp(0.0, 1.0);
+    let basin_w = w - 2.0 * BASIN_MARGIN_X;
+    let gathered = basin_w + (card_w - basin_w) * rise;
+    let card_w_now = (gathered * (1.0 - (stretch - 1.0) * SPILL)).min(w);
+    let card_x = (w - card_w_now) / 2.0;
     // Content is SHAPED at its fully-open geometry (`content_top` is
     // where the grid begins when open; `content_bottom` the pinned card
     // bottom) so rows never reflow mid-animation — then translated by
@@ -459,6 +480,8 @@ pub fn layout(
     });
 
     Layout {
+        card_x,
+        card_w: card_w_now,
         card_top,
         card_h,
         dock_hit_bottom,
@@ -813,9 +836,9 @@ pub fn scene(
     let reveal_top = layout.card_top + dock_h;
     let reveal_bottom = layout.card_top + card_h;
     let reveal_rect = Rect::new(
-        DRAG_MARGIN_X,
+        layout.card_x,
         reveal_top,
-        card_w,
+        layout.card_w,
         (reveal_bottom - reveal_top).max(0.0),
     );
     let reveal_clip = |r: Rect| -> Rect {
@@ -832,9 +855,10 @@ pub fn scene(
         _ => 0.0,
     };
 
-    // Card background (centered in the surface's drag margin).
+    // Card background: the AGUA silhouette — wide basin at rest,
+    // gathered to the box width risen, spilling on the landing.
     scene.rects.push(RectInst {
-        rect: Rect::new(DRAG_MARGIN_X, layout.card_top, card_w, card_h),
+        rect: Rect::new(layout.card_x, layout.card_top, layout.card_w, card_h),
         radius: config.theme.corner_radius,
         color: config.theme.background_rgba(),
     });
