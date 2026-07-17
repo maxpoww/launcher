@@ -166,12 +166,16 @@ const SEARCH_LINE_PX: f32 = 20.0;
 /// it): the parallax depth of the rise-from-the-bottom-edge animation.
 const RIDE_PARALLAX: f32 = 1.18;
 
-/// AGUA squash & stretch: content deformation per px/s of card speed,
-/// and its caps (elongation while rising, compression while dropping).
-/// Anchored at the card's pinned bottom — like water in a glass.
-pub(crate) const STRETCH_PER_PXS: f32 = 0.000_01;
-pub(crate) const STRETCH_MAX: f32 = 0.05;
-pub(crate) const SQUASH_MAX: f32 = 0.03;
+/// AGUA squash & stretch: the card's speed drives a small underdamped
+/// stretch spring anchored at the pinned bottom — content elongates
+/// while rising, keeps sloshing briefly after the card lands, and
+/// relaxes to exactly 1.0. Deformation per px/s of card speed, its
+/// caps, and the follower spring (ζ≈0.3: a visible wobble or two).
+pub(crate) const STRETCH_PER_PXS: f32 = 0.000_02;
+pub(crate) const STRETCH_MAX: f32 = 0.10;
+pub(crate) const SQUASH_MAX: f32 = 0.05;
+pub(crate) const STRETCH_K: f32 = 120.0;
+pub(crate) const STRETCH_C: f32 = 6.5;
 
 /// Gap between an open dock-folder box and the dock icon it springs from.
 const DOCK_BOX_GAP: f32 = 12.0;

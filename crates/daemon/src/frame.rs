@@ -150,12 +150,27 @@ impl App {
 
         let was_animating = self.ui.is_animating();
         let animating = self.ui.tick(dt);
-        // AGUA: the content deforms with the card's live speed — rising
-        // fast stretches it upward from the pinned bottom, dropping
-        // squashes it; at rest it is exactly 1.0.
-        self.stretch = 1.0
+        // AGUA: the card's speed pours energy into a small underdamped
+        // stretch spring (anchored at the pinned bottom edge) — content
+        // elongates while rising and keeps sloshing briefly after the
+        // card lands, relaxing to exactly 1.0.
+        let stretch_target = 1.0
             + (self.ui.extent_velocity() * content::STRETCH_PER_PXS)
                 .clamp(-content::SQUASH_MAX, content::STRETCH_MAX);
+        let mut remaining = dt.min(0.25);
+        while remaining > 0.0 {
+            let h = remaining.min(1.0 / 240.0);
+            let accel = -content::STRETCH_K * (self.stretch - stretch_target)
+                - content::STRETCH_C * self.stretch_vel;
+            self.stretch_vel += accel * h;
+            self.stretch += self.stretch_vel * h;
+            remaining -= h;
+        }
+        let stretch_active = (self.stretch - 1.0).abs() > 0.000_5 || self.stretch_vel.abs() > 0.005;
+        if !stretch_active && !animating {
+            self.stretch = 1.0;
+            self.stretch_vel = 0.0;
+        }
         if animating {
             // The card is moving under a possibly stationary pointer:
             // keep the hover highlight glued to what is really beneath it.
@@ -659,6 +674,11 @@ impl App {
                 // (a dock stack lives in the Dock state, not Open).
                 || (self.stack_open() && self.box_pager.is_settling()))
         {
+            self.dirty = true;
+        }
+        // AGUA: the water keeps sloshing briefly after the card lands —
+        // keep frames coming until the stretch spring rests.
+        if stretch_active {
             self.dirty = true;
         }
     }
