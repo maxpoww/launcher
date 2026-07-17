@@ -620,6 +620,7 @@ impl App {
                     None
                 },
                 query_px,
+                stretch: self.stretch,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()
                 } else {

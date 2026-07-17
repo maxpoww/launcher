@@ -606,6 +606,10 @@ pub struct FrameInput<'a> {
     pub hover: Option<Hit>,
     /// Shaped pixel width of the live query (the caret anchor).
     pub query_px: f32,
+    /// AGUA stretch factor (1.0 at rest): dock icons slosh vertically
+    /// about their baseline with the card's motion — on the dock
+    /// reveal, and at the top of the card as an open lands.
+    pub stretch: f32,
     /// Dock slot whose name tooltip should show — gated behind a hover
     /// dwell (the highlight is immediate; the tooltip waits). `None`
     /// while the dwell hasn't elapsed or the pointer is elsewhere.
@@ -738,6 +742,7 @@ pub fn scene(
     let FrameInput {
         hover,
         query_px,
+        stretch,
         dock_tooltip,
         alpha,
         pointer,
@@ -891,11 +896,13 @@ pub fn scene(
         let baseline = slot_rect.y + slot_rect.h;
         let scale = dock_scales[slot];
         let size = (DOCK_ICON * scale).min(slot_rect.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
+        // AGUA: the icon elongates/compresses vertically about its
+        // baseline with the card's motion — a water drop on the bar.
         let icon_rect = Rect::new(
             vcx - size / 2.0,
-            baseline - size - lift(entry_idx),
+            baseline - (size + lift(entry_idx)) * stretch,
             size,
-            size,
+            size * stretch,
         );
         // A drag hovering this icon's center (a fold target) rings it.
         if drag.and_then(|d| d.over_dock) == Some(slot) {
