@@ -162,6 +162,10 @@ const SEARCH_GAP: f32 = 7.0;
 pub(crate) const SEARCH_FONT_PX: f32 = 15.0;
 const SEARCH_LINE_PX: f32 = 20.0;
 
+/// How much the content ride trails the opening card (1.0 = glued to
+/// it): the parallax depth of the rise-from-the-bottom-edge animation.
+const RIDE_PARALLAX: f32 = 1.18;
+
 /// Gap between an open dock-folder box and the dock icon it springs from.
 const DOCK_BOX_GAP: f32 = 12.0;
 /// Rest size of a dock folder's open box (a square, ~matching a grid box).
@@ -309,7 +313,10 @@ pub fn layout(
     // whatever sits past the card interior).
     let content_top = h - (config.window.height + config.window.bottom_margin) as f32;
     let content_bottom = h - float_gap;
-    let y_off = (card_top - content_top).max(0.0);
+    // Parallax: the content trails the card a touch (it sits deeper in
+    // the stack) and catches up exactly as the card lands — the offset
+    // converges to zero at full extent either way.
+    let y_off = (card_top - content_top).max(0.0) * RIDE_PARALLAX;
     // Docked (a pure bar), the icon columns stay live all the way to the
     // screen edge so the floating gap is clickable; open, they stop at
     // the dock-band bottom and the grid takes over below.
