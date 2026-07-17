@@ -243,6 +243,8 @@ pub(crate) const RIPPLE_MAX: f32 = 0.04;
 /// Running-indicator dot radius (px) and its gap below the icon baseline.
 const DOCK_DOT_R: f32 = 2.0;
 const DOCK_DOT_GAP: f32 = 3.0;
+/// Width (px) of the divider between the pinned and running-unpinned zones.
+const DOCK_DIVIDER_W: f32 = 1.5;
 /// Peak scale of a grid icon under the cursor.
 const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
@@ -715,6 +717,9 @@ pub struct FrameInput<'a> {
     /// macOS-style running indicator dot under that icon. Short/empty
     /// slice ⇒ no dots.
     pub dock_running: &'a [bool],
+    /// Dock slot at which the running-but-unpinned zone begins: a thin
+    /// divider is drawn just left of it. `None` (or 0) draws no divider.
+    pub dock_divider: Option<usize>,
     /// Active drag for ghost icon and insertion indicator; `None` at rest.
     pub drag: Option<DragFrame>,
     /// Hint shown centered in an empty Install section (index state /
@@ -827,6 +832,7 @@ pub fn scene(
         files_path,
         dock_order,
         dock_running,
+        dock_divider,
         drag,
         install_hint,
         busy,
@@ -946,6 +952,30 @@ pub fn scene(
         }
         centers
     };
+    // Divider between the pinned zone and the running-but-unpinned zone
+    // (macOS): a short, faint vertical line centered between the two icons.
+    if let Some(div) = dock_divider {
+        if div >= 1 && div < layout.dock_slots.len() {
+            if let (Some(&left), Some(&right), Some(slot)) = (
+                dock_vcx.get(div - 1),
+                dock_vcx.get(div),
+                layout.dock_slots.get(div),
+            ) {
+                let inset = slot.h * 0.22;
+                let fg = config.theme.text_rgba();
+                scene.rects.push(RectInst {
+                    rect: Rect::new(
+                        (left + right) / 2.0 - DOCK_DIVIDER_W / 2.0,
+                        slot.y + inset,
+                        DOCK_DIVIDER_W,
+                        (slot.h - inset * 2.0).max(1.0),
+                    ),
+                    radius: DOCK_DIVIDER_W / 2.0,
+                    color: [fg[0], fg[1], fg[2], 0.22],
+                });
+            }
+        }
+    }
     // Hover highlight (suppressed while dragging).
     if drag.is_none() {
         if let Some(Hit::DockIcon(i)) = hover {

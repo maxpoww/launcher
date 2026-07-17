@@ -259,6 +259,7 @@ fn main() -> anyhow::Result<()> {
         pins: pins::PinDb::load(),
         dock_order: Vec::new(),
         running: HashMap::new(),
+        dock_divider: None,
         last_rescan: Instant::now(),
         bounce: None,
         placeholders: Vec::new(),
@@ -620,6 +621,10 @@ pub struct App {
     /// running (shows the indicator dot; a click activates instead of
     /// launching). Rebuilt from Hyprland on window open/close.
     running: HashMap<usize, Vec<String>>,
+    /// Dock slot at which the running-but-unpinned zone begins (the
+    /// divider position), or `None` when no such apps are shown. Slots
+    /// `[divider..]` are ephemeral running apps that vanish on quit.
+    dock_divider: Option<usize>,
     /// When the last rescan was requested, for the reveal cooldown.
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
@@ -1314,6 +1319,9 @@ impl App {
         }
         if running != self.running {
             self.running = running;
+            // The unpinned-running dock zone depends on this set, so rebuild
+            // the dock order (adds/removes ephemeral running icons + divider).
+            self.recompute_dock_order();
             self.schedule_frame();
         }
     }
@@ -1341,8 +1349,22 @@ impl App {
                 }
             }
         }
-        // Only pinned apps ride the dock; everything else lives in the Apps
-        // grid (so an app is in exactly one place, never both).
+        // macOS: a running app that isn't pinned rides the dock too, after
+        // a divider, and vanishes when it quits. Entry order ≈ alphabetical
+        // (entries are name-sorted), so the zone stays stable as unrelated
+        // apps come and go rather than reshuffling.
+        let pinned_count = self.dock_order.len();
+        let mut running_unpinned: Vec<usize> = self
+            .running
+            .keys()
+            .copied()
+            .filter(|i| {
+                self.kinds.get(*i) == Some(&apps::EntryKind::App) && !self.dock_order.contains(i)
+            })
+            .collect();
+        running_unpinned.sort_unstable();
+        self.dock_divider = (!running_unpinned.is_empty()).then_some(pinned_count);
+        self.dock_order.extend(running_unpinned);
         // No truncation here — layout() clamps to the available width.
     }
 

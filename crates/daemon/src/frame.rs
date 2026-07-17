@@ -705,6 +705,7 @@ impl App {
                 files_path: &self.files_path_display(),
                 dock_order: &self.dock_order,
                 dock_running: &dock_running,
+                dock_divider: self.dock_divider,
                 drag: drag_frame,
                 install_hint: self.install_hint(),
                 busy: &busy,
