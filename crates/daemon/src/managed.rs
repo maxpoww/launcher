@@ -1,19 +1,20 @@
-//! The waverunner-managed home-manager package list — the apps the user
-//! installed through the launcher.
+//! The waverunner-managed package list — apps the user installed through
+//! the launcher via `nix profile`.
 //!
-//! The **source of truth** is `~/.config/home-manager/waverunner-packages.nix`
-//! (`{ pkgs }: with pkgs; [ … ]`) — the file home-manager reads and the one
-//! that travels to a new machine. A JSON sidecar in the daemon's data dir
-//! caches each attr's shipped desktop-entry ids, so an uninstall drag can
-//! map a launched app back to the attr that installs it. Every mutation
-//! regenerates the `.nix`; the nix worker then runs `home-manager switch`
-//! to apply it. Writes are best-effort (logged, never fatal).
+//! The **declarative record** lives at
+//! `~/.config/home-manager/waverunner-packages.nix` — a home-manager
+//! module that travels to a new machine for reproducibility. Actual
+//! installation and removal use `nix profile install/remove`; the `.nix`
+//! is regenerated on every mutation as a portable snapshot only.
+//! A JSON sidecar in the daemon's data dir caches each attr's shipped
+//! desktop-entry ids so an uninstall drag can map an app back to the attr
+//! that provides it. Writes are best-effort (logged, never fatal).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 /// One waverunner-installed package.
 #[derive(Clone, Serialize, Deserialize)]
@@ -127,15 +128,16 @@ impl ManagedDb {
         self.save();
     }
 
-    /// Regenerate the `.nix` (home-manager's source) and the JSON sidecar.
+    /// Regenerate the declarative `.nix` snapshot and the JSON sidecar.
     fn save(&self) {
         let mut attrs: Vec<&str> = self.pkgs.iter().map(|p| p.attr.as_str()).collect();
         attrs.sort_unstable();
         let mut nix = String::from(
             "# Managed by waverunner — user-installed apps.\n\
              #\n\
-             # waverunner adds/removes attributes here on drag-install / uninstall,\n\
-             # then runs `home-manager switch`. Edit through the launcher.\n\
+             # Packages are installed/removed with `nix profile`; this file is a\n\
+             # portable snapshot. Import it in home.nix to reproduce this set on\n\
+             # another machine.\n\
              { pkgs, ... }:\n\n\
              {\n",
         );
@@ -167,26 +169,6 @@ pub fn snapshot() -> Vec<(String, Vec<String>)> {
         .into_iter()
         .map(|attr| (attr.clone(), vec![attr]))
         .collect()
-}
-
-/// Create a minimal `home.nix` if none exists so `home-manager switch`
-/// has an entry point. Idempotent — safe to call before every switch.
-pub(crate) fn bootstrap_home_nix() {
-    let dir = home_manager_dir();
-    let home_nix = dir.join("home.nix");
-    if home_nix.exists() {
-        return;
-    }
-    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_owned());
-    let home = std::env::var("HOME").unwrap_or_else(|_| format!("/home/{user}"));
-    let content = format!(
-        "{{ pkgs, ... }}:\n{{\n  home.username = \"{user}\";\n  home.homeDirectory = \"{home}\";\n  home.stateVersion = \"24.11\";\n\n  imports = [ ./waverunner-packages.nix ];\n}}\n"
-    );
-    if let Err(e) = std::fs::write(&home_nix, &content) {
-        warn!("could not bootstrap {}: {e}", home_nix.display());
-    } else {
-        info!("bootstrapped {}", home_nix.display());
-    }
 }
 
 /// `~/.config/home-manager` (respecting `XDG_CONFIG_HOME`).

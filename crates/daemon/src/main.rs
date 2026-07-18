@@ -1609,7 +1609,10 @@ impl App {
                 self.managed.add(&attr, desktop_ids);
                 self.recompute_removable();
                 self.busy_ids.insert(attr.clone());
-                self.nix.request(nix::Request::Switch { id: attr });
+                self.nix.request(nix::Request::Install {
+                    id: attr.clone(),
+                    attr,
+                });
                 self.refilter();
             }
             return;

@@ -266,7 +266,7 @@ impl App {
                     self.pins.unpin(&id);
                     self.recompute_removable();
                     self.busy_ids.insert(id.clone());
-                    self.nix.request(nix::Request::Switch { id });
+                    self.nix.request(nix::Request::Remove { id, attr });
                 } else {
                     debug!("{id} is not waverunner-managed; cannot uninstall");
                 }

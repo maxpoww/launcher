@@ -79,8 +79,8 @@ pub enum Event {
         icons: Vec<Vec<u8>>,
         placeholders: Vec<bool>,
     },
-    /// A `home-manager switch` finished. `id` echoes the request's cell
-    /// id (package attr on install, app id on uninstall).
+    /// A `nix profile install` or `remove` finished. `id` echoes the
+    /// request's cell id (package attr on install, app id on uninstall).
     Done { id: String, ok: bool },
     /// A `nix build` for an ephemeral "try it" run finished. `terminal`
     /// is read from the built package (a `.desktop` with `Terminal=true`,
@@ -102,12 +102,16 @@ pub enum Request {
     /// Fuzzy-rank the index against a query; answered with `Ranked`.
     /// Queued queries coalesce to the newest one.
     Rank { query: String },
-    /// Apply the standalone home-manager generation (`home-manager
-    /// switch`) after the daemon has rewritten `waverunner-packages.nix`
-    /// for an install or uninstall. `id` echoes to `Done { id, .. }` —
-    /// the grid cell (package attr on install, app id on uninstall) whose
-    /// busy / failed state the switch resolves.
-    Switch { id: String },
+    /// Install a package into the user's nix profile (`nix profile
+    /// install nixpkgs#attr`). `id` echoes to `Done { id, .. }` —
+    /// the grid cell whose busy / failed state the install resolves.
+    /// On the install path `id` == `attr`.
+    Install { id: String, attr: String },
+    /// Remove a package from the user's nix profile (`nix profile
+    /// remove`). `id` echoes to `Done { id, .. }` — the app cell
+    /// whose busy / failed state the removal resolves (on the uninstall
+    /// path `id` is the desktop id, not the attr).
+    Remove { id: String, attr: String },
     /// Realize (`nix build`) a package so it can be run ephemerally
     /// ("try it" — drag a package out of the box). Answered with
     /// `Done { id: attr, .. }`; the daemon spawns the actual run once the
@@ -213,9 +217,12 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                 // races the generation it applies, and a realize can't
                 // stampede the profile.
                 let event = match request {
-                    // The daemon has already rewritten waverunner-packages.nix.
-                    Request::Switch { id } => {
-                        let ok = home_manager_switch();
+                    Request::Install { id, attr } => {
+                        let ok = nix_profile_install(&attr);
+                        Event::Done { id, ok }
+                    }
+                    Request::Remove { id, attr } => {
+                        let ok = nix_profile_remove(&attr);
                         Event::Done { id, ok }
                     }
                     Request::Realize { attr } => {
@@ -688,29 +695,119 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
     candidates
 }
 
-/// `home-manager switch` — apply the current standalone home-manager
-/// generation, which imports the freshly rewritten
-/// `waverunner-packages.nix`. True on success. Runs on the mutation
-/// worker because a switch builds a generation and can take a while. A
-/// failing attr never touches the live profile (the switch is atomic);
-/// the daemon rolls the bad attr back out of the `.nix` on failure.
-fn home_manager_switch() -> bool {
-    crate::managed::bootstrap_home_nix();
-    info!("home-manager switch");
-    match Command::new("home-manager").arg("switch").output() {
+/// `nix profile install nixpkgs#attr` — add a package to the user's nix
+/// profile. True on success. Unfree packages require the env var.
+fn nix_profile_install(attr: &str) -> bool {
+    info!("nix profile install nixpkgs#{attr}");
+    match Command::new("nix")
+        .args(["profile", "install", "--impure", &format!("nixpkgs#{attr}")])
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
+        .output()
+    {
         Ok(out) if out.status.success() => true,
         Ok(out) => {
             warn!(
-                "home-manager switch failed: {}",
+                "nix profile install of {attr} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
             false
         }
         Err(e) => {
-            warn!("cannot run home-manager: {e}");
+            warn!("cannot run nix: {e}");
             false
         }
     }
+}
+
+/// `nix profile remove` — drop a package from the user's nix profile by
+/// locating its element via `nix profile list --json` (handles both the
+/// legacy array format and the current map format). True on success.
+fn nix_profile_remove(attr: &str) -> bool {
+    info!("nix profile remove for attr {attr}");
+    let list_out = match Command::new("nix")
+        .args(["profile", "list", "--json"])
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        Ok(out) => {
+            warn!(
+                "nix profile list failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return false;
+        }
+        Err(e) => {
+            warn!("cannot run nix: {e}");
+            return false;
+        }
+    };
+    let suffix = format!(".{attr}");
+    let matches = |path: &str| path == attr || path.ends_with(&suffix);
+    let Some(key) = profile_element_key(&list_out.stdout, matches) else {
+        warn!("attr {attr} not found in nix profile (already removed?)");
+        return false;
+    };
+    info!("nix profile remove element {key} (attr {attr})");
+    match Command::new("nix")
+        .args(["profile", "remove", &key])
+        .output()
+    {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            warn!(
+                "nix profile remove failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            warn!("cannot run nix: {e}");
+            false
+        }
+    }
+}
+
+/// Parse the profile element key (index string) from `nix profile list
+/// --json` output. The attrPath of the installed element ends with
+/// `.{attr}` for top-level packages (`legacyPackages.x86_64-linux.vlc`).
+/// Handles both the legacy `{"elements": [...]}` array form and the
+/// current `{"elements": {"0": {...}}}` map form as well as the array-
+/// at-toplevel form used by the newest nix builds.
+fn profile_element_key(json: &[u8], matches: impl Fn(&str) -> bool) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+
+    let attr_matches = |e: &serde_json::Value| {
+        // Nix uses "attrPath" (older) and "attrpath" (newer, snake-case).
+        e["attrPath"]
+            .as_str()
+            .or_else(|| e["attrpath"].as_str())
+            .is_some_and(&matches)
+    };
+
+    // Newest nix (2.24+): top-level array with an "index" field.
+    if let Some(arr) = v.as_array() {
+        return arr
+            .iter()
+            .find(|e| attr_matches(e))
+            .and_then(|e| e["index"].as_u64())
+            .map(|i| i.to_string());
+    }
+    // Older nix: {"elements": {"0": {...}, "1": {...}, ...}} (string-keyed map).
+    if let Some(map) = v["elements"].as_object() {
+        return map
+            .iter()
+            .find(|(_, e)| attr_matches(e))
+            .map(|(k, _)| k.clone());
+    }
+    // Oldest nix: {"elements": [...]} (array, index = position).
+    if let Some(arr) = v["elements"].as_array() {
+        return arr
+            .iter()
+            .enumerate()
+            .find(|(_, e)| attr_matches(e))
+            .map(|(i, _)| i.to_string());
+    }
+    None
 }
 
 /// What a `realize` produced: whether the build succeeded, whether the

@@ -334,8 +334,9 @@ impl App {
         self.managed.add(attr, desktop_ids);
         self.recompute_removable();
         self.busy_ids.insert(attr.to_owned());
-        self.nix.request(nix::Request::Switch {
+        self.nix.request(nix::Request::Install {
             id: attr.to_owned(),
+            attr: attr.to_owned(),
         });
     }
 
@@ -412,8 +413,9 @@ impl App {
         self.managed.add(attr, desktop_ids);
         self.recompute_removable();
         self.busy_ids.insert(attr.to_owned());
-        self.nix.request(nix::Request::Switch {
+        self.nix.request(nix::Request::Install {
             id: attr.to_owned(),
+            attr: attr.to_owned(),
         });
         self.refilter();
     }
