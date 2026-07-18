@@ -178,8 +178,10 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The focused monitor: geometry in layout pixels plus its active
-/// workspace id.
+/// The focused monitor: geometry in **logical** pixels plus its active
+/// workspace id. Hyprland reports monitor dimensions as physical pixels
+/// and window positions as logical pixels; dividing by scale brings them
+/// into the same coordinate space for the zone overlap check.
 pub struct MonitorInfo {
     pub x: f64,
     pub y: f64,
@@ -197,12 +199,18 @@ pub fn focused_monitor() -> anyhow::Result<MonitorInfo> {
         .into_iter()
         .flatten()
         .find(|m| m["focused"].as_bool().unwrap_or(false))
-        .map(|m| MonitorInfo {
-            x: m["x"].as_f64().unwrap_or(0.0),
-            y: m["y"].as_f64().unwrap_or(0.0),
-            w: m["width"].as_f64().unwrap_or(0.0),
-            h: m["height"].as_f64().unwrap_or(0.0),
-            active_ws: m["activeWorkspace"]["id"].as_i64().unwrap_or(-1),
+        .map(|m| {
+            // `width`/`height` are physical pixels; `at`/`size` in
+            // j/clients are logical pixels — divide by scale so both
+            // sides of the zone-overlap check are in the same space.
+            let scale = m["scale"].as_f64().unwrap_or(1.0).max(0.1);
+            MonitorInfo {
+                x: m["x"].as_f64().unwrap_or(0.0),
+                y: m["y"].as_f64().unwrap_or(0.0),
+                w: m["width"].as_f64().unwrap_or(0.0) / scale,
+                h: m["height"].as_f64().unwrap_or(0.0) / scale,
+                active_ws: m["activeWorkspace"]["id"].as_i64().unwrap_or(-1),
+            }
         })
         .ok_or_else(|| anyhow!("no focused monitor in Hyprland reply"))
 }

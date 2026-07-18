@@ -200,7 +200,9 @@ impl App {
             // (the timer's guard keeps it if the pointer is on the dock).
             if self.rest_hide_pending && self.ui.target() == Target::Dock {
                 self.rest_hide_pending = false;
-                self.schedule_hide_after(DOCK_REST_AFTER_CLOSE);
+                if !self.zone_free {
+                    self.schedule_hide_after(DOCK_REST_AFTER_CLOSE);
+                }
             }
         }
 

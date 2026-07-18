@@ -814,25 +814,26 @@ impl App {
         if !self.config.input.intellihide {
             return;
         }
-        // On any IPC failure, assume occupied: that is the plain
-        // auto-hide behavior the daemon has without intellihide.
-        let free = hypr::focused_monitor()
-            .and_then(|mon| {
-                let zone_w = self.config.window.width as f64;
-                let zone_h =
-                    (self.config.window.input_bar_height + self.config.window.bottom_margin) as f64;
-                let zone = (
-                    mon.x + (mon.w - zone_w) / 2.0,
-                    mon.y + mon.h - zone_h,
-                    zone_w,
-                    zone_h,
-                );
-                hypr::zone_state(zone, mon.active_ws).map(|state| !state.occupied)
-            })
-            .unwrap_or_else(|e| {
-                debug!("dock zone query failed: {e:#}");
-                false
-            });
+        // On IPC failure, keep the last known state — a transient socket
+        // error must not flip zone_free to false and trigger a spurious dodge.
+        let last_known = self.zone_free;
+        let free = (|| -> anyhow::Result<bool> {
+            let mon = hypr::focused_monitor()?;
+            let zone_w = self.config.window.width as f64;
+            let zone_h =
+                (self.config.window.input_bar_height + self.config.window.bottom_margin) as f64;
+            let zone = (
+                mon.x + (mon.w - zone_w) / 2.0,
+                mon.y + mon.h - zone_h,
+                zone_w,
+                zone_h,
+            );
+            Ok(!hypr::zone_state(zone, mon.active_ws)?.occupied)
+        })()
+        .unwrap_or_else(|e| {
+            debug!("dock zone query failed: {e:#}");
+            last_known
+        });
 
         if free == self.zone_free {
             return;
@@ -840,7 +841,9 @@ impl App {
         debug!("dock zone free: {free}");
         self.zone_free = free;
         if free {
-            // Nothing needs the space: park the dock visible.
+            // Zone cleared — cancel any pending dodge and reveal the dock
+            // so it parks visible (classic macOS intellihide: dock returns
+            // when the covering window is moved or closed).
             self.hide_deadline = None;
             if self.ui.target() == Target::Hidden {
                 self.handle_command(Command::Show);
@@ -1574,7 +1577,7 @@ impl App {
         // A dock stack (group or directory) closes with the launcher.
         self.dock_stack = None;
         self.dir_stack = None;
-        let command = if self.ui.target() == Target::Open || self.zone_free {
+        let command = if self.ui.target() == Target::Open {
             Command::Collapse
         } else {
             Command::Hide
@@ -2469,11 +2472,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             // no grace period needed (the card is fully open,
                             // not just a slim dock sliver to accidentally graze).
                             app.dismiss();
-                        } else if !app.rest_hide_pending {
-                            // A close settling to the dock owns the hide
-                            // (its rest); don't undercut it with the
-                            // shorter autohide grace.
+                        } else if !app.rest_hide_pending && !app.zone_free {
+                            // Zone is occupied — hide after the grace period.
+                            // When zone_free the dock parks visible instead.
+                            debug!("pointer left, zone occupied → scheduling autohide");
                             app.schedule_autohide();
+                        } else if app.zone_free {
+                            debug!("pointer left, zone free → dock parks visible");
                         }
                     }
                 }
