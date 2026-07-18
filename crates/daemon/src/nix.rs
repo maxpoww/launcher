@@ -695,6 +695,7 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
 /// failing attr never touches the live profile (the switch is atomic);
 /// the daemon rolls the bad attr back out of the `.nix` on failure.
 fn home_manager_switch() -> bool {
+    crate::managed::bootstrap_home_nix();
     info!("home-manager switch");
     match Command::new("home-manager").arg("switch").output() {
         Ok(out) if out.status.success() => true,

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 /// One waverunner-installed package.
 #[derive(Clone, Serialize, Deserialize)]
@@ -136,15 +136,16 @@ impl ManagedDb {
              #\n\
              # waverunner adds/removes attributes here on drag-install / uninstall,\n\
              # then runs `home-manager switch`. Edit through the launcher.\n\
-             { pkgs }:\n\n\
-             with pkgs; [\n",
+             { pkgs, ... }:\n\n\
+             {\n",
         );
+        nix.push_str("  home.packages = with pkgs; [\n");
         for attr in attrs {
-            nix.push_str("  ");
+            nix.push_str("    ");
             nix.push_str(attr);
             nix.push('\n');
         }
-        nix.push_str("]\n");
+        nix.push_str("  ];\n}\n");
         crate::persist::write_text("managed", &self.nix_path, &nix);
         info!("managed: wrote {:?}", self.nix_path);
         crate::persist::write_json("managed", &self.json_path, &self.pkgs);
@@ -166,6 +167,26 @@ pub fn snapshot() -> Vec<(String, Vec<String>)> {
         .into_iter()
         .map(|attr| (attr.clone(), vec![attr]))
         .collect()
+}
+
+/// Create a minimal `home.nix` if none exists so `home-manager switch`
+/// has an entry point. Idempotent — safe to call before every switch.
+pub(crate) fn bootstrap_home_nix() {
+    let dir = home_manager_dir();
+    let home_nix = dir.join("home.nix");
+    if home_nix.exists() {
+        return;
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_owned());
+    let home = std::env::var("HOME").unwrap_or_else(|_| format!("/home/{user}"));
+    let content = format!(
+        "{{ pkgs, ... }}:\n{{\n  home.username = \"{user}\";\n  home.homeDirectory = \"{home}\";\n  home.stateVersion = \"24.11\";\n\n  imports = [ ./waverunner-packages.nix ];\n}}\n"
+    );
+    if let Err(e) = std::fs::write(&home_nix, &content) {
+        warn!("could not bootstrap {}: {e}", home_nix.display());
+    } else {
+        info!("bootstrapped {}", home_nix.display());
+    }
 }
 
 /// `~/.config/home-manager` (respecting `XDG_CONFIG_HOME`).
