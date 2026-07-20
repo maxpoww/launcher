@@ -28,9 +28,15 @@ use crate::content::Scene;
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Globals {
-    screen: [f32; 2],
-    alpha: f32,
-    _pad: f32,
+    screen:     [f32; 2],
+    alpha:      f32,
+    time:       f32,
+    cursor:     [f32; 2],  // pointer in surface pixels; [-9999,-9999] = absent
+    _pad:       [f32; 2],
+    // Up to 4 simultaneous ripples: (x, y, age, 0); x < -9000 = inactive.
+    ripples:    [[f32; 4]; 4],
+    // Up to 2 box-open/close waves: (cx, cy, age, 0); cx < -9000 = inactive.
+    box_waves:  [[f32; 4]; 2],
 }
 
 /// Per-instance data for one rounded rectangle.
@@ -39,9 +45,10 @@ struct Globals {
 struct RectInstance {
     rect_min: [f32; 2],
     rect_max: [f32; 2],
-    color: [f32; 4],
-    radius: f32,
-    _pad: [f32; 3],
+    color:    [f32; 4],
+    radius:   f32,
+    glass:    f32,         // 0 = solid fill, 1 = liquid-glass material
+    _pad:     [f32; 2],
 }
 
 /// Per-instance data for one icon quad.
@@ -83,6 +90,14 @@ pub struct Renderer {
     /// Shaped label buffers, keyed by label text; invalidated when a
     /// new app set arrives via [`Renderer::set_icons`].
     label_cache: std::collections::HashMap<String, TextBuffer>,
+    /// Accumulated render time — only advances while frames are drawn, so
+    /// there are no phase jumps when the dock hides and reappears.
+    anim_time: f32,
+    last_render: Option<std::time::Instant>,
+    /// Active ripples: (surface position, anim_time at spawn).
+    ripples: Vec<([f32; 2], f32)>,
+    /// Active box open/close waves: (icon center, anim_time at spawn).
+    box_waves: Vec<([f32; 2], f32)>,
 }
 
 impl Renderer {
@@ -152,7 +167,6 @@ impl Renderer {
             .first()
             .copied()
             .ok_or_else(|| anyhow!("surface reports no formats"))?;
-
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -241,7 +255,7 @@ impl Renderer {
                     array_stride: std::mem::size_of::<RectInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32, 4 => Float32
                     ],
                 }],
             },
@@ -362,6 +376,10 @@ impl Renderer {
             text_atlas,
             text_renderer,
             label_cache: std::collections::HashMap::new(),
+            anim_time: 0.0,
+            last_render: None,
+            ripples: Vec::new(),
+            box_waves: Vec::new(),
         })
     }
 
@@ -508,8 +526,32 @@ impl Renderer {
         );
     }
 
+    /// Spawn a ripple at the given surface position.
+    pub fn record_click(&mut self, x: f32, y: f32) {
+        self.ripples.push(([x, y], self.anim_time));
+    }
+
+    /// True while any ripple is still animating.
+    pub fn has_active_ripple(&self) -> bool {
+        !self.ripples.is_empty()
+    }
+
+    /// Spawn a box open/close wave centred on the icon at (x, y).
+    pub fn record_box_wave(&mut self, x: f32, y: f32) {
+        self.box_waves.push(([x, y], self.anim_time));
+    }
+
+    /// True while any box wave is still animating.
+    pub fn has_active_box_wave(&self) -> bool {
+        !self.box_waves.is_empty()
+    }
+
     /// Render one frame of the given scene.
-    pub fn render(&mut self, scene: &Scene, text_color: [f32; 4]) -> anyhow::Result<()> {
+    ///
+    /// `cursor` is the pointer position in surface pixels, used for the
+    /// glass cursor-spotlight effect; `None` when the pointer is outside
+    /// the surface.
+    pub fn render(&mut self, scene: &Scene, text_color: [f32; 4], cursor: Option<(f32, f32)>) -> anyhow::Result<()> {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -525,19 +567,52 @@ impl Renderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let (w, h) = (self.config.width, self.config.height);
 
+        // Advance anim_time only while frames are rendered — no phase jump
+        // when the dock hides (no frames) and then reappears.
+        let now = std::time::Instant::now();
+        let dt = self.last_render.map(|l| now.duration_since(l).as_secs_f32().min(0.1)).unwrap_or(0.0);
+        self.last_render = Some(now);
+        self.anim_time += dt;
+
+        // Expire ripples older than 3.5 s; box waves older than 1.0 s.
+        self.ripples.retain(|(_, t)| self.anim_time - t <= 3.5);
+        self.box_waves.retain(|(_, t)| self.anim_time - t <= 1.0);
+
+        let cursor_px = cursor.map(|(x, y)| [x, y]).unwrap_or([-9999.0, -9999.0]);
+
+        let inactive = [-9999.0_f32, -9999.0, 999.0, 0.0];
+        let mut ripples = [inactive; 4];
+        for (slot, (pos, t)) in self.ripples.iter().rev().take(4).enumerate() {
+            ripples[slot] = [pos[0], pos[1], self.anim_time - t, 0.0];
+        }
+        let mut box_waves = [inactive; 2];
+        for (slot, (pos, t)) in self.box_waves.iter().rev().take(2).enumerate() {
+            box_waves[slot] = [pos[0], pos[1], self.anim_time - t, 0.0];
+        }
+
         self.queue.write_buffer(
             &self.globals_buf,
             0,
             bytemuck::bytes_of(&Globals {
-                screen: [w as f32, h as f32],
-                alpha: scene.alpha.clamp(0.0, 1.0),
-                _pad: 0.0,
+                screen:    [w as f32, h as f32],
+                alpha:     scene.alpha.clamp(0.0, 1.0),
+                time:      self.anim_time,
+                cursor:    cursor_px,
+                _pad:      [0.0; 2],
+                ripples,
+                box_waves,
             }),
         );
 
         // Instance buffers: unclipped ranges first, then one scissored
         // range per section grid.
-        let mut rects: Vec<RectInstance> = scene.rects.iter().map(rect_instance).collect();
+        // The first rect is always the card background (per Scene layout);
+        // give it the glass material flag so the shader applies all 9 layers.
+        let mut rects: Vec<RectInstance> = scene.rects.iter().enumerate().map(|(i, r)| {
+            let mut inst = rect_instance(r);
+            if i == 0 { inst.glass = 1.0; }
+            inst
+        }).collect();
         let n_rects_unclipped = rects.len() as u32;
         let mut icons: Vec<IconInstance> = scene.icons.iter().map(icon_instance).collect();
         let n_icons_unclipped = icons.len() as u32;
@@ -802,9 +877,10 @@ fn rect_instance(r: &crate::content::RectInst) -> RectInstance {
     RectInstance {
         rect_min: [r.rect.x, r.rect.y],
         rect_max: [r.rect.x + r.rect.w, r.rect.y + r.rect.h],
-        color: r.color,
-        radius: r.radius,
-        _pad: [0.0; 3],
+        color:    r.color,
+        radius:   r.radius,
+        glass:    0.0,   // overridden to 1.0 for the card background by the caller
+        _pad:     [0.0; 2],
     }
 }
 

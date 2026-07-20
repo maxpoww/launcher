@@ -111,6 +111,7 @@ fn same_workspace_neighbor(addr: &str) -> Option<String> {
         })
 }
 
+
 /// Subscribe to Hyprland's event socket; relevant events re-evaluate
 /// the dock zone via [`App::on_layout_changed`].
 pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {

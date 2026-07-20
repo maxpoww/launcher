@@ -127,6 +127,11 @@ fn main() -> anyhow::Result<()> {
     // App discovery runs on the one allowed background thread; it
     // rescans on request (dock reveals) and delivers results over this
     // channel. The initial scan is queued by spawn_indexer.
+    //
+    // Patch XDG_DATA_DIRS first so both the indexer and nix threads can
+    // find icons under ~/.nix-profile/share (nix profile installs land
+    // there; freedesktop_icons uses XDG_DATA_DIRS for all its lookups).
+    apps::patch_xdg_data_dirs();
     let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
     let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
 
@@ -163,6 +168,7 @@ fn main() -> anyhow::Result<()> {
             full_extent as f32,
         ),
         config,
+        icon_size: 1,
         buffer_size: (0, 0),
         scale_factor: 1,
         last_frame: None,
@@ -177,6 +183,12 @@ fn main() -> anyhow::Result<()> {
         agua_card: animation::Follower::new(content::AGUA_CARD_K, content::AGUA_CARD_C),
         agua_icons: animation::Follower::new(content::AGUA_ICONS_K, content::AGUA_ICONS_C),
         agua_content: animation::Follower::new(content::AGUA_CONTENT_K, content::AGUA_CONTENT_C),
+        agua_breath: animation::Follower::new(content::AGUA_BREATH_K, content::AGUA_BREATH_C),
+        jelly_left:   animation::Follower::new(content::JELLY_K, content::JELLY_C),
+        jelly_right:  animation::Follower::new(content::JELLY_K, content::JELLY_C),
+        jelly_top:    animation::Follower::new(content::JELLY_K, content::JELLY_C),
+        jelly_bottom: animation::Follower::new(content::JELLY_K, content::JELLY_C),
+        pending_jelly_kicks: Vec::new(),
         dock_wave_h: Vec::new(),
         dock_wave_v: Vec::new(),
         dock_crest_prev: Vec::new(),
@@ -251,6 +263,7 @@ fn main() -> anyhow::Result<()> {
         pending_icons: None,
         hover: None,
         pointer_pos: None,
+        pointer_inside_card: false,
         scroll: ScrollState::default(),
         gesture: GestureState::default(),
         search: SearchState::default(),
@@ -355,6 +368,8 @@ pub struct App {
 
     ui: UiState,
     config: Config,
+    /// Icon-size level (0–3). Ctrl+Plus/Minus cycles through ICON_SCALES.
+    icon_size: usize,
     /// Current buffer size in physical pixels, from `configure`.
     buffer_size: (u32, u32),
     scale_factor: i32,
@@ -380,6 +395,17 @@ pub struct App {
     agua_card: animation::Follower,
     agua_icons: animation::Follower,
     agua_content: animation::Follower,
+    agua_breath: animation::Follower,
+    jelly_left:   animation::Follower,
+    jelly_right:  animation::Follower,
+    jelly_top:    animation::Follower,
+    jelly_bottom: animation::Follower,
+    /// Pending jelly impulses: (edge_idx, velocity, delay_remaining_secs).
+    /// Edge indices: 0=left 1=right 2=top 3=bottom.
+    /// Used for anticipation pre-kick, main kick, and Poisson cross-coupling —
+    /// all fired as delayed velocity injections so the membrane feels like it
+    /// has propagation inertia rather than responding instantaneously.
+    pending_jelly_kicks: Vec<(u8, f32, f32)>,
     /// AGUA splash ripple surface across the dock: per-icon wave height
     /// and velocity (0 = flat), plus last frame's per-icon crest so a
     /// collapsing crest can splash the surface. Resized with the dock.
@@ -601,6 +627,9 @@ pub struct App {
     hover: Option<Hit>,
     /// Pointer position in surface coordinates, while inside.
     pointer_pos: Option<(f32, f32)>,
+    /// Tracks whether the pointer was inside the card last motion event,
+    /// so we can fire a ripple on edge-crossing.
+    pointer_inside_card: bool,
     /// Grid scrolling / paging state.
     scroll: ScrollState,
     /// Press-and-drag gesture state.
@@ -774,6 +803,41 @@ const BOUNCE_HEIGHT: f32 = 18.0;
 const DOCK_TOOLTIP_DELAY: Duration = Duration::from_millis(600);
 
 impl App {
+    /// Current icon scale multiplier (driven by `icon_size`).
+    pub fn icon_scale(&self) -> f32 {
+        content::ICON_SCALES[self.icon_size]
+    }
+
+    /// Logical surface dimensions for the current icon_size.
+    /// DRAG_MARGIN_X/TOP are fixed; only the card area scales.
+    fn scaled_surface_size(&self) -> (u32, u32) {
+        let s = self.icon_scale();
+        let w = (self.config.window.width as f32 * s).round() as u32
+            + 2 * content::DRAG_MARGIN_X as u32;
+        let h = ((self.config.window.height + self.config.window.bottom_margin) as f32 * s)
+            .round() as u32
+            + content::MAGNIFY_HEADROOM as u32
+            + content::DRAG_MARGIN_TOP as u32;
+        (w, h)
+    }
+
+    /// UiState dock / full extents for the current icon_size.
+    fn scaled_extents(&self) -> (f32, f32) {
+        let s = self.icon_scale();
+        let full = (self.config.window.height + self.config.window.bottom_margin) as f32 * s;
+        let dock = (self.config.window.input_bar_height + self.config.window.bottom_margin) as f32 * s;
+        (dock, full)
+    }
+
+    /// Resize the Wayland surface and update animation extents after an icon_size change.
+    fn apply_icon_size_change(&mut self) {
+        let (dock_extent, full_extent) = self.scaled_extents();
+        self.ui.set_extents(dock_extent, full_extent);
+        let (w, h) = self.scaled_surface_size();
+        self.layer.set_size(w, h);
+        self.layer.wl_surface().commit();
+    }
+
     /// Entry point for IPC commands (called from ipc.rs) and for
     /// internally generated commands (Escape, focus loss, scroll).
     pub fn handle_command(&mut self, command: Command) {
@@ -785,17 +849,35 @@ impl App {
         }
         let prev = self.ui.target();
         if self.ui.apply(command) {
+            let next = self.ui.target();
             self.sync_surface_state();
             // A box close (Open→Dock) parks as a dock, then hides after a
             // beat (armed once the collapse settles, in the frame loop).
             // Rising back to Open cancels that.
-            match self.ui.target() {
+            match next {
                 Target::Dock if prev == Target::Open => self.rest_hide_pending = true,
                 Target::Open => {
                     self.rest_hide_pending = false;
                     self.hide_deadline = None;
                 }
                 _ => {}
+            }
+            // Horizontal wave when the launcher card fully opens or starts closing.
+            // Fires for both keyboard (Super+Space, Escape) and pointer paths since
+            // all state transitions funnel through handle_command.
+            let is_opening = prev != Target::Open && next == Target::Open;
+            let is_closing = prev == Target::Open && next != Target::Open;
+            if is_opening || is_closing {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    let sw =
+                        self.config.window.width as f32 + 2.0 * content::DRAG_MARGIN_X;
+                    let sh = self.config.window.height as f32
+                        + self.config.window.bottom_margin as f32
+                        + content::MAGNIFY_HEADROOM
+                        + content::DRAG_MARGIN_TOP;
+                    let (wx, wy) = self.pointer_pos.unwrap_or((sw * 0.5, sh));
+                    renderer.record_box_wave(wx, wy);
+                }
             }
             self.schedule_frame();
         }
@@ -1381,6 +1463,52 @@ impl App {
             || pos.1 > layout.card_top + layout.card_h
     }
 
+    /// Surface-pixel center of the slot an icon will land in for the
+    /// current drag. Call this *before* any drop mutation clears the
+    /// drag state. Returns `None` when no drag is active or the drop
+    /// position can't be resolved to a slot.
+    ///
+    /// Covers all three drop surfaces with the same logic:
+    ///   • box  — cell center snapped from the pointer position
+    ///   • dock — final slot center (accounts for the from-dock offset)
+    ///   • grid — reorder-slot center (or the icon's current slot)
+    fn drop_ripple_pos(&self) -> Option<(f32, f32)> {
+        let pos = self.pointer_pos?;
+
+        if self.box_drag.is_some() {
+            return self.box_drag_cell_center(pos);
+        }
+
+        let drag = self.gesture.dragging.as_ref()?;
+        let layout = self.current_layout();
+
+        if let Some(i) = self.drag_dock_insert(&layout, pos) {
+            let origin = self.dock_order.iter().position(|&e| e == drag.entry_idx);
+            let land = i.saturating_sub(usize::from(
+                drag.from_dock && origin.is_some_and(|o| o < i),
+            ));
+            let s = layout.dock_slots.get(land).or_else(|| layout.dock_slots.last())?;
+            return Some((s.x + s.w * 0.5, s.y + s.h * 0.5));
+        }
+
+        let sec = &layout.sections[content::SECTION_APPS];
+        let visible = &self.search.visible[content::SECTION_APPS];
+        let orig = visible.iter().position(|&v| v == drag.entry_idx);
+        let orig_slot = orig.and_then(|o| self.apps_slots.get(o).copied());
+        let slot = self.reorder_slot.or(orig_slot)?;
+        let cap = self.apps_cap.max(1);
+        let page = slot / cap;
+        let within = slot % cap;
+        let cols = sec.cols.max(1);
+        let cw = content::GRID_CELL_W * self.icon_scale();
+        let ch = content::GRID_CELL_H * self.icon_scale();
+        Some((
+            sec.viewport.x - sec.scroll + page as f32 * sec.viewport.w
+                + (within % cols) as f32 * cw + cw * 0.5,
+            sec.viewport.y + (within / cols) as f32 * ch + ch * 0.5,
+        ))
+    }
+
     /// Drop a pointer position left stale above the collapsed dock.
     ///
     /// When our input region shrinks out from under a motionless cursor
@@ -1904,6 +2032,22 @@ impl App {
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // Ctrl+Plus/Minus cycles icon size through 4 levels.
+        if self.modifiers.ctrl {
+            match keysym {
+                Keysym::equal | Keysym::plus | Keysym::KP_Add => {
+                    self.icon_size = (self.icon_size + 1).min(content::ICON_SCALES.len() - 1);
+                    self.apply_icon_size_change();
+                    return;
+                }
+                Keysym::minus | Keysym::KP_Subtract => {
+                    self.icon_size = self.icon_size.saturating_sub(1);
+                    self.apply_icon_size_change();
+                    return;
+                }
+                _ => {}
+            }
+        }
         // Ctrl+V pastes the clipboard into the query.
         if self.modifiers.ctrl && matches!(keysym, Keysym::v | Keysym::V) {
             self.paste();
@@ -2138,14 +2282,10 @@ impl LayerShellHandler for App {
         _serial: u32,
     ) {
         let (mut width, mut height) = configure.new_size;
-        if width == 0 {
-            width = self.config.window.width + 2 * content::DRAG_MARGIN_X as u32;
-        }
-        if height == 0 {
-            height = self.config.window.height
-                + self.config.window.bottom_margin
-                + content::MAGNIFY_HEADROOM as u32
-                + content::DRAG_MARGIN_TOP as u32;
+        if width == 0 || height == 0 {
+            let (sw, sh) = self.scaled_surface_size();
+            if width == 0 { width = sw; }
+            if height == 0 { height = sh; }
         }
         debug!("configure: {width}x{height}");
         self.buffer_size = (width, height);
@@ -2374,8 +2514,86 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 surface_y,
                 ..
             } => {
+                let prev_pos = app.pointer_pos; // save before update for velocity
                 let pos = (surface_x as f32, surface_y as f32);
                 app.pointer_pos = Some(pos);
+                // Edge-crossing ripple: fire whenever the pointer crosses the
+                // card boundary (inside ↔ outside), regardless of click.
+                {
+                    let layout = app.current_layout();
+                    let now_inside = !app.outside_card(&layout, pos);
+                    if now_inside != app.pointer_inside_card {
+                        if let Some(renderer) = app.renderer.as_mut() {
+                            renderer.record_click(pos.0, pos.1);
+                        }
+                        // Organic jelly poke with three layers:
+                        //   1. Velocity-scaled kick — fast crossing = strong poke.
+                        //   2. Anticipation — tiny opposite kick fires now so the
+                        //      edge briefly resists before giving way (membrane feel).
+                        //   3. Poisson cross-coupling — adjacent perpendicular edges
+                        //      ripple in after a short propagation delay (volume
+                        //      conservation: compress horizontally → expand vertically).
+                        if app.ui.target() == Target::Open {
+                            let cx = layout.card_x + layout.card_w * 0.5;
+                            let cy = layout.card_top + layout.card_h * 0.5;
+                            let nx = (pos.0 - cx) / (layout.card_w * 0.5 + 1.0);
+                            let ny = (pos.1 - cy) / (layout.card_h * 0.5 + 1.0);
+
+                            // Pointer speed (px since last event) → kick scale.
+                            let speed = prev_pos.map(|(px, py)| {
+                                let dx = pos.0 - px;
+                                let dy = pos.1 - py;
+                                (dx * dx + dy * dy).sqrt()
+                            }).unwrap_or(10.0);
+                            let speed_factor = (speed / 10.0).clamp(0.35, 2.0);
+                            let k = content::JELLY_KICK * speed_factor;
+                            let cross = k * 0.14; // Poisson coupling fraction
+
+                            // dir: +1 entering (inward), -1 leaving (outward).
+                            // Anticipation: small opposite-direction kick fired now.
+                            // Main kick: full inward/outward, fired after 8 ms.
+                            // Cross kicks: adjacent edges, fired after 28 ms.
+                            // Sign convention per edge:
+                            //   left/top:  positive kick = inward (right/down)
+                            //   right/bottom: positive kick = outward (right/down)
+                            let dir = if now_inside { 1.0_f32 } else { -1.0_f32 };
+                            const ANTICIPATION: f32 = 0.09;
+                            const MAIN_MS: f32 = 0.008;
+                            const CROSS_MS: f32 = 0.028;
+                            if nx.abs() > ny.abs() {
+                                if nx > 0.0 {
+                                    // Right edge crossed: inward = leftward = negative for jelly_right
+                                    app.jelly_right.kick(dir * k * ANTICIPATION); // resist first
+                                    app.pending_jelly_kicks.push((1, -dir * k, MAIN_MS));
+                                    // Poisson: top/bottom expand outward on compression
+                                    app.pending_jelly_kicks.push((2, -dir * cross, CROSS_MS));
+                                    app.pending_jelly_kicks.push((3,  dir * cross, CROSS_MS));
+                                } else {
+                                    // Left edge crossed: inward = rightward = positive for jelly_left
+                                    app.jelly_left.kick(-dir * k * ANTICIPATION);
+                                    app.pending_jelly_kicks.push((0,  dir * k, MAIN_MS));
+                                    app.pending_jelly_kicks.push((2, -dir * cross, CROSS_MS));
+                                    app.pending_jelly_kicks.push((3,  dir * cross, CROSS_MS));
+                                }
+                            } else if ny > 0.0 {
+                                // Bottom edge crossed: inward = upward = negative for jelly_bottom
+                                app.jelly_bottom.kick(dir * k * ANTICIPATION);
+                                app.pending_jelly_kicks.push((3, -dir * k, MAIN_MS));
+                                // Poisson: left/right expand outward on compression
+                                app.pending_jelly_kicks.push((0, -dir * cross, CROSS_MS));
+                                app.pending_jelly_kicks.push((1,  dir * cross, CROSS_MS));
+                            } else {
+                                // Top edge crossed: inward = downward = positive for jelly_top
+                                app.jelly_top.kick(-dir * k * ANTICIPATION);
+                                app.pending_jelly_kicks.push((2,  dir * k, MAIN_MS));
+                                app.pending_jelly_kicks.push((0, -dir * cross, CROSS_MS));
+                                app.pending_jelly_kicks.push((1,  dir * cross, CROSS_MS));
+                            }
+                            app.schedule_frame();
+                        }
+                    }
+                    app.pointer_inside_card = now_inside;
+                }
                 // Hiding under a parked cursor keeps our (now stale)
                 // pointer focus — the compositor never re-sends Enter for
                 // the reveal strip. Treat in-strip motion as the edge
@@ -2492,15 +2710,29 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         app.update_hover();
                         app.gesture.pressed = app.hover;
                         app.gesture.press_pos = app.pointer_pos;
+                        if let (Some(renderer), Some((x, y))) =
+                            (app.renderer.as_mut(), app.pointer_pos)
+                        {
+                            renderer.record_click(x, y);
+                        }
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
                         app.gesture.press_pos = None;
-                        // An in-box reorder drop: move the member, no click.
                         if app.box_drag.is_some() {
+                            let rp = app.drop_ripple_pos();
                             app.drop_box_drag();
-                        } else if let Some(drag) = app.gesture.dragging.take() {
-                            let insert = app.drag_dock_insert(&app.current_layout(), drag.pos);
+                            if let (Some(r), Some((x, y))) = (app.renderer.as_mut(), rp) {
+                                r.record_click(x, y);
+                            }
+                        } else if app.gesture.dragging.is_some() {
+                            let rp = app.drop_ripple_pos();
+                            let drag = app.gesture.dragging.take().unwrap();
+                            let layout = app.current_layout();
+                            let insert = app.drag_dock_insert(&layout, drag.pos);
                             app.drop_drag(drag, insert, true);
+                            if let (Some(r), Some((x, y))) = (app.renderer.as_mut(), rp) {
+                                r.record_click(x, y);
+                            }
                         } else {
                             // Native button behavior: activate on release,
                             // only if it happens on the item the press armed
@@ -2508,6 +2740,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             app.update_hover();
                             if let Some(hit) = app.gesture.pressed.take() {
                                 if app.hover == Some(hit) {
+                                    if let (Some(renderer), Some((x, y))) =
+                                        (app.renderer.as_mut(), app.pointer_pos)
+                                    {
+                                        renderer.record_click(x, y);
+                                    }
                                     app.activate_hit(hit);
                                 }
                                 // else: drag-cancel — do nothing.
@@ -2516,10 +2753,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 // off it closes the box, not the launcher.
                                 app.close_group();
                             } else if app.ui.target() == Target::Open {
-                                // Press started on no interactive element (card
-                                // background / transparent area): treat as a
-                                // click-outside gesture and dismiss the popup.
-                                app.dismiss();
+                                // Dismiss only if the click landed outside the
+                                // card bounds (transparent surface margin).
+                                // Clicks on the card background itself are inert.
+                                if let Some(pos) = app.pointer_pos {
+                                    if app.outside_card(&app.current_layout(), pos) {
+                                        app.dismiss();
+                                    }
+                                }
                             }
                         }
                     }

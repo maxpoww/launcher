@@ -45,6 +45,7 @@ impl App {
         };
         let mut layout = content::layout(
             &self.config,
+            self.icon_scale(),
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             extent,
             self.dock_order.len(),
@@ -91,13 +92,13 @@ impl App {
                     // degenerate here).
                     layout.open_box = Some(content::dock_box_rect(
                         dock_rect,
-                        content::DOCK_BOX_SIDE,
+                        content::DOCK_BOX_SIDE * self.icon_scale(),
                         self.buffer_size.0 as f32,
                     ));
                 }
             } else {
                 let half_cell = s / 6.0; // half a 3×3 cell
-                let mini_off = content::GRID_ICON * 0.26; // 2×2 mini offset
+                let mini_off = content::GRID_ICON * self.icon_scale() * 0.26;
                 let left = ox < vp.x + vp.w / 2.0;
                 // Place the near-corner cell center on the pinned icon's spot.
                 let x = if left {
@@ -161,13 +162,48 @@ impl App {
         self.agua_card.step(stretch_target, dt);
         self.agua_icons.step(stretch_target, dt);
         self.agua_content.step(stretch_target, dt);
+        self.agua_breath.step(stretch_target, dt);
+        // Drain delayed jelly kicks (anticipation, main, Poisson cross-coupling).
+        // Decrement each timer by dt; apply velocity when elapsed.
+        // The take/push pattern avoids a simultaneous borrow of both the
+        // kicks vec and the individual spring fields.
+        let kicks = std::mem::take(&mut self.pending_jelly_kicks);
+        for (edge, vel, delay) in kicks {
+            let remaining = delay - dt;
+            if remaining <= 0.0 {
+                match edge {
+                    0 => self.jelly_left.kick(vel),
+                    1 => self.jelly_right.kick(vel),
+                    2 => self.jelly_top.kick(vel),
+                    _ => self.jelly_bottom.kick(vel),
+                }
+            } else {
+                self.pending_jelly_kicks.push((edge, vel, remaining));
+            }
+        }
+        // Jelly edge springs always target rest (1.0); kicked by edge crossings,
+        // settle independently of the main animation.
+        self.jelly_left.step(1.0, dt);
+        self.jelly_right.step(1.0, dt);
+        self.jelly_top.step(1.0, dt);
+        self.jelly_bottom.step(1.0, dt);
         let stretch_active = self.agua_card.is_active()
             || self.agua_icons.is_active()
-            || self.agua_content.is_active();
-        if !stretch_active && !animating {
+            || self.agua_content.is_active()
+            || self.agua_breath.is_active()
+            || self.jelly_left.is_active()
+            || self.jelly_right.is_active()
+            || self.jelly_top.is_active()
+            || self.jelly_bottom.is_active();
+        if !stretch_active && !animating && self.pending_jelly_kicks.is_empty() {
             self.agua_card.snap();
             self.agua_icons.snap();
             self.agua_content.snap();
+            self.agua_breath.snap();
+            self.jelly_left.snap();
+            self.jelly_right.snap();
+            self.jelly_top.snap();
+            self.jelly_bottom.snap();
         }
         if animating {
             // The card is moving under a possibly stationary pointer:
@@ -225,6 +261,15 @@ impl App {
         }
         scroll_animating |= self.box_pager.ease(dt);
 
+        // Jelly edge: agua_breath is the same spring impulse as agua_card but
+        // softer (lower k, c) so it rings longer after the box opens.
+        // Perfectly in sync — same stretch_target, just slower to settle.
+        let breath_offset = if self.ui.target() == crate::state::Target::Open {
+            (self.agua_breath.pos - 1.0) * 40.0
+        } else {
+            0.0
+        };
+
         self.dirty = false;
 
         let wl_surface = self.layer.wl_surface();
@@ -233,6 +278,7 @@ impl App {
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
+
         // The search caret anchors to the query's shaped width.
         let query_px = self
             .renderer
@@ -676,6 +722,7 @@ impl App {
             .collect();
         let scene = content::scene(
             &self.config,
+            self.icon_scale(),
             &layout,
             &self.entries,
             &self.search.visible,
@@ -728,12 +775,22 @@ impl App {
                 open_box_pages,
                 box_scroll: self.box_pager.pos,
                 box_drag,
+                breath_offset,
+                card_push: {
+                    let s = content::JELLY_SCALE;
+                    (
+                        (self.jelly_left.pos   - 1.0) * s,
+                        (self.jelly_right.pos  - 1.0) * s,
+                        (self.jelly_top.pos    - 1.0) * s,
+                        (self.jelly_bottom.pos - 1.0) * s,
+                    )
+                },
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        if let Err(e) = renderer.render(&scene, self.config.theme.text_rgba()) {
+        if let Err(e) = renderer.render(&scene, self.config.theme.text_rgba(), self.pointer_pos) {
             error!("render failed: {e:#}");
         }
         if search_animating && self.search.expand != search_target {
@@ -753,6 +810,16 @@ impl App {
         // until both rest.
         if stretch_active || ripple_active {
             self.dirty = true;
+        }
+        // Pending jelly impulses waiting on their delay timers.
+        if !self.pending_jelly_kicks.is_empty() {
+            self.dirty = true;
+        }
+        // Glass click ripple / box wave: keep frames coming until they expire.
+        if let Some(r) = self.renderer.as_ref() {
+            if r.has_active_ripple() || r.has_active_box_wave() {
+                self.dirty = true;
+            }
         }
     }
 }

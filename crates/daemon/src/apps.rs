@@ -74,28 +74,71 @@ pub struct LoadedApps {
 
 /// Handle to the long-lived indexer thread.
 pub struct Indexer {
-    requests: mpsc::Sender<()>,
+    /// `true` = flush stale negative icon-path cache entries before scanning
+    /// (sent after a successful nix profile install so fresh icons are found).
+    requests: mpsc::Sender<bool>,
 }
 
 impl Indexer {
     /// Ask for a rescan. Multiple queued requests coalesce into one
     /// scan; a dead indexer thread makes this a no-op.
     pub fn request_rescan(&self) {
-        let _ = self.requests.send(());
+        let _ = self.requests.send(false);
     }
+
+    /// Ask for a rescan AND flush stale negative icon-path cache entries
+    /// first, so a freshly-installed app's icon is found instead of using
+    /// the cached "not found" result from before the install.
+    pub fn request_rescan_fresh(&self) {
+        let _ = self.requests.send(true);
+    }
+}
+
+/// Append `~/.nix-profile/share` to `XDG_DATA_DIRS` when it is not already
+/// present. Nix profile apps install their icons there; `freedesktop_icons`
+/// needs it in `XDG_DATA_DIRS` to resolve them. Called once at startup so
+/// both the indexer thread and the nix thread inherit the updated value.
+pub fn patch_xdg_data_dirs() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let nix_share = format!("{home}/.nix-profile/share");
+    if !std::path::Path::new(&nix_share).exists() {
+        return;
+    }
+    let current = std::env::var("XDG_DATA_DIRS").unwrap_or_default();
+    if current.split(':').any(|d| d == nix_share) {
+        return;
+    }
+    let patched = if current.is_empty() {
+        nix_share
+    } else {
+        format!("{nix_share}:{current}")
+    };
+    std::env::set_var("XDG_DATA_DIRS", patched);
 }
 
 /// Spawn the indexer thread and queue the initial scan. The thread
 /// exits when either channel closes (daemon shutdown).
 pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer {
-    let (requests, rx) = mpsc::channel::<()>();
+    let (requests, rx) = mpsc::channel::<bool>();
     let spawned = std::thread::Builder::new()
         .name("waverunner-index".into())
         .spawn(move || {
             let mut loader = IconLoader::new(icon_theme);
-            while rx.recv().is_ok() {
-                // Coalesce any requests that queued up meanwhile.
-                while rx.try_recv().is_ok() {}
+            while let Ok(flush) = rx.recv() {
+                // Coalesce any requests that queued up meanwhile; OR the
+                // flush flags so a fresh-rescan request is never lost.
+                let mut needs_flush = flush;
+                while let Ok(f) = rx.try_recv() {
+                    needs_flush |= f;
+                }
+                // After a nix profile install the icon path resolver may
+                // hold stale "not found" entries for newly installed apps.
+                // Flush them so the next lookup finds the installed icon.
+                if needs_flush {
+                    loader.resolutions.clear_negative();
+                }
 
                 let started = std::time::Instant::now();
                 let index = DesktopIndex::scan();
@@ -507,6 +550,17 @@ impl ResolutionCache {
         found
     }
 
+    /// Drop every cached "not found" entry so the next lookup re-walks
+    /// the theme. Called after a nix profile install so freshly-installed
+    /// icons are found despite prior negative hits.
+    pub(crate) fn clear_negative(&mut self) {
+        let before = self.map.len();
+        self.map.retain(|_, v| v.is_some());
+        if self.map.len() != before {
+            self.dirty = true;
+        }
+    }
+
     /// Persist if anything changed since the last save.
     fn save(&mut self) {
         if !self.dirty {
@@ -558,6 +612,21 @@ fn fence(theme: &str) -> String {
     for dir in icon_dirs() {
         parts.push_str(&format!("|{dir}:{}", mtime_secs(&dir)));
     }
+    // The nix profile symlink's own mtime changes whenever `nix profile
+    // install/remove` runs (the symlink target is updated). Nix store
+    // directory mtimes are always 1 for reproducibility, so following the
+    // symlink would never detect a profile change; we must read the link
+    // itself. Including this in the fence ensures the on-disk resolution
+    // cache is dropped after any nix profile mutation.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let profile = std::path::PathBuf::from(&home).join(".nix-profile");
+    let profile_mtime = std::fs::symlink_metadata(&profile)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    parts.push_str(&format!("|nix-profile:{profile_mtime}"));
     format!("{:016x}", fnv1a64(&parts))
 }
 

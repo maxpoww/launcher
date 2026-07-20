@@ -69,6 +69,12 @@ impl Follower {
         (self.pos - 1.0).abs() > 0.000_5 || self.vel.abs() > 0.005
     }
 
+    /// Inject a velocity impulse (pos-units / s); the spring drives pos back
+    /// to 1.0 from whatever displaced position results.
+    pub fn kick(&mut self, vel: f32) {
+        self.vel += vel;
+    }
+
     /// Land exactly on rest.
     pub fn snap(&mut self) {
         self.pos = 1.0;

@@ -150,9 +150,11 @@ impl App {
                 debug!("home-manager switch for {id}: ok={ok}");
                 self.busy_ids.remove(&id);
                 if ok {
-                    // The profile changed under us: rescan so the Apps
-                    // grid gains/loses the entry.
-                    self.indexer.request_rescan();
+                    // The profile changed: rescan so the Apps grid gains/
+                    // loses the entry. Use the fresh variant to clear stale
+                    // "icon not found" cache entries — the newly installed
+                    // app's icon is now on disk and must be looked up again.
+                    self.indexer.request_rescan_fresh();
                 } else {
                     // A failed switch never activated (it's atomic), but a
                     // bad attr left in waverunner-packages.nix would wedge

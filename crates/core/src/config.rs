@@ -298,10 +298,10 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            background: "#1e1e2ecc".to_owned(),
+            background: "#05070980".to_owned(),
             corner_radius: 14.0,
-            text: "#e6e6efff".to_owned(),
-            highlight: "#ffffff26".to_owned(),
+            text: "#ffffffff".to_owned(),
+            highlight: "#05070920".to_owned(),
             icon_theme: "hicolor".to_owned(),
         }
     }
@@ -312,19 +312,20 @@ impl ThemeConfig {
     /// `0.0..=1.0`. Invalid values fall back to an opaque dark grey rather
     /// than erroring per frame.
     pub fn background_rgba(&self) -> [f32; 4] {
-        parse_hex_rgba(&self.background).unwrap_or([0.12, 0.12, 0.18, 1.0])
+        parse_hex_rgba(&self.background).unwrap_or([0.02, 0.027, 0.035, 0.502])
     }
 
-    /// Parse [`ThemeConfig::text`], falling back to near-white.
+    /// Parse [`ThemeConfig::text`], falling back to white.
     pub fn text_rgba(&self) -> [f32; 4] {
-        parse_hex_rgba(&self.text).unwrap_or([0.9, 0.9, 0.94, 1.0])
+        parse_hex_rgba(&self.text).unwrap_or([1.0, 1.0, 1.0, 1.0])
     }
 
-    /// Parse [`ThemeConfig::highlight`], falling back to faint white.
+    /// Parse [`ThemeConfig::highlight`], falling back to a faint dark tint.
     pub fn highlight_rgba(&self) -> [f32; 4] {
-        parse_hex_rgba(&self.highlight).unwrap_or([1.0, 1.0, 1.0, 0.15])
+        parse_hex_rgba(&self.highlight).unwrap_or([0.02, 0.027, 0.035, 0.125])
     }
 }
+
 
 /// Parse `#rrggbb` or `#rrggbbaa` into RGBA floats.
 fn parse_hex_rgba(s: &str) -> Option<[f32; 4]> {

@@ -181,6 +181,18 @@ pub(crate) const SQUASH_MAX: f32 = 0.05;
 /// Card silhouette: ζ≈0.5 — swells and rebounds once or twice.
 pub(crate) const AGUA_CARD_K: f32 = 120.0;
 pub(crate) const AGUA_CARD_C: f32 = 11.0;
+/// Softer spring for the jelly edge expansion — same impulse as agua_card
+/// but lower stiffness/damping so it rings longer after the box opens.
+pub(crate) const AGUA_BREATH_K: f32 = 40.0;
+pub(crate) const AGUA_BREATH_C: f32 = 4.5;
+/// Snappy spring for the pointer edge-poke: stiff + lightly damped so the
+/// edge shoots back and bounces once or twice before resting.
+pub(crate) const JELLY_K: f32 = 160.0;
+pub(crate) const JELLY_C: f32 = 6.0; // lower damping = more ring = more alive
+/// Velocity impulse (pos-units/s) injected on each edge crossing.
+pub(crate) const JELLY_KICK: f32 = 11.0;
+/// Scale from pos-deviation (around 1.0) to pixels of edge displacement.
+pub(crate) const JELLY_SCALE: f32 = 2.0;
 /// Dock icons: fastest and bounciest (ζ≈0.3), first to peak, a few
 /// visible sloshes.
 pub(crate) const AGUA_ICONS_K: f32 = 200.0;
@@ -344,8 +356,12 @@ pub struct Layout {
 // Geometry naturally takes many independent inputs; a params struct
 // would just rename them.
 #[allow(clippy::too_many_arguments)]
+/// The four icon-size levels, indexed by `App::icon_size` (default 1).
+pub const ICON_SCALES: [f32; 4] = [0.70, 1.00, 1.30, 1.65];
+
 pub fn layout(
     config: &Config,
+    icon_scale: f32,
     surface: (f32, f32),
     extent: f32,
     n_entries: usize,
@@ -357,14 +373,20 @@ pub fn layout(
     // AGUA deformation, (card silhouette, content ride) — 1.0 = rest.
     stretch: (f32, f32),
 ) -> Layout {
+    // Scaled size metrics — all icon/slot dimensions respond to icon_scale.
+    let dock_slot    = DOCK_SLOT    * icon_scale;
+    let dock_pad_x   = DOCK_PAD_X   * icon_scale;
+    let grid_cell_w  = GRID_CELL_W  * icon_scale;
+    let grid_cell_h  = GRID_CELL_H  * icon_scale;
+
     let (w, h) = surface;
     // The card is centered in the surface with transparent drag margin
     // around it; all card content lays out within these bounds, not
     // the full surface.
     let card_w = w - 2.0 * DRAG_MARGIN_X;
     let card_top = h - extent;
-    let dock_h = config.window.input_bar_height as f32;
-    let float_gap = config.window.bottom_margin as f32;
+    let dock_h    = config.window.input_bar_height as f32 * icon_scale;
+    let float_gap = config.window.bottom_margin     as f32 * icon_scale;
     // Hidden↔Dock: the bar keeps its full dock height and just slides up
     // out of the screen edge (clipped by it), lifting to float over the
     // last `float_gap` of travel — its shape never changes. Dock↔Open:
@@ -373,7 +395,7 @@ pub fn layout(
     // AGUA silhouette: at rest the water spreads wide in its basin;
     // rising gathers it to the box width; the live stretch conserves
     // volume — taller is narrower, and the landing squash spills wider.
-    let full_extent = (config.window.height + config.window.bottom_margin) as f32;
+    let full_extent = (config.window.height + config.window.bottom_margin) as f32 * icon_scale;
     let dock_extent = dock_h + float_gap;
     let rise = ((extent - dock_extent) / (full_extent - dock_extent).max(1.0)).clamp(0.0, 1.0);
     let basin_w = w - 2.0 * BASIN_MARGIN_X;
@@ -386,7 +408,7 @@ pub fn layout(
     // `y_off` so it rides the card: rising from the bottom edge as it
     // opens, sinking back into it as it closes (the reveal band clips
     // whatever sits past the card interior).
-    let content_top = h - (config.window.height + config.window.bottom_margin) as f32;
+    let content_top = h - (config.window.height + config.window.bottom_margin) as f32 * icon_scale;
     let content_bottom = h - float_gap;
     // Parallax: the content trails the card a touch (it sits deeper in
     // the stack) and catches up exactly as the card lands — the offset
@@ -408,16 +430,16 @@ pub fn layout(
     };
 
     // Dock uses n_entries so search never hides dock icons.
-    let max_slots = (((card_w - 2.0 * DOCK_PAD_X) / DOCK_SLOT).floor() as usize).max(1);
+    let max_slots = (((card_w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
     let n_dock = n_entries.min(max_slots);
-    let start_x = (w - n_dock as f32 * DOCK_SLOT) / 2.0;
+    let start_x = (w - n_dock as f32 * dock_slot) / 2.0;
     let dock_slots = (0..n_dock)
         .map(|i| {
             Rect::new(
-                start_x + i as f32 * DOCK_SLOT,
-                card_top + (dock_h - DOCK_SLOT).max(0.0) / 2.0,
-                DOCK_SLOT,
-                DOCK_SLOT.min(dock_h),
+                start_x + i as f32 * dock_slot,
+                card_top + (dock_h - dock_slot).max(0.0) / 2.0,
+                dock_slot,
+                dock_slot.min(dock_h),
             )
         })
         .collect();
@@ -439,17 +461,17 @@ pub fn layout(
 
     let grid_top = content_top + dock_h + GRID_TOP_GAP;
     let grid_bottom = (search_box.y - SEARCH_GAP).min(h);
-    let inner_w = (card_w - 2.0 * GRID_PAD_X).max(GRID_CELL_W);
-    let cols = ((inner_w / GRID_CELL_W).floor() as usize).max(1);
+    let inner_w = (card_w - 2.0 * GRID_PAD_X).max(grid_cell_w);
+    let cols = ((inner_w / grid_cell_w).floor() as usize).max(1);
 
     // Apps takes whatever rows fit after the fixed single-row sections
     // and the three title lines, capped at its design height (6×3 at
     // the default card size); short cards degrade to fewer rows.
-    let fixed = (SECTION_ROWS[SECTION_INSTALL] + SECTION_ROWS[SECTION_FILES]) as f32 * GRID_CELL_H
+    let fixed = (SECTION_ROWS[SECTION_INSTALL] + SECTION_ROWS[SECTION_FILES]) as f32 * grid_cell_h
         + N_SECTIONS as f32 * SECTION_TITLE_H
         + (N_SECTIONS - 1) as f32 * SECTION_GAP;
     let avail = grid_bottom - grid_top - fixed;
-    let apps_rows = ((avail / GRID_CELL_H) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
+    let apps_rows = ((avail / grid_cell_h) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
 
     let mut y = grid_top;
     let sections = std::array::from_fn(|s| {
@@ -460,14 +482,14 @@ pub fn layout(
         };
         // Apps stays full-width even with a box open (the magnified box
         // fills the whole grid, drawn as an overlay in `scene`).
-        let grid_x0 = (w - cols as f32 * GRID_CELL_W) / 2.0;
+        let grid_x0 = (w - cols as f32 * grid_cell_w) / 2.0;
         let title_pos = (grid_x0 + 8.0, agua(y + y_off));
         y += SECTION_TITLE_H;
         let viewport = Rect::new(
             grid_x0,
             agua(y + y_off),
-            cols as f32 * GRID_CELL_W,
-            rows as f32 * GRID_CELL_H,
+            cols as f32 * grid_cell_w,
+            rows as f32 * grid_cell_h,
         );
         y += viewport.h + SECTION_GAP;
         // Horizontal paging: each page is viewport.w wide. Pages wrap
@@ -506,7 +528,9 @@ pub fn layout(
     // magnified box grows into and which swallows clicks.
     let open_box = navigated[SECTION_APPS].then(|| {
         let vp = sections[SECTION_APPS].viewport;
-        let side = vp.h.min(vp.w);
+        // Size the box at exactly 3 scaled cells (OPEN_BOX_COLS rows/cols)
+        // so icons inside track icon_scale directly. Cap at the viewport.
+        let side = (OPEN_BOX_COLS as f32 * grid_cell_h).min(vp.h).min(vp.w);
         Rect::new(vp.x + (vp.w - side) / 2.0, vp.y, side, side)
     });
 
@@ -605,13 +629,16 @@ pub fn hit_test(
             let adjusted_x = pos.0 - sec.viewport.x + sec.scroll;
             let page_w = sec.viewport.w.max(1.0);
             let page = (adjusted_x / page_w).floor() as usize % sec.n_pages.max(1);
-            let col_f = (adjusted_x - page as f32 * page_w) / GRID_CELL_W;
-            let row = ((pos.1 - sec.viewport.y) / GRID_CELL_H).floor() as usize;
+            // Derive scaled cell dimensions from the already-scaled layout geometry.
+            let cell_w = sec.viewport.w / sec.cols.max(1) as f32;
+            let cell_h = sec.viewport.h / sec.rows.max(1) as f32;
+            let col_f = (adjusted_x - page as f32 * page_w) / cell_w;
+            let row = ((pos.1 - sec.viewport.y) / cell_h).floor() as usize;
             let col = col_f.floor() as usize;
             // Static lead cells claim the viewport's first columns on
             // every page (the strip slides beneath them).
             if sec.lead > 0 {
-                let screen_col = ((pos.0 - sec.viewport.x) / GRID_CELL_W).floor() as usize;
+                let screen_col = ((pos.0 - sec.viewport.x) / cell_w).floor() as usize;
                 if pos.0 >= sec.viewport.x && screen_col < sec.lead {
                     return (screen_col < sec.cells).then_some(Hit::GridCell(s, screen_col));
                 }
@@ -786,6 +813,14 @@ pub struct FrameInput<'a> {
     /// slot, pointer pos). The dragged member is hidden and drawn as a
     /// ghost; its page compacts and the gap's page parts around the gap.
     pub box_drag: Option<(usize, usize, (f32, f32))>,
+    /// Vertical offset (px) of the card background from the idle breathing
+    /// oscillation. Positive = card rises; icons are NOT shifted — the glass
+    /// surface floats while content stays anchored to the screen.
+    pub breath_offset: f32,
+    /// Per-edge poke offsets (px): (left, right, top, bottom).
+    /// Each spring moves only its own edge; icons stay anchored.
+    /// Positive = edge moves inward (left→right, top→down, right→left, bottom→up).
+    pub card_push: (f32, f32, f32, f32),
 }
 
 /// Local member index shown in 3×3 slot `slot` (row-major) of an open box
@@ -808,6 +843,7 @@ pub fn open_box_slot_member(left: bool, slot: usize) -> usize {
 /// order. Dock icons always show the dock order unfiltered.
 pub fn scene(
     config: &Config,
+    icon_scale: f32,
     layout: &Layout,
     entries: &[AppEntry],
     visible: &[Vec<usize>; N_SECTIONS],
@@ -853,15 +889,26 @@ pub fn scene(
         open_box_pages,
         box_scroll,
         box_drag,
+        breath_offset,
+        card_push,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
+    // Scaled drawing metrics — mirrors what layout() received.
+    let dock_icon    = DOCK_ICON   * icon_scale;
+    let dock_slot    = DOCK_SLOT   * icon_scale;
+    let dock_magnify = 1.0 + (DOCK_MAGNIFY - 1.0) * icon_scale;
+    let grid_icon    = GRID_ICON   * icon_scale;
+    let grid_icon_top = GRID_ICON_TOP * icon_scale;
+    let box_tile     = BOX_TILE    * icon_scale;
+    let grid_cell_w  = GRID_CELL_W * icon_scale;
+    let grid_cell_h  = GRID_CELL_H * icon_scale;
     // The magnified open box's current rect (grows from the tile into its
     // rest square). Used to draw the box and to hide the grid labels it
     // covers — otherwise those names paint over it in the later text pass.
     let open_box_rect = match (open_box_members.is_empty(), group_origin, layout.open_box) {
         (false, Some((ox, oy)), Some(to)) => {
             let t = group_expand.clamp(0.0, 1.0);
-            let from = Rect::new(ox - BOX_TILE / 2.0, oy - BOX_TILE / 2.0, BOX_TILE, BOX_TILE);
+            let from = Rect::new(ox - box_tile / 2.0, oy - box_tile / 2.0, box_tile, box_tile);
             Some(Rect::new(
                 lerp(from.x, to.x, t),
                 lerp(from.y, to.y, t),
@@ -878,7 +925,7 @@ pub fn scene(
     // it from the bottom up. Everything below the dock band is clipped to
     // this reveal region, whose top (the dock's underside) rises as the
     // box grows — so rows are exposed in place, never moved.
-    let dock_h = config.window.input_bar_height as f32;
+    let dock_h = config.window.input_bar_height as f32 * icon_scale;
     let reveal_top = layout.card_top + dock_h;
     let reveal_bottom = layout.card_top + card_h;
     let reveal_rect = Rect::new(
@@ -903,8 +950,19 @@ pub fn scene(
 
     // Card background: the AGUA silhouette — wide basin at rest,
     // gathered to the box width risen, spilling on the landing.
+    // `breath_offset` expands all four edges equally (card center fixed,
+    // icons stay anchored); positive = exhale (card grows), negative = inhale.
+    // Per-edge jelly: each spring moves only its own edge.
+    // (left, right, top, bottom) offsets; positive = inward.
+    // Combined with breath (uniform expansion from all edges).
+    let (jl, jr, jt, jb) = card_push;
     scene.rects.push(RectInst {
-        rect: Rect::new(layout.card_x, layout.card_top, layout.card_w, card_h),
+        rect: Rect::new(
+            layout.card_x   - breath_offset + jl,
+            layout.card_top - breath_offset + jt,
+            layout.card_w + 2.0 * breath_offset - jl + jr,
+            card_h + 2.0 * breath_offset - jt + jb,
+        ),
         radius: config.theme.corner_radius,
         color: config.theme.background_rgba(),
     });
@@ -926,7 +984,7 @@ pub fn scene(
                     // gap magnifies the icon just like hovering it directly.
                     let d_out = (slot.y - py).max(py - layout.dock_hit_bottom).max(0.0);
                     let fy = falloff(d_out, DOCK_MAG_VRADIUS);
-                    1.0 + (DOCK_MAGNIFY - 1.0)
+                    1.0 + (dock_magnify - 1.0)
                         * falloff(px - cx, DOCK_MAG_RADIUS)
                         * fy
                         * mag_amount.clamp(0.0, 1.0)
@@ -941,12 +999,12 @@ pub fn scene(
     let dock_vcx: Vec<f32> = {
         let total_vw: f32 = dock_scales
             .iter()
-            .map(|&s| DOCK_SLOT + DOCK_ICON * (s - 1.0))
+            .map(|&s| dock_slot + dock_icon * (s - 1.0))
             .sum();
         let mut x = (w - total_vw) / 2.0;
         let mut centers = Vec::with_capacity(dock_scales.len());
         for &s in &dock_scales {
-            let vw = DOCK_SLOT + DOCK_ICON * (s - 1.0);
+            let vw = dock_slot + dock_icon * (s - 1.0);
             centers.push(x + vw / 2.0);
             x += vw;
         }
@@ -981,7 +1039,7 @@ pub fn scene(
         if let Some(Hit::DockIcon(i)) = hover {
             if let (Some(slot), Some(&vcx)) = (layout.dock_slots.get(i), dock_vcx.get(i)) {
                 scene.rects.push(RectInst {
-                    rect: Rect::new(vcx - DOCK_SLOT / 2.0, slot.y, DOCK_SLOT, slot.h),
+                    rect: Rect::new(vcx - dock_slot / 2.0, slot.y, dock_slot, slot.h),
                     radius: 12.0,
                     color: config.theme.highlight_rgba(),
                 });
@@ -999,7 +1057,7 @@ pub fn scene(
             continue;
         }
         let slot_rect = &layout.dock_slots[slot];
-        let vcx = dock_vcx[slot] + dock_slide.get(slot).copied().unwrap_or(0.0) * DOCK_SLOT;
+        let vcx = dock_vcx[slot] + dock_slide.get(slot).copied().unwrap_or(0.0) * dock_slot;
         let baseline = slot_rect.y + slot_rect.h;
         // Running indicator (macOS dot): a small dot beneath the icon.
         // Drawn before the icon so a magnified icon never hides it.
@@ -1017,7 +1075,7 @@ pub fn scene(
             });
         }
         let scale = dock_scales[slot];
-        let size = (DOCK_ICON * scale).min(slot_rect.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
+        let size = (dock_icon * scale).min(slot_rect.h.min(dock_slot) + MAGNIFY_HEADROOM);
         // AGUA: the icon elongates/compresses vertically about its
         // baseline with the card's motion — a water drop on the bar
         // (amplified: at icon scale the raw factor reads as nothing).
@@ -1104,7 +1162,7 @@ pub fn scene(
                     let font_px = LABEL_FONT_PX;
                     let line_px = font_px * 1.3;
                     let scale = dock_scales.get(i).copied().unwrap_or(1.0);
-                    let size = (DOCK_ICON * scale).min(slot.h.min(DOCK_SLOT) + MAGNIFY_HEADROOM);
+                    let size = (dock_icon * scale).min(slot.h.min(dock_slot) + MAGNIFY_HEADROOM);
                     let icon_top = slot.y + slot.h - size - lift(entry_idx);
                     // Width from the same glyph-advance model truncate_label uses.
                     let pill_w = name.chars().count() as f32 * font_px * 0.52 + 16.0;
@@ -1147,7 +1205,7 @@ pub fn scene(
         }
         // Ghost following the pointer, topmost: the dragged icon, or a
         // box's mini stack. Slightly enlarged — it's "in hand".
-        let size = DOCK_ICON * 1.25;
+        let size = dock_icon * 1.25;
         let (gx, gy) = df.pos;
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == df.entry_idx) {
             let m = size * 0.46;
@@ -1181,7 +1239,7 @@ pub fn scene(
     // (Built here, pushed after the section grids so `scene.grids[s]`
     // keeps indexing the sections.)
     let mut search_grid: Option<GridContent> = None;
-    if layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 {
+    if layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale {
         let mut sgrid = GridContent {
             clip: reveal_rect,
             ..Default::default()
@@ -1333,9 +1391,9 @@ pub fn scene(
         };
         if lead > 0 {
             grid.clip = reveal_clip(Rect::new(
-                sec.viewport.x + lead as f32 * GRID_CELL_W,
+                sec.viewport.x + lead as f32 * grid_cell_w,
                 sec.viewport.y,
-                sec.viewport.w - lead as f32 * GRID_CELL_W,
+                sec.viewport.w - lead as f32 * grid_cell_w,
                 sec.viewport.h,
             ));
         }
@@ -1348,7 +1406,7 @@ pub fn scene(
             let corner = |i: usize| -> (f32, f32) {
                 if i < lead {
                     // A lead cell ignores the scroll entirely.
-                    return (sec.viewport.x + i as f32 * GRID_CELL_W, sec.viewport.y);
+                    return (sec.viewport.x + i as f32 * grid_cell_w, sec.viewport.y);
                 }
                 let j = i - lead;
                 let page = j / strip_cpp;
@@ -1357,8 +1415,8 @@ pub fn scene(
                 let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
                 let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
                 (
-                    sec.viewport.x + rel + col as f32 * GRID_CELL_W,
-                    sec.viewport.y + row as f32 * GRID_CELL_H,
+                    sec.viewport.x + rel + col as f32 * grid_cell_w,
+                    sec.viewport.y + row as f32 * grid_cell_h,
                 )
             };
             let (x0, y0) = corner(i0);
@@ -1389,10 +1447,10 @@ pub fn scene(
                 i as f32
             };
             let (cell_x, cell_y) = cell_pos(di);
-            if cell_x - sec.viewport.x <= -GRID_CELL_W || cell_x - sec.viewport.x >= page_w {
+            if cell_x - sec.viewport.x <= -grid_cell_w || cell_x - sec.viewport.x >= page_w {
                 continue;
             }
-            let cell = Rect::new(cell_x, cell_y, GRID_CELL_W, GRID_CELL_H);
+            let cell = Rect::new(cell_x, cell_y, grid_cell_w, grid_cell_h);
             if selected == Some((s, i)) {
                 let hl = config.theme.highlight_rgba();
                 g.rects.push(RectInst {
@@ -1418,7 +1476,7 @@ pub fn scene(
                 });
             }
             let cx = cell.x + cell.w / 2.0;
-            let icon_cy = cell.y + GRID_ICON_TOP + GRID_ICON / 2.0;
+            let icon_cy = cell.y + grid_icon_top + grid_icon / 2.0;
             // Drop a cell's label when its *rect* overlaps the open box —
             // not just when the icon center is inside it. Labels are wider
             // than icons and sit below them, so an edge cell just outside
@@ -1427,7 +1485,7 @@ pub fn scene(
             // opaque panel covers it.)
             let covered = open_box_rect.is_some_and(|b| {
                 let half = (cell.w - 12.0) / 2.0;
-                let ly = cell.y + GRID_ICON_TOP + GRID_ICON + GRID_LABEL_GAP;
+                let ly = cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP;
                 cx + half > b.x
                     && cx - half < b.x + b.w
                     && ly + LABEL_LINE_PX > b.y
@@ -1437,14 +1495,14 @@ pub fn scene(
                 // Group cell: folder-style tile with a 2×2 mini
                 // preview of the first members.
                 let hl = config.theme.highlight_rgba();
-                let tile = BOX_TILE;
+                let tile = box_tile;
                 g.rects.push(RectInst {
                     rect: Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile),
                     radius: 14.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
                 });
-                let m = GRID_ICON * 0.42;
-                let gap = GRID_ICON * 0.10;
+                let m = grid_icon * 0.42;
+                let gap = grid_icon * 0.10;
                 for (k, layer) in minis.iter().enumerate() {
                     let Some(layer) = layer else { continue };
                     let col_k = (k % 2) as f32;
@@ -1462,7 +1520,7 @@ pub fn scene(
                 if !covered {
                     g.labels.push(Label {
                         text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
-                        pos: (cx, cell.y + GRID_ICON_TOP + GRID_ICON + GRID_LABEL_GAP),
+                        pos: (cx, cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP),
                         max_w: cell.w - 12.0,
                         font_px: LABEL_FONT_PX,
                         line_px: LABEL_LINE_PX,
@@ -1483,7 +1541,7 @@ pub fn scene(
                 }
                 None => 1.0,
             };
-            let size = GRID_ICON * scale;
+            let size = grid_icon * scale;
             g.icons.push(IconInst {
                 rect: Rect::new(
                     cx - size / 2.0,
@@ -1531,7 +1589,7 @@ pub fn scene(
             if !covered {
                 g.labels.push(Label {
                     text: name,
-                    pos: (cx, cell.y + GRID_ICON_TOP + GRID_ICON + GRID_LABEL_GAP),
+                    pos: (cx, cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP),
                     max_w: cell.w - 12.0,
                     font_px: LABEL_FONT_PX,
                     line_px: LABEL_LINE_PX,
@@ -1618,8 +1676,8 @@ pub fn scene(
         let cell = box_rect.w / OPEN_BOX_COLS as f32;
         // Closed 2×2 mini geometry (matches the closed tile), centered on the
         // tile — the preview four flow from here into their open slots.
-        let mini = GRID_ICON * 0.42;
-        let mini_offset = (mini + GRID_ICON * 0.10) / 2.0;
+        let mini = grid_icon * 0.42;
+        let mini_offset = (mini + grid_icon * 0.10) / 2.0;
         // The extra members reveal as the box unfolds past the 2×2.
         let reveal = {
             let u = ((t - 0.15) / 0.55).clamp(0.0, 1.0);
@@ -1666,10 +1724,10 @@ pub fn scene(
                 (
                     lerp(ox + sx * mini_offset, open_cx, t),
                     lerp(oy + sy * mini_offset, open_cy, t),
-                    lerp(mini, GRID_ICON, t),
+                    lerp(mini, grid_icon, t),
                 )
             } else {
-                (open_cx, open_cy, lerp(mini, GRID_ICON, t) * reveal)
+                (open_cx, open_cy, lerp(mini, grid_icon, t) * reveal)
             };
             if size <= 0.5 {
                 continue;
@@ -1740,7 +1798,7 @@ pub fn scene(
 
     // Ghost of a box member being reordered, following the pointer (topmost).
     if let Some((entry, _, pos)) = box_drag {
-        let s = GRID_ICON * 1.1;
+        let s = grid_icon * 1.1;
         scene.overlay.push(IconInst {
             rect: Rect::new(pos.0 - s / 2.0, pos.1 - s / 2.0, s, s),
             layer: layer_of(entry),

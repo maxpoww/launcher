@@ -106,6 +106,17 @@ impl UiState {
         }
     }
 
+    /// Update the dock/full extent targets (called when icon_size changes).
+    /// If settled, snaps the current extent to the new rest position immediately.
+    pub fn set_extents(&mut self, dock_extent: f32, full_extent: f32) {
+        self.dock_extent = dock_extent.max(1.0);
+        self.full_extent = full_extent.max(1.0);
+        if self.animator.is_none() {
+            self.extent = self.extent_of(self.target);
+            self.start_extent = self.extent;
+        }
+    }
+
     /// Whether a redraw/frame-callback cycle is needed.
     pub fn is_animating(&self) -> bool {
         self.animator.is_some()
