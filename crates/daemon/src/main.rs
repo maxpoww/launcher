@@ -168,7 +168,7 @@ fn main() -> anyhow::Result<()> {
             full_extent as f32,
         ),
         config,
-        icon_size: 1,
+        icon_size: load_icon_size(),
         buffer_size: (0, 0),
         scale_factor: 1,
         last_frame: None,
@@ -279,6 +279,12 @@ fn main() -> anyhow::Result<()> {
         zone_free: false,
         exit: false,
     };
+
+    // Reconcile the Wayland surface size and UiState extents with the
+    // persisted icon_size (main() computed them assuming scale 1.0).
+    if app.icon_size != 1 {
+        app.apply_icon_size_change();
+    }
 
     let socket_path = waverunner_proto::socket_path();
     let _socket_guard = ipc::listen(&event_loop.handle(), &socket_path)?;
@@ -836,6 +842,7 @@ impl App {
         let (w, h) = self.scaled_surface_size();
         self.layer.set_size(w, h);
         self.layer.wl_surface().commit();
+        save_icon_size(self.icon_size);
     }
 
     /// Entry point for IPC commands (called from ipc.rs) and for
@@ -3022,6 +3029,17 @@ impl DataSourceHandler for App {
         _: DndAction,
     ) {
     }
+}
+
+fn load_icon_size() -> usize {
+    let path = persist::data_path("ui_state.json");
+    let n: usize = persist::read_json(&path).unwrap_or(1);
+    n.min(content::ICON_SCALES.len() - 1)
+}
+
+fn save_icon_size(size: usize) {
+    let path = persist::data_path("ui_state.json");
+    persist::write_json("ui_state", &path, &size);
 }
 
 smithay_client_toolkit::delegate_data_device!(App);
