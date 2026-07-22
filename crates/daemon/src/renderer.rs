@@ -78,6 +78,10 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// Integer supersampling factor. `config.width/height` are physical
+    /// (`logical × scale`); geometry is authored in logical px and scaled
+    /// up automatically (see [`Renderer::render`]).
+    scale: u32,
 
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
@@ -115,13 +119,15 @@ pub struct Renderer {
 
 impl Renderer {
     /// Create the wgpu device and configure the swapchain against an
-    /// already-configured layer surface of `width` x `height` (buffer
-    /// pixels).
+    /// already-configured layer surface of `width` x `height` physical
+    /// (buffer) pixels. `scale` is the integer supersampling factor:
+    /// physical = logical × scale.
     pub fn new(
         conn: &Connection,
         wl_surface: &WlSurface,
         width: u32,
         height: u32,
+        scale: u32,
     ) -> anyhow::Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
@@ -421,6 +427,7 @@ impl Renderer {
             device,
             queue,
             config,
+            scale: scale.max(1),
             globals_buf,
             globals_bind,
             shadow_pipeline,
@@ -626,7 +633,16 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // `w`/`h` are the physical framebuffer size; the scene is authored in
+        // logical px. Geometry pipelines map `px / screen → NDC`, so feeding a
+        // *logical* `screen` while the framebuffer is physical scales all
+        // geometry up to physical resolution for free — no shader changes.
+        // Text (glyphon) is the exception: it must be shaped at physical px to
+        // stay crisp, so its metrics, positions and clip bounds are scaled by
+        // `scale` below.
         let (w, h) = (self.config.width, self.config.height);
+        let scale = self.scale as f32;
+        let (lw, lh) = (w as f32 / scale, h as f32 / scale);
 
         // Advance anim_time only while frames are rendered — no phase jump
         // when the dock hides (no frames) and then reappears.
@@ -655,7 +671,7 @@ impl Renderer {
             &self.globals_buf,
             0,
             bytemuck::bytes_of(&Globals {
-                screen:    [w as f32, h as f32],
+                screen:    [lw, lh],
                 alpha:     scene.alpha.clamp(0.0, 1.0),
                 time:      self.anim_time,
                 cursor:    cursor_px,
@@ -733,8 +749,8 @@ impl Renderer {
         let full = crate::content::Rect {
             x: 0.0,
             y: 0.0,
-            w: w as f32,
-            h: h as f32,
+            w: lw,
+            h: lh,
         };
         let mut all_labels: Vec<(&crate::content::Label, crate::content::Rect)> = Vec::new();
         for label in &scene.labels {
@@ -750,10 +766,14 @@ impl Renderer {
         // cacheable labels (stable text like app names) keep their
         // shaped buffers across frames; volatile ones (the live query)
         // are shaped fresh into `fresh` each frame.
+        // Shaped at physical px (metrics × scale) so glyphs are rasterized at
+        // the resolution they are displayed, then laid out in physical coords.
         let shape = |font_system: &mut FontSystem, label: &crate::content::Label| {
-            let mut buffer =
-                TextBuffer::new(font_system, Metrics::new(label.font_px, label.line_px));
-            buffer.set_size(font_system, Some(label.max_w), Some(label.line_px));
+            let mut buffer = TextBuffer::new(
+                font_system,
+                Metrics::new(label.font_px * scale, label.line_px * scale),
+            );
+            buffer.set_size(font_system, Some(label.max_w * scale), Some(label.line_px * scale));
             buffer.set_text(
                 font_system,
                 &label.text,
@@ -793,23 +813,25 @@ impl Renderer {
             };
             // Measure the shaped line; center about the anchor when
             // requested; snap to whole pixels so glyphs stay crisp.
+            // Everything here is physical px: the buffer was shaped at
+            // metrics × scale, so `line_w` and the anchor/clip must scale too.
             let line_w = buffer
                 .layout_runs()
                 .next()
                 .map(|run| run.line_w)
                 .unwrap_or(0.0)
-                .min(label.max_w);
+                .min(label.max_w * scale);
             let left = if label.centered {
-                (label.pos.0 - line_w / 2.0).round()
+                (label.pos.0 * scale - line_w / 2.0).round()
             } else {
-                label.pos.0.round()
+                (label.pos.0 * scale).round()
             };
-            let top = label.pos.1.round();
+            let top = (label.pos.1 * scale).round();
             let bounds = TextBounds {
-                left: clip.x as i32,
-                top: clip.y as i32,
-                right: (clip.x + clip.w) as i32,
-                bottom: (clip.y + clip.h).min(h as f32) as i32,
+                left: (clip.x * scale) as i32,
+                top: (clip.y * scale) as i32,
+                right: ((clip.x + clip.w) * scale) as i32,
+                bottom: ((clip.y + clip.h) * scale).min(h as f32) as i32,
             };
             text_buffers.push((buffer, (left, top), bounds, label.dim));
         }
@@ -895,10 +917,12 @@ impl Renderer {
 
             // Each section's grid content under its own scissor rect.
             for (clip, rect_range, icon_range) in &grid_ranges {
-                let sx = (clip.x.max(0.0) as u32).min(w);
-                let sy = (clip.y.max(0.0) as u32).min(h);
-                let sw = (clip.w as u32).min(w - sx);
-                let sh = ((clip.y + clip.h).min(h as f32) as u32).saturating_sub(sy);
+                // Scissor rects address the physical framebuffer; the clip is
+                // logical, so scale it up.
+                let sx = ((clip.x.max(0.0) * scale) as u32).min(w);
+                let sy = ((clip.y.max(0.0) * scale) as u32).min(h);
+                let sw = ((clip.w * scale) as u32).min(w - sx);
+                let sh = (((clip.y + clip.h) * scale).min(h as f32) as u32).saturating_sub(sy);
                 if sw == 0 || sh == 0 {
                     continue;
                 }

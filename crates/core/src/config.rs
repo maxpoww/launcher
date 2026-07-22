@@ -113,6 +113,12 @@ pub struct WindowConfig {
     pub input_bar_height: u32,
     /// Gap between the fully risen card and the bottom screen edge.
     pub bottom_margin: u32,
+    /// Integer supersampling factor: the daemon renders its buffer at
+    /// `logical × render_scale` physical pixels and lets the compositor
+    /// downscale to the (possibly fractional) output scale. `2` keeps
+    /// icons and text crisp on HiDPI/fractional displays; `1` renders at
+    /// logical resolution (sharp only on scale-1 outputs).
+    pub render_scale: u32,
 }
 
 impl Default for WindowConfig {
@@ -124,6 +130,7 @@ impl Default for WindowConfig {
             height: 680,
             input_bar_height: 42,
             bottom_margin: 8,
+            render_scale: 2,
         }
     }
 }

@@ -117,12 +117,14 @@ fn main() -> anyhow::Result<()> {
     let surface_height =
         full_extent + content::MAGNIFY_HEADROOM as u32 + content::DRAG_MARGIN_TOP as u32;
     let surface_width = config.window.width + 2 * content::DRAG_MARGIN_X as u32;
+    let render_scale = config.window.render_scale.max(1);
     let layer = surface::create_layer_surface(
         &compositor,
         &layer_shell,
         &qh,
         surface_width,
         surface_height,
+        render_scale,
     );
 
     // App discovery runs on the one allowed background thread; it
@@ -2303,11 +2305,17 @@ impl LayerShellHandler for App {
             if height == 0 { height = sh; }
         }
         debug!("configure: {width}x{height}");
+        // `new_size` is logical (surface-local). Input regions and pointer
+        // hit-testing work in this space, so `buffer_size` stays logical.
         self.buffer_size = (width, height);
+        // The wgpu framebuffer is physical: `logical × render_scale`, matching
+        // the `set_buffer_scale` declared on the surface.
+        let scale = self.config.window.render_scale.max(1);
+        let (pw, ph) = (width * scale, height * scale);
 
         match self.renderer.as_mut() {
-            Some(renderer) => renderer.resize(width, height),
-            None => match Renderer::new(&self.conn, self.layer.wl_surface(), width, height) {
+            Some(renderer) => renderer.resize(pw, ph),
+            None => match Renderer::new(&self.conn, self.layer.wl_surface(), pw, ph, scale) {
                 Ok(mut renderer) => {
                     if let Some(icons) = self.pending_icons.take() {
                         renderer.set_icons(&icons);

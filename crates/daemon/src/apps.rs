@@ -24,7 +24,13 @@ use waverunner_core::index::{AppEntry, DesktopIndex};
 /// Side length of every rasterized icon, in pixels. All icons are
 /// normalized to this size so the renderer can pack them into one
 /// texture array layer each.
-pub const ICON_SIZE: u32 = 48;
+///
+/// Sized to cover the largest on-screen draw at the highest icon-size
+/// level and render scale: grid level‑3 (`GRID_ICON × ICON_SCALES[3]`
+/// ≈ 89 logical px) at render scale 2 ≈ 178 px, with headroom so even a
+/// hover-magnified dock icon is downscaled, never upscaled. Icons are
+/// mostly SVG, so rasterizing larger is free vector quality.
+pub const ICON_SIZE: u32 = 192;
 
 /// What an entry is, deciding which popup section shows it. Applications
 /// come from `.desktop` files; files are home folders and file-search

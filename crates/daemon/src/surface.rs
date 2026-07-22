@@ -23,6 +23,7 @@ pub fn create_layer_surface(
     qh: &QueueHandle<App>,
     width: u32,
     height: u32,
+    render_scale: u32,
 ) -> LayerSurface {
     let surface = compositor.create_surface(qh);
     let layer = layer_shell.create_layer_surface(
@@ -35,6 +36,12 @@ pub fn create_layer_surface(
 
     layer.set_anchor(Anchor::BOTTOM);
     layer.set_size(width, height);
+    // Integer supersampling: the buffer we attach is `logical × render_scale`
+    // physical pixels, so declare the scale up front — it must be active
+    // before the renderer commits its first (`logical × render_scale`)
+    // buffer, or the compositor would misread the buffer size. Surface-local
+    // coordinates (size, input region) stay logical regardless.
+    layer.wl_surface().set_buffer_scale(render_scale as i32);
     // Hidden at startup: never steal focus until shown.
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.commit();
