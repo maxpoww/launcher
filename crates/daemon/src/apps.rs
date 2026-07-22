@@ -817,7 +817,7 @@ const PLATE_EDGE_WIDTH: f32 = 5.0;
 /// pulled `PLATE_ICON_DESAT` of the way toward its own luminance (0 = full
 /// color, 1 = greyscale) and drawn at `PLATE_ICON_OPACITY` so the frosted
 /// plate shows through a little.
-const PLATE_ICON_DESAT: f32 = 0.5;
+const PLATE_ICON_DESAT: f32 = 0.3;
 const PLATE_ICON_OPACITY: f32 = 1.0;
 
 /// Turn a raw `ICON_SIZE`² base tile into the uploaded mip chain, plating
