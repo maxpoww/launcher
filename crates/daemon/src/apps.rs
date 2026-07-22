@@ -818,7 +818,7 @@ const PLATE_EDGE_WIDTH: f32 = 5.0;
 /// color, 1 = greyscale) and drawn at `PLATE_ICON_OPACITY` so the frosted
 /// plate shows through a little.
 const PLATE_ICON_DESAT: f32 = 0.0;
-const PLATE_ICON_OPACITY: f32 = 0.60;
+const PLATE_ICON_OPACITY: f32 = 0.70;
 
 /// Turn a raw `ICON_SIZE`² base tile into the uploaded mip chain, plating
 /// it first when `icon_plate` is on.
