@@ -28,9 +28,31 @@ use waverunner_core::index::{AppEntry, DesktopIndex};
 /// Sized to cover the largest on-screen draw at the highest icon-size
 /// level and render scale: grid level‑3 (`GRID_ICON × ICON_SCALES[3]`
 /// ≈ 89 logical px) at render scale 2 ≈ 178 px, with headroom so even a
-/// hover-magnified dock icon is downscaled, never upscaled. Icons are
-/// mostly SVG, so rasterizing larger is free vector quality.
-pub const ICON_SIZE: u32 = 192;
+/// hover-magnified dock icon is downscaled, never upscaled. A power of
+/// two so the mip chain halves cleanly. Icons are mostly SVG, so
+/// rasterizing larger is free vector quality.
+pub const ICON_SIZE: u32 = 256;
+
+/// Number of mip levels in the icon texture (base + downsamples), i.e.
+/// `log2(ICON_SIZE) + 1`. The smallest level is 1×1.
+pub const ICON_MIPS: u32 = ICON_SIZE.trailing_zeros() + 1;
+
+/// Byte length of one icon's full mip chain (level 0 followed by every
+/// downsample, premultiplied RGBA8): `ICON_SIZE² + (ICON_SIZE/2)² + … + 1`
+/// texels × 4. Every producer emits this so the renderer uploads chains
+/// uniformly and the on-disk cache stores them.
+pub const ICON_CHAIN_BYTES: usize = icon_chain_bytes(ICON_SIZE);
+
+const fn icon_chain_bytes(mut size: u32) -> usize {
+    let mut total = 0usize;
+    loop {
+        total += (size * size * 4) as usize;
+        if size == 1 {
+            return total;
+        }
+        size /= 2;
+    }
+}
 
 /// What an entry is, deciding which popup section shows it. Applications
 /// come from `.desktop` files; files are home folders and file-search
@@ -69,8 +91,9 @@ pub struct LoadedApps {
     pub entries: Vec<AppEntry>,
     /// What each entry is, aligned with `entries`.
     pub kinds: Vec<EntryKind>,
-    /// Premultiplied RGBA8 pixels, `ICON_SIZE * ICON_SIZE * 4` bytes per
-    /// entry; a generated placeholder tile where no icon was found.
+    /// Premultiplied RGBA8 mip chain, [`ICON_CHAIN_BYTES`] per entry
+    /// (base `ICON_SIZE`² plus downsamples); a generated placeholder tile
+    /// where no icon was found.
     pub icons: Vec<Vec<u8>>,
     /// `true` for entries whose icon could not be resolved (placeholder tile).
     pub placeholders: Vec<bool>,
@@ -460,11 +483,11 @@ impl DiskCache {
         Some(self.dir.join(format!("{:016x}", fnv1a64(&key))))
     }
 
-    /// Read a cached raster back, rejecting files of the wrong size
-    /// (truncated write or a stale `ICON_SIZE`).
+    /// Read a cached mip chain back, rejecting files of the wrong size
+    /// (truncated write or a stale format/`ICON_SIZE`).
     fn load(file: &std::path::Path) -> Option<Vec<u8>> {
         let pixels = std::fs::read(file).ok()?;
-        (pixels.len() == (ICON_SIZE * ICON_SIZE * 4) as usize).then_some(pixels)
+        (pixels.len() == ICON_CHAIN_BYTES).then_some(pixels)
     }
 
     /// Persist a raster via write-to-temp + rename, so a concurrent
@@ -733,7 +756,8 @@ fn cache_base() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"))
 }
 
-/// Read and rasterize one icon file to `ICON_SIZE`² premultiplied RGBA.
+/// Read and rasterize one icon file to a full [`ICON_CHAIN_BYTES`] mip
+/// chain (base `ICON_SIZE`² premultiplied RGBA plus its downsamples).
 pub(crate) fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
     let path = std::path::Path::new(path);
     let data = std::fs::read(path).ok()?;
@@ -745,7 +769,93 @@ pub(crate) fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
             return None;
         }
     };
-    Some(pixmap.take())
+    Some(with_mips(pixmap.take()))
+}
+
+/// Append the full mip chain to a base `ICON_SIZE`² premultiplied-RGBA
+/// image, yielding [`ICON_CHAIN_BYTES`]: `level0 || level1 || … || 1×1`.
+/// Each level box-filters the previous one in linear space (RGB is
+/// srgb-encoded, alpha linear) to match the GPU's srgb texture sampling,
+/// so minified icons stay clean instead of aliasing. Runs on the icon
+/// worker threads and its result is cached to disk, so the cost is paid
+/// at most once per icon.
+pub(crate) fn with_mips(base: Vec<u8>) -> Vec<u8> {
+    let mut chain = base;
+    chain.reserve(ICON_CHAIN_BYTES - chain.len());
+    let mut size = ICON_SIZE;
+    let mut level_start = 0usize;
+    while size > 1 {
+        let level_len = (size * size * 4) as usize;
+        let down = downsample_half(&chain[level_start..level_start + level_len], size);
+        level_start += level_len;
+        chain.extend_from_slice(&down);
+        size /= 2;
+    }
+    chain
+}
+
+/// Box-downsample one `size`×`size` premultiplied-RGBA image to half its
+/// side, averaging RGB in linear light and alpha directly.
+fn downsample_half(src: &[u8], size: u32) -> Vec<u8> {
+    let dec = srgb_decode_lut();
+    let enc = srgb_encode_lut();
+    let s = size as usize;
+    let h = s / 2;
+    let mut dst = vec![0u8; h * h * 4];
+    for y in 0..h {
+        for x in 0..h {
+            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let i = (((y * 2 + dy) * s) + (x * 2 + dx)) * 4;
+                    r += dec[src[i] as usize];
+                    g += dec[src[i + 1] as usize];
+                    b += dec[src[i + 2] as usize];
+                    a += src[i + 3] as f32;
+                }
+            }
+            let o = (y * h + x) * 4;
+            dst[o] = enc[(r * 0.25 * ENC_LUT_MAX as f32) as usize];
+            dst[o + 1] = enc[(g * 0.25 * ENC_LUT_MAX as f32) as usize];
+            dst[o + 2] = enc[(b * 0.25 * ENC_LUT_MAX as f32) as usize];
+            dst[o + 3] = (a * 0.25).round() as u8;
+        }
+    }
+    dst
+}
+
+/// Highest index of the linear→srgb encode LUT (its length is this + 1).
+const ENC_LUT_MAX: usize = 4096;
+
+/// srgb byte → linear float, memoized (256 entries).
+fn srgb_decode_lut() -> &'static [f32; 256] {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let c = i as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    })
+}
+
+/// linear float (quantized to `ENC_LUT_MAX + 1` steps) → srgb byte.
+fn srgb_encode_lut() -> &'static [u8; ENC_LUT_MAX + 1] {
+    static LUT: std::sync::OnceLock<[u8; ENC_LUT_MAX + 1]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let c = i as f32 / ENC_LUT_MAX as f32;
+            let s = if c <= 0.003_130_8 {
+                c * 12.92
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            };
+            (s * 255.0).round().clamp(0.0, 255.0) as u8
+        })
+    })
 }
 
 /// Render an SVG into an `ICON_SIZE`² pixmap.
@@ -800,7 +910,7 @@ pub(crate) fn placeholder_icon(name: &str) -> Vec<u8> {
 
     let mut pixmap = match tiny_skia::Pixmap::new(ICON_SIZE, ICON_SIZE) {
         Some(p) => p,
-        None => return vec![0; (ICON_SIZE * ICON_SIZE * 4) as usize],
+        None => return vec![0; ICON_CHAIN_BYTES],
     };
     let mut paint = tiny_skia::Paint::default();
     paint.set_color_rgba8(r, g, b, 215);
@@ -830,7 +940,7 @@ pub(crate) fn placeholder_icon(name: &str) -> Vec<u8> {
             None,
         );
     }
-    pixmap.take()
+    with_mips(pixmap.take())
 }
 
 /// Muted-palette hue to RGB (fixed saturation/lightness).
@@ -878,7 +988,7 @@ mod tests {
         let file = cache.file_for(&icon).unwrap();
         assert_eq!(DiskCache::load(&file), None, "cold cache misses");
 
-        let pixels = vec![7u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
+        let pixels = vec![7u8; ICON_CHAIN_BYTES];
         cache.store(&file, &pixels);
         assert_eq!(DiskCache::load(&file), Some(pixels));
 

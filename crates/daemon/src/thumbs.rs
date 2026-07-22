@@ -154,7 +154,7 @@ fn decode_image(path: &str) -> Option<Vec<u8>> {
             out[at + 3] = a as u8;
         }
     }
-    Some(out)
+    Some(crate::apps::with_mips(out))
 }
 
 /// Generate through an external thumbnailer into a scratch png, then

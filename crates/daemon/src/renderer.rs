@@ -21,7 +21,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Proxy};
 use wgpu::util::DeviceExt;
 
-use crate::apps::ICON_SIZE;
+use crate::apps::{ICON_CHAIN_BYTES, ICON_MIPS, ICON_SIZE};
 use crate::content::Scene;
 
 /// Global uniforms shared by the rect and icon pipelines.
@@ -406,6 +406,9 @@ impl Renderer {
             label: Some("waverunner.icons"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // Trilinear across the mip chain so minified icons (the small
+            // size level, and magnification transitions) stay clean.
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -483,37 +486,15 @@ impl Renderer {
                 height: ICON_SIZE,
                 depth_or_array_layers: layers,
             },
-            mip_level_count: 1,
+            mip_level_count: ICON_MIPS,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        for (i, pixels) in icons.iter().enumerate() {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: 0,
-                        y: 0,
-                        z: i as u32,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                pixels,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(ICON_SIZE * 4),
-                    rows_per_image: Some(ICON_SIZE),
-                },
-                wgpu::Extent3d {
-                    width: ICON_SIZE,
-                    height: ICON_SIZE,
-                    depth_or_array_layers: 1,
-                },
-            );
+        for (i, chain) in icons.iter().enumerate() {
+            write_icon_chain(&self.queue, &texture, i as u32, chain);
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -566,32 +547,10 @@ impl Renderer {
         let Some(texture) = &self.icon_texture else {
             return;
         };
-        if layer >= self.icon_layer_count || pixels.len() != (ICON_SIZE * ICON_SIZE * 4) as usize {
+        if layer >= self.icon_layer_count || pixels.len() != ICON_CHAIN_BYTES {
             return;
         }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: layer,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(ICON_SIZE * 4),
-                rows_per_image: Some(ICON_SIZE),
-            },
-            wgpu::Extent3d {
-                width: ICON_SIZE,
-                height: ICON_SIZE,
-                depth_or_array_layers: 1,
-            },
-        );
+        write_icon_chain(&self.queue, texture, layer, pixels);
     }
 
     /// Spawn a ripple at the given surface position.
@@ -970,6 +929,40 @@ impl Renderer {
         frame.present();
         self.text_atlas.trim();
         Ok(())
+    }
+}
+
+/// Upload one icon's full mip chain (`ICON_CHAIN_BYTES` of base followed
+/// by each downsample) into `layer` of the array texture — one
+/// `write_texture` per mip level. Chains are produced by
+/// [`crate::apps::with_mips`], so the levels are contiguous and match the
+/// texture's `ICON_MIPS`.
+fn write_icon_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, chain: &[u8]) {
+    let mut offset = 0usize;
+    let mut size = ICON_SIZE;
+    for mip in 0..ICON_MIPS {
+        let len = (size * size * 4) as usize;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: mip,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &chain[offset..offset + len],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size * 4),
+                rows_per_image: Some(size),
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+        offset += len;
+        size /= 2;
     }
 }
 
