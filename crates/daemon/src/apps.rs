@@ -468,7 +468,7 @@ impl DiskCache {
         // instead of serving stale tiles (and `raw` when plating is off).
         let variant = if icon_plate_enabled() {
             let params = format!(
-                "{PLATE_CONTENT}|{PLATE_INSET}|{PLATE_RADIUS}|{PLATE_FILL_ALPHA}|{PLATE_EDGE_ALPHA}|{PLATE_EDGE_WIDTH}"
+                "{PLATE_CONTENT}|{PLATE_INSET}|{PLATE_RADIUS}|{PLATE_FILL_ALPHA}|{PLATE_EDGE_ALPHA}|{PLATE_EDGE_WIDTH}|{PLATE_ICON_DESAT}|{PLATE_ICON_OPACITY}"
             );
             format!("plate-{:08x}", fnv1a64(&params))
         } else {
@@ -813,6 +813,12 @@ const PLATE_RADIUS: f32 = 56.0;
 const PLATE_FILL_ALPHA: u8 = 64;
 const PLATE_EDGE_ALPHA: u8 = 96;
 const PLATE_EDGE_WIDTH: f32 = 5.0;
+/// The icon sitting on the plate is muted for a calmer, cohesive dock:
+/// pulled `PLATE_ICON_DESAT` of the way toward its own luminance (0 = full
+/// color, 1 = greyscale) and drawn at `PLATE_ICON_OPACITY` so the frosted
+/// plate shows through a little.
+const PLATE_ICON_DESAT: f32 = 0.30;
+const PLATE_ICON_OPACITY: f32 = 0.88;
 
 /// Turn a raw `ICON_SIZE`² base tile into the uploaded mip chain, plating
 /// it first when `icon_plate` is on.
@@ -839,7 +845,8 @@ fn plate_tile(base: Vec<u8>) -> Vec<u8> {
     if let (Some((x0, y0, x1, y1)), Some(size)) =
         (bounds, tiny_skia::IntSize::from_wh(ICON_SIZE, ICON_SIZE))
     {
-        if let Some(src) = tiny_skia::Pixmap::from_vec(base, size) {
+        if let Some(mut src) = tiny_skia::Pixmap::from_vec(base, size) {
+            desaturate_premult(src.data_mut(), PLATE_ICON_DESAT);
             let (bw, bh) = ((x1 - x0) as f32, (y1 - y0) as f32);
             let s = (ICON_SIZE as f32 * PLATE_CONTENT) / bw.max(bh);
             let (bcx, bcy) = ((x0 + x1) as f32 / 2.0, (y0 + y1) as f32 / 2.0);
@@ -849,6 +856,7 @@ fn plate_tile(base: Vec<u8>) -> Vec<u8> {
                 0,
                 src.as_ref(),
                 &tiny_skia::PixmapPaint {
+                    opacity: PLATE_ICON_OPACITY,
                     quality: tiny_skia::FilterQuality::Bilinear,
                     ..Default::default()
                 },
@@ -858,6 +866,23 @@ fn plate_tile(base: Vec<u8>) -> Vec<u8> {
         }
     }
     tile.take()
+}
+
+/// Mute premultiplied-RGBA pixels toward their own luminance by `amount`
+/// (0 = unchanged, 1 = greyscale). Safe in premultiplied space: the
+/// luminance of `(r,g,b)` is a convex mix, so it stays ≤ alpha and the
+/// premultiplied invariant holds.
+fn desaturate_premult(px: &mut [u8], amount: f32) {
+    if amount <= 0.0 {
+        return;
+    }
+    for p in px.chunks_exact_mut(4) {
+        let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
+        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        p[0] = (r + (lum - r) * amount).round() as u8;
+        p[1] = (g + (lum - g) * amount).round() as u8;
+        p[2] = (b + (lum - b) * amount).round() as u8;
+    }
 }
 
 /// Draw the frosted plate: a translucent white rounded square with a
