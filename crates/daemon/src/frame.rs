@@ -88,11 +88,14 @@ impl App {
                     .position(|&e| self.entries.get(e).is_some_and(|x| x.id == aid))
                     .and_then(|sl| layout.dock_slots.get(sl));
                 if let Some(&dock_rect) = dock {
-                    // Fixed size (the card may be collapsed, so `s` is
-                    // degenerate here).
+                    // Use the same side as the grid box (3 scaled cells) so
+                    // dock stacks and grid boxes are identical in size.
+                    let side = content::OPEN_BOX_COLS as f32
+                        * content::GRID_CELL_H
+                        * self.icon_scale();
                     layout.open_box = Some(content::dock_box_rect(
                         dock_rect,
-                        content::DOCK_BOX_SIDE * self.icon_scale(),
+                        side,
                         self.buffer_size.0 as f32,
                     ));
                 }
@@ -163,47 +166,30 @@ impl App {
         self.agua_icons.step(stretch_target, dt);
         self.agua_content.step(stretch_target, dt);
         self.agua_breath.step(stretch_target, dt);
-        // Drain delayed jelly kicks (anticipation, main, Poisson cross-coupling).
-        // Decrement each timer by dt; apply velocity when elapsed.
-        // The take/push pattern avoids a simultaneous borrow of both the
-        // kicks vec and the individual spring fields.
-        let kicks = std::mem::take(&mut self.pending_jelly_kicks);
-        for (edge, vel, delay) in kicks {
-            let remaining = delay - dt;
-            if remaining <= 0.0 {
-                match edge {
-                    0 => self.jelly_left.kick(vel),
-                    1 => self.jelly_right.kick(vel),
-                    2 => self.jelly_top.kick(vel),
-                    _ => self.jelly_bottom.kick(vel),
-                }
-            } else {
-                self.pending_jelly_kicks.push((edge, vel, remaining));
-            }
-        }
-        // Jelly edge springs always target rest (1.0); kicked by edge crossings,
-        // settle independently of the main animation.
-        self.jelly_left.step(1.0, dt);
-        self.jelly_right.step(1.0, dt);
-        self.jelly_top.step(1.0, dt);
-        self.jelly_bottom.step(1.0, dt);
+        // Drain delayed jelly kicks (anticipation, main, Poisson cross-coupling),
+        // then step both membranes' edge springs toward rest. They always target
+        // rest (1.0) and settle independently of the main animation.
+        self.jelly.drain(dt);
+        self.box_jelly.drain(dt);
+        self.jelly.step(dt);
+        self.box_jelly.step(dt);
         let stretch_active = self.agua_card.is_active()
             || self.agua_icons.is_active()
             || self.agua_content.is_active()
             || self.agua_breath.is_active()
-            || self.jelly_left.is_active()
-            || self.jelly_right.is_active()
-            || self.jelly_top.is_active()
-            || self.jelly_bottom.is_active();
-        if !stretch_active && !animating && self.pending_jelly_kicks.is_empty() {
+            || self.jelly.is_active()
+            || self.box_jelly.is_active();
+        if !stretch_active
+            && !animating
+            && !self.jelly.has_pending()
+            && !self.box_jelly.has_pending()
+        {
             self.agua_card.snap();
             self.agua_icons.snap();
             self.agua_content.snap();
             self.agua_breath.snap();
-            self.jelly_left.snap();
-            self.jelly_right.snap();
-            self.jelly_top.snap();
-            self.jelly_bottom.snap();
+            self.jelly.snap();
+            self.box_jelly.snap();
         }
         if animating {
             // The card is moving under a possibly stationary pointer:
@@ -776,15 +762,16 @@ impl App {
                 box_scroll: self.box_pager.pos,
                 box_drag,
                 breath_offset,
-                card_push: {
-                    let s = content::JELLY_SCALE;
-                    (
-                        (self.jelly_left.pos   - 1.0) * s,
-                        (self.jelly_right.pos  - 1.0) * s,
-                        (self.jelly_top.pos    - 1.0) * s,
-                        (self.jelly_bottom.pos - 1.0) * s,
-                    )
-                },
+                card_push: self.jelly.offsets(),
+                box_push: self.box_jelly.offsets(),
+                card_open: self.ui.open_progress(),
+                // Card drop shadow: present whenever revealed — the dock when
+                // docked and the main box when open — only fading out when hidden.
+                card_shadow: self.ui.reveal(),
+                // A box floating on the dock (dock/dir stack) gets a drop
+                // shadow; a grid box inside the launcher does not.
+                box_over_dock: self.dock_stack.is_some()
+                    || self.dir_stack.as_ref().is_some_and(|ds| !ds.in_grid),
             },
         );
         let Some(renderer) = self.renderer.as_mut() else {
@@ -812,7 +799,7 @@ impl App {
             self.dirty = true;
         }
         // Pending jelly impulses waiting on their delay timers.
-        if !self.pending_jelly_kicks.is_empty() {
+        if self.jelly.has_pending() || self.box_jelly.has_pending() {
             self.dirty = true;
         }
         // Glass click ripple / box wave: keep frames coming until they expire.

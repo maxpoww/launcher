@@ -284,7 +284,8 @@ impl Default for InputConfig {
 pub struct ThemeConfig {
     /// Card background color.
     pub background: String,
-    /// Radius of the card corners, in logical pixels.
+    /// Radius of the dock/main-card corners, in logical pixels. Kept modest
+    /// for a macOS-dock look; the pop-out folder boxes round more than this.
     pub corner_radius: f32,
     /// Primary text color (app names).
     pub text: String,
@@ -299,7 +300,7 @@ impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
             background: "#05070980".to_owned(),
-            corner_radius: 14.0,
+            corner_radius: 16.0,
             text: "#ffffffff".to_owned(),
             highlight: "#05070920".to_owned(),
             icon_theme: "hicolor".to_owned(),

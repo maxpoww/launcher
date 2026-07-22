@@ -67,6 +67,21 @@ impl UiState {
         self.extent
     }
 
+    /// Card reveal: `0.0` while hidden, ramping to `1.0` as the card reaches
+    /// the dock bar (and staying there when open). Used to fade the dock's
+    /// top-edge shadow in with the reveal so nothing shows while hidden.
+    pub fn reveal(&self) -> f32 {
+        (self.extent / self.dock_extent).clamp(0.0, 1.0)
+    }
+
+    /// Fraction of the way from the dock rest to the open rest: `0.0` at (or
+    /// below) the dock bar, `1.0` fully open. Drives the card corner rounding
+    /// (subtle/macOS-like when docked, rounder like the folder boxes when open).
+    pub fn open_progress(&self) -> f32 {
+        let span = (self.full_extent - self.dock_extent).max(1.0);
+        ((self.extent - self.dock_extent) / span).clamp(0.0, 1.0)
+    }
+
     /// Content height of a rest point, in pixels.
     pub fn extent_of(&self, target: Target) -> f32 {
         match target {

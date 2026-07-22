@@ -89,9 +89,11 @@ impl ManagedDb {
             .collect()
     }
 
-    /// Add (or refresh the desktop ids of) a managed package and rewrite
-    /// the `.nix` + sidecar.
-    pub fn add(&mut self, attr: &str, mut desktop_ids: Vec<String>) {
+    /// Stage a package in the in-memory list WITHOUT writing to disk.
+    /// Call `confirm()` once the nix profile install succeeds so that
+    /// killing the daemon mid-install never leaves a stale entry in
+    /// packages.nix (which would show as a CLI tile on restart).
+    pub fn stage(&mut self, attr: &str, mut desktop_ids: Vec<String>) {
         if !desktop_ids.iter().any(|d| d == attr) {
             desktop_ids.push(attr.to_owned());
         }
@@ -102,7 +104,35 @@ impl ManagedDb {
                 desktop_ids,
             }),
         }
+    }
+
+    /// Persist the current in-memory state to disk. Call after a successful
+    /// `nix profile install` so packages.nix only ever reflects what is
+    /// actually installed.
+    pub fn confirm(&mut self) {
         self.save();
+    }
+
+    /// Remove a staged package from the in-memory list without touching
+    /// packages.nix (which was never written for this attr). Call when a
+    /// nix profile install fails.
+    pub fn revert(&mut self, attr: &str) {
+        self.pkgs.retain(|p| p.attr != attr);
+    }
+
+    /// All managed attrs currently staged or confirmed.
+    pub fn all_attrs(&self) -> Vec<String> {
+        self.pkgs.iter().map(|p| p.attr.clone()).collect()
+    }
+
+    /// Desktop ids stored for `attr` (used for dock-pin resolution after
+    /// a managed install without a pending grid tile).
+    pub fn desktop_ids_for(&self, attr: &str) -> Vec<String> {
+        self.pkgs
+            .iter()
+            .find(|p| p.attr == attr)
+            .map(|p| p.desktop_ids.clone())
+            .unwrap_or_default()
     }
 
     /// Record that `attr` provides the app with desktop id `app_id` (the
@@ -222,8 +252,11 @@ mod tests {
     #[test]
     fn add_remove_map_and_regenerate() {
         let (mut d, dir) = db("crud");
-        d.add("vlc", vec!["vlc".into()]);
-        d.add("google-chrome", vec![]); // attr auto-added as its own id
+        d.stage("vlc", vec!["vlc".into()]);
+        d.stage("google-chrome", vec![]); // attr auto-added as its own id
+        // stage is in-memory only — disk should be untouched at this point
+        assert_eq!(parse_nix_attrs(&dir.join("waverunner-packages.nix")), vec![] as Vec<String>);
+        d.confirm();
         assert!(d.contains("vlc"));
         // an app maps back to the attr that ships its desktop id
         assert_eq!(
@@ -239,6 +272,18 @@ mod tests {
         d.remove("vlc");
         assert!(!d.contains("vlc"));
         assert!(d.attr_for_app("vlc").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn revert_does_not_touch_disk() {
+        let (mut d, dir) = db("revert");
+        d.stage("obs-studio", vec![]);
+        assert!(d.contains("obs-studio"));
+        // revert while install is in-flight: in-memory list reverts, disk untouched
+        d.revert("obs-studio");
+        assert!(!d.contains("obs-studio"));
+        assert_eq!(parse_nix_attrs(&dir.join("waverunner-packages.nix")), vec![] as Vec<String>);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -262,7 +307,8 @@ mod tests {
     fn desktop_ids_distinguish_wrapped_apps() {
         let (mut d, dir) = db("wrapped");
         // chromium ships a differently-named desktop entry
-        d.add("chromium", vec!["chromium-browser".into()]);
+        d.stage("chromium", vec!["chromium-browser".into()]);
+        d.confirm();
         assert_eq!(
             d.attr_for_app("chromium-browser").as_deref(),
             Some("chromium")

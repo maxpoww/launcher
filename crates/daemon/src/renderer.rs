@@ -51,6 +51,18 @@ struct RectInstance {
     _pad:     [f32; 2],
 }
 
+/// Per-instance data for one top-edge shadow band.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ShadowInstance {
+    rect_min: [f32; 2],
+    rect_max: [f32; 2],
+    color:    [f32; 4],
+    radius:   f32,
+    blur:     f32,
+    edges:    [f32; 4],
+}
+
 /// Per-instance data for one icon quad.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -69,6 +81,7 @@ pub struct Renderer {
 
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
+    shadow_pipeline: wgpu::RenderPipeline,
     rect_pipeline: wgpu::RenderPipeline,
 
     icon_pipeline: wgpu::RenderPipeline,
@@ -141,7 +154,11 @@ impl Renderer {
             &wgpu::DeviceDescriptor {
                 label: Some("waverunner"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: wgpu::Limits {
+                    // Allow surface expansion to full screen height (>2048 on 4K displays).
+                    max_texture_dimension_2d: 8192,
+                    ..wgpu::Limits::downlevel_defaults()
+                },
                 memory_hints: wgpu::MemoryHints::default(),
             },
             None,
@@ -233,6 +250,49 @@ impl Renderer {
             blend: Some(blend),
             write_mask: wgpu::ColorWrites::ALL,
         })];
+
+        // Top-edge shadow pipeline (instanced gradient bands). Shares the
+        // globals bind group and premultiplied blend target with the rects.
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("waverunner.edge_shadow"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/edge_shadow.wgsl").into()),
+        });
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("waverunner.shadow"),
+            bind_group_layouts: &[&globals_layout],
+            push_constant_ranges: &[],
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.shadow"),
+            layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ShadowInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
+                        3 => Float32, 4 => Float32, 5 => Float32x4
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shadow_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &target,
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         // Rounded-rect pipeline (instanced SDF quads).
         let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -363,6 +423,7 @@ impl Renderer {
             config,
             globals_buf,
             globals_bind,
+            shadow_pipeline,
             rect_pipeline,
             icon_pipeline,
             icon_bind_layout,
@@ -608,11 +669,9 @@ impl Renderer {
         // range per section grid.
         // The first rect is always the card background (per Scene layout);
         // give it the glass material flag so the shader applies all 9 layers.
-        let mut rects: Vec<RectInstance> = scene.rects.iter().enumerate().map(|(i, r)| {
-            let mut inst = rect_instance(r);
-            if i == 0 { inst.glass = 1.0; }
-            inst
-        }).collect();
+        let shadows: Vec<ShadowInstance> = scene.shadows.iter().map(shadow_instance).collect();
+        let n_shadows = shadows.len() as u32;
+        let mut rects: Vec<RectInstance> = scene.rects.iter().map(rect_instance).collect();
         let n_rects_unclipped = rects.len() as u32;
         let mut icons: Vec<IconInstance> = scene.icons.iter().map(icon_instance).collect();
         let n_icons_unclipped = icons.len() as u32;
@@ -643,6 +702,16 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&rects),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        // `create_buffer_init` rejects empty contents; only build the shadow
+        // buffer when there is at least one band to draw.
+        let shadow_buf = (n_shadows > 0).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("waverunner.shadows"),
+                    contents: bytemuck::cast_slice(&shadows),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let icon_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -802,6 +871,13 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.globals_bind, &[]);
 
+            // Behind everything: the dock's soft top-edge shadow.
+            if let Some(shadow_buf) = &shadow_buf {
+                pass.set_pipeline(&self.shadow_pipeline);
+                pass.set_vertex_buffer(0, shadow_buf.slice(..));
+                pass.draw(0..4, 0..n_shadows);
+            }
+
             // Unclipped: card background + dock hover, then dock icons.
             if n_rects_unclipped > 0 {
                 pass.set_pipeline(&self.rect_pipeline);
@@ -873,13 +949,24 @@ impl Renderer {
     }
 }
 
+fn shadow_instance(s: &crate::content::ShadowInst) -> ShadowInstance {
+    ShadowInstance {
+        rect_min: [s.rect.x, s.rect.y],
+        rect_max: [s.rect.x + s.rect.w, s.rect.y + s.rect.h],
+        color:    s.color,
+        radius:   s.radius,
+        blur:     s.blur,
+        edges:    s.edges,
+    }
+}
+
 fn rect_instance(r: &crate::content::RectInst) -> RectInstance {
     RectInstance {
         rect_min: [r.rect.x, r.rect.y],
         rect_max: [r.rect.x + r.rect.w, r.rect.y + r.rect.h],
         color:    r.color,
         radius:   r.radius,
-        glass:    0.0,   // overridden to 1.0 for the card background by the caller
+        glass:    r.glass,
         _pad:     [0.0; 2],
     }
 }

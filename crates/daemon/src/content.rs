@@ -33,6 +33,13 @@ pub struct RectInst {
     pub rect: Rect,
     pub radius: f32,
     pub color: [f32; 4],
+    /// Glass-material strength: `0.0` → plain solid fill; `1.0` → full
+    /// liquid-glass material. Values in between keep all glass layers at
+    /// full strength except the iridescent tint, which is scaled by this
+    /// factor — so `0.5` gives the same rim glow / spotlight as `1.0` but
+    /// half the rainbow shimmer (used for the group-box panel, which is
+    /// smaller so edge effects already read more strongly).
+    pub glass: f32,
 }
 
 /// One icon quad, referencing a texture-array layer.
@@ -40,6 +47,25 @@ pub struct RectInst {
 pub struct IconInst {
     pub rect: Rect,
     pub layer: u32,
+}
+
+/// One continuous soft drop shadow wrapping a rounded rect (the dock). The
+/// shader renders only the exterior penumbra (nothing under the shape, so the
+/// glass stays clean) and blends the four per-edge strengths by direction, so
+/// corners transition smoothly between their two neighbouring edges.
+#[derive(Debug, Clone, Copy)]
+pub struct ShadowInst {
+    /// The rounded rect being shadowed (the dock/card).
+    pub rect: Rect,
+    /// Corner radius of that rect.
+    pub radius: f32,
+    /// Penumbra width in px — how far the shadow reaches beyond every edge.
+    pub blur: f32,
+    /// Straight (non-premultiplied) RGB plus an overall strength in `.a`
+    /// (fades with the dock reveal / open). The shader premultiplies.
+    pub color: [f32; 4],
+    /// Per-edge base darkness: `[top, bottom, left, right]`.
+    pub edges: [f32; 4],
 }
 
 /// One text label.
@@ -77,6 +103,8 @@ pub struct GridContent {
 #[derive(Debug, Default)]
 pub struct Scene {
     pub alpha: f32,
+    /// Edge shadows, drawn first (behind everything).
+    pub shadows: Vec<ShadowInst>,
     /// Unclipped fills: card background first, then dock hover and the
     /// search box.
     pub rects: Vec<RectInst>,
@@ -193,6 +221,21 @@ pub(crate) const JELLY_C: f32 = 6.0; // lower damping = more ring = more alive
 pub(crate) const JELLY_KICK: f32 = 11.0;
 /// Scale from pos-deviation (around 1.0) to pixels of edge displacement.
 pub(crate) const JELLY_SCALE: f32 = 2.0;
+
+/// Corner radius shared by every "box" — the fully-open main card and the
+/// pop-out folder boxes all round to this. Clearly rounder than the docked
+/// card (`theme.corner_radius`), which stays subtle for a macOS-dock look.
+pub(crate) const BOX_CORNER_RADIUS: f32 = 24.0;
+
+/// Dock drop shadow. One continuous soft shadow wraps the whole rounded
+/// dock; `BLUR` is how far the penumbra reaches out from every edge, and the
+/// four `ALPHA`s set per-edge darkness (corners blend the two neighbours, so
+/// there are no seams). Alphas stay under the compositor's `ignore_alpha`
+/// blur threshold so the shadow never triggers layer blur.
+pub(crate) const DOCK_SHADOW_BLUR: f32 = 16.0;
+pub(crate) const DOCK_SHADOW_ALPHA_TOP: f32 = 0.16;
+pub(crate) const DOCK_SHADOW_ALPHA_BOTTOM: f32 = 0.62;
+pub(crate) const DOCK_SHADOW_ALPHA_SIDE: f32 = 0.16;
 /// Dock icons: fastest and bounciest (ζ≈0.3), first to peak, a few
 /// visible sloshes.
 pub(crate) const AGUA_ICONS_K: f32 = 200.0;
@@ -210,8 +253,6 @@ const CONTENT_STRETCH_GAIN: f32 = 0.22;
 
 /// Gap between an open dock-folder box and the dock icon it springs from.
 const DOCK_BOX_GAP: f32 = 12.0;
-/// Rest size of a dock folder's open box (a square, ~matching a grid box).
-pub const DOCK_BOX_SIDE: f32 = 340.0;
 
 /// Space kept above the fully risen card so magnified dock icons can
 /// swell past the card edge (macOS-style). The wl surface is this much
@@ -355,10 +396,10 @@ pub struct Layout {
 /// per-section grid offsets.
 // Geometry naturally takes many independent inputs; a params struct
 // would just rename them.
-#[allow(clippy::too_many_arguments)]
 /// The four icon-size levels, indexed by `App::icon_size` (default 1).
 pub const ICON_SCALES: [f32; 4] = [0.70, 1.00, 1.30, 1.65];
 
+#[allow(clippy::too_many_arguments)]
 pub fn layout(
     config: &Config,
     icon_scale: f32,
@@ -821,6 +862,19 @@ pub struct FrameInput<'a> {
     /// Each spring moves only its own edge; icons stay anchored.
     /// Positive = edge moves inward (left→right, top→down, right→left, bottom→up).
     pub card_push: (f32, f32, f32, f32),
+    /// Same per-edge jelly offsets for the open group box panel.
+    pub box_push: (f32, f32, f32, f32),
+    /// Dock→open progress (0 = docked, 1 = fully open). Rounds the card
+    /// corners from `theme.corner_radius` (dock) to `BOX_CORNER_RADIUS` (open).
+    pub card_open: f32,
+    /// Card drop-shadow strength: `1.0` while revealed (docked or open as the
+    /// main box), fading to `0.0` when hidden. Emits the card's wraparound
+    /// shadow in both the docked and open states.
+    pub card_shadow: f32,
+    /// Whether the open box is floating on top of the dock (a dock/dir
+    /// stack) rather than being a grid box inside the launcher. Gates the
+    /// box's drop shadow — only floating-on-dock boxes get one.
+    pub box_over_dock: bool,
 }
 
 /// Local member index shown in 3×3 slot `slot` (row-major) of an open box
@@ -891,6 +945,10 @@ pub fn scene(
         box_drag,
         breath_offset,
         card_push,
+        box_push,
+        card_open,
+        card_shadow,
+        box_over_dock,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     // Scaled drawing metrics — mirrors what layout() received.
@@ -956,15 +1014,38 @@ pub fn scene(
     // (left, right, top, bottom) offsets; positive = inward.
     // Combined with breath (uniform expansion from all edges).
     let (jl, jr, jt, jb) = card_push;
+    let card_rect = Rect::new(
+        layout.card_x   - breath_offset + jl,
+        layout.card_top - breath_offset + jt,
+        layout.card_w + 2.0 * breath_offset - jl + jr,
+        card_h + 2.0 * breath_offset - jt + jb,
+    );
+    // Subtle/macOS-dock rounding while docked, rounding up to the shared box
+    // radius as the card opens — so the open card matches the folder boxes.
+    let card_radius = lerp(config.theme.corner_radius, BOX_CORNER_RADIUS, card_open);
+    // One continuous soft drop shadow around the whole rounded card — the
+    // dock when docked and the main box when open (fades out only when
+    // hidden). Per-edge strengths keep the top and sides subtle and the
+    // bottom strong; corners blend their neighbours so there are no seams.
+    if card_shadow > 0.001 {
+        scene.shadows.push(ShadowInst {
+            rect: card_rect,
+            radius: card_radius,
+            blur: DOCK_SHADOW_BLUR,
+            color: [0.0, 0.0, 0.0, card_shadow.clamp(0.0, 1.0)],
+            edges: [
+                DOCK_SHADOW_ALPHA_TOP,
+                DOCK_SHADOW_ALPHA_BOTTOM,
+                DOCK_SHADOW_ALPHA_SIDE,
+                DOCK_SHADOW_ALPHA_SIDE,
+            ],
+        });
+    }
     scene.rects.push(RectInst {
-        rect: Rect::new(
-            layout.card_x   - breath_offset + jl,
-            layout.card_top - breath_offset + jt,
-            layout.card_w + 2.0 * breath_offset - jl + jr,
-            card_h + 2.0 * breath_offset - jt + jb,
-        ),
-        radius: config.theme.corner_radius,
+        rect: card_rect,
+        radius: card_radius,
         color: config.theme.background_rgba(),
+        glass: 1.0,
     });
 
     // Dock row: per-icon magnification scales, then spread visual centers.
@@ -1030,6 +1111,7 @@ pub fn scene(
                     ),
                     radius: DOCK_DIVIDER_W / 2.0,
                     color: [fg[0], fg[1], fg[2], 0.22],
+                    glass: 0.0,
                 });
             }
         }
@@ -1042,6 +1124,7 @@ pub fn scene(
                     rect: Rect::new(vcx - dock_slot / 2.0, slot.y, dock_slot, slot.h),
                     radius: 12.0,
                     color: config.theme.highlight_rgba(),
+                    glass: 0.0,
                 });
             }
         }
@@ -1072,6 +1155,7 @@ pub fn scene(
                 ),
                 radius: DOCK_DOT_R,
                 color: [fg[0], fg[1], fg[2], 0.55],
+                glass: 0.0,
             });
         }
         let scale = dock_scales[slot];
@@ -1098,6 +1182,7 @@ pub fn scene(
                 ),
                 radius: 14.0,
                 color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
+                glass: 0.0,
             });
         }
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
@@ -1106,7 +1191,8 @@ pub fn scene(
             scene.rects.push(RectInst {
                 rect: icon_rect,
                 radius: size * 0.22,
-                color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
+                color: [hl[0], hl[1], hl[2], (hl[3] * 4.0).min(0.72)],
+                glass: 0.5,
             });
             let (cx, cy) = (icon_rect.x + size / 2.0, icon_rect.y + size / 2.0);
             let m = size * 0.40;
@@ -1174,6 +1260,7 @@ pub fn scene(
                         rect: Rect::new(vcx - pill_w / 2.0, pill_y, pill_w, pill_h),
                         radius: pill_h / 2.0,
                         color: bg,
+                        glass: 0.0,
                     });
                     scene.labels.push(Label {
                         text: name,
@@ -1201,6 +1288,7 @@ pub fn scene(
                 rect: Rect::new(vp.x - 6.0, vp.y - 4.0, vp.w + 12.0, vp.h + 8.0),
                 radius: 14.0,
                 color: [hl[0], hl[1], hl[2], (hl[3] * 1.4).min(0.3)],
+                glass: 0.0,
             });
         }
         // Ghost following the pointer, topmost: the dragged icon, or a
@@ -1268,6 +1356,7 @@ pub fn scene(
             rect: draw_rect,
             radius: SEARCH_H / 2.0,
             color: box_color,
+            glass: 0.0,
         });
 
         if search_expand < 0.5 {
@@ -1314,6 +1403,7 @@ pub fn scene(
                     rect: Rect::new(caret_x, boxx.y + 6.0, 1.5, SEARCH_H - 12.0),
                     radius: 0.75,
                     color: [t[0], t[1], t[2], 0.9],
+                    glass: 0.0,
                 });
             }
         }
@@ -1457,15 +1547,17 @@ pub fn scene(
                     rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                     radius: 14.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
+                    glass: 0.0,
                 });
             } else if hover == Some(Hit::GridCell(s, i)) {
                 g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                     radius: 14.0,
                     color: config.theme.highlight_rgba(),
+                    glass: 0.0,
                 });
             }
-            // A drag hovering a cell that would take the drop
+            // A drag hovering a cell that would take a drop
             // (group create/add) rings it brightly.
             if drag.and_then(|d| d.over_cell) == Some((s, i)) {
                 let hl = config.theme.highlight_rgba();
@@ -1473,6 +1565,7 @@ pub fn scene(
                     rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
                     radius: 16.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
+                    glass: 0.0,
                 });
             }
             let cx = cell.x + cell.w / 2.0;
@@ -1499,7 +1592,8 @@ pub fn scene(
                 g.rects.push(RectInst {
                     rect: Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile),
                     radius: 14.0,
-                    color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
+                    color: [hl[0], hl[1], hl[2], (hl[3] * 4.0).min(0.72)],
+                    glass: 0.5,
                 });
                 let m = grid_icon * 0.42;
                 let gap = grid_icon * 0.10;
@@ -1626,6 +1720,7 @@ pub fn scene(
                     rect: Rect::new(x - dot_r, dot_y - dot_r, dot_r * 2.0, dot_r * 2.0),
                     radius: dot_r,
                     color: [hl[0], hl[1], hl[2], hl[3] * alpha],
+                    glass: 0.0,
                 });
             }
         }
@@ -1640,27 +1735,54 @@ pub fn scene(
     // opaquely over the loose grid behind it.
     if let (Some(box_rect), Some((ox, oy))) = (open_box_rect, group_origin) {
         let t = group_expand.clamp(0.0, 1.0);
-        let radius = lerp(14.0, 22.0, t);
+        // Starts at the tile's radius for a seamless spring-out, then rounds up
+        // to the shared box radius — the same corner as the fully-open main
+        // card, and rounder than the macOS-style dock behind it.
+        let radius = lerp(14.0, BOX_CORNER_RADIUS, t);
         // Built as its own grid pushed last, so it draws over the loose
         // grid behind it (section grids draw in order).
         let mut boxgrid = GridContent {
             clip: reveal_rect,
             ..Default::default()
         };
-        // The opaque card fades in from nothing, so at t=0 only the folder's
-        // highlight tint shows — matching the closed tile exactly.
+        // The box panel shares the same liquid-glass material as the main card
+        // so it looks and feels like a smaller card: same rim glow, iridescence,
+        // cursor spotlight, and live water effects, all computed relative to the
+        // box's own bounds. The panel fades in with the open animation.
+        // Same base opacity as the main card (glass), fading in with the open
+        // animation — so a group box reads as the same colour as the main box,
+        // not a darker, more opaque panel.
         let mut panel = config.theme.background_rgba();
-        panel[3] = 0.95 * t;
+        panel[3] *= t;
+        let (bjl, bjr, bjt, bjb) = box_push;
+        let box_draw = Rect::new(
+            box_rect.x + bjl,
+            box_rect.y + bjt,
+            box_rect.w - bjl + bjr,
+            box_rect.h - bjt + bjb,
+        );
+        // Same drop-shadow pattern as the dock, but only for a box floating on
+        // top of the dock (dock/dir stack) — grid boxes inside the launcher
+        // sit on the card and get none. Fades in with the box open (`t`).
+        if box_over_dock && t > 0.001 {
+            scene.shadows.push(ShadowInst {
+                rect: box_draw,
+                radius,
+                blur: DOCK_SHADOW_BLUR,
+                color: [0.0, 0.0, 0.0, t],
+                edges: [
+                    DOCK_SHADOW_ALPHA_TOP,
+                    DOCK_SHADOW_ALPHA_BOTTOM,
+                    DOCK_SHADOW_ALPHA_SIDE,
+                    DOCK_SHADOW_ALPHA_SIDE,
+                ],
+            });
+        }
         boxgrid.rects.push(RectInst {
-            rect: box_rect,
+            rect: box_draw,
             radius,
             color: panel,
-        });
-        let hl = config.theme.highlight_rgba();
-        boxgrid.rects.push(RectInst {
-            rect: box_rect,
-            radius,
-            color: [hl[0], hl[1], hl[2], (hl[3] * 1.3).min(0.32)],
+            glass: 0.5,
         });
         // The 3×3 slot each member takes, by the grid side the box sits on:
         // left pins member 0 (A) top-left and fills row-major; right pins
@@ -1790,6 +1912,7 @@ pub fn scene(
                     rect: Rect::new(x - dot_r, dy - dot_r, dot_r * 2.0, dot_r * 2.0),
                     radius: dot_r,
                     color: [hl[0], hl[1], hl[2], a],
+                    glass: 0.0,
                 });
             }
             scene.grids.push(dots);
@@ -1850,6 +1973,7 @@ mod tests {
     fn open_layout(cfg: &Config, n: usize, scroll: f32) -> Layout {
         layout(
             cfg,
+            1.0,
             SURFACE,
             OPEN,
             n,
@@ -1865,6 +1989,7 @@ mod tests {
         let cfg = config();
         let l = layout(
             &cfg,
+            1.0,
             SURFACE,
             48.0,
             20,
@@ -1879,6 +2004,7 @@ mod tests {
         // clips to nothing and no cells show.
         let s = scene(
             &cfg,
+            1.0,
             &l,
             &entries(20),
             &vis(20),
@@ -1908,6 +2034,7 @@ mod tests {
         assert!(apps.scroll >= 0.0 && apps.scroll < apps.n_pages as f32 * apps.viewport.w);
         let s = scene(
             &cfg,
+            1.0,
             &l,
             &entries(40),
             &vis(40),
@@ -1930,6 +2057,7 @@ mod tests {
         let cfg = config();
         let l = layout(
             &cfg,
+            1.0,
             SURFACE,
             OPEN,
             10,
@@ -1941,6 +2069,7 @@ mod tests {
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
         let s = scene(
             &cfg,
+            1.0,
             &l,
             &entries(10),
             &visible,
@@ -1982,6 +2111,7 @@ mod tests {
         let cfg = config();
         let l = layout(
             &cfg,
+            1.0,
             SURFACE,
             OPEN,
             10,
@@ -2032,6 +2162,7 @@ mod tests {
         let cfg = config();
         let flat = layout(
             &cfg,
+            1.0,
             SURFACE,
             OPEN,
             10,
@@ -2042,6 +2173,7 @@ mod tests {
         );
         let nav = layout(
             &cfg,
+            1.0,
             SURFACE,
             OPEN,
             10,
@@ -2061,6 +2193,7 @@ mod tests {
         let cfg = config();
         let l = layout(
             &cfg,
+            1.0,
             SURFACE,
             OPEN,
             10,

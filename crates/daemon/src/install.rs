@@ -147,36 +147,73 @@ impl App {
                 self.schedule_frame();
             }
             nix::Event::Done { id, ok } => {
-                debug!("home-manager switch for {id}: ok={ok}");
+                debug!("nix profile op for {id}: ok={ok}");
                 self.busy_ids.remove(&id);
+                // `managed.contains` is true for installs (staged before the
+                // request) and false for uninstalls (removed before the request).
+                let is_install = self.managed.contains(&id);
                 if ok {
-                    // The profile changed: rescan so the Apps grid gains/
-                    // loses the entry. Use the fresh variant to clear stale
-                    // "icon not found" cache entries — the newly installed
-                    // app's icon is now on disk and must be looked up again.
-                    self.indexer.request_rescan_fresh();
-                } else {
-                    // A failed switch never activated (it's atomic), but a
-                    // bad attr left in waverunner-packages.nix would wedge
-                    // every future switch — roll it back out. (`contains`
-                    // is only true for a freshly-added install attr; an
-                    // uninstall already removed its attr before switching.)
-                    if self.managed.contains(&id) {
-                        self.managed.remove(&id);
+                    if is_install {
+                        // Install succeeded: write packages.nix now that the
+                        // package is actually in the profile.
+                        self.managed.confirm();
                         self.recompute_removable();
                     }
+                    // Profile changed: rescan so the grid gains / loses the
+                    // entry.  Fresh variant clears stale icon-not-found cache
+                    // entries so the newly installed app's icon loads.
+                    self.indexer.request_rescan_fresh();
+                } else if is_install {
+                    // Install failed: roll back the in-memory stage.
+                    // packages.nix was never written so it stays clean — no
+                    // stale CLI tile on the next restart.
+                    self.managed.revert(&id);
+                    self.managed_install_attrs.retain(|a| a != &id);
+                    self.recompute_removable();
                     if let Some(p) = self.pending_installs.iter_mut().find(|p| p.attr == id) {
-                        // A drag-to-install tile stays put as a persistent
-                        // "Failed" cell (click retries, drag-off dismisses)
-                        // rather than flashing and vanishing.
+                        // Drag-to-install tile stays as a persistent "Failed"
+                        // cell (click retries, drag-off dismisses).
                         p.failed = true;
                     } else {
-                        // Flash "Failed" on the cell; a timer clears it.
                         self.flash_failed(id);
                     }
+                } else {
+                    // Uninstall failed with a real error (not "not found" —
+                    // that case now returns ok=true from nix_profile_remove).
+                    self.flash_failed(id);
                 }
                 self.update_hover();
                 self.schedule_frame();
+            }
+            nix::Event::InstalledAttrs(installed) => {
+                // Startup orphan check: any confirmed managed attr that is NOT
+                // in the nix profile was interrupted mid-install (daemon was
+                // killed after packages.nix was written but before the nix
+                // install completed).  Re-queue those installs.
+                //
+                // With the deferred packages.nix write (stage → confirm),
+                // this case is now essentially impossible in normal operation.
+                // But it handles corruption from an older daemon version or
+                // external nix profile manipulation.
+                if installed.is_empty() {
+                    // Could not read the profile (nix unavailable). Skip to
+                    // avoid spuriously re-installing everything.
+                    return;
+                }
+                let orphans: Vec<(String, Vec<String>)> = self
+                    .managed
+                    .all_attrs()
+                    .into_iter()
+                    .filter(|a| !installed.contains(a.as_str()) && !self.busy_ids.contains(a))
+                    .map(|a| {
+                        let ids = self.managed.desktop_ids_for(&a);
+                        (a, ids)
+                    })
+                    .collect();
+                for (attr, desktop_ids) in orphans {
+                    warn!("managed attr {attr} not in nix profile; re-queuing install");
+                    self.start_managed_install(&attr, desktop_ids);
+                }
             }
         }
     }
@@ -333,9 +370,13 @@ impl App {
         if self.busy_ids.contains(attr) {
             return;
         }
-        self.managed.add(attr, desktop_ids);
+        // Stage in memory only — packages.nix is NOT written until the
+        // install succeeds (Done { ok: true } → managed.confirm()).
+        self.managed.stage(attr, desktop_ids.clone());
         self.recompute_removable();
         self.busy_ids.insert(attr.to_owned());
+        // Track for dock-pin resolution on success (no pending grid tile).
+        self.managed_install_attrs.push(attr.to_owned());
         self.nix.request(nix::Request::Install {
             id: attr.to_owned(),
             attr: attr.to_owned(),
@@ -412,7 +453,8 @@ impl App {
             placeholder,
             failed: false,
         });
-        self.managed.add(attr, desktop_ids);
+        // Stage in memory only — packages.nix is NOT written until Done ok=true.
+        self.managed.stage(attr, desktop_ids);
         self.recompute_removable();
         self.busy_ids.insert(attr.to_owned());
         self.nix.request(nix::Request::Install {
@@ -578,6 +620,43 @@ impl App {
             self.pending_installs.retain(|p| p.attr != attr);
             self.busy_ids.remove(&attr);
         }
+
+        // Also resolve managed installs that had no grid tile (dock-drop
+        // path and startup recovery).  Pin any newly-appeared app whose
+        // desktop ids or name matches the attr.
+        let mut resolved_managed: Vec<String> = Vec::new();
+        for attr in &self.managed_install_attrs {
+            let desktop_ids = self.managed.desktop_ids_for(attr);
+            let hit = desktop_ids
+                .iter()
+                .find(|d| current.contains(d.as_str()) && !claimed.contains(d.as_str()))
+                .cloned()
+                .or_else(|| {
+                    let key = normalize_id(attr);
+                    newly
+                        .iter()
+                        .find(|id| {
+                            !claimed.contains(id.as_str()) && {
+                                let n = normalize_id(id);
+                                n.contains(&key) || key.contains(&n)
+                            }
+                        })
+                        .cloned()
+                });
+            if let Some(app_id) = hit {
+                claimed.insert(app_id.clone());
+                self.managed.link_app(attr, &app_id);
+                let slot = self.pins.pins().len();
+                self.pins.pin_at(&app_id, slot);
+                self.just_installed = Some(app_id.clone());
+                self.busy_ids.remove(attr);
+                info!("managed install {attr} resolved as app {app_id}");
+                resolved_managed.push(attr.clone());
+            }
+        }
+        self.managed_install_attrs
+            .retain(|a| !resolved_managed.contains(a));
+
         self.known_app_ids = current;
     }
 

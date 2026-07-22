@@ -95,6 +95,10 @@ pub enum Event {
         program: Option<String>,
         version: Option<String>,
     },
+    /// All attribute paths currently installed in the user's nix profile.
+    /// Sent in response to `Request::CheckInstalled`; used on startup to
+    /// detect managed packages that survived a daemon kill mid-install.
+    InstalledAttrs(std::collections::HashSet<String>),
 }
 
 /// Daemon → thread requests.
@@ -118,6 +122,11 @@ pub enum Request {
     /// build lands. This is the slow, cacheable part — the "Launching…"
     /// note covers it.
     Realize { attr: String },
+    /// List all attrs currently installed in the user's nix profile.
+    /// Answered with `Event::InstalledAttrs`. Used on startup to detect
+    /// managed packages that did not complete installation before the
+    /// daemon was last killed.
+    CheckInstalled,
 }
 
 /// How many top-ranked packages a `Ranked` reply carries. The renderer
@@ -234,6 +243,9 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                             program: r.program,
                             version: r.version,
                         }
+                    }
+                    Request::CheckInstalled => {
+                        Event::InstalledAttrs(installed_attrs_from_profile())
                     }
                     Request::Rank { .. } => continue, // routed elsewhere
                 };
@@ -719,6 +731,60 @@ fn nix_profile_install(attr: &str) -> bool {
     }
 }
 
+/// All attribute paths currently installed in the user's nix profile.
+/// Returns an empty set if `nix profile list` fails (network down, nix
+/// not on PATH, etc.) — callers treat an empty set conservatively.
+fn installed_attrs_from_profile() -> std::collections::HashSet<String> {
+    let out = match Command::new("nix")
+        .args(["profile", "list", "--json"])
+        .output()
+    {
+        Ok(out) if out.status.success() => out.stdout,
+        Ok(out) => {
+            warn!(
+                "nix profile list failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return Default::default();
+        }
+        Err(e) => {
+            warn!("cannot run nix: {e}");
+            return Default::default();
+        }
+    };
+    let mut set = std::collections::HashSet::new();
+    let v: serde_json::Value = match serde_json::from_slice(&out) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("cannot parse nix profile list output: {e}");
+            return set;
+        }
+    };
+    let push_attr = |e: &serde_json::Value, set: &mut std::collections::HashSet<String>| {
+        if let Some(path) = e["attrPath"].as_str().or_else(|| e["attrpath"].as_str()) {
+            // Store the full path and the bare attr (last component).
+            set.insert(path.to_owned());
+            if let Some(bare) = path.rsplit('.').next() {
+                set.insert(bare.to_owned());
+            }
+        }
+    };
+    if let Some(arr) = v.as_array() {
+        for e in arr {
+            push_attr(e, &mut set);
+        }
+    } else if let Some(map) = v["elements"].as_object() {
+        for (_, e) in map {
+            push_attr(e, &mut set);
+        }
+    } else if let Some(arr) = v["elements"].as_array() {
+        for e in arr {
+            push_attr(e, &mut set);
+        }
+    }
+    set
+}
+
 /// `nix profile remove` — drop a package from the user's nix profile by
 /// locating its element via `nix profile list --json` (handles both the
 /// legacy array format and the current map format). True on success.
@@ -744,8 +810,9 @@ fn nix_profile_remove(attr: &str) -> bool {
     let suffix = format!(".{attr}");
     let matches = |path: &str| path == attr || path.ends_with(&suffix);
     let Some(key) = profile_element_key(&list_out.stdout, matches) else {
-        warn!("attr {attr} not found in nix profile (already removed?)");
-        return false;
+        // Not in the profile — already absent, so the desired state is met.
+        info!("attr {attr} not found in nix profile; treating as already removed");
+        return true;
     };
     info!("nix profile remove element {key} (attr {attr})");
     match Command::new("nix")

@@ -98,6 +98,10 @@ impl App {
         });
         self.app_group = Some(g);
         self.reset_stack_view();
+        let origin = self.group_origin.or(self.pointer_pos);
+        if let (Some(renderer), Some((wx, wy))) = (self.renderer.as_mut(), origin) {
+            renderer.record_box_wave(wx, wy);
+        }
     }
 
     /// The shared tail of every stack open (grid box, dock folder,

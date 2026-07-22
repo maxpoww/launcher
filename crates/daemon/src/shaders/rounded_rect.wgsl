@@ -117,9 +117,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let vig    = clamp((norm_y - 0.68) / 0.32, 0.0, 1.0) * -0.004;
 
     // Layer 5 — side Fresnel: outer edges brighten at grazing angles.
+    // Scaled by in.glass so group boxes (0.5) get half the gradient of the main card (1.0).
     let norm_x  = from_left / rect_w;
     let side    = abs(norm_x - 0.5) * 2.0;
-    let fresnel = clamp((side - 0.48) / 0.52, 0.0, 1.0) * 0.02;
+    let fresnel = clamp((side - 0.48) / 0.52, 0.0, 1.0) * 0.02 * in.glass;
 
     // Ripples: each active ripple adds an expanding circular sine wave.
     var ripple = 0.0;
@@ -134,10 +135,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     // Layer 6 — boundary rim glow: thin bright ring at the SDF card edge.
-    let boundary = exp(-d * d * 0.6) * 0.08;
+    // Scaled by `in.glass` so group boxes (0.5) get half the glow of the main card (1.0).
+    let boundary = exp(-d * d * 0.45) * 0.13 * in.glass;
 
     // Layer 8 — iridescent tint on all edges, cursor-driven phase.
-    let iri_mask = clamp(1.0 - edge / 25.0, 0.0, 1.0) * 0.008;
+    // `in.glass` doubles as an iridescence scale: 1.0 = full (main card),
+    // 0.5 = half (group-box panel — smaller rect, edges already read stronger).
+    let iri_mask = clamp(1.0 - edge / 30.0, 0.0, 1.0) * 0.016 * in.glass;
     var phase: f32;
     if cursor_present {
         phase = atan2(in.px.y - cy, in.px.x - cx) * 2.0 + t * 0.15;

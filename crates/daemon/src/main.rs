@@ -19,6 +19,7 @@ mod groups;
 mod hypr;
 mod install;
 mod ipc;
+mod jelly;
 mod launch;
 mod managed;
 mod nix;
@@ -184,11 +185,9 @@ fn main() -> anyhow::Result<()> {
         agua_icons: animation::Follower::new(content::AGUA_ICONS_K, content::AGUA_ICONS_C),
         agua_content: animation::Follower::new(content::AGUA_CONTENT_K, content::AGUA_CONTENT_C),
         agua_breath: animation::Follower::new(content::AGUA_BREATH_K, content::AGUA_BREATH_C),
-        jelly_left:   animation::Follower::new(content::JELLY_K, content::JELLY_C),
-        jelly_right:  animation::Follower::new(content::JELLY_K, content::JELLY_C),
-        jelly_top:    animation::Follower::new(content::JELLY_K, content::JELLY_C),
-        jelly_bottom: animation::Follower::new(content::JELLY_K, content::JELLY_C),
-        pending_jelly_kicks: Vec::new(),
+        jelly: jelly::JellyMembrane::new(),
+        box_jelly: jelly::JellyMembrane::new(),
+        pointer_inside_box: false,
         dock_wave_h: Vec::new(),
         dock_wave_v: Vec::new(),
         dock_crest_prev: Vec::new(),
@@ -240,6 +239,7 @@ fn main() -> anyhow::Result<()> {
         group_minis: Vec::new(),
         order: order::OrderDb::load(),
         pending_installs: Vec::new(),
+        managed_install_attrs: Vec::new(),
         known_app_ids: HashSet::new(),
         just_installed: None,
         dock_hover_since: None,
@@ -348,6 +348,15 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Startup orphan check: ask the nix thread for all currently installed
+    // attrs so we can detect managed packages that survived a daemon kill
+    // mid-install (packages.nix written but nix profile install never
+    // completed).  The result arrives as Event::InstalledAttrs and is
+    // handled in on_nix_event → install.rs.
+    if !app.managed.all_attrs().is_empty() {
+        app.nix.request(nix::Request::CheckInstalled);
+    }
+
     info!("daemon up; try: waverunner-ctl toggle");
     while !app.exit {
         event_loop
@@ -402,16 +411,15 @@ pub struct App {
     agua_icons: animation::Follower,
     agua_content: animation::Follower,
     agua_breath: animation::Follower,
-    jelly_left:   animation::Follower,
-    jelly_right:  animation::Follower,
-    jelly_top:    animation::Follower,
-    jelly_bottom: animation::Follower,
-    /// Pending jelly impulses: (edge_idx, velocity, delay_remaining_secs).
-    /// Edge indices: 0=left 1=right 2=top 3=bottom.
-    /// Used for anticipation pre-kick, main kick, and Poisson cross-coupling —
-    /// all fired as delayed velocity injections so the membrane feels like it
-    /// has propagation inertia rather than responding instantaneously.
-    pending_jelly_kicks: Vec<(u8, f32, f32)>,
+    /// Edge-spring jelly membrane for the main card: wobbles when the
+    /// pointer crosses the card boundary (anticipation pre-kick, main kick,
+    /// and Poisson cross-coupling, all fired as delayed velocity injections
+    /// so the membrane feels like it has propagation inertia).
+    jelly: jelly::JellyMembrane,
+    /// Same jelly membrane for the open group box panel.
+    box_jelly: jelly::JellyMembrane,
+    /// Whether the pointer was inside the open box last motion event.
+    pointer_inside_box: bool,
     /// AGUA splash ripple surface across the dock: per-icon wave height
     /// and velocity (0 = flat), plus last frame's per-icon crest so a
     /// collapsing crest can splash the surface. Resized with the dock.
@@ -559,6 +567,10 @@ pub struct App {
     /// as grid tiles at their drop slots; finalized (or retried) when the
     /// install resolves.
     pending_installs: Vec<PendingInstall>,
+    /// Managed-install attrs fired via `start_managed_install` (dock-drop
+    /// and startup recovery) that have no grid tile.  Resolved to dock
+    /// pins in `resolve_pending_installs` once the app appears in the index.
+    managed_install_attrs: Vec<String>,
     /// App ids present at the last app rescan — diffed against the next
     /// scan so a pending install can resolve to the app that *newly
     /// appeared*, even when its desktop id differs from the attr and the
@@ -1741,7 +1753,8 @@ impl App {
                 });
             if let Some(desktop_ids) = desktop_ids {
                 info!("retrying install of {attr}");
-                self.managed.add(&attr, desktop_ids);
+                // Re-stage in memory; packages.nix not written until success.
+                self.managed.stage(&attr, desktop_ids);
                 self.recompute_removable();
                 self.busy_ids.insert(attr.clone());
                 self.nix.request(nix::Request::Install {
@@ -1864,18 +1877,13 @@ impl App {
             .extent_of(self.ui.target())
             .max(self.ui.extent())
             .round() as u32;
-        // While hidden, keep a thin strip alive at the bottom edge so
-        // touching it with the pointer can reveal the dock.
         if self.ui.target() == Target::Hidden && self.config.input.edge_reveal {
             extent = extent.max(self.config.input.edge_reveal_px);
         }
-        // An open dock stack (a box floating above the dock) must be
-        // interactive, so the input band reaches up to it.
-        if self.dock_stack.is_some() || self.dir_stack.is_some() {
-            if let Some(b) = self.current_layout().open_box {
-                let needed = (self.buffer_size.1 as f32 - b.y).ceil().max(0.0) as u32;
-                extent = extent.max(needed);
-            }
+        // While a box floats above the dock, extend the input region to cover
+        // the full surface so the pointer can reach the box without leaving.
+        if self.stack_open() {
+            extent = extent.max(self.buffer_size.1);
         }
         if self.input_extent != Some(extent) {
             match surface::set_input_extent(
@@ -2533,73 +2541,32 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         if let Some(renderer) = app.renderer.as_mut() {
                             renderer.record_click(pos.0, pos.1);
                         }
-                        // Organic jelly poke with three layers:
-                        //   1. Velocity-scaled kick — fast crossing = strong poke.
-                        //   2. Anticipation — tiny opposite kick fires now so the
-                        //      edge briefly resists before giving way (membrane feel).
-                        //   3. Poisson cross-coupling — adjacent perpendicular edges
-                        //      ripple in after a short propagation delay (volume
-                        //      conservation: compress horizontally → expand vertically).
                         if app.ui.target() == Target::Open {
-                            let cx = layout.card_x + layout.card_w * 0.5;
-                            let cy = layout.card_top + layout.card_h * 0.5;
-                            let nx = (pos.0 - cx) / (layout.card_w * 0.5 + 1.0);
-                            let ny = (pos.1 - cy) / (layout.card_h * 0.5 + 1.0);
-
-                            // Pointer speed (px since last event) → kick scale.
-                            let speed = prev_pos.map(|(px, py)| {
-                                let dx = pos.0 - px;
-                                let dy = pos.1 - py;
-                                (dx * dx + dy * dy).sqrt()
-                            }).unwrap_or(10.0);
-                            let speed_factor = (speed / 10.0).clamp(0.35, 2.0);
-                            let k = content::JELLY_KICK * speed_factor;
-                            let cross = k * 0.14; // Poisson coupling fraction
-
-                            // dir: +1 entering (inward), -1 leaving (outward).
-                            // Anticipation: small opposite-direction kick fired now.
-                            // Main kick: full inward/outward, fired after 8 ms.
-                            // Cross kicks: adjacent edges, fired after 28 ms.
-                            // Sign convention per edge:
-                            //   left/top:  positive kick = inward (right/down)
-                            //   right/bottom: positive kick = outward (right/down)
-                            let dir = if now_inside { 1.0_f32 } else { -1.0_f32 };
-                            const ANTICIPATION: f32 = 0.09;
-                            const MAIN_MS: f32 = 0.008;
-                            const CROSS_MS: f32 = 0.028;
-                            if nx.abs() > ny.abs() {
-                                if nx > 0.0 {
-                                    // Right edge crossed: inward = leftward = negative for jelly_right
-                                    app.jelly_right.kick(dir * k * ANTICIPATION); // resist first
-                                    app.pending_jelly_kicks.push((1, -dir * k, MAIN_MS));
-                                    // Poisson: top/bottom expand outward on compression
-                                    app.pending_jelly_kicks.push((2, -dir * cross, CROSS_MS));
-                                    app.pending_jelly_kicks.push((3,  dir * cross, CROSS_MS));
-                                } else {
-                                    // Left edge crossed: inward = rightward = positive for jelly_left
-                                    app.jelly_left.kick(-dir * k * ANTICIPATION);
-                                    app.pending_jelly_kicks.push((0,  dir * k, MAIN_MS));
-                                    app.pending_jelly_kicks.push((2, -dir * cross, CROSS_MS));
-                                    app.pending_jelly_kicks.push((3,  dir * cross, CROSS_MS));
-                                }
-                            } else if ny > 0.0 {
-                                // Bottom edge crossed: inward = upward = negative for jelly_bottom
-                                app.jelly_bottom.kick(dir * k * ANTICIPATION);
-                                app.pending_jelly_kicks.push((3, -dir * k, MAIN_MS));
-                                // Poisson: left/right expand outward on compression
-                                app.pending_jelly_kicks.push((0, -dir * cross, CROSS_MS));
-                                app.pending_jelly_kicks.push((1,  dir * cross, CROSS_MS));
-                            } else {
-                                // Top edge crossed: inward = downward = positive for jelly_top
-                                app.jelly_top.kick(-dir * k * ANTICIPATION);
-                                app.pending_jelly_kicks.push((2,  dir * k, MAIN_MS));
-                                app.pending_jelly_kicks.push((0, -dir * cross, CROSS_MS));
-                                app.pending_jelly_kicks.push((1,  dir * cross, CROSS_MS));
-                            }
+                            let rect = content::Rect::new(
+                                layout.card_x,
+                                layout.card_top,
+                                layout.card_w,
+                                layout.card_h,
+                            );
+                            app.jelly.poke(rect, pos, prev_pos, now_inside);
                             app.schedule_frame();
                         }
                     }
                     app.pointer_inside_card = now_inside;
+                }
+                // Box jelly: same edge-crossing poke for the open group box panel.
+                if let Some(br) = app.current_layout().open_box {
+                    let now_inside_box = br.contains(pos);
+                    if now_inside_box != app.pointer_inside_box {
+                        if let Some(renderer) = app.renderer.as_mut() {
+                            renderer.record_click(pos.0, pos.1);
+                        }
+                        app.box_jelly.poke(br, pos, prev_pos, now_inside_box);
+                        app.schedule_frame();
+                    }
+                    app.pointer_inside_box = now_inside_box;
+                } else {
+                    app.pointer_inside_box = false;
                 }
                 // Hiding under a parked cursor keeps our (now stale)
                 // pointer focus — the compositor never re-sends Enter for
@@ -2717,9 +2684,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         app.update_hover();
                         app.gesture.pressed = app.hover;
                         app.gesture.press_pos = app.pointer_pos;
-                        if let (Some(renderer), Some((x, y))) =
-                            (app.renderer.as_mut(), app.pointer_pos)
+                        if let (Some((x, y)), Some(renderer)) =
+                            (app.pointer_pos, app.renderer.as_mut())
                         {
+                            // Click ripple only. The box wave (a full-surface
+                            // darkening sweep) is reserved for box open/close,
+                            // not clicks inside an open box.
                             renderer.record_click(x, y);
                         }
                     }
@@ -2756,8 +2726,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 }
                                 // else: drag-cancel — do nothing.
                             } else if app.stack_open() {
-                                // A box (grid or dock stack) is open: a click
-                                // off it closes the box, not the launcher.
+                                // A box is open: a click off it closes the box,
+                                // not the launcher.
                                 app.close_group();
                             } else if app.ui.target() == Target::Open {
                                 // Dismiss only if the click landed outside the
