@@ -2,9 +2,14 @@
 // array. Icon pixels are premultiplied RGBA; the animation alpha
 // multiplies all channels so icons fade with the card.
 
+// Prefix of the shared Globals uniform (the rect/shadow shaders declare
+// the rest — a shorter struct over the same buffer is fine).
 struct Globals {
-    screen: vec2<f32>,   // surface size, pixels
+    screen: vec2<f32>,   // surface size, logical pixels
     alpha: f32,          // animation opacity multiplier
+    time: f32,
+    cursor: vec2<f32>,
+    squircle: f32,       // icon corner superellipse exponent; <= 0 = off
     _pad: f32,
 };
 
@@ -39,5 +44,18 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(icons, icon_sampler, in.uv, i32(in.layer));
-    return texel * globals.alpha;
+    // Squircle (superellipse) corner mask: |x|^n + |y|^n = 1 in the tile's
+    // [-1,1] space. This only trims the extreme corners, so full-bleed
+    // square icons pick up macOS-style rounded corners while already-round
+    // or padded icons (transparent corners) are untouched. fwidth gives a
+    // ~1px anti-aliased edge that stays crisp at every icon size.
+    var mask = 1.0;
+    let n = globals.squircle;
+    if (n > 0.0) {
+        let p = in.uv * 2.0 - vec2<f32>(1.0);
+        let e = pow(abs(p.x), n) + pow(abs(p.y), n);
+        let w = max(fwidth(e), 1e-5);
+        mask = 1.0 - smoothstep(1.0 - w, 1.0 + w, e);
+    }
+    return texel * globals.alpha * mask;
 }

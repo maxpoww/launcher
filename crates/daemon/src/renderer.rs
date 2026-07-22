@@ -32,7 +32,8 @@ struct Globals {
     alpha:      f32,
     time:       f32,
     cursor:     [f32; 2],  // pointer in surface pixels; [-9999,-9999] = absent
-    _pad:       [f32; 2],
+    squircle:   f32,       // icon corner superellipse exponent (icon.wgsl only; 0 = off)
+    _pad:       f32,
     // Up to 4 simultaneous ripples: (x, y, age, 0); x < -9000 = inactive.
     ripples:    [[f32; 4]; 4],
     // Up to 2 box-open/close waves: (cx, cy, age, 0); cx < -9000 = inactive.
@@ -578,7 +579,7 @@ impl Renderer {
     /// `cursor` is the pointer position in surface pixels, used for the
     /// glass cursor-spotlight effect; `None` when the pointer is outside
     /// the surface.
-    pub fn render(&mut self, scene: &Scene, text_color: [f32; 4], cursor: Option<(f32, f32)>) -> anyhow::Result<()> {
+    pub fn render(&mut self, scene: &Scene, text_color: [f32; 4], cursor: Option<(f32, f32)>, squircle: f32) -> anyhow::Result<()> {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -634,7 +635,8 @@ impl Renderer {
                 alpha:     scene.alpha.clamp(0.0, 1.0),
                 time:      self.anim_time,
                 cursor:    cursor_px,
-                _pad:      [0.0; 2],
+                squircle,
+                _pad:      0.0,
                 ripples,
                 box_waves,
             }),

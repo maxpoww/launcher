@@ -777,7 +777,12 @@ impl App {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        if let Err(e) = renderer.render(&scene, self.config.theme.text_rgba(), self.pointer_pos) {
+        if let Err(e) = renderer.render(
+            &scene,
+            self.config.theme.text_rgba(),
+            self.pointer_pos,
+            self.config.theme.icon_squircle,
+        ) {
             error!("render failed: {e:#}");
         }
         if search_animating && self.search.expand != search_target {
