@@ -810,8 +810,8 @@ const PLATE_RADIUS: f32 = 56.0;
 /// Frosted fill (white) and hairline-edge (white) opacities over the dark
 /// card, plus the edge width. Edge is thick at `ICON_SIZE` so it survives
 /// downscaling to the small dock size (~1px there).
-const PLATE_FILL_ALPHA: u8 = 64;
-const PLATE_EDGE_ALPHA: u8 = 96;
+const PLATE_FILL_ALPHA: u8 = 84;
+const PLATE_EDGE_ALPHA: u8 = 112;
 const PLATE_EDGE_WIDTH: f32 = 5.0;
 /// The icon sitting on the plate is muted for a calmer, cohesive dock:
 /// pulled `PLATE_ICON_DESAT` of the way toward its own luminance (0 = full
