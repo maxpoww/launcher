@@ -301,12 +301,17 @@ pub struct ThemeConfig {
     /// Icon theme name for `freedesktop-icons` lookup (falls back to
     /// `hicolor` automatically).
     pub icon_theme: String,
-    /// Squircle (superellipse) exponent used to round icon corners for a
-    /// cohesive macOS-dock silhouette: ~5 gives Apple-style continuous
-    /// corners, lower is rounder (2 ≈ circle), higher is squarer. `0` or
-    /// negative disables the mask (plain square icons). The mask only
-    /// trims the extreme corners, so already-circular or padded theme
-    /// icons are unaffected — only full-bleed square icons get rounded.
+    /// Frosted squircle plate behind every icon: trims each icon to its
+    /// content, scales it to a uniform size and centers it on an identical
+    /// translucent rounded tile, so a mix of circular and square theme
+    /// icons reads as one cohesive dock (macOS/iOS style). Baked once per
+    /// icon (cached), so there is no per-frame cost.
+    pub icon_plate: bool,
+    /// Superellipse corner-mask exponent, used only when `icon_plate` is
+    /// off: ~5 ≈ Apple corners, lower is rounder (2 ≈ circle), higher is
+    /// squarer. `0` disables it. It only trims a tile's extreme corners,
+    /// so it rounds full-bleed square icons but leaves circular or padded
+    /// ones unchanged — hence plates are the default for real cohesion.
     pub icon_squircle: f32,
 }
 
@@ -318,7 +323,8 @@ impl Default for ThemeConfig {
             text: "#ffffffff".to_owned(),
             highlight: "#05070920".to_owned(),
             icon_theme: "hicolor".to_owned(),
-            icon_squircle: 5.0,
+            icon_plate: true,
+            icon_squircle: 0.0,
         }
     }
 }

@@ -135,6 +135,9 @@ fn main() -> anyhow::Result<()> {
     // find icons under ~/.nix-profile/share (nix profile installs land
     // there; freedesktop_icons uses XDG_DATA_DIRS for all its lookups).
     apps::patch_xdg_data_dirs();
+    // Icon-plate mode is a process-wide switch read by the tile producers on
+    // several worker threads; set it before any of them start.
+    apps::set_icon_plate(config.theme.icon_plate);
     let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
     let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
 

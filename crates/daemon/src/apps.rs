@@ -462,10 +462,14 @@ struct DiskCache {
 
 impl DiskCache {
     fn new() -> Self {
+        // The cache stores finished tiles (plated + mipped), so its identity
+        // includes the size and the plate mode — a plate toggle or a format
+        // change lands in a fresh directory instead of serving stale tiles.
+        let variant = if icon_plate_enabled() { "plate" } else { "raw" };
         Self {
             dir: cache_base()
                 .join("waverunner")
-                .join(format!("icons-{ICON_SIZE}")),
+                .join(format!("icons-{ICON_SIZE}-{variant}")),
         }
     }
 
@@ -756,8 +760,8 @@ fn cache_base() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"))
 }
 
-/// Read and rasterize one icon file to a full [`ICON_CHAIN_BYTES`] mip
-/// chain (base `ICON_SIZE`² premultiplied RGBA plus its downsamples).
+/// Read and rasterize one icon file into a ready-to-upload tile: a full
+/// [`ICON_CHAIN_BYTES`] mip chain, plated when `icon_plate` is on.
 pub(crate) fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
     let path = std::path::Path::new(path);
     let data = std::fs::read(path).ok()?;
@@ -769,7 +773,133 @@ pub(crate) fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
             return None;
         }
     };
-    Some(with_mips(pixmap.take()))
+    Some(finish_tile(pixmap.take()))
+}
+
+/// Whether to composite icons onto a frosted plate; set once at startup
+/// from `theme.icon_plate` (defaults on). A process-wide switch because the
+/// tile producers ([`rasterize_icon_file`], [`placeholder_icon`]) are free
+/// functions called from several worker threads.
+static ICON_PLATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Set the icon-plate mode. Call once, before the icon workers start.
+pub fn set_icon_plate(on: bool) {
+    let _ = ICON_PLATE.set(on);
+}
+
+fn icon_plate_enabled() -> bool {
+    *ICON_PLATE.get().unwrap_or(&true)
+}
+
+/// Icon content fills this fraction of the plate's larger dimension; the
+/// rest is the frosted margin that unifies differently-sized icons.
+const PLATE_CONTENT: f32 = 0.72;
+/// Plate margin inside the `ICON_SIZE` tile (at `ICON_SIZE = 256`).
+const PLATE_INSET: f32 = 8.0;
+/// Plate corner radius (~22% of the side, macOS-dock-ish).
+const PLATE_RADIUS: f32 = 56.0;
+
+/// Turn a raw `ICON_SIZE`² base tile into the uploaded mip chain, plating
+/// it first when `icon_plate` is on.
+pub(crate) fn finish_tile(base: Vec<u8>) -> Vec<u8> {
+    if icon_plate_enabled() {
+        with_mips(plate_tile(base))
+    } else {
+        with_mips(base)
+    }
+}
+
+/// Composite `base` onto a frosted rounded-square plate: trim it to its
+/// alpha content, scale that to [`PLATE_CONTENT`] of the tile and center
+/// it, so a mix of circular, square and padded theme icons all share one
+/// silhouette. Returns a plain `ICON_SIZE`² premultiplied tile (the caller
+/// mips it).
+fn plate_tile(base: Vec<u8>) -> Vec<u8> {
+    let bounds = alpha_bounds(&base);
+    let mut tile = match tiny_skia::Pixmap::new(ICON_SIZE, ICON_SIZE) {
+        Some(p) => p,
+        None => return base,
+    };
+    draw_plate(&mut tile);
+    if let (Some((x0, y0, x1, y1)), Some(size)) =
+        (bounds, tiny_skia::IntSize::from_wh(ICON_SIZE, ICON_SIZE))
+    {
+        if let Some(src) = tiny_skia::Pixmap::from_vec(base, size) {
+            let (bw, bh) = ((x1 - x0) as f32, (y1 - y0) as f32);
+            let s = (ICON_SIZE as f32 * PLATE_CONTENT) / bw.max(bh);
+            let (bcx, bcy) = ((x0 + x1) as f32 / 2.0, (y0 + y1) as f32 / 2.0);
+            let c = ICON_SIZE as f32 / 2.0;
+            tile.draw_pixmap(
+                0,
+                0,
+                src.as_ref(),
+                &tiny_skia::PixmapPaint {
+                    quality: tiny_skia::FilterQuality::Bilinear,
+                    ..Default::default()
+                },
+                tiny_skia::Transform::from_scale(s, s).post_translate(c - s * bcx, c - s * bcy),
+                None,
+            );
+        }
+    }
+    tile.take()
+}
+
+/// Draw the frosted plate: a translucent white rounded square with a
+/// slightly brighter hairline edge, so it reads as glass over the dark
+/// card. The shape's transparent corners give the cohesive silhouette.
+fn draw_plate(tile: &mut tiny_skia::Pixmap) {
+    let s = ICON_SIZE as f32;
+    let Some(path) = rounded_rect_path(
+        PLATE_INSET,
+        PLATE_INSET,
+        s - 2.0 * PLATE_INSET,
+        s - 2.0 * PLATE_INSET,
+        PLATE_RADIUS,
+    ) else {
+        return;
+    };
+    let mut fill = tiny_skia::Paint::default();
+    fill.set_color_rgba8(255, 255, 255, 34);
+    fill.anti_alias = true;
+    tile.fill_path(
+        &path,
+        &fill,
+        tiny_skia::FillRule::Winding,
+        tiny_skia::Transform::identity(),
+        None,
+    );
+    let mut edge = tiny_skia::Paint::default();
+    edge.set_color_rgba8(255, 255, 255, 40);
+    edge.anti_alias = true;
+    tile.stroke_path(
+        &path,
+        &edge,
+        &tiny_skia::Stroke {
+            width: 2.0,
+            ..Default::default()
+        },
+        tiny_skia::Transform::identity(),
+        None,
+    );
+}
+
+/// Tight bounding box `(x0, y0, x1, y1)` (high ends exclusive) of pixels
+/// whose alpha clears a small threshold, or `None` if fully transparent.
+fn alpha_bounds(px: &[u8]) -> Option<(u32, u32, u32, u32)> {
+    let s = ICON_SIZE as usize;
+    let (mut x0, mut y0, mut x1, mut y1) = (s, s, 0usize, 0usize);
+    for y in 0..s {
+        for x in 0..s {
+            if px[(y * s + x) * 4 + 3] > 8 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    (x1 > x0 && y1 > y0).then_some((x0 as u32, y0 as u32, x1 as u32, y1 as u32))
 }
 
 /// Append the full mip chain to a base `ICON_SIZE`² premultiplied-RGBA
@@ -919,7 +1049,21 @@ pub(crate) fn placeholder_icon(name: &str) -> Vec<u8> {
     // Rounded-rectangle path with transparent corners so the tile blends
     // cleanly against any card background without hard square edges.
     let s = ICON_SIZE as f32;
-    let (x, y, w, h, rad) = (4.0f32, 4.0, s - 8.0, s - 8.0, 10.0);
+    if let Some(path) = rounded_rect_path(4.0, 4.0, s - 8.0, s - 8.0, 10.0) {
+        pixmap.fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
+    finish_tile(pixmap.take())
+}
+
+/// A rounded-rectangle path at `(x, y)` of size `w × h` with corner radius
+/// `rad`, or `None` if the geometry is degenerate.
+fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, rad: f32) -> Option<tiny_skia::Path> {
     let mut pb = tiny_skia::PathBuilder::new();
     pb.move_to(x + rad, y);
     pb.line_to(x + w - rad, y);
@@ -931,16 +1075,7 @@ pub(crate) fn placeholder_icon(name: &str) -> Vec<u8> {
     pb.line_to(x, y + rad);
     pb.quad_to(x, y, x + rad, y);
     pb.close();
-    if let Some(path) = pb.finish() {
-        pixmap.fill_path(
-            &path,
-            &paint,
-            tiny_skia::FillRule::Winding,
-            tiny_skia::Transform::identity(),
-            None,
-        );
-    }
-    with_mips(pixmap.take())
+    pb.finish()
 }
 
 /// Muted-palette hue to RGB (fixed saturation/lightness).
