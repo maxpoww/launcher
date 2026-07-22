@@ -96,6 +96,12 @@ impl App {
                 None => pos,
             }
         });
+        // Switching from another open box: drop its state so only this one
+        // is live (reset_stack_view below rewinds the grow for it).
+        self.dock_stack = None;
+        self.dir_stack = None;
+        self.closing_members = None;
+        self.box_from_dock = false; // opened from a grid folder tile
         self.app_group = Some(g);
         self.reset_stack_view();
         let origin = self.group_origin.or(self.pointer_pos);
@@ -183,6 +189,8 @@ impl App {
         self.group_origin = self.dock_slot_center(&id);
         self.app_group = None;
         self.dock_stack = None;
+        self.closing_members = None;
+        self.box_from_dock = true; // opened from a pinned dock directory
         self.dir_stack = Some(DirStack {
             id,
             path,
@@ -197,6 +205,12 @@ impl App {
     /// above the icon. Either way it's the same magnified box.
     pub(crate) fn open_dock_folder(&mut self, g: usize) {
         self.group_origin = self.dock_folder_center(g);
+        // Switching from another open box: drop its state first.
+        self.app_group = None;
+        self.dock_stack = None;
+        self.dir_stack = None;
+        self.closing_members = None;
+        self.box_from_dock = true; // opened from a dock folder icon
         if self.ui.target() == Target::Open {
             self.app_group = Some(g);
         } else {

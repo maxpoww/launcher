@@ -236,6 +236,7 @@ fn main() -> anyhow::Result<()> {
         app_group: None,
         dock_stack: None,
         dir_stack: None,
+        box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
         box_page: 0,
@@ -548,6 +549,10 @@ pub struct App {
     dock_stack: Option<usize>,
     /// A pinned directory whose content stack is open above the dock.
     dir_stack: Option<boxes::DirStack>,
+    /// Whether the currently open box was opened *from the dock* (a dock
+    /// folder or pinned directory), as opposed to a grid folder tile. Arms
+    /// the dock hover-switch even when the box opened into the grid.
+    box_from_dock: bool,
     /// In-box member reorder drag: the dragged member's entry index and the
     /// pointer position. The box stays open; drop reorders it (or, dragged
     /// out of the box, it converts to a pull-out into the grid).
@@ -777,6 +782,17 @@ struct DragState {
     from_dock: bool,
     /// Current pointer position in surface coordinates.
     pos: (f32, f32),
+}
+
+/// The box a click would open. Resolved from a [`content::Hit`] while a
+/// box is already open, so a click on a *different* folder switches
+/// straight to it (close + open in one click) while a click on the open
+/// box's own icon toggles it shut.
+enum BoxTarget {
+    /// A group folder, by group index (grid cell or dock folder icon).
+    Group(usize),
+    /// A pinned directory's content stack, by the dock entry's id.
+    Dir(String),
 }
 
 /// Accumulated scroll (in wl_pointer axis units; one wheel notch ≈ 15)
@@ -1596,9 +1612,60 @@ impl App {
             } else {
                 self.dock_hover_since = None;
             }
+            // Dock hover-switch: once a box has been opened *from the dock*
+            // (by an explicit click), gliding the pointer onto a different
+            // dock folder or directory switches straight to it — no click
+            // needed, whether the box floats over the dock or opened into
+            // the grid. Armed only for dock-origin boxes, so it ends the
+            // moment the box is dismissed (click-out / Escape) and never
+            // fires for a box opened from a grid folder tile.
+            if self.stack_open() && self.box_from_dock {
+                if let Some(Hit::DockIcon(slot)) = hover {
+                    self.hover_switch_dock_box(slot);
+                }
+            }
             self.schedule_frame();
         }
         self.apply_cursor();
+    }
+
+    /// Switch the open dock stack to the folder/directory under dock slot
+    /// `slot`, if it's a different one (a plain app or the already-open box
+    /// leaves it untouched). The dock hover-switch counterpart of a click.
+    fn hover_switch_dock_box(&mut self, slot: usize) {
+        let Some(&idx) = self.dock_order.get(slot) else {
+            return;
+        };
+        match self.kinds.get(idx) {
+            Some(apps::EntryKind::Group) => {
+                let g = self
+                    .entries
+                    .get(idx)
+                    .and_then(|e| e.id.strip_prefix("group:"))
+                    .and_then(|gid| self.groups.index_by_id(gid));
+                if let Some(g) = g {
+                    if self.open_box_group() != Some(g) {
+                        self.open_dock_folder(g);
+                    }
+                }
+            }
+            Some(apps::EntryKind::File) => {
+                let dir = self.entries.get(idx).and_then(|e| {
+                    let path = e.description.clone()?;
+                    std::fs::metadata(&path)
+                        .ok()?
+                        .is_dir()
+                        .then(|| (e.id.clone(), path))
+                });
+                if let Some((id, path)) = dir {
+                    let already = self.dir_stack.as_ref().map(|d| d.id.as_str()) == Some(id.as_str());
+                    if !already {
+                        self.open_dir_stack(id, path);
+                    }
+                }
+            }
+            _ => {} // a plain app: leave the open box as it is
+        }
     }
 
     /// Reflect what's under the pointer in its cursor: the pointing hand
@@ -1637,14 +1704,62 @@ impl App {
         }
     }
 
+    /// The box a click would open, if any (a group folder or a pinned
+    /// directory). Used to switch boxes in one click while one is open.
+    fn hit_box_target(&self, hit: Hit) -> Option<BoxTarget> {
+        let group_of = |idx: usize| {
+            self.entries
+                .get(idx)
+                .and_then(|e| e.id.strip_prefix("group:"))
+                .and_then(|gid| self.groups.index_by_id(gid))
+                .map(BoxTarget::Group)
+        };
+        match hit {
+            Hit::DockIcon(slot) => {
+                let &idx = self.dock_order.get(slot)?;
+                match self.kinds.get(idx)? {
+                    apps::EntryKind::Group => group_of(idx),
+                    apps::EntryKind::File => {
+                        let e = self.entries.get(idx)?;
+                        let path = e.description.clone()?;
+                        std::fs::metadata(&path)
+                            .ok()?
+                            .is_dir()
+                            .then(|| BoxTarget::Dir(e.id.clone()))
+                    }
+                    _ => None,
+                }
+            }
+            Hit::GridCell(s, i) if s == content::SECTION_APPS => {
+                let idx = self.search.visible[s].get(i).copied()?;
+                (self.kinds.get(idx) == Some(&apps::EntryKind::Group))
+                    .then(|| group_of(idx))
+                    .flatten()
+            }
+            _ => None,
+        }
+    }
+
     /// Resolve a hit to an action: launch an entry or toggle the search box.
     fn activate_hit(&mut self, hit: Hit) {
-        // While a box is open, the grid behind is just context: a click
-        // anywhere but the box itself closes the box (and does nothing
-        // else this click).
-        if self.stack_open() && !matches!(hit, Hit::OpenBoxCell(_)) {
-            self.close_group();
-            return;
+        // While a box is open, the grid behind is just context. Clicking a
+        // *different* folder switches straight to it (the open_* call below
+        // replaces the current box in one click); clicking the open box's
+        // own icon toggles it shut; any other click just dismisses it.
+        if self.stack_open() {
+            let target = self.hit_box_target(hit);
+            let same = match &target {
+                Some(BoxTarget::Group(g)) => self.open_box_group() == Some(*g),
+                Some(BoxTarget::Dir(id)) => {
+                    self.dir_stack.as_ref().map(|ds| ds.id.as_str()) == Some(id.as_str())
+                }
+                None => false,
+            };
+            if same || (target.is_none() && !matches!(hit, Hit::OpenBoxCell(_))) {
+                self.close_group();
+                return;
+            }
+            // A different box (target is Some): fall through to open it.
         }
         match hit {
             Hit::DockIcon(slot) => {
