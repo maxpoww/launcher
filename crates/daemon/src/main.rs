@@ -1629,9 +1629,10 @@ impl App {
         self.apply_cursor();
     }
 
-    /// Switch the open dock stack to the folder/directory under dock slot
-    /// `slot`, if it's a different one (a plain app or the already-open box
-    /// leaves it untouched). The dock hover-switch counterpart of a click.
+    /// React to the pointer gliding onto dock slot `slot` while a dock box
+    /// is open: hovering a *different* folder/directory switches straight to
+    /// it; hovering the already-open box's own icon keeps it open; hovering
+    /// any other icon (a plain app) closes the box so that icon is clickable.
     fn hover_switch_dock_box(&mut self, slot: usize) {
         let Some(&idx) = self.dock_order.get(slot) else {
             return;
@@ -1643,10 +1644,10 @@ impl App {
                     .get(idx)
                     .and_then(|e| e.id.strip_prefix("group:"))
                     .and_then(|gid| self.groups.index_by_id(gid));
-                if let Some(g) = g {
-                    if self.open_box_group() != Some(g) {
-                        self.open_dock_folder(g);
-                    }
+                match g {
+                    Some(g) if self.open_box_group() != Some(g) => self.open_dock_folder(g),
+                    Some(_) => {} // the open box's own icon: keep it open
+                    None => self.close_group(),
                 }
             }
             Some(apps::EntryKind::File) => {
@@ -1657,14 +1658,20 @@ impl App {
                         .is_dir()
                         .then(|| (e.id.clone(), path))
                 });
-                if let Some((id, path)) = dir {
-                    let already = self.dir_stack.as_ref().map(|d| d.id.as_str()) == Some(id.as_str());
-                    if !already {
-                        self.open_dir_stack(id, path);
+                match dir {
+                    Some((id, path)) => {
+                        let same =
+                            self.dir_stack.as_ref().map(|d| d.id.as_str()) == Some(id.as_str());
+                        if !same {
+                            self.open_dir_stack(id, path);
+                        }
                     }
+                    // A plain (non-directory) pinned file: close so it's clickable.
+                    None => self.close_group(),
                 }
             }
-            _ => {} // a plain app: leave the open box as it is
+            // Any other dock icon (a plain app): close the box.
+            _ => self.close_group(),
         }
     }
 
