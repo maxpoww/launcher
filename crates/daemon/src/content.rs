@@ -115,6 +115,15 @@ pub struct Scene {
     /// Section grids (Apps / Install / Files), each clipped to its own
     /// viewport by the renderer.
     pub grids: Vec<GridContent>,
+    /// Index into `grids` where the open box's overlay begins (the box
+    /// panel and its members). Grids before it are the base scene, which
+    /// the renderer blurs behind the box; from here on is drawn *over* that
+    /// blur. `None` = no box open (nothing to split).
+    pub blur_split: Option<usize>,
+    /// The open box's rounded rect and corner radius — the region the
+    /// renderer fills with a blurred sample of the base scene (frosted
+    /// glass). `None` when no box is open.
+    pub box_rect: Option<(Rect, f32)>,
     /// Topmost icon quads, drawn over everything (the drag ghost —
     /// what's in your hand must never hide behind the grid).
     pub overlay: Vec<IconInst>,
@@ -1761,6 +1770,12 @@ pub fn scene(
             box_rect.w - bjl + bjr,
             box_rect.h - bjt + bjb,
         );
+        // Everything from here (the box panel + its members) is the box
+        // overlay: the renderer draws the base scene before it into the
+        // offscreen texture, blurs the box's region, and composites this on
+        // top (see `blur_split` / `box_rect`).
+        scene.blur_split = Some(scene.grids.len());
+        scene.box_rect = Some((box_draw, radius));
         // Same drop-shadow pattern as the dock, but only for a box floating on
         // top of the dock (dock/dir stack) — grid boxes inside the launcher
         // sit on the card and get none. Fades in with the box open (`t`).

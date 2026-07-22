@@ -74,6 +74,17 @@ struct IconInstance {
     _pad: [u32; 3],
 }
 
+/// Per-instance data for the open box's frosted backdrop quad.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BoxBackdropInstance {
+    rect_min: [f32; 2],
+    rect_max: [f32; 2],
+    radius:   f32,
+    screen:   [f32; 2],
+    _pad:     f32,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -88,6 +99,32 @@ pub struct Renderer {
     globals_bind: wgpu::BindGroup,
     shadow_pipeline: wgpu::RenderPipeline,
     rect_pipeline: wgpu::RenderPipeline,
+
+    /// Offscreen colour target the scene is rendered into, then blitted to
+    /// the swapchain — so the box can sample a blurred copy of it (frosted
+    /// glass). Same size/format as the swapchain; rebuilt on resize.
+    scene_tex: wgpu::Texture,
+    scene_view: wgpu::TextureView,
+    /// Fullscreen textured-quad pipeline (copies `scene_tex` to the screen).
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_layout: wgpu::BindGroupLayout,
+    blit_sampler: wgpu::Sampler,
+    /// Bind group over `scene_view` for the blit; rebuilt on resize.
+    blit_bind: wgpu::BindGroup,
+    /// Frosted-glass backdrop for the open box: samples the blurred scene
+    /// over the box region (shares `blit_layout`).
+    box_backdrop_pipeline: wgpu::RenderPipeline,
+    /// Separable-Gaussian blur ping-pong: scene → `blur_a` (horizontal) →
+    /// `blur_b` (vertical); the box backdrop samples `blur_b`. Rebuilt on
+    /// resize.
+    blur_a_tex: wgpu::Texture,
+    blur_a_view: wgpu::TextureView,
+    blur_a_bind: wgpu::BindGroup,
+    blur_b_tex: wgpu::Texture,
+    blur_b_view: wgpu::TextureView,
+    blur_b_bind: wgpu::BindGroup,
+    blur_pipeline_h: wgpu::RenderPipeline,
+    blur_pipeline_v: wgpu::RenderPipeline,
 
     icon_pipeline: wgpu::RenderPipeline,
     icon_bind_layout: wgpu::BindGroupLayout,
@@ -116,6 +153,48 @@ pub struct Renderer {
     ripples: Vec<([f32; 2], f32)>,
     /// Active box open/close waves: (icon center, anim_time at spawn).
     box_waves: Vec<([f32; 2], f32)>,
+}
+
+/// Build the offscreen scene colour target (texture + view + blit bind
+/// group) at `width`×`height`. Called at init and on every resize.
+fn make_scene_target(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::BindGroup) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("waverunner.scene-tex"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("waverunner.blit-bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+    (tex, view, bind)
 }
 
 impl Renderer {
@@ -413,6 +492,158 @@ impl Renderer {
             ..Default::default()
         });
 
+        // Blit pipeline: copies the offscreen scene texture to the screen
+        // (and, later, samples the blurred copy for the box backdrop).
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("waverunner.blit"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+        });
+        let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("waverunner.blit"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("waverunner.blit"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("waverunner.blit"),
+            bind_group_layouts: &[&blit_layout],
+            push_constant_ranges: &[],
+        });
+        // Replace blend: write the (premultiplied) source pixels verbatim.
+        let blit_target = [Some(wgpu::ColorTargetState {
+            format: config.format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.blit"),
+            layout: Some(&blit_pl),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &blit_target,
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let (scene_tex, scene_view, blit_bind) =
+            make_scene_target(&device, config.format, width, height, &blit_layout, &blit_sampler);
+
+        // Box frosted backdrop: samples/blurs the scene texture over the box
+        // region, premultiplied "over" blend (same as the scene pipelines).
+        let backdrop_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("waverunner.box-backdrop"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/box_backdrop.wgsl").into()),
+        });
+        let backdrop_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("waverunner.box-backdrop"),
+            bind_group_layouts: &[&blit_layout],
+            push_constant_ranges: &[],
+        });
+        let box_backdrop_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("waverunner.box-backdrop"),
+                layout: Some(&backdrop_pl),
+                vertex: wgpu::VertexState {
+                    module: &backdrop_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &backdrop_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &target,
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        // Separable-Gaussian blur ping-pong targets (frost the box backdrop).
+        let (blur_a_tex, blur_a_view, blur_a_bind) =
+            make_scene_target(&device, config.format, width, height, &blit_layout, &blit_sampler);
+        let (blur_b_tex, blur_b_view, blur_b_bind) =
+            make_scene_target(&device, config.format, width, height, &blit_layout, &blit_sampler);
+        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("waverunner.blur"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
+        });
+        // Replace-blend (overwrite the target); both passes share the layout.
+        let blur_target = [Some(wgpu::ColorTargetState {
+            format: config.format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let make_blur_pipeline = |entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("waverunner.blur"),
+                layout: Some(&blit_pl),
+                vertex: wgpu::VertexState {
+                    module: &blur_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blur_shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &blur_target,
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let blur_pipeline_h = make_blur_pipeline("fs_horizontal");
+        let blur_pipeline_v = make_blur_pipeline("fs_vertical");
+
         // Text stack (glyphon).
         let font_system = FontSystem::new();
         let swash = SwashCache::new();
@@ -436,6 +667,21 @@ impl Renderer {
             globals_bind,
             shadow_pipeline,
             rect_pipeline,
+            scene_tex,
+            scene_view,
+            blit_pipeline,
+            blit_layout,
+            blit_sampler,
+            blit_bind,
+            box_backdrop_pipeline,
+            blur_a_tex,
+            blur_a_view,
+            blur_a_bind,
+            blur_b_tex,
+            blur_b_view,
+            blur_b_bind,
+            blur_pipeline_h,
+            blur_pipeline_v,
             icon_pipeline,
             icon_bind_layout,
             icon_sampler,
@@ -464,6 +710,28 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        let rebuild = |dev: &wgpu::Device| {
+            make_scene_target(
+                dev,
+                self.config.format,
+                width,
+                height,
+                &self.blit_layout,
+                &self.blit_sampler,
+            )
+        };
+        let (tex, view, bind) = rebuild(&self.device);
+        self.scene_tex = tex;
+        self.scene_view = view;
+        self.blit_bind = bind;
+        let (tex, view, bind) = rebuild(&self.device);
+        self.blur_a_tex = tex;
+        self.blur_a_view = view;
+        self.blur_a_bind = bind;
+        let (tex, view, bind) = rebuild(&self.device);
+        self.blur_b_tex = tex;
+        self.blur_b_view = view;
+        self.blur_b_bind = bind;
     }
 
     /// Upload the icon texture array delivered by the indexer thread.
@@ -696,6 +964,23 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&icons),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        // One-instance buffer for the box's frosted backdrop (only when a
+        // box is open).
+        let backdrop_buf = scene.box_rect.map(|(r, radius)| {
+            let inst = BoxBackdropInstance {
+                rect_min: [r.x, r.y],
+                rect_max: [r.x + r.w, r.y + r.h],
+                radius,
+                screen: [lw, lh],
+                _pad: 0.0,
+            };
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("waverunner.box-backdrop"),
+                    contents: bytemuck::bytes_of(&inst),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
 
         // Shape the visible labels and hand them to glyphon.
         let alpha = scene.alpha.clamp(0.0, 1.0);
@@ -832,16 +1117,25 @@ impl Renderer {
             )
             .context("glyphon prepare failed")?;
 
+        // Grids before `split` are the base scene (offscreen, blurred behind
+        // the box); from `split` on is the box overlay (composited on top).
+        let split = scene
+            .blur_split
+            .unwrap_or(grid_ranges.len())
+            .min(grid_ranges.len());
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("waverunner.frame"),
             });
         {
+            // Pass 1: the whole scene into the offscreen texture (so the
+            // box can later sample a blurred copy of it).
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("waverunner.scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.scene_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -876,8 +1170,10 @@ impl Renderer {
                 }
             }
 
-            // Each section's grid content under its own scissor rect.
-            for (clip, rect_range, icon_range) in &grid_ranges {
+            // Base section grids (everything before the box overlay), each
+            // under its own scissor rect. The box overlay (grids from
+            // `split` on) is held back for pass 2 so it draws over the blur.
+            for (clip, rect_range, icon_range) in &grid_ranges[..split] {
                 // Scissor rects address the physical framebuffer; the clip is
                 // logical, so scale it up.
                 let sx = ((clip.x.max(0.0) * scale) as u32).min(w);
@@ -903,19 +1199,113 @@ impl Renderer {
                 }
             }
             pass.set_scissor_rect(0, 0, w, h);
+        }
 
-            // Text renders unscissored: every TextArea carries its own
-            // clip bounds (grid viewport for app names, the search box
-            // for the query), so labels outside the grid still show.
+        // Blur passes (only when a box is open): scene → blur_a (horizontal)
+        // → blur_b (vertical). Separable Gaussian for a smooth frost.
+        if backdrop_buf.is_some() {
+            for (target_view, pipeline, src_bind, label) in [
+                (
+                    &self.blur_a_view,
+                    &self.blur_pipeline_h,
+                    &self.blit_bind,
+                    "waverunner.blur-h",
+                ),
+                (
+                    &self.blur_b_view,
+                    &self.blur_pipeline_v,
+                    &self.blur_a_bind,
+                    "waverunner.blur-v",
+                ),
+            ] {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, src_bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        {
+            // Pass 2: blit the offscreen base scene onto the swapchain, then
+            // draw the box overlay (and all text + the drag ghost) over it.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("waverunner.composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &self.blit_bind, &[]);
+            pass.draw(0..3, 0..1);
+
+            // Frosted backdrop: replace the box region with the blurred
+            // (blur_b) scene, un-premultiplied to opaque.
+            if let Some(backdrop_buf) = &backdrop_buf {
+                pass.set_pipeline(&self.box_backdrop_pipeline);
+                pass.set_bind_group(0, &self.blur_b_bind, &[]);
+                pass.set_vertex_buffer(0, backdrop_buf.slice(..));
+                pass.draw(0..4, 0..1);
+            }
+
+            // The box overlay: panel + members, over the frosted backdrop.
+            // Same scissored grid draw as the base grids.
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            for (clip, rect_range, icon_range) in &grid_ranges[split..] {
+                let sx = ((clip.x.max(0.0) * scale) as u32).min(w);
+                let sy = ((clip.y.max(0.0) * scale) as u32).min(h);
+                let sw = ((clip.w * scale) as u32).min(w - sx);
+                let sh = (((clip.y + clip.h) * scale).min(h as f32) as u32).saturating_sub(sy);
+                if sw == 0 || sh == 0 {
+                    continue;
+                }
+                pass.set_scissor_rect(sx, sy, sw, sh);
+                if !rect_range.is_empty() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, rect_buf.slice(..));
+                    pass.draw(0..4, rect_range.clone());
+                }
+                if !icon_range.is_empty() {
+                    if let Some(icon_bind) = &self.icon_bind {
+                        pass.set_pipeline(&self.icon_pipeline);
+                        pass.set_bind_group(1, icon_bind, &[]);
+                        pass.set_vertex_buffer(0, icon_buf.slice(..));
+                        pass.draw(0..4, icon_range.clone());
+                    }
+                }
+            }
+            pass.set_scissor_rect(0, 0, w, h);
+
+            // Text renders unscissored: every TextArea carries its own clip
+            // bounds, so labels outside the grid still show.
             if !text_buffers.is_empty() {
                 self.text_renderer
                     .render(&self.text_atlas, &self.text_viewport, &mut pass)
                     .context("glyphon render failed")?;
             }
 
-            // Topmost: the drag ghost — above grids and labels alike.
-            // Glyphon replaced bind group 0 with its atlas; restore our
-            // globals before touching either pipeline again.
+            // Topmost: the drag ghost. Glyphon replaced bind group 0 with
+            // its atlas; restore our globals before touching our pipelines.
             if !overlay_range.is_empty() {
                 pass.set_bind_group(0, &self.globals_bind, &[]);
                 if let Some(icon_bind) = &self.icon_bind {
