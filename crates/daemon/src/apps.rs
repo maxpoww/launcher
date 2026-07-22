@@ -463,9 +463,17 @@ struct DiskCache {
 impl DiskCache {
     fn new() -> Self {
         // The cache stores finished tiles (plated + mipped), so its identity
-        // includes the size and the plate mode — a plate toggle or a format
-        // change lands in a fresh directory instead of serving stale tiles.
-        let variant = if icon_plate_enabled() { "plate" } else { "raw" };
+        // must track the plate appearance: the directory carries a hash of
+        // every plate parameter, so any tuning lands in a fresh directory
+        // instead of serving stale tiles (and `raw` when plating is off).
+        let variant = if icon_plate_enabled() {
+            let params = format!(
+                "{PLATE_CONTENT}|{PLATE_INSET}|{PLATE_RADIUS}|{PLATE_FILL_ALPHA}|{PLATE_EDGE_ALPHA}|{PLATE_EDGE_WIDTH}"
+            );
+            format!("plate-{:08x}", fnv1a64(&params))
+        } else {
+            "raw".to_owned()
+        };
         Self {
             dir: cache_base()
                 .join("waverunner")
@@ -793,11 +801,18 @@ fn icon_plate_enabled() -> bool {
 
 /// Icon content fills this fraction of the plate's larger dimension; the
 /// rest is the frosted margin that unifies differently-sized icons.
-const PLATE_CONTENT: f32 = 0.72;
-/// Plate margin inside the `ICON_SIZE` tile (at `ICON_SIZE = 256`).
-const PLATE_INSET: f32 = 8.0;
-/// Plate corner radius (~22% of the side, macOS-dock-ish).
+const PLATE_CONTENT: f32 = 0.80;
+/// Plate margin inside the `ICON_SIZE` tile (at `ICON_SIZE = 256`). Small,
+/// so the plate fills its slot like a group box does.
+const PLATE_INSET: f32 = 6.0;
+/// Plate corner radius (~22% of the side, matching the group-box tiles).
 const PLATE_RADIUS: f32 = 56.0;
+/// Frosted fill (white) and hairline-edge (white) opacities over the dark
+/// card, plus the edge width. Edge is thick at `ICON_SIZE` so it survives
+/// downscaling to the small dock size (~1px there).
+const PLATE_FILL_ALPHA: u8 = 64;
+const PLATE_EDGE_ALPHA: u8 = 96;
+const PLATE_EDGE_WIDTH: f32 = 5.0;
 
 /// Turn a raw `ICON_SIZE`² base tile into the uploaded mip chain, plating
 /// it first when `icon_plate` is on.
@@ -860,7 +875,7 @@ fn draw_plate(tile: &mut tiny_skia::Pixmap) {
         return;
     };
     let mut fill = tiny_skia::Paint::default();
-    fill.set_color_rgba8(255, 255, 255, 34);
+    fill.set_color_rgba8(255, 255, 255, PLATE_FILL_ALPHA);
     fill.anti_alias = true;
     tile.fill_path(
         &path,
@@ -870,13 +885,13 @@ fn draw_plate(tile: &mut tiny_skia::Pixmap) {
         None,
     );
     let mut edge = tiny_skia::Paint::default();
-    edge.set_color_rgba8(255, 255, 255, 40);
+    edge.set_color_rgba8(255, 255, 255, PLATE_EDGE_ALPHA);
     edge.anti_alias = true;
     tile.stroke_path(
         &path,
         &edge,
         &tiny_skia::Stroke {
-            width: 2.0,
+            width: PLATE_EDGE_WIDTH,
             ..Default::default()
         },
         tiny_skia::Transform::identity(),
