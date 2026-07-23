@@ -17,6 +17,11 @@
 
       # Runtime libs wgpu dlopens; must be on LD_LIBRARY_PATH at process start.
       runtimeLibs = pkgs: with pkgs; [ wayland vulkan-loader libxkbcommon ];
+
+      # External tools the daemon shells out to for Files-section thumbnails:
+      # ffmpegthumbnailer for videos, poppler's pdftoppm for PDFs. Missing
+      # ones just fall back to the file's type icon.
+      runtimeTools = pkgs: with pkgs; [ ffmpegthumbnailer poppler-utils ];
     in {
 
       # ── Nix packages ────────────────────────────────────────────────────────
@@ -35,9 +40,12 @@
           doCheck = false;
 
           # wgpu uses dlopen for Vulkan/Wayland; wrap so store paths are found.
+          # Also put the thumbnailer tools on PATH so previews work whatever
+          # the launching environment.
           postInstall = ''
             wrapProgram $out/bin/waverunner \
-              --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (runtimeLibs pkgs)}
+              --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (runtimeLibs pkgs)} \
+              --prefix PATH : ${pkgs.lib.makeBinPath (runtimeTools pkgs)}
           '';
         };
 
@@ -118,7 +126,7 @@
             rust-analyzer
             pkg-config
             home-manager.packages.${pkgs.stdenv.hostPlatform.system}.home-manager
-          ];
+          ] ++ (runtimeTools pkgs);
 
           buildInputs = with pkgs; [ wayland libxkbcommon vulkan-loader ];
 

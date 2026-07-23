@@ -217,6 +217,7 @@ fn main() -> anyhow::Result<()> {
         thumb_map: HashMap::new(),
         thumb_next: 0,
         thumb_pending: HashSet::new(),
+        audio_paths: HashSet::new(),
         nix,
         pkg_hits: Vec::new(),
         pkg_hits_query: None,
@@ -494,6 +495,9 @@ pub struct App {
     thumb_next: usize,
     /// Paths with a thumbnail job in flight (request deduplication).
     thumb_pending: HashSet<String>,
+    /// Files classified as video by extension but found to be audio-only
+    /// (no video stream): shown with the audio icon, never re-requested.
+    audio_paths: HashSet<String>,
     /// Handle to the nix threads (package index + profile mutations).
     nix: nix::Nix,
     /// Top-ranked packages for `pkg_hits_query`, delivered async by the
@@ -1141,14 +1145,11 @@ impl App {
         let ranked = self.search.matcher.rank(&self.search.query, &names);
         let mut visible: [Vec<usize>; content::N_SECTIONS] = Default::default();
         for idx in ranked {
-            match self.kinds.get(idx) {
-                Some(apps::EntryKind::App) => visible[content::SECTION_APPS].push(idx),
-                // While searching, the file index below covers folders
-                // too — don't list them twice.
-                Some(apps::EntryKind::File) if !searching => {
-                    visible[content::SECTION_FILES].push(idx)
-                }
-                _ => {}
+            // Apps rank into the grid. The Files section is a live directory
+            // listing (home root or a navigated folder), built below, not the
+            // ranked home-folder carriers — so File entries add nothing here.
+            if self.kinds.get(idx) == Some(&apps::EntryKind::App) {
+                visible[content::SECTION_APPS].push(idx);
             }
         }
         // The Install section fills with or without a query (live
@@ -1246,11 +1247,9 @@ impl App {
                 self.apps_slots = slots;
                 visible[content::SECTION_APPS] = arranged;
             }
-            if self.files_dir.is_some() {
-                // Navigated into a folder: list its contents instead of
-                // the top-level home strip.
-                visible[content::SECTION_FILES] = self.dir_listing();
-            }
+            // The Files section: a live listing of the navigated folder, or
+            // of `$HOME` itself at the root (everything but dotfiles).
+            visible[content::SECTION_FILES] = self.dir_listing();
         }
         // Pinned filesystem paths render on the dock through transient
         // entries; an open directory stack lists its contents the same way.

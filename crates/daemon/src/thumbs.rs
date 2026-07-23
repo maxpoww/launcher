@@ -22,11 +22,15 @@ use crate::files::file_asset_name;
 /// slots recycle round-robin once full.
 pub const THUMB_CAP: usize = 64;
 
-/// A finished thumbnail: the file it previews and its premultiplied
-/// RGBA8 `ICON_SIZE`² pixels.
-pub struct Event {
-    pub path: String,
-    pub pixels: Vec<u8>,
+/// A worker result for one requested file.
+pub enum Event {
+    /// A finished thumbnail: the file and its premultiplied RGBA8
+    /// `ICON_SIZE`² pixels (a full mip chain).
+    Thumb { path: String, pixels: Vec<u8> },
+    /// A file classified as video by extension turned out to have no video
+    /// stream (an audio-only `.mp4`/`.mov`/…): the daemon reclassifies it
+    /// to the audio icon instead of leaving a misleading video icon.
+    AudioOnly { path: String },
 }
 
 /// Handle to the thumbnailer thread.
@@ -57,11 +61,22 @@ pub fn spawn(results: Sender<Event>) -> Thumbs {
         .name("waverunner-thumbs".into())
         .spawn(move || {
             while let Ok(path) = rx.recv() {
-                let Some(pixels) = thumbnail(&path) else {
-                    debug!("no thumbnail for {path}");
-                    continue;
+                let event = match thumbnail(&path) {
+                    Some(pixels) => Event::Thumb { path, pixels },
+                    // A "video" that produced no thumbnail is almost always
+                    // audio-only (no video stream) — flag it so its icon
+                    // becomes the audio one. Real failures on other kinds
+                    // just keep their type icon.
+                    None if file_asset_name(&path) == "asset-video" => {
+                        debug!("no video stream, treating as audio: {path}");
+                        Event::AudioOnly { path }
+                    }
+                    None => {
+                        debug!("no thumbnail for {path}");
+                        continue;
+                    }
                 };
-                if results.send(Event { path, pixels }).is_err() {
+                if results.send(event).is_err() {
                     return; // event loop is gone
                 }
             }
@@ -78,7 +93,10 @@ fn thumbnail(path: &str) -> Option<Vec<u8>> {
     if let Some(px) = from_xdg_cache(path) {
         return Some(px);
     }
-    match file_asset_name(path) {
+    let size = ICON_SIZE.to_string();
+    let kind = file_asset_name(path);
+    debug!("thumb: {path} classified {kind}");
+    match kind {
         "asset-image" => decode_image(path),
         "asset-video" => via_tool(path, "ffmpegthumbnailer", |src, dst| {
             vec![
@@ -87,7 +105,7 @@ fn thumbnail(path: &str) -> Option<Vec<u8>> {
                 "-o".into(),
                 dst.into(),
                 "-s".into(),
-                "128".into(),
+                size.clone(),
             ]
         }),
         "asset-pdf" => via_tool(path, "pdftoppm", |src, dst| {
@@ -99,7 +117,7 @@ fn thumbnail(path: &str) -> Option<Vec<u8>> {
                 "1".into(),
                 "-singlefile".into(),
                 "-scale-to".into(),
-                "128".into(),
+                size.clone(),
                 src.into(),
                 stem,
             ]
@@ -154,26 +172,46 @@ fn decode_image(path: &str) -> Option<Vec<u8>> {
             out[at + 3] = a as u8;
         }
     }
-    Some(crate::apps::finish_tile(out))
+    // Thumbnails skip the frosted rounded plate `finish_tile` applies to
+    // app icons: a file preview keeps its true square corners (and full
+    // size/opacity), just mipped for clean minification.
+    Some(crate::apps::with_mips(out))
 }
 
 /// Generate through an external thumbnailer into a scratch png, then
-/// decode it. Quietly gives up when the tool isn't installed.
+/// decode it. Logs (rather than silently swallowing) each failure mode so
+/// a missing tool or a decode problem is diagnosable.
 fn via_tool(path: &str, tool: &str, args: impl Fn(&str, &str) -> Vec<String>) -> Option<Vec<u8>> {
     let scratch = cache_base().join("waverunner");
-    std::fs::create_dir_all(&scratch).ok()?;
-    let dst = scratch.join("scratch-thumb.png");
+    if let Err(e) = std::fs::create_dir_all(&scratch) {
+        warn!("thumb: scratch dir {}: {e}", scratch.display());
+        return None;
+    }
+    // Per-tool scratch name so a slow video job can't clobber a pdf's output.
+    let dst = scratch.join(format!("scratch-{tool}.png"));
     let dst_s = dst.to_str()?.to_owned();
     let status = std::process::Command::new(tool)
         .args(args(path, &dst_s))
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .ok()?;
+        .status();
+    let status = match status {
+        Ok(s) => s,
+        // The classic cause: the tool isn't on the daemon's PATH.
+        Err(e) => {
+            warn!("thumb: '{tool}' failed to run (installed / on PATH?): {e}");
+            return None;
+        }
+    };
     if !status.success() {
+        warn!("thumb: '{tool}' exited {status} for {path}");
         return None;
     }
     let px = decode_image(&dst_s);
+    if px.is_none() {
+        warn!("thumb: '{tool}' output for {path} did not decode");
+    }
     let _ = std::fs::remove_file(&dst);
     px
 }

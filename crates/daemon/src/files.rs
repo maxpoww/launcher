@@ -62,6 +62,9 @@ impl App {
     ) -> usize {
         let asset = if is_dir {
             "asset-folder"
+        } else if self.audio_paths.contains(id) {
+            // A prior thumbnail attempt found this "video" is audio-only.
+            "asset-audio"
         } else {
             file_asset_name(name)
         };
@@ -69,7 +72,8 @@ impl App {
         let (mut layer, mut placeholder) = self.asset(asset).unwrap_or((0, true));
         // A finished thumbnail overrides the type icon; a thumbable file
         // without one queues a job (the worker answers via `on_thumb`).
-        if !is_dir {
+        // Known audio-only files skip it (they keep the audio icon).
+        if !is_dir && !self.audio_paths.contains(id) {
             if let Some(&(slot, _)) = self.thumb_map.get(id) {
                 layer = self.thumb_layer_base() + slot as u32;
                 placeholder = false;
@@ -110,11 +114,17 @@ impl App {
     /// each page's first slot, so it stays put while paging: browsing
     /// exits through it), then folders, then files, each alphabetical.
     pub(crate) fn dir_listing(&mut self) -> Vec<usize> {
-        let Some(dir) = self.files_dir.clone() else {
-            return Vec::new();
-        };
-        let up = self.push_transient_file(FILES_UP_ID, "..", "true".to_owned(), true);
-        let mut out = vec![up];
+        // Not navigated ⇒ the home root: list `$HOME` itself (everything but
+        // dotfiles), with no ".." lead cell (can't go above home).
+        let navigated = self.files_dir.is_some();
+        let dir = self
+            .files_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()));
+        let mut out = Vec::new();
+        if navigated {
+            out.push(self.push_transient_file(FILES_UP_ID, "..", "true".to_owned(), true));
+        }
         let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -145,12 +155,39 @@ impl App {
         self.pkg_layer_base + (crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP) as u32
     }
 
+    /// A worker result: a finished thumbnail, or an audio-only file to
+    /// reclassify.
+    pub(crate) fn on_thumb(&mut self, ev: crate::thumbs::Event) {
+        match ev {
+            crate::thumbs::Event::Thumb { path, pixels } => self.on_thumb_pixels(path, pixels),
+            crate::thumbs::Event::AudioOnly { path } => self.on_audio_only(path),
+        }
+    }
+
+    /// A file that classified as video but has no video stream: remember it
+    /// as audio and repoint its entries to the audio icon (future listings
+    /// classify it straight to audio via `audio_paths`).
+    fn on_audio_only(&mut self, path: String) {
+        self.thumb_pending.remove(&path);
+        let Some((layer, _)) = self.asset("asset-audio") else {
+            return;
+        };
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.id == path {
+                self.icon_layers[i] = layer;
+                self.placeholders[i] = false;
+            }
+        }
+        self.audio_paths.insert(path);
+        self.schedule_frame();
+    }
+
     /// A finished thumbnail: park it in a reserved slot (round-robin,
     /// recycling the oldest), upload it, and repoint every entry for
     /// that path at it.
-    pub(crate) fn on_thumb(&mut self, ev: crate::thumbs::Event) {
-        self.thumb_pending.remove(&ev.path);
-        let slot = match self.thumb_map.get(&ev.path) {
+    fn on_thumb_pixels(&mut self, path: String, pixels: Vec<u8>) {
+        self.thumb_pending.remove(&path);
+        let slot = match self.thumb_map.get(&path) {
             Some(&(slot, _)) => slot,
             None => {
                 let slot = self.thumb_next % crate::thumbs::THUMB_CAP;
@@ -163,15 +200,15 @@ impl App {
         };
         let layer = self.thumb_layer_base() + slot as u32;
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.update_icon_layer(layer, &ev.pixels);
+            renderer.update_icon_layer(layer, &pixels);
         }
         for (i, e) in self.entries.iter().enumerate() {
-            if e.id == ev.path {
+            if e.id == path {
                 self.icon_layers[i] = layer;
                 self.placeholders[i] = false;
             }
         }
-        self.thumb_map.insert(ev.path, (slot, ev.pixels));
+        self.thumb_map.insert(path, (slot, pixels));
         self.schedule_frame();
     }
 
