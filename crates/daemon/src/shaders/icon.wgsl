@@ -10,7 +10,9 @@ struct Globals {
     time: f32,
     cursor: vec2<f32>,
     squircle: f32,       // icon corner superellipse exponent; <= 0 = off
-    _pad: f32,
+    thumb_base: f32,     // first texture layer of the thumbnail block; icons
+                         // at/above it skip the squircle (file thumbnails
+                         // keep their true square corners)
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -51,7 +53,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // ~1px anti-aliased edge that stays crisp at every icon size.
     var mask = 1.0;
     let n = globals.squircle;
-    if (n > 0.0) {
+    // Thumbnails (file previews) keep their real square corners — the
+    // squircle mask applies only to app/asset icons below `thumb_base`.
+    let is_thumb = f32(in.layer) >= globals.thumb_base;
+    if (n > 0.0 && !is_thumb) {
         let p = in.uv * 2.0 - vec2<f32>(1.0);
         let e = pow(abs(p.x), n) + pow(abs(p.y), n);
         let w = max(fwidth(e), 1e-5);

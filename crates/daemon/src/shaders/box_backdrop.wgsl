@@ -4,8 +4,12 @@
 // grid icons behind it. The box panel (a translucent glass rect) is drawn
 // over this, then the members.
 //
-// The blurred texture holds premultiplied RGBA; we un-premultiply to an
-// opaque colour so the box fully replaces the sharp base underneath it.
+// The blurred texture holds premultiplied RGBA and we keep it that way, so
+// the box preserves the base's *translucency*: transparent areas (e.g. a
+// dock stack floating over the wallpaper) stay transparent and let the
+// compositor's blur show through — never forced opaque/black. It replaces
+// (rather than composites over) the sharp base via a preceding erase pass
+// (`fs_erase`), so the two together are `mix(base, blurred, coverage)`.
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var scene_samp: sampler;
@@ -41,25 +45,34 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     return out;
 }
 
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Rounded-rect SDF coverage (matches rounded_rect.wgsl).
+// Rounded-rect SDF coverage (matches rounded_rect.wgsl).
+fn box_coverage(in: VsOut) -> f32 {
     let center = (in.rect_min + in.rect_max) * 0.5;
     let half   = (in.rect_max - in.rect_min) * 0.5;
     let p      = in.px - center;
     let r      = min(in.radius, min(half.x, half.y));
     let q      = abs(p) - half + vec2<f32>(r);
     let d      = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
-    let coverage = clamp(0.5 - d, 0.0, 1.0);
+    return clamp(0.5 - d, 0.0, 1.0);
+}
+
+// Erase pass: with blend (Zero, OneMinusSrcAlpha) this multiplies the
+// destination by (1 - coverage), clearing the box region (AA at the edge)
+// so the fill can replace it rather than stack on it.
+@fragment
+fn fs_erase(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, box_coverage(in));
+}
+
+// Fill pass: composite the blurred (premultiplied) scene over the erased
+// region. Alpha is preserved, so the box is as translucent as the base was.
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let coverage = box_coverage(in);
     if (coverage <= 0.0) {
         discard;
     }
-
-    // Sample the pre-blurred scene at this pixel (uv is resolution-agnostic).
     let uv = in.px / in.screen;
-    let blurred  = textureSampleLevel(scene, scene_samp, uv, 0.0); // premultiplied
-    let straight = blurred.rgb / max(blurred.a, 1e-4);
-    // Opaque inside (alpha = coverage), so it replaces the sharp base; the
-    // translucent box panel drawn on top re-tints it. Premultiplied output.
-    return vec4<f32>(straight * coverage, coverage);
+    let blurred = textureSampleLevel(scene, scene_samp, uv, 0.0); // premultiplied
+    return blurred * coverage;
 }

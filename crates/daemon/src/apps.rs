@@ -413,7 +413,12 @@ impl IconLoader {
 
     /// The entry's icon as `(pixels, is_placeholder)`.
     pub(crate) fn icon_for(&mut self, entry: &AppEntry) -> (Vec<u8>, bool) {
+        // `asset-*` carriers are keyed by their id (not the resolved path):
+        // they render unplated while an app using the same themed icon stays
+        // plated, so the two must not share a cache slot.
+        let is_asset = entry.id.starts_with("asset-");
         let (key, path) = match self.resolve(entry) {
+            Some(path) if is_asset => (entry.id.clone(), Some(path)),
             Some(path) => (path.clone(), Some(path)),
             None => (format!("placeholder:{}", entry.name), None),
         };
@@ -421,8 +426,14 @@ impl IconLoader {
             return (pixels.clone(), *is_placeholder);
         }
         // Placeholder tiles are cheap to regenerate and never touch disk;
-        // real icons go through the persistent cache.
-        let cache_file = path.as_deref().and_then(|p| self.disk.file_for(p));
+        // real icons go through the persistent cache — except the unplated
+        // asset carriers, which skip it (cheap, and so a stale plated tile
+        // from before this behaviour is never served).
+        let cache_file = if is_asset {
+            None
+        } else {
+            path.as_deref().and_then(|p| self.disk.file_for(p))
+        };
         let (pixels, is_placeholder) = match cache_file.as_deref().and_then(DiskCache::load) {
             Some(pixels) => (pixels, false),
             None => match path.and_then(|p| rasterize_icon_file(&p, &entry.id)) {
@@ -769,7 +780,10 @@ fn cache_base() -> PathBuf {
 }
 
 /// Read and rasterize one icon file into a ready-to-upload tile: a full
-/// [`ICON_CHAIN_BYTES`] mip chain, plated when `icon_plate` is on.
+/// [`ICON_CHAIN_BYTES`] mip chain, plated when `icon_plate` is on — except
+/// the `asset-*` file-type carrier icons, which stay unplated so the Files
+/// section (and pinned filesystem items) shows square icons like its
+/// thumbnails, never a rounded frosted plate.
 pub(crate) fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
     let path = std::path::Path::new(path);
     let data = std::fs::read(path).ok()?;
@@ -781,7 +795,12 @@ pub(crate) fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
             return None;
         }
     };
-    Some(finish_tile(pixmap.take()))
+    let tile = pixmap.take();
+    Some(if id.starts_with("asset-") {
+        with_mips(tile)
+    } else {
+        finish_tile(tile)
+    })
 }
 
 /// Whether to composite icons onto a frosted plate; set once at startup

@@ -774,6 +774,7 @@ impl App {
                     || self.dir_stack.as_ref().is_some_and(|ds| !ds.in_grid),
             },
         );
+        let thumb_base = self.thumb_layer_base();
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -782,6 +783,7 @@ impl App {
             self.config.theme.text_rgba(),
             self.pointer_pos,
             self.config.theme.icon_squircle,
+            thumb_base,
         ) {
             error!("render failed: {e:#}");
         }

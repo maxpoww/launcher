@@ -33,7 +33,7 @@ struct Globals {
     time:       f32,
     cursor:     [f32; 2],  // pointer in surface pixels; [-9999,-9999] = absent
     squircle:   f32,       // icon corner superellipse exponent (icon.wgsl only; 0 = off)
-    _pad:       f32,
+    thumb_base: f32,       // first thumbnail texture layer (icon.wgsl; ≥ it skips squircle)
     // Up to 4 simultaneous ripples: (x, y, age, 0); x < -9000 = inactive.
     ripples:    [[f32; 4]; 4],
     // Up to 2 box-open/close waves: (cx, cy, age, 0); cx < -9000 = inactive.
@@ -114,6 +114,9 @@ pub struct Renderer {
     /// Frosted-glass backdrop for the open box: samples the blurred scene
     /// over the box region (shares `blit_layout`).
     box_backdrop_pipeline: wgpu::RenderPipeline,
+    /// Clears the box region to transparent (× (1−coverage)) before the
+    /// backdrop fill, so the frost replaces the base instead of stacking.
+    box_erase_pipeline: wgpu::RenderPipeline,
     /// Separable-Gaussian blur ping-pong: scene → `blur_a` (horizontal) →
     /// `blur_b` (vertical); the box backdrop samples `blur_b`. Rebuilt on
     /// resize.
@@ -603,6 +606,56 @@ impl Renderer {
                 cache: None,
             });
 
+        // Box erase: multiplies the box region by (1 - coverage) so the
+        // backdrop fill replaces the sharp base rather than stacking on it.
+        let erase_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let erase_target = [Some(wgpu::ColorTargetState {
+            format: config.format,
+            blend: Some(erase_blend),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let box_erase_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.box-erase"),
+            layout: Some(&backdrop_pl),
+            vertex: wgpu::VertexState {
+                module: &backdrop_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &backdrop_shader,
+                entry_point: Some("fs_erase"),
+                compilation_options: Default::default(),
+                targets: &erase_target,
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // Separable-Gaussian blur ping-pong targets (frost the box backdrop).
         let (blur_a_tex, blur_a_view, blur_a_bind) =
             make_scene_target(&device, config.format, width, height, &blit_layout, &blit_sampler);
@@ -674,6 +727,7 @@ impl Renderer {
             blit_sampler,
             blit_bind,
             box_backdrop_pipeline,
+            box_erase_pipeline,
             blur_a_tex,
             blur_a_view,
             blur_a_bind,
@@ -847,7 +901,7 @@ impl Renderer {
     /// `cursor` is the pointer position in surface pixels, used for the
     /// glass cursor-spotlight effect; `None` when the pointer is outside
     /// the surface.
-    pub fn render(&mut self, scene: &Scene, text_color: [f32; 4], cursor: Option<(f32, f32)>, squircle: f32) -> anyhow::Result<()> {
+    pub fn render(&mut self, scene: &Scene, text_color: [f32; 4], cursor: Option<(f32, f32)>, squircle: f32, thumb_base: u32) -> anyhow::Result<()> {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -904,7 +958,7 @@ impl Renderer {
                 time:      self.anim_time,
                 cursor:    cursor_px,
                 squircle,
-                _pad:      0.0,
+                thumb_base: thumb_base as f32,
                 ripples,
                 box_waves,
             }),
@@ -1259,12 +1313,15 @@ impl Renderer {
             pass.set_bind_group(0, &self.blit_bind, &[]);
             pass.draw(0..3, 0..1);
 
-            // Frosted backdrop: replace the box region with the blurred
-            // (blur_b) scene, un-premultiplied to opaque.
+            // Frosted backdrop: erase the box region, then fill it with the
+            // blurred (blur_b) scene — together a mix(base, blurred), so the
+            // box keeps the base's translucency instead of going opaque.
             if let Some(backdrop_buf) = &backdrop_buf {
-                pass.set_pipeline(&self.box_backdrop_pipeline);
-                pass.set_bind_group(0, &self.blur_b_bind, &[]);
                 pass.set_vertex_buffer(0, backdrop_buf.slice(..));
+                pass.set_bind_group(0, &self.blur_b_bind, &[]);
+                pass.set_pipeline(&self.box_erase_pipeline);
+                pass.draw(0..4, 0..1);
+                pass.set_pipeline(&self.box_backdrop_pipeline);
                 pass.draw(0..4, 0..1);
             }
 
