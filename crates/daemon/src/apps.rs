@@ -97,6 +97,12 @@ pub struct LoadedApps {
     pub icons: Vec<Vec<u8>>,
     /// `true` for entries whose icon could not be resolved (placeholder tile).
     pub placeholders: Vec<bool>,
+    /// Ids of the synthetic CLI-tool tiles ([`managed_cli_tiles`]) among the
+    /// entries — the fabricated stand-ins for installed packages that ship no
+    /// `.desktop`. The daemon excludes these when resolving a pending install
+    /// to its real app, so a wrapped GUI package (`chromium` →
+    /// `chromium-browser`) never latches onto its own `chromium` placeholder.
+    pub cli_ids: Vec<String>,
     /// Home-tree file index for search (fresh every rescan).
     pub files: Vec<FileEntry>,
 }
@@ -182,6 +188,7 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 // app. Rebuilt on every rescan, so it tracks install/
                 // uninstall.
                 let cli = managed_cli_tiles(&entries);
+                let cli_ids: Vec<String> = cli.iter().map(|e| e.id.clone()).collect();
                 kinds.extend(std::iter::repeat_n(EntryKind::App, cli.len()));
                 entries.extend(cli);
                 let folders = home_folders();
@@ -209,6 +216,7 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                         kinds,
                         icons,
                         placeholders,
+                        cli_ids,
                         files,
                     })
                     .is_err()
@@ -223,6 +231,74 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
     let indexer = Indexer { requests };
     indexer.request_rescan();
     indexer
+}
+
+/// The XDG application directories (`$XDG_DATA_HOME/applications` and each
+/// `$XDG_DATA_DIRS/applications`) — where `.desktop` launchers live and the
+/// desktop index scans.
+fn application_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let data_home =
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+        dirs.push(std::path::PathBuf::from(format!("{data_home}/applications")));
+    }
+    let data_dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+    for base in data_dirs.split(':').filter(|s| !s.is_empty()) {
+        dirs.push(std::path::PathBuf::from(format!("{base}/applications")));
+    }
+    dirs
+}
+
+/// Start watching the application directories for `.desktop` changes and
+/// return the inotify descriptor (non-blocking, level-triggered readable on
+/// any change). Register it as a calloop source and drain it with
+/// [`drain_inotify`]. Returns `None` if inotify is unavailable or no
+/// application directory could be watched — live reload then simply stays off.
+pub fn watch_application_dirs() -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: inotify_init1 returns a fresh fd (or -1); nothing else owns it.
+    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    if fd < 0 {
+        warn!("inotify_init1 failed; live launcher reload disabled");
+        return None;
+    }
+    // SAFETY: `fd` is a valid, freshly created descriptor we now take ownership of.
+    let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    let mask = libc::IN_CREATE
+        | libc::IN_DELETE
+        | libc::IN_MOVED_TO
+        | libc::IN_MOVED_FROM
+        | libc::IN_CLOSE_WRITE;
+    let mut watched = 0u32;
+    for dir in application_dirs() {
+        let Ok(cpath) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+            continue;
+        };
+        // SAFETY: `fd` is our inotify descriptor; `cpath` is a valid NUL-terminated path.
+        let wd = unsafe { libc::inotify_add_watch(fd, cpath.as_ptr(), mask) };
+        if wd >= 0 {
+            watched += 1;
+        }
+    }
+    if watched == 0 {
+        return None;
+    }
+    Some(owned)
+}
+
+/// Drain all pending events from an inotify descriptor created by
+/// [`watch_application_dirs`]. The event contents are irrelevant — any event
+/// means the application directories changed — so we only clear the queue so
+/// the level-triggered source goes quiet until the next change.
+pub fn drain_inotify(fd: std::os::fd::BorrowedFd<'_>) {
+    use std::os::fd::AsRawFd;
+    let raw = fd.as_raw_fd();
+    let mut buf = [0u8; 8192];
+    // SAFETY: reading into a stack buffer we own; `raw` is a valid fd.
+    while unsafe { libc::read(raw, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) } > 0 {}
 }
 
 /// Every visible top-level folder in the home directory, alphabetical,
@@ -307,8 +383,17 @@ fn managed_cli_tiles(apps: &[AppEntry]) -> Vec<AppEntry> {
     let app_ids: HashSet<&str> = apps.iter().map(|e| e.id.as_str()).collect();
     crate::managed::snapshot()
         .into_iter()
-        .filter(|(_, desktop_ids)| !desktop_ids.iter().any(|d| app_ids.contains(d.as_str())))
-        .map(|(attr, _)| AppEntry {
+        // A known GUI app (`gui == Some(true)`) never gets a synthetic
+        // terminal tile — not even in the window right after install,
+        // before its `.desktop` reaches the scan. That fabrication used to
+        // be pinned in place of the real app (a green box that opened a
+        // shell) and never healed until a relogin. CLI tools
+        // (`Some(false)`) and legacy entries (`None`) still get a tile when
+        // no scanned `.desktop` already covers them.
+        .filter(|(_, desktop_ids, gui)| {
+            *gui != Some(true) && !desktop_ids.iter().any(|d| app_ids.contains(d.as_str()))
+        })
+        .map(|(attr, _, _)| AppEntry {
             id: attr.clone(),
             name: attr.clone(),
             description: Some("Command-line tool".to_owned()),

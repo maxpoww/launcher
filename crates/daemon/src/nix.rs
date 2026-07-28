@@ -79,9 +79,23 @@ pub enum Event {
         icons: Vec<Vec<u8>>,
         placeholders: Vec<bool>,
     },
-    /// A `nix profile install` or `remove` finished. `id` echoes the
-    /// request's cell id (package attr on install, app id on uninstall).
-    Done { id: String, ok: bool },
+    /// A declarative install or uninstall finished — the package list was
+    /// edited and the privileged apply helper ran `nixos-rebuild switch` to
+    /// completion (see [`crate::applier`]). `id` echoes the request's cell
+    /// id (package attr on install, app id on uninstall). `desktop_ids` is
+    /// `Some(stems)` after a successful install — the `.desktop` entry stems
+    /// the installed package actually ships, read straight from its store
+    /// path (an empty vec = a CLI-only tool with no GUI launcher). It is
+    /// `None` for a removal, a failed install, or when the store path could
+    /// not be resolved. The daemon records it so a just-installed GUI app is
+    /// never stood in for by a synthetic terminal tile while its `.desktop`
+    /// is still propagating into the scan (which used to pin a green-box
+    /// "CLI" in the real app's place).
+    Done {
+        id: String,
+        ok: bool,
+        desktop_ids: Option<Vec<String>>,
+    },
     /// A `nix build` for an ephemeral "try it" run finished. `terminal`
     /// is read from the built package (a `.desktop` with `Terminal=true`,
     /// or no `.desktop` at all → a CLI tool) so the daemon runs it in a
@@ -95,10 +109,6 @@ pub enum Event {
         program: Option<String>,
         version: Option<String>,
     },
-    /// All attribute paths currently installed in the user's nix profile.
-    /// Sent in response to `Request::CheckInstalled`; used on startup to
-    /// detect managed packages that survived a daemon kill mid-install.
-    InstalledAttrs(std::collections::HashSet<String>),
 }
 
 /// Daemon → thread requests.
@@ -106,15 +116,16 @@ pub enum Request {
     /// Fuzzy-rank the index against a query; answered with `Ranked`.
     /// Queued queries coalesce to the newest one.
     Rank { query: String },
-    /// Install a package into the user's nix profile (`nix profile
-    /// install nixpkgs#attr`). `id` echoes to `Done { id, .. }` —
-    /// the grid cell whose busy / failed state the install resolves.
-    /// On the install path `id` == `attr`.
+    /// Install a package declaratively: add `attr` to the package list and
+    /// wait for the privileged helper's `nixos-rebuild switch` to finish
+    /// (see [`crate::applier`]). `id` echoes to `Done { id, .. }` — the
+    /// grid cell whose busy / failed state the install resolves. On the
+    /// install path `id` == `attr`.
     Install { id: String, attr: String },
-    /// Remove a package from the user's nix profile (`nix profile
-    /// remove`). `id` echoes to `Done { id, .. }` — the app cell
-    /// whose busy / failed state the removal resolves (on the uninstall
-    /// path `id` is the desktop id, not the attr).
+    /// Uninstall a package declaratively: remove `attr` from the package
+    /// list and wait for the rebuild. `id` echoes to `Done { id, .. }` —
+    /// the app cell whose busy / failed state the removal resolves (on the
+    /// uninstall path `id` is the desktop id, not the attr).
     Remove { id: String, attr: String },
     /// Realize (`nix build`) a package so it can be run ephemerally
     /// ("try it" — drag a package out of the box). Answered with
@@ -122,11 +133,6 @@ pub enum Request {
     /// build lands. This is the slow, cacheable part — the "Launching…"
     /// note covers it.
     Realize { attr: String },
-    /// List all attrs currently installed in the user's nix profile.
-    /// Answered with `Event::InstalledAttrs`. Used on startup to detect
-    /// managed packages that did not complete installation before the
-    /// daemon was last killed.
-    CheckInstalled,
 }
 
 /// How many top-ranked packages a `Ranked` reply carries. The renderer
@@ -184,15 +190,21 @@ fn recommended_hits(pkgs: &[PkgEntry]) -> Vec<PkgEntry> {
 pub struct Nix {
     ranks: mpsc::Sender<String>,
     mutations: mpsc::Sender<Request>,
+    realizes: mpsc::Sender<String>,
 }
 
 impl Nix {
     /// Queue a request. Dead threads make this a no-op (their reply
-    /// channel is gone with them, so no state is left dangling).
+    /// channel is gone with them, so no state is left dangling). Ranking,
+    /// profile mutations (install/uninstall), and "try it" builds each go
+    /// to their own worker so none can stall behind another.
     pub fn request(&self, request: Request) {
         match request {
             Request::Rank { query } => {
                 let _ = self.ranks.send(query);
+            }
+            Request::Realize { attr } => {
+                let _ = self.realizes.send(attr);
             }
             other => {
                 let _ = self.mutations.send(other);
@@ -201,14 +213,19 @@ impl Nix {
     }
 }
 
-/// Spawn the nix threads. The index thread loads/refreshes the package
-/// index and serves rank queries (they coalesce to the newest, so slow
-/// ranking never queues up behind typing); it also rasterizes the hit
-/// icons via `icon_theme`. Profile mutations run on their own worker:
-/// a minutes-long install must not block search.
+/// Spawn the nix threads. Three workers, so none stalls behind another:
+/// the **index** thread loads/refreshes the package index and serves rank
+/// queries (coalesced to the newest, so slow ranking never queues behind
+/// typing) plus hit-icon rasterization; the **mutation** thread runs
+/// install/uninstall one at a time (a `nixos-rebuild switch` must not race
+/// another); the **try-it** thread runs the ephemeral `nix build`s. Try-it
+/// gets its own worker because a build can take minutes and must not hold
+/// up an install queued behind it — a read-only realize runs fine
+/// alongside a rebuild, as the nix daemon serializes store access itself.
 pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
     let (ranks, ranks_rx) = mpsc::channel::<String>();
     let (mutations, mutations_rx) = mpsc::channel::<Request>();
+    let (realizes, realizes_rx) = mpsc::channel::<String>();
 
     let rank_events = events.clone();
     let spawned = std::thread::Builder::new()
@@ -218,38 +235,40 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
         warn!("failed to spawn nix index thread: {e}");
     }
 
+    let mut_events = events.clone();
     let spawned = std::thread::Builder::new()
         .name("waverunner-nix-mut".into())
         .spawn(move || {
             while let Ok(request) = mutations_rx.recv() {
-                // Both run one at a time on this worker: a switch never
-                // races the generation it applies, and a realize can't
-                // stampede the profile.
+                // One install/uninstall at a time: a switch never races the
+                // generation it applies.
                 let event = match request {
                     Request::Install { id, attr } => {
-                        let ok = nix_profile_install(&attr);
-                        Event::Done { id, ok }
-                    }
-                    Request::Remove { id, attr } => {
-                        let ok = nix_profile_remove(&attr);
-                        Event::Done { id, ok }
-                    }
-                    Request::Realize { attr } => {
-                        let r = realize(&attr);
-                        Event::Realized {
-                            attr,
-                            ok: r.ok,
-                            terminal: r.terminal,
-                            program: r.program,
-                            version: r.version,
+                        // Declarative: add the attr to the package list and
+                        // block until the privileged helper's rebuild lands.
+                        // The rebuild completes before this returns, so the
+                        // package's real `.desktop` is already in the scan;
+                        // `resolve_pending_installs` reads GUI-ness from that
+                        // (authoritative) instead of a second `nix build`.
+                        let ok = crate::applier::apply_install(&attr);
+                        Event::Done {
+                            id,
+                            ok,
+                            desktop_ids: None,
                         }
                     }
-                    Request::CheckInstalled => {
-                        Event::InstalledAttrs(installed_attrs_from_profile())
+                    Request::Remove { id, attr } => {
+                        let ok = crate::applier::apply_uninstall(&attr);
+                        Event::Done {
+                            id,
+                            ok,
+                            desktop_ids: None,
+                        }
                     }
-                    Request::Rank { .. } => continue, // routed elsewhere
+                    // Routed to their own threads.
+                    Request::Rank { .. } | Request::Realize { .. } => continue,
                 };
-                if events.send(event).is_err() {
+                if mut_events.send(event).is_err() {
                     return;
                 }
             }
@@ -258,7 +277,32 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
         warn!("failed to spawn nix mutation thread: {e}");
     }
 
-    Nix { ranks, mutations }
+    let spawned = std::thread::Builder::new()
+        .name("waverunner-nix-try".into())
+        .spawn(move || {
+            while let Ok(attr) = realizes_rx.recv() {
+                let r = realize(&attr);
+                let event = Event::Realized {
+                    attr,
+                    ok: r.ok,
+                    terminal: r.terminal,
+                    program: r.program,
+                    version: r.version,
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("failed to spawn nix try-it thread: {e}");
+    }
+
+    Nix {
+        ranks,
+        mutations,
+        realizes,
+    }
 }
 
 /// Body of the index thread: cache load, background refresh, then rank
@@ -705,176 +749,6 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
         base = stripped;
     }
     candidates
-}
-
-/// `nix profile install nixpkgs#attr` — add a package to the user's nix
-/// profile. True on success. Unfree packages require the env var.
-fn nix_profile_install(attr: &str) -> bool {
-    info!("nix profile install nixpkgs#{attr}");
-    match Command::new("nix")
-        .args(["profile", "install", "--impure", &format!("nixpkgs#{attr}")])
-        .env("NIXPKGS_ALLOW_UNFREE", "1")
-        .output()
-    {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            warn!(
-                "nix profile install of {attr} failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            false
-        }
-        Err(e) => {
-            warn!("cannot run nix: {e}");
-            false
-        }
-    }
-}
-
-/// All attribute paths currently installed in the user's nix profile.
-/// Returns an empty set if `nix profile list` fails (network down, nix
-/// not on PATH, etc.) — callers treat an empty set conservatively.
-fn installed_attrs_from_profile() -> std::collections::HashSet<String> {
-    let out = match Command::new("nix")
-        .args(["profile", "list", "--json"])
-        .output()
-    {
-        Ok(out) if out.status.success() => out.stdout,
-        Ok(out) => {
-            warn!(
-                "nix profile list failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            return Default::default();
-        }
-        Err(e) => {
-            warn!("cannot run nix: {e}");
-            return Default::default();
-        }
-    };
-    let mut set = std::collections::HashSet::new();
-    let v: serde_json::Value = match serde_json::from_slice(&out) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("cannot parse nix profile list output: {e}");
-            return set;
-        }
-    };
-    let push_attr = |e: &serde_json::Value, set: &mut std::collections::HashSet<String>| {
-        if let Some(path) = e["attrPath"].as_str().or_else(|| e["attrpath"].as_str()) {
-            // Store the full path and the bare attr (last component).
-            set.insert(path.to_owned());
-            if let Some(bare) = path.rsplit('.').next() {
-                set.insert(bare.to_owned());
-            }
-        }
-    };
-    if let Some(arr) = v.as_array() {
-        for e in arr {
-            push_attr(e, &mut set);
-        }
-    } else if let Some(map) = v["elements"].as_object() {
-        for (_, e) in map {
-            push_attr(e, &mut set);
-        }
-    } else if let Some(arr) = v["elements"].as_array() {
-        for e in arr {
-            push_attr(e, &mut set);
-        }
-    }
-    set
-}
-
-/// `nix profile remove` — drop a package from the user's nix profile by
-/// locating its element via `nix profile list --json` (handles both the
-/// legacy array format and the current map format). True on success.
-fn nix_profile_remove(attr: &str) -> bool {
-    info!("nix profile remove for attr {attr}");
-    let list_out = match Command::new("nix")
-        .args(["profile", "list", "--json"])
-        .output()
-    {
-        Ok(out) if out.status.success() => out,
-        Ok(out) => {
-            warn!(
-                "nix profile list failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            return false;
-        }
-        Err(e) => {
-            warn!("cannot run nix: {e}");
-            return false;
-        }
-    };
-    let suffix = format!(".{attr}");
-    let matches = |path: &str| path == attr || path.ends_with(&suffix);
-    let Some(key) = profile_element_key(&list_out.stdout, matches) else {
-        // Not in the profile — already absent, so the desired state is met.
-        info!("attr {attr} not found in nix profile; treating as already removed");
-        return true;
-    };
-    info!("nix profile remove element {key} (attr {attr})");
-    match Command::new("nix")
-        .args(["profile", "remove", &key])
-        .output()
-    {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            warn!(
-                "nix profile remove failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            false
-        }
-        Err(e) => {
-            warn!("cannot run nix: {e}");
-            false
-        }
-    }
-}
-
-/// Parse the profile element key (index string) from `nix profile list
-/// --json` output. The attrPath of the installed element ends with
-/// `.{attr}` for top-level packages (`legacyPackages.x86_64-linux.vlc`).
-/// Handles both the legacy `{"elements": [...]}` array form and the
-/// current `{"elements": {"0": {...}}}` map form as well as the array-
-/// at-toplevel form used by the newest nix builds.
-fn profile_element_key(json: &[u8], matches: impl Fn(&str) -> bool) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
-
-    let attr_matches = |e: &serde_json::Value| {
-        // Nix uses "attrPath" (older) and "attrpath" (newer, snake-case).
-        e["attrPath"]
-            .as_str()
-            .or_else(|| e["attrpath"].as_str())
-            .is_some_and(&matches)
-    };
-
-    // Newest nix (2.24+): top-level array with an "index" field.
-    if let Some(arr) = v.as_array() {
-        return arr
-            .iter()
-            .find(|e| attr_matches(e))
-            .and_then(|e| e["index"].as_u64())
-            .map(|i| i.to_string());
-    }
-    // Older nix: {"elements": {"0": {...}, "1": {...}, ...}} (string-keyed map).
-    if let Some(map) = v["elements"].as_object() {
-        return map
-            .iter()
-            .find(|(_, e)| attr_matches(e))
-            .map(|(k, _)| k.clone());
-    }
-    // Oldest nix: {"elements": [...]} (array, index = position).
-    if let Some(arr) = v["elements"].as_array() {
-        return arr
-            .iter()
-            .enumerate()
-            .find(|(_, e)| attr_matches(e))
-            .map(|(i, _)| i.to_string());
-    }
-    None
 }
 
 /// What a `realize` produced: whether the build succeeded, whether the

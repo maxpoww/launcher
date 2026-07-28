@@ -146,27 +146,44 @@ impl App {
                 self.update_hover();
                 self.schedule_frame();
             }
-            nix::Event::Done { id, ok } => {
-                debug!("nix profile op for {id}: ok={ok}");
+            nix::Event::Done {
+                id,
+                ok,
+                desktop_ids,
+            } => {
+                debug!("declarative op for {id}: ok={ok}");
                 self.busy_ids.remove(&id);
-                // `managed.contains` is true for installs (staged before the
-                // request) and false for uninstalls (removed before the request).
-                let is_install = self.managed.contains(&id);
-                if ok {
-                    if is_install {
-                        // Install succeeded: write packages.nix now that the
-                        // package is actually in the profile.
-                        self.managed.confirm();
+                let _ = &desktop_ids; // reserved for a future authoritative gui probe
+                if let Some(attr) = self.uninstalling.remove(&id) {
+                    // An uninstall finished. Only now — on success — drop the
+                    // cache entry and dock pin; on failure the package is
+                    // still installed and still tracked (apply_uninstall
+                    // re-added the list line), so leave both in place.
+                    if ok {
+                        self.managed.remove(&attr);
+                        self.pins.unpin(&id);
+                        self.recompute_removable();
+                        self.indexer.request_rescan_fresh();
+                    } else {
+                        self.flash_failed(id);
+                    }
+                } else if ok {
+                    // Install succeeded: mark THIS attr confirmed and persist.
+                    // Only confirmed packages reach managed.json, so other
+                    // stages still queued behind it (a batch of simultaneous
+                    // drags) don't leak in and get a phantom terminal tile
+                    // before their own rebuild lands.
+                    if self.managed.contains(&id) {
+                        self.managed.confirm(&id);
                         self.recompute_removable();
                     }
-                    // Profile changed: rescan so the grid gains / loses the
-                    // entry.  Fresh variant clears stale icon-not-found cache
-                    // entries so the newly installed app's icon loads.
+                    // Profile changed: rescan so the grid gains the entry.
+                    // Fresh variant clears stale icon-not-found cache entries
+                    // so the newly installed app's icon loads.
                     self.indexer.request_rescan_fresh();
-                } else if is_install {
-                    // Install failed: roll back the in-memory stage.
-                    // packages.nix was never written so it stays clean — no
-                    // stale CLI tile on the next restart.
+                } else {
+                    // Install failed: roll back the in-memory stage. Nothing
+                    // was written to disk, so it stays clean.
                     self.managed.revert(&id);
                     self.managed_install_attrs.retain(|a| a != &id);
                     self.recompute_removable();
@@ -177,43 +194,9 @@ impl App {
                     } else {
                         self.flash_failed(id);
                     }
-                } else {
-                    // Uninstall failed with a real error (not "not found" —
-                    // that case now returns ok=true from nix_profile_remove).
-                    self.flash_failed(id);
                 }
                 self.update_hover();
                 self.schedule_frame();
-            }
-            nix::Event::InstalledAttrs(installed) => {
-                // Startup orphan check: any confirmed managed attr that is NOT
-                // in the nix profile was interrupted mid-install (daemon was
-                // killed after packages.nix was written but before the nix
-                // install completed).  Re-queue those installs.
-                //
-                // With the deferred packages.nix write (stage → confirm),
-                // this case is now essentially impossible in normal operation.
-                // But it handles corruption from an older daemon version or
-                // external nix profile manipulation.
-                if installed.is_empty() {
-                    // Could not read the profile (nix unavailable). Skip to
-                    // avoid spuriously re-installing everything.
-                    return;
-                }
-                let orphans: Vec<(String, Vec<String>)> = self
-                    .managed
-                    .all_attrs()
-                    .into_iter()
-                    .filter(|a| !installed.contains(a.as_str()) && !self.busy_ids.contains(a))
-                    .map(|a| {
-                        let ids = self.managed.desktop_ids_for(&a);
-                        (a, ids)
-                    })
-                    .collect();
-                for (attr, desktop_ids) in orphans {
-                    warn!("managed attr {attr} not in nix profile; re-queuing install");
-                    self.start_managed_install(&attr, desktop_ids);
-                }
             }
         }
     }
@@ -552,23 +535,35 @@ impl App {
     /// the attr, then (3) the lone new app when a single install is
     /// outstanding.
     pub(crate) fn resolve_pending_installs(&mut self) {
+        // Real `.desktop` apps only — the synthetic CLI tiles are excluded
+        // so a pending install can't latch onto the placeholder whose id
+        // equals the attr (a `chromium` tile shadowing the real
+        // `chromium-browser`). CLI-only tools resolve to their tile via the
+        // dedicated fallback below.
         let current: HashSet<String> = self
             .entries
             .iter()
             .zip(&self.kinds)
             .take(self.base_len)
-            .filter(|(_, k)| **k == apps::EntryKind::App)
+            .filter(|(e, k)| **k == apps::EntryKind::App && !self.cli_ids.contains(&e.id))
             .map(|(e, _)| e.id.clone())
             .collect();
         let newly: Vec<String> = current.difference(&self.known_app_ids).cloned().collect();
 
+        // Only resolve installs that have actually completed: a package
+        // still building (busy) hasn't got its real `.desktop` yet, so it
+        // must wait for its own rescan rather than latch onto whatever the
+        // scan currently holds (another package's app, or a phantom).
         let pending: Vec<(String, Vec<String>, Option<String>)> = self
             .pending_installs
             .iter()
-            .filter(|p| !p.failed)
+            .filter(|p| !p.failed && !self.busy_ids.contains(&p.attr))
             .map(|p| (p.attr.clone(), p.desktop_ids.clone(), p.anchor.clone()))
             .collect();
-        let mut resolved: Vec<(String, String, Option<String>)> = Vec::new();
+        // (attr, app_id, anchor, gui) — gui is false when the package
+        // resolved to its own CLI tile (a genuine command-line tool), true
+        // when it resolved to a scanned GUI `.desktop`.
+        let mut resolved: Vec<(String, String, Option<String>, bool)> = Vec::new();
         let mut claimed: HashSet<String> = HashSet::new();
         for (attr, desktop_ids, anchor) in &pending {
             let hit = desktop_ids
@@ -590,49 +585,70 @@ impl App {
                 });
             if let Some(app_id) = hit {
                 claimed.insert(app_id.clone());
-                resolved.push((attr.clone(), app_id, anchor.clone()));
+                resolved.push((attr.clone(), app_id, anchor.clone(), true));
             }
         }
         // Last resort: a single outstanding install ↔ a single new app
         // (covers reverse-DNS ids that share no substring with the attr).
         let still: Vec<&(String, Vec<String>, Option<String>)> = pending
             .iter()
-            .filter(|(a, _, _)| !resolved.iter().any(|(ra, _, _)| ra == a))
+            .filter(|(a, _, _)| !resolved.iter().any(|(ra, _, _, _)| ra == a))
             .collect();
         let leftover: Vec<&String> = newly.iter().filter(|id| !claimed.contains(*id)).collect();
         if let ([(attr, _, anchor)], [app_id]) = (still.as_slice(), leftover.as_slice()) {
-            resolved.push((attr.clone(), (*app_id).clone(), anchor.clone()));
+            claimed.insert((*app_id).clone());
+            resolved.push((attr.clone(), (*app_id).clone(), anchor.clone(), true));
+        }
+        // CLI-only fallback: a pending install that matched no scanned GUI
+        // app but has a synthetic CLI tile (id == attr) is a command-line
+        // tool — resolve it to that tile so it lands and stops "installing".
+        for (attr, _, anchor) in &pending {
+            if resolved.iter().any(|(ra, _, _, _)| ra == attr) {
+                continue;
+            }
+            if self.cli_ids.contains(attr) {
+                resolved.push((attr.clone(), attr.clone(), anchor.clone(), false));
+            }
         }
 
-        for (attr, app_id, anchor) in resolved {
+        let mut linked_real = false;
+        let mut changed = false;
+        for (attr, app_id, anchor, gui) in resolved {
             if let Some(anchor) = anchor {
                 self.order.insert_before(&app_id, &anchor);
             }
-            // Record the real app id (uninstall/removable mapping), pin
-            // the app onto the dock so it lands there (a fresh install is
-            // usage-0 and would otherwise sort off the end of the dock),
-            // and mark it for the landing flash once its cell is known.
-            self.managed.link_app(&attr, &app_id);
+            // Record the real app id and whether it is a GUI app, so a
+            // wrapped package (chromium → chromium-browser) never regrows a
+            // phantom terminal tile and uninstall maps back correctly. Then
+            // pin it onto the dock (a fresh install is usage-0 and would
+            // otherwise sort off the end) and flash it in.
+            self.managed
+                .note_installed(&attr, std::slice::from_ref(&app_id), gui);
+            changed = true;
+            linked_real |= gui;
             let slot = self.pins.pins().len();
             self.pins.pin_at(&app_id, slot);
             self.just_installed = Some(app_id.clone());
-            info!("pending install {attr} resolved as app {app_id}");
+            info!("pending install {attr} resolved as app {app_id} (gui={gui})");
             self.pending_installs.retain(|p| p.attr != attr);
             self.busy_ids.remove(&attr);
         }
 
         // Also resolve managed installs that had no grid tile (dock-drop
         // path and startup recovery).  Pin any newly-appeared app whose
-        // desktop ids or name matches the attr.
+        // desktop ids or name matches the attr, else its CLI tile.
         let mut resolved_managed: Vec<String> = Vec::new();
-        for attr in &self.managed_install_attrs {
-            let desktop_ids = self.managed.desktop_ids_for(attr);
+        for attr in self.managed_install_attrs.clone() {
+            if self.busy_ids.contains(&attr) {
+                continue; // still installing — wait for its own rescan
+            }
+            let desktop_ids = self.managed.desktop_ids_for(&attr);
             let hit = desktop_ids
                 .iter()
                 .find(|d| current.contains(d.as_str()) && !claimed.contains(d.as_str()))
                 .cloned()
                 .or_else(|| {
-                    let key = normalize_id(attr);
+                    let key = normalize_id(&attr);
                     newly
                         .iter()
                         .find(|id| {
@@ -643,19 +659,77 @@ impl App {
                         })
                         .cloned()
                 });
-            if let Some(app_id) = hit {
-                claimed.insert(app_id.clone());
-                self.managed.link_app(attr, &app_id);
-                let slot = self.pins.pins().len();
-                self.pins.pin_at(&app_id, slot);
-                self.just_installed = Some(app_id.clone());
-                self.busy_ids.remove(attr);
-                info!("managed install {attr} resolved as app {app_id}");
-                resolved_managed.push(attr.clone());
-            }
+            let (app_id, gui) = match hit {
+                Some(app_id) => (app_id, true),
+                None if self.cli_ids.contains(&attr) => (attr.clone(), false),
+                None => continue,
+            };
+            claimed.insert(app_id.clone());
+            self.managed
+                .note_installed(&attr, std::slice::from_ref(&app_id), gui);
+            changed = true;
+            linked_real |= gui;
+            let slot = self.pins.pins().len();
+            self.pins.pin_at(&app_id, slot);
+            self.just_installed = Some(app_id.clone());
+            self.busy_ids.remove(&attr);
+            info!("managed install {attr} resolved as app {app_id} (gui={gui})");
+            resolved_managed.push(attr.clone());
         }
         self.managed_install_attrs
             .retain(|a| !resolved_managed.contains(a));
+
+        // Reconcile managed apps whose GUI-ness was never learned (adopted
+        // from the package list on startup, or a migrated legacy entry):
+        // link each to its real scanned app — matched as the attr,
+        // optionally with a suffix, so a wrapped package (chromium →
+        // chromium-browser) is recognized — so its phantom terminal tile
+        // clears and uninstall can map back to it. A CLI-only tool finds no
+        // such app and keeps its tile. These aren't fresh installs, so they
+        // are never pinned; ones handled by the pending / dock-drop flows
+        // above are skipped.
+        for attr in self.managed.gui_unknown_attrs() {
+            if self.busy_ids.contains(&attr)
+                || self.pending_installs.iter().any(|p| p.attr == attr)
+            {
+                continue;
+            }
+            let key = normalize_id(&attr);
+            let hit = current
+                .iter()
+                .find(|id| {
+                    !claimed.contains(id.as_str()) && {
+                        let n = normalize_id(id);
+                        n == key || n.starts_with(&key)
+                    }
+                })
+                .cloned();
+            match hit {
+                Some(app_id) => {
+                    claimed.insert(app_id.clone());
+                    self.managed
+                        .note_installed(&attr, std::slice::from_ref(&app_id), true);
+                    changed = true;
+                    linked_real = true;
+                }
+                None if self.cli_ids.contains(&attr) => {
+                    self.managed.note_installed(&attr, &[], false);
+                    changed = true;
+                }
+                None => {} // its app may simply not be scanned yet — retry next scan
+            }
+        }
+
+        // note_installed persisted the newly-learned app ids / gui flags;
+        // just refresh the removable set to match.
+        if changed {
+            self.recompute_removable();
+        }
+        // A GUI app resolved: a stale phantom CLI tile for it may still be in
+        // this scan's entries — rescan to drop it now that its gui flag is set.
+        if linked_real {
+            self.indexer.request_rescan();
+        }
 
         self.known_app_ids = current;
     }

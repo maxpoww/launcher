@@ -9,6 +9,7 @@
 //! the process goes fully idle.
 
 mod animation;
+mod applier;
 mod apps;
 mod boxes;
 mod content;
@@ -22,6 +23,7 @@ mod ipc;
 mod jelly;
 mod launch;
 mod managed;
+mod managed_webapps;
 mod nix;
 mod order;
 mod pager;
@@ -33,14 +35,17 @@ mod state;
 mod surface;
 mod thumbs;
 mod usage;
+mod webapps;
 
 use std::collections::{HashMap, HashSet};
+use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use calloop::channel;
+use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
-use calloop::{EventLoop, LoopHandle};
+use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
 use calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::data_device_manager::data_device::{DataDevice, DataDeviceHandler};
@@ -135,6 +140,10 @@ fn main() -> anyhow::Result<()> {
     // find icons under ~/.nix-profile/share (nix profile installs land
     // there; freedesktop_icons uses XDG_DATA_DIRS for all its lookups).
     apps::patch_xdg_data_dirs();
+    // Materialize a launcher for every catalog webapp so the indexer finds
+    // them; whether each shows on the grid or only in the Install section is
+    // decided at runtime by managed-webapps membership.
+    webapps::materialize_catalog();
     // Icon-plate mode is a process-wide switch read by the tile producers on
     // several worker threads; set it before any of them start.
     apps::set_icon_plate(config.theme.icon_plate);
@@ -229,6 +238,8 @@ fn main() -> anyhow::Result<()> {
         failed_ids: HashMap::new(),
         launching: HashSet::new(),
         managed: managed::ManagedDb::load(),
+        managed_webapps: managed_webapps::ManagedWebapps::load(),
+        webapp_recommended: webapps::recommended_slugs(),
         removable_ids: HashSet::new(),
         installed_app_ids: HashSet::new(),
         file_index: Vec::new(),
@@ -248,6 +259,8 @@ fn main() -> anyhow::Result<()> {
         pending_installs: Vec::new(),
         managed_install_attrs: Vec::new(),
         known_app_ids: HashSet::new(),
+        cli_ids: HashSet::new(),
+        uninstalling: HashMap::new(),
         just_installed: None,
         dock_hover_since: None,
         reorder_slot: None,
@@ -332,6 +345,26 @@ fn main() -> anyhow::Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering paste channel: {e}"))?;
 
+    // Live launcher reload: rescan when a `.desktop` file is added, removed,
+    // or rewritten in any XDG application dir, so launcher changes (webapps-gen
+    // regenerating from ~/.config/webapps.list, or an external package install)
+    // appear without restarting the daemon. Level-triggered inotify on the one
+    // event loop — no extra thread. A fresh rescan also clears the negative
+    // icon cache so newly added icons resolve.
+    if let Some(watch_fd) = apps::watch_application_dirs() {
+        let source = Generic::new(watch_fd, Interest::READ, Mode::Level);
+        if let Err(e) = event_loop
+            .handle()
+            .insert_source(source, |_readiness, fd, app: &mut App| {
+                apps::drain_inotify(fd.as_fd());
+                app.indexer.request_rescan_fresh();
+                Ok(PostAction::Continue)
+            })
+        {
+            warn!("cannot watch application dirs for live reload: {e}");
+        }
+    }
+
     // Intellihide: watch Hyprland window events so the dock can stay
     // up while nothing overlaps its zone, plus a steady poll — this
     // Hyprland emits no event for float toggles or float moves/resizes,
@@ -355,14 +388,15 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Startup orphan check: ask the nix thread for all currently installed
-    // attrs so we can detect managed packages that survived a daemon kill
-    // mid-install (packages.nix written but nix profile install never
-    // completed).  The result arrives as Event::InstalledAttrs and is
-    // handled in on_nix_event → install.rs.
-    if !app.managed.all_attrs().is_empty() {
-        app.nix.request(nix::Request::CheckInstalled);
-    }
+    // Declarative installs: the package list is the source of truth. Seed
+    // it once from the managed set (the migration from the old imperative
+    // `nix profile` era), then adopt any attr in the list that the managed
+    // cache is missing — covers a hand-edited list or a daemon killed
+    // mid-install (the root helper's rebuild completes independently, so on
+    // restart the app is simply present and the cache catches up).
+    applier::seed_if_missing(&app.managed.all_attrs());
+    app.managed.adopt_list(&applier::list_attrs());
+    app.recompute_removable();
 
     info!("daemon up; try: waverunner-ctl toggle");
     while !app.exit {
@@ -531,6 +565,14 @@ pub struct App {
     /// for what the launcher installed, and the generator of
     /// `waverunner-packages.nix`). Drives removable/installed detection.
     managed: managed::ManagedDb,
+    /// Webapps installed from the catalog (dragged to the grid). Catalog
+    /// entries not in this set stay in the Install section; members show on
+    /// the grid. Generator of `waverunner-webapps.nix`.
+    managed_webapps: managed_webapps::ManagedWebapps,
+    /// Catalog slugs marked as storefront recommendations (`*` in
+    /// webapps.list) — shown in the Install section on an empty query; the
+    /// rest only appear when searched.
+    webapp_recommended: std::collections::HashSet<String>,
     /// Ids of the currently-indexed apps that are removable — the apps
     /// whose attr is in [`Self::managed`], recomputed whenever apps or
     /// the managed list change. Only these offer the Install section as
@@ -590,6 +632,17 @@ pub struct App {
     /// appeared*, even when its desktop id differs from the attr and the
     /// package index carried no desktop hints (e.g. `chromium`).
     known_app_ids: HashSet<String>,
+    /// Ids of the synthetic CLI-tool tiles in the current scan
+    /// ([`apps::LoadedApps::cli_ids`]). Excluded when matching a pending
+    /// install to its real app so a wrapped package never resolves to its
+    /// own placeholder tile.
+    cli_ids: HashSet<String>,
+    /// Uninstalls in flight: app desktop id → the managed attr being
+    /// removed. The cache entry and dock pin are dropped only once the
+    /// rebuild succeeds ([`nix::Event::Done`]); on failure they stay, so the
+    /// cache never diverges from the package list. Also the authoritative
+    /// install-vs-uninstall discriminator for `Done`.
+    uninstalling: HashMap<String, String>,
     /// An app that just resolved from a pending install: it gets a
     /// launch-style bounce as it lands in the grid (set during rescan,
     /// consumed once its cell index is known).
@@ -1060,6 +1113,10 @@ impl App {
                 .filter(|(_, k)| **k == apps::EntryKind::App)
                 .map(|(e, _)| e.id.as_str()),
         );
+        // Which of the freshly-loaded entries are synthetic CLI tiles —
+        // resolve must exclude them so a wrapped package matches its real
+        // `.desktop`, not its placeholder.
+        self.cli_ids = loaded.cli_ids.into_iter().collect();
         // A drag-to-install app that has now landed: reposition it into
         // its tile's slot and retire the tile (before the refilter below
         // reads the order).
@@ -1120,6 +1177,25 @@ impl App {
     /// section searches the whole home-tree file index (transient
     /// entries borrowing a generic icon); without one it shows the
     /// top-level home folders, most-used first.
+    /// Whether entry `idx` is a catalog webapp that has NOT been installed
+    /// (dragged to the grid) — those live in the Install section, not the
+    /// grid. Installed webapps and all other apps return `false`.
+    fn is_catalog_webapp(&self, idx: usize) -> bool {
+        self.entries
+            .get(idx)
+            .and_then(|e| webapps::slug_of_id(&e.id))
+            .is_some_and(|slug| !self.managed_webapps.contains(slug))
+    }
+
+    /// Whether entry `idx` is a catalog webapp marked as a storefront
+    /// recommendation (shown on an empty query).
+    fn is_recommended_webapp(&self, idx: usize) -> bool {
+        self.entries
+            .get(idx)
+            .and_then(|e| webapps::slug_of_id(&e.id))
+            .is_some_and(|slug| self.webapp_recommended.contains(slug))
+    }
+
     fn refilter(&mut self) {
         // Snapshot the Apps cells' animated display positions (by
         // entry id — indices won't survive the rebuild) so the new
@@ -1149,12 +1225,32 @@ impl App {
             // listing (home root or a navigated folder), built below, not the
             // ranked home-folder carriers — so File entries add nothing here.
             if self.kinds.get(idx) == Some(&apps::EntryKind::App) {
-                visible[content::SECTION_APPS].push(idx);
+                if self.is_catalog_webapp(idx) {
+                    // Catalog webapps live in the Install section, not the
+                    // grid. On an empty query only the recommended few show;
+                    // any webapp surfaces once its name is searched.
+                    if searching || self.is_recommended_webapp(idx) {
+                        visible[content::SECTION_INSTALL].push(idx);
+                    }
+                } else {
+                    visible[content::SECTION_APPS].push(idx);
+                }
             }
         }
-        // The Install section fills with or without a query (live
-        // search vs the recommendations storefront).
-        visible[content::SECTION_INSTALL] = self.pkg_results();
+        // Blend the webapp hits with the ranked package hits into the one
+        // Install list: searching puts webapp name-matches first; the empty-
+        // query storefront spreads the few recommendations among the programs.
+        {
+            let webapp_hits = std::mem::take(&mut visible[content::SECTION_INSTALL]);
+            let pkgs = self.pkg_results();
+            visible[content::SECTION_INSTALL] = if searching {
+                let mut v = webapp_hits;
+                v.extend(pkgs);
+                v
+            } else {
+                blend_hits(webapp_hits, pkgs)
+            };
+        }
         self.group_minis.clear();
         // Every box gets a transient Group entry each refilter (indices
         // shift), used by both the grid and the dock; a box pinned to the
@@ -1889,6 +1985,11 @@ impl App {
                 });
                 self.refilter();
             }
+            return;
+        }
+        // Catalog webapps aren't launched by a click either — like packages,
+        // "try" is a drag out of the box and install is a drag to the grid.
+        if self.is_catalog_webapp(index) {
             return;
         }
         let (exec, id) = (entry.exec.clone(), entry.id.clone());
@@ -3137,6 +3238,30 @@ fn load_icon_size() -> usize {
     let path = persist::data_path("ui_state.json");
     let n: usize = persist::read_json(&path).unwrap_or(1);
     n.min(content::ICON_SCALES.len() - 1)
+}
+
+/// Interleave a few webapp hits through a longer package-hit list so the
+/// storefront recommendations sit among the programs rather than clustered
+/// at the top. Order within each input is preserved.
+fn blend_hits(webapps: Vec<usize>, pkgs: Vec<usize>) -> Vec<usize> {
+    if webapps.is_empty() {
+        return pkgs;
+    }
+    if pkgs.is_empty() {
+        return webapps;
+    }
+    let step = (pkgs.len() / (webapps.len() + 1)).max(1);
+    let mut out = Vec::with_capacity(webapps.len() + pkgs.len());
+    let mut wi = 0;
+    for (i, &p) in pkgs.iter().enumerate() {
+        if wi < webapps.len() && i == (wi + 1) * step {
+            out.push(webapps[wi]);
+            wi += 1;
+        }
+        out.push(p);
+    }
+    out.extend_from_slice(&webapps[wi..]);
+    out
 }
 
 fn save_icon_size(size: usize) {

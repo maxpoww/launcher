@@ -260,15 +260,40 @@ impl App {
                 // list, then switch; the busy id is the app cell.
                 if let Some(attr) = self.managed.attr_for_app(&id) {
                     info!("uninstalling {id} (attr {attr})");
-                    self.managed.remove(&attr);
-                    // The install pinned it onto the dock; drop that pin so
-                    // it doesn't linger once the app is gone.
-                    self.pins.unpin(&id);
-                    self.recompute_removable();
+                    // Defer dropping the cache entry and dock pin until the
+                    // rebuild succeeds (see `nix::Event::Done`): a failed
+                    // uninstall re-adds the package-list line, so removing the
+                    // cache now would leave the two out of sync. The app cell
+                    // shows busy meanwhile.
                     self.busy_ids.insert(id.clone());
+                    self.uninstalling.insert(id.clone(), attr.clone());
                     self.nix.request(nix::Request::Remove { id, attr });
                 } else {
                     debug!("{id} is not waverunner-managed; cannot uninstall");
+                }
+            }
+            // A catalog webapp: dropped clear of the card runs it ephemerally
+            // ("try it", window shows in the dock unpinned); dropped on the
+            // grid installs it (moves out of the Install section onto the
+            // grid). It is never on the grid, so it never reorders.
+            Some(apps::EntryKind::App) if self.catalog_webapp_slug(&id).is_some() => {
+                if released && self.outside_card(&layout, drag.pos) {
+                    self.launch_webapp(drag.entry_idx);
+                } else if section == Some(content::SECTION_APPS) {
+                    if let Some(slug) = self.catalog_webapp_slug(&id) {
+                        self.install_webapp(&slug);
+                    }
+                }
+                // Dropped back in the Install section / elsewhere: snap back.
+            }
+            // An installed webapp dragged into the Install section uninstalls
+            // (returns to the catalog; the launcher file stays on disk).
+            Some(apps::EntryKind::App)
+                if section == Some(content::SECTION_INSTALL)
+                    && self.installed_webapp_slug(&id).is_some() =>
+            {
+                if let Some(slug) = self.installed_webapp_slug(&id) {
+                    self.uninstall_webapp(&slug);
                 }
             }
             _ => {
@@ -674,6 +699,53 @@ impl App {
                 Some(section)
             }
             _ => None,
+        }
+    }
+}
+
+impl App {
+    /// The slug of a *catalog* webapp id (materialized but not installed),
+    /// or `None` for a non-webapp or already-installed id.
+    fn catalog_webapp_slug(&self, id: &str) -> Option<String> {
+        crate::webapps::slug_of_id(id)
+            .filter(|s| !self.managed_webapps.contains(s))
+            .map(str::to_string)
+    }
+
+    /// The slug of an *installed* webapp id, or `None` otherwise.
+    fn installed_webapp_slug(&self, id: &str) -> Option<String> {
+        crate::webapps::slug_of_id(id)
+            .filter(|s| self.managed_webapps.contains(s))
+            .map(str::to_string)
+    }
+
+    /// Install a catalog webapp: record it so it moves from the Install
+    /// section onto the grid, then refilter to relocate its tile.
+    fn install_webapp(&mut self, slug: &str) {
+        info!("installing webapp {slug}");
+        self.managed_webapps.add(slug);
+        self.refilter();
+        self.schedule_frame();
+    }
+
+    /// Uninstall a webapp: drop the record so it returns to the catalog
+    /// (its launcher file stays on disk).
+    fn uninstall_webapp(&mut self, slug: &str) {
+        info!("uninstalling webapp {slug}");
+        self.managed_webapps.remove(slug);
+        self.refilter();
+        self.schedule_frame();
+    }
+
+    /// "Try it": launch a catalog webapp's Chrome app-mode command without
+    /// installing it (its window shows in the dock unpinned while open).
+    fn launch_webapp(&mut self, idx: usize) {
+        let Some(entry) = self.entries.get(idx) else {
+            return;
+        };
+        let exec = entry.exec.clone();
+        if let Err(e) = crate::launch::launch(&exec, false, &self.config.launch.terminal) {
+            tracing::error!("try-launch webapp failed: {e}");
         }
     }
 }
