@@ -9,6 +9,9 @@ use calloop::timer::{TimeoutAction, Timer};
 use tracing::{debug, error, info, warn};
 use waverunner_core::index::AppEntry;
 
+use waverunner_proto::Command;
+
+use crate::state::Target;
 use crate::{apps, content, launch, nix};
 use crate::{App, PkgIndexState};
 
@@ -81,9 +84,58 @@ pub(crate) fn install_ring_progress(elapsed: Duration) -> f32 {
 }
 
 /// How long the ring takes to ease from wherever it was to a full circle
-/// once the rebuild finishes — also how long the real app's appearance is
-/// deferred, so the completion always reads even for a quick install.
+/// once the rebuild finishes.
 pub(crate) const INSTALL_RING_FILL: Duration = Duration::from_millis(420);
+
+/// After the ring fills, an aggressive glass-shine streak sweeps across the
+/// icon for this long before the real app is swapped in.
+pub(crate) const INSTALL_SHINE: Duration = Duration::from_millis(520);
+
+/// Total time a finished install is held before the real app swaps in: the
+/// ring fill, then the shine sweep (420 + 520 ms). The app's appearance is
+/// deferred this long so the whole completion flourish always plays.
+pub(crate) const INSTALL_HOLD: Duration = Duration::from_millis(940);
+
+/// Shine-sweep progress in `0.0..=1.0` for a finished install, or a negative
+/// value while the ring is still filling (no shine yet) or when not finished.
+pub(crate) fn install_shine(completed_at: Option<Instant>) -> f32 {
+    match completed_at {
+        Some(done) => {
+            let e = done.elapsed();
+            if e < INSTALL_RING_FILL {
+                -1.0
+            } else {
+                ((e - INSTALL_RING_FILL).as_secs_f32() / INSTALL_SHINE.as_secs_f32()).clamp(0.0, 1.0)
+            }
+        }
+        None => -1.0,
+    }
+}
+
+/// A just-installed app surfaced on the dock because the launcher was closed
+/// when it finished: a one-shot shine plays, and it stays there — temp-pinned
+/// and hidden from the grid — until it has been opened and then closed, when
+/// it returns to its grid slot. In-memory only; never persisted.
+pub(crate) struct InstallNotify {
+    /// The installed app's grid entry id (temp-pinned onto the dock).
+    pub(crate) id: String,
+    /// When the one-shot dock shine started.
+    pub(crate) shine_at: Instant,
+    /// Whether the app has been opened at least once (a window seen): only
+    /// then does its next close return it to the grid.
+    pub(crate) seen_running: bool,
+}
+
+/// One-shot dock-shine progress `0.0..=1.0` for a just-installed notify, or a
+/// negative value once the single sweep has played out.
+pub(crate) fn dock_notify_shine(shine_at: Instant) -> f32 {
+    let e = shine_at.elapsed();
+    if e >= INSTALL_SHINE {
+        -1.0
+    } else {
+        (e.as_secs_f32() / INSTALL_SHINE.as_secs_f32()).clamp(0.0, 1.0)
+    }
+}
 
 /// A webapp installs instantly (it's only a classification flip), but we fake
 /// this much of a "build" so it lands with the exact same progress ring as a
@@ -707,12 +759,10 @@ impl App {
             .pending_installs
             .iter()
             .filter(|p| !p.failed && !self.busy_ids.contains(&p.attr))
-            // Hold a just-finished tile until its ring has eased to full, so
-            // the completion animation always plays before the swap-in.
-            .filter(|p| {
-                p.completed_at
-                    .is_none_or(|c| c.elapsed() >= INSTALL_RING_FILL)
-            })
+            // Hold a just-finished tile until its ring fill and shine sweep
+            // have both played, so the completion flourish always finishes
+            // before the swap-in.
+            .filter(|p| p.completed_at.is_none_or(|c| c.elapsed() >= INSTALL_HOLD))
             .map(|p| (p.attr.clone(), p.desktop_ids.clone(), p.anchor.clone()))
             .collect();
         // (attr, app_id, anchor, gui) — gui is false when the package
@@ -790,6 +840,8 @@ impl App {
                 .note_installed(&attr, std::slice::from_ref(&app_id), gui);
             changed = true;
             linked_real |= gui;
+            // A plain grid install (not dropped on the dock or into a box).
+            let grid_dest = dock_slot.is_none() && box_dest.is_none();
             if let Some(slot) = dock_slot {
                 self.pins.unpin(&attr);
                 self.pins.pin_at(&app_id, slot);
@@ -799,7 +851,24 @@ impl App {
                     self.groups.replace_member(g, &attr, &app_id);
                 }
             }
-            self.just_installed = Some(app_id.clone());
+            if grid_dest && self.ui.target() != Target::Open {
+                // The launcher was closed when this finished: surface the app
+                // on the dock with a one-shot shine (temp-pinned, hidden from
+                // the grid) instead of landing it quietly on the grid, and pop
+                // the dock up so the shine is seen. It returns to the grid once
+                // opened and closed (see `reconcile_install_notify`).
+                self.install_notify.push(InstallNotify {
+                    id: app_id.clone(),
+                    shine_at: std::time::Instant::now(),
+                    seen_running: false,
+                });
+                if self.ui.apply(Command::Show) {
+                    // Popped up from hidden just for the shine: auto-hide in 3s.
+                    self.arm_notify_dock_hide();
+                }
+            } else {
+                self.just_installed = Some(app_id.clone()); // bounce it in on the grid
+            }
             info!("pending install {attr} resolved as app {app_id} (gui={gui}, dock {dock_slot:?})");
             self.pending_installs.retain(|p| p.attr != attr);
             self.busy_ids.remove(&attr);

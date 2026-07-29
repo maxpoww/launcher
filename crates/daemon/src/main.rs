@@ -258,6 +258,8 @@ fn main() -> anyhow::Result<()> {
         order: order::OrderDb::load(),
         pending_installs: Vec::new(),
         pending_webapps: Vec::new(),
+        install_notify: Vec::new(),
+        notify_dock_hide_at: None,
         managed_install_attrs: Vec::new(),
         known_app_ids: HashSet::new(),
         cli_ids: HashSet::new(),
@@ -628,6 +630,13 @@ pub struct App {
     /// grid, this just drives the same ring for a fake ~4 s "build" so they
     /// land with the same feel as a package (see [`install::PendingWebapp`]).
     pending_webapps: Vec<crate::install::PendingWebapp>,
+    /// Apps that finished installing while the launcher was closed: temp-
+    /// pinned to the dock with a one-shot shine (never persisted, hidden from
+    /// the grid) until opened and closed once (see [`install::InstallNotify`]).
+    install_notify: Vec<crate::install::InstallNotify>,
+    /// When a notify-revealed dock should auto-hide again (it popped up just
+    /// to say "your app is ready"). Cleared/ignored if the user engages.
+    notify_dock_hide_at: Option<Instant>,
     /// Managed-install attrs fired via `start_managed_install` (dock-drop
     /// and startup recovery) that have no grid tile.  Resolved to dock
     /// pins in `resolve_pending_installs` once the app appears in the index.
@@ -1312,7 +1321,9 @@ impl App {
             // apps live inside their box, not loose in the grid.
             visible[content::SECTION_APPS].retain(|&idx| {
                 let id = &self.entries[idx].id;
-                !self.pins.is_pinned(id) && !self.groups.is_grouped(id)
+                !self.pins.is_pinned(id)
+                    && !self.groups.is_grouped(id)
+                    && !self.install_notify.iter().any(|n| n.id == *id)
             });
             // A dissolved group can't stay open.
             if self
@@ -1591,6 +1602,67 @@ impl App {
             // The unpinned-running dock zone depends on this set, so rebuild
             // the dock order (adds/removes ephemeral running icons + divider).
             self.recompute_dock_order();
+            self.reconcile_install_notify();
+            self.schedule_frame();
+        }
+    }
+
+    /// A just-installed dock notify becomes "seen" the first time its app is
+    /// running, and is dropped the first time a seen one has fully closed —
+    /// unpinning it from the dock so the app returns to its grid slot.
+    fn reconcile_install_notify(&mut self) {
+        if self.install_notify.is_empty() {
+            return;
+        }
+        let running_ids: HashSet<&String> = self
+            .running
+            .keys()
+            .filter_map(|&i| self.entries.get(i).map(|e| &e.id))
+            .collect();
+        for n in &mut self.install_notify {
+            if running_ids.contains(&n.id) {
+                n.seen_running = true;
+            }
+        }
+        let before = self.install_notify.len();
+        self.install_notify
+            .retain(|n| !n.seen_running || running_ids.contains(&n.id));
+        if self.install_notify.len() != before {
+            // One returned to the grid: rebuild the dock and unhide it.
+            self.recompute_dock_order();
+            self.refilter();
+        }
+    }
+
+    /// Arm a 3 s auto-hide after a notify pop-up: the dock only came up to
+    /// flash "your app is ready", so it tucks itself away again.
+    fn arm_notify_dock_hide(&mut self) {
+        const NOTIFY_DOCK_DWELL: Duration = Duration::from_secs(3);
+        self.notify_dock_hide_at = Some(Instant::now() + NOTIFY_DOCK_DWELL);
+        let timer = Timer::from_duration(NOTIFY_DOCK_DWELL);
+        if let Err(e) = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.notify_dock_autohide();
+            TimeoutAction::Drop
+        }) {
+            warn!("failed to arm notify-dock hide timer: {e}");
+        }
+    }
+
+    /// Fired ~3 s after a notify pop-up: hide the dock again, unless the user
+    /// has engaged with it (expanded it, or the pointer is on it) or a newer
+    /// notify pushed the deadline back.
+    fn notify_dock_autohide(&mut self) {
+        let Some(at) = self.notify_dock_hide_at else {
+            return;
+        };
+        if Instant::now() < at {
+            return; // a later notify extended the dwell; its own timer fires
+        }
+        self.notify_dock_hide_at = None;
+        if self.ui.target() == Target::Dock
+            && self.pointer_pos.is_none()
+            && self.ui.apply(Command::Hide)
+        {
             self.schedule_frame();
         }
     }
@@ -1650,8 +1722,30 @@ impl App {
             })
             .collect();
         running_unpinned.sort_unstable();
-        self.dock_divider = (!running_unpinned.is_empty()).then_some(pinned_count);
-        self.dock_order.extend(running_unpinned);
+        // Freshly-installed notify apps sit in this same "in between" zone,
+        // right after the divider (so they read as never-pinned): openable,
+        // and gone once opened and closed. Placed first so the new app stands
+        // out; skip any already pinned or already in the running zone.
+        let mut zone: Vec<usize> = Vec::new();
+        for n in &self.install_notify {
+            let idx = self
+                .entries
+                .iter()
+                .zip(&self.kinds)
+                .position(|(e, k)| e.id == n.id && *k == apps::EntryKind::App);
+            if let Some(idx) = idx {
+                if !self.dock_order.contains(&idx) && !zone.contains(&idx) {
+                    zone.push(idx);
+                }
+            }
+        }
+        for idx in running_unpinned {
+            if !zone.contains(&idx) {
+                zone.push(idx);
+            }
+        }
+        self.dock_divider = (!zone.is_empty()).then_some(pinned_count);
+        self.dock_order.extend(zone);
         // No truncation here — layout() clamps to the available width.
     }
 

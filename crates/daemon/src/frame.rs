@@ -433,7 +433,13 @@ impl App {
         }
         // Keep frames coming while any install is in flight so its progress
         // ring animates (a failed tile is static, so it doesn't count).
-        if self.pending_installs.iter().any(|p| !p.failed) || !self.pending_webapps.is_empty() {
+        if self.pending_installs.iter().any(|p| !p.failed)
+            || !self.pending_webapps.is_empty()
+            || self
+                .install_notify
+                .iter()
+                .any(|n| crate::install::dock_notify_shine(n.shine_at) >= 0.0)
+        {
             self.dirty = true;
         }
         // Webapp install ring lifecycle: begin the completion fill once the
@@ -449,13 +455,29 @@ impl App {
             .iter()
             .filter(|w| {
                 w.completed_at
-                    .is_some_and(|c| c.elapsed() >= crate::install::INSTALL_RING_FILL)
+                    .is_some_and(|c| c.elapsed() >= crate::install::INSTALL_HOLD)
             })
             .map(|w| w.id.clone())
             .collect();
         if !webapp_done.is_empty() {
             self.pending_webapps.retain(|w| !webapp_done.contains(&w.id));
-            self.just_installed = webapp_done.into_iter().next(); // bounce it in
+            for id in webapp_done {
+                if self.ui.target() != Target::Open {
+                    // Launcher closed: surface it on the dock with a one-shot
+                    // shine (mirrors the package path in resolve_pending_installs).
+                    self.install_notify.push(crate::install::InstallNotify {
+                        id,
+                        shine_at: Instant::now(),
+                        seen_running: false,
+                    });
+                    if self.ui.apply(waverunner_proto::Command::Show) {
+                        self.arm_notify_dock_hide(); // popped up: auto-hide in 3s
+                    }
+                } else {
+                    self.just_installed = Some(id); // bounce it in on the grid
+                }
+            }
+            self.recompute_dock_order();
             self.refilter();
         }
         // A finished install whose ring has now eased to full: fire the
@@ -465,7 +487,7 @@ impl App {
         for p in &mut self.pending_installs {
             if !p.rescan_fired
                 && p.completed_at
-                    .is_some_and(|c| c.elapsed() >= crate::install::INSTALL_RING_FILL)
+                    .is_some_and(|c| c.elapsed() >= crate::install::INSTALL_HOLD)
             {
                 p.rescan_fired = true;
                 fill_done = true;
@@ -646,23 +668,48 @@ impl App {
             .zip(&installing)
             .map(|(e, &inst)| inst || self.busy_ids.contains(&e.id))
             .collect();
-        // Progress-ring fraction per entry: an eased estimate for each
-        // in-flight (non-failed) install tile, -1 elsewhere (no ring).
+        // Per-entry install visuals: the ring fraction and completion time of
+        // whichever pending install/webapp matches (both share the ring +
+        // shine flow).
+        let install_state = |id: &str| -> (f32, Option<Instant>) {
+            if let Some(p) = self.pending_installs.iter().find(|p| p.attr == id && !p.failed) {
+                (p.ring_fraction(), p.completed_at)
+            } else if let Some(w) = self.pending_webapps.iter().find(|w| w.id == id) {
+                (w.ring_fraction(), w.completed_at)
+            } else {
+                (-1.0, None)
+            }
+        };
+        // Progress ring per entry — but suppressed once the shine sweep has
+        // begun (the ring is gone by then), -1 elsewhere.
         let progress: Vec<f32> = self
             .entries
             .iter()
             .map(|e| {
-                self.pending_installs
-                    .iter()
-                    .find(|p| p.attr == e.id && !p.failed)
-                    .map(|p| p.ring_fraction())
-                    .or_else(|| {
-                        self.pending_webapps
-                            .iter()
-                            .find(|w| w.id == e.id)
-                            .map(|w| w.ring_fraction())
-                    })
-                    .unwrap_or(-1.0)
+                let (ring, completed) = install_state(&e.id);
+                if crate::install::install_shine(completed) >= 0.0 {
+                    -1.0
+                } else {
+                    ring
+                }
+            })
+            .collect();
+        // Shine-sweep fraction per entry: an in-flight install's post-ring
+        // shine, or a just-installed dock notify's one-shot shine.
+        let shine: Vec<f32> = self
+            .entries
+            .iter()
+            .map(|e| {
+                let s = crate::install::install_shine(install_state(&e.id).1);
+                if s >= 0.0 {
+                    s
+                } else {
+                    self.install_notify
+                        .iter()
+                        .find(|n| n.id == e.id)
+                        .map(|n| crate::install::dock_notify_shine(n.shine_at))
+                        .unwrap_or(-1.0)
+                }
             })
             .collect();
         let failed: Vec<bool> = self
@@ -817,6 +864,7 @@ impl App {
                 installing: &installing,
                 launching: &launching,
                 progress: &progress,
+                shine: &shine,
                 group_minis: &self.group_minis,
                 apps_group: &self.apps_group_name(),
                 apps_slide: &self.apps_slide,

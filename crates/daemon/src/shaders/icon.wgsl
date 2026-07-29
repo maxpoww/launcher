@@ -68,6 +68,40 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(icons, icon_sampler, in.uv, i32(in.layer));
     // One pixel in uv units (the quad is square) for the SDF edges below.
     let px = max(fwidth(in.uv.x), 1e-5);
+    // Squircle (superellipse) corner mask: |x|^n + |y|^n = 1 in the tile's
+    // [-1,1] space. This only trims the extreme corners, so full-bleed
+    // square icons pick up macOS-style rounded corners while already-round
+    // or padded icons (transparent corners) are untouched. fwidth gives a
+    // ~1px anti-aliased edge that stays crisp at every icon size. Computed up
+    // here so the shine sweep below can clip to it too.
+    var mask = 1.0;
+    let n = globals.squircle;
+    // Thumbnails (file previews) keep their real square corners — the
+    // squircle mask applies only to app/asset icons below `thumb_base`.
+    let is_thumb = f32(in.layer) >= globals.thumb_base;
+    if (n > 0.0 && !is_thumb) {
+        let p = in.uv * 2.0 - vec2<f32>(1.0);
+        let e = pow(abs(p.x), n) + pow(abs(p.y), n);
+        let w = max(fwidth(e), 1e-5);
+        mask = 1.0 - smoothstep(1.0 - w, 1.0 + w, e);
+    }
+    // Shine sweep (ring >= 2.0, progress = ring - 2.0): an aggressive glass
+    // reflection streaked diagonally across the icon once its install ring has
+    // finished. Drawn as its own quad over the full-colour icon beneath, and
+    // clipped to the icon's silhouette (texel.a) and squircle so it only
+    // glints on the app itself, not the tile background.
+    if (in.ring >= 2.0) {
+        let shine = in.ring - 2.0;
+        // ↗ diagonal: 0 at the bottom-left corner, 1 at the top-right.
+        let diag = (in.uv.x - in.uv.y + 1.0) * 0.5;
+        let center = mix(-0.4, 1.4, shine);     // travels across and off-icon
+        let dd = abs(diag - center);
+        let band = smoothstep(0.22, 0.0, dd);   // wide soft glow
+        let core = smoothstep(0.06, 0.0, dd);   // hot bright core
+        let env = sin(shine * 3.14159265);      // fade in then out over sweep
+        let k = clamp((band * 0.6 + core * 1.1) * env, 0.0, 1.0) * texel.a * mask;
+        return vec4<f32>(vec3<f32>(1.0) * k, k) * globals.alpha;
+    }
     // Progress-ring mode: this quad is an install progress ring, not an icon.
     // A dark veil dims the tile beneath, then a faint white track carries a
     // brighter arc filled clockwise from the top to `ring` of a full turn.
@@ -96,22 +130,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         oa = ring_a + oa * (1.0 - ring_a);
         orgb = ring_col * ring_a + orgb * (1.0 - ring_a);
         return vec4<f32>(orgb, oa) * globals.alpha;
-    }
-    // Squircle (superellipse) corner mask: |x|^n + |y|^n = 1 in the tile's
-    // [-1,1] space. This only trims the extreme corners, so full-bleed
-    // square icons pick up macOS-style rounded corners while already-round
-    // or padded icons (transparent corners) are untouched. fwidth gives a
-    // ~1px anti-aliased edge that stays crisp at every icon size.
-    var mask = 1.0;
-    let n = globals.squircle;
-    // Thumbnails (file previews) keep their real square corners — the
-    // squircle mask applies only to app/asset icons below `thumb_base`.
-    let is_thumb = f32(in.layer) >= globals.thumb_base;
-    if (n > 0.0 && !is_thumb) {
-        let p = in.uv * 2.0 - vec2<f32>(1.0);
-        let e = pow(abs(p.x), n) + pow(abs(p.y), n);
-        let w = max(fwidth(e), 1e-5);
-        mask = 1.0 - smoothstep(1.0 - w, 1.0 + w, e);
     }
     // Silhouette tint (drag ghost over the uninstall target): blend the
     // colour in *premultiplied* space — `tint.rgb * texel.a` matches the

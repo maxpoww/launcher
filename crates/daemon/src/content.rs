@@ -833,6 +833,10 @@ pub struct FrameInput<'a> {
     /// draws a macOS-style circular progress ring over an installing tile;
     /// a negative value (the default) means no ring. Empty slice = none.
     pub progress: &'a [f32],
+    /// Shine-sweep progress per entry, aligned with `entries`: `0.0..=1.0`
+    /// sweeps a glass reflection across a just-finished install's icon (after
+    /// its ring fills); a negative value means no shine. Empty slice = none.
+    pub shine: &'a [f32],
     /// Group cells: (entry index of the transient group entry, up to
     /// four member texture layers for the 2×2 mini preview). Cells
     /// listed here draw the tile + minis instead of a single icon.
@@ -956,6 +960,7 @@ pub fn scene(
         installing,
         launching,
         progress,
+        shine,
         group_minis,
         apps_group,
         apps_slide,
@@ -1247,6 +1252,18 @@ pub fn scene(
             tint: [0.0; 4],
             ring: -1.0,
         });
+        // A just-installed app surfaced here plays a one-shot glass shine over
+        // its dock icon (`ring = 2.0 + progress`; the shader clips it to the
+        // icon silhouette).
+        let dock_shine = shine.get(entry_idx).copied().unwrap_or(-1.0);
+        if dock_shine >= 0.0 {
+            scene.icons.push(IconInst {
+                rect: icon_rect,
+                layer: layer_of(entry_idx),
+                tint: [0.0; 4],
+                ring: 2.0 + dock_shine.clamp(0.0, 1.0),
+            });
+        }
         if placeholders.get(entry_idx).copied().unwrap_or(false) {
             if let Some(ch) = entries.get(entry_idx).and_then(|e| e.name.chars().next()) {
                 let letter: String = ch.to_uppercase().collect();
@@ -1719,18 +1736,31 @@ pub fn scene(
             let is_launching = launching.get(entry_idx).copied().unwrap_or(false);
             // A macOS-style circular progress ring over an installing tile:
             // pushed after the icon (so it draws on top), sharing its rect.
+            // Once the ring fills, a glass-shine streak sweeps the icon (the
+            // ring is gone by then — `prog` is negative during the shine).
             let prog = progress.get(entry_idx).copied().unwrap_or(-1.0);
+            let shine_p = shine.get(entry_idx).copied().unwrap_or(-1.0);
+            let icon_rect = Rect::new(
+                cx - size / 2.0,
+                icon_cy - size / 2.0 - lift(entry_idx),
+                size,
+                size,
+            );
             if is_installing && prog >= 0.0 {
                 g.icons.push(IconInst {
-                    rect: Rect::new(
-                        cx - size / 2.0,
-                        icon_cy - size / 2.0 - lift(entry_idx),
-                        size,
-                        size,
-                    ),
+                    rect: icon_rect,
                     layer: 0,
                     tint: [0.0; 4],
                     ring: prog.clamp(0.0, 1.0),
+                });
+            } else if is_installing && shine_p >= 0.0 {
+                // Shine instance: samples the app icon's silhouette (its layer)
+                // to clip the streak, encoded as `ring = 2.0 + progress`.
+                g.icons.push(IconInst {
+                    rect: icon_rect,
+                    layer: layer_of(entry_idx),
+                    tint: [0.0; 4],
+                    ring: 2.0 + shine_p.clamp(0.0, 1.0),
                 });
             }
             let name = if is_busy && is_launching {
