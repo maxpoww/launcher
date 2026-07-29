@@ -1146,6 +1146,11 @@ impl App {
         // Entry indices just changed — re-match live windows to them.
         self.refresh_running();
         self.recompute_removable();
+        // A finished uninstall was held hidden until its `.desktop` left the
+        // index; now that the rescan reflects the removal, drop the hold for
+        // any id no longer present (a still-pending uninstall keeps its).
+        self.uninstalling
+            .retain(|id, _| self.entries.iter().any(|e| &e.id == id));
         // Boxes left with fewer than two members after uninstalls are
         // deleted (and their grid slot forgotten) so nothing undersized
         // lingers. Guarded against a degenerate empty scan wiping every box.
@@ -1197,6 +1202,16 @@ impl App {
     /// though the query is still live for the Install list itself.
     fn grid_resting(&self) -> bool {
         self.search.query.is_empty() || self.install_drag_reset
+    }
+
+    /// Whether entry `idx` is an app whose uninstall is in flight — hidden
+    /// from the grid and dock the instant it's dropped on the Install
+    /// section, so it vanishes at once instead of lingering "Removing…"
+    /// through the rebuild. Restored only if the rebuild fails.
+    fn is_removing(&self, idx: usize) -> bool {
+        self.entries
+            .get(idx)
+            .is_some_and(|e| self.uninstalling.contains_key(&e.id))
     }
 
     /// Whether entry `idx` is a catalog webapp marked as a storefront
@@ -1258,7 +1273,10 @@ impl App {
         for idx in grid_ranked {
             // The Files section is a live directory listing (home root or a
             // navigated folder), built below — File entries add nothing here.
-            if self.kinds.get(idx) == Some(&apps::EntryKind::App) && !self.is_catalog_webapp(idx) {
+            if self.kinds.get(idx) == Some(&apps::EntryKind::App)
+                && !self.is_catalog_webapp(idx)
+                && !self.is_removing(idx)
+            {
                 visible[content::SECTION_APPS].push(idx);
             }
         }
@@ -1584,6 +1602,12 @@ impl App {
             .map(|p| p.attr.clone())
             .collect();
         for pin_id in self.pins.pins() {
+            // An uninstall in flight hides its pin at once (the app vanishes
+            // from the dock the moment it's dropped on Install), restored
+            // only if the rebuild fails.
+            if self.uninstalling.contains_key(pin_id) {
+                continue;
+            }
             // Match a real App entry, a box's Group entry, or — for
             // filesystem pins only (path ids, home-strip `folder-<name>`
             // ids) — a File entry. Other pins never match File/Package
@@ -1615,7 +1639,9 @@ impl App {
             .keys()
             .copied()
             .filter(|i| {
-                self.kinds.get(*i) == Some(&apps::EntryKind::App) && !self.dock_order.contains(i)
+                self.kinds.get(*i) == Some(&apps::EntryKind::App)
+                    && !self.dock_order.contains(i)
+                    && !self.is_removing(*i)
             })
             .collect();
         running_unpinned.sort_unstable();

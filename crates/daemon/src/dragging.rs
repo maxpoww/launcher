@@ -690,15 +690,16 @@ impl App {
         let section = content::section_at(layout, pos)?;
         match self.kinds.get(entry_idx) {
             Some(apps::EntryKind::Package) if section == content::SECTION_APPS => Some(section),
-            // Only apps waverunner installed (i.e. in the managed
-            // home-manager list) can be uninstalled here — base / system
-            // apps don't offer the target at all (a drop just snaps back).
+            // Only apps waverunner installed can be uninstalled here — a
+            // managed package (in the home-manager list) or an installed
+            // catalog webapp. Base / system apps don't offer the target at
+            // all (a drop just snaps back).
             Some(apps::EntryKind::App)
                 if section == content::SECTION_INSTALL
-                    && self
-                        .entries
-                        .get(entry_idx)
-                        .is_some_and(|e| self.removable_ids.contains(&e.id)) =>
+                    && self.entries.get(entry_idx).is_some_and(|e| {
+                        self.removable_ids.contains(&e.id)
+                            || self.installed_webapp_slug(&e.id).is_some()
+                    }) =>
             {
                 Some(section)
             }

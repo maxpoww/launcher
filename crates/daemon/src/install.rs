@@ -160,7 +160,7 @@ impl App {
                 debug!("declarative op for {id}: ok={ok}");
                 self.busy_ids.remove(&id);
                 let _ = &desktop_ids; // reserved for a future authoritative gui probe
-                if let Some(attr) = self.uninstalling.remove(&id) {
+                if let Some(attr) = self.uninstalling.get(&id).cloned() {
                     // An uninstall finished. Only now — on success — drop the
                     // cache entry and dock pin; on failure the package is
                     // still installed and still tracked (apply_uninstall
@@ -170,8 +170,17 @@ impl App {
                         self.pins.unpin(&id);
                         self.recompute_removable();
                         self.indexer.request_rescan_fresh();
+                        // Keep `id` in `uninstalling` so the app stays hidden
+                        // (see `is_removing`) through the seconds between the
+                        // rebuild finishing and the reindex — `on_apps_loaded`
+                        // prunes it once the real entry is actually gone.
+                        // Otherwise it flashes back onto the grid mid-rebuild.
                     } else {
+                        // Rebuild failed: the app is still installed, so
+                        // un-hide it and flash the failure.
+                        self.uninstalling.remove(&id);
                         self.flash_failed(id);
+                        self.refilter();
                     }
                 } else if ok {
                     // Install succeeded: mark THIS attr confirmed and persist.

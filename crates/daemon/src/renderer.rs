@@ -71,7 +71,10 @@ struct IconInstance {
     rect_min: [f32; 2],
     rect_max: [f32; 2],
     layer: u32,
-    _pad: [u32; 3],
+    // Silhouette tint: rgb colour + strength in a (0 = untinted). Packed
+    // contiguously (offset 20) so `vertex_attr_array` lays it out with no
+    // padding — the struct is exactly 36 bytes, Pod-clean.
+    tint: [f32; 4],
 }
 
 /// Per-instance data for the open box's frosted backdrop quad.
@@ -466,7 +469,7 @@ impl Renderer {
                     array_stride: std::mem::size_of::<IconInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Uint32
+                        0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4
                     ],
                 }],
             },
@@ -1442,6 +1445,6 @@ fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
         rect_min: [i.rect.x, i.rect.y],
         rect_max: [i.rect.x + i.rect.w, i.rect.y + i.rect.h],
         layer: i.layer,
-        _pad: [0; 3],
+        tint: i.tint,
     }
 }

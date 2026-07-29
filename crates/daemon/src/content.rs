@@ -43,10 +43,15 @@ pub struct RectInst {
 }
 
 /// One icon quad, referencing a texture-array layer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct IconInst {
     pub rect: Rect,
     pub layer: u32,
+    /// Colour wash over the icon's silhouette: `rgb` the colour, `a` the
+    /// strength (0 = untinted, the default). Used to flush the drag ghost
+    /// red while it hovers the uninstall target — the icon that's about to
+    /// disappear literally reddens in hand.
+    pub tint: [f32; 4],
 }
 
 /// One continuous soft drop shadow wrapping a rounded rect (the dock). The
@@ -1221,6 +1226,7 @@ pub fn scene(
                         m,
                     ),
                     layer: *layer,
+                    tint: [0.0; 4],
                 });
             }
             continue;
@@ -1228,6 +1234,7 @@ pub fn scene(
         scene.icons.push(IconInst {
             rect: icon_rect,
             layer: layer_of(entry_idx),
+            tint: [0.0; 4],
         });
         if placeholders.get(entry_idx).copied().unwrap_or(false) {
             if let Some(ch) = entries.get(entry_idx).and_then(|e| e.name.chars().next()) {
@@ -1304,6 +1311,13 @@ pub fn scene(
                 glass: 0.0,
             });
         }
+        // Over the uninstall target, flush the ghost red — the icon in hand
+        // is the one about to disappear, so it reddens to say "drop = remove".
+        let tint = if df.drop_section == Some(SECTION_INSTALL) {
+            [0.52, 0.11, 0.09, 0.55]
+        } else {
+            [0.0; 4]
+        };
         // Ghost following the pointer, topmost: the dragged icon, or a
         // box's mini stack. Sized to the row it hovers — dock icons over
         // the dock, grid cells over the grid — so the grabbed icon always
@@ -1325,12 +1339,14 @@ pub fn scene(
                         m,
                     ),
                     layer: *layer,
+                    tint,
                 });
             }
         } else {
             scene.overlay.push(IconInst {
                 rect: Rect::new(gx - size / 2.0, gy - size / 2.0, size, size),
                 layer: layer_of(df.entry_idx),
+                tint,
             });
         }
     }
@@ -1624,6 +1640,7 @@ pub fn scene(
                             m,
                         ),
                         layer: *layer,
+                        tint: [0.0; 4],
                     });
                 }
                 if !covered {
@@ -1659,6 +1676,7 @@ pub fn scene(
                     size,
                 ),
                 layer: layer_of(entry_idx),
+                tint: [0.0; 4],
             });
             if !covered && placeholders.get(entry_idx).copied().unwrap_or(false) {
                 if let Some(ch) = entry.name.chars().next() {
@@ -1878,6 +1896,7 @@ pub fn scene(
             boxgrid.icons.push(IconInst {
                 rect: Rect::new(cx - size / 2.0, cy - size / 2.0, size, size),
                 layer: layer_of(idx),
+                tint: [0.0; 4],
             });
             if placeholders.get(idx).copied().unwrap_or(false) {
                 if let Some(ch) = entries.get(idx).and_then(|e| e.name.chars().next()) {
@@ -1946,6 +1965,7 @@ pub fn scene(
         scene.overlay.push(IconInst {
             rect: Rect::new(pos.0 - s / 2.0, pos.1 - s / 2.0, s, s),
             layer: layer_of(entry),
+            tint: [0.0; 4],
         });
     }
 
