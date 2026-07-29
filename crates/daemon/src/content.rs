@@ -43,7 +43,7 @@ pub struct RectInst {
 }
 
 /// One icon quad, referencing a texture-array layer.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct IconInst {
     pub rect: Rect,
     pub layer: u32,
@@ -52,6 +52,10 @@ pub struct IconInst {
     /// red while it hovers the uninstall target — the icon that's about to
     /// disappear literally reddens in hand.
     pub tint: [f32; 4],
+    /// Progress-ring mode: `0.0..=1.0` makes this quad a circular install
+    /// progress ring (that fraction filled) instead of a textured icon; a
+    /// negative value (the default) draws the icon normally.
+    pub ring: f32,
 }
 
 /// One continuous soft drop shadow wrapping a rounded rect (the dock). The
@@ -825,6 +829,10 @@ pub struct FrameInput<'a> {
     /// Entries being realized for an ephemeral "try it" run, aligned with
     /// `entries`: their cells say "Launching…".
     pub launching: &'a [bool],
+    /// Install progress per entry, aligned with `entries`: `0.0..=1.0`
+    /// draws a macOS-style circular progress ring over an installing tile;
+    /// a negative value (the default) means no ring. Empty slice = none.
+    pub progress: &'a [f32],
     /// Group cells: (entry index of the transient group entry, up to
     /// four member texture layers for the 2×2 mini preview). Cells
     /// listed here draw the tile + minis instead of a single icon.
@@ -947,6 +955,7 @@ pub fn scene(
         failed,
         installing,
         launching,
+        progress,
         group_minis,
         apps_group,
         apps_slide,
@@ -1227,6 +1236,7 @@ pub fn scene(
                     ),
                     layer: *layer,
                     tint: [0.0; 4],
+                    ring: -1.0,
                 });
             }
             continue;
@@ -1235,6 +1245,7 @@ pub fn scene(
             rect: icon_rect,
             layer: layer_of(entry_idx),
             tint: [0.0; 4],
+            ring: -1.0,
         });
         if placeholders.get(entry_idx).copied().unwrap_or(false) {
             if let Some(ch) = entries.get(entry_idx).and_then(|e| e.name.chars().next()) {
@@ -1340,6 +1351,7 @@ pub fn scene(
                     ),
                     layer: *layer,
                     tint,
+                    ring: -1.0,
                 });
             }
         } else {
@@ -1347,6 +1359,7 @@ pub fn scene(
                 rect: Rect::new(gx - size / 2.0, gy - size / 2.0, size, size),
                 layer: layer_of(df.entry_idx),
                 tint,
+                ring: -1.0,
             });
         }
     }
@@ -1641,6 +1654,7 @@ pub fn scene(
                         ),
                         layer: *layer,
                         tint: [0.0; 4],
+                        ring: -1.0,
                     });
                 }
                 if !covered {
@@ -1677,6 +1691,7 @@ pub fn scene(
                 ),
                 layer: layer_of(entry_idx),
                 tint: [0.0; 4],
+                ring: -1.0,
             });
             if !covered && placeholders.get(entry_idx).copied().unwrap_or(false) {
                 if let Some(ch) = entry.name.chars().next() {
@@ -1702,6 +1717,22 @@ pub fn scene(
             let is_failed = failed.get(entry_idx).copied().unwrap_or(false);
             let is_installing = installing.get(entry_idx).copied().unwrap_or(false);
             let is_launching = launching.get(entry_idx).copied().unwrap_or(false);
+            // A macOS-style circular progress ring over an installing tile:
+            // pushed after the icon (so it draws on top), sharing its rect.
+            let prog = progress.get(entry_idx).copied().unwrap_or(-1.0);
+            if is_installing && prog >= 0.0 {
+                g.icons.push(IconInst {
+                    rect: Rect::new(
+                        cx - size / 2.0,
+                        icon_cy - size / 2.0 - lift(entry_idx),
+                        size,
+                        size,
+                    ),
+                    layer: 0,
+                    tint: [0.0; 4],
+                    ring: prog.clamp(0.0, 1.0),
+                });
+            }
             let name = if is_busy && is_launching {
                 "Launching…".to_string()
             } else if is_busy && (s == SECTION_INSTALL || is_installing) {
@@ -1897,6 +1928,7 @@ pub fn scene(
                 rect: Rect::new(cx - size / 2.0, cy - size / 2.0, size, size),
                 layer: layer_of(idx),
                 tint: [0.0; 4],
+                ring: -1.0,
             });
             if placeholders.get(idx).copied().unwrap_or(false) {
                 if let Some(ch) = entries.get(idx).and_then(|e| e.name.chars().next()) {
@@ -1966,6 +1998,7 @@ pub fn scene(
             rect: Rect::new(pos.0 - s / 2.0, pos.1 - s / 2.0, s, s),
             layer: layer_of(entry),
             tint: [0.0; 4],
+            ring: -1.0,
         });
     }
 

@@ -45,6 +45,99 @@ pub(crate) struct PendingInstall {
     pub(crate) placeholder: bool,
     /// Last attempt failed; the tile shows "Failed" and a click retries.
     pub(crate) failed: bool,
+    /// When the (current) install attempt began — drives the progress ring.
+    /// Reset on a retry so the ring restarts from empty.
+    pub(crate) started: Instant,
+    /// Set when the rebuild actually finished (`Done` ok): the ring then
+    /// eases to a full circle over [`INSTALL_RING_FILL`] before the deferred
+    /// rescan swaps in the real app, so even a quick install fills the ring
+    /// instead of popping at 20%.
+    pub(crate) completed_at: Option<Instant>,
+    /// Whether the post-fill rescan has been fired (so it fires just once).
+    pub(crate) rescan_fired: bool,
+}
+
+/// Progress fraction for an install's ring, given how long it has been
+/// running. `nixos-rebuild` reports no real percentage, so this fakes the
+/// feel of a real installer with two eased phases: a brisk climb to ~85%,
+/// then a slow crawl through the last stretch that never quite fills. The
+/// tile is replaced by the real app on completion, which reads as 100%.
+pub(crate) fn install_ring_progress(elapsed: Duration) -> f32 {
+    // `nixos-rebuild` reports no real percentage, and any exponential ease is
+    // front-loaded (rushes early, crawls forever near the top). So advance
+    // *linearly* over an expected build window — an even pace, where the first
+    // half takes as long as the second — and only if the build overruns that
+    // estimate do we ease slowly through the last sliver. The tile is replaced
+    // by the real app on completion, which reads as 100% however far we got.
+    const EXPECTED: f32 = 55.0; // seconds of even, linear climb to `LINEAR_TO`
+    const LINEAR_TO: f32 = 0.85;
+    let t = elapsed.as_secs_f32();
+    if t < EXPECTED {
+        LINEAR_TO * (t / EXPECTED)
+    } else {
+        // Past the estimate: crawl the remaining sliver so it still inches.
+        LINEAR_TO + 0.12 * (1.0 - (-(t - EXPECTED) / 40.0).exp())
+    }
+}
+
+/// How long the ring takes to ease from wherever it was to a full circle
+/// once the rebuild finishes — also how long the real app's appearance is
+/// deferred, so the completion always reads even for a quick install.
+pub(crate) const INSTALL_RING_FILL: Duration = Duration::from_millis(420);
+
+/// A webapp installs instantly (it's only a classification flip), but we fake
+/// this much of a "build" so it lands with the exact same progress ring as a
+/// package instead of just snapping onto the grid. `+ INSTALL_RING_FILL` of
+/// completion sweep lands the whole thing at ~4 s.
+pub(crate) const WEBAPP_BUILD: Duration = Duration::from_millis(3600);
+
+/// A webapp whose install ring is playing: it is already placed on the grid
+/// (and in `managed_webapps`), this just drives its ring for the fake build.
+pub(crate) struct PendingWebapp {
+    /// The grid entry id (`webapp-<slug>`) the ring draws over.
+    pub(crate) id: String,
+    pub(crate) started: Instant,
+    /// Set once the fake build elapses: the ring then eases to full.
+    pub(crate) completed_at: Option<Instant>,
+}
+
+impl PendingWebapp {
+    /// Ring fraction: a linear climb to `LINEAR_TO` over [`WEBAPP_BUILD`],
+    /// then an ease-out to a full ring over [`INSTALL_RING_FILL`] — the same
+    /// shape a package shows, but on a known 4 s timeline.
+    pub(crate) fn ring_fraction(&self) -> f32 {
+        const LINEAR_TO: f32 = 0.85;
+        match self.completed_at {
+            None => {
+                let k = (self.started.elapsed().as_secs_f32() / WEBAPP_BUILD.as_secs_f32()).min(1.0);
+                LINEAR_TO * k
+            }
+            Some(done) => {
+                let k =
+                    (done.elapsed().as_secs_f32() / INSTALL_RING_FILL.as_secs_f32()).clamp(0.0, 1.0);
+                let ease = 1.0 - (1.0 - k) * (1.0 - k);
+                LINEAR_TO + (1.0 - LINEAR_TO) * ease
+            }
+        }
+    }
+}
+
+impl PendingInstall {
+    /// The progress-ring fraction to draw right now: the linear time estimate
+    /// while building, then — once the rebuild has actually finished — an
+    /// ease-out from that point to a full ring over [`INSTALL_RING_FILL`].
+    pub(crate) fn ring_fraction(&self) -> f32 {
+        match self.completed_at {
+            None => install_ring_progress(self.started.elapsed()),
+            Some(done) => {
+                let base = install_ring_progress(done.duration_since(self.started));
+                let k =
+                    (done.elapsed().as_secs_f32() / INSTALL_RING_FILL.as_secs_f32()).clamp(0.0, 1.0);
+                let ease = 1.0 - (1.0 - k) * (1.0 - k); // ease-out to full
+                base + (1.0 - base) * ease
+            }
+        }
+    }
 }
 
 /// Minimum query length before the package index is ranked — one
@@ -192,10 +285,19 @@ impl App {
                         self.managed.confirm(&id);
                         self.recompute_removable();
                     }
-                    // Profile changed: rescan so the grid gains the entry.
+                    // A drag-to-install tile: mark it finished so its ring
+                    // eases to full, and defer the rescan (see `draw`) until
+                    // that fill plays — so a quick install still fills the ring
+                    // rather than popping the app in at 20%. No tile (some
+                    // other install path) → rescan straight away as before.
                     // Fresh variant clears stale icon-not-found cache entries
                     // so the newly installed app's icon loads.
-                    self.indexer.request_rescan_fresh();
+                    if let Some(p) = self.pending_installs.iter_mut().find(|p| p.attr == id) {
+                        p.completed_at = Some(std::time::Instant::now());
+                        self.schedule_frame();
+                    } else {
+                        self.indexer.request_rescan_fresh();
+                    }
                 } else {
                     // Install failed: roll back the in-memory stage. Nothing
                     // was written to disk, so it stays clean.
@@ -468,6 +570,9 @@ impl App {
             icon_pixels,
             placeholder,
             failed: false,
+            started: Instant::now(),
+            completed_at: None,
+            rescan_fired: false,
         });
         // A dock drop was already pinned at its slot by the caller (via
         // `pin_dropped_on_dock`), so the tile shows there immediately; the
@@ -602,6 +707,12 @@ impl App {
             .pending_installs
             .iter()
             .filter(|p| !p.failed && !self.busy_ids.contains(&p.attr))
+            // Hold a just-finished tile until its ring has eased to full, so
+            // the completion animation always plays before the swap-in.
+            .filter(|p| {
+                p.completed_at
+                    .is_none_or(|c| c.elapsed() >= INSTALL_RING_FILL)
+            })
             .map(|p| (p.attr.clone(), p.desktop_ids.clone(), p.anchor.clone()))
             .collect();
         // (attr, app_id, anchor, gui) — gui is false when the package

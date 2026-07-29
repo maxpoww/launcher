@@ -257,6 +257,7 @@ fn main() -> anyhow::Result<()> {
         group_minis: Vec::new(),
         order: order::OrderDb::load(),
         pending_installs: Vec::new(),
+        pending_webapps: Vec::new(),
         managed_install_attrs: Vec::new(),
         known_app_ids: HashSet::new(),
         cli_ids: HashSet::new(),
@@ -623,6 +624,10 @@ pub struct App {
     /// as grid tiles at their drop slots; finalized (or retried) when the
     /// install resolves.
     pending_installs: Vec<PendingInstall>,
+    /// Webapps whose install progress ring is playing: already placed on the
+    /// grid, this just drives the same ring for a fake ~4 s "build" so they
+    /// land with the same feel as a package (see [`install::PendingWebapp`]).
+    pending_webapps: Vec<crate::install::PendingWebapp>,
     /// Managed-install attrs fired via `start_managed_install` (dock-drop
     /// and startup recovery) that have no grid tile.  Resolved to dock
     /// pins in `resolve_pending_installs` once the app appears in the index.
@@ -2033,6 +2038,9 @@ impl App {
                 .find(|p| p.attr == attr && p.failed)
                 .map(|p| {
                     p.failed = false;
+                    p.started = std::time::Instant::now(); // restart the ring
+                    p.completed_at = None;
+                    p.rescan_fired = false;
                     p.desktop_ids.clone()
                 });
             if let Some(desktop_ids) = desktop_ids {

@@ -736,6 +736,14 @@ impl App {
         let id = crate::webapps::id_for_slug(slug);
         let slot = self.reorder_slot.unwrap_or(self.apps_span);
         self.place_in_grid_at_slot(&id, dragged_idx, slot);
+        // A webapp installs instantly, but play the same progress ring for a
+        // beat (see `PendingWebapp`) so it lands with the same feel as a
+        // package; `draw` fills and then retires the ring.
+        self.pending_webapps.push(crate::install::PendingWebapp {
+            id,
+            started: Instant::now(),
+            completed_at: None,
+        });
         self.refilter();
         self.schedule_frame();
     }

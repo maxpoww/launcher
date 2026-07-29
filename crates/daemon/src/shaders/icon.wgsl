@@ -24,6 +24,7 @@ struct Instance {
     @location(1) rect_max: vec2<f32>,  // bottom-right, pixels
     @location(2) layer: u32,           // texture array layer
     @location(3) tint: vec4<f32>,      // silhouette tint: rgb + strength (a)
+    @location(4) ring: f32,            // >=0 = draw a progress ring, that filled
 };
 
 struct VsOut {
@@ -31,6 +32,7 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) layer: u32,
     @location(2) @interpolate(flat) tint: vec4<f32>,
+    @location(3) @interpolate(flat) ring: f32,
 };
 
 @vertex
@@ -43,6 +45,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.uv = corner;
     out.layer = inst.layer;
     out.tint = inst.tint;
+    out.ring = inst.ring;
     return out;
 }
 
@@ -63,8 +66,37 @@ fn stroke_cov(d: f32, half: f32, aa: f32) -> f32 {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(icons, icon_sampler, in.uv, i32(in.layer));
-    // One pixel in uv units (the ghost quad is square) for the SDF edges below.
+    // One pixel in uv units (the quad is square) for the SDF edges below.
     let px = max(fwidth(in.uv.x), 1e-5);
+    // Progress-ring mode: this quad is an install progress ring, not an icon.
+    // A dark veil dims the tile beneath, then a faint white track carries a
+    // brighter arc filled clockwise from the top to `ring` of a full turn.
+    if (in.ring >= 0.0) {
+        let q = in.uv - vec2<f32>(0.5);
+        // Dim veil: a rounded square nested *inside* the icon (half-extent
+        // 0.46 with a generous 0.18 radius) so its soft corners stay within
+        // the squircle instead of poking out into a dark corner frame.
+        let veil = fill_cov(sd_box(q, vec2<f32>(0.28, 0.28)) - 0.18, px) * 0.55;
+        // Ring annulus of centreline radius rc, half-thickness ht.
+        let rc = 0.40;
+        let ht = 0.052;
+        let ann = 1.0 - smoothstep(ht - px, ht + px, abs(length(q) - rc));
+        // Angle from the top, clockwise, as a fraction [0,1) of a full turn.
+        let ang = atan2(q.x, -q.y);
+        var frac = ang / 6.2831853;
+        if (frac < 0.0) { frac = frac + 1.0; }
+        let aw = px / (6.2831853 * rc) + 0.003; // angular AA at the arc's head
+        let arcm = 1.0 - smoothstep(in.ring - aw, in.ring + aw, frac);
+        let ring_a = ann * mix(0.30, 0.95, arcm); // faint track, bright arc
+        // Track stays white, the filled progress arc is green.
+        let ring_col = mix(vec3<f32>(0.96), vec3<f32>(0.24, 0.80, 0.40), arcm);
+        // Composite the ring "over" the dark veil (premultiplied).
+        var oa = veil;
+        var orgb = vec3<f32>(0.0); // premultiplied black veil
+        oa = ring_a + oa * (1.0 - ring_a);
+        orgb = ring_col * ring_a + orgb * (1.0 - ring_a);
+        return vec4<f32>(orgb, oa) * globals.alpha;
+    }
     // Squircle (superellipse) corner mask: |x|^n + |y|^n = 1 in the tile's
     // [-1,1] space. This only trims the extreme corners, so full-bleed
     // square icons pick up macOS-style rounded corners while already-round

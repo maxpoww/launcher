@@ -73,8 +73,11 @@ struct IconInstance {
     layer: u32,
     // Silhouette tint: rgb colour + strength in a (0 = untinted). Packed
     // contiguously (offset 20) so `vertex_attr_array` lays it out with no
-    // padding — the struct is exactly 36 bytes, Pod-clean.
+    // padding.
     tint: [f32; 4],
+    // Progress-ring mode: >=0 draws a circular install ring that filled, <0
+    // draws the icon. Offset 36 → the struct is exactly 40 bytes, Pod-clean.
+    ring: f32,
 }
 
 /// Per-instance data for the open box's frosted backdrop quad.
@@ -469,7 +472,7 @@ impl Renderer {
                     array_stride: std::mem::size_of::<IconInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4
+                        0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32
                     ],
                 }],
             },
@@ -1446,5 +1449,6 @@ fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
         rect_max: [i.rect.x + i.rect.w, i.rect.y + i.rect.h],
         layer: i.layer,
         tint: i.tint,
+        ring: i.ring,
     }
 }

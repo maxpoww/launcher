@@ -431,6 +431,49 @@ impl App {
                 self.dirty = true;
             }
         }
+        // Keep frames coming while any install is in flight so its progress
+        // ring animates (a failed tile is static, so it doesn't count).
+        if self.pending_installs.iter().any(|p| !p.failed) || !self.pending_webapps.is_empty() {
+            self.dirty = true;
+        }
+        // Webapp install ring lifecycle: begin the completion fill once the
+        // fake build has elapsed, then retire the ring (revealing the app,
+        // already placed) once that fill has played.
+        for w in &mut self.pending_webapps {
+            if w.completed_at.is_none() && w.started.elapsed() >= crate::install::WEBAPP_BUILD {
+                w.completed_at = Some(Instant::now());
+            }
+        }
+        let webapp_done: Vec<String> = self
+            .pending_webapps
+            .iter()
+            .filter(|w| {
+                w.completed_at
+                    .is_some_and(|c| c.elapsed() >= crate::install::INSTALL_RING_FILL)
+            })
+            .map(|w| w.id.clone())
+            .collect();
+        if !webapp_done.is_empty() {
+            self.pending_webapps.retain(|w| !webapp_done.contains(&w.id));
+            self.just_installed = webapp_done.into_iter().next(); // bounce it in
+            self.refilter();
+        }
+        // A finished install whose ring has now eased to full: fire the
+        // deferred rescan that swaps the tile for the real app (held back so
+        // the completion fill always plays — see `install_ring_progress`).
+        let mut fill_done = false;
+        for p in &mut self.pending_installs {
+            if !p.rescan_fired
+                && p.completed_at
+                    .is_some_and(|c| c.elapsed() >= crate::install::INSTALL_RING_FILL)
+            {
+                p.rescan_fired = true;
+                fill_done = true;
+            }
+        }
+        if fill_done {
+            self.indexer.request_rescan_fresh();
+        }
         let mag_target = if self.gesture.dragging.is_none() && self.mag_sleep.is_none() {
             1.0f32
         } else {
@@ -588,6 +631,7 @@ impl App {
                 self.pending_installs
                     .iter()
                     .any(|p| p.attr == e.id && !p.failed)
+                    || self.pending_webapps.iter().any(|w| w.id == e.id)
             })
             .collect();
         // Packages being realized for an ephemeral run show "Launching…".
@@ -601,6 +645,25 @@ impl App {
             .iter()
             .zip(&installing)
             .map(|(e, &inst)| inst || self.busy_ids.contains(&e.id))
+            .collect();
+        // Progress-ring fraction per entry: an eased estimate for each
+        // in-flight (non-failed) install tile, -1 elsewhere (no ring).
+        let progress: Vec<f32> = self
+            .entries
+            .iter()
+            .map(|e| {
+                self.pending_installs
+                    .iter()
+                    .find(|p| p.attr == e.id && !p.failed)
+                    .map(|p| p.ring_fraction())
+                    .or_else(|| {
+                        self.pending_webapps
+                            .iter()
+                            .find(|w| w.id == e.id)
+                            .map(|w| w.ring_fraction())
+                    })
+                    .unwrap_or(-1.0)
+            })
             .collect();
         let failed: Vec<bool> = self
             .entries
@@ -753,6 +816,7 @@ impl App {
                 failed: &failed,
                 installing: &installing,
                 launching: &launching,
+                progress: &progress,
                 group_minis: &self.group_minis,
                 apps_group: &self.apps_group_name(),
                 apps_slide: &self.apps_slide,
