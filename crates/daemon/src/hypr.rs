@@ -68,6 +68,15 @@ pub fn dispatch(lua: &str) {
     }
 }
 
+/// Close a window by address (best effort) — used when uninstalling an app
+/// that's still open, so it goes away with its package instead of lingering
+/// on screen with nothing behind it.
+pub fn close_window(addr: &str) {
+    dispatch(&format!(
+        "hl.dsp.closewindow({{ window = \"address:{addr}\" }})"
+    ));
+}
+
 /// Address (`0x…`) of the currently-focused window, if any.
 pub fn active_window() -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;

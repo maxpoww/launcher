@@ -264,6 +264,10 @@ impl App {
                 // list, then switch; the busy id is the app cell.
                 if let Some(attr) = self.managed.attr_for_app(&id) {
                     info!("uninstalling {id} (attr {attr})");
+                    // Close it first if it's open, so uninstalling a running
+                    // app removes it cleanly instead of leaving a live window
+                    // with no package behind it.
+                    self.kill_app_windows(&id);
                     // Defer dropping the cache entry and dock pin until the
                     // rebuild succeeds (see `nix::Event::Done`): a failed
                     // uninstall re-adds the package-list line, so removing the
@@ -846,6 +850,9 @@ impl App {
     /// (its launcher file stays on disk).
     fn uninstall_webapp(&mut self, slug: &str) {
         info!("uninstalling webapp {slug}");
+        // Close it first if it's open, so uninstalling a running webapp closes
+        // its window instead of leaving it up as an orphaned catalog entry.
+        self.kill_app_windows(&crate::webapps::id_for_slug(slug));
         self.managed_webapps.remove(slug);
         self.refilter();
         self.schedule_frame();

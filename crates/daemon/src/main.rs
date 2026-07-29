@@ -1553,6 +1553,21 @@ impl App {
     /// `StartupWMClass`, its desktop-file id and the id's last dotted
     /// segment (`org.mozilla.firefox` → `firefox`), and the exec's
     /// program basename. Only real apps can be running windows.
+    /// Close every open window of app `id` (best effort) — used on uninstall
+    /// so an app that's still open goes away with its package rather than
+    /// lingering on screen (and in the running-dock zone) with nothing behind
+    /// it.
+    fn kill_app_windows(&self, id: &str) {
+        let Some(idx) = self.entries.iter().position(|e| e.id == id) else {
+            return;
+        };
+        if let Some(addrs) = self.running.get(&idx) {
+            for addr in addrs {
+                crate::hypr::close_window(addr);
+            }
+        }
+    }
+
     fn app_match_keys(entry: &AppEntry, kind: apps::EntryKind) -> Vec<String> {
         if kind != apps::EntryKind::App {
             return Vec::new();
@@ -1634,6 +1649,22 @@ impl App {
         }
     }
 
+    /// Whether a dock notify's app is still installed — false once it has been
+    /// uninstalled (webapp dropped from `managed_webapps`, package entry gone,
+    /// or an uninstall in flight), so the dead temp-pin is dropped.
+    fn notify_still_installed(&self, id: &str) -> bool {
+        if self.uninstalling.contains_key(id) {
+            return false;
+        }
+        if let Some(slug) = crate::webapps::slug_of_id(id) {
+            return self.managed_webapps.contains(slug);
+        }
+        self.entries
+            .iter()
+            .zip(&self.kinds)
+            .any(|(e, k)| e.id == id && *k == apps::EntryKind::App)
+    }
+
     /// Arm a 3 s auto-hide after a notify pop-up: the dock only came up to
     /// flash "your app is ready", so it tucks itself away again.
     fn arm_notify_dock_hide(&mut self) {
@@ -1669,6 +1700,17 @@ impl App {
 
     fn recompute_dock_order(&mut self) {
         self.dock_order.clear();
+        // Drop any dock notify whose app is no longer installed (e.g.
+        // uninstalled while it was still surfaced on the dock): its `.desktop`
+        // may linger (a webapp returns to the catalog), so without this it
+        // would stick to the dock as a dead icon that can't be launched or
+        // removed.
+        if !self.install_notify.is_empty() {
+            self.install_notify = std::mem::take(&mut self.install_notify)
+                .into_iter()
+                .filter(|n| self.notify_still_installed(&n.id))
+                .collect();
+        }
         // A package installing onto the dock rides its `Package` transient
         // until the real app lands — allow that pin to match (below), while
         // other Package/File transient pins stay excluded.
