@@ -1252,9 +1252,22 @@ pub fn scene(
             tint: [0.0; 4],
             ring: -1.0,
         });
+        // A package installing straight onto the dock (drag-to-dock pins the
+        // tile there) animates the same macOS-style progress ring the grid
+        // tiles show, over its pinned slot — drawn on top of the icon.
+        let dock_prog = progress.get(entry_idx).copied().unwrap_or(-1.0);
+        if dock_prog >= 0.0 {
+            scene.icons.push(IconInst {
+                rect: icon_rect,
+                layer: 0,
+                tint: [0.0; 4],
+                ring: dock_prog.clamp(0.0, 1.0),
+            });
+        }
         // A just-installed app surfaced here plays a one-shot glass shine over
         // its dock icon (`ring = 2.0 + progress`; the shader clips it to the
-        // icon silhouette).
+        // icon silhouette). This covers both a drag-to-dock install's
+        // completion sweep and a hidden-completion notify's one-shot shine.
         let dock_shine = shine.get(entry_idx).copied().unwrap_or(-1.0);
         if dock_shine >= 0.0 {
             scene.icons.push(IconInst {

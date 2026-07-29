@@ -1727,6 +1727,16 @@ impl App {
             if self.uninstalling.contains_key(pin_id) {
                 continue;
             }
+            // A webapp that's been uninstalled (returned to the catalog) keeps
+            // its materialized `.desktop`, so a stale pin would still match its
+            // App entry and stick to the dock. A catalog webapp is never docked
+            // — skip the pin so it can't ghost there. (`uninstall_webapp` drops
+            // the pin outright; this is the belt-and-suspenders net.)
+            if crate::webapps::slug_of_id(pin_id)
+                .is_some_and(|s| !self.managed_webapps.contains(s))
+            {
+                continue;
+            }
             // Match a real App entry, a box's Group entry, or — for
             // filesystem pins only (path ids, home-strip `folder-<name>`
             // ids) — a File entry. Other pins never match File/Package

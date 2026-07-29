@@ -605,6 +605,12 @@ impl App {
         // A dock app that lands in the grid unpins as it does.
         if orig.is_none() {
             self.pins.unpin(id);
+            // If it was a just-installed app riding the dock's "fresh install"
+            // zone, retire that notify — otherwise the grid keeps hiding it
+            // (it's still "notified") and `recompute_dock_order` snaps it back
+            // onto the dock. This is the third exit from the zone, alongside
+            // opening it and pinning it left of the divider.
+            self.install_notify.retain(|n| n.id.as_str() != id);
         }
         let orig_slot = orig.and_then(|o| self.apps_slots.get(o).copied());
         let slot = self
@@ -759,6 +765,14 @@ impl App {
         self.managed_webapps.add(slug);
         let id = crate::webapps::id_for_slug(slug);
         self.pin_dropped_on_dock(&id, insert, None, false);
+        // Play the same ring-fill + shine flourish a grid install shows, over
+        // the pinned dock slot (the dock now draws both — see `content`). Without
+        // this a drag-straight-to-dock webapp appeared with no feedback at all.
+        self.pending_webapps.push(crate::install::PendingWebapp {
+            id,
+            started: Instant::now(),
+            completed_at: None,
+        });
         self.refilter();
         self.schedule_frame();
     }
@@ -850,11 +864,19 @@ impl App {
     /// (its launcher file stays on disk).
     fn uninstall_webapp(&mut self, slug: &str) {
         info!("uninstalling webapp {slug}");
+        let id = crate::webapps::id_for_slug(slug);
         // Close it first if it's open, so uninstalling a running webapp closes
         // its window instead of leaving it up as an orphaned catalog entry.
-        self.kill_app_windows(&crate::webapps::id_for_slug(slug));
+        self.kill_app_windows(&id);
         self.managed_webapps.remove(slug);
-        self.refilter();
+        // Drop any dock pin. A webapp's `.desktop` stays materialized after
+        // uninstall (it returns to the catalog), so a lingering pin would keep
+        // matching that App entry in `recompute_dock_order` — the icon would
+        // stick to the dock as an uninstalled catalog entry with no unpin path
+        // (catalog-webapp drags only try/install). This is the webapp analogue
+        // of the package uninstall's `pins.unpin` in `nix::Event::Done`.
+        self.pins.unpin(&id);
+        self.refilter(); // refilter recomputes the dock order
         self.schedule_frame();
     }
 
