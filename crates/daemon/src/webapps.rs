@@ -37,7 +37,7 @@ pub struct WebappEntry {
 impl WebappEntry {
     /// The desktop-file id this entry installs as (`webapp-netflix`).
     pub fn desktop_id(&self) -> String {
-        format!("webapp-{}", self.slug)
+        id_for_slug(&self.slug)
     }
 
     /// The frameless `Exec=` command — also used for a "try it" launch.
@@ -188,6 +188,12 @@ pub fn materialize_catalog() {
 /// `None` for a non-webapp id.
 pub fn slug_of_id(id: &str) -> Option<&str> {
     id.strip_prefix("webapp-")
+}
+
+/// The desktop id a slug installs as (`netflix` -> `webapp-netflix`) —
+/// the inverse of [`slug_of_id`], matching [`WebappEntry::desktop_id`].
+pub fn id_for_slug(slug: &str) -> String {
+    format!("webapp-{slug}")
 }
 
 /// Slugs of the catalog entries marked as storefront recommendations

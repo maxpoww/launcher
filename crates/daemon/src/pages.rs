@@ -86,6 +86,19 @@ impl PagedList {
             .push(id.to_owned());
     }
 
+    /// Replace `old` with `new` in place, keeping its exact slot (a pending
+    /// install's attr → the real app id once it lands). No-op if `old` is
+    /// absent; true when it swapped.
+    pub fn replace(&mut self, old: &str, new: &str) -> bool {
+        match self.position(old) {
+            Some((p, i)) => {
+                self.pages[p][i] = new.to_owned();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Remove `id` wherever it is; emptied pages drop. True if found.
     pub fn remove(&mut self, id: &str) -> bool {
         let found = self.contains(id);

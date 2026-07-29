@@ -13,8 +13,9 @@ use crate::{animation, apps, content, groups, hypr, pager, pages};
 use crate::{App, BOUNCE_DURATION, BOUNCE_HEIGHT, DOCK_REST_AFTER_CLOSE};
 
 /// Exponential make-room glide rate (per second) for the grid and dock
-/// reflow while dragging — higher is snappier, lower is slower.
-pub(crate) const MAKEROOM_RATE: f32 = 18.0;
+/// reflow while dragging — higher is snappier, lower is slower. Kept brisk
+/// so the icons part right under the dragged ghost instead of lagging it.
+pub(crate) const MAKEROOM_RATE: f32 = 34.0;
 
 impl App {
     /// Layout for an arbitrary card extent at the current scroll offsets.
@@ -22,7 +23,7 @@ impl App {
     /// grid then offers one extra empty page at its end (the Launchpad
     /// gesture: drag to the edge to park an app on a fresh page).
     pub(crate) fn ghost_page_active(&self) -> bool {
-        self.search.query.is_empty()
+        self.grid_resting()
             && self.gesture.dragging.as_ref().is_some_and(|d| {
                 matches!(
                     self.kinds.get(d.entry_idx),
@@ -324,19 +325,23 @@ impl App {
                 .iter()
                 .position(|&v| v == e)
         });
-        // A dock app or box dragged into the grid opens a brand-new slot
-        // (it has no cell to vacate): cells at or past the gap slide down
-        // one to make room — like a reorder, but leaving no hole behind.
+        // A drag with no grid cell to vacate opens a brand-new slot: cells
+        // at or past the gap slide down one to make room — like a reorder,
+        // but leaving no hole behind. That's a dock app/box dragged in, or a
+        // package / catalog webapp dragged up from the Install section (the
+        // same set `update_grid_target` treats as `inserting`).
         let insert_gap = self
             .gesture
             .dragging
             .as_ref()
             .filter(|d| {
-                d.from_dock
+                (d.from_dock
                     && matches!(
                         self.kinds.get(d.entry_idx),
                         Some(apps::EntryKind::App | apps::EntryKind::Group)
-                    )
+                    ))
+                    || self.kinds.get(d.entry_idx) == Some(&apps::EntryKind::Package)
+                    || self.is_catalog_webapp(d.entry_idx)
             })
             .and(self.reorder_slot);
         // Shifts happen in slot space, page-locally (Launchpad), via the
@@ -552,6 +557,7 @@ impl App {
             .as_ref()
             .map(|drag| content::DragFrame {
                 entry_idx: drag.entry_idx,
+                on_dock: self.drag_dock_insert(&layout, drag.pos).is_some(),
                 // A dock-origin drag is locked inside the box: the ghost
                 // can reorder or drop into the grid, but never follows the
                 // pointer up/out of the card (dropping outside just snaps

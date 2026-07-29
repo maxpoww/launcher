@@ -143,6 +143,18 @@ impl GroupDb {
         self.save();
     }
 
+    /// Swap a member id in place, keeping its slot — a pending install's
+    /// attr becomes the real app id once it lands in the box.
+    pub fn replace_member(&mut self, index: usize, old: &str, new: &str) {
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        if group.members.replace(old, new) {
+            info!("group {index}: {old} -> {new}");
+            self.save();
+        }
+    }
+
     /// Move a member to sit before flat member position `before` within
     /// its group (legacy flat-position reordering).
     pub fn move_member(&mut self, index: usize, id: &str, before: usize) {

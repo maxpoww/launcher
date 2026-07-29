@@ -29,6 +29,12 @@ pub(crate) struct PendingInstall {
     /// Grid id the installed app should land *before* (`None` = end) —
     /// the app displayed at the drop slot when it was let go.
     pub(crate) anchor: Option<String>,
+    /// Dropped on the dock instead of the grid: the tile pins there at this
+    /// slot (not a grid cell), and the finished app takes the same slot.
+    pub(crate) dock_slot: Option<usize>,
+    /// Dropped into (or onto, creating) a box: the tile is a member of this
+    /// group id while installing, and the finished app replaces it in place.
+    pub(crate) box_dest: Option<String>,
     /// Reserved-tail icon slot (`0..PENDING_INSTALL_CAP`); its texture
     /// layer is `pkg_layer_base + RANK_HITS_MAX + slot`.
     pub(crate) icon_slot: usize,
@@ -372,7 +378,20 @@ impl App {
     /// tile shows "Installing…" until the rescan swaps in the real app
     /// (see [`Self::resolve_pending_installs`]), or "Failed" (retry on
     /// click) if the switch fails.
-    pub(crate) fn start_pending_install(&mut self, attr: &str, name: String, version: String) {
+    ///
+    /// `dock_slot` is set when the drop landed on the dock band instead of
+    /// the grid: the tile then pins onto the dock at that slot (and the
+    /// finished app takes the same slot) rather than riding a grid cell.
+    /// `box_dest` is set when the drop landed in/onto a box: the tile is
+    /// already a member of that group and the finished app replaces it there.
+    pub(crate) fn start_pending_install(
+        &mut self,
+        attr: &str,
+        name: String,
+        version: String,
+        dock_slot: Option<usize>,
+        box_dest: Option<String>,
+    ) {
         if self.busy_ids.contains(attr) || self.pending_installs.iter().any(|p| p.attr == attr) {
             return;
         }
@@ -396,19 +415,22 @@ impl App {
         };
         // The grid id the tile should sit before: the first item at or
         // past the drop slot (the make-room gap) on its display page.
-        // A page-tail / ghost-page drop → append (no anchor).
-        let anchor = self.reorder_slot.and_then(|slot| {
-            let cap = self.apps_cap.max(1);
-            let dp = slot / cap;
-            self.apps_slots
-                .iter()
-                .enumerate()
-                .filter(|&(_, &s)| s >= slot && s / cap == dp)
-                .min_by_key(|&(_, &s)| s)
-                .and_then(|(j, _)| self.search.visible[content::SECTION_APPS].get(j))
-                .and_then(|&e| self.entries.get(e))
-                .map(|e| e.id.clone())
-        });
+        // A page-tail / ghost-page drop → append (no anchor). A dock or box
+        // drop rides that surface instead, so it takes no grid anchor.
+        let anchor = (dock_slot.is_none() && box_dest.is_none()).then(|| {
+            self.reorder_slot.and_then(|slot| {
+                let cap = self.apps_cap.max(1);
+                let dp = slot / cap;
+                self.apps_slots
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &s)| s >= slot && s / cap == dp)
+                    .min_by_key(|&(_, &s)| s)
+                    .and_then(|(j, _)| self.search.visible[content::SECTION_APPS].get(j))
+                    .and_then(|&e| self.entries.get(e))
+                    .map(|e| e.id.clone())
+            })
+        }).flatten();
         // The package's own icon, recovered from the hits by attr; no
         // rasterized hit icon falls back to the generic package tile.
         let (icon_pixels, placeholder) = match hit {
@@ -424,18 +446,23 @@ impl App {
                 renderer.update_icon_layer(layer, &icon_pixels);
             }
         }
-        info!("installing {attr} in place (slot {icon_slot}, anchor {anchor:?})");
+        info!("installing {attr} (slot {icon_slot}, anchor {anchor:?}, dock {dock_slot:?})");
         self.pending_installs.push(PendingInstall {
             attr: attr.to_owned(),
             name,
             version,
             desktop_ids: desktop_ids.clone(),
             anchor,
+            dock_slot,
+            box_dest,
             icon_slot,
             icon_pixels,
             placeholder,
             failed: false,
         });
+        // A dock drop was already pinned at its slot by the caller (via
+        // `pin_dropped_on_dock`), so the tile shows there immediately; the
+        // stored `dock_slot` lets the resolve re-pin the finished app.
         // Stage in memory only — packages.nix is NOT written until Done ok=true.
         self.managed.stage(attr, desktop_ids);
         self.recompute_removable();
@@ -494,6 +521,14 @@ impl App {
                 path: None,
             };
             let idx = self.push_transient(entry, apps::EntryKind::Package, placeholder, layer);
+            // A dock- or box-destined tile renders on that surface (its dock
+            // pin, or as a box member), not in the grid — the transient entry
+            // still exists so it can be drawn, but it claims no grid cell.
+            if self.pending_installs[i].dock_slot.is_some()
+                || self.pending_installs[i].box_dest.is_some()
+            {
+                continue;
+            }
             let cap = self.apps_cap.max(1);
             match anchor
                 .as_ref()
@@ -614,22 +649,38 @@ impl App {
         let mut linked_real = false;
         let mut changed = false;
         for (attr, app_id, anchor, gui) in resolved {
+            // Where the tile was dropped decides where the app lands: a dock
+            // drop re-pins the finished app at the same slot; a box drop
+            // swaps the placeholder member for the real app in place; a grid
+            // drop keeps it in the grid at its anchor and never pins — so it
+            // stays exactly where it was dropped instead of teleporting.
+            let (dock_slot, box_dest) = self
+                .pending_installs
+                .iter()
+                .find(|p| p.attr == attr)
+                .map(|p| (p.dock_slot, p.box_dest.clone()))
+                .unwrap_or((None, None));
             if let Some(anchor) = anchor {
                 self.order.insert_before(&app_id, &anchor);
             }
             // Record the real app id and whether it is a GUI app, so a
             // wrapped package (chromium → chromium-browser) never regrows a
-            // phantom terminal tile and uninstall maps back correctly. Then
-            // pin it onto the dock (a fresh install is usage-0 and would
-            // otherwise sort off the end) and flash it in.
+            // phantom terminal tile and uninstall maps back correctly.
             self.managed
                 .note_installed(&attr, std::slice::from_ref(&app_id), gui);
             changed = true;
             linked_real |= gui;
-            let slot = self.pins.pins().len();
-            self.pins.pin_at(&app_id, slot);
+            if let Some(slot) = dock_slot {
+                self.pins.unpin(&attr);
+                self.pins.pin_at(&app_id, slot);
+            }
+            if let Some(box_id) = box_dest {
+                if let Some(g) = self.groups.index_by_id(&box_id) {
+                    self.groups.replace_member(g, &attr, &app_id);
+                }
+            }
             self.just_installed = Some(app_id.clone());
-            info!("pending install {attr} resolved as app {app_id} (gui={gui})");
+            info!("pending install {attr} resolved as app {app_id} (gui={gui}, dock {dock_slot:?})");
             self.pending_installs.retain(|p| p.attr != attr);
             self.busy_ids.remove(&attr);
         }

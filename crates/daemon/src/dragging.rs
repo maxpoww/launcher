@@ -1,6 +1,6 @@
-//! Grid and dock drag & drop: the make-room gap and its dwell, edge
-//! paging while a drag holds at a side, fold targets (app-onto-app boxes
-//! and dock folders), and the drop resolution for every drag origin.
+//! Grid and dock drag & drop: the continuous make-room gap, edge paging
+//! while a drag holds at a side, fold targets (app-onto-app boxes and dock
+//! folders), and the drop resolution for every drag origin.
 
 use std::time::{Duration, Instant};
 
@@ -55,16 +55,10 @@ pub(crate) fn edge_page_due(timer: &mut Option<Instant>, dir: i64) -> bool {
     }
 }
 
-/// How long the pointer must linger over a new grid slot before the
-/// make-room gap moves there. Folding is immediate; reordering is
-/// deliberate — that split keeps side-neighbor folds reachable.
-pub(crate) const REORDER_DWELL: Duration = Duration::from_millis(180);
-
-/// Horizontal band within a cell (fraction of its width) where hovering
-/// an app rings a fold target and a drop makes/joins a box. Wide enough
-/// that folding onto a side-by-side neighbour is easy — only the narrow
-/// edges (aim at the gap between icons) make room to reorder instead.
-pub(crate) const FOLD_BAND: std::ops::Range<f32> = 0.225..0.775;
+/// Horizontal band within a cell (fraction of its width) where a drop onto
+/// an app makes/joins a box. The centre ~40% folds; the outer edges (the
+/// seam between two icons) reorder instead.
+pub(crate) const FOLD_BAND: std::ops::Range<f32> = 0.30..0.70;
 
 impl App {
     /// Which dock slot a drag should insert before, given the pointer
@@ -239,14 +233,24 @@ impl App {
                     // is Y-only — a margin drop at grid altitude still
                     // reports SECTION_APPS and would otherwise install.
                     self.start_launch(&id);
+                } else if let Some(target) = (section == Some(content::SECTION_APPS))
+                    .then(|| self.grid_fold_at(drag.pos, drag.entry_idx))
+                    .flatten()
+                {
+                    // Dropped on an app/box centre: install into a box.
+                    self.start_pending_install_boxed(&id, pkg_name, pkg_version, target);
                 } else if section == Some(content::SECTION_APPS) {
                     // Fresh package dropped into the grid: place it as a
                     // tile at the drop slot and install it in place.
-                    self.start_pending_install(&id, pkg_name, pkg_version);
-                } else if insert.is_some() && !self.busy_ids.contains(&id) {
-                    // Dropped on the dock band: plain install (no tile),
-                    // the app appears wherever its grid order puts it.
-                    self.start_managed_install(&id, Vec::new());
+                    self.start_pending_install(&id, pkg_name, pkg_version, None, None);
+                } else if let Some(slot) = insert {
+                    if !self.busy_ids.contains(&id) {
+                        // Dropped on the dock band: pin the tile at that slot
+                        // and install in place; the finished app re-pins at
+                        // the same slot (see `resolve_pending_installs`).
+                        let pinned = self.pin_dropped_on_dock(&id, slot, None, false);
+                        self.start_pending_install(&id, pkg_name, pkg_version, Some(pinned), None);
+                    }
                 }
             }
             Some(apps::EntryKind::App)
@@ -279,9 +283,22 @@ impl App {
             Some(apps::EntryKind::App) if self.catalog_webapp_slug(&id).is_some() => {
                 if released && self.outside_card(&layout, drag.pos) {
                     self.launch_webapp(drag.entry_idx);
+                } else if let Some(target) = (section == Some(content::SECTION_APPS))
+                    .then(|| self.grid_fold_at(drag.pos, drag.entry_idx))
+                    .flatten()
+                {
+                    // Dropped on an app/box centre: install into a box.
+                    if let Some(slug) = self.catalog_webapp_slug(&id) {
+                        self.install_webapp_boxed(&slug, target, drag.entry_idx);
+                    }
                 } else if section == Some(content::SECTION_APPS) {
                     if let Some(slug) = self.catalog_webapp_slug(&id) {
-                        self.install_webapp(&slug);
+                        self.install_webapp(&slug, drag.entry_idx);
+                    }
+                } else if let Some(slot) = insert {
+                    // Dropped on the dock band: install and pin at that slot.
+                    if let Some(slug) = self.catalog_webapp_slug(&id) {
+                        self.install_webapp_on_dock(&slug, slot);
                     }
                 }
                 // Dropped back in the Install section / elsewhere: snap back.
@@ -308,42 +325,19 @@ impl App {
                         kind,
                         Some(apps::EntryKind::App) | Some(apps::EntryKind::Group)
                     )
-                    && self.search.query.is_empty()
+                    && self.grid_resting()
                     && self.handle_grid_drop(drag.entry_idx, &id, drag.pos);
                 // Dropped centered on a dock icon: join/create a folder on
                 // the dock (an app onto a folder joins; onto an app boxes).
                 let dock_folded = !boxed
                     && released
-                    && self.search.query.is_empty()
+                    && self.grid_resting()
                     && kind == Some(apps::EntryKind::App)
                     && self.handle_dock_fold(drag.entry_idx, &id, drag.pos);
                 if !boxed && !dock_folded {
                     // Dropped on the dock pins the item (app or box) there.
                     if let Some(slot) = insert {
-                        // Dock reorder. Drop in the visible gap: the
-                        // dock parts in compact coordinates (origin
-                        // removed), so translate the raw slot.
-                        let slot = if drag.from_dock {
-                            let origin = self.dock_order.iter().position(|&e| e == drag.entry_idx);
-                            slot - usize::from(origin.is_some_and(|o| o < slot))
-                        } else {
-                            slot
-                        };
-                        // Everything left of the drop keeps its exact
-                        // place: usage-filled slots there become
-                        // explicit pins first (pin_at's index is
-                        // pins-relative).
-                        let prefix: Vec<String> = self
-                            .dock_order
-                            .iter()
-                            .filter(|&&e| e != drag.entry_idx)
-                            .take(slot)
-                            .map(|&e| self.entries[e].id.clone())
-                            .collect();
-                        for (k, pid) in prefix.iter().enumerate() {
-                            self.pins.pin_at(pid, k);
-                        }
-                        self.pins.pin_at(&id, slot);
+                        self.pin_dropped_on_dock(&id, slot, Some(drag.entry_idx), drag.from_dock);
                     } else if drag.from_dock && released && kind == Some(apps::EntryKind::File) {
                         // A pinned path (dir/file from the Files section)
                         // has no grid home to land in: dropping it
@@ -357,7 +351,6 @@ impl App {
             }
         }
         self.reorder_slot = None;
-        self.reorder_dwell = None;
         self.grid_drag_page_at = None;
         self.recompute_dock_order();
         // Remap the dock glide onto the new arrangement *before*
@@ -377,6 +370,14 @@ impl App {
         // Magnification sleeps a full second so the icon simply *is*
         // placed before any wave returns.
         self.mag_sleep = Some(Instant::now() + MAG_SLEEP_AFTER_DROP);
+        // A drag out of the Install section held the search query so the
+        // grid could rest under it; now the drop has landed, clear the box
+        // so the popup returns to a clean resting state.
+        if self.install_drag_reset {
+            self.install_drag_reset = false;
+            self.search.query.clear();
+            self.search.open = false;
+        }
         self.refilter();
     }
 
@@ -396,29 +397,31 @@ impl App {
         let page_w = sec.viewport.w.max(1.0);
         let ax = (pos.0 - sec.viewport.x + sec.scroll).max(0.0);
         let page = ((ax / page_w).floor() as usize) % sec.n_pages.max(1);
-        let fx = (ax.rem_euclid(page_w)) / content::GRID_CELL_W;
-        let fy = (pos.1 - sec.viewport.y) / content::GRID_CELL_H;
+        // Cell size must match what's on screen — the grid renders at
+        // `icon_scale`, so map the pointer through the *scaled* cell, not the
+        // raw constants (otherwise every row/column is mis-counted at any
+        // non-default icon size, and the make-room reacts on the wrong cell).
+        let scale = self.icon_scale();
+        let fx = (ax.rem_euclid(page_w)) / (content::GRID_CELL_W * scale);
+        let fy = (pos.1 - sec.viewport.y) / (content::GRID_CELL_H * scale);
         let col = (fx.floor() as usize).min(sec.cols.saturating_sub(1));
         let row = (fy.floor() as usize).min(sec.rows.saturating_sub(1));
         let d = page * sec.cols * sec.rows + row * sec.cols + col;
         Some((d, fx.fract(), fy.fract().clamp(0.0, 1.0)))
     }
 
-    /// Track the drag's grid target in display space. The make-room
-    /// gap starts at the pickup slot (nothing moves on pickup); it
-    /// only moves after the pointer *lingers* over a new slot
-    /// ([`REORDER_DWELL`]) — that dwell is what makes folding onto a
-    /// side neighbor possible at all: icons no longer dive out of the
-    /// way the moment you approach them. Hovering an item rings it as
-    /// a fold target immediately. Returns the fold target, if any;
-    /// the gap itself lives in `self.reorder_slot`.
+    /// Track the drag's grid target in display space. The make-room gap
+    /// follows the pointer continuously to the insertion seam nearest it
+    /// (Launchpad-style — the grid parts as you move); hovering an app's
+    /// centre instead rings it as a fold target and rests the grid so it
+    /// holds still to fold onto. Returns the fold target, if any; the gap
+    /// itself lives in `self.reorder_slot`.
     pub(crate) fn update_grid_target(
         &mut self,
         layout: &content::Layout,
     ) -> Option<(usize, usize)> {
         let Some(drag) = self.gesture.dragging.as_ref() else {
             self.reorder_slot = None;
-            self.reorder_dwell = None;
             self.grid_drag_page_at = None;
             return None;
         };
@@ -426,13 +429,23 @@ impl App {
         let visible = &self.search.visible[content::SECTION_APPS];
         let (len, pos) = (visible.len(), drag.pos);
         let orig = visible.iter().position(|&v| v == drag.entry_idx);
-        // Three ways to target the grid: a grid-origin app/box reordering
-        // itself, a dock-origin app dragged in to unpin it, or a package
-        // dragged up from Install to be placed as it installs. The latter
-        // two own no cell, so the gap is a brand-new slot (nothing to
-        // vacate) and may land one past the end (append).
-        let inserting = drag.from_dock || kind == Some(apps::EntryKind::Package);
-        let grid_drag = self.search.query.is_empty()
+        // Ways to target the grid: a grid-origin app/box reordering
+        // itself, a dock-origin app dragged in to unpin it, or an
+        // Install-section item — a package, or a catalog webapp
+        // (`EntryKind::App`, but living in Install not the grid) — dragged
+        // up to be placed as it installs. The inserting cases own no cell,
+        // so the gap is a brand-new slot (nothing to vacate) and may land
+        // one past the end (append).
+        let is_catalog_webapp = self
+            .entries
+            .get(drag.entry_idx)
+            .is_some_and(|e| self.catalog_webapp_slug(&e.id).is_some());
+        let inserting =
+            drag.from_dock || kind == Some(apps::EntryKind::Package) || is_catalog_webapp;
+        // The grid must be at rest to target a slot — true on an empty query,
+        // or while dragging an install out of the Install section (the grid
+        // is held resting for exactly this).
+        let grid_drag = self.grid_resting()
             && if inserting {
                 // A dock box dragged into the grid inserts too (it unpins
                 // and lands there).
@@ -452,7 +465,6 @@ impl App {
             };
         if !grid_drag {
             self.reorder_slot = None;
-            self.reorder_dwell = None;
             self.grid_drag_page_at = None;
             return None;
         }
@@ -476,21 +488,15 @@ impl App {
         } else {
             self.grid_drag_page_at = None;
         }
-        // The gap rests at the app's own display slot (reorder — nothing
-        // moves on pickup) or past everything (insert — the grid stays
-        // whole until the pointer asks for a slot).
+        // The resting gap: a reorder rests at the item's own display slot
+        // (nothing moves on pickup); an insert has no gap (the grid stays
+        // whole) until the pointer asks for a slot.
         let orig_slot = orig.and_then(|o| self.apps_slots.get(o).copied());
-        let slot = *self
-            .reorder_slot
-            .get_or_insert(orig_slot.unwrap_or(self.apps_span));
 
-        // Off the grid: a reorder leaves the gap where it was (you may
-        // be reaching for the dock); an insert closes the grid back up.
-        let Some((d, fx, fy)) = self.apps_display_cell(layout, pos) else {
-            if inserting {
-                self.reorder_slot = None;
-            }
-            self.reorder_dwell = None;
+        // Off the grid: rest the gap (a reorder at its slot, an insert to
+        // none) — you may be reaching for the dock, so the grid closes up.
+        let Some((d, fx, _fy)) = self.apps_display_cell(layout, pos) else {
+            self.reorder_slot = orig_slot;
             return None;
         };
         // The hovered page's append position: one past its last occupied
@@ -507,64 +513,72 @@ impl App {
             .map(|(_, &s)| s + 1)
             .max()
             .unwrap_or(page_start);
-        if d == slot {
-            self.reorder_dwell = None;
-            return None; // hovering the gap: stable
-        }
-        // The item at the hovered slot rings a fold target immediately
-        // (apps only; boxes never fold or nest). Empty slots don't fold.
-        if kind == Some(apps::EntryKind::App)
-            && FOLD_BAND.contains(&fx)
-            && (0.08..0.92).contains(&fy)
-        {
-            let full = self
-                .apps_slots
-                .iter()
-                .position(|&s| s == d)
-                .filter(|&j| Some(j) != orig);
-            let foldable = full.and_then(|j| self.search.visible[content::SECTION_APPS].get(j));
-            if let (Some(full), Some(&t)) = (full, foldable) {
-                let ok = match self.kinds.get(t) {
-                    Some(apps::EntryKind::Group) => true,
-                    Some(apps::EntryKind::App) => self.app_group.is_none(),
-                    _ => false,
+        // Make room continuously (Launchpad). Continuous row-major position
+        // of the pointer (monotonic across row wraps): `d` is the cell, `fx`
+        // the fraction across it.
+        let p = d as f32 + fx;
+        let want = match orig_slot {
+            // Reorder: symmetric make-room. The gap rests at the dragged
+            // item's home slot and moves only once the pointer passes a
+            // *neighbour's* centre — a full cell of travel either way — so a
+            // neighbour holds still until you cross its middle, on both sides
+            // equally, instead of the far side snapping into the freed hole
+            // the instant you nudge toward it. (A neighbour that holds still
+            // is also what lets you drop onto it to make a box.)
+            Some(o) => {
+                let rel = p - (o as f32 + 0.5);
+                let steps = if rel >= 1.0 {
+                    rel.floor() as i64
+                } else if rel <= -1.0 {
+                    -((-rel).floor() as i64)
+                } else {
+                    0
                 };
-                if ok {
-                    self.reorder_dwell = None;
-                    return Some((content::SECTION_APPS, full));
-                }
+                (o as i64 + steps).clamp(page_start as i64, append as i64) as usize
             }
-        }
-        // Reordering: move the gap only after a dwell. A hover past a
-        // page's items snaps to its append slot (tail gaps and the ghost
-        // page land there). Only a dock insert gets the right-edge nudge
-        // (so it can append past the last icon); a reorder moves the gap
-        // straight to the hovered cell. The old unconditional nudge could
-        // leap the gap over a neighbour, sliding two icons for one step.
-        let want = if inserting && fx >= 0.85 {
-            (d + 1).min(append)
-        } else {
-            d.min(append)
+            // Insert (dock / package / webapp drag): no hole to close, so
+            // icon centres are the seam boundaries directly.
+            None => (d + usize::from(fx >= 0.5)).min(append),
         };
-        if want == slot {
-            self.reorder_dwell = None;
-            return None;
-        }
-        match self.reorder_dwell {
-            Some((w, since)) if w == want => {
-                if since.elapsed() >= REORDER_DWELL {
-                    self.reorder_slot = Some(want);
-                    self.reorder_dwell = None;
-                }
-                // Keep frames coming while the dwell clock runs.
-                self.dirty = true;
-            }
-            _ => {
-                self.reorder_dwell = Some((want, Instant::now()));
-                self.dirty = true;
-            }
+        if self.reorder_slot != Some(want) {
+            self.reorder_slot = Some(want);
+            self.dirty = true;
         }
         None
+    }
+
+    /// Pin `id` onto the dock at the visible insert position `insert`
+    /// (`drag_dock_insert` space): everything left of the drop keeps its
+    /// exact place, so the usage-filled slots there are first materialized
+    /// into explicit pins (pin_at's index is pins-relative). `exclude` is
+    /// the dragged entry (skipped, and — for a dock-origin drag — its
+    /// removal from the compact coordinates shifts the raw slot). Returns
+    /// the pins-relative slot `id` was pinned at.
+    pub(crate) fn pin_dropped_on_dock(
+        &mut self,
+        id: &str,
+        insert: usize,
+        exclude: Option<usize>,
+        from_dock: bool,
+    ) -> usize {
+        let slot = if from_dock {
+            let origin = exclude.and_then(|x| self.dock_order.iter().position(|&e| e == x));
+            insert - usize::from(origin.is_some_and(|o| o < insert))
+        } else {
+            insert
+        };
+        let prefix: Vec<String> = self
+            .dock_order
+            .iter()
+            .filter(|&&e| Some(e) != exclude)
+            .take(slot)
+            .map(|&e| self.entries[e].id.clone())
+            .collect();
+        for (k, pid) in prefix.iter().enumerate() {
+            self.pins.pin_at(pid, k);
+        }
+        self.pins.pin_at(id, slot);
+        slot
     }
 
     /// Resolve a grid-origin drop; true when it was a grid gesture
@@ -592,44 +606,15 @@ impl App {
         let slot = self
             .reorder_slot
             .unwrap_or(orig_slot.unwrap_or(self.apps_span));
-        // Fold wins when the pointer sits on a foldable item's center.
+        // Fold wins when the pointer sits on a foldable item's centre —
+        // the exact same detection and box create/join the Install drops
+        // use, so every placement shares one path. (Boxes don't nest, so
+        // only a dragged App folds.)
         if kind == Some(apps::EntryKind::App) {
-            if let Some((d, fx, _)) = self.apps_display_cell(&layout, pos) {
-                if d != slot && FOLD_BAND.contains(&fx) {
-                    // The item occupying the hovered display slot.
-                    let full = self
-                        .apps_slots
-                        .iter()
-                        .position(|&s| s == d)
-                        .filter(|&j| Some(j) != orig);
-                    if let Some(&target_idx) =
-                        full.and_then(|j| self.search.visible[content::SECTION_APPS].get(j))
-                    {
-                        let target_id = self.entries[target_idx].id.clone();
-                        match self.kinds.get(target_idx) {
-                            Some(apps::EntryKind::Group) => {
-                                if let Some(g) = target_id
-                                    .strip_prefix("group:")
-                                    .and_then(|gid| self.groups.index_by_id(gid))
-                                {
-                                    self.groups.add(g, id);
-                                    self.refilter();
-                                    return true;
-                                }
-                            }
-                            Some(apps::EntryKind::App) if self.app_group.is_none() => {
-                                // The new box takes the target's grid
-                                // position.
-                                let box_id = self.groups.create(&target_id, id);
-                                self.order
-                                    .insert_before(&format!("group:{box_id}"), &target_id);
-                                self.refilter();
-                                return true;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+            if let Some(target) = self.grid_fold_at(pos, entry_idx) {
+                self.fold_box_for(target, id);
+                self.refilter();
+                return true;
             }
         }
         // Otherwise the drop lands in the gap, wherever it is now.
@@ -639,33 +624,52 @@ impl App {
             let full_before = (slot + usize::from(orig.is_some_and(|o| slot >= o))).min(n_members);
             self.groups.move_member(g, id, full_before);
         } else {
-            // Resolve the gap via the shared drop rule: before the item
-            // at-or-past the gap on its page, or — a page's empty tail,
-            // or the ghost page — append to that page (the ghost drop
-            // creates it: the drag-to-new-page gesture).
-            let cap = self.apps_cap.max(1);
-            let items = self.search.visible[content::SECTION_APPS]
-                .iter()
-                .enumerate()
-                .filter(|&(_, &e)| e != entry_idx)
-                .filter_map(|(j, &e)| self.apps_slots.get(j).map(|&s| (s, e)));
-            match pages::drop_anchor(items, slot, cap) {
-                Some(e) => {
-                    let a = self.entries[e].id.clone();
-                    self.order.move_before(id, &a);
-                }
-                None => {
-                    let sp = self
-                        .apps_page_map
-                        .get(slot / cap)
-                        .copied()
-                        .unwrap_or_else(|| self.order.pages().len());
-                    self.order.move_to_page_end(id, sp);
-                }
-            }
+            self.place_in_grid_at_slot(id, entry_idx, slot);
         }
         self.refilter();
         true
+    }
+
+    /// Place `id` in the Apps-grid order at display `slot`, by the shared
+    /// drop rule: before the first grid item at-or-past the gap on its
+    /// page, or — a page's empty tail, or the ghost page — appended to
+    /// that page (the ghost drop creates it: the drag-to-new-page
+    /// gesture). `dragged_idx` is excluded as an anchor candidate so an
+    /// item never anchors on itself. Caller refilters.
+    fn place_in_grid_at_slot(&mut self, id: &str, dragged_idx: usize, slot: usize) {
+        let cap = self.apps_cap.max(1);
+        // Resolve the drop against the *shifted* positions the make-room
+        // previews — the dragged item's hole closed, the gap opened — so a
+        // rightward move lands exactly where it showed instead of anchoring
+        // on the neighbour that already slid into the hole (which read as a
+        // swap on screen but no-op'd on drop, snapping both back).
+        let orig_slot = self.search.visible[content::SECTION_APPS]
+            .iter()
+            .position(|&e| e == dragged_idx)
+            .and_then(|o| self.apps_slots.get(o).copied());
+        let items = self.search.visible[content::SECTION_APPS]
+            .iter()
+            .enumerate()
+            .filter(|&(_, &e)| e != dragged_idx)
+            .filter_map(|(j, &e)| {
+                self.apps_slots
+                    .get(j)
+                    .map(|&s| (pages::shifted_slot(s, orig_slot, slot, cap), e))
+            });
+        match pages::drop_anchor(items, slot, cap) {
+            Some(e) => {
+                let a = self.entries[e].id.clone();
+                self.order.move_before(id, &a);
+            }
+            None => {
+                let sp = self
+                    .apps_page_map
+                    .get(slot / cap)
+                    .copied()
+                    .unwrap_or_else(|| self.order.pages().len());
+                self.order.move_to_page_end(id, sp);
+            }
+        }
     }
 
     /// The section that would accept the dragged entry if dropped at
@@ -720,10 +724,111 @@ impl App {
     }
 
     /// Install a catalog webapp: record it so it moves from the Install
-    /// section onto the grid, then refilter to relocate its tile.
-    fn install_webapp(&mut self, slug: &str) {
+    /// section onto the grid, land it in the grid order at the drop slot
+    /// (the make-room gap, like a package's captured anchor — without
+    /// this it teleports to its long-ago-materialized end-of-grid slot),
+    /// then refilter to relocate its tile. `dragged_idx` is the webapp's
+    /// Install-section entry (excluded as an anchor candidate).
+    fn install_webapp(&mut self, slug: &str, dragged_idx: usize) {
         info!("installing webapp {slug}");
         self.managed_webapps.add(slug);
+        let id = crate::webapps::id_for_slug(slug);
+        let slot = self.reorder_slot.unwrap_or(self.apps_span);
+        self.place_in_grid_at_slot(&id, dragged_idx, slot);
+        self.refilter();
+        self.schedule_frame();
+    }
+
+    /// Install a catalog webapp straight onto the dock, pinned at the slot
+    /// it was dropped on (the dock counterpart of [`Self::install_webapp`]).
+    fn install_webapp_on_dock(&mut self, slug: &str, insert: usize) {
+        info!("installing webapp {slug} onto the dock");
+        self.managed_webapps.add(slug);
+        let id = crate::webapps::id_for_slug(slug);
+        self.pin_dropped_on_dock(&id, insert, None, false);
+        self.refilter();
+        self.schedule_frame();
+    }
+
+    /// The grid app or box under `pos` that a fold would target — dropping
+    /// on an app's centre boxes the two, on a box joins it. `None` off a
+    /// foldable cell. Shared by grid-origin drops (via `handle_grid_drop`)
+    /// and install drops, so both fold the same way.
+    pub(crate) fn grid_fold_at(&self, pos: (f32, f32), dragged_idx: usize) -> Option<usize> {
+        if self.app_group.is_some() {
+            return None; // an open box places members its own way
+        }
+        let layout = self.current_layout();
+        let (d, fx, fy) = self.apps_display_cell(&layout, pos)?;
+        // Fold only on the centre of a real cell that ISN'T the make-room
+        // gap — a drop in the gap (where the ghost already sits) reorders.
+        // Without this a drag would fold onto nearly every icon it passed.
+        let slot = self.reorder_slot?;
+        if d == slot || !FOLD_BAND.contains(&fx) || !(0.08..0.92).contains(&fy) {
+            return None;
+        }
+        let j = self.apps_slots.iter().position(|&s| s == d)?;
+        let target = *self.search.visible[content::SECTION_APPS].get(j)?;
+        if target == dragged_idx {
+            return None; // never fold an item onto itself
+        }
+        matches!(
+            self.kinds.get(target),
+            Some(apps::EntryKind::App) | Some(apps::EntryKind::Group)
+        )
+        .then_some(target)
+    }
+
+    /// Resolve the box a fold onto grid `target_idx` lands in: an app makes
+    /// a new box (placed at the app's grid slot); a box is joined. Returns
+    /// the group id, or `None` if the target turned out not to be foldable.
+    fn fold_box_for(&mut self, target_idx: usize, member_id: &str) -> Option<String> {
+        let target_id = self.entries.get(target_idx)?.id.clone();
+        match self.kinds.get(target_idx) {
+            Some(apps::EntryKind::Group) => {
+                let gid = target_id.strip_prefix("group:")?.to_owned();
+                let g = self.groups.index_by_id(&gid)?;
+                self.groups.add(g, member_id);
+                Some(gid)
+            }
+            Some(apps::EntryKind::App) => {
+                let gid = self.groups.create(&target_id, member_id);
+                self.order
+                    .insert_before(&format!("group:{gid}"), &target_id);
+                Some(gid)
+            }
+            _ => None,
+        }
+    }
+
+    /// Drag-to-install that lands in a box: fold `attr` onto grid `target`
+    /// (new box from an app, or join a box), then install with that box as
+    /// the pending tile's destination so the finished app replaces it there.
+    fn start_pending_install_boxed(
+        &mut self,
+        attr: &str,
+        name: String,
+        version: String,
+        target: usize,
+    ) {
+        match self.fold_box_for(target, attr) {
+            Some(box_id) => self.start_pending_install(attr, name, version, None, Some(box_id)),
+            // Not foldable after all — a plain grid install at the drop slot.
+            None => self.start_pending_install(attr, name, version, None, None),
+        }
+    }
+
+    /// Install a catalog webapp folded into a box (create/join), the box
+    /// counterpart of [`Self::install_webapp`] — instant, no pending tile.
+    fn install_webapp_boxed(&mut self, slug: &str, target: usize, dragged_idx: usize) {
+        info!("installing webapp {slug} into a box");
+        self.managed_webapps.add(slug);
+        let id = crate::webapps::id_for_slug(slug);
+        if self.fold_box_for(target, &id).is_none() {
+            // Target wasn't foldable — fall back to a plain grid placement.
+            let slot = self.reorder_slot.unwrap_or(self.apps_span);
+            self.place_in_grid_at_slot(&id, dragged_idx, slot);
+        }
         self.refilter();
         self.schedule_frame();
     }

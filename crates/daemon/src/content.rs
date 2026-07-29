@@ -726,6 +726,10 @@ pub fn hit_test(
 pub struct DragFrame {
     /// The entry being dragged (index into the entries slice).
     pub entry_idx: usize,
+    /// The ghost is currently hovering the dock band — it sizes to the
+    /// dock icons there, and back to the grid icon over the grid, so a
+    /// grabbed icon always matches whatever row it is over.
+    pub on_dock: bool,
     /// Current pointer position in surface coordinates.
     pub pos: (f32, f32),
     /// Section that would accept this drop (install/uninstall target),
@@ -1301,8 +1305,10 @@ pub fn scene(
             });
         }
         // Ghost following the pointer, topmost: the dragged icon, or a
-        // box's mini stack. Slightly enlarged — it's "in hand".
-        let size = dock_icon * 1.25;
+        // box's mini stack. Sized to the row it hovers — dock icons over
+        // the dock, grid cells over the grid — so the grabbed icon always
+        // matches its neighbours, shrinking onto the dock on the fly.
+        let size = if df.on_dock { dock_icon } else { grid_icon };
         let (gx, gy) = df.pos;
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == df.entry_idx) {
             let m = size * 0.46;

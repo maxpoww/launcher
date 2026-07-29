@@ -264,7 +264,6 @@ fn main() -> anyhow::Result<()> {
         just_installed: None,
         dock_hover_since: None,
         reorder_slot: None,
-        reorder_dwell: None,
         grid_drag_page_at: None,
         apps_slide: Vec::new(),
         apps_slots: Vec::new(),
@@ -272,7 +271,8 @@ fn main() -> anyhow::Result<()> {
         apps_cap: 24,
         apps_span: 0,
         just_dropped: None,
-        prev_searching: false,
+        install_drag_reset: false,
+        prev_resting_grid: true,
         dock_slide: Vec::new(),
         mag_sleep: None,
         mag_amount: 1.0,
@@ -654,9 +654,6 @@ pub struct App {
     /// Drag-to-reorder: the make-room gap's display slot (`None` = no
     /// grid drag in flight).
     reorder_slot: Option<usize>,
-    /// Pending gap move: the wanted slot and when the pointer started
-    /// hovering it (the gap moves after [`REORDER_DWELL`]).
-    reorder_dwell: Option<(usize, Instant)>,
     /// Dwell timer for edge-paging the Apps grid while a drag hovers its
     /// left/right edge — carries the dragged icon to another page (same
     /// feel as the open-box drag paging).
@@ -683,10 +680,16 @@ pub struct App {
     /// animated position, so the icon lands where it was dropped rather
     /// than gliding there from its origin. One-shot (cleared on use).
     just_dropped: Option<String>,
-    /// Whether the previous refilter was showing search results, so the
-    /// grid can tell when the query was just cleared — leaving a search
-    /// reshuffles wholesale and must not glide the icons back.
-    prev_searching: bool,
+    /// Grabbing an icon out of the Install section holds the Apps grid and
+    /// Files in their resting layout even while a query is live, so the
+    /// full grid is on screen to drop the new icon onto the exact slot you
+    /// want. Set when a drag starts from Install, cleared when the user
+    /// next edits the query (i.e. resumes searching).
+    install_drag_reset: bool,
+    /// Whether the previous refilter rendered the grid in its resting
+    /// layout (see `grid_resting`) — a flip resets the Apps page like
+    /// entering/leaving a search does.
+    prev_resting_grid: bool,
     /// Animated displacement per dock slot, in slot units (the dock's
     /// make-room glide during drags).
     dock_slide: Vec<f32>,
@@ -1187,6 +1190,15 @@ impl App {
             .is_some_and(|slug| !self.managed_webapps.contains(slug))
     }
 
+    /// Whether the Apps grid (and Files) should render in their resting
+    /// layout: no live query, or an icon was grabbed from the Install
+    /// section (`install_drag_reset`) — the latter keeps the full grid on
+    /// screen so the dragged install can be dropped on an exact slot even
+    /// though the query is still live for the Install list itself.
+    fn grid_resting(&self) -> bool {
+        self.search.query.is_empty() || self.install_drag_reset
+    }
+
     /// Whether entry `idx` is a catalog webapp marked as a storefront
     /// recommendation (shown on an empty query).
     fn is_recommended_webapp(&self, idx: usize) -> bool {
@@ -1212,29 +1224,42 @@ impl App {
         self.truncate_transients();
 
         let searching = !self.search.query.is_empty();
-        // Clearing the query snaps the grid from ranked order back to
-        // its resting order — a wholesale reshuffle the carry-over must
-        // skip, or every icon glides back to its cell.
-        let leaving_search = self.prev_searching && !searching;
-        self.prev_searching = searching;
+        // The grid rests either on an empty query or while an icon is being
+        // dragged out of Install (query still live for the Install list).
+        let resting_grid = self.grid_resting();
+        // A flip into or out of the resting layout reshuffles the grid
+        // wholesale — the carry-over glide must skip it, and the Apps page
+        // resets like entering/leaving a search.
+        let grid_flip = resting_grid != self.prev_resting_grid;
+        self.prev_resting_grid = resting_grid;
         let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
         let ranked = self.search.matcher.rank(&self.search.query, &names);
         let mut visible: [Vec<usize>; content::N_SECTIONS] = Default::default();
-        for idx in ranked {
-            // Apps rank into the grid. The Files section is a live directory
-            // listing (home root or a navigated folder), built below, not the
-            // ranked home-folder carriers — so File entries add nothing here.
-            if self.kinds.get(idx) == Some(&apps::EntryKind::App) {
-                if self.is_catalog_webapp(idx) {
-                    // Catalog webapps live in the Install section, not the
-                    // grid. On an empty query only the recommended few show;
-                    // any webapp surfaces once its name is searched.
-                    if searching || self.is_recommended_webapp(idx) {
-                        visible[content::SECTION_INSTALL].push(idx);
-                    }
-                } else {
-                    visible[content::SECTION_APPS].push(idx);
-                }
+        // Install-section catalog-webapp hits, ranked by the live query. On
+        // an empty query only the recommended few show; any webapp surfaces
+        // once its name is searched.
+        for &idx in &ranked {
+            if self.kinds.get(idx) == Some(&apps::EntryKind::App)
+                && self.is_catalog_webapp(idx)
+                && (searching || self.is_recommended_webapp(idx))
+            {
+                visible[content::SECTION_INSTALL].push(idx);
+            }
+        }
+        // Grid apps (real, non-catalog): a live search ranks them; a resting
+        // grid shows them all in install/manual order (arranged below from
+        // `self.order`), so a query held only for the Install list — the
+        // drag-from-Install reset — still shows the whole grid to drop onto.
+        let grid_ranked = if resting_grid && searching {
+            self.search.matcher.rank("", &names)
+        } else {
+            ranked
+        };
+        for idx in grid_ranked {
+            // The Files section is a live directory listing (home root or a
+            // navigated folder), built below — File entries add nothing here.
+            if self.kinds.get(idx) == Some(&apps::EntryKind::App) && !self.is_catalog_webapp(idx) {
+                visible[content::SECTION_APPS].push(idx);
             }
         }
         // Blend the webapp hits with the ranked package hits into the one
@@ -1256,7 +1281,7 @@ impl App {
         // shift), used by both the grid and the dock; a box pinned to the
         // dock is hidden from the grid, like a pinned app.
         let group_cells = self.group_cells();
-        if searching {
+        if !resting_grid {
             visible[content::SECTION_FILES] = self.file_results();
         } else {
             // Hide pinned apps from the grid when the search box is
@@ -1352,8 +1377,9 @@ impl App {
         self.pinned_path_entries();
         self.rebuild_dir_stack();
         self.search.visible = visible;
-        // Search results are a flat ranked list: dense identity slots.
-        if searching {
+        // Search results are a flat ranked list: dense identity slots. (A
+        // resting grid keeps the paged slots built just above.)
+        if !resting_grid {
             let n = self.search.visible[content::SECTION_APPS].len();
             self.apps_slots = (0..n).collect();
             self.apps_page_map.clear();
@@ -1370,7 +1396,7 @@ impl App {
         let mut slide: Vec<f32> = (0..vis.len())
             .map(|i| self.apps_slots.get(i).copied().unwrap_or(i) as f32)
             .collect();
-        if !searching && !leaving_search {
+        if resting_grid && !grid_flip {
             // (Ranked search results churn per keystroke; gliding
             // between ranks would be noise, so carry-over is for the
             // loose grid and box views only.)
@@ -1390,14 +1416,14 @@ impl App {
         }
         self.just_dropped = None;
         self.apps_slide = slide;
-        self.search.selected = if self.search.query.is_empty() || self.flat_len() == 0 {
+        self.search.selected = if resting_grid || self.flat_len() == 0 {
             None
         } else {
             Some(0)
         };
-        if searching || leaving_search {
-            // Entering / leaving search replaces the content wholesale:
-            // start every section back at its first page.
+        if !resting_grid || grid_flip {
+            // Entering / leaving the searched grid replaces the content
+            // wholesale: start every section back at its first page.
             self.scroll.reset_sections();
         } else {
             // A grid mutation (drop, rescan, box open/close, pin change)
@@ -1548,6 +1574,15 @@ impl App {
 
     fn recompute_dock_order(&mut self) {
         self.dock_order.clear();
+        // A package installing onto the dock rides its `Package` transient
+        // until the real app lands — allow that pin to match (below), while
+        // other Package/File transient pins stay excluded.
+        let dock_pending: std::collections::HashSet<String> = self
+            .pending_installs
+            .iter()
+            .filter(|p| p.dock_slot.is_some())
+            .map(|p| p.attr.clone())
+            .collect();
         for pin_id in self.pins.pins() {
             // Match a real App entry, a box's Group entry, or — for
             // filesystem pins only (path ids, home-strip `folder-<name>`
@@ -1560,7 +1595,8 @@ impl App {
                     && match k {
                         apps::EntryKind::App | apps::EntryKind::Group => true,
                         apps::EntryKind::File => fs_pin,
-                        _ => false,
+                        apps::EntryKind::Package => dock_pending.contains(pin_id),
+                        apps::EntryKind::Asset => false,
                     }
             });
             if let Some(idx) = idx {
@@ -2314,6 +2350,9 @@ impl App {
             }
             Keysym::BackSpace => {
                 if self.search.query.pop().is_some() {
+                    // Editing the query means the user is searching again —
+                    // release the drag-from-Install grid hold.
+                    self.install_drag_reset = false;
                     if self.search.query.is_empty() {
                         self.search.open = false;
                     }
@@ -2358,6 +2397,9 @@ impl App {
                     let printable: String = text.chars().filter(|c| !c.is_control()).collect();
                     if !printable.is_empty() {
                         self.search.open = true;
+                        // Typing means the user is searching again — release
+                        // the drag-from-Install grid hold.
+                        self.install_drag_reset = false;
                         self.search.query.push_str(&printable);
                         self.refilter();
                     }
@@ -2414,6 +2456,7 @@ impl App {
             return;
         }
         self.search.open = true;
+        self.install_drag_reset = false;
         self.search.query.push_str(&printable);
         self.refilter();
     }
@@ -2857,6 +2900,26 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                         pos,
                                     });
                                     app.gesture.pressed = None;
+                                    // Grabbing an icon out of Install resets the
+                                    // grid/Files to their resting layout so it
+                                    // can be dropped on an exact slot. Refilter
+                                    // to rebuild the resting grid now; the
+                                    // dragged transient keeps its index (built
+                                    // before the grid branch) but relocate it by
+                                    // id to be safe.
+                                    if matches!(hit, Hit::GridCell(s, _) if s == content::SECTION_INSTALL)
+                                    {
+                                        let dragged_id = app.entries[entry_idx].id.clone();
+                                        app.install_drag_reset = true;
+                                        app.refilter();
+                                        if let Some(i) =
+                                            app.entries.iter().position(|e| e.id == dragged_id)
+                                        {
+                                            if let Some(d) = app.gesture.dragging.as_mut() {
+                                                d.entry_idx = i;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
