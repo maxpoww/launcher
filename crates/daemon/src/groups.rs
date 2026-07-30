@@ -25,6 +25,18 @@ use tracing::info;
 /// data model and the box geometry can't drift apart.
 pub const PAGE_CAP: usize = crate::content::OPEN_BOX_CAP;
 
+/// Reserved id of the always-present Recycle Bin group. Unlike a normal box
+/// it persists while empty and never auto-dissolves; its tile renders as a
+/// garbage can, and app-drops onto it uninstall rather than join. (Files
+/// dropped in will live here as members — a later increment.)
+pub const TRASH_ID: &str = "trash";
+
+/// Whether `id` is the Recycle Bin's group id (`"trash"`) or its pinned
+/// dock/grid entry id (`"group:trash"`).
+pub fn is_trash(id: &str) -> bool {
+    id == TRASH_ID || id == "group:trash"
+}
+
 /// One app group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
@@ -77,7 +89,22 @@ impl GroupDb {
         if split {
             db.save();
         }
+        db.ensure_trash();
         db
+    }
+
+    /// Ensure the always-present Recycle Bin group exists (created once,
+    /// empty). Idempotent; safe to call on every load.
+    pub fn ensure_trash(&mut self) {
+        if self.index_by_id(TRASH_ID).is_none() {
+            self.groups.push(Group {
+                id: TRASH_ID.to_owned(),
+                name: Some("Recycle Bin".to_owned()),
+                members: PagedList::default(),
+            });
+            info!("recycle-bin group created");
+            self.save();
+        }
     }
 
     /// Index of the group with the given stable id.
@@ -218,7 +245,9 @@ impl GroupDb {
             g.members.retain(|m| exists.contains(m));
         }
         let groups_before = self.groups.len();
-        self.groups.retain(|g| g.members.len() >= 2);
+        // The Recycle Bin is exempt from the under-two dissolution rule — it
+        // is a permanent fixture that persists while empty.
+        self.groups.retain(|g| g.members.len() >= 2 || g.id == TRASH_ID);
         let changed = self.groups.len() != groups_before
             || self.groups.iter().map(|g| g.members.len()).sum::<usize>() != members_before;
         if changed {
@@ -376,6 +405,30 @@ mod tests {
         let exists2: HashSet<String> = ["a".to_string()].into_iter().collect();
         assert!(g.prune(&exists2));
         assert!(g.groups().is_empty());
+    }
+
+    #[test]
+    fn trash_persists_empty_and_survives_prune() {
+        let mut g = db();
+        g.ensure_trash();
+        assert!(g.index_by_id(TRASH_ID).is_some());
+        // Idempotent — a second call adds no duplicate.
+        g.ensure_trash();
+        assert_eq!(g.groups().iter().filter(|x| x.id == TRASH_ID).count(), 1);
+        // A prune where nothing exists drops normal (undersized) boxes but
+        // keeps the empty Recycle Bin.
+        g.create("a", "b");
+        g.prune(&HashSet::new());
+        assert!(g.index_by_id(TRASH_ID).is_some(), "trash survived prune");
+        assert_eq!(g.groups().len(), 1, "only the trash remains");
+    }
+
+    #[test]
+    fn is_trash_matches_group_and_entry_ids() {
+        assert!(is_trash(TRASH_ID));
+        assert!(is_trash("group:trash"));
+        assert!(!is_trash("group:box-123-4"));
+        assert!(!is_trash("firefox"));
     }
 
     #[test]

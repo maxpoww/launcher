@@ -26,9 +26,29 @@ pub(crate) struct DirStack {
     /// Opened with the card up: the box anchors into the grid (like a
     /// dock folder does then) instead of floating above the dock.
     pub(crate) in_grid: bool,
+    /// This is the Recycle Bin's view: the listing comes from the FreeDesktop
+    /// trash (`trash::Trash::list`, original names) rather than a plain
+    /// directory read (see [`crate::App::rebuild_dir_stack`]).
+    pub(crate) is_trash: bool,
 }
 
 impl App {
+    /// One-shot: pin the Recycle Bin to the dock the first time waverunner
+    /// runs with it. A marker file guards it so a user who later unpins or
+    /// moves it isn't overruled on the next start.
+    pub(crate) fn pin_trash_once(&mut self) {
+        let marker = crate::persist::data_path("trash-pinned");
+        if marker.exists() {
+            return;
+        }
+        let id = format!("group:{}", groups::TRASH_ID);
+        if !self.pins.is_pinned(&id) {
+            let slot = self.pins.pins().len();
+            self.pins.pin_at(&id, slot);
+        }
+        crate::persist::write_text("trash-pin-marker", &marker, "1\n");
+    }
+
     /// Build one transient Apps-grid cell per group (id
     /// `group:<stable-id>`, kind Group) and record the member texture
     /// layers for the 2×2 mini preview. Returns the cells' entry
@@ -196,6 +216,32 @@ impl App {
             path,
             members: pages::PagedList::default(),
             in_grid: self.ui.target() == Target::Open,
+            is_trash: false,
+        });
+        self.reset_stack_view();
+    }
+
+    /// Open the Recycle Bin as a stack showing the FreeDesktop trash contents,
+    /// anchored to the bin's dock tile — the same magnified box a pinned
+    /// directory uses, but its listing comes from [`crate::trash`]. The `id`
+    /// matches the bin's pinned dock entry so the box grows out of it.
+    pub(crate) fn open_trash_stack(&mut self) {
+        let id = format!("group:{}", groups::TRASH_ID);
+        info!("recycle bin: opening trash view");
+        self.group_origin = self.dock_slot_center(&id);
+        self.app_group = None;
+        self.dock_stack = None;
+        self.closing_members = None;
+        self.box_from_dock = true;
+        self.dir_stack = Some(DirStack {
+            id,
+            path: crate::trash::Trash::home()
+                .files_root()
+                .to_string_lossy()
+                .into_owned(),
+            members: pages::PagedList::default(),
+            in_grid: self.ui.target() == Target::Open,
+            is_trash: true,
         });
         self.reset_stack_view();
     }

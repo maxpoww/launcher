@@ -85,6 +85,39 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let w = max(fwidth(e), 1e-5);
         mask = 1.0 - smoothstep(1.0 - w, 1.0 + w, e);
     }
+    // Recycle-bin mode (ring <= -2): a plain garbage-can glyph on a fully
+    // transparent background — a clean monochrome icon that sits among the
+    // Papirus tiles like any other, no opaque plate. `tint.rgb` is the can
+    // colour (grey → red as an app arms the drop), `tint.a` its opacity; the
+    // fractional part of `ring` is the lid openness (1 = open, 0 = shut).
+    if (in.ring < -1.5) {
+        let o = clamp(-in.ring - 2.0, 0.0, 1.0);
+        // `s` scales the whole can within the tile (bigger `s` = bigger can).
+        // The rounded tile behind it is a normal `RectInst` (rect-shader
+        // radius), so the can here is just the glyph on a transparent quad.
+        let s = 0.94;
+        let q = (in.uv - vec2<f32>(0.5)) / s;
+        let aa = px / s;
+        var can = 0.0;
+        // Body: a rounded-rect outline (the bin) with three vertical slats.
+        let body = sd_box(q - vec2<f32>(0.0, 0.12), vec2<f32>(0.165, 0.205)) - 0.035;
+        can = max(can, stroke_cov(body, 0.030, aa));
+        can = max(can, fill_cov(sd_box(q - vec2<f32>(-0.075, 0.135), vec2<f32>(0.018, 0.135)), aa));
+        can = max(can, fill_cov(sd_box(q - vec2<f32>( 0.000, 0.135), vec2<f32>(0.018, 0.135)), aa));
+        can = max(can, fill_cov(sd_box(q - vec2<f32>( 0.075, 0.135), vec2<f32>(0.018, 0.135)), aa));
+        // Lid: a bar that lifts and tilts open with `o`, plus a handle nub.
+        let lidy = -0.16 - o * 0.16;
+        let ang = -o * 0.30;
+        var pl = q - vec2<f32>(0.0, lidy);
+        let c = cos(ang);
+        let sn = sin(ang);
+        pl = vec2<f32>(c * pl.x - sn * pl.y, sn * pl.x + c * pl.y);
+        can = max(can, fill_cov(sd_box(pl, vec2<f32>(0.245, 0.042)) - 0.02, aa));
+        can = max(can, fill_cov(sd_box(pl - vec2<f32>(0.0, -0.078), vec2<f32>(0.07, 0.03)) - 0.015, aa));
+        // Plain gray (→ red while dragging) on transparent — the can shape is
+        // the only opaque part, so it reads as a monochrome icon.
+        return vec4<f32>(in.tint.rgb * can, can) * in.tint.a * globals.alpha;
+    }
     // Shine sweep (ring >= 2.0, progress = ring - 2.0): an aggressive glass
     // reflection streaked diagonally across the icon once its install ring has
     // finished. Drawn as its own quad over the full-colour icon beneath, and
@@ -142,9 +175,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     rgb = rgb * mask;
     a = a * mask;
     // A red trash can composited over the reddened icon — the "this will be
-    // removed" mark, drawn only while the ghost is tinted. Built from SDFs in
-    // centred uv space (`q`), y-down, spanning [-0.5, 0.5].
-    if (in.tint.a > 0.0) {
+    // removed" mark, drawn only while the ghost is tinted AND `ring` isn't the
+    // no-can flag (ring <= -1.15). Over the Recycle Bin the bin is the can, so
+    // the ghost reddens (ring = -1.3) without a redundant second can; the
+    // Install-section drop keeps it (ring = -1.0). Built from SDFs in centred
+    // uv space (`q`), y-down, spanning [-0.5, 0.5].
+    if (in.tint.a > 0.0 && in.ring > -1.15) {
         // Overall scale of the trash can within the icon (smaller = tinier).
         let s = 0.68;
         let q = (in.uv - vec2<f32>(0.5)) / s;

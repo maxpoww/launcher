@@ -34,6 +34,12 @@ mod renderer;
 mod state;
 mod surface;
 mod thumbs;
+// FreeDesktop trash backend. Read (`list`/`file_path`) and trash (drop a file
+// on the bin) are wired; `restore`/`erase`/`empty`/`is_empty` are complete and
+// tested but not yet triggered from the UI — drop this allow once the
+// empty/restore gestures land.
+#[allow(dead_code)]
+mod trash;
 mod usage;
 mod webapps;
 
@@ -266,6 +272,8 @@ fn main() -> anyhow::Result<()> {
         uninstalling: HashMap::new(),
         just_installed: None,
         dock_hover_since: None,
+        trash_react: 0.0,
+        trash_hover: 0.0,
         reorder_slot: None,
         grid_drag_page_at: None,
         apps_slide: Vec::new(),
@@ -400,6 +408,9 @@ fn main() -> anyhow::Result<()> {
     applier::seed_if_missing(&app.managed.all_attrs());
     app.managed.adopt_list(&applier::list_attrs());
     app.recompute_removable();
+    // Surface the Recycle Bin on the dock the first time (a one-shot pin; the
+    // user can move or unpin it freely afterwards — we never re-pin it).
+    app.pin_trash_once();
 
     info!("daemon up; try: waverunner-ctl toggle");
     while !app.exit {
@@ -665,6 +676,13 @@ pub struct App {
     /// tooltip appears once this passes [`DOCK_TOOLTIP_DELAY`]. `None`
     /// when the pointer isn't on a dock icon.
     dock_hover_since: Option<Instant>,
+    /// Recycle-bin reaction, eased 0→1 while an app (or box) is being
+    /// dragged: the bin tile reddens and its lid opens, inviting a drop.
+    /// Eased back to 0 (lid shuts, red fades) when the drag ends.
+    trash_react: f32,
+    /// Recycle-bin hover, eased 0→1 while a dragged icon is over the bin as a
+    /// drop target: the bin swells to acknowledge the drop it would accept.
+    trash_hover: f32,
     /// Drag-to-reorder: the make-room gap's display slot (`None` = no
     /// grid drag in flight).
     reorder_slot: Option<usize>,
@@ -1947,6 +1965,18 @@ impl App {
         };
         match self.kinds.get(idx) {
             Some(apps::EntryKind::Group) => {
+                // The Recycle Bin switches to its trash view (a dir stack), not
+                // a group folder.
+                if self.entries.get(idx).is_some_and(|e| groups::is_trash(&e.id)) {
+                    let already = self
+                        .dir_stack
+                        .as_ref()
+                        .is_some_and(|ds| ds.is_trash);
+                    if !already {
+                        self.open_trash_stack();
+                    }
+                    return;
+                }
                 let g = self
                     .entries
                     .get(idx)
@@ -2033,6 +2063,14 @@ impl App {
             Hit::DockIcon(slot) => {
                 let &idx = self.dock_order.get(slot)?;
                 match self.kinds.get(idx)? {
+                    // The Recycle Bin opens as a trash dir-stack (id
+                    // `group:trash`), not a group box — report it as such so
+                    // clicking it again toggles the open stack shut.
+                    apps::EntryKind::Group
+                        if self.entries.get(idx).is_some_and(|e| groups::is_trash(&e.id)) =>
+                    {
+                        Some(BoxTarget::Dir(self.entries[idx].id.clone()))
+                    }
                     apps::EntryKind::Group => group_of(idx),
                     apps::EntryKind::File => {
                         let e = self.entries.get(idx)?;
@@ -2083,6 +2121,16 @@ impl App {
                     // (the same magnified box, anchored to the icon); an app
                     // launches.
                     if self.kinds.get(entry_idx) == Some(&apps::EntryKind::Group) {
+                        // The Recycle Bin opens a trash view (its FreeDesktop
+                        // trash contents), not an empty folder.
+                        if self
+                            .entries
+                            .get(entry_idx)
+                            .is_some_and(|e| groups::is_trash(&e.id))
+                        {
+                            self.open_trash_stack();
+                            return;
+                        }
                         if let Some(g) = self
                             .entries
                             .get(entry_idx)

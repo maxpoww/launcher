@@ -812,6 +812,12 @@ pub struct FrameInput<'a> {
     pub dock_divider: Option<usize>,
     /// Active drag for ghost icon and insertion indicator; `None` at rest.
     pub drag: Option<DragFrame>,
+    /// Recycle-bin reaction (0 = shut/grey at rest, 1 = open/red while an app
+    /// is being dragged): drives the bin tile's lid openness and red tint.
+    pub trash_react: f32,
+    /// Recycle-bin hover-grow (0 = rest size, 1 = a dragged icon is over it):
+    /// swells the bin tile to acknowledge the drop it would accept.
+    pub trash_hover: f32,
     /// Hint shown centered in an empty Install section (index state /
     /// search prompt); empty string falls back to "No results".
     pub install_hint: &'a str,
@@ -920,6 +926,50 @@ pub fn open_box_slot_member(left: bool, slot: usize) -> usize {
     slot_member.get(slot).copied().unwrap_or(slot)
 }
 
+/// The Recycle Bin's garbage-can icon instance for `rect`, given the reaction
+/// `react` (0 = grey, lid shut at rest; 1 = red, lid wide open while an app is
+/// being dragged). Rendered by the icon shader's bin mode (`ring <= -2`, its
+/// fractional part the lid openness); the texture layer is ignored.
+/// The Recycle Bin tile's rounded-rect fill colour for reaction `react`, given
+/// the theme's `highlight` rgba. At rest it is byte-for-byte the box/folder
+/// tile fill (`hl` with alpha `(hl.a*4).min(0.72)`), so it can't look different
+/// from them; it lerps to a translucent red as an app arms the drop.
+fn trash_tile_color(highlight: [f32; 4], react: f32) -> [f32; 4] {
+    let r = react.clamp(0.0, 1.0);
+    let rest = [
+        highlight[0],
+        highlight[1],
+        highlight[2],
+        (highlight[3] * 4.0).min(0.72),
+    ];
+    let red = [0.80, 0.20, 0.17, 0.66];
+    [
+        lerp(rest[0], red[0], r),
+        lerp(rest[1], red[1], r),
+        lerp(rest[2], red[2], r),
+        lerp(rest[3], red[3], r),
+    ]
+}
+
+/// Scale `r` by `scale` about its bottom-centre — the dock grow anchor, so a
+/// swelling icon rises off the bar instead of sinking into it.
+fn grow_bottom(r: Rect, scale: f32) -> Rect {
+    let (w, h) = (r.w * scale, r.h * scale);
+    Rect::new(r.x + r.w / 2.0 - w / 2.0, r.y + r.h - h, w, h)
+}
+
+fn bin_icon(rect: Rect, react: f32) -> IconInst {
+    let r = react.clamp(0.0, 1.0);
+    IconInst {
+        rect,
+        layer: 0,
+        // A light can glyph; the rounded tile behind it (drawn as a RectInst by
+        // the caller) carries the grey→red colour. Only the openness varies.
+        tint: [0.95, 0.96, 0.97, 1.0],
+        ring: -2.0 - r,
+    }
+}
+
 /// Assemble the draw scene for one frame.
 ///
 /// `visible` holds, per section, indices into `entries` ranked by the
@@ -954,6 +1004,8 @@ pub fn scene(
         dock_running,
         dock_divider,
         drag,
+        trash_react,
+        trash_hover,
         install_hint,
         busy,
         failed,
@@ -1217,6 +1269,24 @@ pub fn scene(
                 glass: 0.0,
             });
         }
+        // The Recycle Bin: the same rounded "squircle" tile the box/folder
+        // cells use (rect-shader `radius` + glass), so it matches them — a grey
+        // plate that warms to red while an app is dragged, with a can on top.
+        if entries
+            .get(entry_idx)
+            .is_some_and(|e| crate::groups::is_trash(&e.id))
+        {
+            // Swell it while a dragged icon hovers it as the drop target.
+            let rect = grow_bottom(icon_rect, 1.0 + 0.18 * trash_hover);
+            scene.rects.push(RectInst {
+                rect,
+                radius: rect.h * 0.22,
+                color: trash_tile_color(config.theme.highlight_rgba(), trash_react),
+                glass: 0.5,
+            });
+            scene.icons.push(bin_icon(rect, trash_react));
+            continue;
+        }
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
             // A pinned box: a folder tile with a 2×2 mini preview.
             let hl = config.theme.highlight_rgba();
@@ -1352,18 +1422,26 @@ pub fn scene(
                 glass: 0.0,
             });
         }
-        // Over the uninstall target, flush the ghost red — the icon in hand
-        // is the one about to disappear, so it reddens to say "drop = remove".
-        let tint = if df.drop_section == Some(SECTION_INSTALL) {
-            [0.52, 0.11, 0.09, 0.55]
+        // Over an uninstall target, flush the ghost red — the icon in hand is
+        // the one about to disappear, so it reddens to say "drop = remove".
+        // Full red over the Install section; eased in with the hover-grow while
+        // it's over the Recycle Bin.
+        // `ghost_ring` = -1.0 keeps the shader's composited trash-can mark (the
+        // Install-section drop has no bin, so the mark is its only "= remove"
+        // cue); -1.3 reddens the ghost but skips the can (over the Recycle Bin
+        // the bin itself is the can — a second one would be redundant).
+        let (tint, ghost_ring) = if df.drop_section == Some(SECTION_INSTALL) {
+            ([0.52, 0.11, 0.09, 0.55], -1.0)
         } else {
-            [0.0; 4]
+            ([0.52, 0.11, 0.09, 0.55 * trash_hover], -1.3)
         };
         // Ghost following the pointer, topmost: the dragged icon, or a
         // box's mini stack. Sized to the row it hovers — dock icons over
         // the dock, grid cells over the grid — so the grabbed icon always
         // matches its neighbours, shrinking onto the dock on the fly.
-        let size = if df.on_dock { dock_icon } else { grid_icon };
+        // Shrink the ghost a little while it hovers the bin — it reads as being
+        // drawn into the trash the bin is swelling to accept.
+        let size = if df.on_dock { dock_icon } else { grid_icon } * (1.0 - 0.22 * trash_hover);
         let (gx, gy) = df.pos;
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == df.entry_idx) {
             let m = size * 0.46;
@@ -1381,7 +1459,7 @@ pub fn scene(
                     ),
                     layer: *layer,
                     tint,
-                    ring: -1.0,
+                    ring: ghost_ring,
                 });
             }
         } else {
@@ -1389,7 +1467,7 @@ pub fn scene(
                 rect: Rect::new(gx - size / 2.0, gy - size / 2.0, size, size),
                 layer: layer_of(df.entry_idx),
                 tint,
-                ring: -1.0,
+                ring: ghost_ring,
             });
         }
     }
@@ -1658,6 +1736,33 @@ pub fn scene(
                     && ly + LABEL_LINE_PX > b.y
                     && ly < b.y + b.h
             });
+            // The Recycle Bin, if it's been moved onto the grid: the same
+            // rounded box-style tile + a can on top (grey → red while dragging).
+            if crate::groups::is_trash(&entry.id) {
+                let tile = box_tile;
+                let rect = Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile);
+                g.rects.push(RectInst {
+                    rect,
+                    radius: 14.0,
+                    color: trash_tile_color(config.theme.highlight_rgba(), trash_react),
+                    glass: 0.5,
+                });
+                g.icons.push(bin_icon(rect, trash_react));
+                if !covered {
+                    g.labels.push(Label {
+                        text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),
+                        pos: (cx, cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP),
+                        max_w: cell.w - 12.0,
+                        font_px: LABEL_FONT_PX,
+                        line_px: LABEL_LINE_PX,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        clip: None,
+                    });
+                }
+                continue;
+            }
             if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
                 // Group cell: folder-style tile with a 2×2 mini
                 // preview of the first members.

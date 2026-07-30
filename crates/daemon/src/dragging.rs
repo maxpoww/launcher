@@ -4,9 +4,9 @@
 
 use std::time::{Duration, Instant};
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::{apps, content, nix, pages};
+use crate::{apps, content, groups, nix, pages};
 use crate::{App, DragState, MAG_SLEEP_AFTER_DROP};
 
 /// Minimum time between page turns while *holding a drag* at the grid /
@@ -127,6 +127,13 @@ impl App {
             return false; // dropped on itself
         }
         let target_id = self.entries[target_idx].id.clone();
+        // Dropped onto the Recycle Bin: uninstall the app (→ back to Install)
+        // instead of folding it into a box. A non-removable app is a no-op and
+        // simply snaps back.
+        if groups::is_trash(&target_id) {
+            self.uninstall_app(dragged_id);
+            return true;
+        }
         match self.kinds.get(target_idx) {
             // Join the folder.
             Some(apps::EntryKind::Group) => {
@@ -160,12 +167,65 @@ impl App {
         }
     }
 
+    /// Uninstall the app `id` if it's removable — a waverunner-managed package
+    /// app (a declarative `nixos-rebuild`) or an installed catalog webapp.
+    /// Returns whether an uninstall was actually started. Shared by the
+    /// Install-section drop and the Recycle Bin drop.
+    ///
+    /// A managed app defers dropping its cache entry / dock pin until the
+    /// rebuild's `Done` (a failed rebuild re-adds the package-list line, so
+    /// tearing down now would diverge the two); its cell shows busy meanwhile.
+    /// A webapp is instant. A non-removable (base/system) app is a no-op.
+    pub(crate) fn uninstall_app(&mut self, id: &str) -> bool {
+        if self.busy_ids.contains(id) {
+            return false;
+        }
+        if self.removable_ids.contains(id) {
+            if let Some(attr) = self.managed.attr_for_app(id) {
+                info!("uninstalling {id} (attr {attr})");
+                self.kill_app_windows(id);
+                self.busy_ids.insert(id.to_owned());
+                self.uninstalling.insert(id.to_owned(), attr.clone());
+                self.nix.request(nix::Request::Remove {
+                    id: id.to_owned(),
+                    attr,
+                });
+                return true;
+            }
+        }
+        if let Some(slug) = self.installed_webapp_slug(id) {
+            self.uninstall_webapp(&slug);
+            return true;
+        }
+        false
+    }
+
+    /// Whether `pos` is over the Recycle Bin's dock tile (its centre — the
+    /// same fold-target test app drops use).
+    pub(crate) fn dropped_on_trash(&self, layout: &content::Layout, pos: (f32, f32)) -> bool {
+        self.dock_fold_target(layout, pos)
+            .and_then(|slot| self.dock_order.get(slot))
+            .and_then(|&idx| self.entries.get(idx))
+            .is_some_and(|e| groups::is_trash(&e.id))
+    }
+
+    /// Send `path` (a Files-section entry's absolute-path id) to the
+    /// FreeDesktop trash, then refilter so it drops out of the Files listing
+    /// and, if the trash view is open, appears in the bin.
+    pub(crate) fn trash_file(&mut self, path: &str) {
+        match crate::trash::Trash::home().trash(std::path::Path::new(path)) {
+            Ok(item) => info!("trashed {path} → Trash/files/{}", item.name),
+            Err(e) => warn!("failed to trash {path}: {e}"),
+        }
+        self.refilter();
+    }
+
     /// Finish a drag. Apps pin at the dock slot they were dropped on
     /// (dock-origin drags dropped elsewhere unpin), a profile app
-    /// dropped on the Install section uninstalls, and a package dropped
-    /// on the Apps section (or the dock) installs. `released` is false
-    /// when the drag ended by the pointer leaving the surface — that
-    /// path never installs or uninstalls anything.
+    /// dropped on the Install section (or the Recycle Bin) uninstalls, and
+    /// a package dropped on the Apps section (or the dock) installs.
+    /// `released` is false when the drag ended by the pointer leaving the
+    /// surface — that path never installs or uninstalls anything.
     pub(crate) fn drop_drag(&mut self, drag: DragState, insert: Option<usize>, released: bool) {
         let Some(entry) = self.entries.get(drag.entry_idx) else {
             return; // entries were replaced mid-drag
@@ -259,26 +319,9 @@ impl App {
                     && !self.busy_ids.contains(&id) =>
             {
                 // Uninstall — gated to managed apps, so this only runs for
-                // something the launcher installed (non-removable apps
-                // fall through and snap back). Remove the attr from the
-                // list, then switch; the busy id is the app cell.
-                if let Some(attr) = self.managed.attr_for_app(&id) {
-                    info!("uninstalling {id} (attr {attr})");
-                    // Close it first if it's open, so uninstalling a running
-                    // app removes it cleanly instead of leaving a live window
-                    // with no package behind it.
-                    self.kill_app_windows(&id);
-                    // Defer dropping the cache entry and dock pin until the
-                    // rebuild succeeds (see `nix::Event::Done`): a failed
-                    // uninstall re-adds the package-list line, so removing the
-                    // cache now would leave the two out of sync. The app cell
-                    // shows busy meanwhile.
-                    self.busy_ids.insert(id.clone());
-                    self.uninstalling.insert(id.clone(), attr.clone());
-                    self.nix.request(nix::Request::Remove { id, attr });
-                } else {
-                    debug!("{id} is not waverunner-managed; cannot uninstall");
-                }
+                // something the launcher installed (non-removable apps fall
+                // through and snap back). See `uninstall_app`.
+                self.uninstall_app(&id);
             }
             // A catalog webapp: dropped clear of the card runs it ephemerally
             // ("try it", window shows in the dock unpinned); dropped on the
@@ -313,9 +356,16 @@ impl App {
                 if section == Some(content::SECTION_INSTALL)
                     && self.installed_webapp_slug(&id).is_some() =>
             {
-                if let Some(slug) = self.installed_webapp_slug(&id) {
-                    self.uninstall_webapp(&slug);
-                }
+                self.uninstall_app(&id);
+            }
+            // A file or directory (from the Files section) dropped onto the
+            // Recycle Bin: send it to the FreeDesktop trash. Its entry id is
+            // the absolute path (see `push_transient_file`). It vanishes from
+            // the Files listing; an open trash view picks it up on refilter.
+            Some(apps::EntryKind::File)
+                if released && self.dropped_on_trash(&layout, drag.pos) =>
+            {
+                self.trash_file(&id);
             }
             _ => {
                 // Grid gestures: an app dropped on another app creates a
@@ -622,7 +672,17 @@ impl App {
         // only a dragged App folds.)
         if kind == Some(apps::EntryKind::App) {
             if let Some(target) = self.grid_fold_at(pos, entry_idx) {
-                self.fold_box_for(target, id);
+                // Dropped onto the Recycle Bin (if it's been moved to the
+                // grid): uninstall instead of folding into a box.
+                if self
+                    .entries
+                    .get(target)
+                    .is_some_and(|e| groups::is_trash(&e.id))
+                {
+                    self.uninstall_app(id);
+                } else {
+                    self.fold_box_for(target, id);
+                }
                 self.refilter();
                 return true;
             }

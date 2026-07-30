@@ -642,6 +642,51 @@ impl App {
                 over_cell,
                 over_dock,
             });
+        // Recycle-bin reaction: the bin reddens and its lid opens while an app,
+        // a box, or a file/dir is being dragged anywhere — inviting a drop
+        // (apps uninstall; files go to the system trash). A package (install
+        // gesture) or the bin itself don't arm it.
+        let trash_react_target = self.gesture.dragging.as_ref().is_some_and(|d| {
+            matches!(
+                self.kinds.get(d.entry_idx),
+                Some(apps::EntryKind::App | apps::EntryKind::Group | apps::EntryKind::File)
+            ) && self
+                .entries
+                .get(d.entry_idx)
+                .is_some_and(|e| !groups::is_trash(&e.id))
+        });
+        let (v, moving) = animation::ease_toward(
+            self.trash_react,
+            if trash_react_target { 1.0 } else { 0.0 },
+            dt,
+            14.0,
+            0.004,
+        );
+        self.trash_react = v;
+        if moving {
+            self.dirty = true;
+        }
+        // Recycle-bin hover-grow: the bin swells while a dragged icon sits over
+        // it. Computed straight from the fold target (not `over_dock`, which is
+        // App-only) so a dragged file/dir hovering the bin grows it too.
+        let over_trash = trash_react_target
+            && self.gesture.dragging.as_ref().is_some_and(|d| {
+                self.dock_fold_target(&layout, d.pos)
+                    .and_then(|slot| self.dock_order.get(slot).copied())
+                    .and_then(|idx| self.entries.get(idx))
+                    .is_some_and(|e| groups::is_trash(&e.id))
+            });
+        let (hv, hv_moving) = animation::ease_toward(
+            self.trash_hover,
+            if over_trash { 1.0 } else { 0.0 },
+            dt,
+            16.0,
+            0.004,
+        );
+        self.trash_hover = hv;
+        if hv_moving {
+            self.dirty = true;
+        }
         // A pending drag-to-install tile counts as busy (its "Installing…"
         // note holds from the drop until the rescan swaps in the real app)
         // unless the install failed, when it flashes "Failed" and awaits a
@@ -858,6 +903,8 @@ impl App {
                 dock_running: &dock_running,
                 dock_divider: self.dock_divider,
                 drag: drag_frame,
+                trash_react: self.trash_react,
+                trash_hover: self.trash_hover,
                 install_hint: self.install_hint(),
                 busy: &busy,
                 failed: &failed,

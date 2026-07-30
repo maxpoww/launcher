@@ -254,9 +254,34 @@ impl App {
     /// the box overlay to render, and the paged member list (folders
     /// first, alphabetical — the same order the Files section uses).
     pub(crate) fn rebuild_dir_stack(&mut self) {
-        let Some(path) = self.dir_stack.as_ref().map(|ds| ds.path.clone()) else {
+        let Some((path, is_trash)) = self
+            .dir_stack
+            .as_ref()
+            .map(|ds| (ds.path.clone(), ds.is_trash))
+        else {
             return;
         };
+        // The Recycle Bin lists the FreeDesktop trash: each entry keeps its
+        // ORIGINAL name (from the `.trashinfo`) but its icon/thumbnail and open
+        // action point at the real file under `Trash/files/`. Empty trash (or
+        // no trash dir yet, on a fresh install) simply lists nothing.
+        if is_trash {
+            let trash = crate::trash::Trash::home();
+            let items = trash.list();
+            let mut ids = Vec::with_capacity(items.len().min(DIR_STACK_MAX));
+            for item in items.into_iter().take(DIR_STACK_MAX) {
+                let disk = trash.file_path(&item.name).to_string_lossy().into_owned();
+                let exec = format!("xdg-open {}", launch::shell_quote(&disk));
+                self.push_transient_file(&disk, item.display_name(), exec, item.is_dir);
+                ids.push(disk);
+            }
+            let mut members = crate::pages::PagedList::from_flat(ids);
+            members.normalize(crate::groups::PAGE_CAP, |_| true);
+            if let Some(ds) = &mut self.dir_stack {
+                ds.members = members;
+            }
+            return;
+        }
         let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&path)
             .into_iter()
             .flatten()
