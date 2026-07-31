@@ -44,7 +44,7 @@ pub struct AppInternalContext {
     pub is_reading_docs: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitContext {
     pub repo_root: Option<PathBuf>,
     pub branch: Option<String>,
