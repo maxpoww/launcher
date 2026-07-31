@@ -224,15 +224,18 @@ fn main() -> anyhow::Result<()> {
         options_ptr: None,
         options_hover: None,
         options_clock: App::options_clock_init(),
+        options_date: App::options_date_init(),
         options_title: None,
         options_active_addr: None,
         options_clock_w: 0.0,
+        options_date_w: 0.0,
         options_title_w: 0.0,
         options_fullscreen: false,
         options_hidden: false,
         options_reveal_deadline: None,
         options_hide_deadline: None,
         options_ctrl: options::CtrlAnim::default(),
+        options_clock_meta: options::ClockMeta::default(),
         ui: UiState::new(
             config.animation.clone(),
             // Docked, the card is a floating bar: dock height plus the
@@ -535,11 +538,15 @@ pub struct App {
     options_ptr: Option<(f32, f32)>,
     options_hover: Option<options::PillId>,
     options_clock: String,
+    /// Full date shown when the clock pill is hovered ("Friday, 31 July 2026").
+    options_date: String,
     options_title: Option<String>,
     options_active_addr: Option<String>,
-    /// Measured (logical px) widths of the clock and window-title text, so the
-    /// proportional-font pills can be sized without re-measuring every frame.
+    /// Measured (logical px) widths of the clock, date, and window-title text,
+    /// so the proportional-font pills can be sized without re-measuring every
+    /// frame.
     options_clock_w: f32,
+    options_date_w: f32,
     options_title_w: f32,
     /// Fullscreen auto-hide: whether the focused window is fullscreen, whether
     /// the bar is currently concealed, and the dwell/grace timers that reveal
@@ -550,6 +557,9 @@ pub struct App {
     options_hide_deadline: Option<Instant>,
     /// Reveal animation state for the window control buttons.
     options_ctrl: options::CtrlAnim,
+    /// Clock↔date "metamorphosis": the pill grows horizontally on hover and
+    /// crossfades HH:MM into the full date, holding 3s after leave.
+    options_clock_meta: options::ClockMeta,
 
     ui: UiState,
     config: Config,

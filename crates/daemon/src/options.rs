@@ -21,7 +21,7 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_pointer;
 use wayland_client::WEnum;
 
-use crate::animation::ease_toward;
+use crate::animation::{ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene, ShadowInst};
 use crate::{hypr, surface, App, BTN_LEFT};
 
@@ -66,8 +66,9 @@ const RED_GLYPH: [f32; 4] = [0.92, 0.30, 0.30, 1.0];
 
 // --- Control-button reveal animation ---------------------------------------
 // The buttons are hidden by default; hovering the window pill makes them slide
-// down from the top edge to their resting spots, staggered (close+pseudo, then
-// float, then fullscreen). Leaving fades them out. All dt-based.
+// out horizontally from behind their parent pill, staggered (close+pseudo from
+// behind the window name, then float from behind pseudo, then fullscreen from
+// behind float). Leaving fades them out. All dt-based.
 const CTRL_STAGGER: f32 = 0.085; // s between stagger stages
 /// Per-button reveal delay, indexed by [`ctrl_index`]: close, pseudo, float,
 /// fullscreen. Close and pseudo fall together; float then fullscreen follow.
@@ -93,6 +94,33 @@ pub(crate) struct CtrlAnim {
     frame_pending: bool,
 }
 
+// --- Clock↔date metamorphosis ----------------------------------------------
+// Hovering the clock pill grows it horizontally and crossfades HH:MM into the
+// full date; it holds as the date for a few seconds after the pointer leaves,
+// then plays the same transition backwards. All dt-based.
+/// Glide rate of the metamorphosis progress (exponential approach).
+const META_RATE: f32 = 13.0;
+const META_EPS: f32 = 0.001;
+/// How long the pill stays on the date after the hover leaves.
+const META_HOLD: Duration = Duration::from_millis(1500);
+/// Crossfade split: the clock fades out by `t = OUT_END`, the date fades in
+/// from `t = IN_START` — a slight overlap in the middle keeps it smooth.
+const META_OUT_END: f32 = 0.55;
+const META_IN_START: f32 = 0.45;
+
+/// Progress + timing state for the clock↔date metamorphosis.
+#[derive(Debug, Default)]
+pub(crate) struct ClockMeta {
+    /// Whether the pill should show the date (pointer on it, or within hold).
+    reveal: bool,
+    /// Progress 0 (clock) → 1 (date).
+    t: f32,
+    last: Option<std::time::Instant>,
+    frame_pending: bool,
+    /// When the post-leave hold expires and the pill collapses back to clock.
+    hold_deadline: Option<std::time::Instant>,
+}
+
 /// Animation slot for a control-button pill (`None` for window/clock).
 fn ctrl_index(id: PillId) -> Option<usize> {
     match id {
@@ -101,6 +129,20 @@ fn ctrl_index(id: PillId) -> Option<usize> {
         PillId::Float => Some(2),
         PillId::Fullscreen => Some(3),
         _ => None,
+    }
+}
+
+/// Back-to-front draw order so each parent pill occludes the control emerging
+/// from behind it: fullscreen ← float ← pseudo ← window, and close ← window.
+/// (Clock is independent — it never overlaps the cluster.)
+fn draw_z(id: PillId) -> u8 {
+    match id {
+        PillId::Fullscreen => 0,
+        PillId::Float => 1,
+        PillId::Pseudo => 2,
+        PillId::Close => 3,
+        PillId::Window => 4,
+        PillId::Clock => 5,
     }
 }
 
@@ -147,6 +189,27 @@ fn clock_now() -> String {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
         format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    }
+}
+
+/// Local date as `Weekday, D Month YYYY` (e.g. "Friday, 31 July 2026"), via
+/// libc so it respects the timezone.
+fn date_now() -> String {
+    const WD: [&str; 7] = [
+        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    ];
+    const MO: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June", "July", "August", "September",
+        "October", "November", "December",
+    ];
+    // SAFETY: `localtime_r` fills a caller-owned `tm`; `time` takes null.
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        let wd = WD[(tm.tm_wday as usize).min(6)];
+        let mo = MO[(tm.tm_mon as usize).min(11)];
+        format!("{wd}, {} {mo} {}", tm.tm_mday, tm.tm_year + 1900)
     }
 }
 
@@ -208,6 +271,11 @@ impl App {
         clock_now()
     }
 
+    /// Startup date value (shown when the clock pill is hovered).
+    pub(crate) fn options_date_init() -> String {
+        date_now()
+    }
+
     /// Compute the current pills (interactive modules) for the bar state.
     fn options_pills(&self) -> Vec<Pill> {
         let w = self.options_size.0 as f32;
@@ -220,9 +288,13 @@ impl App {
         let y = PILL_MARGIN_Y;
         let mut pills = Vec::new();
 
-        // Clock, far right.
+        // Clock, far right. Its width metamorphoses between the HH:MM and the
+        // full date as the pill is hovered; it grows leftward (right edge
+        // pinned at the bar edge). The wider rect stays hoverable-as-clock, so
+        // the date holds open while the pointer is over it.
         if !self.options_clock.is_empty() {
-            let cw = (self.options_clock_w + 2.0 * PILL_PAD_X).max(ph);
+            let content_w = lerp(self.options_clock_w, self.options_date_w, self.options_clock_meta.t);
+            let cw = (content_w + 2.0 * PILL_PAD_X).max(ph);
             pills.push(Pill {
                 id: PillId::Clock,
                 rect: Rect::new(w - EDGE_PAD - cw, y, cw, ph),
@@ -273,15 +345,18 @@ impl App {
     /// widths must be measured, not estimated). Cheap; only on data change.
     pub(crate) fn measure_options_text(&mut self) {
         let clock = self.options_clock.clone();
+        let date = self.options_date.clone();
         let title = self.options_title.as_ref().map(|t| truncate(t, TITLE_MAX));
         let Some(r) = self.options_renderer.as_mut() else {
             return;
         };
         let cw = r.measure_text(&clock, FONT_PX, TEXT_FONT);
+        let dw = r.measure_text(&date, FONT_PX, TEXT_FONT);
         let tw = title
             .as_deref()
             .map_or(0.0, |t| r.measure_text(t, FONT_PX, TEXT_FONT));
         self.options_clock_w = cw;
+        self.options_date_w = dw;
         self.options_title_w = tw;
     }
 
@@ -330,30 +405,79 @@ impl App {
     }
 
     /// Add the OPTIONS pills to the bar's scene (called after the base fill).
-    /// Control buttons carry the reveal animation: a vertical slide offset from
-    /// `slide` and an opacity from `alpha`; window/clock are always full.
+    /// Control buttons carry the reveal animation: a horizontal slide from
+    /// behind their parent pill (offset from `slide`) plus an opacity from
+    /// `alpha`; window/clock are always at rest, full opacity.
     pub(crate) fn push_options_pills(&self, scene: &mut Scene) {
         let hover_wash = self.options_hover_wash();
         let rest_wash = self.options_rest_wash();
         let bright = self.options_bar_is_bright();
         let text_color = self.options_text_color();
-        for pill in &self.options_pills() {
-            // Reveal animation for the control buttons.
-            let (dy, a) = match ctrl_index(pill.id) {
+        let bar_h = self.config.options.height as f32;
+        let full_w = self.options_size.0 as f32;
+
+        let pills = self.options_pills();
+        // Resting rect of a pill by id, for computing where each control is
+        // tucked (behind its parent) and the edge it emerges past.
+        let home = |id: PillId| pills.iter().find(|p| p.id == id).map(|p| p.rect);
+        let window = home(PillId::Window);
+        // Draw parents last so they occlude the buttons emerging behind them.
+        let mut order: Vec<&Pill> = pills.iter().collect();
+        order.sort_by_key(|p| draw_z(p.id));
+
+        for pill in order {
+            // Reveal animation for the control buttons: slide out horizontally
+            // from behind the parent's near edge (slide 0 = tucked, 1 = rest),
+            // fading in; the glyph is clipped to the emerge side so it reads as
+            // coming out from under the parent rather than through it.
+            let (rect, a, clip, shadow_a) = match ctrl_index(pill.id) {
                 Some(i) => {
                     let a = self.options_ctrl.alpha[i];
                     if a <= 0.01 {
                         continue; // fully hidden — don't draw
                     }
-                    // Fall from above the top edge (slide 0) to rest (slide 1).
-                    let fall = pill.rect.y + pill.rect.h;
-                    (-(1.0 - self.options_ctrl.slide[i]) * fall, a)
+                    let s = self.options_ctrl.slide[i];
+                    let d = pill.rect.w;
+                    // `origin` = tucked-x behind the parent; `edge`/`left` =
+                    // the vertical line the glyph emerges past, and which side.
+                    let (origin, edge, left) = match pill.id {
+                        // Close emerges leftward from the window pill's left edge.
+                        PillId::Close => {
+                            let wx = window.map_or(pill.rect.x, |w| w.x);
+                            (wx, wx, true)
+                        }
+                        // Mode toggles emerge rightward, each from behind the
+                        // previous pill's right edge.
+                        PillId::Pseudo => {
+                            let wr = window.map_or(pill.rect.x + d, |w| w.x + w.w);
+                            (wr - d, wr, false)
+                        }
+                        PillId::Float => {
+                            let pr =
+                                home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x + r.w);
+                            (pr - d, pr, false)
+                        }
+                        PillId::Fullscreen => {
+                            let fr = home(PillId::Float).map_or(pill.rect.x, |r| r.x + r.w);
+                            (fr - d, fr, false)
+                        }
+                        _ => (pill.rect.x, pill.rect.x, false),
+                    };
+                    let x = lerp(origin, pill.rect.x, s);
+                    let rect = Rect::new(x, pill.rect.y, d, pill.rect.h);
+                    let clip = if left {
+                        Rect::new(0.0, 0.0, edge, bar_h)
+                    } else {
+                        Rect::new(edge, 0.0, (full_w - edge).max(0.0), bar_h)
+                    };
+                    // Gate the depth shadow by slide so a tucked button's halo
+                    // doesn't leak over the parent (overlay shadows draw on top).
+                    (rect, a, Some(clip), a * s)
                 }
-                None => (0.0, 1.0),
+                None => (pill.rect, 1.0, None, 1.0),
             };
-            let rect = Rect::new(pill.rect.x, pill.rect.y + dy, pill.rect.w, pill.rect.h);
             let radius = rect.h / 2.0; // stadium ⇒ circle when w == h
-            push_neumorph(scene, rect, radius, bright, a);
+            push_neumorph(scene, rect, radius, bright, shadow_a);
             let base = if self.options_hover == Some(pill.id) {
                 hover_wash
             } else {
@@ -366,19 +490,41 @@ impl App {
                 glass: 0.0,
             });
             let g = pill.glyph_color.unwrap_or(text_color);
-            scene.labels.push(Label {
-                text: pill.text.clone(),
-                pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - LINE_PX) / 2.0),
-                max_w: rect.w,
+            let family = pill.family;
+            let cx = rect.x + rect.w / 2.0;
+            let ty = rect.y + (rect.h - LINE_PX) / 2.0;
+            let mk = |text: String, alpha: f32, max_w: f32, clip: Option<Rect>| Label {
+                text,
+                pos: (cx, ty),
+                max_w,
                 font_px: FONT_PX,
                 line_px: LINE_PX,
                 centered: true,
                 dim: false,
                 cache: true,
-                family: pill.family,
-                color: Some([g[0], g[1], g[2], g[3] * a]),
-                clip: None,
-            });
+                family,
+                color: Some([g[0], g[1], g[2], g[3] * alpha]),
+                clip,
+            };
+            // The clock pill crossfades HH:MM ↔ the full date during its
+            // metamorphosis: the clock fades out early, the date fades in late
+            // (a slight overlap), the date centred on the pill and scissor-
+            // clipped to it so it reveals from the centre outward as it grows.
+            let t = self.options_clock_meta.t;
+            if pill.id == PillId::Clock && t > 0.001 {
+                let out = (1.0 - t / META_OUT_END).clamp(0.0, 1.0);
+                let inn = ((t - META_IN_START) / (1.0 - META_IN_START)).clamp(0.0, 1.0);
+                if out > 0.001 {
+                    scene.labels.push(mk(self.options_clock.clone(), out, rect.w, Some(rect)));
+                }
+                if inn > 0.001 {
+                    scene
+                        .labels
+                        .push(mk(self.options_date.clone(), inn, self.options_date_w + 2.0, Some(rect)));
+                }
+            } else {
+                scene.labels.push(mk(pill.text.clone(), 1.0, rect.w, clip));
+            }
         }
     }
 
@@ -461,16 +607,18 @@ impl App {
         });
     }
 
-    /// Tick the clock; returns whether the displayed `HH:MM` changed.
+    /// Tick the clock (and refresh the date, which changes at midnight);
+    /// returns whether anything displayed changed.
     pub(crate) fn tick_options_clock(&mut self) -> bool {
-        let now = clock_now();
-        if now != self.options_clock {
-            self.options_clock = now;
+        let clock = clock_now();
+        let date = date_now();
+        let changed = clock != self.options_clock || date != self.options_date;
+        if changed {
+            self.options_clock = clock;
+            self.options_date = date;
             self.measure_options_text();
-            true
-        } else {
-            false
         }
+        changed
     }
 
     /// Set the surface's pointer input region: the whole bar strip while shown
@@ -537,6 +685,7 @@ impl App {
                 if !self.options_hidden {
                     self.options_hover = None;
                     self.update_ctrl_reveal(); // fade the buttons out
+                    self.update_clock_meta(); // start the date's hold-then-collapse
                     self.draw_options();
                     // Revealed in fullscreen: conceal again shortly after leave.
                     if self.options_fullscreen {
@@ -572,15 +721,24 @@ impl App {
     }
 
     fn options_update_hover(&mut self) {
+        let bar_h = self.config.options.height as f32;
         let hover = self.options_ptr.and_then(|p| {
             self.options_pills()
                 .iter()
-                .find(|pill| pill.rect.contains(p) && self.ctrl_pill_visible(pill.id))
+                .find(|pill| {
+                    // Extend each pill's hit area over the full bar height (up
+                    // to the very top screen edge), so slamming the pointer to
+                    // the edge still lands on the pill without vertical aiming —
+                    // the same forgiveness the dock gives at the bottom edge.
+                    let hit = Rect::new(pill.rect.x, 0.0, pill.rect.w, bar_h);
+                    hit.contains(p) && self.ctrl_pill_visible(pill.id)
+                })
                 .map(|pill| pill.id)
         });
         let changed = hover != self.options_hover;
         self.options_hover = hover;
         self.update_ctrl_reveal();
+        self.update_clock_meta();
         if changed {
             self.draw_options();
         }
@@ -692,6 +850,80 @@ impl App {
             self.schedule_options_ctrl_frame();
         } else {
             self.options_ctrl.last = None;
+        }
+    }
+
+    /// Update whether the clock pill should show the date: revealed while it's
+    /// hovered; on leave it holds on the date for [`META_HOLD`] then collapses
+    /// back to the clock (same transition backwards).
+    fn update_clock_meta(&mut self) {
+        if self.options_hover == Some(PillId::Clock) {
+            // Hovering the clock: reveal, and cancel any pending collapse.
+            self.options_clock_meta.hold_deadline = None;
+            if !self.options_clock_meta.reveal {
+                self.options_clock_meta.reveal = true;
+                self.options_clock_meta.last = None;
+                self.schedule_options_clock_frame();
+            }
+        } else if self.options_clock_meta.reveal && self.options_clock_meta.hold_deadline.is_none() {
+            // Left the clock while showing the date: hold, then collapse.
+            self.schedule_clock_collapse();
+        }
+    }
+
+    /// After the hover leaves, keep the date up for [`META_HOLD`], then play
+    /// the metamorphosis backwards (unless the clock got hovered again).
+    fn schedule_clock_collapse(&mut self) {
+        let deadline = Instant::now() + META_HOLD;
+        self.options_clock_meta.hold_deadline = Some(deadline);
+        let timer = Timer::from_duration(META_HOLD);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if app.options_clock_meta.hold_deadline == Some(deadline) {
+                app.options_clock_meta.hold_deadline = None;
+                if app.options_hover != Some(PillId::Clock) {
+                    app.options_clock_meta.reveal = false;
+                    app.options_clock_meta.last = None;
+                    app.schedule_options_clock_frame();
+                }
+            }
+            TimeoutAction::Drop
+        });
+    }
+
+    fn schedule_options_clock_frame(&mut self) {
+        if self.options_clock_meta.frame_pending {
+            return;
+        }
+        self.options_clock_meta.frame_pending = true;
+        if self.options_clock_meta.last.is_none() {
+            self.options_clock_meta.last = Some(Instant::now());
+        }
+        let timer = Timer::from_duration(Duration::from_millis(8));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.options_clock_meta.frame_pending = false;
+            app.tick_options_clock_meta();
+            TimeoutAction::Drop
+        });
+    }
+
+    /// Advance the clock↔date metamorphosis one frame; the pill width and the
+    /// crossfade are both derived from `t` at draw time.
+    fn tick_options_clock_meta(&mut self) {
+        let now = Instant::now();
+        let dt = self
+            .options_clock_meta
+            .last
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+        self.options_clock_meta.last = Some(now);
+        let target = if self.options_clock_meta.reveal { 1.0 } else { 0.0 };
+        let (nt, moving) =
+            ease_toward(self.options_clock_meta.t, target, dt, META_RATE, META_EPS);
+        self.options_clock_meta.t = nt;
+        self.draw_options();
+        if moving {
+            self.schedule_options_clock_frame();
+        } else {
+            self.options_clock_meta.last = None;
         }
     }
 
