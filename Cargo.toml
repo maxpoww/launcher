@@ -6,6 +6,7 @@ members = [
     "crates/core",
     "crates/proto",
     "crates/options-engine",
+    "crates/options-notify",
 ]
 
 [workspace.package]
@@ -35,6 +36,8 @@ waverunner-proto = { path = "crates/proto" }
 # The OPTIONS Context Core ("the Brain") — headless sensing engine the daemon
 # subscribes to. Not yet consumed by the daemon; wired in a later step.
 options-engine = { path = "crates/options-engine" }
+# OPTIONS' own notification backend (org.freedesktop.Notifications server).
+options-notify = { path = "crates/options-notify" }
 
 [profile.release]
 lto = "thin"
