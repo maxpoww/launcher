@@ -97,6 +97,12 @@ pub struct Label {
     pub cache: bool,
     /// Extra clip rect for labels outside the grid scissor.
     pub clip: Option<Rect>,
+    /// Font family override (`None` = the default SansSerif). OPTIONS labels
+    /// set this to a Nerd Font for its icons + text.
+    pub family: Option<&'static str>,
+    /// Per-label colour override (`None` = the frame's default text colour).
+    /// Used for e.g. the OPTIONS red close glyph.
+    pub color: Option<[f32; 4]>,
 }
 
 /// Scrollable grid content, clipped to `clip` by the renderer.
@@ -114,6 +120,10 @@ pub struct Scene {
     pub alpha: f32,
     /// Edge shadows, drawn first (behind everything).
     pub shadows: Vec<ShadowInst>,
+    /// Edge shadows drawn *over* the unclipped fills (not behind) — for
+    /// neumorphic button depth on the OPTIONS bar, where the opaque bar fill
+    /// would otherwise cover a behind-shadow.
+    pub overlay_shadows: Vec<ShadowInst>,
     /// Unclipped fills: card background first, then dock hover and the
     /// search box.
     pub rects: Vec<RectInst>,
@@ -1362,6 +1372,8 @@ pub fn scene(
                     centered: true,
                     dim: false,
                     cache: true,
+                    family: None,
+                    color: None,
                     clip: None,
                 });
             }
@@ -1402,6 +1414,8 @@ pub fn scene(
                         centered: true,
                         dim: false,
                         cache: true,
+                        family: None,
+                        color: None,
                         clip: None,
                     });
                 }
@@ -1522,6 +1536,8 @@ pub fn scene(
                 centered: true,
                 dim: false,
                 cache: true,
+                family: None,
+                color: None,
                 clip: Some(reveal_clip(draw_rect)),
             });
         } else {
@@ -1543,6 +1559,8 @@ pub fn scene(
                 centered: true,
                 dim,
                 cache: query.is_empty(),
+                family: None,
+                color: None,
                 clip: Some(reveal_clip(draw_rect)),
             });
             // The caret rides the centered text's right edge while
@@ -1581,6 +1599,8 @@ pub fn scene(
             centered: false,
             dim: true,
             cache: true,
+            family: None,
+            color: None,
             clip: Some(reveal_rect),
         });
 
@@ -1611,6 +1631,8 @@ pub fn scene(
                 centered: true,
                 dim: true,
                 cache: true,
+                family: None,
+                color: None,
                 clip: Some(reveal_rect),
             });
             scene.grids.push(grid);
@@ -1758,6 +1780,8 @@ pub fn scene(
                         centered: true,
                         dim: false,
                         cache: true,
+                        family: None,
+                        color: None,
                         clip: None,
                     });
                 }
@@ -1802,6 +1826,8 @@ pub fn scene(
                         centered: true,
                         dim: false,
                         cache: true,
+                        family: None,
+                        color: None,
                         clip: None,
                     });
                 }
@@ -1842,6 +1868,8 @@ pub fn scene(
                         centered: true,
                         dim: false,
                         cache: true,
+                        family: None,
+                        color: None,
                         clip: None,
                     });
                 }
@@ -1902,6 +1930,8 @@ pub fn scene(
                     centered: true,
                     dim: is_busy,
                     cache: true,
+                    family: None,
+                    color: None,
                     clip: None,
                 });
             }
@@ -2090,6 +2120,8 @@ pub fn scene(
                         centered: true,
                         dim: false,
                         cache: true,
+                        family: None,
+                        color: None,
                         clip: Some(box_rect),
                     });
                 }
@@ -2106,6 +2138,8 @@ pub fn scene(
                         centered: true,
                         dim: false,
                         cache: true,
+                        family: None,
+                        color: None,
                         clip: Some(box_rect),
                     });
                 }

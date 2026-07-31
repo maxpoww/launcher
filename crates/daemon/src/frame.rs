@@ -4,6 +4,7 @@
 
 use std::time::Instant;
 
+use smithay_client_toolkit::shell::wlr_layer::LayerSurfaceConfigure;
 use smithay_client_toolkit::shell::WaylandSurface;
 use tracing::{debug, error};
 
@@ -270,7 +271,7 @@ impl App {
         let query_px = self
             .renderer
             .as_mut()
-            .map(|r| r.measure_text(&self.search.query, content::SEARCH_FONT_PX))
+            .map(|r| r.measure_text(&self.search.query, content::SEARCH_FONT_PX, None))
             .unwrap_or(0.0);
         // (layout.scroll is the cyclic-wrapped image of list_scroll; the
         // raw value is what animates, so never sync it back from layout.)
@@ -979,6 +980,85 @@ impl App {
             if r.has_active_ripple() || r.has_active_box_wave() {
                 self.dirty = true;
             }
+        }
+    }
+
+    /// Handle a `configure` for the OPTIONS topbar: learn its (logical) size,
+    /// build or resize its own renderer, and draw the strip once. The bar is
+    /// static, so — unlike the dock — it needs no frame-callback loop yet.
+    pub(crate) fn configure_options(&mut self, configure: LayerSurfaceConfigure) {
+        let (width, height) = configure.new_size;
+        if width == 0 || height == 0 {
+            return; // wait for the compositor to report a real size
+        }
+        self.options_size = (width, height);
+        let scale = self.config.options.render_scale.max(1);
+        let (pw, ph) = (width * scale, height * scale);
+        if let Some(renderer) = self.options_renderer.as_mut() {
+            renderer.resize(pw, ph);
+        } else {
+            let built = {
+                let Some(layer) = self.options_layer.as_ref() else {
+                    return;
+                };
+                crate::renderer::Renderer::new(&self.conn, layer.wl_surface(), pw, ph, scale)
+            };
+            match built {
+                Ok(renderer) => self.options_renderer = Some(renderer),
+                Err(e) => {
+                    error!("options renderer init failed: {e:#}");
+                    return;
+                }
+            }
+        }
+        // Now the size + renderer exist: measure the pill text, set the input
+        // region, and draw.
+        self.measure_options_text();
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    /// Draw the OPTIONS topbar. Normally a near-transparent (90%) strip; when
+    /// a maximized window sits flush under it (smart gaps), the bar is painted
+    /// that window's sampled top colour, opaque, so the two read as one
+    /// surface (see [`crate::screencopy`]).
+    pub(crate) fn draw_options(&mut self) {
+        let (w, h) = self.options_size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let w = w as f32;
+        let bar_h = self.config.options.height as f32;
+        // Matched: opaque window colour, extended down over the window's top
+        // border (the overhang) to hide the seam. Otherwise the faint
+        // transparent strip, drawn only to the bar height.
+        let (color, bottom) = match self.options_bar_matched {
+            Some(c) => (c, bar_h + crate::OPTIONS_OVERHANG as f32),
+            None => ([0.0, 0.0, 0.0, 0.10], bar_h),
+        };
+        // Bleed the top/left/right edges a couple px past the surface so the
+        // SDF anti-aliasing seam falls off-screen instead of showing a 1px
+        // wallpaper line where an opaque matched bar meets the screen edges.
+        let mut scene = content::Scene {
+            alpha: 1.0,
+            rects: vec![content::RectInst {
+                rect: content::Rect::new(-2.0, -2.0, w + 4.0, bottom + 2.0),
+                radius: 0.0,
+                color,
+                glass: 0.0,
+            }],
+            ..Default::default()
+        };
+        // The context-aware pill modules ride on top of the base fill.
+        self.push_options_pills(&mut scene);
+        // Adaptive: black text on a bright matched bar, white on a dark one.
+        let text_rgba = self.options_text_color();
+        let squircle = self.config.theme.icon_squircle;
+        let Some(renderer) = self.options_renderer.as_mut() else {
+            return;
+        };
+        if let Err(e) = renderer.render(&scene, text_rgba, None, squircle, 0) {
+            error!("options render failed: {e:#}");
         }
     }
 }

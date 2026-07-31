@@ -48,6 +48,73 @@ pub fn create_layer_surface(
     layer
 }
 
+/// Create and commit the OPTIONS topbar surface: a strip anchored to the
+/// top edge, spanning the full output width, reserving its own exclusive
+/// zone so windows and the dock lay out beneath it.
+///
+/// The surface is `surface_height` tall but only reserves `bar_height` — the
+/// extra sliver overhangs the window's top edge (transparent, click-through)
+/// so, while colour-matched, the bar can paint over the window's top border
+/// and hide the seam between them.
+///
+/// Like the dock, the renderer is built on the first `configure` — anchoring
+/// left+right with a `0` width lets the compositor stretch the surface to the
+/// output width and report it back. The input region is empty: the strip is
+/// pointer-inert (currently just a near-transparent surface, no content).
+pub fn create_top_surface(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<App>,
+    bar_height: u32,
+    surface_height: u32,
+    render_scale: u32,
+) -> LayerSurface {
+    let surface = compositor.create_surface(qh);
+    let layer = layer_shell.create_layer_surface(
+        qh,
+        surface,
+        Layer::Top,
+        Some("waverunner-options"),
+        None, // let the compositor pick the active output
+    );
+
+    // Anchoring top + left + right with width 0 stretches to the output width;
+    // the real size arrives in the first configure.
+    layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
+    layer.set_size(0, surface_height);
+    // Reserve only the bar strip; the overhang below it is not reserved.
+    layer.set_exclusive_zone(bar_height as i32);
+    layer.wl_surface().set_buffer_scale(render_scale as i32);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    // Empty input region: pointer events pass through, never reaching the
+    // dock's pointer handlers.
+    if let Ok(region) = Region::new(compositor) {
+        layer.wl_surface().set_input_region(Some(region.wl_region()));
+    }
+    layer.commit();
+    layer
+}
+
+/// Set a layer surface's pointer input region to the union of `rects`
+/// (logical `x, y, w, h`). An empty slice makes the whole surface
+/// click-through.
+pub fn set_input_rects(
+    compositor: &CompositorState,
+    layer: &LayerSurface,
+    rects: &[(i32, i32, i32, i32)],
+) {
+    let Ok(region) = Region::new(compositor) else {
+        return;
+    };
+    for &(x, y, w, h) in rects {
+        region.add(x, y, w, h);
+    }
+    layer
+        .wl_surface()
+        .set_input_region(Some(region.wl_region()));
+    layer.commit();
+}
+
 /// Flip keyboard interactivity as the popup expands/collapses.
 ///
 /// `Exclusive` while fully open: the popup only opens by deliberate

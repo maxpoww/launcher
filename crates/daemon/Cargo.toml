@@ -18,6 +18,9 @@ waverunner-proto = { workspace = true }
 
 smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
 wayland-client = "0.31"
+# wlr-screencopy: sample the top row of a maximized window so the OPTIONS
+# bar can colour-match it (the smart-gaps "one surface" look).
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # client_system: back the connection with libwayland so we can hand raw
 # wl_display/wl_surface pointers to wgpu.
 wayland-backend = { version = "0.3", features = ["client_system"] }

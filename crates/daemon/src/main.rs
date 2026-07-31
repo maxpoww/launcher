@@ -25,8 +25,10 @@ mod launch;
 mod managed;
 mod managed_webapps;
 mod nix;
+mod options;
 mod order;
 mod pager;
+mod screencopy;
 mod pages;
 mod persist;
 mod pins;
@@ -67,13 +69,15 @@ use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
 use smithay_client_toolkit::seat::pointer::cursor_shape::CursorShapeManager;
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
+use smithay_client_toolkit::shm::raw::RawPool;
+use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::shell::wlr_layer::{
     LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
 };
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
-    delegate_seat, registry_handlers,
+    delegate_seat, delegate_shm, registry_handlers,
 };
 use tracing::{debug, error, info, warn};
 use waverunner_core::index::AppEntry;
@@ -85,6 +89,7 @@ use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{
     wl_data_device, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface,
 };
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 
 use crate::content::Hit;
@@ -138,6 +143,31 @@ fn main() -> anyhow::Result<()> {
         render_scale,
     );
 
+    // The OPTIONS topbar: a second top-anchored strip, created only when
+    // enabled. Its renderer is built on its first configure (like the dock's).
+    let options_layer = config.options.enabled.then(|| {
+        surface::create_top_surface(
+            &compositor,
+            &layer_shell,
+            &qh,
+            config.options.height,
+            config.options.height + OPTIONS_OVERHANG,
+            config.options.render_scale.max(1),
+        )
+    });
+    // wlr-screencopy + shm for the smart-gaps colour-match. Both optional:
+    // without them (or without Hyprland IPC) the bar just never matches.
+    let shm = Shm::bind(&globals, &qh).ok();
+    let screencopy = options_layer
+        .is_some()
+        .then(|| {
+            globals
+                .bind::<ZwlrScreencopyManagerV1, App, _>(&qh, 1..=3, ())
+                .map_err(|e| warn!("wlr-screencopy unavailable; bar colour-match off: {e}"))
+                .ok()
+        })
+        .flatten();
+
     // App discovery runs on the one allowed background thread; it
     // rescans on request (dock reveals) and delivers results over this
     // channel. The initial scan is queued by spawn_indexer.
@@ -180,6 +210,24 @@ fn main() -> anyhow::Result<()> {
         compositor,
         layer,
         renderer: None,
+        options_layer,
+        options_renderer: None,
+        options_size: (0, 0),
+        options_bar_matched: None,
+        options_match: None,
+        capture: None,
+        options_poll_pending: false,
+        screencopy,
+        shm,
+        shm_pool: None,
+        pointer_surface: options::PointerSurface::Dock,
+        options_ptr: None,
+        options_hover: None,
+        options_clock: App::options_clock_init(),
+        options_title: None,
+        options_active_addr: None,
+        options_clock_w: 0.0,
+        options_title_w: 0.0,
         ui: UiState::new(
             config.animation.clone(),
             // Docked, the card is a floating bar: dock height plus the
@@ -381,21 +429,43 @@ fn main() -> anyhow::Result<()> {
     // Hyprland emits no event for float toggles or float moves/resizes,
     // so events alone can never catch every layout change. Optional:
     // without Hyprland IPC the dock simply always auto-hides.
-    if app.config.input.intellihide {
+    // A 1 s clock tick for the OPTIONS time pill (redraws only on change).
+    if app.options_layer.is_some() {
+        if let Err(e) = event_loop.handle().insert_source(
+            Timer::from_duration(Duration::from_secs(1)),
+            |_, _, app: &mut App| {
+                if app.tick_options_clock() {
+                    app.sync_options_input();
+                    app.draw_options();
+                }
+                TimeoutAction::ToDuration(Duration::from_secs(1))
+            },
+        ) {
+            warn!("options clock timer failed: {e}");
+        }
+    }
+
+    // Watch Hyprland window events when the dock's intellihide or the OPTIONS
+    // topbar (colour-match + window pill) needs them.
+    if app.config.input.intellihide || app.options_layer.is_some() {
         match hypr::subscribe(&event_loop.handle()) {
             Ok(()) => {
                 app.on_layout_changed();
-                if let Err(e) = event_loop.handle().insert_source(
-                    Timer::from_duration(ZONE_POLL_INTERVAL),
-                    |_, _, app: &mut App| {
-                        app.on_layout_changed();
-                        TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
-                    },
-                ) {
-                    warn!("zone poll timer failed ({e}); intellihide is event-driven only");
+                // The steady zone poll is intellihide-only (float moves emit no
+                // event); the bar colour-match runs its own resample loop.
+                if app.config.input.intellihide {
+                    if let Err(e) = event_loop.handle().insert_source(
+                        Timer::from_duration(ZONE_POLL_INTERVAL),
+                        |_, _, app: &mut App| {
+                            app.on_layout_changed();
+                            TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
+                        },
+                    ) {
+                        warn!("zone poll timer failed ({e}); intellihide is event-driven only");
+                    }
                 }
             }
-            Err(e) => warn!("intellihide inactive: {e:#}"),
+            Err(e) => warn!("Hyprland IPC unavailable: {e:#}"),
         }
     }
 
@@ -435,6 +505,37 @@ pub struct App {
     compositor: CompositorState,
     layer: LayerSurface,
     renderer: Option<Renderer>,
+    /// The "OPTIONS" topbar surface (a near-transparent top-edge strip), its
+    /// renderer, and its logical size from `configure`.
+    options_layer: Option<LayerSurface>,
+    options_renderer: Option<Renderer>,
+    options_size: (u32, u32),
+    /// Smart-gaps colour-match: when a maximized window is flush under the
+    /// bar, the bar is painted this sampled colour (opaque); `None` = the
+    /// default transparent strip. See [`screencopy`].
+    options_bar_matched: Option<[f32; 4]>,
+    /// The output + row to sample for the current match (if any).
+    options_match: Option<screencopy::CaptureTarget>,
+    /// An in-flight screencopy of the focused output.
+    capture: Option<screencopy::Capture>,
+    /// Whether a resample timer is already queued.
+    options_poll_pending: bool,
+    /// wlr-screencopy manager + shm plumbing for the colour sampling.
+    screencopy: Option<ZwlrScreencopyManagerV1>,
+    shm: Option<Shm>,
+    shm_pool: Option<RawPool>,
+    /// OPTIONS content (pills): which surface the pointer is on, its position,
+    /// the hovered pill, and the data the pills show.
+    pointer_surface: options::PointerSurface,
+    options_ptr: Option<(f32, f32)>,
+    options_hover: Option<options::PillId>,
+    options_clock: String,
+    options_title: Option<String>,
+    options_active_addr: Option<String>,
+    /// Measured (logical px) widths of the clock and window-title text, so the
+    /// proportional-font pills can be sized without re-measuring every frame.
+    options_clock_w: f32,
+    options_title_w: f32,
 
     ui: UiState,
     config: Config,
@@ -891,6 +992,12 @@ enum BoxTarget {
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
 
+/// How far (logical px) the OPTIONS bar overhangs the window's top edge while
+/// colour-matched, to paint over the window's top border and kill the seam.
+/// Kept minimal (just the ~1px border) so the colour is still sampled from the
+/// window's toolbar just below it, not from content deeper down.
+const OPTIONS_OVERHANG: u32 = 2;
+
 /// After the box closes, the dock rests this long before it hides — a
 /// brief beat parked as a dock instead of vanishing straight away.
 const DOCK_REST_AFTER_CLOSE: Duration = Duration::from_millis(650);
@@ -1025,6 +1132,10 @@ impl App {
         // regardless of intellihide (the macOS dot + activate-on-click
         // need it even when the dock never dodges).
         self.refresh_running();
+        // Re-evaluate the OPTIONS bar colour-match and window pill on every
+        // layout change.
+        self.reeval_options_bar();
+        self.refresh_options_content();
         if !self.config.input.intellihide {
             return;
         }
@@ -2790,10 +2901,20 @@ impl LayerShellHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        // Route by surface: the OPTIONS topbar has its own renderer and draw
+        // path; everything below is the dock/card.
+        if self
+            .options_layer
+            .as_ref()
+            .is_some_and(|opt| opt.wl_surface() == layer.wl_surface())
+        {
+            self.configure_options(configure);
+            return;
+        }
         let (mut width, mut height) = configure.new_size;
         if width == 0 || height == 0 {
             let (sw, sh) = self.scaled_surface_size();
@@ -3007,6 +3128,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        // Latch which surface the pointer entered; the OPTIONS topbar owns its
+        // own pointer handling and must never fall through into the dock's.
+        if let wl_pointer::Event::Enter { surface, .. } = &event {
+            app.pointer_surface = app.classify_pointer_surface(surface);
+        }
+        if app.pointer_surface == options::PointerSurface::Options {
+            app.options_pointer(event);
+            return;
+        }
         match event {
             wl_pointer::Event::Enter {
                 serial,
@@ -3405,6 +3535,14 @@ delegate_seat!(App);
 delegate_keyboard!(App);
 delegate_layer!(App);
 delegate_registry!(App);
+delegate_shm!(App);
+
+impl ShmHandler for App {
+    fn shm_state(&mut self) -> &mut Shm {
+        // Only reached once `shm` is bound (WlShm dispatch can't fire otherwise).
+        self.shm.as_mut().expect("shm bound before wl_shm dispatch")
+    }
+}
 
 // Clipboard plumbing: we only ever *read* the selection on Ctrl+V, so
 // every data-device / offer / source callback is a no-op — the paste

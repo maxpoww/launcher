@@ -2265,6 +2265,7 @@ dependencies = [
  "waverunner-proto",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols-wlr",
  "wgpu",
 ]
 

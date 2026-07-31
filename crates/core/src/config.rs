@@ -43,6 +43,8 @@ pub struct Config {
     pub input: InputConfig,
     /// Application launch behavior.
     pub launch: LaunchConfig,
+    /// The "OPTIONS" topbar — a reserved strip at the top of the screen.
+    pub options: OptionsConfig,
 }
 
 /// Application launch behavior.
@@ -61,6 +63,32 @@ impl Default for LaunchConfig {
     fn default() -> Self {
         Self {
             terminal: "foot".to_owned(),
+        }
+    }
+}
+
+/// The "OPTIONS" topbar: a second layer-shell surface anchored to the top
+/// edge, reserving its own strip (exclusive zone) so windows and the dock
+/// lay out beneath it. This is the foundation for glanceable status and
+/// quick-setting modules; for now it is just a glass bar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OptionsConfig {
+    /// Whether the topbar is created at all.
+    pub enabled: bool,
+    /// Height of the reserved strip, in logical pixels.
+    pub height: u32,
+    /// Integer supersampling factor, matching [`WindowConfig::render_scale`]
+    /// so text and icons stay crisp on HiDPI/fractional outputs.
+    pub render_scale: u32,
+}
+
+impl Default for OptionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            height: 28,
+            render_scale: 2,
         }
     }
 }

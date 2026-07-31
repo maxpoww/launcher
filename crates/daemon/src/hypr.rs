@@ -83,6 +83,23 @@ pub fn active_window() -> Option<String> {
     json["address"].as_str().map(str::to_owned)
 }
 
+/// The focused window's address + title, for the OPTIONS window pill. `None`
+/// when nothing is focused (empty workspace).
+pub fn active_window_info() -> Option<(String, String)> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let address = json["address"].as_str()?.to_owned();
+    if address.is_empty() || address == "0x0" {
+        return None;
+    }
+    let title = json["title"].as_str().unwrap_or("").to_owned();
+    Some((address, title))
+}
+
+/// Toggle pseudotile on the focused window (the OPTIONS square control).
+pub fn pseudo_active() {
+    dispatch("hl.dsp.window.pseudo()");
+}
+
 /// Give keyboard focus back to a window by address.
 ///
 /// After our layer releases its exclusive keyboard grab the window we
@@ -198,6 +215,10 @@ pub struct MonitorInfo {
     pub w: f64,
     pub h: f64,
     pub active_ws: i64,
+    /// Output scale factor (physical = logical × scale).
+    pub scale: f64,
+    /// Connector name (e.g. `DP-1`) — matches the `wl_output` name.
+    pub name: String,
 }
 
 /// Query the focused monitor.
@@ -220,9 +241,56 @@ pub fn focused_monitor() -> anyhow::Result<MonitorInfo> {
                 w: m["width"].as_f64().unwrap_or(0.0) / scale,
                 h: m["height"].as_f64().unwrap_or(0.0) / scale,
                 active_ws: m["activeWorkspace"]["id"].as_i64().unwrap_or(-1),
+                scale,
+                name: m["name"].as_str().unwrap_or("").to_owned(),
             }
         })
         .ok_or_else(|| anyhow!("no focused monitor in Hyprland reply"))
+}
+
+/// What the OPTIONS bar needs to colour-match a maximized window: the
+/// `wl_output` name and the physical row (window's top) to sample.
+pub struct TopFill {
+    /// Connector name of the monitor to capture.
+    pub monitor: String,
+    /// Physical y of the window's top row (just below the reserved bar).
+    pub sample_y: u32,
+}
+
+/// Detect Hyprland "smart gaps": a single tiled window sitting flush under
+/// the bar and spanning the full monitor width. Returns what to sample, or
+/// `None` (gaps, multiple/floating windows, empty workspace) — in which case
+/// the bar stays transparent.
+///
+/// `bar_h_logical` is the reserved bar height; the window's top edge is
+/// expected right below it (the exclusive zone), flush to both sides.
+pub fn top_fill(bar_h_logical: f64) -> Option<TopFill> {
+    let mon = focused_monitor().ok()?;
+    let clients: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    let usable_top = mon.y + bar_h_logical;
+    let eps = 3.0;
+    let flush = clients.as_array()?.iter().any(|c| {
+        if c["workspace"]["id"].as_i64() != Some(mon.active_ws)
+            || !c["mapped"].as_bool().unwrap_or(false)
+            || c["hidden"].as_bool().unwrap_or(false)
+            || c["floating"].as_bool().unwrap_or(false)
+        {
+            return false;
+        }
+        let x = c["at"][0].as_f64().unwrap_or(f64::NAN);
+        let y = c["at"][1].as_f64().unwrap_or(f64::NAN);
+        let w = c["size"][0].as_f64().unwrap_or(0.0);
+        (x - mon.x).abs() <= eps
+            && (y - usable_top).abs() <= eps
+            && ((x + w) - (mon.x + mon.w)).abs() <= eps
+    });
+    flush.then(|| TopFill {
+        monitor: mon.name,
+        // Sample the window's toolbar just below its top border — shallow, so
+        // it reads the top edge colour (not content deeper down), yet below the
+        // small bar overhang so it never samples the bar itself.
+        sample_y: ((bar_h_logical + 4.0) * mon.scale.max(0.1)).round() as u32,
+    })
 }
 
 /// One live compositor window, for matching against dock apps.

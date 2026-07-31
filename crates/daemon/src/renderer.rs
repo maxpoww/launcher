@@ -850,16 +850,17 @@ impl Renderer {
     /// Width in pixels of `text` shaped at `font_px` — the same family
     /// and shaping the labels render with, so the search caret can sit
     /// exactly after the glyphs instead of guessing from char counts.
-    pub fn measure_text(&mut self, text: &str, font_px: f32) -> f32 {
+    pub fn measure_text(&mut self, text: &str, font_px: f32, family: Option<&str>) -> f32 {
         if text.is_empty() {
             return 0.0;
         }
         let mut buffer =
             TextBuffer::new(&mut self.font_system, Metrics::new(font_px, font_px * 1.3));
+        let fam = family.map_or(Family::SansSerif, Family::Name);
         buffer.set_text(
             &mut self.font_system,
             text,
-            Attrs::new().family(Family::SansSerif),
+            Attrs::new().family(fam),
             Shaping::Advanced,
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
@@ -974,8 +975,12 @@ impl Renderer {
         // range per section grid.
         // The first rect is always the card background (per Scene layout);
         // give it the glass material flag so the shader applies all 9 layers.
-        let shadows: Vec<ShadowInstance> = scene.shadows.iter().map(shadow_instance).collect();
+        let mut shadows: Vec<ShadowInstance> = scene.shadows.iter().map(shadow_instance).collect();
         let n_shadows = shadows.len() as u32;
+        // Overlay shadows (neumorphic button depth) ride the same buffer but are
+        // drawn after the unclipped fills, not behind them.
+        shadows.extend(scene.overlay_shadows.iter().map(shadow_instance));
+        let n_overlay_shadows = shadows.len() as u32 - n_shadows;
         let mut rects: Vec<RectInstance> = scene.rects.iter().map(rect_instance).collect();
         let n_rects_unclipped = rects.len() as u32;
         let mut icons: Vec<IconInstance> = scene.icons.iter().map(icon_instance).collect();
@@ -1009,7 +1014,7 @@ impl Renderer {
             });
         // `create_buffer_init` rejects empty contents; only build the shadow
         // buffer when there is at least one band to draw.
-        let shadow_buf = (n_shadows > 0).then(|| {
+        let shadow_buf = (!shadows.is_empty()).then(|| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("waverunner.shadows"),
@@ -1080,10 +1085,11 @@ impl Renderer {
                 Metrics::new(label.font_px * scale, label.line_px * scale),
             );
             buffer.set_size(font_system, Some(label.max_w * scale), Some(label.line_px * scale));
+            let family = label.family.map_or(Family::SansSerif, Family::Name);
             buffer.set_text(
                 font_system,
                 &label.text,
-                Attrs::new().family(Family::SansSerif),
+                Attrs::new().family(family),
                 Shaping::Advanced,
             );
             buffer.shape_until_scroll(font_system, false);
@@ -1105,7 +1111,14 @@ impl Renderer {
             }
         }
 
-        let mut text_buffers: Vec<(&TextBuffer, (f32, f32), TextBounds, bool)> = Vec::new();
+        let dim_rgba = glyphon::Color::rgba(
+            (text_color[0] * 255.0) as u8,
+            (text_color[1] * 255.0) as u8,
+            (text_color[2] * 255.0) as u8,
+            (text_color[3] * alpha * 0.45 * 255.0) as u8,
+        );
+        let mut text_buffers: Vec<(&TextBuffer, (f32, f32), TextBounds, glyphon::Color)> =
+            Vec::new();
         for (i, (label, clip)) in all_labels.iter().enumerate() {
             let buffer = match fresh_of[i] {
                 Some(fi) => &fresh[fi],
@@ -1139,7 +1152,17 @@ impl Renderer {
                 right: ((clip.x + clip.w) * scale) as i32,
                 bottom: ((clip.y + clip.h) * scale).min(h as f32) as i32,
             };
-            text_buffers.push((buffer, (left, top), bounds, label.dim));
+            let col = match label.color {
+                Some(c) => glyphon::Color::rgba(
+                    (c[0] * 255.0) as u8,
+                    (c[1] * 255.0) as u8,
+                    (c[2] * 255.0) as u8,
+                    (c[3] * alpha * 255.0) as u8,
+                ),
+                None if label.dim => dim_rgba,
+                None => text_rgba,
+            };
+            text_buffers.push((buffer, (left, top), bounds, col));
         }
         self.text_viewport.update(
             &self.queue,
@@ -1148,21 +1171,15 @@ impl Renderer {
                 height: h,
             },
         );
-        let dim_rgba = glyphon::Color::rgba(
-            (text_color[0] * 255.0) as u8,
-            (text_color[1] * 255.0) as u8,
-            (text_color[2] * 255.0) as u8,
-            (text_color[3] * alpha * 0.45 * 255.0) as u8,
-        );
         let areas = text_buffers
             .iter()
-            .map(|(buffer, pos, bounds, dim)| TextArea {
+            .map(|(buffer, pos, bounds, col)| TextArea {
                 buffer,
                 left: pos.0,
                 top: pos.1,
                 scale: 1.0,
                 bounds: *bounds,
-                default_color: if *dim { dim_rgba } else { text_rgba },
+                default_color: *col,
                 custom_glyphs: &[],
             });
         self.text_renderer
@@ -1220,6 +1237,14 @@ impl Renderer {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_vertex_buffer(0, rect_buf.slice(..));
                 pass.draw(0..4, 0..n_rects_unclipped);
+            }
+            // Over the fills: neumorphic button shadows.
+            if n_overlay_shadows > 0 {
+                if let Some(shadow_buf) = &shadow_buf {
+                    pass.set_pipeline(&self.shadow_pipeline);
+                    pass.set_vertex_buffer(0, shadow_buf.slice(..));
+                    pass.draw(0..4, n_shadows..(n_shadows + n_overlay_shadows));
+                }
             }
             if n_icons_unclipped > 0 {
                 if let Some(icon_bind) = &self.icon_bind {
