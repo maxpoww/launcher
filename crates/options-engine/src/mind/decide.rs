@@ -69,9 +69,11 @@ pub fn decide(ctx: &ContextState, tuning: &Tuning) -> OptionSet {
     // Clear away what doesn't fit the situation (activity-aware declutter).
     items.retain(|a| fits_activity(a.id, activity));
 
-    // Calibrate to skill, then clear away the irrelevant.
+    // Calibrate to *effective* skill (dynamic difficulty: friction lowers it),
+    // then clear away the irrelevant.
+    let skill = effective_skill(ctx, tuning.skill);
     for a in &mut items {
-        a.relevance = calibrate(a.kind, a.relevance, tuning.skill);
+        a.relevance = calibrate(a.kind, a.relevance, skill);
     }
     items.retain(|a| a.relevance >= tuning.min_relevance);
 
@@ -98,6 +100,26 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
         Activity::Communication => id != "media.now_playing",
         _ => true,
     }
+}
+
+/// Pillar 4 (dynamic difficulty): the *effective* skill for this moment.
+/// Observed friction lowers it, so scaffolding grows when the user is
+/// struggling and recedes when they're fluent — all from non-invasive signals
+/// (window churn, a failed command, editor diagnostics), no input capture.
+fn effective_skill(ctx: &ContextState, base: f32) -> f32 {
+    let churn = (ctx.behavior.focus_switch_velocity / 2.0).clamp(0.0, 1.0) * 0.4;
+    let shell_err = match ctx.app_internal.shell_exit_code {
+        Some(code) if code != 0 => 0.3,
+        _ => 0.0,
+    };
+    let diagnostics = if ctx.app_internal.editor_diagnostics_count > 0 {
+        0.2
+    } else {
+        0.0
+    };
+    let hesitating = if ctx.behavior.is_hesitating { 0.3 } else { 0.0 };
+    let friction = (churn + shell_err + diagnostics + hesitating).clamp(0.0, 1.0);
+    (base - friction).clamp(0.0, 1.0)
 }
 
 /// Skill scaling: safety is untouchable; scaffolding fades for experts.
@@ -448,30 +470,69 @@ mod tests {
     }
 
     #[test]
-    fn expert_skill_suppresses_scaffolding_but_not_safety() {
+    fn calibrate_scales_scaffolding_by_skill_but_never_safety() {
+        // Safety is untouchable regardless of skill.
+        assert_eq!(calibrate(AffordanceKind::Warning, 0.9, 1.0), 0.9);
+        assert_eq!(calibrate(AffordanceKind::Warning, 0.9, 0.0), 0.9);
+        // An Action fades for the expert, full for the novice.
+        assert!(calibrate(AffordanceKind::Action, 0.4, 1.0) < calibrate(AffordanceKind::Action, 0.4, 0.0));
+        // Below threshold for an expert, above for a novice (suppression).
+        assert!(calibrate(AffordanceKind::Action, 0.4, 1.0) < 0.2);
+        assert!(calibrate(AffordanceKind::Action, 0.4, 0.0) >= 0.2);
+    }
+
+    #[test]
+    fn friction_lowers_effective_skill() {
+        let calm = live_ctx();
+        assert_eq!(effective_skill(&calm, 1.0), 1.0);
+
+        let mut churny = live_ctx();
+        churny.behavior.focus_switch_velocity = 2.0; // max churn contribution
+        assert!(effective_skill(&churny, 1.0) < 1.0);
+
+        let mut failing = live_ctx();
+        failing.app_internal.shell_exit_code = Some(1);
+        failing.app_internal.editor_diagnostics_count = 4;
+        // Errors + diagnostics stack, pulling effective skill well down.
+        assert!(effective_skill(&failing, 1.0) <= 0.5);
+    }
+
+    #[test]
+    fn dynamic_difficulty_keeps_help_under_friction_and_safety_always() {
         let mut ctx = live_ctx();
-        ctx.behavior.focus_switch_velocity = 1.0; // Action affordance
-        ctx.is_screencasting = true; // Warning affordance
+        ctx.behavior.focus_switch_velocity = 2.0; // friction + focus-churn Action
+        ctx.is_screencasting = true; // safety Warning
 
-        let novice = decide(
-            &ctx,
-            &Tuning {
-                skill: 0.0,
-                ..Default::default()
-            },
-        );
-        assert!(novice.items.iter().any(|a| a.id == "behavior.focus_churn"));
-
-        let expert = decide(
+        // Even with an expert *base* skill, friction keeps the scaffolding up…
+        let opts = decide(
             &ctx,
             &Tuning {
                 skill: 1.0,
                 ..Default::default()
             },
         );
-        // Scaffolding is calibrated away for the expert…
-        assert!(expert.items.iter().all(|a| a.id != "behavior.focus_churn"));
-        // …but the safety warning still stands.
-        assert!(expert.items.iter().any(|a| a.id == "compositor.screencasting"));
+        assert!(opts.items.iter().any(|a| a.id == "behavior.focus_churn"));
+        // …and safety is present no matter what.
+        assert!(opts.items.iter().any(|a| a.id == "compositor.screencasting"));
+    }
+
+    #[test]
+    fn expert_sees_ambient_info_dimmer_than_novice() {
+        let mut ctx = live_ctx();
+        ctx.media = Some(MediaState {
+            player_name: "p".into(),
+            title: "t".into(),
+            artist: "a".into(),
+            is_playing: true,
+        });
+        let rel = |skill| {
+            decide(&ctx, &Tuning { skill, ..Default::default() })
+                .items
+                .iter()
+                .find(|a| a.id == "media.now_playing")
+                .map(|a| a.relevance)
+                .unwrap()
+        };
+        assert!(rel(1.0) < rel(0.0));
     }
 }
