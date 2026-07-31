@@ -61,7 +61,9 @@ mod state;
 pub use collector::{Collector, CollectorFuture};
 pub use engine::Engine;
 pub use message::{ContextDelta, Update};
-pub use mind::{decide, Affordance, AffordanceKind, Mind, OptionSet, Tuning};
+pub use mind::{
+    decide, infer_activity, Activity, Affordance, AffordanceKind, Mind, OptionSet, Tuning,
+};
 pub use state::{
     ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, GitContext,
     Health, Layer, LayerHealth, MediaState, SystemMetrics, TextSelection,

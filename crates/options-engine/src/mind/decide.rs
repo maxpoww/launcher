@@ -16,6 +16,7 @@
 
 use crate::state::{ContextState, Layer};
 
+use super::activity::{infer_activity, Activity};
 use super::affordance::{Affordance, AffordanceKind, OptionSet};
 
 /// Knobs for the decision. Kept small and explicit; the `skill` term is the
@@ -57,10 +58,14 @@ const PROVIDERS: &[Provider] = &[
 
 /// Decide the current option set from a context snapshot.
 pub fn decide(ctx: &ContextState, tuning: &Tuning) -> OptionSet {
+    let activity = infer_activity(ctx);
     let mut items: Vec<Affordance> = PROVIDERS.iter().flat_map(|p| p(ctx)).collect();
 
     // Never surface from a source that isn't live (freshness gate).
     items.retain(|a| layer_alive(ctx, a.source));
+
+    // Clear away what doesn't fit the situation (activity-aware declutter).
+    items.retain(|a| fits_activity(a.id, activity));
 
     // Calibrate to skill, then clear away the irrelevant.
     for a in &mut items {
@@ -77,8 +82,19 @@ pub fn decide(ctx: &ContextState, tuning: &Tuning) -> OptionSet {
     items.truncate(tuning.max_items);
 
     OptionSet {
+        activity,
         items,
         generation: ctx.generation,
+    }
+}
+
+/// Activity-aware suppression: some affordances are noise in some situations.
+/// Safety (warnings) always fits; this only clears ambient distractions.
+fn fits_activity(id: &str, activity: Activity) -> bool {
+    match activity {
+        // In a call, now-playing media is a distraction — clear it away.
+        Activity::Communication => id != "media.now_playing",
+        _ => true,
     }
 }
 

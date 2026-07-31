@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::activity::Activity;
 use crate::state::Layer;
 
 // `AffordanceKind` round-trips (no borrows); `Affordance`/`OptionSet` are
@@ -55,6 +56,9 @@ pub struct Affordance {
 /// context snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct OptionSet {
+    /// The mind's read of what the user is doing — the situation these options
+    /// were chosen for.
+    pub activity: Activity,
     /// Affordances, highest relevance first.
     pub items: Vec<Affordance>,
     /// The [`ContextState`](crate::ContextState) generation this was decided

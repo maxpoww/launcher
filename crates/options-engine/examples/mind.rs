@@ -17,15 +17,19 @@ async fn main() {
     let mind = options_engine::Mind::new(&engine, options_engine::Tuning::default());
     let mut rx = mind.subscribe();
     println!("watching OPTIONS decisions (Ctrl-C to stop)…\n");
+    let mut last = None;
     loop {
         if rx.changed().await.is_err() {
             break;
         }
-        let opts = rx.borrow();
-        if opts.items.is_empty() {
+        // Only print when the decision actually changes (ignore the generation).
+        let opts = rx.borrow().clone();
+        let key = (opts.activity, opts.items.clone());
+        if last.as_ref() == Some(&key) {
             continue;
         }
-        println!("── options @gen{} ──", opts.generation);
+        last = Some(key);
+        println!("── {:?} ──", opts.activity);
         for a in &opts.items {
             println!(
                 "  [{:.2}] {:?}  {} — {}   ({})",

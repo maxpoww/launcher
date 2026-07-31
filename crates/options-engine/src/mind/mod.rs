@@ -23,9 +23,11 @@
 //! # }
 //! ```
 
+mod activity;
 mod affordance;
 mod decide;
 
+pub use activity::{infer_activity, Activity};
 pub use affordance::{Affordance, AffordanceKind, OptionSet};
 pub use decide::{decide, Tuning};
 
