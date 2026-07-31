@@ -54,6 +54,8 @@ const PROVIDERS: &[Provider] = &[
     media_provider,
     git_provider,
     focus_churn_provider,
+    shell_error_provider,
+    diagnostics_provider,
 ];
 
 /// Decide the current option set from a context snapshot.
@@ -262,10 +264,61 @@ fn focus_churn_provider(ctx: &ContextState) -> Vec<Affordance> {
     }]
 }
 
+/// A shell command that just failed — the moment a helpful hand turns
+/// frustration into revelation. Scaffolding (an Action), so it fades for
+/// experts and grows for strugglers.
+fn shell_error_provider(ctx: &ContextState) -> Vec<Affordance> {
+    match ctx.app_internal.shell_exit_code {
+        Some(code) if code != 0 => {
+            let detail = ctx
+                .app_internal
+                .shell_last_cmd
+                .as_deref()
+                .map(|c| format!("{c} → exit {code}"))
+                .unwrap_or_else(|| format!("exit {code}"));
+            vec![Affordance {
+                id: "shell.last_failed",
+                kind: AffordanceKind::Action,
+                title: "Last command failed".into(),
+                detail,
+                relevance: 0.55,
+                reason: "nonzero shell exit code",
+                source: Layer::AppBridge,
+            }]
+        }
+        _ => vec![],
+    }
+}
+
+/// Diagnostics in the focused editor buffer — surface the count while you work.
+fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let n = ctx.app_internal.editor_diagnostics_count;
+    if n == 0 {
+        return vec![];
+    }
+    let file = ctx
+        .app_internal
+        .editor_file
+        .as_deref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    vec![Affordance {
+        id: "editor.diagnostics",
+        kind: AffordanceKind::Info,
+        title: format!("{n} problem{}", if n == 1 { "" } else { "s" }),
+        detail: file,
+        // A little more pressing as they pile up.
+        relevance: (0.35 + 0.05 * n.min(5) as f32).clamp(0.0, 0.6),
+        reason: "editor diagnostics present",
+        source: Layer::AppBridge,
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{GitContext, MediaState, SystemMetrics};
+    use crate::state::{AppInternalContext, GitContext, MediaState, SystemMetrics};
 
     /// A context with everything's source layer marked alive, so freshness
     /// gating doesn't hide provider output under test.
@@ -274,6 +327,7 @@ mod tests {
         ctx.health.compositor.alive = true;
         ctx.health.hardware.alive = true;
         ctx.health.behavior.alive = true;
+        ctx.health.app_bridge.alive = true;
         ctx
     }
 
@@ -344,6 +398,53 @@ mod tests {
         assert!(opts.items.iter().all(|a| a.kind == AffordanceKind::Warning));
         // Sorted descending.
         assert!(opts.items[0].relevance >= opts.items[1].relevance);
+    }
+
+    #[test]
+    fn shell_failure_surfaces_as_actionable_help() {
+        let mut ctx = live_ctx();
+        ctx.app_internal = AppInternalContext {
+            shell_last_cmd: Some("cargo build".into()),
+            shell_exit_code: Some(101),
+            ..Default::default()
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        let a = opts
+            .items
+            .iter()
+            .find(|a| a.id == "shell.last_failed")
+            .expect("failure should surface");
+        assert_eq!(a.kind, AffordanceKind::Action);
+        assert!(a.detail.contains("cargo build"));
+        // A zero exit surfaces nothing.
+        ctx.app_internal.shell_exit_code = Some(0);
+        assert!(decide(&ctx, &Tuning::default())
+            .items
+            .iter()
+            .all(|a| a.id != "shell.last_failed"));
+    }
+
+    #[test]
+    fn diagnostics_surface_and_need_a_live_bridge() {
+        let mut ctx = live_ctx();
+        ctx.app_internal = AppInternalContext {
+            editor_file: Some("/p/src/main.rs".into()),
+            editor_diagnostics_count: 3,
+            ..Default::default()
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        let a = opts
+            .items
+            .iter()
+            .find(|a| a.id == "editor.diagnostics")
+            .expect("diagnostics should surface");
+        assert!(a.title.contains('3') && a.detail == "main.rs");
+        // If the bridge layer is dead, its affordances vanish (freshness gate).
+        ctx.health.app_bridge.alive = false;
+        assert!(decide(&ctx, &Tuning::default())
+            .items
+            .iter()
+            .all(|a| a.id != "editor.diagnostics"));
     }
 
     #[test]
