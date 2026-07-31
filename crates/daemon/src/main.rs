@@ -232,6 +232,7 @@ fn main() -> anyhow::Result<()> {
         options_hidden: false,
         options_reveal_deadline: None,
         options_hide_deadline: None,
+        options_ctrl: options::CtrlAnim::default(),
         ui: UiState::new(
             config.animation.clone(),
             // Docked, the card is a floating bar: dock height plus the
@@ -547,6 +548,8 @@ pub struct App {
     options_hidden: bool,
     options_reveal_deadline: Option<Instant>,
     options_hide_deadline: Option<Instant>,
+    /// Reveal animation state for the window control buttons.
+    options_ctrl: options::CtrlAnim,
 
     ui: UiState,
     config: Config,
@@ -1143,10 +1146,10 @@ impl App {
         // regardless of intellihide (the macOS dot + activate-on-click
         // need it even when the dock never dodges).
         self.refresh_running();
-        // Re-evaluate the OPTIONS bar colour-match and window pill on every
-        // layout change.
-        self.reeval_options_bar();
+        // Update the window pill + fullscreen state first, then the colour
+        // match (which depends on the fullscreen state).
         self.refresh_options_content();
+        self.reeval_options_bar();
         if !self.config.input.intellihide {
             return;
         }

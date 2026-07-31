@@ -21,6 +21,7 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_pointer;
 use wayland_client::WEnum;
 
+use crate::animation::ease_toward;
 use crate::content::{Label, Rect, RectInst, Scene, ShadowInst};
 use crate::{hypr, surface, App, BTN_LEFT};
 
@@ -28,8 +29,8 @@ use crate::{hypr, surface, App, BTN_LEFT};
 /// band while the bar is hidden in fullscreen.
 const REVEAL_PX: f32 = 3.0;
 /// How long the pointer must dwell at the top edge before the bar reveals — a
-/// long, deliberate hold so it only happens when really intended.
-const REVEAL_DWELL: Duration = Duration::from_millis(1500);
+/// deliberate hold so it only happens when really intended.
+const REVEAL_DWELL: Duration = Duration::from_millis(1000);
 /// Grace after the pointer leaves the revealed bar before it conceals again.
 const HIDE_GRACE: Duration = Duration::from_millis(500);
 
@@ -62,6 +63,46 @@ const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 // `options_rest_wash` / `options_hover_wash`.
 // The close glyph is red; its pill just brightens on hover like the rest.
 const RED_GLYPH: [f32; 4] = [0.92, 0.30, 0.30, 1.0];
+
+// --- Control-button reveal animation ---------------------------------------
+// The buttons are hidden by default; hovering the window pill makes them slide
+// down from the top edge to their resting spots, staggered (close+pseudo, then
+// float, then fullscreen). Leaving fades them out. All dt-based.
+const CTRL_STAGGER: f32 = 0.085; // s between stagger stages
+/// Per-button reveal delay, indexed by [`ctrl_index`]: close, pseudo, float,
+/// fullscreen. Close and pseudo fall together; float then fullscreen follow.
+const CTRL_DELAY: [f32; 4] = [0.0, 0.0, CTRL_STAGGER, 2.0 * CTRL_STAGGER];
+const CTRL_SLIDE_RATE: f32 = 17.0; // ease-out fall
+const CTRL_ALPHA_IN: f32 = 34.0; // opaque quickly as it falls
+const CTRL_ALPHA_OUT: f32 = 13.0; // graceful fade on leave
+const CTRL_EPS: f32 = 0.002;
+
+/// Per-button slide/opacity state for the reveal animation. Buttons are
+/// ordered [close, pseudo, float, fullscreen] (see [`ctrl_index`]).
+#[derive(Debug, Default)]
+pub(crate) struct CtrlAnim {
+    /// Whether the cluster should be revealed (pointer on the window/cluster).
+    reveal: bool,
+    /// When the current reveal began, for the stagger.
+    reveal_at: Option<std::time::Instant>,
+    /// Slide progress 0 (above the top edge) → 1 (resting).
+    slide: [f32; 4],
+    /// Opacity 0 → 1.
+    alpha: [f32; 4],
+    last: Option<std::time::Instant>,
+    frame_pending: bool,
+}
+
+/// Animation slot for a control-button pill (`None` for window/clock).
+fn ctrl_index(id: PillId) -> Option<usize> {
+    match id {
+        PillId::Close => Some(0),
+        PillId::Pseudo => Some(1),
+        PillId::Float => Some(2),
+        PillId::Fullscreen => Some(3),
+        _ => None,
+    }
+}
 
 // A single, tiny soft shadow around the button circles for a touch of depth —
 // black when the bar is bright, white when it's dark (never both). Strengths
@@ -137,12 +178,12 @@ fn wash(white: bool, a: f32) -> [f32; 4] {
 /// Push a single tiny soft shadow around a circle for a touch of depth: black
 /// on a bright bar, white on a dark one (a uniform exterior penumbra). The
 /// white is gamma-corrected so its strength means its true on-screen level.
-fn push_neumorph(scene: &mut Scene, rect: Rect, radius: f32, bright: bool) {
+fn push_neumorph(scene: &mut Scene, rect: Rect, radius: f32, bright: bool, alpha: f32) {
     let color = if bright {
-        [0.0, 0.0, 0.0, NEU_DARK]
+        [0.0, 0.0, 0.0, NEU_DARK * alpha]
     } else {
         let v = srgb_to_linear(NEU_LIGHT) / NEU_LIGHT;
-        [v, v, v, NEU_LIGHT]
+        [v, v, v, NEU_LIGHT * alpha]
     };
     scene.overlay_shadows.push(ShadowInst {
         rect,
@@ -191,15 +232,14 @@ impl App {
             });
         }
 
-        // The focused-window cluster, centred as a group:
+        // The window name pill is centred *alone* (so it doesn't shift when the
+        // buttons reveal); the control circles flank it at fixed resting spots:
         //   [X] [window name] [pseudo] [float] [fullscreen]
         if let Some(title) = &self.options_title {
             let shown = truncate(title, TITLE_MAX);
             let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
-            let group_w =
-                d + GROUP_GAP + ww + GROUP_GAP + d + CTRL_GAP + d + CTRL_GAP + d;
-            let mut x = ((w - group_w) / 2.0).max(EDGE_PAD);
+            let wx = ((w - ww) / 2.0).max(EDGE_PAD + d + GROUP_GAP);
             let circle = |pills: &mut Vec<Pill>, x: f32, id, glyph: &str, color| {
                 pills.push(Pill {
                     id,
@@ -210,22 +250,21 @@ impl App {
                 });
             };
             // Close, left of the window name.
-            circle(&mut pills, x, PillId::Close, GLYPH_CLOSE, Some(RED_GLYPH));
-            x += d + GROUP_GAP;
+            circle(&mut pills, wx - GROUP_GAP - d, PillId::Close, GLYPH_CLOSE, Some(RED_GLYPH));
             pills.push(Pill {
                 id: PillId::Window,
-                rect: Rect::new(x, y, ww, ph),
+                rect: Rect::new(wx, y, ww, ph),
                 text: shown,
                 family: TEXT_FONT,
                 glyph_color: None,
             });
-            x += ww + GROUP_GAP;
             // Window-mode toggles, right of the window name.
-            circle(&mut pills, x, PillId::Pseudo, GLYPH_SQUARE, None);
-            x += d + CTRL_GAP;
-            circle(&mut pills, x, PillId::Float, GLYPH_FLOAT, None);
-            x += d + CTRL_GAP;
-            circle(&mut pills, x, PillId::Fullscreen, GLYPH_FULL, None);
+            let mut cx = wx + ww + GROUP_GAP;
+            circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
+            cx += d + CTRL_GAP;
+            circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
+            cx += d + CTRL_GAP;
+            circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
         }
         pills
     }
@@ -291,39 +330,53 @@ impl App {
     }
 
     /// Add the OPTIONS pills to the bar's scene (called after the base fill).
+    /// Control buttons carry the reveal animation: a vertical slide offset from
+    /// `slide` and an opacity from `alpha`; window/clock are always full.
     pub(crate) fn push_options_pills(&self, scene: &mut Scene) {
         let hover_wash = self.options_hover_wash();
         let rest_wash = self.options_rest_wash();
         let bright = self.options_bar_is_bright();
+        let text_color = self.options_text_color();
         for pill in &self.options_pills() {
-            let radius = pill.rect.h / 2.0; // stadium ⇒ circle when w == h
-            // A touch of depth on every pill.
-            push_neumorph(scene, pill.rect, radius, bright);
-            let bg = if self.options_hover == Some(pill.id) {
+            // Reveal animation for the control buttons.
+            let (dy, a) = match ctrl_index(pill.id) {
+                Some(i) => {
+                    let a = self.options_ctrl.alpha[i];
+                    if a <= 0.01 {
+                        continue; // fully hidden — don't draw
+                    }
+                    // Fall from above the top edge (slide 0) to rest (slide 1).
+                    let fall = pill.rect.y + pill.rect.h;
+                    (-(1.0 - self.options_ctrl.slide[i]) * fall, a)
+                }
+                None => (0.0, 1.0),
+            };
+            let rect = Rect::new(pill.rect.x, pill.rect.y + dy, pill.rect.w, pill.rect.h);
+            let radius = rect.h / 2.0; // stadium ⇒ circle when w == h
+            push_neumorph(scene, rect, radius, bright, a);
+            let base = if self.options_hover == Some(pill.id) {
                 hover_wash
             } else {
                 rest_wash
             };
             scene.rects.push(RectInst {
-                rect: pill.rect,
+                rect,
                 radius,
-                color: bg,
+                color: [base[0], base[1], base[2], base[3] * a],
                 glass: 0.0,
             });
+            let g = pill.glyph_color.unwrap_or(text_color);
             scene.labels.push(Label {
                 text: pill.text.clone(),
-                pos: (
-                    pill.rect.x + pill.rect.w / 2.0,
-                    pill.rect.y + (pill.rect.h - LINE_PX) / 2.0,
-                ),
-                max_w: pill.rect.w,
+                pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - LINE_PX) / 2.0),
+                max_w: rect.w,
                 font_px: FONT_PX,
                 line_px: LINE_PX,
                 centered: true,
                 dim: false,
                 cache: true,
                 family: pill.family,
-                color: pill.glyph_color,
+                color: Some([g[0], g[1], g[2], g[3] * a]),
                 clip: None,
             });
         }
@@ -482,9 +535,9 @@ impl App {
                 self.pointer_surface = PointerSurface::Dock;
                 self.options_reveal_deadline = None;
                 if !self.options_hidden {
-                    if self.options_hover.take().is_some() {
-                        self.draw_options();
-                    }
+                    self.options_hover = None;
+                    self.update_ctrl_reveal(); // fade the buttons out
+                    self.draw_options();
                     // Revealed in fullscreen: conceal again shortly after leave.
                     if self.options_fullscreen {
                         self.schedule_options_hide();
@@ -522,12 +575,123 @@ impl App {
         let hover = self.options_ptr.and_then(|p| {
             self.options_pills()
                 .iter()
-                .find(|pill| pill.rect.contains(p))
+                .find(|pill| pill.rect.contains(p) && self.ctrl_pill_visible(pill.id))
                 .map(|pill| pill.id)
         });
-        if hover != self.options_hover {
-            self.options_hover = hover;
+        let changed = hover != self.options_hover;
+        self.options_hover = hover;
+        self.update_ctrl_reveal();
+        if changed {
             self.draw_options();
+        }
+    }
+
+    /// A control button is only hoverable/clickable once mostly revealed.
+    fn ctrl_pill_visible(&self, id: PillId) -> bool {
+        match ctrl_index(id) {
+            Some(i) => self.options_ctrl.alpha[i] > 0.5,
+            None => true, // window / clock always
+        }
+    }
+
+    /// Whether the pointer is within the window+controls cluster span (so a
+    /// small gap between pills doesn't count as leaving).
+    fn options_ptr_in_cluster(&self) -> bool {
+        let Some((x, y)) = self.options_ptr else {
+            return false;
+        };
+        if y < 0.0 || y > self.config.options.height as f32 {
+            return false;
+        }
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for p in &self.options_pills() {
+            if p.id == PillId::Window || ctrl_index(p.id).is_some() {
+                lo = lo.min(p.rect.x);
+                hi = hi.max(p.rect.x + p.rect.w);
+            }
+        }
+        x >= lo && x <= hi
+    }
+
+    /// Update whether the control buttons should be revealed: they appear when
+    /// the window pill is hovered and stay while the pointer is over the
+    /// cluster; leaving fades them out. A fresh reveal restarts the slide.
+    fn update_ctrl_reveal(&mut self) {
+        let want = if self.options_ctrl.reveal {
+            self.options_ptr_in_cluster()
+        } else {
+            self.options_hover == Some(PillId::Window)
+        };
+        if want != self.options_ctrl.reveal {
+            self.options_ctrl.reveal = want;
+            if want {
+                self.options_ctrl.reveal_at = Some(Instant::now());
+                self.options_ctrl.slide = [0.0; 4];
+                self.options_ctrl.alpha = [0.0; 4];
+            }
+            self.options_ctrl.last = None;
+            self.schedule_options_ctrl_frame();
+        }
+    }
+
+    fn schedule_options_ctrl_frame(&mut self) {
+        if self.options_ctrl.frame_pending {
+            return;
+        }
+        self.options_ctrl.frame_pending = true;
+        if self.options_ctrl.last.is_none() {
+            self.options_ctrl.last = Some(Instant::now());
+        }
+        let timer = Timer::from_duration(Duration::from_millis(8));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.options_ctrl.frame_pending = false;
+            app.tick_options_ctrl();
+            TimeoutAction::Drop
+        });
+    }
+
+    /// Advance the control-button reveal one frame and keep frames coming until
+    /// everything settles.
+    fn tick_options_ctrl(&mut self) {
+        let now = Instant::now();
+        let dt = self
+            .options_ctrl
+            .last
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+        self.options_ctrl.last = Some(now);
+        let elapsed = self
+            .options_ctrl
+            .reveal_at
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+        let reveal = self.options_ctrl.reveal;
+        let mut active = false;
+        for (i, &delay) in CTRL_DELAY.iter().enumerate() {
+            let due = reveal && elapsed >= delay;
+            let (atarget, arate) = if due {
+                (1.0, CTRL_ALPHA_IN)
+            } else {
+                (0.0, CTRL_ALPHA_OUT)
+            };
+            let (na, am) = ease_toward(self.options_ctrl.alpha[i], atarget, dt, arate, CTRL_EPS);
+            self.options_ctrl.alpha[i] = na;
+            active |= am;
+            if due {
+                let (ns, sm) =
+                    ease_toward(self.options_ctrl.slide[i], 1.0, dt, CTRL_SLIDE_RATE, CTRL_EPS);
+                self.options_ctrl.slide[i] = ns;
+                active |= sm;
+            } else if reveal {
+                // Waiting for its turn: parked above the edge; keep ticking.
+                self.options_ctrl.slide[i] = 0.0;
+                active = true;
+            }
+            // Concealing: slide stays frozen while alpha fades.
+        }
+        self.draw_options();
+        if active {
+            self.schedule_options_ctrl_frame();
+        } else {
+            self.options_ctrl.last = None;
         }
     }
 

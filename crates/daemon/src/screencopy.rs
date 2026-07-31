@@ -55,23 +55,34 @@ pub(crate) struct Capture {
 
 impl App {
     /// Re-evaluate whether the bar should colour-match, on layout changes:
-    /// start a capture when a maximized window is flush under the bar, else
-    /// fall back to the transparent bar.
+    /// - fullscreen: match the fullscreen window's top colour, so when the bar
+    ///   is revealed (dwell) it's opaque and blends instead of a transparent
+    ///   strip over the app;
+    /// - smart-gaps: match a maximized window flush under the bar;
+    /// - otherwise: the transparent bar.
     pub(crate) fn reeval_options_bar(&mut self) {
         if self.options_layer.is_none() || self.screencopy.is_none() {
             return;
         }
+        if self.options_fullscreen {
+            if let Ok(mon) = hypr::focused_monitor() {
+                if let Some(output) = self.output_by_name(&mon.name) {
+                    // Sample the fullscreen content a few px below the bar —
+                    // past the bar's own drawn extent (bar_h + overhang) so a
+                    // revealed opaque bar never samples itself.
+                    let sample_y = ((self.config.options.height as f64 + 4.0)
+                        * mon.scale.max(0.1))
+                    .round() as u32;
+                    self.begin_options_match(output, sample_y);
+                    return;
+                }
+            }
+            self.clear_options_match();
+            return;
+        }
         match hypr::top_fill(self.config.options.height as f64) {
             Some(tf) => match self.output_by_name(&tf.monitor) {
-                Some(output) => {
-                    self.options_match = Some(CaptureTarget {
-                        output,
-                        sample_y: tf.sample_y,
-                    });
-                    self.start_options_capture();
-                    // Keep tracking on-the-fly colour changes while matched.
-                    self.schedule_options_resample();
-                }
+                Some(output) => self.begin_options_match(output, tf.sample_y),
                 None => {
                     debug!("options: no wl_output named {}", tf.monitor);
                     self.clear_options_match();
@@ -79,6 +90,13 @@ impl App {
             },
             None => self.clear_options_match(),
         }
+    }
+
+    /// Start (and keep resampling) a colour-match for `output` at `sample_y`.
+    fn begin_options_match(&mut self, output: wayland_client::protocol::wl_output::WlOutput, sample_y: u32) {
+        self.options_match = Some(CaptureTarget { output, sample_y });
+        self.start_options_capture();
+        self.schedule_options_resample();
     }
 
     /// Drop any match and repaint the transparent bar.
