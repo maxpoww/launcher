@@ -13,6 +13,9 @@
 //! Proportional text means pill widths are measured (cached) rather than
 //! estimated.
 
+use std::time::{Duration, Instant};
+
+use calloop::timer::{TimeoutAction, Timer};
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_pointer;
@@ -20,6 +23,15 @@ use wayland_client::WEnum;
 
 use crate::content::{Label, Rect, RectInst, Scene, ShadowInst};
 use crate::{hypr, surface, App, BTN_LEFT};
+
+/// Thickness of the top reveal strip (logical px) — the only pointer-sensitive
+/// band while the bar is hidden in fullscreen.
+const REVEAL_PX: f32 = 3.0;
+/// How long the pointer must dwell at the top edge before the bar reveals — a
+/// long, deliberate hold so it only happens when really intended.
+const REVEAL_DWELL: Duration = Duration::from_millis(1500);
+/// Grace after the pointer leaves the revealed bar before it conceals again.
+const HIDE_GRACE: Duration = Duration::from_millis(500);
 
 /// Nerd Font for the icon glyphs (close / pseudotile).
 const NERD: &str = "JetBrainsMono Nerd Font Mono";
@@ -43,6 +55,8 @@ const TITLE_MAX: usize = 48;
 // Nerd Font glyphs (Font Awesome range, present in JetBrainsMono NF).
 const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
 const GLYPH_SQUARE: &str = "\u{f096}"; // fa-square-o (pseudotile)
+const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
+const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 
 // Pill backgrounds (resting + hover) are adaptive washes — see
 // `options_rest_wash` / `options_hover_wash`.
@@ -70,6 +84,8 @@ pub(crate) enum PillId {
     Window,
     Close,
     Pseudo,
+    Float,
+    Fullscreen,
 }
 
 struct Pill {
@@ -175,34 +191,41 @@ impl App {
             });
         }
 
-        // Window name (centre) + controls, only when a window is focused.
+        // The focused-window cluster, centred as a group:
+        //   [X] [window name] [pseudo] [float] [fullscreen]
         if let Some(title) = &self.options_title {
             let shown = truncate(title, TITLE_MAX);
             let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
-            let wx = ((w - ww) / 2.0).max(EDGE_PAD);
+            let d = ph; // control-circle diameter
+            let group_w =
+                d + GROUP_GAP + ww + GROUP_GAP + d + CTRL_GAP + d + CTRL_GAP + d;
+            let mut x = ((w - group_w) / 2.0).max(EDGE_PAD);
+            let circle = |pills: &mut Vec<Pill>, x: f32, id, glyph: &str, color| {
+                pills.push(Pill {
+                    id,
+                    rect: Rect::new(x, y, d, d),
+                    text: glyph.to_owned(),
+                    family: Some(NERD),
+                    glyph_color: color,
+                });
+            };
+            // Close, left of the window name.
+            circle(&mut pills, x, PillId::Close, GLYPH_CLOSE, Some(RED_GLYPH));
+            x += d + GROUP_GAP;
             pills.push(Pill {
                 id: PillId::Window,
-                rect: Rect::new(wx, y, ww, ph),
+                rect: Rect::new(x, y, ww, ph),
                 text: shown,
                 family: TEXT_FONT,
                 glyph_color: None,
             });
-            // Two individual control circles just right of the window pill.
-            let x1 = wx + ww + GROUP_GAP;
-            pills.push(Pill {
-                id: PillId::Close,
-                rect: Rect::new(x1, y, ph, ph),
-                text: GLYPH_CLOSE.to_owned(),
-                family: Some(NERD),
-                glyph_color: Some(RED_GLYPH),
-            });
-            pills.push(Pill {
-                id: PillId::Pseudo,
-                rect: Rect::new(x1 + ph + CTRL_GAP, y, ph, ph),
-                text: GLYPH_SQUARE.to_owned(),
-                family: Some(NERD),
-                glyph_color: None,
-            });
+            x += ww + GROUP_GAP;
+            // Window-mode toggles, right of the window name.
+            circle(&mut pills, x, PillId::Pseudo, GLYPH_SQUARE, None);
+            x += d + CTRL_GAP;
+            circle(&mut pills, x, PillId::Float, GLYPH_FLOAT, None);
+            x += d + CTRL_GAP;
+            circle(&mut pills, x, PillId::Fullscreen, GLYPH_FULL, None);
         }
         pills
     }
@@ -311,9 +334,9 @@ impl App {
         if self.options_layer.is_none() {
             return;
         }
-        let (addr, title) = match hypr::active_window_info() {
-            Some((a, t)) => (Some(a), Some(t)),
-            None => (None, None),
+        let (addr, title, fullscreen) = match hypr::active_window_info() {
+            Some((a, t, fs)) => (Some(a), Some(t), fs),
+            None => (None, None, false),
         };
         if self.options_active_addr != addr || self.options_title != title {
             self.options_active_addr = addr;
@@ -322,6 +345,67 @@ impl App {
             self.sync_options_input();
             self.draw_options();
         }
+        self.set_options_fullscreen(fullscreen);
+    }
+
+    /// React to the focused window entering/leaving fullscreen: conceal the
+    /// bar while fullscreen (it reveals on a deliberate top-edge hold), show it
+    /// again otherwise.
+    fn set_options_fullscreen(&mut self, fs: bool) {
+        if fs == self.options_fullscreen {
+            return;
+        }
+        self.options_fullscreen = fs;
+        self.options_reveal_deadline = None;
+        self.options_hide_deadline = None;
+        self.options_hidden = fs;
+        if fs {
+            self.options_hover = None;
+        }
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    /// Arm the dwell timer that reveals a concealed bar. Idempotent while pending.
+    fn arm_options_reveal(&mut self) {
+        if self.options_reveal_deadline.is_some() {
+            return;
+        }
+        let deadline = Instant::now() + REVEAL_DWELL;
+        self.options_reveal_deadline = Some(deadline);
+        let timer = Timer::from_duration(REVEAL_DWELL);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if app.options_reveal_deadline == Some(deadline) {
+                app.options_reveal_deadline = None;
+                let still_at_top = app.options_ptr.is_some_and(|(_, y)| y <= REVEAL_PX);
+                if app.options_hidden && still_at_top {
+                    app.options_hidden = false;
+                    app.sync_options_input();
+                    app.draw_options();
+                }
+            }
+            TimeoutAction::Drop
+        });
+    }
+
+    /// Conceal the revealed bar after the grace period (unless the pointer came
+    /// back or fullscreen ended).
+    fn schedule_options_hide(&mut self) {
+        let deadline = Instant::now() + HIDE_GRACE;
+        self.options_hide_deadline = Some(deadline);
+        let timer = Timer::from_duration(HIDE_GRACE);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if app.options_hide_deadline == Some(deadline) {
+                app.options_hide_deadline = None;
+                if app.options_fullscreen && !app.options_hidden && app.options_ptr.is_none() {
+                    app.options_hidden = true;
+                    app.options_hover = None;
+                    app.sync_options_input();
+                    app.draw_options();
+                }
+            }
+            TimeoutAction::Drop
+        });
     }
 
     /// Tick the clock; returns whether the displayed `HH:MM` changed.
@@ -336,26 +420,23 @@ impl App {
         }
     }
 
-    /// Set the surface's pointer input region to the union of the pill rects,
-    /// so only the pills are interactive (the rest of the bar stays
-    /// click-through).
+    /// Set the surface's pointer input region: the whole bar strip while shown
+    /// (so hover works across pills and the reveal can auto-hide on leave), or
+    /// just the thin top reveal strip while concealed in fullscreen.
     pub(crate) fn sync_options_input(&mut self) {
+        let (w, _) = self.options_size;
+        if w == 0 {
+            return;
+        }
         let Some(layer) = self.options_layer.as_ref() else {
             return;
         };
-        let rects: Vec<(i32, i32, i32, i32)> = self
-            .options_pills()
-            .iter()
-            .map(|p| {
-                (
-                    p.rect.x as i32,
-                    p.rect.y as i32,
-                    p.rect.w.ceil() as i32,
-                    p.rect.h.ceil() as i32,
-                )
-            })
-            .collect();
-        surface::set_input_rects(&self.compositor, layer, &rects);
+        let h = if self.options_hidden {
+            REVEAL_PX.ceil() as i32
+        } else {
+            self.config.options.height as i32
+        };
+        surface::set_input_rects(&self.compositor, layer, &[(0, 0, w as i32, h)]);
     }
 
     /// Classify which surface a pointer `Enter` targets.
@@ -386,8 +467,7 @@ impl App {
                 self.enter_serial = serial;
                 self.cursor_now = None;
                 self.options_ptr = Some((surface_x as f32, surface_y as f32));
-                self.options_update_hover();
-                self.options_apply_cursor();
+                self.options_on_motion(surface_y as f32);
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -395,24 +475,47 @@ impl App {
                 ..
             } => {
                 self.options_ptr = Some((surface_x as f32, surface_y as f32));
-                self.options_update_hover();
-                self.options_apply_cursor();
+                self.options_on_motion(surface_y as f32);
             }
             wl_pointer::Event::Leave { .. } => {
                 self.options_ptr = None;
                 self.pointer_surface = PointerSurface::Dock;
-                if self.options_hover.take().is_some() {
-                    self.draw_options();
+                self.options_reveal_deadline = None;
+                if !self.options_hidden {
+                    if self.options_hover.take().is_some() {
+                        self.draw_options();
+                    }
+                    // Revealed in fullscreen: conceal again shortly after leave.
+                    if self.options_fullscreen {
+                        self.schedule_options_hide();
+                    }
                 }
             }
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_LEFT
-                    && state == WEnum::Value(wl_pointer::ButtonState::Released) =>
+                    && state == WEnum::Value(wl_pointer::ButtonState::Released)
+                    && !self.options_hidden =>
             {
                 self.options_click();
             }
             _ => {}
         }
+    }
+
+    /// Shared Enter/Motion logic: reveal-dwell at the top edge while concealed,
+    /// otherwise hover the pills and cancel any pending conceal.
+    fn options_on_motion(&mut self, y: f32) {
+        if self.options_hidden {
+            if y <= REVEAL_PX {
+                self.arm_options_reveal();
+            } else {
+                self.options_reveal_deadline = None;
+            }
+        } else {
+            self.options_hide_deadline = None;
+            self.options_update_hover();
+        }
+        self.options_apply_cursor();
     }
 
     fn options_update_hover(&mut self) {
@@ -436,6 +539,8 @@ impl App {
                 }
             }
             Some(PillId::Pseudo) => hypr::pseudo_active(),
+            Some(PillId::Float) => hypr::float_active(),
+            Some(PillId::Fullscreen) => hypr::fullscreen_active(),
             _ => {}
         }
     }
@@ -445,8 +550,8 @@ impl App {
             return;
         };
         let shape = match self.options_hover {
-            Some(PillId::Close) | Some(PillId::Pseudo) => Shape::Pointer,
-            _ => Shape::Default,
+            Some(PillId::Clock) | Some(PillId::Window) | None => Shape::Default,
+            Some(_) => Shape::Pointer, // any control circle
         };
         if self.cursor_now != Some(shape) {
             device.set_shape(self.enter_serial, shape);

@@ -228,6 +228,10 @@ fn main() -> anyhow::Result<()> {
         options_active_addr: None,
         options_clock_w: 0.0,
         options_title_w: 0.0,
+        options_fullscreen: false,
+        options_hidden: false,
+        options_reveal_deadline: None,
+        options_hide_deadline: None,
         ui: UiState::new(
             config.animation.clone(),
             // Docked, the card is a floating bar: dock height plus the
@@ -536,6 +540,13 @@ pub struct App {
     /// proportional-font pills can be sized without re-measuring every frame.
     options_clock_w: f32,
     options_title_w: f32,
+    /// Fullscreen auto-hide: whether the focused window is fullscreen, whether
+    /// the bar is currently concealed, and the dwell/grace timers that reveal
+    /// it on a deliberate top-edge hold.
+    options_fullscreen: bool,
+    options_hidden: bool,
+    options_reveal_deadline: Option<Instant>,
+    options_hide_deadline: Option<Instant>,
 
     ui: UiState,
     config: Config,

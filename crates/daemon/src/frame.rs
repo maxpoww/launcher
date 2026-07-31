@@ -1027,6 +1027,18 @@ impl App {
         if w == 0 || h == 0 {
             return;
         }
+        // Concealed in fullscreen: render an empty (transparent) frame so the
+        // bar disappears until a deliberate top-edge hold reveals it.
+        if self.options_hidden {
+            if let Some(renderer) = self.options_renderer.as_mut() {
+                let scene = content::Scene {
+                    alpha: 1.0,
+                    ..Default::default()
+                };
+                let _ = renderer.render(&scene, [0.0; 4], None, 0.0, 0);
+            }
+            return;
+        }
         let w = w as f32;
         let bar_h = self.config.options.height as f32;
         // Matched: opaque window colour, extended down over the window's top

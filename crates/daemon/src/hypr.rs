@@ -83,21 +83,36 @@ pub fn active_window() -> Option<String> {
     json["address"].as_str().map(str::to_owned)
 }
 
-/// The focused window's address + title, for the OPTIONS window pill. `None`
-/// when nothing is focused (empty workspace).
-pub fn active_window_info() -> Option<(String, String)> {
+/// The focused window's address, title, and whether it's fullscreen — for the
+/// OPTIONS window pill and the fullscreen auto-hide. `None` when nothing is
+/// focused (empty workspace).
+pub fn active_window_info() -> Option<(String, String, bool)> {
     let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
     let address = json["address"].as_str()?.to_owned();
     if address.is_empty() || address == "0x0" {
         return None;
     }
     let title = json["title"].as_str().unwrap_or("").to_owned();
-    Some((address, title))
+    // `fullscreen`: 0 none, 1 maximized (respects the reserved bar), 2 true
+    // fullscreen (covers the whole output, including the bar) — only the latter
+    // should trigger the auto-hide.
+    let fullscreen = json["fullscreen"].as_i64().unwrap_or(0) >= 2;
+    Some((address, title, fullscreen))
 }
 
 /// Toggle pseudotile on the focused window (the OPTIONS square control).
 pub fn pseudo_active() {
     dispatch("hl.dsp.window.pseudo()");
+}
+
+/// Toggle floating on the focused window.
+pub fn float_active() {
+    dispatch("hl.dsp.window.float({ action = \"toggle\" })");
+}
+
+/// Toggle fullscreen on the focused window.
+pub fn fullscreen_active() {
+    dispatch("hl.dsp.window.fullscreen({ action = \"toggle\" })");
 }
 
 /// Give keyboard focus back to a window by address.

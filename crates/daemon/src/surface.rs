@@ -70,10 +70,13 @@ pub fn create_top_surface(
     render_scale: u32,
 ) -> LayerSurface {
     let surface = compositor.create_surface(qh);
+    // Overlay (not Top) so the bar sits *above* true-fullscreen windows: that
+    // lets its top reveal strip catch the pointer to un-hide it while an app is
+    // fullscreen. It stays invisible until revealed by drawing an empty frame.
     let layer = layer_shell.create_layer_surface(
         qh,
         surface,
-        Layer::Top,
+        Layer::Overlay,
         Some("waverunner-options"),
         None, // let the compositor pick the active output
     );
