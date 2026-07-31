@@ -54,6 +54,18 @@ impl Notifications {
     fn publish(&self) {
         let _ = self.tx.send(self.store.clone());
     }
+
+    /// Remove a notification from the store (UI-driven dismiss/action/reply),
+    /// republishing the list. Returns whether one was actually removed.
+    pub(crate) fn remove(&mut self, id: u32) -> bool {
+        if let Some(pos) = self.store.iter().position(|n| n.id == id) {
+            self.store.remove(pos);
+            self.publish();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[zbus::interface(name = "org.freedesktop.Notifications")]
@@ -133,6 +145,15 @@ impl Notifications {
         emitter: &SignalEmitter<'_>,
         id: u32,
         action_key: &str,
+    ) -> zbus::Result<()>;
+
+    /// Emitted when the user submits an inline reply (the text goes back to the
+    /// originating app). Non-standard but the de-facto inline-reply signal.
+    #[zbus(signal)]
+    async fn notification_replied(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        text: &str,
     ) -> zbus::Result<()>;
 }
 

@@ -73,6 +73,19 @@
         default = waverunner-daemon;
       });
 
+      # ── NixOS module ─────────────────────────────────────────────────────────
+      #
+      # Makes OPTIONS the system notification daemon. Usage in your NixOS flake:
+      #
+      #   imports = [ waverunner.nixosModules.notification-service ];
+      #   services.options-notify.enable = true;   # package defaults to ours
+      #
+      nixosModules.notification-service = { pkgs, lib, ... }: {
+        imports = [ ./notification-service.nix ];
+        services.options-notify.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.options-notify;
+      };
+
       # ── Home-manager module ──────────────────────────────────────────────────
       #
       # Usage in your home.nix:

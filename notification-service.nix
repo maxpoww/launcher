@@ -72,7 +72,10 @@ in
         Type = "dbus";
         BusName = "org.freedesktop.Notifications";
         ExecStart = "${cfg.package}/bin/options-notify";
-        Restart = "on-failure";
+        # Always keep the notification server up (a clean `systemctl stop` is
+        # still honoured); the daemon exits non-zero if the bus drops so we
+        # reclaim the name after a session-bus restart.
+        Restart = "always";
         RestartSec = "2s";
         Environment = [ "RUST_LOG=options_notify=${cfg.logLevel}" ];
         # Hardening: it needs only the session bus and network (KDE Connect

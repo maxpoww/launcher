@@ -36,12 +36,18 @@ async fn main() {
     loop {
         tokio::select! {
             changed = rx.changed() => {
-                if changed.is_err() { break; }
+                if changed.is_err() {
+                    // The server (and its D-Bus connection) went away — e.g. the
+                    // session bus restarted. Exit non-zero so systemd restarts
+                    // us and we reclaim the name (graceful fallback).
+                    tracing::error!("notification server stopped (bus lost?); exiting for restart");
+                    std::process::exit(1);
+                }
                 tracing::debug!(active = rx.borrow().len(), "notification list changed");
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("shutting down");
-                break;
+                return;
             }
         }
     }

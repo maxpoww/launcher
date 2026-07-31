@@ -31,6 +31,11 @@ mod state;
 pub use state::{NotificationAction, NotificationEvent, UrgencyLevel};
 
 use tokio::sync::watch;
+use zbus::object_server::InterfaceRef;
+
+// The `#[interface]` macro generates this trait, which carries the signal-emit
+// methods (`action_invoked`, `notification_closed`, …) on `SignalEmitter`.
+use server::{Notifications, NotificationsSignals};
 
 /// The well-known bus name and object path of the FreeDesktop notification
 /// service.
@@ -40,7 +45,7 @@ pub const NOTIFY_PATH: &str = "/org/freedesktop/Notifications";
 /// A running notification server. Holds the D-Bus connection (dropping it gives
 /// up the name) and exposes the live notification list.
 pub struct NotificationService {
-    _conn: zbus::Connection,
+    conn: zbus::Connection,
     rx: watch::Receiver<Vec<NotificationEvent>>,
 }
 
@@ -51,12 +56,12 @@ impl NotificationService {
     pub async fn start() -> zbus::Result<Self> {
         let (tx, rx) = watch::channel(Vec::new());
         let conn = zbus::connection::Builder::session()?
-            .serve_at(NOTIFY_PATH, server::Notifications::new(tx))?
+            .serve_at(NOTIFY_PATH, Notifications::new(tx))?
             .name(NOTIFY_NAME)?
             .build()
             .await?;
         tracing::info!("options-notify: serving {NOTIFY_NAME}");
-        Ok(Self { _conn: conn, rx })
+        Ok(Self { conn, rx })
     }
 
     /// Subscribe to the live list of active notifications (newest appended).
@@ -68,4 +73,53 @@ impl NotificationService {
     pub fn current(&self) -> Vec<NotificationEvent> {
         self.rx.borrow().clone()
     }
+
+    /// UI acted on a notification's button: notify the originating app
+    /// (`ActionInvoked`) and clear the notification (`NotificationClosed`,
+    /// dismissed).
+    pub async fn invoke_action(&self, id: u32, action_key: &str) -> zbus::Result<()> {
+        let iface = self.iface().await?;
+        iface.signal_emitter().action_invoked(id, action_key).await?;
+        self.close(&iface, id, CLOSE_DISMISSED).await
+    }
+
+    /// UI submitted an inline reply: send the text back (`NotificationReplied`)
+    /// and clear the notification.
+    pub async fn reply(&self, id: u32, text: &str) -> zbus::Result<()> {
+        let iface = self.iface().await?;
+        iface.signal_emitter().notification_replied(id, text).await?;
+        self.close(&iface, id, CLOSE_DISMISSED).await
+    }
+
+    /// UI dismissed a notification (swipe/close) — clear it and tell the app.
+    pub async fn dismiss(&self, id: u32) -> zbus::Result<()> {
+        let iface = self.iface().await?;
+        self.close(&iface, id, CLOSE_DISMISSED).await
+    }
+
+    async fn iface(&self) -> zbus::Result<InterfaceRef<Notifications>> {
+        self.conn
+            .object_server()
+            .interface::<_, Notifications>(NOTIFY_PATH)
+            .await
+    }
+
+    /// Remove from the store and emit `NotificationClosed` with `reason`
+    /// (2 = dismissed, 3 = call). No-op if it's already gone.
+    async fn close(
+        &self,
+        iface: &InterfaceRef<Notifications>,
+        id: u32,
+        reason: u32,
+    ) -> zbus::Result<()> {
+        let removed = iface.get_mut().await.remove(id);
+        if removed {
+            iface.signal_emitter().notification_closed(id, reason).await?;
+        }
+        Ok(())
+    }
 }
+
+/// `NotificationClosed` reason codes (FreeDesktop): 1 expired, 2 dismissed by
+/// the user, 3 closed via `CloseNotification`, 4 undefined.
+const CLOSE_DISMISSED: u32 = 2;
