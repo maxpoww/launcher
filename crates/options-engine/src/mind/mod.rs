@@ -26,15 +26,21 @@
 mod activity;
 mod affordance;
 mod decide;
+mod session;
 
 pub use activity::{infer_activity, Activity};
 pub use affordance::{Affordance, AffordanceKind, OptionSet};
-pub use decide::{decide, Tuning};
+pub use decide::{decide, decide_with, Tuning};
+pub use session::Temporal;
+
+use std::time::Instant;
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::engine::Engine;
+
+use session::Session;
 
 /// A live decision loop: context in, ranked options out.
 pub struct Mind {
@@ -49,12 +55,14 @@ impl Mind {
         let mut ctx_rx = engine.subscribe();
         let (tx, rx) = watch::channel(OptionSet::default());
         let task = tokio::spawn(async move {
+            let mut session = Session::new(Instant::now());
             loop {
-                // Decide from the latest snapshot; scope the borrow so it's
-                // dropped before the await.
+                // Decide from the latest snapshot plus the session's temporal
+                // memory; scope the borrow so it's dropped before the await.
                 let options = {
                     let ctx = ctx_rx.borrow_and_update();
-                    decide(&ctx, &tuning)
+                    let temporal = session.observe(&ctx, Instant::now());
+                    decide_with(&ctx, &temporal, &tuning)
                 };
                 if tx.send(options).is_err() {
                     break; // no subscribers and receiver dropped

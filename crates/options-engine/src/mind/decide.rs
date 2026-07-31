@@ -18,6 +18,10 @@ use crate::state::{ContextState, Layer};
 
 use super::activity::{infer_activity, Activity};
 use super::affordance::{Affordance, AffordanceKind, OptionSet};
+use super::session::Temporal;
+
+/// A coding stretch past this long earns a gentle "take a break" nudge.
+const LONG_CODING_SECS: u64 = 60 * 60;
 
 /// Knobs for the decision. Kept small and explicit; the `skill` term is the
 /// seam where behavioural calibration (Layer 3) will feed in.
@@ -60,10 +64,19 @@ const PROVIDERS: &[Provider] = &[
     mic_provider,
 ];
 
-/// Decide the current option set from a context snapshot.
+/// Decide the current option set from a context snapshot alone (no temporal
+/// memory). Convenience over [`decide_with`] for callers/tests without a
+/// [`Session`](super::session::Session).
 pub fn decide(ctx: &ContextState, tuning: &Tuning) -> OptionSet {
+    decide_with(ctx, &Temporal::default(), tuning)
+}
+
+/// Decide the current option set from a context snapshot plus the session's
+/// [`Temporal`] memory (duration in activity, failure streaks).
+pub fn decide_with(ctx: &ContextState, temporal: &Temporal, tuning: &Tuning) -> OptionSet {
     let activity = infer_activity(ctx);
     let mut items: Vec<Affordance> = PROVIDERS.iter().flat_map(|p| p(ctx)).collect();
+    items.extend(temporal_affordances(activity, temporal));
 
     // Never surface from a source that isn't live (freshness gate).
     items.retain(|a| layer_alive(ctx, a.source));
@@ -92,6 +105,35 @@ pub fn decide(ctx: &ContextState, tuning: &Tuning) -> OptionSet {
         items,
         generation: ctx.generation,
     }
+}
+
+/// Affordances that only exist with temporal memory: how long you've been at
+/// something, and streaks. Pure in `(activity, temporal)`.
+fn temporal_affordances(activity: Activity, temporal: &Temporal) -> Vec<Affordance> {
+    let mut out = Vec::new();
+    if activity == Activity::Coding && temporal.activity_secs >= LONG_CODING_SECS {
+        out.push(Affordance {
+            id: "session.long_coding",
+            kind: AffordanceKind::Info,
+            title: "Long coding session".into(),
+            detail: format!("{} min — a break?", temporal.activity_secs / 60),
+            relevance: 0.4,
+            reason: "coding over an hour",
+            source: Layer::Compositor,
+        });
+    }
+    if temporal.failure_streak >= 3 {
+        out.push(Affordance {
+            id: "session.failure_streak",
+            kind: AffordanceKind::Action,
+            title: "Several commands failing".into(),
+            detail: format!("{} in a row — want a hand?", temporal.failure_streak),
+            relevance: 0.7,
+            reason: "repeated shell failures",
+            source: Layer::AppBridge,
+        });
+    }
+    out
 }
 
 /// Activity-aware suppression: some affordances are noise in some situations.
@@ -495,6 +537,44 @@ mod tests {
             .items
             .iter()
             .all(|a| a.id != "shell.last_failed"));
+    }
+
+    #[test]
+    fn long_coding_session_suggests_a_break() {
+        let ctx = {
+            let mut c = live_ctx();
+            c.window.class = "Code".into();
+            c.window.pid = 1;
+            c
+        };
+        // No time elapsed → nothing; over an hour → the nudge appears.
+        assert!(decide(&ctx, &Tuning::default())
+            .items
+            .iter()
+            .all(|a| a.id != "session.long_coding"));
+        let temporal = Temporal {
+            activity_secs: 3700,
+            ..Default::default()
+        };
+        assert!(decide_with(&ctx, &temporal, &Tuning::default())
+            .items
+            .iter()
+            .any(|a| a.id == "session.long_coding"));
+    }
+
+    #[test]
+    fn failure_streak_escalates_to_a_hand() {
+        let ctx = live_ctx();
+        let temporal = Temporal {
+            failure_streak: 3,
+            ..Default::default()
+        };
+        let a = decide_with(&ctx, &temporal, &Tuning::default())
+            .items
+            .into_iter()
+            .find(|a| a.id == "session.failure_streak")
+            .expect("streak should surface");
+        assert_eq!(a.kind, AffordanceKind::Action);
     }
 
     #[test]
