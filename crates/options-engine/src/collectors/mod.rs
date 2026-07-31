@@ -6,4 +6,6 @@
 //!
 //! [`Collector`]: crate::collector::Collector
 
+pub mod git;
 pub mod hyprland;
+pub mod system;

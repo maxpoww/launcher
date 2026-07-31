@@ -6,7 +6,7 @@
 //! layers entirely — a high-frequency source (window focus) can never block a
 //! low-frequency one (battery), and one dead collector can't stall the rest.
 
-use crate::state::{ActiveWindow, Layer};
+use crate::state::{ActiveWindow, GitContext, Layer, SystemMetrics};
 
 /// A partial change to the context. Only the variants the current collectors
 /// produce exist; more are added as each layer lands (Layer 1 today).
@@ -24,6 +24,11 @@ pub enum ContextDelta {
     /// Focus-switching velocity (window switches per second, trailing window) —
     /// a behavioural metric derived from compositor events, no input capture.
     FocusSwitchVelocity(f32),
+    /// System hardware sample (CPU / RAM / battery).
+    Metrics(SystemMetrics),
+    /// Git context of the focused window's working directory (or cleared
+    /// default when it isn't in a repo / nothing is focused).
+    Git(GitContext),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

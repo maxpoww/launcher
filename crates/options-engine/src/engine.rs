@@ -47,9 +47,10 @@ impl Engine {
 
         for collector in collectors {
             let tx = upd_tx.clone();
+            let ctx = rx.clone();
             let name = collector.name();
             tasks.push(tokio::spawn(async move {
-                if let Err(e) = collector.run(tx).await {
+                if let Err(e) = collector.run(ctx, tx).await {
                     tracing::warn!(collector = name, "collector exited: {e:#}");
                 }
             }));
@@ -84,7 +85,11 @@ impl Drop for Engine {
 
 /// Production collector set. Extended as each layer lands.
 fn default_collectors() -> Vec<Box<dyn Collector>> {
-    vec![Box::new(crate::collectors::hyprland::HyprlandCollector::new())]
+    vec![
+        Box::new(crate::collectors::hyprland::HyprlandCollector::new()),
+        Box::new(crate::collectors::system::SystemCollector::new()),
+        Box::new(crate::collectors::git::GitCollector::new()),
+    ]
 }
 
 /// The sole writer of the master state: apply each update, stamp provenance,
@@ -118,6 +123,8 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
         ContextDelta::ActiveLayout(l) => state.active_layout = l,
         ContextDelta::Screencasting(b) => state.is_screencasting = b,
         ContextDelta::FocusSwitchVelocity(v) => state.behavior.focus_switch_velocity = v,
+        ContextDelta::Metrics(m) => state.metrics = m,
+        ContextDelta::Git(g) => state.git = g,
     }
 }
 
@@ -141,7 +148,11 @@ mod tests {
         fn layer(&self) -> Layer {
             self.layer
         }
-        fn run(self: Box<Self>, tx: mpsc::Sender<Update>) -> CollectorFuture {
+        fn run(
+            self: Box<Self>,
+            _ctx: watch::Receiver<ContextState>,
+            tx: mpsc::Sender<Update>,
+        ) -> CollectorFuture {
             Box::pin(async move {
                 for u in self.script {
                     tx.send(u).await.map_err(|e| anyhow::anyhow!("{e}"))?;

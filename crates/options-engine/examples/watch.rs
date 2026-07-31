@@ -23,19 +23,27 @@ async fn main() {
         }
         let ctx = rx.borrow();
         println!(
-            "#{:>3} | compositor={} fresh={:?}ms | win='{}' [{}] ws{} fs={} float={} | submap='{}' layout='{}' cast={} | focusvel={:.2}/s",
+            "#{:>3} | win='{}' [{}] ws{} fs={} float={} | focusvel={:.2}/s | git={}@{} | cpu={:.0}% ram={:.0}% batt={:?}{} | submap='{}' cast={}",
             ctx.generation,
-            ctx.health.compositor.alive,
-            ctx.health.compositor.last_update_ms,
             ctx.window.title,
             ctx.window.class,
             ctx.window.workspace_id,
             ctx.window.is_fullscreen,
             ctx.window.is_floating,
-            ctx.hypr_submap,
-            ctx.active_layout,
-            ctx.is_screencasting,
             ctx.behavior.focus_switch_velocity,
+            ctx.git.branch.as_deref().unwrap_or("-"),
+            ctx.git
+                .repo_root
+                .as_deref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "-".into()),
+            ctx.metrics.cpu_usage_pct,
+            ctx.metrics.ram_usage_pct,
+            ctx.metrics.battery_pct,
+            if ctx.metrics.is_charging { "+" } else { "" },
+            ctx.hypr_submap,
+            ctx.is_screencasting,
         );
     }
 }

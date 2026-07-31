@@ -24,9 +24,11 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+use tokio::sync::watch;
+
 use crate::collector::{Collector, CollectorFuture};
 use crate::message::{ContextDelta, Update};
-use crate::state::{ActiveWindow, Layer};
+use crate::state::{ActiveWindow, ContextState, Layer};
 
 /// Trailing window over which focus switches are counted for velocity.
 const FOCUS_WINDOW: Duration = Duration::from_secs(5);
@@ -50,7 +52,11 @@ impl Collector for HyprlandCollector {
     fn layer(&self) -> Layer {
         Layer::Compositor
     }
-    fn run(self: Box<Self>, tx: mpsc::Sender<Update>) -> CollectorFuture {
+    fn run(
+        self: Box<Self>,
+        _ctx: watch::Receiver<ContextState>,
+        tx: mpsc::Sender<Update>,
+    ) -> CollectorFuture {
         Box::pin(async move {
             let mut backoff = BACKOFF_MIN;
             let mut tracker = FocusTracker::default();
