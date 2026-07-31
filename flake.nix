@@ -59,6 +59,17 @@
           doCheck = false;
         };
 
+        # The OPTIONS notification daemon (org.freedesktop.Notifications server).
+        # Pure Rust (zbus/tokio) — no wgpu/wayland runtime libs needed.
+        options-notify = pkgs.rustPlatform.buildRustPackage {
+          pname = "options-notify";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "options-notify" ];
+          doCheck = false;
+        };
+
         default = waverunner-daemon;
       });
 
