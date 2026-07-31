@@ -53,10 +53,11 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # Cross-device bridging (optional): KDE Connect headless daemon + its D-Bus
-    # service files + firewall pinholes.
+    # Cross-device bridging (optional): the KDE Connect NixOS module already
+    # provides the daemon, its D-Bus service files, and firewall pinholes — no
+    # need to add the package to services.dbus.packages (and the attribute name
+    # varies across nixpkgs: pkgs.kdeconnect vs pkgs.kdePackages.kdeconnect-kde).
     programs.kdeconnect.enable = lib.mkIf cfg.enableKdeConnect true;
-    services.dbus.packages = lib.mkIf cfg.enableKdeConnect [ pkgs.kdeconnect ];
 
     # The notification backend, tied to the graphical session. Type = "dbus"
     # with BusName means systemd considers the unit *started* only once the name
