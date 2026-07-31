@@ -6,7 +6,9 @@
 //! layers entirely — a high-frequency source (window focus) can never block a
 //! low-frequency one (battery), and one dead collector can't stall the rest.
 
-use crate::state::{ActiveWindow, GitContext, Layer, MediaState, SystemMetrics};
+use crate::state::{
+    ActiveWindow, AppInternalContext, GitContext, Layer, MediaState, SystemMetrics,
+};
 
 /// A partial change to the context. Only the variants the current collectors
 /// produce exist; more are added as each layer lands (Layer 1 today).
@@ -31,6 +33,8 @@ pub enum ContextDelta {
     Git(GitContext),
     /// The active media player's state, or `None` when nothing is playing/present.
     Media(Option<MediaState>),
+    /// Merged app-internal context from the shell/editor/browser bridges.
+    AppInternal(AppInternalContext),
 }
 
 /// A message from a collector to the aggregator: either a data change or a
