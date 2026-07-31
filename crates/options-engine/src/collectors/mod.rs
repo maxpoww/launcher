@@ -10,4 +10,5 @@ pub mod bridge;
 pub mod git;
 pub mod hyprland;
 pub mod media;
+pub mod selection;
 pub mod system;

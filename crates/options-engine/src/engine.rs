@@ -91,6 +91,7 @@ fn default_collectors() -> Vec<Box<dyn Collector>> {
         Box::new(crate::collectors::git::GitCollector::new()),
         Box::new(crate::collectors::media::MediaCollector::new()),
         Box::new(crate::collectors::bridge::BridgeCollector::new()),
+        Box::new(crate::collectors::selection::SelectionCollector::new()),
     ]
 }
 
@@ -129,6 +130,7 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
         ContextDelta::Git(g) => state.git = g,
         ContextDelta::Media(m) => state.media = m,
         ContextDelta::AppInternal(a) => state.app_internal = a,
+        ContextDelta::Selection(s) => state.selection = s,
     }
 }
 

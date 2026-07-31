@@ -56,6 +56,7 @@ const PROVIDERS: &[Provider] = &[
     focus_churn_provider,
     shell_error_provider,
     diagnostics_provider,
+    selection_provider,
 ];
 
 /// Decide the current option set from a context snapshot.
@@ -337,10 +338,41 @@ fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
     }]
 }
 
+/// A copied URL or code snippet is strong intent — offer to act on it.
+fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let s = &ctx.selection;
+    if s.char_count == 0 {
+        return vec![];
+    }
+    if s.contains_url {
+        vec![Affordance {
+            id: "selection.url",
+            kind: AffordanceKind::Action,
+            title: "Open copied link".into(),
+            detail: s.highlighted_text.clone().unwrap_or_default(),
+            relevance: 0.5,
+            reason: "clipboard holds a url",
+            source: Layer::Selection,
+        }]
+    } else if s.is_code {
+        vec![Affordance {
+            id: "selection.code",
+            kind: AffordanceKind::Action,
+            title: "Copied code".into(),
+            detail: format!("{} characters", s.char_count),
+            relevance: 0.4,
+            reason: "clipboard looks like code",
+            source: Layer::Selection,
+        }]
+    } else {
+        vec![]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{AppInternalContext, GitContext, MediaState, SystemMetrics};
+    use crate::state::{AppInternalContext, GitContext, MediaState, SystemMetrics, TextSelection};
 
     /// A context with everything's source layer marked alive, so freshness
     /// gating doesn't hide provider output under test.
@@ -350,6 +382,7 @@ mod tests {
         ctx.health.hardware.alive = true;
         ctx.health.behavior.alive = true;
         ctx.health.app_bridge.alive = true;
+        ctx.health.selection.alive = true;
         ctx
     }
 
@@ -444,6 +477,19 @@ mod tests {
             .items
             .iter()
             .all(|a| a.id != "shell.last_failed"));
+    }
+
+    #[test]
+    fn copied_url_offers_to_open() {
+        let mut ctx = live_ctx();
+        ctx.selection = TextSelection {
+            highlighted_text: Some("https://example.com".into()),
+            char_count: 19,
+            is_code: false,
+            contains_url: true,
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        assert!(opts.items.iter().any(|a| a.id == "selection.url"));
     }
 
     #[test]

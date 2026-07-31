@@ -7,7 +7,7 @@
 //! low-frequency one (battery), and one dead collector can't stall the rest.
 
 use crate::state::{
-    ActiveWindow, AppInternalContext, GitContext, Layer, MediaState, SystemMetrics,
+    ActiveWindow, AppInternalContext, GitContext, Layer, MediaState, SystemMetrics, TextSelection,
 };
 
 /// A partial change to the context. Only the variants the current collectors
@@ -35,6 +35,8 @@ pub enum ContextDelta {
     Media(Option<MediaState>),
     /// Merged app-internal context from the shell/editor/browser bridges.
     AppInternal(AppInternalContext),
+    /// The current clipboard selection (classified), or cleared default.
+    Selection(TextSelection),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

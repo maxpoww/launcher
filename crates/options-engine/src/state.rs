@@ -25,7 +25,7 @@ pub struct ActiveWindow {
     pub is_floating: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextSelection {
     pub highlighted_text: Option<String>,
     pub char_count: usize,
