@@ -1,0 +1,18 @@
+[package]
+name = "options-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The OPTIONS Context Core: a headless, async engine that senses desktop context for the OPTIONS reactive surface (StandardOS)."
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "test-util"] }
+tracing-subscriber = { workspace = true }

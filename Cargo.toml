@@ -5,6 +5,7 @@ members = [
     "crates/client",
     "crates/core",
     "crates/proto",
+    "crates/options-engine",
 ]
 
 [workspace.package]
@@ -31,6 +32,9 @@ serde_json = "1"
 
 waverunner-core = { path = "crates/core" }
 waverunner-proto = { path = "crates/proto" }
+# The OPTIONS Context Core ("the Brain") — headless sensing engine the daemon
+# subscribes to. Not yet consumed by the daemon; wired in a later step.
+options-engine = { path = "crates/options-engine" }
 
 [profile.release]
 lto = "thin"
