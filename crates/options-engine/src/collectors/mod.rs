@@ -6,6 +6,7 @@
 //!
 //! [`Collector`]: crate::collector::Collector
 
+pub mod audio;
 pub mod bridge;
 pub mod git;
 pub mod hyprland;

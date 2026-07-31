@@ -7,7 +7,8 @@
 //! low-frequency one (battery), and one dead collector can't stall the rest.
 
 use crate::state::{
-    ActiveWindow, AppInternalContext, GitContext, Layer, MediaState, SystemMetrics, TextSelection,
+    ActiveWindow, AppInternalContext, AudioState, GitContext, Layer, MediaState, SystemMetrics,
+    TextSelection,
 };
 
 /// A partial change to the context. Only the variants the current collectors
@@ -37,6 +38,8 @@ pub enum ContextDelta {
     AppInternal(AppInternalContext),
     /// The current clipboard selection (classified), or cleared default.
     Selection(TextSelection),
+    /// Audio state: mic activity, default sink volume and mute.
+    Audio(AudioState),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

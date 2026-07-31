@@ -57,6 +57,7 @@ const PROVIDERS: &[Provider] = &[
     shell_error_provider,
     diagnostics_provider,
     selection_provider,
+    mic_provider,
 ];
 
 /// Decide the current option set from a context snapshot.
@@ -335,6 +336,23 @@ fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
         relevance: (0.35 + 0.05 * n.min(5) as f32).clamp(0.0, 0.6),
         reason: "editor diagnostics present",
         source: Layer::AppBridge,
+    }]
+}
+
+/// A live microphone — awareness that you're being heard (and the seat of the
+/// Communication activity).
+fn mic_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if !ctx.audio.is_mic_active {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "audio.mic_live",
+        kind: AffordanceKind::Warning,
+        title: "Microphone is live".into(),
+        detail: "You're being recorded or heard".into(),
+        relevance: 0.8,
+        reason: "active capture stream",
+        source: Layer::Hardware,
     }]
 }
 

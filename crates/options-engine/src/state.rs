@@ -68,7 +68,7 @@ pub struct MediaState {
     pub is_playing: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioState {
     pub is_mic_active: bool,
     pub default_sink_volume: u32,

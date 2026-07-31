@@ -45,6 +45,13 @@ async fn main() {
             ctx.hypr_submap,
             ctx.is_screencasting,
         );
+        let au = &ctx.audio;
+        println!(
+            "       audio: mic={} vol={}%{}",
+            au.is_mic_active,
+            au.default_sink_volume,
+            if au.is_muted { " MUTED" } else { "" }
+        );
         if let Some(m) = &ctx.media {
             println!(
                 "      ♪ {} — {} · {} [{}]",

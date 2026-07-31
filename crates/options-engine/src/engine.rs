@@ -92,6 +92,7 @@ fn default_collectors() -> Vec<Box<dyn Collector>> {
         Box::new(crate::collectors::media::MediaCollector::new()),
         Box::new(crate::collectors::bridge::BridgeCollector::new()),
         Box::new(crate::collectors::selection::SelectionCollector::new()),
+        Box::new(crate::collectors::audio::AudioCollector::new()),
     ]
 }
 
@@ -131,6 +132,7 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
         ContextDelta::Media(m) => state.media = m,
         ContextDelta::AppInternal(a) => state.app_internal = a,
         ContextDelta::Selection(s) => state.selection = s,
+        ContextDelta::Audio(a) => state.audio = a,
     }
 }
 
