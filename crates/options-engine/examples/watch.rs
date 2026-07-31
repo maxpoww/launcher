@@ -45,5 +45,14 @@ async fn main() {
             ctx.hypr_submap,
             ctx.is_screencasting,
         );
+        if let Some(m) = &ctx.media {
+            println!(
+                "      ♪ {} — {} · {} [{}]",
+                m.player_name,
+                m.title,
+                m.artist,
+                if m.is_playing { "playing" } else { "paused" }
+            );
+        }
     }
 }

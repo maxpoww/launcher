@@ -8,4 +8,5 @@
 
 pub mod git;
 pub mod hyprland;
+pub mod media;
 pub mod system;

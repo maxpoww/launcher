@@ -89,6 +89,7 @@ fn default_collectors() -> Vec<Box<dyn Collector>> {
         Box::new(crate::collectors::hyprland::HyprlandCollector::new()),
         Box::new(crate::collectors::system::SystemCollector::new()),
         Box::new(crate::collectors::git::GitCollector::new()),
+        Box::new(crate::collectors::media::MediaCollector::new()),
     ]
 }
 
@@ -125,6 +126,7 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
         ContextDelta::FocusSwitchVelocity(v) => state.behavior.focus_switch_velocity = v,
         ContextDelta::Metrics(m) => state.metrics = m,
         ContextDelta::Git(g) => state.git = g,
+        ContextDelta::Media(m) => state.media = m,
     }
 }
 

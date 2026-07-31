@@ -60,7 +60,7 @@ pub struct BehavioralMetrics {
     pub focus_switch_velocity: f32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaState {
     pub player_name: String,
     pub title: String,

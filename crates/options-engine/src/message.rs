@@ -6,7 +6,7 @@
 //! layers entirely — a high-frequency source (window focus) can never block a
 //! low-frequency one (battery), and one dead collector can't stall the rest.
 
-use crate::state::{ActiveWindow, GitContext, Layer, SystemMetrics};
+use crate::state::{ActiveWindow, GitContext, Layer, MediaState, SystemMetrics};
 
 /// A partial change to the context. Only the variants the current collectors
 /// produce exist; more are added as each layer lands (Layer 1 today).
@@ -29,6 +29,8 @@ pub enum ContextDelta {
     /// Git context of the focused window's working directory (or cleared
     /// default when it isn't in a repo / nothing is focused).
     Git(GitContext),
+    /// The active media player's state, or `None` when nothing is playing/present.
+    Media(Option<MediaState>),
 }
 
 /// A message from a collector to the aggregator: either a data change or a
