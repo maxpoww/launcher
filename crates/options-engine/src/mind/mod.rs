@@ -1,0 +1,83 @@
+//! The mind — the decision layer that sits above sensing.
+//!
+//! It subscribes to the engine's [`ContextState`](crate::ContextState) stream
+//! and, for every change, decides the current [`OptionSet`]: the ranked,
+//! de-cluttered affordances to surface. Sensing (the collectors) stays pure and
+//! unaware of decisions; the mind is the only place context becomes *options*.
+//!
+//! The decision itself is the pure [`decide`] function; this module just wraps
+//! it in a task and republishes on its own `watch`, so any surface can
+//! subscribe to options exactly the way it subscribes to context.
+//!
+//! ```no_run
+//! # async fn demo() {
+//! let engine = options_engine::Engine::start();
+//! let mind = options_engine::Mind::new(&engine, Default::default());
+//! let mut rx = mind.subscribe();
+//! loop {
+//!     rx.changed().await.unwrap();
+//!     for a in &rx.borrow().items {
+//!         println!("[{:.2}] {} — {}", a.relevance, a.title, a.detail);
+//!     }
+//! }
+//! # }
+//! ```
+
+mod affordance;
+mod decide;
+
+pub use affordance::{Affordance, AffordanceKind, OptionSet};
+pub use decide::{decide, Tuning};
+
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use crate::engine::Engine;
+
+/// A live decision loop: context in, ranked options out.
+pub struct Mind {
+    rx: watch::Receiver<OptionSet>,
+    task: JoinHandle<()>,
+}
+
+impl Mind {
+    /// Start deciding from `engine`'s context with the given [`Tuning`]. Must be
+    /// called within a Tokio runtime.
+    pub fn new(engine: &Engine, tuning: Tuning) -> Self {
+        let mut ctx_rx = engine.subscribe();
+        let (tx, rx) = watch::channel(OptionSet::default());
+        let task = tokio::spawn(async move {
+            loop {
+                // Decide from the latest snapshot; scope the borrow so it's
+                // dropped before the await.
+                let options = {
+                    let ctx = ctx_rx.borrow_and_update();
+                    decide(&ctx, &tuning)
+                };
+                if tx.send(options).is_err() {
+                    break; // no subscribers and receiver dropped
+                }
+                if ctx_rx.changed().await.is_err() {
+                    break; // engine gone
+                }
+            }
+        });
+        Mind { rx, task }
+    }
+
+    /// A fresh subscription to the option stream.
+    pub fn subscribe(&self) -> watch::Receiver<OptionSet> {
+        self.rx.clone()
+    }
+
+    /// The current option set.
+    pub fn current(&self) -> OptionSet {
+        self.rx.borrow().clone()
+    }
+}
+
+impl Drop for Mind {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}

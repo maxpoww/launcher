@@ -8,10 +8,12 @@
 //! decide what is *logical to surface* (pillar 3) and *calibrate to your skill*
 //! (pillar 4). This crate is that reading.
 //!
-//! It is deliberately **only perception**: it senses and publishes a unified
-//! [`ContextState`]; it does not decide what to show. The decision layer (the
-//! "mind") subscribes to these snapshots and lives above this crate, so sensing
-//! stays pure, testable, and reusable.
+//! Sensing and deciding are kept strictly apart. The **collectors** only
+//! perceive — they sense and publish a unified [`ContextState`], deciding
+//! nothing. The **[`Mind`]** is the separate decision layer: it subscribes to
+//! those snapshots and produces a ranked, de-cluttered [`OptionSet`] (the
+//! affordances to surface). Perception stays pure and reusable; the mind is the
+//! only place context becomes *options*.
 //!
 //! ## Architecture
 //!
@@ -53,11 +55,13 @@ mod collector;
 mod collectors;
 mod engine;
 mod message;
+mod mind;
 mod state;
 
 pub use collector::{Collector, CollectorFuture};
 pub use engine::Engine;
 pub use message::{ContextDelta, Update};
+pub use mind::{decide, Affordance, AffordanceKind, Mind, OptionSet, Tuning};
 pub use state::{
     ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, GitContext,
     Health, Layer, LayerHealth, MediaState, SystemMetrics, TextSelection,
