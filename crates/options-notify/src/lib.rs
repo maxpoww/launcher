@@ -25,16 +25,19 @@
 //!
 //! [`options-engine`]: https://docs.rs/options-engine
 
+mod control;
 mod server;
 mod state;
 
-pub use state::{NotificationAction, NotificationEvent, UrgencyLevel};
+pub use state::{ActiveNotification, NotificationAction, NotificationEvent, UrgencyLevel};
 
 use tokio::sync::watch;
-use zbus::object_server::InterfaceRef;
+use zbus::object_server::{InterfaceRef, SignalEmitter};
 
-// The `#[interface]` macro generates this trait, which carries the signal-emit
-// methods (`action_invoked`, `notification_closed`, …) on `SignalEmitter`.
+// The `#[interface]` macro generates these traits, which carry the signal-emit
+// methods (`action_invoked`, `notification_closed`, `active_changed`, …) on
+// `SignalEmitter`.
+use control::{OptionsControl, OptionsControlSignals};
 use server::{Notifications, NotificationsSignals};
 
 /// The well-known bus name and object path of the FreeDesktop notification
@@ -57,10 +60,19 @@ impl NotificationService {
         let (tx, rx) = watch::channel(Vec::new());
         let conn = zbus::connection::Builder::session()?
             .serve_at(NOTIFY_PATH, Notifications::new(tx))?
+            // The private control interface for the OPTIONS frontend, on the
+            // same object path (see `control.rs`). It reads the same live list.
+            .serve_at(NOTIFY_PATH, OptionsControl::new(rx.clone()))?
             .name(NOTIFY_NAME)?
             .build()
             .await?;
         tracing::info!("options-notify: serving {NOTIFY_NAME}");
+
+        // Bridge the internal watch to the `ActiveChanged` D-Bus signal, so the
+        // frontend re-renders on every change without polling. One task, its own
+        // emitter; it ends quietly when the service (and the watch) is dropped.
+        spawn_active_changed(conn.clone(), rx.clone());
+
         Ok(Self { conn, rx })
     }
 
@@ -123,3 +135,28 @@ impl NotificationService {
 /// `NotificationClosed` reason codes (FreeDesktop): 1 expired, 2 dismissed by
 /// the user, 3 closed via `CloseNotification`, 4 undefined.
 const CLOSE_DISMISSED: u32 = 2;
+
+/// Spawn the task that mirrors the live notification list onto the
+/// `org.options.Notifications.ActiveChanged` signal. Fires once per store change
+/// (the watch coalesces bursts to the latest), carrying the whole current list.
+fn spawn_active_changed(conn: zbus::Connection, mut rx: watch::Receiver<Vec<NotificationEvent>>) {
+    tokio::spawn(async move {
+        let emitter = match SignalEmitter::new(&conn, NOTIFY_PATH) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("active_changed: cannot build emitter: {e}");
+                return;
+            }
+        };
+        loop {
+            // Ends when the service drops the sender — clean shutdown.
+            if rx.changed().await.is_err() {
+                break;
+            }
+            let list = OptionsControl::snapshot(&rx);
+            if let Err(e) = emitter.active_changed(list).await {
+                tracing::warn!("active_changed: emit failed: {e}");
+            }
+        }
+    });
+}
