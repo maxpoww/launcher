@@ -25,6 +25,12 @@ mod launch;
 mod managed;
 mod managed_webapps;
 mod nix;
+// Notification OPTION data plane: a D-Bus worker that mirrors the options-notify
+// daemon's active list into the UI and sends back dismiss/act/reply. The render
+// surface (the vertical-list box + entry/exit springs) consumes this next; the
+// allow drops once `spawn`/`NotifHandle` are wired into the event loop.
+#[allow(dead_code)]
+mod notifications;
 mod options;
 mod order;
 mod pager;
