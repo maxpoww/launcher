@@ -7,8 +7,8 @@
 //! low-frequency one (battery), and one dead collector can't stall the rest.
 
 use crate::state::{
-    ActiveWindow, AppInternalContext, AudioState, GitContext, Layer, MediaState, SystemMetrics,
-    TextSelection,
+    ActiveWindow, AppInternalContext, AudioState, DeployHealth, GitContext, Layer, MediaState,
+    SystemMetrics, TextSelection,
 };
 
 /// A partial change to the context. Only the variants the current collectors
@@ -40,6 +40,8 @@ pub enum ContextDelta {
     Selection(TextSelection),
     /// Audio state: mic activity, default sink volume and mute.
     Audio(AudioState),
+    /// NixOS deploy health (generation drift between booted/current/latest).
+    Deploy(DeployHealth),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

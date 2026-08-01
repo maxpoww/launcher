@@ -83,6 +83,26 @@ pub struct SystemMetrics {
     pub is_charging: bool,
 }
 
+/// NixOS deploy state: is the system we're *running* the system we last *built*?
+///
+/// Both flags default to `false` — the healthy, in-sync case, and also the
+/// resting value on non-NixOS hosts (where the collector never produces data,
+/// so the [`Layer::System`] health stays dark and the mind never surfaces
+/// these). Derived by comparing the fully-resolved store paths of
+/// `/run/booted-system`, `/run/current-system`, and the latest built profile
+/// `/nix/var/nix/profiles/system`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployHealth {
+    /// The activated (current) system differs from the newest built profile —
+    /// the last `nixos-rebuild switch` didn't take effect. The more serious of
+    /// the two: the deploy silently failed to activate.
+    pub not_activated: bool,
+    /// The booted system differs from the newest built profile — a newer
+    /// generation was built but we're still running an older one, so a reboot is
+    /// needed to actually run the latest.
+    pub stale_generation: bool,
+}
+
 /// The collector layers, used to stamp per-layer [`Health`]. One layer may feed
 /// several fields of [`ContextState`]; this identifies the *source*, not the
 /// destination field (e.g. focus-switch velocity is a behavioural metric but is
@@ -99,6 +119,10 @@ pub enum Layer {
     Behavior,
     /// Layer 4 — media, audio, and hardware/system state.
     Hardware,
+    /// Layer 4 (part) — NixOS deploy health (generation drift / pending reboot).
+    /// Tracked separately from [`Layer::Hardware`] so its liveness reflects the
+    /// deploy sensor alone (reading the nix profiles), not the /proc sampler.
+    System,
 }
 
 /// Liveness and freshness of one collector layer.
@@ -121,6 +145,7 @@ pub struct Health {
     pub app_bridge: LayerHealth,
     pub behavior: LayerHealth,
     pub hardware: LayerHealth,
+    pub system: LayerHealth,
 }
 
 impl Health {
@@ -131,6 +156,7 @@ impl Health {
             Layer::AppBridge => &mut self.app_bridge,
             Layer::Behavior => &mut self.behavior,
             Layer::Hardware => &mut self.hardware,
+            Layer::System => &mut self.system,
         }
     }
 
@@ -162,6 +188,7 @@ pub struct ContextState {
     pub media: Option<MediaState>,
     pub audio: AudioState,
     pub metrics: SystemMetrics,
+    pub deploy: DeployHealth,
     pub hypr_submap: String,
     pub active_layout: String,
     pub is_screencasting: bool,

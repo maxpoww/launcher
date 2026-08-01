@@ -66,6 +66,6 @@ pub use mind::{
     Temporal, Tuning,
 };
 pub use state::{
-    ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, GitContext,
-    Health, Layer, LayerHealth, MediaState, SystemMetrics, TextSelection,
+    ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, DeployHealth,
+    GitContext, Health, Layer, LayerHealth, MediaState, SystemMetrics, TextSelection,
 };

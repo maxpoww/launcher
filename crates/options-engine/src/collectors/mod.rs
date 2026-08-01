@@ -8,6 +8,7 @@
 
 pub mod audio;
 pub mod bridge;
+pub mod deploy;
 pub mod git;
 pub mod hyprland;
 pub mod media;

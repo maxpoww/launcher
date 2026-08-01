@@ -53,6 +53,7 @@ type Provider = fn(&ContextState) -> Vec<Affordance>;
 
 const PROVIDERS: &[Provider] = &[
     screencast_provider,
+    deploy_provider,
     battery_provider,
     cpu_provider,
     media_provider,
@@ -184,6 +185,7 @@ fn layer_alive(ctx: &ContextState, layer: Layer) -> bool {
         Layer::AppBridge => ctx.health.app_bridge.alive,
         Layer::Behavior => ctx.health.behavior.alive,
         Layer::Hardware => ctx.health.hardware.alive,
+        Layer::System => ctx.health.system.alive,
     }
 }
 
@@ -203,6 +205,38 @@ fn screencast_provider(ctx: &ContextState) -> Vec<Affordance> {
         reason: "screencast active",
         source: Layer::Compositor,
     }]
+}
+
+/// Deploy health: the system you're running isn't the system you last built.
+/// Invisible-but-wrong state made visible at the moment it matters (a Warning,
+/// never suppressed by skill). The two cases are mutually exclusive in what we
+/// surface — a failed activation is the root cause, so it wins over the merely
+/// stale generation it also implies, keeping the surface to one clear option.
+fn deploy_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let d = &ctx.deploy;
+    if d.not_activated {
+        return vec![Affordance {
+            id: "deploy.not_activated",
+            kind: AffordanceKind::Warning,
+            title: "Last deploy didn't activate".into(),
+            detail: "Newest build isn't the running system — re-run switch".into(),
+            relevance: 0.85,
+            reason: "current system != latest built generation",
+            source: Layer::System,
+        }];
+    }
+    if d.stale_generation {
+        return vec![Affordance {
+            id: "deploy.stale_generation",
+            kind: AffordanceKind::Warning,
+            title: "Running a stale system generation".into(),
+            detail: "Reboot to run the latest build".into(),
+            relevance: 0.8,
+            reason: "booted system != latest built generation",
+            source: Layer::System,
+        }];
+    }
+    vec![]
 }
 
 /// Battery: escalating urgency as it drains on battery power.
@@ -432,7 +466,9 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{AppInternalContext, GitContext, MediaState, SystemMetrics, TextSelection};
+    use crate::state::{
+        AppInternalContext, DeployHealth, GitContext, MediaState, SystemMetrics, TextSelection,
+    };
 
     /// A context with everything's source layer marked alive, so freshness
     /// gating doesn't hide provider output under test.
@@ -443,6 +479,7 @@ mod tests {
         ctx.health.behavior.alive = true;
         ctx.health.app_bridge.alive = true;
         ctx.health.selection.alive = true;
+        ctx.health.system.alive = true;
         ctx
     }
 
@@ -611,6 +648,44 @@ mod tests {
             .items
             .iter()
             .all(|a| a.id != "editor.diagnostics"));
+    }
+
+    #[test]
+    fn failed_activation_outranks_and_hides_the_stale_generation() {
+        let mut ctx = live_ctx();
+        // A failed switch implies both flags; we surface only the root cause.
+        ctx.deploy = DeployHealth {
+            not_activated: true,
+            stale_generation: true,
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        let a = opts
+            .items
+            .iter()
+            .find(|a| a.id == "deploy.not_activated")
+            .expect("failed activation should surface");
+        assert_eq!(a.kind, AffordanceKind::Warning);
+        assert!(opts.items.iter().all(|a| a.id != "deploy.stale_generation"));
+    }
+
+    #[test]
+    fn stale_generation_surfaces_and_needs_a_live_sensor() {
+        let mut ctx = live_ctx();
+        ctx.deploy = DeployHealth {
+            not_activated: false,
+            stale_generation: true,
+        };
+        assert!(decide(&ctx, &Tuning::default())
+            .items
+            .iter()
+            .any(|a| a.id == "deploy.stale_generation"));
+        // If the deploy sensor is dead, its warning vanishes (freshness gate) —
+        // never assert stale drift from a source we can't see.
+        ctx.health.system.alive = false;
+        assert!(decide(&ctx, &Tuning::default())
+            .items
+            .iter()
+            .all(|a| !a.id.starts_with("deploy.")));
     }
 
     #[test]
