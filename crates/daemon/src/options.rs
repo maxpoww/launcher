@@ -34,22 +34,23 @@ const REVEAL_DWELL: Duration = Duration::from_millis(1000);
 /// Grace after the pointer leaves the revealed bar before it conceals again.
 const HIDE_GRACE: Duration = Duration::from_millis(500);
 
-/// Nerd Font for the icon glyphs (close / pseudotile).
-const NERD: &str = "JetBrainsMono Nerd Font Mono";
+/// Nerd Font for the icon glyphs (close / pseudotile). Shared with the
+/// notification OPTION ([`crate::notif`]) for its bell glyph.
+pub(crate) const NERD: &str = "JetBrainsMono Nerd Font Mono";
 /// Text (clock, window name) uses `None` → the default SansSerif, which is
 /// exactly the font the dock uses (fontconfig resolves it to DejaVu Sans).
 const TEXT_FONT: Option<&str> = None;
-const FONT_PX: f32 = 17.0;
-const LINE_PX: f32 = 20.0;
+pub(crate) const FONT_PX: f32 = 17.0;
+pub(crate) const LINE_PX: f32 = 20.0;
 
 /// Margin above/below the pills — leaves room for the neumorphic rim so the
 /// pills themselves stay compact rather than filling the whole bar.
-const PILL_MARGIN_Y: f32 = 2.5;
-const PILL_PAD_X: f32 = 11.5;
-const EDGE_PAD: f32 = 6.0;
+pub(crate) const PILL_MARGIN_Y: f32 = 2.5;
+pub(crate) const PILL_PAD_X: f32 = 11.5;
+pub(crate) const EDGE_PAD: f32 = 6.0;
 /// Gaps between the window pill and the controls, and between the two control
 /// circles — 3px, so each button keeps its full round outline (and its rim).
-const GROUP_GAP: f32 = 3.0;
+pub(crate) const GROUP_GAP: f32 = 3.0;
 const CTRL_GAP: f32 = 3.0;
 const TITLE_MAX: usize = 48;
 
@@ -58,6 +59,7 @@ const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
 const GLYPH_SQUARE: &str = "\u{f096}"; // fa-square-o (pseudotile)
 const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
 const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
+pub(crate) const GLYPH_BELL: &str = "\u{f0f3}"; // fa-bell (notification OPTION)
 
 // Pill backgrounds (resting + hover) are adaptive washes — see
 // `options_rest_wash` / `options_hover_wash`.
@@ -143,6 +145,7 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Close => 3,
         PillId::Window => 4,
         PillId::Clock => 5,
+        PillId::Notif => 6,
     }
 }
 
@@ -164,6 +167,9 @@ pub(crate) enum PointerSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PillId {
     Clock,
+    /// The notification OPTION — a bell that metamorphoses on hover (see
+    /// [`crate::notif`]).
+    Notif,
     Window,
     Close,
     Pseudo,
@@ -229,7 +235,7 @@ fn srgb_to_linear(c: f32) -> f32 {
 /// `0.04` shows as ~22% grey on black). Pre-dividing the linearised alpha back
 /// out of the RGB cancels that, so `a` becomes the actual displayed fraction.
 /// Black needs no correction (0 stays 0 through the encode).
-fn wash(white: bool, a: f32) -> [f32; 4] {
+pub(crate) fn wash(white: bool, a: f32) -> [f32; 4] {
     if white && a > 0.0 {
         let v = srgb_to_linear(a) / a;
         [v, v, v, a]
@@ -241,7 +247,7 @@ fn wash(white: bool, a: f32) -> [f32; 4] {
 /// Push a single tiny soft shadow around a circle for a touch of depth: black
 /// on a bright bar, white on a dark one (a uniform exterior penumbra). The
 /// white is gamma-corrected so its strength means its true on-screen level.
-fn push_neumorph(scene: &mut Scene, rect: Rect, radius: f32, bright: bool, alpha: f32) {
+pub(crate) fn push_neumorph(scene: &mut Scene, rect: Rect, radius: f32, bright: bool, alpha: f32) {
     let color = if bright {
         [0.0, 0.0, 0.0, NEU_DARK * alpha]
     } else {
@@ -292,17 +298,31 @@ impl App {
         // full date as the pill is hovered; it grows leftward (right edge
         // pinned at the bar edge). The wider rect stays hoverable-as-clock, so
         // the date holds open while the pointer is over it.
+        let mut clock_left = w - EDGE_PAD;
         if !self.options_clock.is_empty() {
             let content_w = lerp(self.options_clock_w, self.options_date_w, self.options_clock_meta.t);
             let cw = (content_w + 2.0 * PILL_PAD_X).max(ph);
+            clock_left = w - EDGE_PAD - cw;
             pills.push(Pill {
                 id: PillId::Clock,
-                rect: Rect::new(w - EDGE_PAD - cw, y, cw, ph),
+                rect: Rect::new(clock_left, y, cw, ph),
                 text: self.options_clock.clone(),
                 family: TEXT_FONT,
                 glyph_color: None,
             });
         }
+
+        // Notification OPTION: one element (bell → preview pill → history
+        // rectangle) just left of the clock; its full drawing + morph is in
+        // `crate::notif`. Its rect is the whole morphing shape (it grows *down*
+        // past the bar when expanded), right edge pinned a gap left of the clock.
+        pills.push(Pill {
+            id: PillId::Notif,
+            rect: self.notif_geom(clock_left - GROUP_GAP, y, ph),
+            text: GLYPH_BELL.to_owned(),
+            family: Some(NERD),
+            glyph_color: None,
+        });
 
         // The window name pill is centred *alone* (so it doesn't shift when the
         // buttons reveal); the control circles flank it at fixed resting spots:
@@ -341,6 +361,21 @@ impl App {
         pills
     }
 
+    /// The clock pill's current left edge (accounting for its date
+    /// metamorphosis), or the bar's right padding when there's no clock — the
+    /// anchor the notification element pins its right edge a gap left of.
+    pub(crate) fn options_clock_left(&self) -> f32 {
+        let w = self.options_size.0 as f32;
+        if self.options_clock.is_empty() {
+            return w - EDGE_PAD;
+        }
+        let bar_h = self.config.options.height as f32;
+        let ph = (bar_h - 2.0 * PILL_MARGIN_Y).max(1.0);
+        let content_w = lerp(self.options_clock_w, self.options_date_w, self.options_clock_meta.t);
+        let cw = (content_w + 2.0 * PILL_PAD_X).max(ph);
+        w - EDGE_PAD - cw
+    }
+
     /// Re-measure the clock + window-title text widths (proportional font, so
     /// widths must be measured, not estimated). Cheap; only on data change.
     pub(crate) fn measure_options_text(&mut self) {
@@ -364,7 +399,7 @@ impl App {
     /// (`options_bar_matched` is stored linear, so this is true relative
     /// luminance; 0.179 is the WCAG flip point where black and white contrast
     /// equally.) A transparent bar counts as dark.
-    fn options_bar_is_bright(&self) -> bool {
+    pub(crate) fn options_bar_is_bright(&self) -> bool {
         match self.options_bar_matched {
             Some(c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] > 0.179,
             None => false,
@@ -387,7 +422,7 @@ impl App {
     /// white-on-dark reads ~2–3× stronger than black-on-white at equal alpha
     /// (we're far more sensitive to light added to darkness), so the white
     /// wash must be much lighter to feel as subtle as the black one.
-    fn options_rest_wash(&self) -> [f32; 4] {
+    pub(crate) fn options_rest_wash(&self) -> [f32; 4] {
         if self.options_bar_is_bright() {
             wash(false, 0.10)
         } else {
@@ -396,7 +431,7 @@ impl App {
     }
 
     /// Hover wash — stronger than the resting wash, with the same asymmetry.
-    fn options_hover_wash(&self) -> [f32; 4] {
+    pub(crate) fn options_hover_wash(&self) -> [f32; 4] {
         if self.options_bar_is_bright() {
             wash(false, 0.22)
         } else {
@@ -426,6 +461,11 @@ impl App {
         order.sort_by_key(|p| draw_z(p.id));
 
         for pill in order {
+            // The notification OPTION draws itself (bell ↔ peek metamorphosis).
+            if pill.id == PillId::Notif {
+                self.push_notif_pill(scene, pill.rect);
+                continue;
+            }
             // Reveal animation for the control buttons: slide out horizontally
             // from behind the parent's near edge (slide 0 = tucked, 1 = rest),
             // fading in; the glyph is clipped to the emerge side so it reads as
@@ -634,6 +674,11 @@ impl App {
         };
         let h = if self.options_hidden {
             REVEAL_PX.ceil() as i32
+        } else if self.notif.expanded {
+            // Extend the pointer-sensitive region down over the open history
+            // rectangle so scroll/hover there reach us instead of passing through.
+            let r = self.notif_rect();
+            (r.y + r.h).ceil().max(self.config.options.height as f32) as i32
         } else {
             self.config.options.height as i32
         };
@@ -686,6 +731,7 @@ impl App {
                     self.options_hover = None;
                     self.update_ctrl_reveal(); // fade the buttons out
                     self.update_clock_meta(); // start the date's hold-then-collapse
+                    self.update_notif_reveal(); // collapse the bell's peek/history
                     self.draw_options();
                     // Revealed in fullscreen: conceal again shortly after leave.
                     if self.options_fullscreen {
@@ -699,6 +745,17 @@ impl App {
                     && !self.options_hidden =>
             {
                 self.options_click();
+            }
+            // Scroll over the notification OPTION: browse history / expand the
+            // list. Only when the bell is peeked or its history is open.
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } if !self.options_hidden
+                && (self.options_hover == Some(PillId::Notif) || self.notif.expanded) =>
+            {
+                self.notif_axis(value as f32);
             }
             _ => {}
         }
@@ -726,11 +783,15 @@ impl App {
             self.options_pills()
                 .iter()
                 .find(|pill| {
-                    // Extend each pill's hit area over the full bar height (up
-                    // to the very top screen edge), so slamming the pointer to
-                    // the edge still lands on the pill without vertical aiming —
-                    // the same forgiveness the dock gives at the bottom edge.
-                    let hit = Rect::new(pill.rect.x, 0.0, pill.rect.w, bar_h);
+                    // The notification element owns its whole (possibly tall,
+                    // below-the-bar) rect so hover holds while its history is
+                    // open; every other pill gets the full-bar-height hit (up to
+                    // the top screen edge) so slamming to the edge still lands.
+                    let hit = if pill.id == PillId::Notif {
+                        Rect::new(pill.rect.x, 0.0, pill.rect.w, pill.rect.y + pill.rect.h)
+                    } else {
+                        Rect::new(pill.rect.x, 0.0, pill.rect.w, bar_h)
+                    };
                     hit.contains(p) && self.ctrl_pill_visible(pill.id)
                 })
                 .map(|pill| pill.id)
@@ -739,6 +800,7 @@ impl App {
         self.options_hover = hover;
         self.update_ctrl_reveal();
         self.update_clock_meta();
+        self.update_notif_reveal();
         if changed {
             self.draw_options();
         }
@@ -946,7 +1008,9 @@ impl App {
             return;
         };
         let shape = match self.options_hover {
-            Some(PillId::Clock) | Some(PillId::Window) | None => Shape::Default,
+            Some(PillId::Clock) | Some(PillId::Window) | Some(PillId::Notif) | None => {
+                Shape::Default
+            }
             Some(_) => Shape::Pointer, // any control circle
         };
         if self.cursor_now != Some(shape) {

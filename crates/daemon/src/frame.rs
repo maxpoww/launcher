@@ -1011,9 +1011,11 @@ impl App {
                 }
             }
         }
-        // Now the size + renderer exist: measure the pill text, set the input
-        // region, and draw.
+        // Now the size + renderer exist: measure the pill text (incl. the notif
+        // rows, in case notifications hydrated before this first configure), set
+        // the input region, and draw.
         self.measure_options_text();
+        self.measure_notif();
         self.sync_options_input();
         self.draw_options();
     }

@@ -31,6 +31,8 @@ mod nix;
 // allow drops once `spawn`/`NotifHandle` are wired into the event loop.
 #[allow(dead_code)]
 mod notifications;
+// The notification OPTION UI (bell → peek → history dropdown) on the topbar.
+mod notif;
 mod options;
 mod order;
 mod pager;
@@ -157,7 +159,7 @@ fn main() -> anyhow::Result<()> {
             &layer_shell,
             &qh,
             config.options.height,
-            config.options.height + OPTIONS_OVERHANG,
+            config.options.height + OPTIONS_OVERHANG + OPTIONS_DROPDOWN_H,
             config.options.render_scale.max(1),
         )
     });
@@ -206,6 +208,15 @@ fn main() -> anyhow::Result<()> {
     // the selection pipe on a short-lived thread).
     let (paste_tx, paste_rx) = channel::channel::<String>();
 
+    // Notification OPTION: the options-notify D-Bus client worker feeds the
+    // topbar's bell + history. Only spawned when the topbar (its host) is on.
+    let (notif_handle, notif_rx) = if config.options.enabled {
+        let (tx, rx) = channel::channel::<notifications::NotifEvent>();
+        (Some(notifications::spawn(tx)), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -242,6 +253,7 @@ fn main() -> anyhow::Result<()> {
         options_hide_deadline: None,
         options_ctrl: options::CtrlAnim::default(),
         options_clock_meta: options::ClockMeta::default(),
+        notif: notif::NotifState::new(notif_handle),
         ui: UiState::new(
             config.animation.clone(),
             // Docked, the card is a floating bar: dock height plus the
@@ -418,6 +430,17 @@ fn main() -> anyhow::Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering paste channel: {e}"))?;
 
+    if let Some(notif_rx) = notif_rx {
+        event_loop
+            .handle()
+            .insert_source(notif_rx, |event, _, app| {
+                if let channel::Event::Msg(ev) = event {
+                    app.on_notif_event(ev);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("registering notif channel: {e}"))?;
+    }
+
     // Live launcher reload: rescan when a `.desktop` file is added, removed,
     // or rewritten in any XDG application dir, so launcher changes (webapps-gen
     // regenerating from ~/.config/webapps.list, or an external package install)
@@ -566,6 +589,8 @@ pub struct App {
     /// Clock↔date "metamorphosis": the pill grows horizontally on hover and
     /// crossfades HH:MM into the full date, holding 3s after leave.
     options_clock_meta: options::ClockMeta,
+    /// Notification OPTION: bell + peek + history dropdown (see [`crate::notif`]).
+    notif: notif::NotifState,
 
     ui: UiState,
     config: Config,
@@ -1027,6 +1052,11 @@ const SCROLL_THRESHOLD: f64 = 10.0;
 /// Kept minimal (just the ~1px border) so the colour is still sampled from the
 /// window's toolbar just below it, not from content deeper down.
 const OPTIONS_OVERHANG: u32 = 2;
+/// Extra transparent height below the OPTIONS bar, reserved on the surface (not
+/// the exclusive zone) to host the notification history dropdown — same
+/// fixed-surface / animate-content discipline as the dock. Desktop layout is
+/// untouched (Zero Layout Shift); the area is click-through until expanded.
+pub(crate) const OPTIONS_DROPDOWN_H: u32 = 240;
 
 /// After the box closes, the dock rests this long before it hides — a
 /// brief beat parked as a dock instead of vanishing straight away.
