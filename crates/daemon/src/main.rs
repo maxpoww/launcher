@@ -489,7 +489,8 @@ fn main() -> anyhow::Result<()> {
             Ok(()) => {
                 app.on_layout_changed();
                 // The steady zone poll is intellihide-only (float moves emit no
-                // event); the bar colour-match runs its own resample loop.
+                // event); the bar colour-match runs its own self-healing poll
+                // (started from `reeval_options_bar`).
                 if app.config.input.intellihide {
                     if let Err(e) = event_loop.handle().insert_source(
                         Timer::from_duration(ZONE_POLL_INTERVAL),
@@ -1357,7 +1358,20 @@ impl App {
         // Boxes left with fewer than two members after uninstalls are
         // deleted (and their grid slot forgotten) so nothing undersized
         // lingers. Guarded against a degenerate empty scan wiping every box.
-        if !self.installed_app_ids.is_empty() && self.groups.prune(&self.installed_app_ids) {
+        //
+        // A package dropped into a box placeholds its slot under the raw
+        // attr until its build finishes (`resolve_pending_installs` then
+        // swaps in the real app id via `replace_member`). That attr is not
+        // an installed app id yet, so it must be exempted here — otherwise
+        // the placeholder member is pruned on the first rescan after the
+        // drop, before the (slow, or failed) rebuild ever resolves. A
+        // box-destined pending tile renders *only* as that member
+        // (`insert_pending_cells` claims no grid cell for it), so pruning it
+        // orphans the tile: the package vanishes from the box, the grid, and
+        // never reaches packages.list. Keep live pending attrs alive.
+        let mut exists = self.installed_app_ids.clone();
+        exists.extend(self.pending_installs.iter().map(|p| p.attr.clone()));
+        if !self.installed_app_ids.is_empty() && self.groups.prune(&exists) {
             let live: std::collections::HashSet<String> = self
                 .groups
                 .groups()

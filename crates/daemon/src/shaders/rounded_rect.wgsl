@@ -93,7 +93,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Solid fill (hover highlights, dividers, box overlay, etc.)
     if in.glass < 0.5 {
         var rgb = clamp(in.color.rgb + vec3<f32>(box_lum), vec3<f32>(0.0), vec3<f32>(1.0));
-        let a   = in.color.a * globals.alpha * coverage;
+        // Hard-edged fill (glass < -0.5): no SDF anti-aliasing. Used by the
+        // colour-matched OPTIONS bar, whose bottom edge abuts a window of the
+        // SAME colour. A fractional-alpha AA edge there gets gamma-lifted by
+        // the compositor's premultiplied-sRGB blend and shows as a faint seam;
+        // a crisp cut between two identical colours is invisible instead.
+        var cov = coverage;
+        if in.glass < -0.5 {
+            cov = select(0.0, 1.0, d < 0.0);
+        }
+        let a   = in.color.a * globals.alpha * cov;
         return vec4<f32>(rgb * a, a);
     }
 

@@ -644,8 +644,28 @@ impl App {
     /// Drop a pending-install tile (dismissed by the user, or resolved),
     /// freeing its icon slot and clearing any lingering busy mark.
     pub(crate) fn remove_pending(&mut self, attr: &str) {
+        // A box-destined tile placeholds its slot in the box under `attr`
+        // until it resolves. Dismissing a failed one must also pull that
+        // member now — otherwise the box keeps a phantom slot (and a blank
+        // mini) until the next rescan's prune happens to clear it.
+        let boxed = self
+            .pending_installs
+            .iter()
+            .find(|p| p.attr == attr)
+            .and_then(|p| p.box_dest.clone());
         self.pending_installs.retain(|p| p.attr != attr);
         self.busy_ids.remove(attr);
+        if boxed.is_some() && self.groups.remove_member(attr) {
+            // The box may have just dissolved (dropped below two members):
+            // forget its remembered grid slot so nothing dead lingers.
+            let live: std::collections::HashSet<String> = self
+                .groups
+                .groups()
+                .iter()
+                .map(|g| format!("group:{}", g.id))
+                .collect();
+            self.order.forget_dead_boxes(&live);
+        }
         self.refilter();
     }
 

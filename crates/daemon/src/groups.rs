@@ -408,6 +408,27 @@ mod tests {
     }
 
     #[test]
+    fn pending_install_placeholder_survives_prune() {
+        // A package dropped into a box placeholds its slot under the raw
+        // attr until its build finishes. The prune callsite treats live
+        // pending attrs as "existing" (see `main.rs`), so the placeholder
+        // must survive a rescan where it is not yet an installed app id —
+        // otherwise the tile is orphaned and the package silently vanishes.
+        let mut g = db();
+        let id = g.create("firefox", "grim"); // grim = pending boxed install
+        let idx = g.index_by_id(&id).unwrap();
+        g.add(idx, "slurp"); // box [firefox, grim, slurp], grim+slurp pending
+        // firefox is installed; grim + slurp are still building, but the
+        // callsite folds their attrs into the exists set.
+        let exists: HashSet<String> = ["firefox", "grim", "slurp"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!g.prune(&exists), "no dead members → nothing pruned");
+        assert_eq!(flat(&g, 0), vec!["firefox", "grim", "slurp"]);
+    }
+
+    #[test]
     fn trash_persists_empty_and_survives_prune() {
         let mut g = db();
         g.ensure_trash();

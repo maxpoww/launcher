@@ -1046,20 +1046,23 @@ impl App {
         // Matched: opaque window colour, extended down over the window's top
         // border (the overhang) to hide the seam. Otherwise the faint
         // transparent strip, drawn only to the bar height.
-        let (color, bottom) = match self.options_bar_matched {
-            Some(c) => (c, bar_h + crate::OPTIONS_OVERHANG as f32),
-            None => ([0.0, 0.0, 0.0, 0.10], bar_h),
+        let (color, bottom, matched) = match self.options_bar_matched {
+            Some(c) => (c, bar_h + crate::OPTIONS_OVERHANG as f32, true),
+            None => ([0.0, 0.0, 0.0, 0.10], bar_h, false),
         };
         // Bleed the top/left/right edges a couple px past the surface so the
         // SDF anti-aliasing seam falls off-screen instead of showing a 1px
         // wallpaper line where an opaque matched bar meets the screen edges.
+        // When matched, draw the fill hard-edged (`glass = -1.0`) so its bottom
+        // edge — which meets the window's identical colour — is a crisp cut
+        // rather than a gamma-lifted AA seam. See `rounded_rect.wgsl`.
         let mut scene = content::Scene {
             alpha: 1.0,
             rects: vec![content::RectInst {
                 rect: content::Rect::new(-2.0, -2.0, w + 4.0, bottom + 2.0),
                 radius: 0.0,
                 color,
-                glass: 0.0,
+                glass: if matched { -1.0 } else { 0.0 },
             }],
             ..Default::default()
         };

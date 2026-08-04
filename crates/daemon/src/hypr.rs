@@ -272,39 +272,58 @@ pub struct TopFill {
     pub sample_y: u32,
 }
 
-/// Detect Hyprland "smart gaps": a single tiled window sitting flush under
-/// the bar and spanning the full monitor width. Returns what to sample, or
-/// `None` (gaps, multiple/floating windows, empty workspace) — in which case
-/// the bar stays transparent.
+/// How far into the window (logical px below its top edge) to sample the
+/// colour match. Kept **shallow** — just past the ~1–2px top border/highlight
+/// the bar overhang already paints over — so on a two-tone top (e.g. Chrome's
+/// black tab strip over its darker-grey toolbar) the bar takes the strip it
+/// actually abuts. Combined with side-only horizontal sampling (see
+/// `read_sample`), this reads the top strip's *background*, not a centred
+/// URL/search field.
+const WINDOW_TOP_INSET: f64 = 4.0;
+
+/// Detect a single tiled window filling the space under the bar, so the bar
+/// can take its colour and the two read as one surface. Returns what to
+/// sample, or `None` when there's nothing unambiguous to match: an empty
+/// workspace, a split (2+ tiled windows), or only floating windows — in which
+/// case the bar stays transparent.
 ///
-/// `bar_h_logical` is the reserved bar height; the window's top edge is
-/// expected right below it (the exclusive zone), flush to both sides.
+/// Unlike a strict "smart-gaps flush" test, this matches whether or not the
+/// window's gaps have collapsed: any lone tiled window sitting under the bar
+/// qualifies, so the bar tracks it in both gapped and edge-to-edge layouts.
+/// It samples from the window's *actual* top edge, so a gapped window (pushed
+/// down by a top gap) is still read at the right row.
 pub fn top_fill(bar_h_logical: f64) -> Option<TopFill> {
     let mon = focused_monitor().ok()?;
     let clients: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
     let usable_top = mon.y + bar_h_logical;
-    let eps = 3.0;
-    let flush = clients.as_array()?.iter().any(|c| {
-        if c["workspace"]["id"].as_i64() != Some(mon.active_ws)
-            || !c["mapped"].as_bool().unwrap_or(false)
-            || c["hidden"].as_bool().unwrap_or(false)
-            || c["floating"].as_bool().unwrap_or(false)
-        {
-            return false;
-        }
-        let x = c["at"][0].as_f64().unwrap_or(f64::NAN);
-        let y = c["at"][1].as_f64().unwrap_or(f64::NAN);
-        let w = c["size"][0].as_f64().unwrap_or(0.0);
-        (x - mon.x).abs() <= eps
-            && (y - usable_top).abs() <= eps
-            && ((x + w) - (mon.x + mon.w)).abs() <= eps
+
+    // Tiled (non-floating), mapped, visible, non-fullscreen windows on the
+    // focused workspace. Fullscreen is handled separately by the caller.
+    let mut tiled = clients.as_array()?.iter().filter(|c| {
+        c["workspace"]["id"].as_i64() == Some(mon.active_ws)
+            && c["mapped"].as_bool().unwrap_or(false)
+            && !c["hidden"].as_bool().unwrap_or(false)
+            && !c["floating"].as_bool().unwrap_or(false)
+            && c["fullscreen"].as_i64().unwrap_or(0) == 0
     });
-    flush.then(|| TopFill {
+    // Exactly one tiled window ⇒ unambiguous colour to match. A split is left
+    // transparent (which of the two colours would the full-width bar take?).
+    let win = tiled.next()?;
+    if tiled.next().is_some() {
+        return None;
+    }
+    // It must sit right under the bar — top at (or just below, allowing for a
+    // top gap) the reserved zone — not pushed far down the screen.
+    let top = win["at"][1].as_f64()?;
+    if top < usable_top - 3.0 || top > usable_top + 40.0 {
+        return None;
+    }
+    Some(TopFill {
         monitor: mon.name,
-        // Sample the window's toolbar just below its top border — shallow, so
-        // it reads the top edge colour (not content deeper down), yet below the
-        // small bar overhang so it never samples the bar itself.
-        sample_y: ((bar_h_logical + 4.0) * mon.scale.max(0.1)).round() as u32,
+        // Sample a little below the window's actual top edge ([`WINDOW_TOP_INSET`])
+        // — past the top-edge band (CSD rounding/border/gradient) yet firmly in
+        // the chrome, and below the bar overhang so it never samples the bar.
+        sample_y: ((top + WINDOW_TOP_INSET) * mon.scale.max(0.1)).round() as u32,
     })
 }
 

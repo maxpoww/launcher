@@ -122,6 +122,15 @@ impl NotifState {
             handle,
         }
     }
+
+    /// Whether the notification box currently extends below the bar — its
+    /// history drawer is open or mid-animation (`expand_t` drives the only
+    /// downward growth; the preview pill stays within the bar). While it does,
+    /// it paints its panel over the window right where the colour-match samples
+    /// the toolbar, so the sampler must pause to avoid matching the panel.
+    pub(crate) fn occludes_below_bar(&self) -> bool {
+        self.expand_t > 0.01
+    }
 }
 
 /// Local `HH:MM` for a unix-millis timestamp, via libc (respects timezone).
@@ -273,21 +282,40 @@ impl App {
         } else {
             self.options_rest_wash()
         };
-        // Opaque when expanded so it's readable over any window behind it (a
-        // translucent panel lets text bleed through). The pill wash at rest keeps
-        // its subtle look; the fill lerps between them with the morph.
-        let dark = [0.11, 0.11, 0.14, 1.0];
+        // The open box MIMICS THE BUBBLE LIVE: as it expands it fills with the
+        // bubble's own colour — the live bar-matched window colour with the pill
+        // wash composited on top — made opaque so it reads over the desktop
+        // without text bleeding through. So the drawer looks like the bubble
+        // grown, tracking the window colour in real time, not a separate dark
+        // panel. With no colour match (transparent bar) fall back to a readable
+        // dark panel.
+        let text_color = self.options_text_color();
+        let (expanded_fill, expanded_ink) = match self.options_bar_matched {
+            Some(c) => {
+                // Composite the (translucent) pill wash over the matched colour
+                // so the opaque box equals what the translucent bubble shows.
+                let a = pill_base[3];
+                let blend = [
+                    c[0] * (1.0 - a) + pill_base[0] * a,
+                    c[1] * (1.0 - a) + pill_base[1] * a,
+                    c[2] * (1.0 - a) + pill_base[2] * a,
+                    1.0,
+                ];
+                (blend, text_color) // bar colour is already legible for text_color
+            }
+            None => ([0.11, 0.11, 0.14, 1.0], [0.93, 0.93, 0.96, 1.0]),
+        };
         scene.rects.push(RectInst {
             rect,
             radius,
-            color: lerp4(pill_base, dark, e),
+            color: lerp4(pill_base, expanded_fill, e),
             glass: 0.0,
         });
 
-        // The bell, top-left, is the constant identity anchor.
-        let text_color = self.options_text_color();
-        // As the fill darkens, the ink must stay light to read on it.
-        let ink = lerp4(text_color, [0.93, 0.93, 0.96, 1.0], e);
+        // The bell, top-left, is the constant identity anchor. Ink tracks the
+        // fill: steady when the box mimics the (already-legible) bar colour,
+        // else brightening as the fallback panel darkens.
+        let ink = lerp4(text_color, expanded_ink, e);
         let bell_color = if self.notif.active_count > 0 { AMBER } else { ink };
         let bell_cx = rect.x + ph / 2.0;
         let band_ty = rect.y + (ph - LINE_PX) / 2.0;
