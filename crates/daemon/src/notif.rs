@@ -131,6 +131,15 @@ impl NotifState {
     pub(crate) fn occludes_below_bar(&self) -> bool {
         self.expand_t > 0.01
     }
+
+    /// Whether the history drawer is open (intent), so the colour-match should
+    /// sample the bar's frosted colour for the box. Uses `expanded` (set the
+    /// instant the user scrolls open) rather than `expand_t` (which lags behind
+    /// as it animates), so the box has its colour ready before it finishes
+    /// growing.
+    pub(crate) fn drawer_open(&self) -> bool {
+        self.expanded
+    }
 }
 
 /// Local `HH:MM` for a unix-millis timestamp, via libc (respects timezone).
@@ -282,18 +291,18 @@ impl App {
         } else {
             self.options_rest_wash()
         };
-        // The open box MIMICS THE BUBBLE LIVE: as it expands it fills with the
-        // bubble's own colour — the live bar-matched window colour with the pill
-        // wash composited on top — made opaque so it reads over the desktop
-        // without text bleeding through. So the drawer looks like the bubble
-        // grown, tracking the window colour in real time, not a separate dark
-        // panel. With no colour match (transparent bar) fall back to a readable
-        // dark panel.
+        // The open box MIMICS THE BUBBLE LIVE, opaque so text doesn't bleed
+        // through. Its fill is the pill's *exact* apparent colour: the pill's
+        // backdrop with the same wash composited on top — identical maths in
+        // both cases, so the box is literally the pill grown. The backdrop is
+        // the matched window colour when the bar is colour-matched, else the
+        // bar's own sampled frosted/wallpaper shade (`options_pill_color`).
         let text_color = self.options_text_color();
-        let (expanded_fill, expanded_ink) = match self.options_bar_matched {
+        let backdrop = self.options_bar_matched.or(self.options_pill_color);
+        let (expanded_fill, expanded_ink) = match backdrop {
             Some(c) => {
-                // Composite the (translucent) pill wash over the matched colour
-                // so the opaque box equals what the translucent bubble shows.
+                // Composite the (translucent) pill wash over the backdrop so the
+                // opaque box equals what the translucent pill shows.
                 let a = pill_base[3];
                 let blend = [
                     c[0] * (1.0 - a) + pill_base[0] * a,
@@ -301,9 +310,22 @@ impl App {
                     c[2] * (1.0 - a) + pill_base[2] * a,
                     1.0,
                 ];
-                (blend, text_color) // bar colour is already legible for text_color
+                // Matched: bar text colour already adapts to it. Frosted: adapt
+                // ink to the blended shade so it stays legible on any wallpaper.
+                let ink = if self.options_bar_matched.is_some() {
+                    text_color
+                } else {
+                    let lum = 0.2126 * blend[0] + 0.7152 * blend[1] + 0.0722 * blend[2];
+                    if lum > 0.179 {
+                        [0.0, 0.0, 0.0, 1.0]
+                    } else {
+                        [0.93, 0.93, 0.96, 1.0]
+                    }
+                };
+                (blend, ink)
             }
-            None => ([0.11, 0.11, 0.14, 1.0], [0.93, 0.93, 0.96, 1.0]),
+            // Not sampled yet (first frames after opening): neutral dark.
+            None => ([0.10, 0.10, 0.12, 1.0], [0.93, 0.93, 0.96, 1.0]),
         };
         scene.rects.push(RectInst {
             rect,
@@ -422,6 +444,10 @@ impl App {
             self.notif.list_scroll = 0.0;
         }
         self.sync_options_input();
+        // Opening/closing the drawer changes whether we sample the bar's frosted
+        // colour for the box — re-evaluate now so the colour is ready as it
+        // grows, rather than waiting up to a full poll tick.
+        self.reeval_options_bar();
         self.schedule_notif_frame();
     }
 

@@ -231,6 +231,7 @@ fn main() -> anyhow::Result<()> {
         options_renderer: None,
         options_size: (0, 0),
         options_bar_matched: None,
+        options_pill_color: None,
         options_match: None,
         capture: None,
         options_poll_pending: false,
@@ -552,6 +553,10 @@ pub struct App {
     /// bar, the bar is painted this sampled colour (opaque); `None` = the
     /// default transparent strip. See [`screencopy`].
     options_bar_matched: Option<[f32; 4]>,
+    /// The bar's own frosted (wallpaper-tinted) colour, sampled while the bar is
+    /// *transparent* and the notification drawer is open, so the box can
+    /// continue the pill's colour instead of a flat slab. See [`screencopy`].
+    options_pill_color: Option<[f32; 4]>,
     /// The output + row to sample for the current match (if any).
     options_match: Option<screencopy::CaptureTarget>,
     /// An in-flight screencopy of the focused output.

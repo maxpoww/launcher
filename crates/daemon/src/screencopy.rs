@@ -46,6 +46,9 @@ type ColorHist = std::collections::HashMap<(u8, u8, u8), (u32, u32, u32, u32)>;
 pub(crate) struct CaptureTarget {
     output: WlOutput,
     sample_y: u32,
+    /// `true` = sampling the bar's own frosted colour (→ `options_pill_color`);
+    /// `false` = sampling a window under the bar (→ `options_bar_matched`).
+    frost: bool,
 }
 
 /// An in-flight screencopy of the focused output.
@@ -58,6 +61,7 @@ pub(crate) struct Capture {
     format: wl_shm::Format,
     y_invert: bool,
     sample_y: u32,
+    frost: bool,
     copied: bool,
 }
 
@@ -100,7 +104,40 @@ impl App {
                     self.clear_options_match();
                 }
             },
-            None => self.clear_options_match(),
+            None => self.eval_transparent_bar(),
+        }
+    }
+
+    /// No window to match ⇒ the bar stays transparent. But if the notification
+    /// drawer is open, sample the bar's *own* frosted colour (the blurred
+    /// wallpaper the pills float on) so the box can continue the pill's colour
+    /// rather than dropping to a flat slab. When the drawer is closed there's
+    /// nothing to sample — go idle (the last pill colour is kept, cached).
+    fn eval_transparent_bar(&mut self) {
+        let had_match = self.options_bar_matched.take().is_some();
+        if self.notif.drawer_open() {
+            if let Ok(mon) = hypr::focused_monitor() {
+                if let Some(output) = self.output_by_name(&mon.name) {
+                    // A row inside the bar itself (mid-height) — always the
+                    // blurred wallpaper, since the reserved zone keeps windows
+                    // out from under the bar.
+                    let sample_y = ((self.config.options.height as f64 * 0.5)
+                        * mon.scale.max(0.1))
+                    .round()
+                    .max(1.0) as u32;
+                    if had_match {
+                        self.draw_options();
+                    }
+                    self.options_match = Some(CaptureTarget { output, sample_y, frost: true });
+                    self.start_options_capture();
+                    return;
+                }
+            }
+        }
+        self.options_match = None;
+        self.abort_capture();
+        if had_match {
+            self.draw_options();
         }
     }
 
@@ -108,7 +145,7 @@ impl App {
     /// The always-on poll (see [`Self::schedule_options_poll`]) drives the
     /// resample cadence, so this doesn't schedule one itself.
     fn begin_options_match(&mut self, output: wayland_client::protocol::wl_output::WlOutput, sample_y: u32) {
-        self.options_match = Some(CaptureTarget { output, sample_y });
+        self.options_match = Some(CaptureTarget { output, sample_y, frost: false });
         self.start_options_capture();
     }
 
@@ -149,6 +186,7 @@ impl App {
         };
         let output = target.output.clone();
         let sample_y = target.sample_y;
+        let frost = target.frost;
         let frame = mgr.capture_output(0, &output, &self.qh, ());
         self.capture = Some(Capture {
             frame,
@@ -159,6 +197,7 @@ impl App {
             format: wl_shm::Format::Xrgb8888,
             y_invert: false,
             sample_y,
+            frost,
             copied: false,
         });
     }
@@ -232,10 +271,16 @@ impl App {
         }
         // Update the colour if we got one; the poll runs on its own timer
         // (see `schedule_options_poll`), so re-evaluation keeps going regardless.
+        // A frost capture feeds the box's pill colour; a normal one the bar.
         if self.options_match.is_some() {
             if let Some(color) = color {
-                if self.options_bar_matched != Some(color) {
-                    self.options_bar_matched = Some(color);
+                let slot = if cap.frost {
+                    &mut self.options_pill_color
+                } else {
+                    &mut self.options_bar_matched
+                };
+                if *slot != Some(color) {
+                    *slot = Some(color);
                     self.draw_options();
                 }
             }
@@ -247,12 +292,13 @@ impl App {
         debug!("options: screencopy failed");
     }
 
-    /// Read the window's top strip into one opaque colour — the *dominant*
-    /// colour there, so text, icons, a search box or a 1px highlight can't
-    /// drag the match off the real header background. We **trim the horizontal
-    /// edges** (where CSD rounding, the window border and a right-edge
-    /// scrollbar live) and take the **mode** over a shallow band. See the
-    /// bucket logic below for why mode beats mean/median on real windows.
+    /// Read one opaque colour from the captured frame. Two modes:
+    /// - **window** (`cap.frost == false`): the *dominant* colour of the
+    ///   window's top strip (mode over the sides, skipping edges + the centre
+    ///   URL/search field) — the real header background.
+    /// - **frost** (`cap.frost == true`): the *mean* of the bar backdrop just
+    ///   left of the notification box — the wallpaper colour next to the pill,
+    ///   so the box matches it locally (see the frost branch below).
     fn read_sample(&mut self, cap: &Capture) -> Option<[f32; 4]> {
         if cap.width == 0 || cap.height == 0 {
             return None;
@@ -294,6 +340,29 @@ impl App {
         } else {
             None
         };
+        // Frost sample (transparent bar → the notification box's colour): read
+        // the bar backdrop *immediately left of the box*, so the box takes the
+        // wallpaper colour right next to the pill. Sampling the far side instead
+        // mis-matched on wallpapers that vary left-to-right. Averaged, not mode:
+        // the pill shows the blurred (≈ averaged) wallpaper, so a local mean is
+        // what it actually looks like.
+        let frost_band: Option<(usize, usize)> = if cap.frost {
+            let sw = self.options_size.0 as f32;
+            let r = self.notif_rect();
+            if sw > 0.0 {
+                let px = width as f32 / sw;
+                let box_left = (r.x * px).max(0.0) as usize;
+                let gap = (width / 100).max(2);
+                let bandw = (width / 8).max(24);
+                let band_r = box_left.saturating_sub(gap).min(width);
+                let band_l = band_r.saturating_sub(bandw).max(outer);
+                (band_r > band_l + 2).then_some((band_l, band_r))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // `sample_y` is physical-from-top; in a y-inverted buffer that maps to a
         // row counted from the bottom. "Deeper into the window" is +dy from the
         // top, i.e. a smaller row index when inverted.
@@ -306,6 +375,43 @@ impl App {
         let pool = self.shm_pool.as_mut()?;
         let map = pool.mmap();
         let bytes: &[u8] = &map[..];
+
+        // Frost path: average the band just left of the box (see above).
+        if cap.frost {
+            let (bl, br) = frost_band?;
+            let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+            for dy in 0u32..=5 {
+                let row = if cap.y_invert {
+                    base.saturating_sub(dy)
+                } else {
+                    (base + dy).min(cap.height - 1)
+                };
+                let start = (row as usize) * (cap.stride as usize);
+                let Some(rowbytes) = bytes.get(start..start + width * 4) else {
+                    continue;
+                };
+                let mut x = bl;
+                while x < br {
+                    let (rr, gg, bb) = channels(cap.format, &rowbytes[x * 4..x * 4 + 4]);
+                    r += rr as u64;
+                    g += gg as u64;
+                    b += bb as u64;
+                    n += 1;
+                    x += 2;
+                }
+            }
+            if n == 0 {
+                return None;
+            }
+            let (mr, mg, mb) = ((r / n) as u8, (g / n) as u8, (b / n) as u8);
+            debug!("options: pill frost colour = #{mr:02x}{mg:02x}{mb:02x}");
+            return Some([
+                srgb_to_linear(mr as f32 / 255.0),
+                srgb_to_linear(mg as f32 / 255.0),
+                srgb_to_linear(mb as f32 / 255.0),
+                1.0,
+            ]);
+        }
 
         // Pool a short band of the toolbar and take the **dominant colour**
         // (statistical mode), not a median. A header is rarely one flat colour
