@@ -676,9 +676,11 @@ impl App {
             REVEAL_PX.ceil() as i32
         } else if self.notif.expanded {
             // Extend the pointer-sensitive region down over the open history
-            // rectangle so scroll/hover there reach us instead of passing through.
-            let r = self.notif_rect();
-            (r.y + r.h).ceil().max(self.config.options.height as f32) as i32
+            // rectangle so scroll/hover there reach us instead of passing
+            // through. Use the *fully-expanded* bottom (not the live animating
+            // height) so the region is stable the instant the box opens —
+            // otherwise hover cuts out at an unstable row as it grows.
+            self.notif_input_bottom().ceil().max(self.config.options.height as f32) as i32
         } else {
             self.config.options.height as i32
         };
@@ -732,6 +734,7 @@ impl App {
                     self.update_ctrl_reveal(); // fade the buttons out
                     self.update_clock_meta(); // start the date's hold-then-collapse
                     self.update_notif_reveal(); // collapse the bell's peek/history
+                    self.update_notif_hover_row(); // drop any per-row hover (ptr gone)
                     self.draw_options();
                     // Revealed in fullscreen: conceal again shortly after leave.
                     if self.options_fullscreen {
@@ -801,7 +804,10 @@ impl App {
         self.update_ctrl_reveal();
         self.update_clock_meta();
         self.update_notif_reveal();
-        if changed {
+        // Per-row hover moves within the same (Notif) pill, so redraw on a row
+        // change too — not just when the hovered pill changes.
+        let row_changed = self.update_notif_hover_row();
+        if changed || row_changed {
             self.draw_options();
         }
     }

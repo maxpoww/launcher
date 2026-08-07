@@ -27,8 +27,8 @@ use crate::animation::{ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::notifications::{ActiveNotification, NotifEvent, NotifHandle};
 use crate::options::{
-    push_neumorph, PillId, EDGE_PAD, FONT_PX, GLYPH_BELL, GROUP_GAP, LINE_PX, NERD, PILL_MARGIN_Y,
-    PILL_PAD_X,
+    push_neumorph, wash, PillId, EDGE_PAD, FONT_PX, GLYPH_BELL, GROUP_GAP, LINE_PX, NERD,
+    PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
 
@@ -55,6 +55,17 @@ const TEXT_GAP: f32 = 8.0;
 /// History-list row height and inner padding within the expanded rectangle.
 const ROW_H: f32 = 30.0;
 const LIST_PAD: f32 = 6.0;
+/// Zebra striping for the history list — alternate rows get a wash so adjacent
+/// lines read as distinct (old-Finder style). Direction is **adaptive**: a dark
+/// box lightens its stripes, a light box darkens them, keyed off the box's own
+/// luminance. Asymmetric alphas because a white wash reads stronger than a
+/// black one at equal alpha (same reasoning as the pill washes).
+const STRIPE_LIGHTEN: f32 = 0.31;
+const STRIPE_DARKEN: f32 = 0.48;
+/// Resting text opacity of the open box's lines (band + list). The whole list
+/// sits muted as soon as it opens; the hovered line pops back to full contrast.
+/// Lower = more muted rest / stronger hover pop.
+const LIST_DIM: f32 = 0.55;
 
 /// One notification's pre-measured render fields — a single canonical layout so
 /// every row (pinned band item and list rows alike) looks identical.
@@ -87,6 +98,9 @@ pub(crate) struct NotifState {
     expand_t: f32,
     /// Vertical scroll (px) within the history list.
     list_scroll: f32,
+    /// History list row under the pointer (0 = first list row below the band),
+    /// for the per-row hover highlight. `None` = none / collapsed.
+    hover_row: Option<usize>,
     /// Accumulated wheel delta, so one notch = one step.
     scroll_accum: f32,
     /// Pre-measured render fields for every history item, so the band (pinned
@@ -114,6 +128,7 @@ impl NotifState {
             peek_t: 0.0,
             expand_t: 0.0,
             list_scroll: 0.0,
+            hover_row: None,
             scroll_accum: 0.0,
             rows: Vec::new(),
             last: None,
@@ -273,6 +288,50 @@ impl App {
         self.notif_geom(right, y, ph)
     }
 
+    /// Bottom edge (surface px) the pointer-input region must reach while the
+    /// drawer is open — the *fully-expanded* box height, independent of the
+    /// expand animation. Sizing the input region off the live (animating)
+    /// height instead left it short until some later re-sync, so hover/scroll
+    /// cut out partway down the list at an unstable row.
+    pub(crate) fn notif_input_bottom(&self) -> f32 {
+        PILL_MARGIN_Y + EXPANDED_H
+    }
+
+    /// The box line under the pointer — `0` = the pinned band, `1..` = list
+    /// rows — or `None` (collapsed, outside the box, or off the rows). Drives
+    /// the per-line hover highlight.
+    fn notif_hover_row(&self) -> Option<usize> {
+        if self.notif.expand_t < 0.5 {
+            return None;
+        }
+        let p = self.options_ptr?;
+        let rect = self.notif_rect();
+        if p.0 < rect.x || p.0 >= rect.x + rect.w {
+            return None;
+        }
+        let list_top = rect.y + self.notif_band_h();
+        // The pinned band occupies the top band; treat it as line 0.
+        if p.1 >= rect.y && p.1 < list_top {
+            return Some(0);
+        }
+        let ry0 = list_top + LIST_PAD - self.notif.list_scroll;
+        if p.1 < ry0 || p.1 >= rect.y + rect.h {
+            return None;
+        }
+        let i = ((p.1 - ry0) / ROW_H) as usize;
+        let n = self.notif.rows.len().saturating_sub(self.notif.index + 1);
+        (i < n).then_some(i + 1)
+    }
+
+    /// Recompute the hovered row from the pointer; returns whether it changed
+    /// (so the caller can redraw). Called on pointer motion over the bar.
+    pub(crate) fn update_notif_hover_row(&mut self) -> bool {
+        let new = self.notif_hover_row();
+        let changed = new != self.notif.hover_row;
+        self.notif.hover_row = new;
+        changed
+    }
+
     /// Draw the whole morphing element: the pill/rectangle fill, the bell glyph,
     /// the preview line (fading out as it expands), and the history list (fading
     /// in). One rounded rect — the pill literally becomes the box.
@@ -280,17 +339,13 @@ impl App {
         let ph = self.notif_band_h();
         let radius = ph / 2.0; // stadium ends collapsed; rounded corners expanded
         let bright = self.options_bar_is_bright();
-        let hovered = self.options_hover == Some(PillId::Notif);
         let e = self.notif.expand_t;
 
         push_neumorph(scene, rect, radius, bright, 1.0);
-        // Fill morphs from the subtle pill wash to a readable dark panel as it
-        // grows down over the desktop (below the bar there's no fill behind it).
-        let pill_base = if hovered {
-            self.options_hover_wash()
-        } else {
-            self.options_rest_wash()
-        };
+        // The box fill never reacts to hover — hover is per-row (the pointed
+        // line's text brightens/darkens; see the list loop below). So the fill
+        // always uses the resting wash, matched or frosted alike.
+        let pill_base = self.options_rest_wash();
         // The open box MIMICS THE BUBBLE LIVE, opaque so text doesn't bleed
         // through. Its fill is the pill's *exact* apparent colour: the pill's
         // backdrop with the same wash composited on top — identical maths in
@@ -338,6 +393,18 @@ impl App {
         // fill: steady when the box mimics the (already-legible) bar colour,
         // else brightening as the fallback panel darkens.
         let ink = lerp4(text_color, expanded_ink, e);
+        // Per-line spotlight: the whole open box (pinned band + list) rests
+        // muted; the pointed line jumps to full contrast (white on a dark box,
+        // black on a light one). `hover_row` numbers lines with the band as 0
+        // and list rows as 1, 2, … See `notif_hover_row`.
+        let hover_line = self.notif.hover_row;
+        let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
+        let hover_ink = if dark_ink {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            [1.0, 1.0, 1.0, 1.0]
+        };
+        let dim_ink = [ink[0], ink[1], ink[2], ink[3] * LIST_DIM];
         let bell_color = if self.notif.active_count > 0 { AMBER } else { ink };
         let bell_cx = rect.x + ph / 2.0;
         let band_ty = rect.y + (ph - LINE_PX) / 2.0;
@@ -370,7 +437,13 @@ impl App {
         let band = self.notif.rows.get(self.notif.index).unwrap_or(&placeholder);
         let pa = ((self.notif.peek_t - 0.35) / 0.5).clamp(0.0, 1.0);
         if pa > 0.01 {
-            push_notif_row(scene, band, tx, right, band_ty, ink, pa, rect);
+            let band_ink = if hover_line == Some(0) {
+                hover_ink
+            } else {
+                // Full while it's just a preview (e≈0); dims as the box opens.
+                lerp4(ink, dim_ink, e)
+            };
+            push_notif_row(scene, band, tx, right, band_ty, band_ink, pa, rect);
         }
 
         // The rest of the history reveals below the band — identical layout,
@@ -383,10 +456,39 @@ impl App {
                 rect.w,
                 (rect.y + rect.h - list_top).max(0.0),
             );
+            // Adaptive zebra stripe colour: lighten a dark box, darken a light
+            // one, off the box's own fill luminance (0.179 = the WCAG flip point
+            // we use for ink too, so stripe direction matches text direction).
+            let flum = 0.2126 * expanded_fill[0] + 0.7152 * expanded_fill[1] + 0.0722 * expanded_fill[2];
+            let stripe = if flum <= 0.179 {
+                wash(true, STRIPE_LIGHTEN)
+            } else {
+                wash(false, STRIPE_DARKEN)
+            };
+            // Keep stripes out of the box's rounded bottom corners (square rects
+            // would poke past the radius over the wallpaper).
+            let stripe_bot_max = rect.y + rect.h - radius;
             let mut ry = list_top + LIST_PAD - self.notif.list_scroll;
-            for info in self.notif.rows.iter().skip(self.notif.index + 1) {
+            for (i, info) in self.notif.rows.iter().skip(self.notif.index + 1).enumerate() {
                 if ry + ROW_H >= list_top && ry <= rect.y + rect.h {
-                    push_notif_row(scene, info, tx, right, ry + (ROW_H - LINE_PX) / 2.0, ink, e, list_clip);
+                    // Every other row (the band above counts as line 0) gets the
+                    // wash, fading in with the expand so it can't pop.
+                    if i % 2 == 0 {
+                        let top = ry.max(list_top);
+                        let bot = (ry + ROW_H).min(stripe_bot_max);
+                        if bot > top {
+                            scene.rects.push(RectInst {
+                                rect: Rect::new(rect.x, top, rect.w, bot - top),
+                                radius: 0.0,
+                                color: [stripe[0], stripe[1], stripe[2], stripe[3] * e],
+                                glass: 0.0,
+                            });
+                        }
+                    }
+                    // List rows are lines 1, 2, … (band is line 0). Muted at rest,
+                    // full contrast when hovered.
+                    let row_ink = if hover_line == Some(i + 1) { hover_ink } else { dim_ink };
+                    push_notif_row(scene, info, tx, right, ry + (ROW_H - LINE_PX) / 2.0, row_ink, e, list_clip);
                 }
                 ry += ROW_H;
             }
@@ -554,7 +656,7 @@ fn push_notif_row(
     clip: Rect,
 ) {
     let prim = [ink[0], ink[1], ink[2], ink[3] * alpha];
-    let dim = [ink[0], ink[1], ink[2], 0.55 * alpha];
+    let dim = [ink[0], ink[1], ink[2], ink[3] * 0.55 * alpha];
     let mut content_right = right;
     if !info.time.is_empty() {
         let time_x = (right - info.time_w).max(tx);
