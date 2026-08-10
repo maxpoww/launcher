@@ -1343,6 +1343,7 @@ dependencies = [
 name = "options-notify"
 version = "0.1.0"
 dependencies = [
+ "image",
  "serde",
  "tokio",
  "tracing",

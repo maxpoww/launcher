@@ -124,7 +124,7 @@ impl Notifications {
     fn get_server_information(&self) -> (String, String, String, String) {
         (
             "OPTIONS".to_string(),
-            "StandardOS".to_string(),
+            "Golem".to_string(),
             env!("CARGO_PKG_VERSION").to_string(),
             "1.2".to_string(),
         )
@@ -178,11 +178,22 @@ fn build_event(
     hints: &HashMap<String, OwnedValue>,
     ) -> NotificationEvent {
     let (actions, supports_inline_reply, inline_reply_action_key) = parse_actions(actions);
+    // Resolve the notification's own image, richest source first. The `*-data`
+    // hints carry raw pixels; the `*-path` hints and (for Chrome-style web
+    // notifications) the `app_icon` param point at image *files* that must be
+    // read now — they live in scoped-temp dirs the app deletes moments later.
     let (image_data, image_dims) = hints
         .get("image-data")
         .or_else(|| hints.get("image_data"))
         .or_else(|| hints.get("icon_data"))
         .and_then(parse_image)
+        .or_else(|| {
+            hint_string(hints, "image-path")
+                .or_else(|| hint_string(hints, "image_path"))
+                .as_deref()
+                .and_then(load_image_file)
+        })
+        .or_else(|| load_image_file(&app_icon))
         .map(|(bytes, dims)| (Some(bytes), Some(dims)))
         .unwrap_or((None, None));
 
@@ -265,6 +276,35 @@ fn parse_image(v: &OwnedValue) -> Option<(Vec<u8>, (u32, u32))> {
         }
     }
     Some((rgba, (w as u32, h as u32)))
+}
+
+/// Load an image *file* referenced by a notification (an `image-path` hint or a
+/// `file://` / absolute `app_icon`) into tight RGBA8 plus `(w, h)`, downscaled
+/// so the wire payload stays small. Returns `None` for empty strings, themed
+/// icon names (which are not files), missing files, or anything that won't
+/// decode. This is the capture that makes per-service imagery (WhatsApp / etc.
+/// avatars Chrome writes to scoped-temp files) survive past `Notify`.
+fn load_image_file(reference: &str) -> Option<(Vec<u8>, (u32, u32))> {
+    if reference.is_empty() {
+        return None;
+    }
+    // Accept `file://` URIs and bare absolute paths; a themed name isn't a file.
+    let path = reference.strip_prefix("file://").unwrap_or(reference);
+    if !path.starts_with('/') {
+        return None;
+    }
+    let img = image::open(path).ok()?;
+    // Cap the long edge: the card tile is small, and this bounds the D-Bus
+    // payload (every `ActiveChanged` re-sends the whole active list).
+    const MAX_EDGE: u32 = 96;
+    let img = if img.width().max(img.height()) > MAX_EDGE {
+        img.thumbnail(MAX_EDGE, MAX_EDGE)
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    (w > 0 && h > 0).then(|| (rgba.into_raw(), (w, h)))
 }
 
 #[cfg(test)]

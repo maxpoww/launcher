@@ -88,6 +88,18 @@ pub struct ActiveNotification {
     pub urgency: u8,
     pub supports_inline_reply: bool,
     pub timestamp_ms: u64,
+    /// Tightly-packed premultiplied-*straight* RGBA8 for the notification's own
+    /// image (a messaging avatar, media art, …), captured at `Notify` time —
+    /// empty when the notification carries no image. Unlike `app_icon` /
+    /// `desktop_entry` (which the shell resolves through its icon theme), these
+    /// pixels can't be re-fetched later: apps like Chrome point their image
+    /// hints at scoped-temp files that are deleted seconds after `Notify`, so
+    /// the daemon reads them immediately and ships the bytes.
+    pub image_rgba: Vec<u8>,
+    /// Dimensions of `image_rgba` (`0×0` when absent). `image_rgba.len()` is
+    /// always `width * height * 4`.
+    pub image_width: u32,
+    pub image_height: u32,
 }
 
 impl From<&NotificationEvent> for ActiveNotification {
@@ -108,6 +120,9 @@ impl From<&NotificationEvent> for ActiveNotification {
             urgency: e.urgency as u8,
             supports_inline_reply: e.supports_inline_reply,
             timestamp_ms: e.timestamp.max(0) as u64,
+            image_rgba: e.image_data.clone().unwrap_or_default(),
+            image_width: e.image_dims.map_or(0, |(w, _)| w),
+            image_height: e.image_dims.map_or(0, |(_, h)| h),
         }
     }
 }
