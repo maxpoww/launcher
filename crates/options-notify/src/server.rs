@@ -6,11 +6,12 @@
 //! inline-reply — into the rich [`NotificationEvent`] model.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
+use zbus::Connection;
 
 use crate::state::{NotificationAction, NotificationEvent, UrgencyLevel};
 
@@ -66,6 +67,30 @@ impl Notifications {
             false
         }
     }
+
+    /// Whether the notification `id` is resident (stays after an action is
+    /// invoked). Absent id ⇒ not resident.
+    pub(crate) fn is_resident(&self, id: u32) -> bool {
+        self.store.iter().any(|n| n.id == id && n.resident)
+    }
+
+    /// Expire a notification: remove it only if it's still the *same* one that
+    /// armed the timer (matched by id **and** its arm-time `timestamp`), so a
+    /// replace/close before the deadline doesn't wrongly close its successor.
+    /// Returns whether one was actually expired.
+    pub(crate) fn expire(&mut self, id: u32, armed_ts: i64) -> bool {
+        if let Some(pos) = self
+            .store
+            .iter()
+            .position(|n| n.id == id && n.timestamp == armed_ts)
+        {
+            self.store.remove(pos);
+            self.publish();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[zbus::interface(name = "org.freedesktop.Notifications")]
@@ -82,14 +107,25 @@ impl Notifications {
         body: String,
         actions: Vec<String>,
         hints: HashMap<String, OwnedValue>,
-        _expire_timeout: i32,
+        expire_timeout: i32,
+        #[zbus(connection)] conn: &Connection,
     ) -> u32 {
+        // Id resolution, in priority order: an explicit `replaces_id`; else a
+        // synchronous notification replacing a prior one with the same tag
+        // (volume/brightness bars update in place, never stack); else a fresh id.
         let id = if replaces_id != 0 {
             replaces_id
+        } else if let Some(id) = sync_tag(&hints).and_then(|tag| find_sync_id(&self.store, &tag)) {
+            id
         } else {
             self.alloc_id()
         };
         let event = build_event(id, replaces_id, app_name, app_icon, summary, body, &actions, &hints);
+        // Capture the fields the expiry timer needs before the event moves into
+        // the store. `timestamp` is refreshed on every post/replace, so it doubles
+        // as the arm token that ties this timer to this exact notification.
+        let armed_ts = event.timestamp;
+        let expire = effective_expire(expire_timeout, event.urgency);
         // Replace in place if the id already exists, else append.
         if let Some(slot) = self.store.iter_mut().find(|n| n.id == id) {
             *slot = event;
@@ -97,6 +133,18 @@ impl Notifications {
             self.store.push(event);
         }
         self.publish();
+        // Arm the auto-expiry off the interface loop: after the delay it reaches
+        // back through the object server to remove the notification (if still the
+        // same one) and emit `NotificationClosed` reason 1.
+        if let Some(delay_ms) = expire {
+            let conn = conn.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                if let Err(e) = expire_notification(&conn, id, armed_ts).await {
+                    tracing::warn!("expire notification {id}: {e}");
+                }
+            });
+        }
         id
     }
 
@@ -165,6 +213,49 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// Auto-expiry defaults for `expire_timeout == -1` ("server default"), by
+/// urgency — generous so the active set (and the amber bell) doesn't accumulate
+/// notifications an app never explicitly closes.
+const DEFAULT_EXPIRE_MS: u64 = 10_000;
+const LOW_EXPIRE_MS: u64 = 5_000;
+
+/// Resolve the FreeDesktop `expire_timeout` (ms) into an actual delay, or `None`
+/// for "never auto-expire":
+/// - `> 0`: honour it exactly (the app asked for this lifetime).
+/// - `0`: never expire (spec — stays until dismissed/replaced).
+/// - `< 0` (`-1` = "server default"): our choice — Critical is sticky, Normal/Low
+///   get a generous default.
+///
+/// Expiry only clears the *active* notification (Closed reason 1); the UI keeps
+/// its own durable history, so nothing browsable is lost. Pure, so it's tested.
+fn effective_expire(expire_timeout: i32, urgency: UrgencyLevel) -> Option<u64> {
+    use std::cmp::Ordering;
+    match expire_timeout.cmp(&0) {
+        Ordering::Greater => Some(expire_timeout as u64),
+        Ordering::Equal => None,
+        Ordering::Less => match urgency {
+            UrgencyLevel::Critical => None,
+            UrgencyLevel::Low => Some(LOW_EXPIRE_MS),
+            UrgencyLevel::Normal => Some(DEFAULT_EXPIRE_MS),
+        },
+    }
+}
+
+/// Fire the auto-expiry: reach the standard interface through the object server,
+/// remove the notification if it's still the same one that armed the timer, and
+/// emit `NotificationClosed` reason 1 (expired) so the originating app learns it.
+async fn expire_notification(conn: &Connection, id: u32, armed_ts: i64) -> zbus::Result<()> {
+    let iface = conn
+        .object_server()
+        .interface::<_, Notifications>(crate::NOTIFY_PATH)
+        .await?;
+    let expired = iface.get_mut().await.expire(id, armed_ts);
+    if expired {
+        iface.signal_emitter().notification_closed(id, 1).await?;
+    }
+    Ok(())
+}
+
 /// Assemble a [`NotificationEvent`] from the raw `Notify` arguments.
 #[allow(clippy::too_many_arguments)]
 fn build_event(
@@ -216,7 +307,58 @@ fn build_event(
         timestamp: now_millis(),
         replaces_id,
         is_read: false,
+        transient: is_transient(hints),
+        sync_tag: sync_tag(hints),
+        resident: hint_flag(hints, "resident"),
     }
+}
+
+/// The `x-canonical-private-synchronous` tag, if the hint is present. Its value
+/// is a string (`"volume"`, `"brightness"`, …); a present-but-non-string value
+/// collapses to an empty tag so such notifications still share one slot.
+fn sync_tag(hints: &HashMap<String, OwnedValue>) -> Option<String> {
+    let v = hints.get("x-canonical-private-synchronous")?;
+    Some(
+        v.try_clone()
+            .ok()
+            .and_then(|c| String::try_from(c).ok())
+            .unwrap_or_default(),
+    )
+}
+
+/// The id of an existing synchronous notification carrying the same `tag`, so a
+/// repeat (a volume/brightness bar nudged again) replaces it in place instead of
+/// stacking a new card. Pure, so it's unit-tested.
+fn find_sync_id(store: &[NotificationEvent], tag: &str) -> Option<u32> {
+    store
+        .iter()
+        .find(|n| n.sync_tag.as_deref() == Some(tag))
+        .map(|n| n.id)
+}
+
+/// Whether a notification should bypass durable persistence: the explicit
+/// `transient` hint, or a synchronous OSD notification
+/// (`x-canonical-private-synchronous`), which is throwaway by nature (volume /
+/// brightness bars that replace each other and shouldn't be logged).
+fn is_transient(hints: &HashMap<String, OwnedValue>) -> bool {
+    hint_flag(hints, "transient") || hints.contains_key("x-canonical-private-synchronous")
+}
+
+/// Read a boolean hint `key` (accepting the bool or byte forms apps send).
+fn hint_flag(hints: &HashMap<String, OwnedValue>, key: &str) -> bool {
+    hints.get(key).is_some_and(hint_truthy)
+}
+
+/// Interpret a hint value as a boolean flag — apps send `transient` as either a
+/// real bool or a byte (`0`/`1`), so accept either.
+fn hint_truthy(v: &OwnedValue) -> bool {
+    if let Some(b) = v.try_clone().ok().and_then(|c| bool::try_from(c).ok()) {
+        return b;
+    }
+    v.try_clone()
+        .ok()
+        .and_then(|c| u8::try_from(c).ok())
+        .is_some_and(|n| n != 0)
 }
 
 /// Split the flat `[key, label, key, label, …]` actions array into pairs, and
@@ -343,5 +485,122 @@ mod tests {
         assert_eq!(UrgencyLevel::from_u8(0), UrgencyLevel::Low);
         assert_eq!(UrgencyLevel::from_u8(2), UrgencyLevel::Critical);
         assert_eq!(UrgencyLevel::from_u8(9), UrgencyLevel::Normal);
+    }
+
+    fn ev(id: u32, sync_tag: Option<&str>) -> NotificationEvent {
+        NotificationEvent {
+            id,
+            app_name: "App".into(),
+            app_icon: None,
+            summary: String::new(),
+            body: String::new(),
+            urgency: UrgencyLevel::Normal,
+            actions: vec![],
+            supports_inline_reply: false,
+            inline_reply_action_key: None,
+            category: None,
+            desktop_entry: None,
+            image_data: None,
+            image_dims: None,
+            timestamp: 0,
+            replaces_id: 0,
+            is_read: false,
+            transient: sync_tag.is_some(),
+            sync_tag: sync_tag.map(Into::into),
+            resident: false,
+        }
+    }
+
+    #[test]
+    fn is_resident_reads_the_store() {
+        let (tx, _rx) = watch::channel(Vec::new());
+        let mut n = Notifications::new(tx);
+        let mut resident = ev(1, None);
+        resident.resident = true;
+        n.store.push(resident);
+        n.store.push(ev(2, None)); // not resident
+        assert!(n.is_resident(1));
+        assert!(!n.is_resident(2));
+        assert!(!n.is_resident(99)); // absent
+    }
+
+    #[test]
+    fn resident_hint_detection() {
+        use zbus::zvariant::Value;
+        let mut h: HashMap<String, OwnedValue> = HashMap::new();
+        assert!(!hint_flag(&h, "resident"));
+        h.insert("resident".into(), Value::Bool(true).try_into().unwrap());
+        assert!(hint_flag(&h, "resident"));
+    }
+
+    #[test]
+    fn synchronous_replaces_by_tag_not_others() {
+        let store = vec![
+            ev(1, Some("volume")),
+            ev(2, None),
+            ev(3, Some("brightness")),
+        ];
+        // A repeat volume bar reuses id 1; brightness reuses 3; an unknown tag or
+        // a plain notification gets no match (→ a fresh id at the call site).
+        assert_eq!(find_sync_id(&store, "volume"), Some(1));
+        assert_eq!(find_sync_id(&store, "brightness"), Some(3));
+        assert_eq!(find_sync_id(&store, "battery"), None);
+        assert_eq!(find_sync_id(&[], "volume"), None);
+    }
+
+    #[test]
+    fn sync_tag_extraction() {
+        use zbus::zvariant::Value;
+        let mut h: HashMap<String, OwnedValue> = HashMap::new();
+        assert_eq!(sync_tag(&h), None); // absent
+        h.insert(
+            "x-canonical-private-synchronous".into(),
+            Value::from("volume").try_into().unwrap(),
+        );
+        assert_eq!(sync_tag(&h), Some("volume".to_string()));
+    }
+
+    #[test]
+    fn transient_hint_detection() {
+        use zbus::zvariant::Value;
+        let mut h: HashMap<String, OwnedValue> = HashMap::new();
+        assert!(!is_transient(&h)); // nothing set
+
+        h.insert("transient".into(), Value::Bool(true).try_into().unwrap());
+        assert!(is_transient(&h)); // bool form
+
+        let mut h2: HashMap<String, OwnedValue> = HashMap::new();
+        h2.insert("transient".into(), Value::U8(1).try_into().unwrap());
+        assert!(is_transient(&h2)); // byte form
+
+        let mut h3: HashMap<String, OwnedValue> = HashMap::new();
+        h3.insert("transient".into(), Value::Bool(false).try_into().unwrap());
+        assert!(!is_transient(&h3)); // explicitly false
+
+        // A synchronous OSD notification is transient by nature.
+        let mut h4: HashMap<String, OwnedValue> = HashMap::new();
+        h4.insert(
+            "x-canonical-private-synchronous".into(),
+            Value::from("volume").try_into().unwrap(),
+        );
+        assert!(is_transient(&h4));
+    }
+
+    #[test]
+    fn expire_timeout_resolution() {
+        // An explicit positive timeout is honoured verbatim, regardless of urgency.
+        assert_eq!(effective_expire(3000, UrgencyLevel::Normal), Some(3000));
+        assert_eq!(effective_expire(3000, UrgencyLevel::Critical), Some(3000));
+        // 0 means never expire.
+        assert_eq!(effective_expire(0, UrgencyLevel::Normal), None);
+        // -1 (server default): critical is sticky, others get a default, low the
+        // shortest.
+        assert_eq!(effective_expire(-1, UrgencyLevel::Critical), None);
+        assert_eq!(effective_expire(-1, UrgencyLevel::Normal), Some(DEFAULT_EXPIRE_MS));
+        assert_eq!(effective_expire(-1, UrgencyLevel::Low), Some(LOW_EXPIRE_MS));
+        assert!(
+            effective_expire(-1, UrgencyLevel::Low).unwrap()
+                < effective_expire(-1, UrgencyLevel::Normal).unwrap()
+        );
     }
 }

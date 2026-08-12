@@ -77,7 +77,12 @@ impl OptionsControl {
             Action::Invoke(key) => emitter.action_invoked(id, key).await?,
         }
 
-        // Clear the card only if it was actually present; tell the app it closed.
+        // A `resident` notification stays after its action fires (persistent
+        // controls); everything else clears on activation. Only emit Closed when
+        // the card was actually present and removed.
+        if iface.get().await.is_resident(id) {
+            return Ok(());
+        }
         if iface.get_mut().await.remove(id) {
             emitter.notification_closed(id, CLOSE_DISMISSED).await?;
         }

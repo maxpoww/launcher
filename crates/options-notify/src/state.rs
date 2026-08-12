@@ -60,6 +60,19 @@ pub struct NotificationEvent {
     pub timestamp: i64,
     pub replaces_id: u32,
     pub is_read: bool,
+    /// The `transient` hint (or a synchronous OSD notification): bypass the
+    /// server's persistence — show it live, but never keep it in the durable
+    /// history. True for volume/brightness OSD and similar throwaway toasts.
+    pub transient: bool,
+    /// The `x-canonical-private-synchronous` tag, if present. Synchronous
+    /// notifications with the same tag (a volume or brightness bar being nudged
+    /// repeatedly) replace each other in place instead of stacking. Internal —
+    /// never sent to the UI.
+    pub sync_tag: Option<String>,
+    /// The `resident` hint: the notification should stay after one of its actions
+    /// is invoked (persistent controls, e.g. a media player's prev/next), rather
+    /// than closing as notifications normally do on activation.
+    pub resident: bool,
 }
 
 /// The over-the-wire notification the frontend renders — the render-relevant
@@ -100,6 +113,17 @@ pub struct ActiveNotification {
     /// always `width * height * 4`.
     pub image_width: u32,
     pub image_height: u32,
+    /// The `transient` hint — the notification should be shown but not kept in
+    /// the durable history. `Option` (not bare `bool`) so this stays wire-
+    /// compatible with an older daemon that predates the field: a dict missing
+    /// the key deserializes to `None` (treated as not-transient) instead of
+    /// failing. `None` and `Some(false)` mean the same thing to the UI.
+    pub transient: Option<bool>,
+    /// The `resident` hint — the notification stays after an action is invoked
+    /// (persistent controls) rather than closing. `Option` for the same wire-
+    /// compatibility reason as `transient`: an older peer omits the key → `None`
+    /// (treated as not-resident).
+    pub resident: Option<bool>,
 }
 
 impl From<&NotificationEvent> for ActiveNotification {
@@ -123,6 +147,98 @@ impl From<&NotificationEvent> for ActiveNotification {
             image_rgba: e.image_data.clone().unwrap_or_default(),
             image_width: e.image_dims.map_or(0, |(w, _)| w),
             image_height: e.image_dims.map_or(0, |(_, h)| h),
+            transient: Some(e.transient),
+            resident: Some(e.resident),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zbus::zvariant::{serialized::Context, to_bytes, SerializeDict, Type, LE};
+
+    /// A copy of the wire dict **without** the `transient` field — stands in for
+    /// an older daemon that predates it.
+    #[derive(SerializeDict, Type)]
+    #[zvariant(signature = "a{sv}")]
+    struct OldWire {
+        id: u32,
+        app_name: String,
+        app_icon: String,
+        desktop_entry: String,
+        summary: String,
+        body: String,
+        actions: Vec<String>,
+        urgency: u8,
+        supports_inline_reply: bool,
+        timestamp_ms: u64,
+        image_rgba: Vec<u8>,
+        image_width: u32,
+        image_height: u32,
+    }
+
+    /// Forward compatibility: a dict from an older peer (no `transient` key) must
+    /// still deserialize into the current [`ActiveNotification`], with the missing
+    /// field defaulting to `None` (treated as not-transient) rather than erroring.
+    /// This is why the field is `Option<bool>`, and it guards against the wire
+    /// skew that a bare `bool` would crash on.
+    #[test]
+    fn missing_transient_key_deserializes_to_none() {
+        let old = OldWire {
+            id: 7,
+            app_name: "App".into(),
+            app_icon: String::new(),
+            desktop_entry: String::new(),
+            summary: "S".into(),
+            body: "B".into(),
+            actions: vec![],
+            urgency: 1,
+            supports_inline_reply: false,
+            timestamp_ms: 100,
+            image_rgba: vec![],
+            image_width: 0,
+            image_height: 0,
+        };
+        let ctxt = Context::new_dbus(LE, 0);
+        let bytes = to_bytes(ctxt, &old).expect("serialize old wire");
+        let (decoded, _): (ActiveNotification, _) =
+            bytes.deserialize().expect("deserialize into current type");
+        assert_eq!(decoded.id, 7);
+        // Both fields added after the old schema default to `None`.
+        assert_eq!(decoded.transient, None);
+        assert_eq!(decoded.resident, None);
+    }
+
+    /// A round-trip through the current schema preserves `transient`.
+    #[test]
+    fn transient_round_trips() {
+        let ev = NotificationEvent {
+            id: 1,
+            app_name: "OSD".into(),
+            app_icon: None,
+            summary: "Volume".into(),
+            body: String::new(),
+            urgency: UrgencyLevel::Normal,
+            actions: vec![],
+            supports_inline_reply: false,
+            inline_reply_action_key: None,
+            category: None,
+            desktop_entry: None,
+            image_data: None,
+            image_dims: None,
+            timestamp: 5,
+            replaces_id: 0,
+            is_read: false,
+            transient: true,
+            sync_tag: None,
+            resident: false,
+        };
+        let wire = ActiveNotification::from(&ev);
+        assert_eq!(wire.transient, Some(true));
+        let ctxt = Context::new_dbus(LE, 0);
+        let bytes = to_bytes(ctxt, &wire).expect("serialize");
+        let (decoded, _): (ActiveNotification, _) = bytes.deserialize().expect("deserialize");
+        assert_eq!(decoded.transient, Some(true));
     }
 }
