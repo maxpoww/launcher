@@ -576,9 +576,14 @@ impl App {
                 continue;
             }
             // The clipboard box draws itself (slides out from behind the small
-            // pill); the small glyph pill uses the generic path below, on top.
+            // pill); the small glyph pill draws on top of it, with its own
+            // fresh-clip beat (like the bell's muted-arrival blink).
             if pill.id == PillId::ClipboardBox {
                 self.push_clip_pill(scene, pill.rect);
+                continue;
+            }
+            if pill.id == PillId::Clipboard {
+                self.push_clip_glyph(scene, pill.rect);
                 continue;
             }
             // Reveal animation for the control buttons: slide out horizontally

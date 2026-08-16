@@ -33,7 +33,10 @@ use tracing::{debug, warn};
 
 use crate::animation::{ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene};
-use crate::options::{push_neumorph, PillId, BOND_GAP, FONT_PX, LINE_PX, PILL_PAD_X};
+use crate::options::{
+    hover_grow, push_neumorph, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, LINE_PX, NERD,
+    PILL_PAD_X,
+};
 use crate::App;
 
 /// Target width of the extended preview pill (mirrors the notification OPTION's
@@ -45,6 +48,10 @@ const MORPH_EPS: f32 = 0.001;
 /// Grace before the preview collapses once the pointer leaves — enough to cross
 /// a small gap, snappy otherwise. Matches the bell's `LEAVE_HOLD`.
 const LEAVE_HOLD: Duration = Duration::from_millis(300);
+/// A fresh clip beats the small pill for this long — one slow heartbeat (swell +
+/// settle), the same single-period pulse as the bell's muted-arrival blink.
+const BEAT_DURATION: Duration = Duration::from_millis(500);
+const BEAT_PERIOD: Duration = Duration::from_millis(500);
 
 /// On-disk history store (in the daemon's XDG data dir, beside the notif one).
 const HISTORY_FILE: &str = "clipboard-history.json";
@@ -488,6 +495,8 @@ pub(crate) struct ClipState {
     last: Option<Instant>,
     frame_pending: bool,
     hold_deadline: Option<Instant>,
+    /// When the fresh-clip beat on the small pill ends (`None` = not beating).
+    blink_until: Option<Instant>,
 }
 
 impl ClipState {
@@ -506,6 +515,7 @@ impl ClipState {
             last: None,
             frame_pending: false,
             hold_deadline: None,
+            blink_until: None,
         }
     }
 }
@@ -535,6 +545,9 @@ impl App {
                 }
                 self.save_clip_history();
                 debug!("clipboard: captured; {} entries", self.clip.history.len());
+                // A fresh clip landed: beat the small pill (mirrors the bell's
+                // muted-arrival blink) as a silent "captured" cue.
+                self.trigger_clip_beat();
             }
         }
     }
@@ -619,6 +632,83 @@ impl App {
         }
     }
 
+    /// Draw the small fixed clipboard-glyph pill (the left-edge anchor the box
+    /// slides out from behind). Mirrors the bell (`push_notif_mute`): a fresh
+    /// clip beats it — the whole pill pulses like a hover (grow + wash), swelling
+    /// and settling over one heartbeat; a real hover pins it fully lifted.
+    pub(crate) fn push_clip_glyph(&self, scene: &mut Scene, rect: Rect) {
+        let hovered = self.options_hover == Some(PillId::Clipboard);
+        let beat = self.clip_blink().unwrap_or(0.0);
+        let lift = if hovered { 1.0 } else { beat };
+        let grown = hover_grow(rect);
+        let rect = Rect::new(
+            lerp(rect.x, grown.x, lift),
+            lerp(rect.y, grown.y, lift),
+            lerp(rect.w, grown.w, lift),
+            lerp(rect.h, grown.h, lift),
+        );
+        let bright = self.options_bar_is_bright();
+        let radius = rect.h / 2.0; // stadium with w == h ⇒ circle
+        push_neumorph(scene, rect, radius, bright, 1.0);
+        // Same gentle beat colour as the bell's muted landing: on a dark bar the
+        // peak flashes toward white, on a light bar toward the adaptive hover
+        // wash; a real hover just settles at the normal hover wash.
+        let hover = self.options_hover_wash();
+        let peak = if hovered {
+            hover
+        } else if bright {
+            [hover[0], hover[1], hover[2], 0.55]
+        } else {
+            [1.0, 1.0, 1.0, 0.5]
+        };
+        let base = lerp4(self.options_rest_wash(), peak, lift);
+        scene.rects.push(RectInst {
+            rect,
+            radius,
+            color: base,
+            glass: 0.0,
+        });
+
+        let ink = self.options_text_color();
+        let cx = rect.x + rect.w / 2.0;
+        let ty = rect.y + (rect.h - LINE_PX) / 2.0;
+        scene.labels.push(Label {
+            text: GLYPH_CLIPBOARD.to_owned(),
+            pos: (cx, ty),
+            max_w: rect.w + 4.0,
+            font_px: FONT_PX,
+            line_px: LINE_PX,
+            centered: true,
+            dim: false,
+            cache: true,
+            family: Some(NERD),
+            color: Some(ink),
+            clip: Some(rect),
+        });
+    }
+
+    /// Start a fresh-clip beat on the small pill and drive the frame loop.
+    fn trigger_clip_beat(&mut self) {
+        self.clip.blink_until = Some(Instant::now() + BEAT_DURATION);
+        self.clip.last = None;
+        self.schedule_clip_frame();
+    }
+
+    /// The fresh-clip heartbeat (`0.0..=1.0`, `None` when idle): a smooth pulse
+    /// over one [`BEAT_PERIOD`] that swells to `1` and settles back to `0`.
+    /// Smoothstepped so it breathes rather than ticks. Same shape as the bell's.
+    fn clip_blink(&self) -> Option<f32> {
+        let until = self.clip.blink_until?;
+        let now = Instant::now();
+        if now >= until {
+            return None;
+        }
+        let rem = (until - now).as_secs_f32();
+        let phase = (rem / BEAT_PERIOD.as_secs_f32()).fract();
+        let tri = 1.0 - (phase * 2.0 - 1.0).abs();
+        Some(tri * tri * (3.0 - 2.0 * tri)) // smoothstep for an eased beat
+    }
+
     /// Recompute whether the preview should show, and manage the hold/collapse
     /// after the pointer leaves (mirrors the bell's peek). Hovering either the
     /// small pill or the box it reveals holds it open.
@@ -693,13 +783,27 @@ impl App {
         let target = if self.clip.peek_reveal { 1.0 } else { 0.0 };
         let (pt, moving) = ease_toward(self.clip.peek_t, target, dt, MORPH_RATE, MORPH_EPS);
         self.clip.peek_t = pt;
+        // Keep the beat pulsing until its deadline, then clear it.
+        let beating = self.clip.blink_until.is_some_and(|u| now < u);
+        if !beating {
+            self.clip.blink_until = None;
+        }
         self.draw_options();
-        if moving {
+        if moving || beating {
             self.schedule_clip_frame();
         } else {
             self.clip.last = None;
         }
     }
+}
+
+fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        lerp(a[0], b[0], t),
+        lerp(a[1], b[1], t),
+        lerp(a[2], b[2], t),
+        lerp(a[3], b[3], t),
+    ]
 }
 
 #[cfg(test)]
