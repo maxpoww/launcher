@@ -2159,8 +2159,11 @@ impl App {
         self.measure_notif();
         self.save_notif_history();
         if self.notif.history.is_empty() {
-            self.notif.expanded = false;
-            self.notif.peek_reveal = false;
+            // Retire the box the same graceful way every other empty path does,
+            // and — crucially — drive the collapse animation so it hides even
+            // when the pointer never leaves (e.g. a card-body click that opens
+            // the app and pulls focus away). See `collapse_empty_box`.
+            self.collapse_empty_box();
         }
         // Keep the scroll within the (now shorter) pixel span after removal.
         let span = self.notif_scroll_span();
@@ -2185,9 +2188,24 @@ impl App {
         self.notif.scroll_target = 0.0;
         self.measure_notif();
         self.save_notif_history();
-        // Keep the box open a beat on the empty state (it shrinks to the centred
-        // "No notifications"), then let it fall away on its own — even though the
-        // pointer is still over it — and don't re-reveal until the pointer leaves.
+        self.collapse_empty_box();
+        self.sync_options_input();
+        self.update_notif_hit();
+        self.draw_options();
+    }
+
+    /// Gracefully retire the open box once its history has just gone empty —
+    /// shared by every path that can empty it (Clear all, the last card's ✕,
+    /// opening the last card). Keeps the box open a beat on the centred "No
+    /// notifications" state (shrinking to it), then lets it fall away on its
+    /// own — even though the pointer is still over it, or focus has moved to an
+    /// app we just opened — and doesn't re-reveal until the pointer leaves.
+    ///
+    /// The immediate `schedule_notif_frame` is what drives the collapse: without
+    /// it `expand_t` never eases back to 0, so the box would stay stuck on the
+    /// empty state until dismissed by hand (which is exactly what happened when a
+    /// card-body click opened the app — no pointer-leave ever rescued it).
+    fn collapse_empty_box(&mut self) {
         self.notif.peek_suppressed = true;
         let timer = Timer::from_duration(EMPTY_HOLD);
         let _ = self
@@ -2204,10 +2222,7 @@ impl App {
                 }
                 TimeoutAction::Drop
             });
-        self.sync_options_input();
-        self.update_notif_hit();
         self.schedule_notif_frame();
-        self.draw_options();
     }
 
     /// Maximum scroll (px): the newest at the top down to the last card's bottom
