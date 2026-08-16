@@ -26,14 +26,13 @@ async fn main() {
         println!("== {} active ==", list.len());
         for n in &list {
             println!(
-                "  #{} [{}] {} — {} | urgency={:?} actions={} inline={} img={}",
+                "  #{} [{}] {} — {} | urgency={:?} actions={} img={}",
                 n.id,
                 n.app_name,
                 n.summary,
                 n.body,
                 n.urgency,
                 n.actions.len(),
-                n.supports_inline_reply,
                 n.image_dims.map_or("no".into(), |(w, h)| format!("{w}x{h}")),
             );
         }

@@ -95,14 +95,6 @@ impl NotificationService {
         self.close(&iface, id, CLOSE_DISMISSED).await
     }
 
-    /// UI submitted an inline reply: send the text back (`NotificationReplied`)
-    /// and clear the notification.
-    pub async fn reply(&self, id: u32, text: &str) -> zbus::Result<()> {
-        let iface = self.iface().await?;
-        iface.signal_emitter().notification_replied(id, text).await?;
-        self.close(&iface, id, CLOSE_DISMISSED).await
-    }
-
     /// UI dismissed a notification (swipe/close) — clear it and tell the app.
     pub async fn dismiss(&self, id: u32) -> zbus::Result<()> {
         let iface = self.iface().await?;

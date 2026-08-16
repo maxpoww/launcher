@@ -47,8 +47,6 @@ pub struct NotificationEvent {
     pub body: String,
     pub urgency: UrgencyLevel,
     pub actions: Vec<NotificationAction>,
-    pub supports_inline_reply: bool,
-    pub inline_reply_action_key: Option<String>,
     pub category: Option<String>,
     pub desktop_entry: Option<String>,
     /// Raw pixel buffer from the `image-data` hint (see [`RawImage`] for the
@@ -69,10 +67,6 @@ pub struct NotificationEvent {
     /// repeatedly) replace each other in place instead of stacking. Internal —
     /// never sent to the UI.
     pub sync_tag: Option<String>,
-    /// The `resident` hint: the notification should stay after one of its actions
-    /// is invoked (persistent controls, e.g. a media player's prev/next), rather
-    /// than closing as notifications normally do on activation.
-    pub resident: bool,
 }
 
 /// The over-the-wire notification the frontend renders — the render-relevant
@@ -99,7 +93,6 @@ pub struct ActiveNotification {
     pub body: String,
     pub actions: Vec<String>,
     pub urgency: u8,
-    pub supports_inline_reply: bool,
     pub timestamp_ms: u64,
     /// Tightly-packed premultiplied-*straight* RGBA8 for the notification's own
     /// image (a messaging avatar, media art, …), captured at `Notify` time —
@@ -119,11 +112,6 @@ pub struct ActiveNotification {
     /// the key deserializes to `None` (treated as not-transient) instead of
     /// failing. `None` and `Some(false)` mean the same thing to the UI.
     pub transient: Option<bool>,
-    /// The `resident` hint — the notification stays after an action is invoked
-    /// (persistent controls) rather than closing. `Option` for the same wire-
-    /// compatibility reason as `transient`: an older peer omits the key → `None`
-    /// (treated as not-resident).
-    pub resident: Option<bool>,
 }
 
 impl From<&NotificationEvent> for ActiveNotification {
@@ -142,13 +130,11 @@ impl From<&NotificationEvent> for ActiveNotification {
             body: e.body.clone(),
             actions,
             urgency: e.urgency as u8,
-            supports_inline_reply: e.supports_inline_reply,
             timestamp_ms: e.timestamp.max(0) as u64,
             image_rgba: e.image_data.clone().unwrap_or_default(),
             image_width: e.image_dims.map_or(0, |(w, _)| w),
             image_height: e.image_dims.map_or(0, |(_, h)| h),
             transient: Some(e.transient),
-            resident: Some(e.resident),
         }
     }
 }
@@ -171,7 +157,6 @@ mod tests {
         body: String,
         actions: Vec<String>,
         urgency: u8,
-        supports_inline_reply: bool,
         timestamp_ms: u64,
         image_rgba: Vec<u8>,
         image_width: u32,
@@ -194,7 +179,6 @@ mod tests {
             body: "B".into(),
             actions: vec![],
             urgency: 1,
-            supports_inline_reply: false,
             timestamp_ms: 100,
             image_rgba: vec![],
             image_width: 0,
@@ -205,9 +189,8 @@ mod tests {
         let (decoded, _): (ActiveNotification, _) =
             bytes.deserialize().expect("deserialize into current type");
         assert_eq!(decoded.id, 7);
-        // Both fields added after the old schema default to `None`.
+        // The transient key, added after the old schema, defaults to `None`.
         assert_eq!(decoded.transient, None);
-        assert_eq!(decoded.resident, None);
     }
 
     /// A round-trip through the current schema preserves `transient`.
@@ -221,8 +204,6 @@ mod tests {
             body: String::new(),
             urgency: UrgencyLevel::Normal,
             actions: vec![],
-            supports_inline_reply: false,
-            inline_reply_action_key: None,
             category: None,
             desktop_entry: None,
             image_data: None,
@@ -232,7 +213,6 @@ mod tests {
             is_read: false,
             transient: true,
             sync_tag: None,
-            resident: false,
         };
         let wire = ActiveNotification::from(&ev);
         assert_eq!(wire.transient, Some(true));

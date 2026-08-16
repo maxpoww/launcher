@@ -39,9 +39,18 @@ in
       type = lib.types.bool;
       default = false;
       description = ''
-        Also run the KDE Connect daemon (headless) so cross-device
-        notifications (e.g. WhatsApp on a paired phone) can be bridged into
-        OPTIONS.
+        Opt-in phone-notification bridge — OPTIONS does NOT depend on this; it's
+        purely for users who already use KDE Connect. When enabled, the KDE
+        Connect daemon runs and its "receive notifications" plugin forwards a
+        paired phone's notifications onto org.freedesktop.Notifications, where the
+        OPTIONS daemon picks them up like any other notification (no extra wiring;
+        phone-app icon + text come through as-is). It covers apps that can't
+        notify from a closed desktop (WhatsApp, Messenger, …) by using the phone
+        as the always-on source.
+
+        One-time setup after enabling: pair the phone in the KDE Connect app and
+        turn on its notification-sync plugin. Left off by default — a Golem
+        desktop is fully functional without it.
       '';
     };
 
@@ -84,7 +93,12 @@ in
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
-        PrivateTmp = true;
+        # NOT PrivateTmp: notifying apps (Chrome/Chromium web notifications)
+        # write their image assets — the site logo and per-message avatar — to
+        # scoped-temp dirs under the host /tmp and delete them moments later. The
+        # daemon must read those files at Notify time to capture the image, so it
+        # needs the shared /tmp, not a private one.
+        PrivateTmp = false;
       };
     };
   };

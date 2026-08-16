@@ -3,7 +3,7 @@
 //! Owns the live notification store and republishes it on a `watch` whenever it
 //! changes, so the surface (the notification OPTION box) always sees the current
 //! list. Parses the raw `Notify` arguments — actions, urgency, category, images,
-//! inline-reply — into the rich [`NotificationEvent`] model.
+//! transient/synchronous — into the rich [`NotificationEvent`] model.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,7 +22,6 @@ const CAPABILITIES: &[&str] = &[
     "body-hyperlinks",
     "body-markup",
     "icon-static",
-    "inline-reply",
     "x-canonical-private-synchronous",
 ];
 
@@ -66,12 +65,6 @@ impl Notifications {
         } else {
             false
         }
-    }
-
-    /// Whether the notification `id` is resident (stays after an action is
-    /// invoked). Absent id ⇒ not resident.
-    pub(crate) fn is_resident(&self, id: u32) -> bool {
-        self.store.iter().any(|n| n.id == id && n.resident)
     }
 
     /// Expire a notification: remove it only if it's still the *same* one that
@@ -125,7 +118,14 @@ impl Notifications {
         // the store. `timestamp` is refreshed on every post/replace, so it doubles
         // as the arm token that ties this timer to this exact notification.
         let armed_ts = event.timestamp;
-        let expire = effective_expire(expire_timeout, event.urgency);
+        // Phone messages bridged in over KDE Connect are persistent unread
+        // indicators — they must stay until the phone marks them read (which
+        // closes them), never auto-expire out from under the user.
+        let expire = if is_persistent(&event) {
+            None
+        } else {
+            effective_expire(expire_timeout, event.urgency)
+        };
         // Replace in place if the id already exists, else append.
         if let Some(slot) = self.store.iter_mut().find(|n| n.id == id) {
             *slot = event;
@@ -194,15 +194,6 @@ impl Notifications {
         id: u32,
         action_key: &str,
     ) -> zbus::Result<()>;
-
-    /// Emitted when the user submits an inline reply (the text goes back to the
-    /// originating app). Non-standard but the de-facto inline-reply signal.
-    #[zbus(signal)]
-    async fn notification_replied(
-        emitter: &SignalEmitter<'_>,
-        id: u32,
-        text: &str,
-    ) -> zbus::Result<()>;
 }
 
 /// Current unix time in milliseconds.
@@ -268,7 +259,7 @@ fn build_event(
     actions: &[String],
     hints: &HashMap<String, OwnedValue>,
     ) -> NotificationEvent {
-    let (actions, supports_inline_reply, inline_reply_action_key) = parse_actions(actions);
+    let actions = parse_actions(actions);
     // Resolve the notification's own image, richest source first. The `*-data`
     // hints carry raw pixels; the `*-path` hints and (for Chrome-style web
     // notifications) the `app_icon` param point at image *files* that must be
@@ -298,8 +289,6 @@ fn build_event(
             .map(UrgencyLevel::from_u8)
             .unwrap_or_default(),
         actions,
-        supports_inline_reply,
-        inline_reply_action_key,
         category: hint_string(hints, "category"),
         desktop_entry: hint_string(hints, "desktop-entry"),
         image_data,
@@ -309,7 +298,6 @@ fn build_event(
         is_read: false,
         transient: is_transient(hints),
         sync_tag: sync_tag(hints),
-        resident: hint_flag(hints, "resident"),
     }
 }
 
@@ -334,6 +322,17 @@ fn find_sync_id(store: &[NotificationEvent], tag: &str) -> Option<u32> {
         .iter()
         .find(|n| n.sync_tag.as_deref() == Some(tag))
         .map(|n| n.id)
+}
+
+/// Whether a notification should never auto-expire (stays until explicitly
+/// closed). Phone notifications bridged in over KDE Connect are live unread
+/// indicators — the phone owns their lifetime, closing them when read.
+fn is_persistent(event: &NotificationEvent) -> bool {
+    event
+        .desktop_entry
+        .as_deref()
+        .is_some_and(|d| d.starts_with("org.kde.kdeconnect"))
+        || event.app_name.eq_ignore_ascii_case("KDE Connect")
 }
 
 /// Whether a notification should bypass durable persistence: the explicit
@@ -361,25 +360,15 @@ fn hint_truthy(v: &OwnedValue) -> bool {
         .is_some_and(|n| n != 0)
 }
 
-/// Split the flat `[key, label, key, label, …]` actions array into pairs, and
-/// detect inline-reply support (an action keyed `inline-reply`).
-fn parse_actions(actions: &[String]) -> (Vec<NotificationAction>, bool, Option<String>) {
-    let mut out = Vec::new();
-    let mut inline = false;
-    let mut inline_key = None;
-    for pair in actions.chunks(2) {
-        if let [key, label] = pair {
-            if key == "inline-reply" {
-                inline = true;
-                inline_key = Some(key.clone());
-            }
-            out.push(NotificationAction {
-                key: key.clone(),
-                label: label.clone(),
-            });
-        }
-    }
-    (out, inline, inline_key)
+/// Split the flat `[key, label, key, label, …]` actions array into pairs.
+fn parse_actions(actions: &[String]) -> Vec<NotificationAction> {
+    actions
+        .chunks_exact(2)
+        .map(|pair| NotificationAction {
+            key: pair[0].clone(),
+            label: pair[1].clone(),
+        })
+        .collect()
 }
 
 fn hint_u8(hints: &HashMap<String, OwnedValue>, key: &str) -> Option<u8> {
@@ -455,7 +444,7 @@ mod tests {
 
     #[test]
     fn actions_split_into_pairs() {
-        let (acts, inline, _) = parse_actions(&[
+        let acts = parse_actions(&[
             "default".into(),
             "Open".into(),
             "archive".into(),
@@ -464,19 +453,11 @@ mod tests {
         assert_eq!(acts.len(), 2);
         assert_eq!(acts[0].key, "default");
         assert_eq!(acts[1].label, "Archive");
-        assert!(!inline);
-    }
-
-    #[test]
-    fn inline_reply_action_is_detected() {
-        let (_, inline, key) = parse_actions(&["inline-reply".into(), "Reply".into()]);
-        assert!(inline);
-        assert_eq!(key.as_deref(), Some("inline-reply"));
     }
 
     #[test]
     fn odd_action_arrays_dont_panic() {
-        let (acts, _, _) = parse_actions(&["lonely".into()]);
+        let acts = parse_actions(&["lonely".into()]);
         assert!(acts.is_empty());
     }
 
@@ -496,8 +477,6 @@ mod tests {
             body: String::new(),
             urgency: UrgencyLevel::Normal,
             actions: vec![],
-            supports_inline_reply: false,
-            inline_reply_action_key: None,
             category: None,
             desktop_entry: None,
             image_data: None,
@@ -507,30 +486,7 @@ mod tests {
             is_read: false,
             transient: sync_tag.is_some(),
             sync_tag: sync_tag.map(Into::into),
-            resident: false,
         }
-    }
-
-    #[test]
-    fn is_resident_reads_the_store() {
-        let (tx, _rx) = watch::channel(Vec::new());
-        let mut n = Notifications::new(tx);
-        let mut resident = ev(1, None);
-        resident.resident = true;
-        n.store.push(resident);
-        n.store.push(ev(2, None)); // not resident
-        assert!(n.is_resident(1));
-        assert!(!n.is_resident(2));
-        assert!(!n.is_resident(99)); // absent
-    }
-
-    #[test]
-    fn resident_hint_detection() {
-        use zbus::zvariant::Value;
-        let mut h: HashMap<String, OwnedValue> = HashMap::new();
-        assert!(!hint_flag(&h, "resident"));
-        h.insert("resident".into(), Value::Bool(true).try_into().unwrap());
-        assert!(hint_flag(&h, "resident"));
     }
 
     #[test]
