@@ -130,21 +130,24 @@ pub enum ClipEvent {
 }
 
 /// A UI intent for the worker.
-// Constructed by `copy_clip`, which the history box (stage 2) drives; wired end
-// to end now so the copy-back path is ready when the UI lands.
-#[allow(dead_code)]
 pub enum ClipCommand {
-    /// Restore this payload to the system clipboard (`wl-copy`).
+    /// Restore this payload to the system clipboard (`wl-copy`). Used by the
+    /// history box (a later stage); wired end to end now.
+    #[allow(dead_code)]
     Copy {
         mime: String,
         text: String,
         image_path: Option<PathBuf>,
     },
+    /// Copy the current *primary* (highlight) selection to the clipboard — the
+    /// copy-pill action. Robust: it lifts the selected text straight from the
+    /// primary selection rather than injecting a Ctrl+C into the focused app
+    /// (whose active highlight may already be gone).
+    CopySelection,
 }
 
 /// Handle to the clipboard worker: send [`ClipCommand`]s. Dropping it stops the
 /// command side after its current recv.
-#[allow(dead_code)] // `send` is exercised by the box UI (stage 2).
 pub struct ClipHandle {
     tx: mpsc::Sender<ClipCommand>,
 }
@@ -183,7 +186,31 @@ fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) 
         .expect("spawn clipboard primary thread");
 
     while let Ok(cmd) = commands.recv() {
-        copy_back(cmd);
+        match cmd {
+            ClipCommand::Copy {
+                mime,
+                text,
+                image_path,
+            } => {
+                let data = match &image_path {
+                    Some(path) => match std::fs::read(path) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            warn!("clipboard: cannot read image {path:?}: {e}");
+                            continue;
+                        }
+                    },
+                    None => text.into_bytes(),
+                };
+                wl_copy(&mime, &data);
+            }
+            ClipCommand::CopySelection => {
+                let text = paste_primary();
+                if !text.trim().is_empty() {
+                    wl_copy("text/plain;charset=utf-8", text.as_bytes());
+                }
+            }
+        }
     }
 }
 
@@ -245,30 +272,15 @@ fn paste_primary() -> String {
         .unwrap_or_default()
 }
 
-/// Restore a payload to the clipboard with `wl-copy` (which forks to serve the
+/// Set the clipboard to `data` with `wl-copy` (which forks to serve the
 /// selection, so the write returns promptly).
-fn copy_back(cmd: ClipCommand) {
-    let ClipCommand::Copy {
-        mime,
-        text,
-        image_path,
-    } = cmd;
+fn wl_copy(mime: &str, data: &[u8]) {
     let mut c = Command::new("wl-copy");
-    c.arg("--type").arg(&mime).stdin(Stdio::piped());
-    let data = match &image_path {
-        Some(path) => match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                warn!("clipboard: cannot read image {path:?} for copy-back: {e}");
-                return;
-            }
-        },
-        None => text.into_bytes(),
-    };
+    c.arg("--type").arg(mime).stdin(Stdio::piped());
     match c.spawn() {
         Ok(mut child) => {
             if let Some(mut stdin) = child.stdin.take() {
-                if let Err(e) = stdin.write_all(&data) {
+                if let Err(e) = stdin.write_all(data) {
                     warn!("clipboard: wl-copy stdin write failed: {e}");
                 }
             }
@@ -948,18 +960,41 @@ impl App {
         });
     }
 
-    /// Click on an action pill: inject its chord into the focused window
-    /// (copy = Ctrl+C, cut = Ctrl+X, select = Ctrl+A) and keep the pills out a
-    /// moment longer so the user can chain (e.g. select → copy).
+    /// Click on an action pill.
+    ///
+    /// - **Copy** lifts the selected text straight from the *primary* selection
+    ///   into the clipboard (robust — no dependence on the focused app still
+    ///   showing an active highlight, which is why injecting Ctrl+C was flaky).
+    /// - **Cut** does the same robust copy, then injects Ctrl+X so the app also
+    ///   removes the selection.
+    /// - **Select-all** injects Ctrl+A (only the app can do it), and keeps the
+    ///   pills up so the user can chain into copy.
+    ///
+    /// Copy/cut retire the pills once done; the resulting clipboard change flows
+    /// back through the watcher (history + beat).
     pub(crate) fn clip_action(&mut self, id: PillId) {
-        let key = match id {
-            PillId::ClipCopy => "c",
-            PillId::ClipCut => "x",
-            PillId::ClipSelectAll => "a",
-            _ => return,
-        };
-        crate::hypr::send_shortcut_active("CTRL", key);
-        self.arm_clip_actions_hide();
+        match id {
+            PillId::ClipCopy => {
+                self.send_clip(ClipCommand::CopySelection);
+                self.hide_clip_actions();
+            }
+            PillId::ClipCut => {
+                self.send_clip(ClipCommand::CopySelection);
+                crate::hypr::send_shortcut_active("CTRL", "x");
+                self.hide_clip_actions();
+            }
+            PillId::ClipSelectAll => {
+                crate::hypr::send_shortcut_active("CTRL", "a");
+                self.arm_clip_actions_hide();
+            }
+            _ => {}
+        }
+    }
+
+    fn send_clip(&self, cmd: ClipCommand) {
+        if let Some(h) = &self.clip.handle {
+            h.send(cmd);
+        }
     }
 
     /// After the pointer leaves, hold briefly then collapse the preview.
