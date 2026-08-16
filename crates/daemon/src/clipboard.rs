@@ -33,10 +33,7 @@ use tracing::{debug, warn};
 
 use crate::animation::{ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene};
-use crate::options::{
-    hover_grow, push_neumorph, PillId, EDGE_PAD, FONT_PX, GLYPH_CLIPBOARD, LINE_PX, NERD,
-    PILL_MARGIN_Y, PILL_PAD_X,
-};
+use crate::options::{push_neumorph, PillId, BOND_GAP, FONT_PX, LINE_PX, PILL_PAD_X};
 use crate::App;
 
 /// Target width of the extended preview pill (mirrors the notification OPTION's
@@ -48,8 +45,6 @@ const MORPH_EPS: f32 = 0.001;
 /// Grace before the preview collapses once the pointer leaves — enough to cross
 /// a small gap, snappy otherwise. Matches the bell's `LEAVE_HOLD`.
 const LEAVE_HOLD: Duration = Duration::from_millis(300);
-/// Gap between the preview text and the glyph slot.
-const TEXT_GAP: f32 = 8.0;
 
 /// On-disk history store (in the daemon's XDG data dir, beside the notif one).
 const HISTORY_FILE: &str = "clipboard-history.json";
@@ -567,78 +562,46 @@ impl App {
         );
     }
 
-    /// Band height of the resting pill (the bar minus its top/bottom margins).
-    fn clip_band_h(&self) -> f32 {
-        (self.config.options.height as f32 - 2.0 * PILL_MARGIN_Y).max(1.0)
+    /// Geometry of the morphing preview/box given the pinned *left* edge of its
+    /// resting slot (behind the small fixed pill), top, and band height: at rest
+    /// it sits exactly under the small pill; as `peek_t` rises its left edge
+    /// slides *right* (clearing the small pill plus a bond gap) and it grows to
+    /// the preview width — the left-side mirror of the bell, opening rightward.
+    pub(crate) fn clip_geom(&self, left0: f32, y: f32, ph: f32) -> Rect {
+        let left = left0 + (ph + BOND_GAP) * self.clip.peek_t;
+        let w = lerp(ph, PEEK_W, self.clip.peek_t).max(ph);
+        Rect::new(left, y, w, ph)
     }
 
-    /// Geometry of the morphing clipboard element given its pinned right edge,
-    /// top, and band height: a resting circle that grows leftward into the
-    /// preview pill as `peek_t` rises (the glyph slot stays anchored at `right`).
-    pub(crate) fn clip_geom(&self, right: f32, y: f32, ph: f32) -> Rect {
-        let mut w = lerp(ph, PEEK_W, self.clip.peek_t).max(ph);
-        if right - w < EDGE_PAD {
-            w = (right - EDGE_PAD).max(ph);
-        }
-        Rect::new(right - w, y, w, ph)
-    }
-
-    /// Draw the clipboard element: a neumorphic circle with the clipboard glyph
-    /// anchored at its right, growing leftward on hover into a preview of the
-    /// most-recent clip (fading in with the peek).
+    /// Draw the preview/box element: the pill that slides out to the right from
+    /// behind the small clipboard glyph, showing the most-recent clip (fading in
+    /// with the peek). The glyph itself lives on the small fixed pill.
     pub(crate) fn push_clip_pill(&self, scene: &mut Scene, rect: Rect) {
-        let ph = self.clip_band_h();
         let bright = self.options_bar_is_bright();
         let peek = self.clip.peek_t;
-        let hovered = self.options_hover == Some(PillId::Clipboard);
-        // Hover lift only while collapsed — once peeking, the pill grows itself.
-        let rect = if hovered && peek < 0.01 {
-            hover_grow(rect)
-        } else {
-            rect
-        };
+        // Nothing to show until it starts sliding out (at rest it hides fully
+        // behind the small pill, which draws on top).
+        if peek < 0.001 {
+            return;
+        }
         let radius = rect.h / 2.0; // stadium ⇒ circle when w == h
         push_neumorph(scene, rect, radius, bright, 1.0);
-        // The preview never reacts to hover (mirrors the box): resting wash once
-        // it starts growing, hover wash only on the bare resting circle.
-        let base = if hovered && peek < 0.01 {
-            self.options_hover_wash()
-        } else {
-            self.options_rest_wash()
-        };
+        // The preview never reacts to hover (mirrors the box): resting wash.
         scene.rects.push(RectInst {
             rect,
             radius,
-            color: base,
+            color: self.options_rest_wash(),
             glass: 0.0,
-        });
-
-        let ink = self.options_text_color();
-        // Glyph pinned in the rightmost band-sized slot, so it holds its resting
-        // position as the pill extends to the left.
-        let slot_cx = rect.x + rect.w - ph / 2.0;
-        let gty = rect.y + (rect.h - LINE_PX) / 2.0;
-        scene.labels.push(Label {
-            text: GLYPH_CLIPBOARD.to_owned(),
-            pos: (slot_cx, gty),
-            max_w: ph + 4.0,
-            font_px: FONT_PX,
-            line_px: LINE_PX,
-            centered: true,
-            dim: false,
-            cache: true,
-            family: Some(NERD),
-            color: Some(ink),
-            clip: Some(rect),
         });
 
         // Preview of the newest clip, left-aligned, fading in with the peek.
         let pa = ((peek - 0.35) / 0.5).clamp(0.0, 1.0);
         if pa > 0.01 {
             if let Some(latest) = self.clip.history.first() {
+                let ink = self.options_text_color();
                 let tx = rect.x + PILL_PAD_X;
-                let text_right = rect.x + rect.w - ph - TEXT_GAP;
-                let max_w = (text_right - tx).max(0.0);
+                let gty = rect.y + (rect.h - LINE_PX) / 2.0;
+                let max_w = (rect.x + rect.w - PILL_PAD_X - tx).max(0.0);
                 scene.labels.push(Label {
                     text: latest.preview.clone(),
                     pos: (tx, gty),
@@ -657,9 +620,13 @@ impl App {
     }
 
     /// Recompute whether the preview should show, and manage the hold/collapse
-    /// after the pointer leaves (mirrors the bell's peek).
+    /// after the pointer leaves (mirrors the bell's peek). Hovering either the
+    /// small pill or the box it reveals holds it open.
     pub(crate) fn update_clip_reveal(&mut self) {
-        let on = self.options_hover == Some(PillId::Clipboard);
+        let on = matches!(
+            self.options_hover,
+            Some(PillId::Clipboard | PillId::ClipboardBox)
+        );
         if on {
             self.clip.hold_deadline = None;
             // Nothing to preview on an empty history — just the resting glyph.
@@ -683,7 +650,10 @@ impl App {
             .insert_source(timer, move |_, _, app: &mut App| {
                 if app.clip.hold_deadline == Some(deadline) {
                     app.clip.hold_deadline = None;
-                    if app.options_hover != Some(PillId::Clipboard) {
+                    if !matches!(
+                        app.options_hover,
+                        Some(PillId::Clipboard | PillId::ClipboardBox)
+                    ) {
                         app.clip.peek_reveal = false;
                         app.clip.last = None;
                         app.schedule_clip_frame();

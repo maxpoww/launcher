@@ -162,9 +162,10 @@ fn draw_z(id: PillId) -> u8 {
         // on top of it, capping its right end as it grows out from behind.
         PillId::Notif => 6,
         PillId::NotifMute => 7,
-        // The clipboard OPTION is independent (a gap left of the notif cluster),
-        // so its z is only relative to itself.
-        PillId::Clipboard => 8,
+        // Mirror of the bell on the left edge: the box draws first, the small
+        // fixed glyph pill on top of it, capping its left end as it grows out.
+        PillId::ClipboardBox => 8,
+        PillId::Clipboard => 9,
     }
 }
 
@@ -192,10 +193,13 @@ pub(crate) enum PillId {
     /// The mute-notifications pill: rests directly *behind* the bell and is
     /// uncovered (to the bell's right) as the bell slides left to peek open.
     NotifMute,
-    /// The clipboard OPTION — a clipboard glyph that metamorphoses on hover into
-    /// a preview of the latest clip and a browsable history (see
-    /// [`crate::clipboard`]).
+    /// The clipboard OPTION's small fixed pill: a clipboard glyph at the left
+    /// edge. The preview/history box slides out to its right from behind it —
+    /// the left-side mirror of the bell + its box (see [`crate::clipboard`]).
     Clipboard,
+    /// The clipboard OPTION's morphing preview/history box (rests behind the
+    /// small pill, slides out rightward). Mirrors `Notif`.
+    ClipboardBox,
     Window,
     Close,
     Pseudo,
@@ -394,14 +398,20 @@ impl App {
             glyph_color: None,
         });
 
-        // Clipboard OPTION: a clipboard glyph a gap to the left of the
-        // notification cluster (whose resting left edge is the mute pill). Like
-        // the bell it metamorphoses — its rect is the whole morphing shape, right
-        // edge pinned; `crate::clipboard` draws it.
-        let notif_left = clock_left - OPTION_GAP - ph;
+        // Clipboard OPTION: the left-edge mirror of the notification cluster.
+        // A small fixed glyph pill sits at the left edge; the preview/history box
+        // slides out to its RIGHT from behind it (drawn first, capped by the
+        // small pill on top). `crate::clipboard` draws the box.
+        pills.push(Pill {
+            id: PillId::ClipboardBox,
+            rect: self.clip_geom(EDGE_PAD, y, ph),
+            text: String::new(),
+            family: None,
+            glyph_color: None,
+        });
         pills.push(Pill {
             id: PillId::Clipboard,
-            rect: self.clip_geom(notif_left - OPTION_GAP, y, ph),
+            rect: Rect::new(EDGE_PAD, y, ph, ph),
             text: GLYPH_CLIPBOARD.to_owned(),
             family: Some(NERD),
             glyph_color: None,
@@ -565,8 +575,9 @@ impl App {
                 self.push_notif_mute(scene, pill.rect);
                 continue;
             }
-            // The clipboard OPTION draws itself (glyph ↔ preview metamorphosis).
-            if pill.id == PillId::Clipboard {
+            // The clipboard box draws itself (slides out from behind the small
+            // pill); the small glyph pill uses the generic path below, on top.
+            if pill.id == PillId::ClipboardBox {
                 self.push_clip_pill(scene, pill.rect);
                 continue;
             }
@@ -907,7 +918,7 @@ impl App {
                     // below-the-bar) rect so hover holds while its history is
                     // open; every other pill gets the full-bar-height hit (up to
                     // the top screen edge) so slamming to the edge still lands.
-                    let hit = if pill.id == PillId::Notif {
+                    let hit = if matches!(pill.id, PillId::Notif | PillId::ClipboardBox) {
                         Rect::new(pill.rect.x, 0.0, pill.rect.w, pill.rect.y + pill.rect.h)
                     } else {
                         Rect::new(pill.rect.x, 0.0, pill.rect.w, bar_h)
@@ -1170,9 +1181,8 @@ impl App {
             }
             // The clipboard element just previews on hover (its clickable
             // history box lands in a later stage) — default cursor for now.
-            Some(PillId::Clock) | Some(PillId::Window) | Some(PillId::Clipboard) | None => {
-                Shape::Default
-            }
+            Some(PillId::Clock | PillId::Window | PillId::Clipboard | PillId::ClipboardBox)
+            | None => Shape::Default,
             Some(_) => Shape::Pointer, // any control circle
         };
         if self.cursor_now != Some(shape) {
