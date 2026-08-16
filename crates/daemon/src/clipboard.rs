@@ -34,8 +34,8 @@ use tracing::{debug, warn};
 use crate::animation::{ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{
-    hover_grow, push_neumorph, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, LINE_PX, NERD,
-    PILL_PAD_X,
+    hover_grow, push_neumorph, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY, GLYPH_CUT,
+    GLYPH_SELECT_ALL, LINE_PX, NERD, PILL_PAD_X,
 };
 use crate::App;
 
@@ -52,6 +52,17 @@ const LEAVE_HOLD: Duration = Duration::from_millis(300);
 /// settle), the same single-period pulse as the bell's muted-arrival blink.
 const BEAT_DURATION: Duration = Duration::from_millis(500);
 const BEAT_PERIOD: Duration = Duration::from_millis(500);
+/// Gap between the copy/cut/select action pills (and from the small pill).
+pub(crate) const ACTION_GAP: f32 = 6.0;
+/// How long the action pills stay out after a selection before auto-hiding (with
+/// no hover). Re-armed on each new selection; hovering the cluster holds them.
+const ACTIONS_HOLD: Duration = Duration::from_secs(4);
+/// The three selection-action pills, in slide-out order.
+pub(crate) const ACTIONS: [(PillId, &str); 3] = [
+    (PillId::ClipCopy, GLYPH_COPY),
+    (PillId::ClipCut, GLYPH_CUT),
+    (PillId::ClipSelectAll, GLYPH_SELECT_ALL),
+];
 
 /// On-disk history store (in the daemon's XDG data dir, beside the notif one).
 const HISTORY_FILE: &str = "clipboard-history.json";
@@ -109,9 +120,13 @@ pub struct ClipEntry {
     pub hash: u64,
 }
 
-/// A clipboard change the worker observed.
+/// Something the worker observed.
 pub enum ClipEvent {
+    /// A new clip landed on the clipboard.
     Captured(ClipEntry),
+    /// The *primary* (highlight) selection went non-empty (`true`, the user just
+    /// selected something) or empty (`false`). Drives the copy/cut/select pills.
+    Selection(bool),
 }
 
 /// A UI intent for the worker.
@@ -153,17 +168,74 @@ pub fn spawn(events: Sender<ClipEvent>) -> ClipHandle {
     ClipHandle { tx }
 }
 
-/// Worker entry: a detached watch loop feeding `events`, and this thread serving
-/// copy-back commands until the handle is dropped.
+/// Worker entry: two detached watch loops feeding `events` (the clipboard and
+/// the primary/highlight selection), and this thread serving copy-back commands
+/// until the handle is dropped.
 fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) {
+    let primary_events = events.clone();
     std::thread::Builder::new()
         .name("clipboard-watch".into())
         .spawn(move || watch_loop(events))
         .expect("spawn clipboard watch thread");
+    std::thread::Builder::new()
+        .name("clipboard-primary".into())
+        .spawn(move || primary_watch_loop(primary_events))
+        .expect("spawn clipboard primary thread");
 
     while let Ok(cmd) = commands.recv() {
         copy_back(cmd);
     }
+}
+
+/// Watch the *primary* (highlight) selection and report whether it holds text —
+/// this is the "brain" detecting that the user selected something. We only need
+/// the presence, never the content, so nothing is stored. Respawns on
+/// exit/error like the clipboard watcher.
+fn primary_watch_loop(events: Sender<ClipEvent>) {
+    let mut present = false;
+    loop {
+        match run_primary_watch(&events, &mut present) {
+            Ok(false) => return, // UI gone
+            Ok(true) => debug!("clipboard: primary watch ended; respawning"),
+            Err(e) => debug!("clipboard: primary watch error: {e}"),
+        }
+        std::thread::sleep(RESPAWN);
+    }
+}
+
+fn run_primary_watch(events: &Sender<ClipEvent>, present: &mut bool) -> std::io::Result<bool> {
+    let mut child = Command::new("wl-paste")
+        .args(["--primary", "--watch", "sh", "-c", "printf '\\n'"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("no stdout"))?;
+    let reader = BufReader::new(stdout);
+    for line in reader.lines() {
+        line?;
+        // Re-read presence in Rust (a trigger fires on every selection change).
+        let now_present = !paste_primary().trim().is_empty();
+        if now_present == *present {
+            continue; // only report edges (non-empty ⇄ empty)
+        }
+        *present = now_present;
+        if events.send(ClipEvent::Selection(now_present)).is_err() {
+            let _ = child.kill();
+            return Ok(false);
+        }
+    }
+    let _ = child.wait();
+    Ok(true)
+}
+
+/// Read the primary selection as text (empty on error / no owner).
+fn paste_primary() -> String {
+    run_stdout(Command::new("wl-paste").args(["--primary", "--no-newline"]))
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
 }
 
 /// Restore a payload to the clipboard with `wl-copy` (which forks to serve the
@@ -497,6 +569,14 @@ pub(crate) struct ClipState {
     hold_deadline: Option<Instant>,
     /// When the fresh-clip beat on the small pill ends (`None` = not beating).
     blink_until: Option<Instant>,
+    // ---- selection action pills (copy / cut / select) ----
+    /// The brain has detected a live selection, so the action pills show.
+    selection_active: bool,
+    /// Slide-out progress of the action pills: 0 = tucked behind the small pill,
+    /// 1 = fully fanned out to the right.
+    actions_t: f32,
+    /// When the action pills auto-hide (re-armed on each selection / hover).
+    actions_hide_deadline: Option<Instant>,
 }
 
 impl ClipState {
@@ -516,6 +596,9 @@ impl ClipState {
             frame_pending: false,
             hold_deadline: None,
             blink_until: None,
+            selection_active: false,
+            actions_t: 0.0,
+            actions_hide_deadline: None,
         }
     }
 }
@@ -525,6 +608,7 @@ impl App {
     /// (newest first, de-duplicated) and persist.
     pub(crate) fn on_clip_event(&mut self, ev: ClipEvent) {
         match ev {
+            ClipEvent::Selection(present) => self.on_clip_selection(present),
             ClipEvent::Captured(mut entry) => {
                 // A re-copied clip moves to the top rather than piling up; it
                 // keeps its original id so any UI reference stays valid.
@@ -723,10 +807,22 @@ impl App {
     /// after the pointer leaves (mirrors the bell's peek). Hovering either the
     /// small pill or the box it reveals holds it open.
     pub(crate) fn update_clip_reveal(&mut self) {
-        let on = matches!(
-            self.options_hover,
-            Some(PillId::Clipboard | PillId::ClipboardBox)
-        );
+        // Action pills out: hovering the cluster holds them; leaving re-arms the
+        // auto-hide so they don't linger once the pointer moves on.
+        if self.clip.selection_active {
+            if self.clip_cluster_hovered() {
+                self.clip.actions_hide_deadline = None;
+            } else if self.clip.actions_hide_deadline.is_none() {
+                self.arm_clip_actions_hide();
+            }
+        }
+        // The hover preview is suppressed while the action pills occupy the space
+        // to the right of the small pill.
+        let on = !self.clip.selection_active
+            && matches!(
+                self.options_hover,
+                Some(PillId::Clipboard | PillId::ClipboardBox)
+            );
         if on {
             self.clip.hold_deadline = None;
             // Nothing to preview on an empty history — just the resting glyph.
@@ -738,6 +834,125 @@ impl App {
         } else if self.clip.peek_reveal && self.clip.hold_deadline.is_none() {
             self.schedule_clip_collapse(LEAVE_HOLD);
         }
+    }
+
+    /// The brain reported a selection edge: reveal the copy/cut/select pills, or
+    /// retire them when the selection is gone.
+    fn on_clip_selection(&mut self, present: bool) {
+        if present {
+            self.clip.selection_active = true;
+            self.clip.peek_reveal = false; // the preview yields to the actions
+            self.arm_clip_actions_hide();
+            self.clip.last = None;
+            self.schedule_clip_frame();
+        } else {
+            self.hide_clip_actions();
+        }
+    }
+
+    /// (Re)arm the action pills' auto-hide. Hovering the cluster cancels it (see
+    /// `update_clip_reveal`); the timer only fires if still un-hovered.
+    fn arm_clip_actions_hide(&mut self) {
+        let deadline = Instant::now() + ACTIONS_HOLD;
+        self.clip.actions_hide_deadline = Some(deadline);
+        let timer = Timer::from_duration(ACTIONS_HOLD);
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                if app.clip.actions_hide_deadline == Some(deadline) {
+                    app.clip.actions_hide_deadline = None;
+                    if !app.clip_cluster_hovered() {
+                        app.hide_clip_actions();
+                    }
+                }
+                TimeoutAction::Drop
+            });
+    }
+
+    fn hide_clip_actions(&mut self) {
+        if self.clip.selection_active {
+            self.clip.selection_active = false;
+            self.clip.actions_hide_deadline = None;
+            self.clip.last = None;
+            self.schedule_clip_frame();
+        }
+    }
+
+    /// Whether the pointer is over any clipboard element — the small pill, the
+    /// preview box, or one of the action pills.
+    fn clip_cluster_hovered(&self) -> bool {
+        matches!(
+            self.options_hover,
+            Some(
+                PillId::Clipboard
+                    | PillId::ClipboardBox
+                    | PillId::ClipCopy
+                    | PillId::ClipCut
+                    | PillId::ClipSelectAll
+            )
+        )
+    }
+
+    /// Slide-out progress of the action pills (0 hidden → 1 fanned out), read by
+    /// the layout to place them.
+    pub(crate) fn clip_actions_t(&self) -> f32 {
+        self.clip.actions_t
+    }
+
+    /// Draw one selection-action pill (copy / cut / select), fading + sliding in
+    /// with the shared `actions_t`. Emerges from behind the small pill, which
+    /// draws on top.
+    pub(crate) fn push_clip_action(&self, scene: &mut Scene, rect: Rect, id: PillId, glyph: &str) {
+        // Fade in a touch after the slide begins, so it reads as coming out from
+        // under the small pill rather than blinking on.
+        let a = ((self.clip.actions_t - 0.15) / 0.6).clamp(0.0, 1.0);
+        if a <= 0.01 {
+            return;
+        }
+        let bright = self.options_bar_is_bright();
+        let hovered = self.options_hover == Some(id);
+        let rect = if hovered { hover_grow(rect) } else { rect };
+        let radius = rect.h / 2.0;
+        push_neumorph(scene, rect, radius, bright, a);
+        let base = if hovered {
+            self.options_hover_wash()
+        } else {
+            self.options_rest_wash()
+        };
+        scene.rects.push(RectInst {
+            rect,
+            radius,
+            color: [base[0], base[1], base[2], base[3] * a],
+            glass: 0.0,
+        });
+        let ink = self.options_text_color();
+        scene.labels.push(Label {
+            text: glyph.to_owned(),
+            pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - LINE_PX) / 2.0),
+            max_w: rect.w + 4.0,
+            font_px: FONT_PX,
+            line_px: LINE_PX,
+            centered: true,
+            dim: false,
+            cache: true,
+            family: Some(NERD),
+            color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
+            clip: Some(rect),
+        });
+    }
+
+    /// Click on an action pill: inject its chord into the focused window
+    /// (copy = Ctrl+C, cut = Ctrl+X, select = Ctrl+A) and keep the pills out a
+    /// moment longer so the user can chain (e.g. select → copy).
+    pub(crate) fn clip_action(&mut self, id: PillId) {
+        let key = match id {
+            PillId::ClipCopy => "c",
+            PillId::ClipCut => "x",
+            PillId::ClipSelectAll => "a",
+            _ => return,
+        };
+        crate::hypr::send_shortcut_active("CTRL", key);
+        self.arm_clip_actions_hide();
     }
 
     /// After the pointer leaves, hold briefly then collapse the preview.
@@ -793,13 +1008,17 @@ impl App {
         let target = if self.clip.peek_reveal { 1.0 } else { 0.0 };
         let (pt, moving) = ease_toward(self.clip.peek_t, target, dt, MORPH_RATE, MORPH_EPS);
         self.clip.peek_t = pt;
+        // Slide the action pills toward their selection-driven target.
+        let atarget = if self.clip.selection_active { 1.0 } else { 0.0 };
+        let (at, amoving) = ease_toward(self.clip.actions_t, atarget, dt, MORPH_RATE, MORPH_EPS);
+        self.clip.actions_t = at;
         // Keep the beat pulsing until its deadline, then clear it.
         let beating = self.clip.blink_until.is_some_and(|u| now < u);
         if !beating {
             self.clip.blink_until = None;
         }
         self.draw_options();
-        if moving || beating {
+        if moving || amoving || beating {
             self.schedule_clip_frame();
         } else {
             self.clip.last = None;

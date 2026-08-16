@@ -115,20 +115,25 @@ pub fn fullscreen_active() {
     dispatch("hl.dsp.window.fullscreen({ action = \"toggle\" })");
 }
 
-/// Inject a paste (Ctrl+V) into the currently focused window via this fork's
+/// Inject a modifier+key chord into the currently focused window via this fork's
 /// keystroke dispatcher `hl.dsp.send_shortcut{ mods, key, window }`. Used by the
-/// clipboard OPTION so a click pastes the current clip where the user is
-/// working. Targets the focused window explicitly — clicking the topbar doesn't
-/// move keyboard focus, so it's still the app the user was in. `key` is the
-/// lowercase `v` keysym so it sends Ctrl+V (not Ctrl+Shift+V).
-pub fn paste_active() {
+/// clipboard OPTION (paste / copy / cut / select-all) so a pill click acts where
+/// the user is working. Targets the focused window explicitly — clicking the
+/// topbar doesn't move keyboard focus, so it's still the app the user was in.
+/// `key` should be the lowercase keysym (e.g. `v`) so no implicit Shift is sent.
+pub fn send_shortcut_active(mods: &str, key: &str) {
     let Some(addr) = active_window() else {
-        debug!("paste: no active window to paste into");
+        debug!("send_shortcut: no active window for {mods}+{key}");
         return;
     };
     dispatch(&format!(
-        "hl.dsp.send_shortcut({{ mods = \"CTRL\", key = \"v\", window = \"address:{addr}\" }})"
+        "hl.dsp.send_shortcut({{ mods = \"{mods}\", key = \"{key}\", window = \"address:{addr}\" }})"
     ));
+}
+
+/// Inject a paste (Ctrl+V) into the focused window.
+pub fn paste_active() {
+    send_shortcut_active("CTRL", "v");
 }
 
 /// Give keyboard focus back to a window by address.
