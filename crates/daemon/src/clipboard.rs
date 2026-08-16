@@ -192,9 +192,13 @@ fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) 
 /// the presence, never the content, so nothing is stored. Respawns on
 /// exit/error like the clipboard watcher.
 fn primary_watch_loop(events: Sender<ClipEvent>) {
-    let mut present = false;
+    // The last selection we reported (`None` = empty), by content hash — so each
+    // *distinct* new selection re-triggers the pills, while an app re-asserting
+    // the identical selection doesn't. (Edge-only detection was wrong: the
+    // primary stays non-empty across selections, so it fired only once.)
+    let mut last: Option<u64> = None;
     loop {
-        match run_primary_watch(&events, &mut present) {
+        match run_primary_watch(&events, &mut last) {
             Ok(false) => return, // UI gone
             Ok(true) => debug!("clipboard: primary watch ended; respawning"),
             Err(e) => debug!("clipboard: primary watch error: {e}"),
@@ -203,7 +207,7 @@ fn primary_watch_loop(events: Sender<ClipEvent>) {
     }
 }
 
-fn run_primary_watch(events: &Sender<ClipEvent>, present: &mut bool) -> std::io::Result<bool> {
+fn run_primary_watch(events: &Sender<ClipEvent>, last: &mut Option<u64>) -> std::io::Result<bool> {
     let mut child = Command::new("wl-paste")
         .args(["--primary", "--watch", "sh", "-c", "printf '\\n'"])
         .stdout(Stdio::piped())
@@ -216,13 +220,16 @@ fn run_primary_watch(events: &Sender<ClipEvent>, present: &mut bool) -> std::io:
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         line?;
-        // Re-read presence in Rust (a trigger fires on every selection change).
-        let now_present = !paste_primary().trim().is_empty();
-        if now_present == *present {
-            continue; // only report edges (non-empty ⇄ empty)
+        // Re-read in Rust (a trigger fires on every selection change). Hash the
+        // content so a genuinely new selection lands even while primary stays
+        // non-empty; identical re-asserts are dropped.
+        let text = paste_primary();
+        let hash = (!text.trim().is_empty()).then(|| hash_bytes(text.as_bytes()));
+        if hash == *last {
+            continue;
         }
-        *present = now_present;
-        if events.send(ClipEvent::Selection(now_present)).is_err() {
+        *last = hash;
+        if events.send(ClipEvent::Selection(hash.is_some())).is_err() {
             let _ = child.kill();
             return Ok(false);
         }
