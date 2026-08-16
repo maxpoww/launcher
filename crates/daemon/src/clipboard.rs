@@ -56,11 +56,14 @@ const BEAT_PERIOD: Duration = Duration::from_millis(500);
 pub(crate) const ACTION_GAP: f32 = 6.0;
 /// While the action pills are up, poll the primary selection this often so they
 /// hide as soon as the user deselects (the `--watch` never fires on a clear).
-const SELECTION_POLL: Duration = Duration::from_millis(300);
+const SELECTION_POLL: Duration = Duration::from_millis(250);
+/// Consecutive empty polls required before hiding — debounces a single spurious
+/// empty read (e.g. mid-drag, or a transient) so the pills don't flicker.
+const SELECTION_MISS_LIMIT: u32 = 2;
 /// Safety cap on the poll: some apps never clear the primary on deselect, so
 /// without this the pills (and the poll) could linger forever. After this many
 /// ticks (~15s) with the selection still standing, retire them anyway.
-const MAX_POLL_TICKS: u32 = 50;
+const MAX_POLL_TICKS: u32 = 60;
 /// The three selection-action pills, in slide-out order.
 pub(crate) const ACTIONS: [(PillId, &str); 3] = [
     (PillId::ClipCopy, GLYPH_COPY),
@@ -613,6 +616,8 @@ pub(crate) struct ClipState {
     polling: bool,
     /// Poll ticks since the pills came up, for the runaway safety cap.
     poll_ticks: u32,
+    /// Consecutive empty selection reads, for the hide debounce.
+    miss_count: u32,
 }
 
 impl ClipState {
@@ -636,6 +641,7 @@ impl ClipState {
             actions_t: 0.0,
             polling: false,
             poll_ticks: 0,
+            miss_count: 0,
         }
     }
 }
@@ -870,6 +876,7 @@ impl App {
     /// deselect the watch never sees).
     fn on_clip_selection(&mut self, present: bool) {
         if present {
+            self.clip.miss_count = 0;
             if !self.clip.selection_active {
                 self.clip.selection_active = true;
                 self.clip.peek_reveal = false; // the preview yields to the actions
@@ -877,10 +884,15 @@ impl App {
                 self.schedule_clip_frame();
                 self.start_selection_poll();
             }
-        } else if !self.clip_cluster_hovered() {
-            // Deselected — retire the pills. Held while the pointer is on them so
-            // a click isn't yanked away; the next poll re-checks on leave.
-            self.hide_clip_actions();
+        } else {
+            // Deselected. Debounce a single spurious empty read (mid-drag, or a
+            // transient) so the pills don't flicker; hide only after a couple of
+            // consecutive misses. Held while the pointer is on them so a click
+            // isn't yanked away — the next poll re-checks on leave.
+            self.clip.miss_count += 1;
+            if self.clip.miss_count >= SELECTION_MISS_LIMIT && !self.clip_cluster_hovered() {
+                self.hide_clip_actions();
+            }
         }
     }
 
@@ -893,6 +905,7 @@ impl App {
         }
         self.clip.polling = true;
         self.clip.poll_ticks = 0;
+        self.clip.miss_count = 0;
         self.schedule_selection_poll();
     }
 
@@ -919,6 +932,7 @@ impl App {
     fn hide_clip_actions(&mut self) {
         if self.clip.selection_active {
             self.clip.selection_active = false;
+            self.clip.miss_count = 0;
             self.clip.last = None;
             self.schedule_clip_frame();
         }
