@@ -1,0 +1,587 @@
+//! The clipboard OPTION's data plane.
+//!
+//! A background worker watches the Wayland clipboard (via `wl-paste --watch`,
+//! the canonical wlr-data-control client — focus-independent, unlike our own
+//! `wl_data_device` which only sees the selection while the surface holds
+//! keyboard focus) and reports each change as a classified [`ClipEntry`]: plain
+//! **text**, a **files** copy (`text/uri-list`), or an **image**. The UI thread
+//! folds those into a browsable, persisted history; picking an entry sends a
+//! [`ClipCommand::Copy`] back so the worker restores it with `wl-copy`.
+//!
+//! Same discipline as the notification worker and the app indexer: it lives on
+//! its own thread and talks to the calloop loop **only** over channels (one
+//! event loop; shared state stays on it). It respawns the watcher with backoff
+//! and never brings the loop down.
+//!
+//! The engine's `selection` collector still senses the *latest* clipboard for
+//! the mind's ambient awareness; this OPTION owns the rich history and the
+//! copy-back, exactly the way notifications are split between the engine's
+//! summary collector and the notification OPTION's live list.
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use calloop::channel::Sender;
+use serde::{Deserialize, Serialize};
+use tracing::{debug, warn};
+
+use crate::App;
+
+/// On-disk history store (in the daemon's XDG data dir, beside the notif one).
+const HISTORY_FILE: &str = "clipboard-history.json";
+/// How many entries to retain; older ones (and their image side files) drop.
+const MAX_HISTORY: usize = 200;
+/// How long to wait before respawning the watcher after it exits/errors.
+const RESPAWN: Duration = Duration::from_secs(3);
+/// Max characters of clipboard text retained per entry (the clipboard can hold
+/// anything — keep the store bounded).
+const TEXT_CAP: usize = 100_000;
+/// Max characters shown on an entry's one-line preview.
+const PREVIEW_CAP: usize = 200;
+
+/// What a captured clip is, so the UI can render it appropriately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipKind {
+    /// Plain text (snippets, URLs, code).
+    Text,
+    /// A `text/uri-list` copy from a file manager (one or more `file://` URIs).
+    Files,
+    /// An image (PNG/other), stored as bytes on disk.
+    Image,
+}
+
+/// One captured clipboard entry. Serialized directly to the history store; image
+/// pixels live in a side file (`image_path`), never inline, so the JSON stays
+/// small.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClipEntry {
+    /// Stable per-session id (assigned by the UI on capture; `0` from the
+    /// worker). Used to address an entry for copy-back / removal.
+    #[serde(default)]
+    pub id: u64,
+    pub kind: ClipKind,
+    pub timestamp_ms: u64,
+    /// One-line label for the collapsed preview / list row.
+    pub preview: String,
+    /// Full text payload for [`ClipKind::Text`] / [`ClipKind::Files`] (used for
+    /// copy-back and search); empty for an image.
+    #[serde(default)]
+    pub text: String,
+    /// The MIME type to restore the clip with (`text/plain;charset=utf-8`,
+    /// `text/uri-list`, `image/png`, …).
+    pub mime: String,
+    /// Side file holding the original image bytes, for an image clip.
+    #[serde(default)]
+    pub image_path: Option<PathBuf>,
+    /// Image pixel dimensions (0 for text/files).
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    /// Content hash, for dedup (a re-copied clip moves to the top instead of
+    /// piling up).
+    pub hash: u64,
+}
+
+/// A clipboard change the worker observed.
+pub enum ClipEvent {
+    Captured(ClipEntry),
+}
+
+/// A UI intent for the worker.
+// Constructed by `copy_clip`, which the history box (stage 2) drives; wired end
+// to end now so the copy-back path is ready when the UI lands.
+#[allow(dead_code)]
+pub enum ClipCommand {
+    /// Restore this payload to the system clipboard (`wl-copy`).
+    Copy {
+        mime: String,
+        text: String,
+        image_path: Option<PathBuf>,
+    },
+}
+
+/// Handle to the clipboard worker: send [`ClipCommand`]s. Dropping it stops the
+/// command side after its current recv.
+#[allow(dead_code)] // `send` is exercised by the box UI (stage 2).
+pub struct ClipHandle {
+    tx: mpsc::Sender<ClipCommand>,
+}
+
+impl ClipHandle {
+    pub fn send(&self, cmd: ClipCommand) {
+        if let Err(e) = self.tx.send(cmd) {
+            warn!("clipboard worker gone, dropping command: {e}");
+        }
+    }
+}
+
+/// Start the clipboard worker. `events` is the calloop channel the UI loop
+/// listens on; the returned [`ClipHandle`] carries copy-back commands.
+pub fn spawn(events: Sender<ClipEvent>) -> ClipHandle {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("clipboard".into())
+        .spawn(move || run_worker(events, rx))
+        .expect("spawn clipboard worker thread");
+    ClipHandle { tx }
+}
+
+/// Worker entry: a detached watch loop feeding `events`, and this thread serving
+/// copy-back commands until the handle is dropped.
+fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) {
+    std::thread::Builder::new()
+        .name("clipboard-watch".into())
+        .spawn(move || watch_loop(events))
+        .expect("spawn clipboard watch thread");
+
+    while let Ok(cmd) = commands.recv() {
+        copy_back(cmd);
+    }
+}
+
+/// Restore a payload to the clipboard with `wl-copy` (which forks to serve the
+/// selection, so the write returns promptly).
+fn copy_back(cmd: ClipCommand) {
+    let ClipCommand::Copy {
+        mime,
+        text,
+        image_path,
+    } = cmd;
+    let mut c = Command::new("wl-copy");
+    c.arg("--type").arg(&mime).stdin(Stdio::piped());
+    let data = match &image_path {
+        Some(path) => match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!("clipboard: cannot read image {path:?} for copy-back: {e}");
+                return;
+            }
+        },
+        None => text.into_bytes(),
+    };
+    match c.spawn() {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                if let Err(e) = stdin.write_all(&data) {
+                    warn!("clipboard: wl-copy stdin write failed: {e}");
+                }
+            }
+            let _ = child.wait();
+        }
+        Err(e) => warn!("clipboard: cannot spawn wl-copy: {e}"),
+    }
+}
+
+/// Spawn `wl-paste --watch` (a trigger that prints a newline per change) and, on
+/// each change, re-read + classify the clipboard. Respawns on exit/error.
+fn watch_loop(events: Sender<ClipEvent>) {
+    let mut last_hash: Option<u64> = None;
+    loop {
+        match run_watch(&events, &mut last_hash) {
+            // UI gone (channel closed): stop for good.
+            Ok(false) => return,
+            Ok(true) => debug!("clipboard: wl-paste --watch ended; respawning"),
+            Err(e) => debug!("clipboard: watch error: {e}"),
+        }
+        std::thread::sleep(RESPAWN);
+    }
+}
+
+/// `Ok(true)` = the watcher ended, respawn; `Ok(false)` = the UI is gone, stop.
+fn run_watch(events: &Sender<ClipEvent>, last_hash: &mut Option<u64>) -> std::io::Result<bool> {
+    // The command is a bare trigger: it fires on every selection change (any
+    // type, including image-only), and we re-read the content ourselves so the
+    // classification and any binary handling stays in Rust.
+    let mut child = Command::new("wl-paste")
+        .args(["--watch", "sh", "-c", "printf '\\n'"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("no stdout"))?;
+    let reader = BufReader::new(stdout);
+    for line in reader.lines() {
+        line?; // each line = "the clipboard changed"
+        if let Some(entry) = capture(last_hash) {
+            if events.send(ClipEvent::Captured(entry)).is_err() {
+                // UI gone: stop the watcher (and let the child be reaped).
+                let _ = child.kill();
+                return Ok(false);
+            }
+        }
+    }
+    let _ = child.wait();
+    Ok(true)
+}
+
+/// Read and classify the current clipboard, or `None` if it's empty, unchanged,
+/// or an unsupported type.
+fn capture(last_hash: &mut Option<u64>) -> Option<ClipEntry> {
+    let types = list_types();
+    if types.is_empty() {
+        return None;
+    }
+    let entry = if let Some(mime) = image_mime(&types) {
+        classify_image(&mime)?
+    } else if types.iter().any(|t| t == "text/uri-list") {
+        classify_files(&paste_text(Some("text/uri-list")))?
+    } else if types.iter().any(|t| t.starts_with("text/")) {
+        classify_text(&paste_text(None), best_text_mime(&types))?
+    } else {
+        return None;
+    };
+    // Drop an unchanged capture (our own copy-back re-fires the watch, and some
+    // apps re-assert the selection repeatedly).
+    if *last_hash == Some(entry.hash) {
+        return None;
+    }
+    *last_hash = Some(entry.hash);
+    Some(entry)
+}
+
+fn classify_text(content: &str, mime: String) -> Option<ClipEntry> {
+    if content.trim().is_empty() {
+        return None;
+    }
+    let text: String = content.chars().take(TEXT_CAP).collect();
+    Some(ClipEntry {
+        hash: hash_bytes(text.as_bytes()),
+        preview: one_line(&text),
+        kind: ClipKind::Text,
+        mime,
+        text,
+        ..base_entry()
+    })
+}
+
+fn classify_files(uri_list: &str) -> Option<ClipEntry> {
+    let names = file_names(uri_list);
+    if names.is_empty() {
+        return None;
+    }
+    Some(ClipEntry {
+        hash: hash_bytes(uri_list.as_bytes()),
+        preview: cap(&names.join(", "), PREVIEW_CAP),
+        kind: ClipKind::Files,
+        mime: "text/uri-list".into(),
+        text: uri_list.to_owned(),
+        ..base_entry()
+    })
+}
+
+fn classify_image(mime: &str) -> Option<ClipEntry> {
+    let bytes = paste_bytes(mime);
+    if bytes.is_empty() {
+        return None;
+    }
+    let hash = hash_bytes(&bytes);
+    let (width, height) = image_dimensions(&bytes).unwrap_or((0, 0));
+    let ext = mime.rsplit('/').next().unwrap_or("bin");
+    let path = crate::persist::data_path(&format!("clipboard-images/{hash:016x}.{ext}"));
+    crate::persist::write_bytes("clipboard-image", &path, &bytes);
+    let preview = if width > 0 {
+        format!("Image · {width}×{height}")
+    } else {
+        "Image".into()
+    };
+    Some(ClipEntry {
+        hash,
+        preview,
+        kind: ClipKind::Image,
+        mime: mime.to_owned(),
+        image_path: Some(path),
+        width,
+        height,
+        ..base_entry()
+    })
+}
+
+/// The common defaults for a freshly captured entry (id assigned by the UI).
+fn base_entry() -> ClipEntry {
+    ClipEntry {
+        id: 0,
+        kind: ClipKind::Text,
+        timestamp_ms: now_ms(),
+        preview: String::new(),
+        text: String::new(),
+        mime: String::new(),
+        image_path: None,
+        width: 0,
+        height: 0,
+        hash: 0,
+    }
+}
+
+/// `wl-paste --list-types`, one MIME per line (duplicates and legacy pseudo-
+/// types like `TEXT`/`STRING` included — we only match on them).
+fn list_types() -> Vec<String> {
+    run_stdout(Command::new("wl-paste").arg("--list-types"))
+        .map(|out| {
+            String::from_utf8_lossy(&out)
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn paste_text(mime: Option<&str>) -> String {
+    let mut c = Command::new("wl-paste");
+    c.arg("--no-newline");
+    if let Some(m) = mime {
+        c.arg("--type").arg(m);
+    }
+    run_stdout(&mut c)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
+}
+
+fn paste_bytes(mime: &str) -> Vec<u8> {
+    run_stdout(Command::new("wl-paste").args(["--no-newline", "--type", mime])).unwrap_or_default()
+}
+
+/// Run `cmd`, returning stdout on a zero exit, else `None`.
+fn run_stdout(cmd: &mut Command) -> Option<Vec<u8>> {
+    match cmd.stderr(Stdio::null()).output() {
+        Ok(out) if out.status.success() => Some(out.stdout),
+        Ok(_) => None,
+        Err(e) => {
+            warn!("clipboard: {:?} failed: {e}", cmd.get_program());
+            None
+        }
+    }
+}
+
+/// The best image MIME on offer (prefer PNG), or `None`.
+fn image_mime(types: &[String]) -> Option<String> {
+    if types.iter().any(|t| t == "image/png") {
+        return Some("image/png".into());
+    }
+    types.iter().find(|t| t.starts_with("image/")).cloned()
+}
+
+/// The most specific text MIME to copy back with (prefer a charset-tagged one).
+fn best_text_mime(types: &[String]) -> String {
+    types
+        .iter()
+        .find(|t| t.starts_with("text/plain") && t.contains("charset"))
+        .or_else(|| types.iter().find(|t| *t == "text/plain"))
+        .cloned()
+        .unwrap_or_else(|| "text/plain".into())
+}
+
+/// Parse a `text/uri-list` into display basenames (percent-decoded `file://`).
+fn file_names(uri_list: &str) -> Vec<String> {
+    uri_list
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let path = l.strip_prefix("file://").unwrap_or(l);
+            let decoded = percent_decode(path);
+            decoded
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or(&decoded)
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Minimal percent-decoding for `file://` URIs (spaces etc.).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// First non-empty line, whitespace-collapsed and capped.
+fn one_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    cap(&line.split_whitespace().collect::<Vec<_>>().join(" "), PREVIEW_CAP)
+}
+
+fn cap(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_owned()
+    } else {
+        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h = DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The UI-side clipboard history: the browsable list the OPTION renders, plus
+/// the worker handle for copy-back. Persisted across sessions.
+pub(crate) struct ClipState {
+    // Read by `copy_clip`, which the history box (stage 2) drives.
+    #[allow(dead_code)]
+    pub handle: Option<ClipHandle>,
+    pub history: Vec<ClipEntry>,
+    /// Next id to hand a freshly captured entry (monotonic, past any reloaded).
+    next_id: u64,
+}
+
+impl ClipState {
+    pub fn new(handle: Option<ClipHandle>) -> Self {
+        let mut history: Vec<ClipEntry> =
+            crate::persist::read_json(&crate::persist::data_path(HISTORY_FILE)).unwrap_or_default();
+        history.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms));
+        history.truncate(MAX_HISTORY);
+        let next_id = history.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+        Self {
+            handle,
+            history,
+            next_id,
+        }
+    }
+}
+
+impl App {
+    /// A clipboard change arrived from the worker: fold it into the history
+    /// (newest first, de-duplicated) and persist.
+    pub(crate) fn on_clip_event(&mut self, ev: ClipEvent) {
+        match ev {
+            ClipEvent::Captured(mut entry) => {
+                // A re-copied clip moves to the top rather than piling up; it
+                // keeps its original id so any UI reference stays valid.
+                if let Some(pos) = self.clip.history.iter().position(|e| e.hash == entry.hash) {
+                    entry.id = self.clip.history.remove(pos).id;
+                } else {
+                    entry.id = self.clip.next_id;
+                    self.clip.next_id += 1;
+                }
+                self.clip.history.insert(0, entry);
+                // Trim the tail, cleaning up any image side files it owned.
+                while self.clip.history.len() > MAX_HISTORY {
+                    if let Some(old) = self.clip.history.pop() {
+                        if let Some(p) = &old.image_path {
+                            let _ = std::fs::remove_file(p);
+                        }
+                    }
+                }
+                self.save_clip_history();
+                debug!("clipboard: captured; {} entries", self.clip.history.len());
+            }
+        }
+    }
+
+    /// Restore history entry `idx` to the system clipboard (a card click).
+    #[allow(dead_code)] // wired to the history box in stage 2.
+    pub(crate) fn copy_clip(&self, idx: usize) {
+        let Some(e) = self.clip.history.get(idx) else {
+            return;
+        };
+        if let Some(h) = &self.clip.handle {
+            h.send(ClipCommand::Copy {
+                mime: e.mime.clone(),
+                text: e.text.clone(),
+                image_path: e.image_path.clone(),
+            });
+        }
+    }
+
+    fn save_clip_history(&self) {
+        crate::persist::write_json(
+            "clipboard-history",
+            &crate::persist::data_path(HISTORY_FILE),
+            &self.clip.history,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_classifies_with_preview() {
+        let e = classify_text("  hello  world  \nsecond line", "text/plain".into()).unwrap();
+        assert_eq!(e.kind, ClipKind::Text);
+        assert_eq!(e.preview, "hello world");
+        assert!(e.hash != 0);
+    }
+
+    #[test]
+    fn blank_text_is_dropped() {
+        assert!(classify_text("   \n\t ", "text/plain".into()).is_none());
+    }
+
+    #[test]
+    fn files_show_basenames() {
+        let list = "file:///home/max/a%20b.txt\nfile:///home/max/photos/pic.png\n";
+        let e = classify_files(list).unwrap();
+        assert_eq!(e.kind, ClipKind::Files);
+        assert_eq!(e.preview, "a b.txt, pic.png");
+        assert_eq!(e.mime, "text/uri-list");
+    }
+
+    #[test]
+    fn empty_uri_list_is_dropped() {
+        assert!(classify_files("# comment only\n").is_none());
+    }
+
+    #[test]
+    fn prefers_png_image_mime() {
+        let types = vec!["image/bmp".into(), "image/png".into()];
+        assert_eq!(image_mime(&types).as_deref(), Some("image/png"));
+        assert_eq!(
+            image_mime(&["image/jpeg".into()]).as_deref(),
+            Some("image/jpeg")
+        );
+        assert!(image_mime(&["text/plain".into()]).is_none());
+    }
+
+    #[test]
+    fn preview_is_capped() {
+        let big = "x".repeat(500);
+        let e = classify_text(&big, "text/plain".into()).unwrap();
+        assert_eq!(e.preview.chars().count(), PREVIEW_CAP);
+        assert!(e.preview.ends_with('…'));
+    }
+}

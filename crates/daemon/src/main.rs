@@ -12,6 +12,7 @@ mod animation;
 mod applier;
 mod apps;
 mod boxes;
+mod clipboard;
 mod content;
 mod dragging;
 mod files;
@@ -219,6 +220,16 @@ fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Clipboard OPTION: a worker watches the Wayland clipboard and feeds the
+    // browsable history; copy-back commands ride back over the handle. Only
+    // spawned when the topbar (its host) is on.
+    let (clip_handle, clip_rx) = if config.options.enabled {
+        let (tx, rx) = channel::channel::<clipboard::ClipEvent>();
+        (Some(clipboard::spawn(tx)), Some(rx))
+    } else {
+        (None, None)
+    };
+
     // Notification OPTION icon resolver: turns a notification's app_icon /
     // desktop_entry into a card-tile mip chain off the compositor thread.
     let (notif_icons_handle, notif_icon_rx) = if config.options.enabled {
@@ -269,6 +280,7 @@ fn main() -> anyhow::Result<()> {
         options_ctrl: options::CtrlAnim::default(),
         options_clock_meta: options::ClockMeta::default(),
         notif: notif::NotifState::new(notif_handle),
+        clip: clipboard::ClipState::new(clip_handle),
         notif_icons_handle,
         notif_icon_chains: Vec::new(),
         notif_icon_slot: HashMap::new(),
@@ -460,6 +472,17 @@ fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("registering notif channel: {e}"))?;
     }
 
+    if let Some(clip_rx) = clip_rx {
+        event_loop
+            .handle()
+            .insert_source(clip_rx, |event, _, app| {
+                if let channel::Event::Msg(ev) = event {
+                    app.on_clip_event(ev);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("registering clipboard channel: {e}"))?;
+    }
+
     if let Some(notif_icon_rx) = notif_icon_rx {
         event_loop
             .handle()
@@ -627,6 +650,8 @@ pub struct App {
     options_clock_meta: options::ClockMeta,
     /// Notification OPTION: bell + peek + history dropdown (see [`crate::notif`]).
     notif: notif::NotifState,
+    /// Clipboard OPTION: watched history + copy-back (see [`crate::clipboard`]).
+    clip: clipboard::ClipState,
     /// Off-thread resolver turning a notification's icon hint into a card-tile
     /// mip chain (`None` when the topbar is disabled).
     notif_icons_handle: Option<notif_icons::NotifIcons>,
