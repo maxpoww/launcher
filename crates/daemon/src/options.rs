@@ -72,6 +72,7 @@ const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
 const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 pub(crate) const GLYPH_BELL: &str = "\u{f0f3}"; // fa-bell (notification OPTION)
 pub(crate) const GLYPH_BELL_SLASH: &str = "\u{f1f6}"; // fa-bell-slash (mute pill)
+pub(crate) const GLYPH_CLIPBOARD: &str = "\u{f0ea}"; // fa-clipboard (clipboard OPTION)
 
 // Pill backgrounds (resting + hover) are adaptive washes — see
 // `options_rest_wash` / `options_hover_wash`.
@@ -161,6 +162,9 @@ fn draw_z(id: PillId) -> u8 {
         // on top of it, capping its right end as it grows out from behind.
         PillId::Notif => 6,
         PillId::NotifMute => 7,
+        // The clipboard OPTION is independent (a gap left of the notif cluster),
+        // so its z is only relative to itself.
+        PillId::Clipboard => 8,
     }
 }
 
@@ -188,6 +192,10 @@ pub(crate) enum PillId {
     /// The mute-notifications pill: rests directly *behind* the bell and is
     /// uncovered (to the bell's right) as the bell slides left to peek open.
     NotifMute,
+    /// The clipboard OPTION — a clipboard glyph that metamorphoses on hover into
+    /// a preview of the latest clip and a browsable history (see
+    /// [`crate::clipboard`]).
+    Clipboard,
     Window,
     Close,
     Pseudo,
@@ -386,6 +394,19 @@ impl App {
             glyph_color: None,
         });
 
+        // Clipboard OPTION: a clipboard glyph a gap to the left of the
+        // notification cluster (whose resting left edge is the mute pill). Like
+        // the bell it metamorphoses — its rect is the whole morphing shape, right
+        // edge pinned; `crate::clipboard` draws it.
+        let notif_left = clock_left - OPTION_GAP - ph;
+        pills.push(Pill {
+            id: PillId::Clipboard,
+            rect: self.clip_geom(notif_left - OPTION_GAP, y, ph),
+            text: GLYPH_CLIPBOARD.to_owned(),
+            family: Some(NERD),
+            glyph_color: None,
+        });
+
         // The window name pill is centred *alone* (so it doesn't shift when the
         // buttons reveal); the control circles flank it at fixed resting spots:
         //   [X] [window name] [pseudo] [float] [fullscreen]
@@ -542,6 +563,11 @@ impl App {
             // preview/box that grows out from behind it.
             if pill.id == PillId::NotifMute {
                 self.push_notif_mute(scene, pill.rect);
+                continue;
+            }
+            // The clipboard OPTION draws itself (glyph ↔ preview metamorphosis).
+            if pill.id == PillId::Clipboard {
+                self.push_clip_pill(scene, pill.rect);
                 continue;
             }
             // Reveal animation for the control buttons: slide out horizontally
@@ -822,6 +848,7 @@ impl App {
                     self.update_ctrl_reveal(); // fade the buttons out
                     self.update_clock_meta(); // start the date's hold-then-collapse
                     self.update_notif_reveal(); // collapse the bell's peek/history
+                    self.update_clip_reveal(); // collapse the clipboard's peek
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
                     self.draw_options();
                     // Revealed in fullscreen: conceal again shortly after leave.
@@ -894,6 +921,7 @@ impl App {
         self.update_ctrl_reveal();
         self.update_clock_meta();
         self.update_notif_reveal();
+        self.update_clip_reveal();
         // The hit target (card / control / footer) moves within the same (Notif)
         // pill, so redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
@@ -1140,7 +1168,11 @@ impl App {
                     Shape::Default
                 }
             }
-            Some(PillId::Clock) | Some(PillId::Window) | None => Shape::Default,
+            // The clipboard element just previews on hover (its clickable
+            // history box lands in a later stage) — default cursor for now.
+            Some(PillId::Clock) | Some(PillId::Window) | Some(PillId::Clipboard) | None => {
+                Shape::Default
+            }
             Some(_) => Shape::Pointer, // any control circle
         };
         if self.cursor_now != Some(shape) {
