@@ -54,9 +54,13 @@ const BEAT_DURATION: Duration = Duration::from_millis(500);
 const BEAT_PERIOD: Duration = Duration::from_millis(500);
 /// Gap between the copy/cut/select action pills (and from the small pill).
 pub(crate) const ACTION_GAP: f32 = 6.0;
-/// How long the action pills stay out after a selection before auto-hiding (with
-/// no hover). Re-armed on each new selection; hovering the cluster holds them.
-const ACTIONS_HOLD: Duration = Duration::from_secs(4);
+/// While the action pills are up, poll the primary selection this often so they
+/// hide as soon as the user deselects (the `--watch` never fires on a clear).
+const SELECTION_POLL: Duration = Duration::from_millis(300);
+/// Safety cap on the poll: some apps never clear the primary on deselect, so
+/// without this the pills (and the poll) could linger forever. After this many
+/// ticks (~15s) with the selection still standing, retire them anyway.
+const MAX_POLL_TICKS: u32 = 50;
 /// The three selection-action pills, in slide-out order.
 pub(crate) const ACTIONS: [(PillId, &str); 3] = [
     (PillId::ClipCopy, GLYPH_COPY),
@@ -144,6 +148,11 @@ pub enum ClipCommand {
     /// primary selection rather than injecting a Ctrl+C into the focused app
     /// (whose active highlight may already be gone).
     CopySelection,
+    /// Check whether the primary selection still holds text and report it back as
+    /// a [`ClipEvent::Selection`]. Polled by the UI while the action pills are up
+    /// (the `--watch` never fires on a *clear*, so deselect can only be seen by
+    /// polling).
+    PollSelection,
 }
 
 /// Handle to the clipboard worker: send [`ClipCommand`]s. Dropping it stops the
@@ -176,6 +185,7 @@ pub fn spawn(events: Sender<ClipEvent>) -> ClipHandle {
 /// until the handle is dropped.
 fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) {
     let primary_events = events.clone();
+    let cmd_events = events.clone();
     std::thread::Builder::new()
         .name("clipboard-watch".into())
         .spawn(move || watch_loop(events))
@@ -187,6 +197,10 @@ fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) 
 
     while let Ok(cmd) = commands.recv() {
         match cmd {
+            ClipCommand::PollSelection => {
+                let present = !paste_primary().trim().is_empty();
+                let _ = cmd_events.send(ClipEvent::Selection(present));
+            }
             ClipCommand::Copy {
                 mime,
                 text,
@@ -594,8 +608,11 @@ pub(crate) struct ClipState {
     /// Slide-out progress of the action pills: 0 = tucked behind the small pill,
     /// 1 = fully fanned out to the right.
     actions_t: f32,
-    /// When the action pills auto-hide (re-armed on each selection / hover).
-    actions_hide_deadline: Option<Instant>,
+    /// Whether the primary-selection poll loop is running (so it isn't started
+    /// twice). Runs only while the pills are up.
+    polling: bool,
+    /// Poll ticks since the pills came up, for the runaway safety cap.
+    poll_ticks: u32,
 }
 
 impl ClipState {
@@ -617,7 +634,8 @@ impl ClipState {
             blink_until: None,
             selection_active: false,
             actions_t: 0.0,
-            actions_hide_deadline: None,
+            polling: false,
+            poll_ticks: 0,
         }
     }
 }
@@ -826,15 +844,6 @@ impl App {
     /// after the pointer leaves (mirrors the bell's peek). Hovering either the
     /// small pill or the box it reveals holds it open.
     pub(crate) fn update_clip_reveal(&mut self) {
-        // Action pills out: hovering the cluster holds them; leaving re-arms the
-        // auto-hide so they don't linger once the pointer moves on.
-        if self.clip.selection_active {
-            if self.clip_cluster_hovered() {
-                self.clip.actions_hide_deadline = None;
-            } else if self.clip.actions_hide_deadline.is_none() {
-                self.arm_clip_actions_hide();
-            }
-        }
         // The hover preview is suppressed while the action pills occupy the space
         // to the right of the small pill.
         let on = !self.clip.selection_active
@@ -855,34 +864,53 @@ impl App {
         }
     }
 
-    /// The brain reported a selection edge: reveal the copy/cut/select pills, or
-    /// retire them when the selection is gone.
+    /// The brain reported the selection's presence: show the copy/cut/select
+    /// pills while there's a selection, hide them when it's gone. Fed both by the
+    /// `--watch` (instant on a new selection) and the poll (which catches the
+    /// deselect the watch never sees).
     fn on_clip_selection(&mut self, present: bool) {
         if present {
-            self.clip.selection_active = true;
-            self.clip.peek_reveal = false; // the preview yields to the actions
-            self.arm_clip_actions_hide();
-            self.clip.last = None;
-            self.schedule_clip_frame();
-        } else {
+            if !self.clip.selection_active {
+                self.clip.selection_active = true;
+                self.clip.peek_reveal = false; // the preview yields to the actions
+                self.clip.last = None;
+                self.schedule_clip_frame();
+                self.start_selection_poll();
+            }
+        } else if !self.clip_cluster_hovered() {
+            // Deselected — retire the pills. Held while the pointer is on them so
+            // a click isn't yanked away; the next poll re-checks on leave.
             self.hide_clip_actions();
         }
     }
 
-    /// (Re)arm the action pills' auto-hide. Hovering the cluster cancels it (see
-    /// `update_clip_reveal`); the timer only fires if still un-hovered.
-    fn arm_clip_actions_hide(&mut self) {
-        let deadline = Instant::now() + ACTIONS_HOLD;
-        self.clip.actions_hide_deadline = Some(deadline);
-        let timer = Timer::from_duration(ACTIONS_HOLD);
+    /// Poll the primary selection while the pills are up so a deselect hides
+    /// them promptly (`wl-paste --watch` never fires on a clear). Self-stops once
+    /// the pills are down.
+    fn start_selection_poll(&mut self) {
+        if self.clip.polling {
+            return;
+        }
+        self.clip.polling = true;
+        self.clip.poll_ticks = 0;
+        self.schedule_selection_poll();
+    }
+
+    fn schedule_selection_poll(&mut self) {
+        let timer = Timer::from_duration(SELECTION_POLL);
         let _ = self
             .loop_handle
-            .insert_source(timer, move |_, _, app: &mut App| {
-                if app.clip.actions_hide_deadline == Some(deadline) {
-                    app.clip.actions_hide_deadline = None;
-                    if !app.clip_cluster_hovered() {
-                        app.hide_clip_actions();
-                    }
+            .insert_source(timer, |_, _, app: &mut App| {
+                if !app.clip.selection_active {
+                    app.clip.polling = false;
+                } else if app.clip.poll_ticks >= MAX_POLL_TICKS && !app.clip_cluster_hovered() {
+                    // The app never cleared the primary; stop the runaway poll.
+                    app.clip.polling = false;
+                    app.hide_clip_actions();
+                } else {
+                    app.clip.poll_ticks += 1;
+                    app.send_clip(ClipCommand::PollSelection);
+                    app.schedule_selection_poll();
                 }
                 TimeoutAction::Drop
             });
@@ -891,7 +919,6 @@ impl App {
     fn hide_clip_actions(&mut self) {
         if self.clip.selection_active {
             self.clip.selection_active = false;
-            self.clip.actions_hide_deadline = None;
             self.clip.last = None;
             self.schedule_clip_frame();
         }
@@ -984,8 +1011,9 @@ impl App {
                 self.hide_clip_actions();
             }
             PillId::ClipSelectAll => {
+                // Only the app can select-all; the poll keeps the pills up while
+                // the (now full) selection stands, so the user can chain to copy.
                 crate::hypr::send_shortcut_active("CTRL", "a");
-                self.arm_clip_actions_hide();
             }
             _ => {}
         }
