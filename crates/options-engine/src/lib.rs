@@ -1,7 +1,7 @@
 //! # options-engine — the OPTIONS Context Core ("the Brain", sensing half)
 //!
 //! The headless perception engine behind **OPTIONS**, the reactive desktop
-//! surface at the heart of **StandardOS** ("Standard OPTIONS"). OPTIONS gives
+//! surface at the heart of **Golem**. OPTIONS gives
 //! the user the right tool or information at the right moment and clears away
 //! the rest — guiding diegetically, without breaking immersion. That requires
 //! the system to continuously *read your actions* (pillar 2) so it can later
@@ -67,5 +67,6 @@ pub use mind::{
 };
 pub use state::{
     ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, DeployHealth,
-    GitContext, Health, Layer, LayerHealth, MediaState, SystemMetrics, TextSelection,
+    GitContext, Health, Layer, LayerHealth, MediaState, NotificationContext, SystemMetrics,
+    TextSelection,
 };

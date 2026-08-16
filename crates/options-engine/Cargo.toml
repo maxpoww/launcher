@@ -3,7 +3,7 @@ name = "options-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The OPTIONS Context Core: a headless, async engine that senses desktop context for the OPTIONS reactive surface (StandardOS)."
+description = "The OPTIONS Context Core: a headless, async engine that senses desktop context for the OPTIONS reactive surface (Golem)."
 
 [dependencies]
 anyhow = { workspace = true }

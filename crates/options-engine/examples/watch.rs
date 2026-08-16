@@ -52,6 +52,13 @@ async fn main() {
             au.default_sink_volume,
             if au.is_muted { " MUTED" } else { "" }
         );
+        let n = &ctx.notifications;
+        if n.active_count > 0 || ctx.health.notifications.alive {
+            println!(
+                "       notif: count={} critical={} latest='{}' — '{}'",
+                n.active_count, n.has_critical, n.latest_app, n.latest_summary
+            );
+        }
         if let Some(m) = &ctx.media {
             println!(
                 "      ♪ {} — {} · {} [{}]",

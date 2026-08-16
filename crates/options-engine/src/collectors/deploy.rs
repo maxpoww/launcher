@@ -9,7 +9,7 @@
 //!
 //! When they diverge, deploy state has gone invisible-but-wrong: a switch that
 //! didn't activate, or a newer generation built but not yet booted. Surfacing
-//! that at the right moment is the StandardOS dogfood of the OPTIONS pillars.
+//! that at the right moment is the Golem dogfood of the OPTIONS pillars.
 //!
 //! Born from a real incident (2026-07-31): a sticky systemd-boot EFI default
 //! silently kept reboots on a 2-day-old generation while `nixos-rebuild switch`

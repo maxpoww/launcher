@@ -8,7 +8,7 @@
 
 use crate::state::{
     ActiveWindow, AppInternalContext, AudioState, DeployHealth, GitContext, Layer, MediaState,
-    SystemMetrics, TextSelection,
+    NotificationContext, SystemMetrics, TextSelection,
 };
 
 /// A partial change to the context. Only the variants the current collectors
@@ -42,6 +42,8 @@ pub enum ContextDelta {
     Audio(AudioState),
     /// NixOS deploy health (generation drift between booted/current/latest).
     Deploy(DeployHealth),
+    /// The live (unread) notification summary from the OPTIONS notification daemon.
+    Notifications(NotificationContext),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

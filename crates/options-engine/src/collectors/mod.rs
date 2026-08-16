@@ -12,5 +12,6 @@ pub mod deploy;
 pub mod git;
 pub mod hyprland;
 pub mod media;
+pub mod notifications;
 pub mod selection;
 pub mod system;

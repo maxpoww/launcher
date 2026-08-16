@@ -75,6 +75,24 @@ pub struct AudioState {
     pub is_muted: bool,
 }
 
+/// A summary of the live (unread) notifications the OPTIONS notification daemon
+/// is holding. Sensed from `org.options.Notifications` — the mind turns this into
+/// a "you have a critical notification / N unread" affordance. Kept to a summary
+/// (count + worst urgency + the newest one's identity), not the full list: the
+/// context model surfaces *whether it's worth attention*, and the notification
+/// OPTION itself owns the rich list + interaction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationContext {
+    /// How many notifications are currently active (unread) on the daemon.
+    pub active_count: usize,
+    /// Whether any active notification is Critical urgency.
+    pub has_critical: bool,
+    /// The newest active notification's app name (for the affordance detail).
+    pub latest_app: String,
+    /// The newest active notification's summary line.
+    pub latest_summary: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemMetrics {
     pub cpu_usage_pct: f32,
@@ -123,6 +141,10 @@ pub enum Layer {
     /// Tracked separately from [`Layer::Hardware`] so its liveness reflects the
     /// deploy sensor alone (reading the nix profiles), not the /proc sampler.
     System,
+    /// Layer 4 (part) — the OPTIONS notification daemon's live list, sensed over
+    /// `org.options.Notifications`. Its own layer so liveness reflects the
+    /// notification bus alone (the daemon being reachable).
+    Notifications,
 }
 
 /// Liveness and freshness of one collector layer.
@@ -146,6 +168,7 @@ pub struct Health {
     pub behavior: LayerHealth,
     pub hardware: LayerHealth,
     pub system: LayerHealth,
+    pub notifications: LayerHealth,
 }
 
 impl Health {
@@ -157,6 +180,7 @@ impl Health {
             Layer::Behavior => &mut self.behavior,
             Layer::Hardware => &mut self.hardware,
             Layer::System => &mut self.system,
+            Layer::Notifications => &mut self.notifications,
         }
     }
 
@@ -189,6 +213,7 @@ pub struct ContextState {
     pub audio: AudioState,
     pub metrics: SystemMetrics,
     pub deploy: DeployHealth,
+    pub notifications: NotificationContext,
     pub hypr_submap: String,
     pub active_layout: String,
     pub is_screencasting: bool,

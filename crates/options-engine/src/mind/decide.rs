@@ -63,6 +63,7 @@ const PROVIDERS: &[Provider] = &[
     diagnostics_provider,
     selection_provider,
     mic_provider,
+    notifications_provider,
 ];
 
 /// Decide the current option set from a context snapshot alone (no temporal
@@ -186,6 +187,7 @@ fn layer_alive(ctx: &ContextState, layer: Layer) -> bool {
         Layer::Behavior => ctx.health.behavior.alive,
         Layer::Hardware => ctx.health.hardware.alive,
         Layer::System => ctx.health.system.alive,
+        Layer::Notifications => ctx.health.notifications.alive,
     }
 }
 
@@ -432,6 +434,48 @@ fn mic_provider(ctx: &ContextState) -> Vec<Affordance> {
     }]
 }
 
+/// Unread notifications the daemon is holding. A critical one is a genuine
+/// "right moment" (a Warning, never suppressed by skill); a backlog of ordinary
+/// unread ones is quiet ambient Info that fades for experts. The notification
+/// OPTION itself owns the full list — this is only the mind's nudge that there's
+/// something worth a glance.
+fn notifications_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let n = &ctx.notifications;
+    if n.active_count == 0 {
+        return vec![];
+    }
+    let detail = match (n.latest_app.is_empty(), n.latest_summary.is_empty()) {
+        (false, false) => format!("{} — {}", n.latest_app, n.latest_summary),
+        (false, true) => n.latest_app.clone(),
+        (true, false) => n.latest_summary.clone(),
+        _ => format!("{} unread", n.active_count),
+    };
+    if n.has_critical {
+        return vec![Affordance {
+            id: "notifications.critical",
+            kind: AffordanceKind::Warning,
+            title: "Critical notification".into(),
+            detail,
+            relevance: 0.8,
+            reason: "an active notification is critical urgency",
+            source: Layer::Notifications,
+        }];
+    }
+    vec![Affordance {
+        id: "notifications.unread",
+        kind: AffordanceKind::Info,
+        title: match n.active_count {
+            1 => "1 notification".into(),
+            c => format!("{c} notifications"),
+        },
+        detail,
+        // A little more present as they stack, but stays quiet ambient info.
+        relevance: (0.3 + 0.05 * n.active_count.min(4) as f32).clamp(0.0, 0.5),
+        reason: "unread notifications present",
+        source: Layer::Notifications,
+    }]
+}
+
 /// A copied URL or code snippet is strong intent — offer to act on it.
 fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
     let s = &ctx.selection;
@@ -480,6 +524,7 @@ mod tests {
         ctx.health.app_bridge.alive = true;
         ctx.health.selection.alive = true;
         ctx.health.system.alive = true;
+        ctx.health.notifications.alive = true;
         ctx
     }
 
@@ -612,6 +657,51 @@ mod tests {
             .find(|a| a.id == "session.failure_streak")
             .expect("streak should surface");
         assert_eq!(a.kind, AffordanceKind::Action);
+    }
+
+    #[test]
+    fn critical_notification_is_a_warning_and_needs_a_live_daemon() {
+        let mut ctx = live_ctx();
+        ctx.notifications = crate::state::NotificationContext {
+            active_count: 2,
+            has_critical: true,
+            latest_app: "Alarm".into(),
+            latest_summary: "Wake up".into(),
+        };
+        let a = decide(&ctx, &Tuning::default())
+            .items
+            .into_iter()
+            .find(|a| a.id == "notifications.critical")
+            .expect("critical notification should surface");
+        assert_eq!(a.kind, AffordanceKind::Warning);
+        assert!(a.detail.contains("Alarm"));
+        // If the notification daemon is unreachable, its state must not surface.
+        ctx.health.notifications.alive = false;
+        assert!(decide(&ctx, &Tuning::default())
+            .items
+            .iter()
+            .all(|a| !a.id.starts_with("notifications.")));
+    }
+
+    #[test]
+    fn plain_unread_is_ambient_info_that_fades_for_experts() {
+        let mut ctx = live_ctx();
+        ctx.notifications = crate::state::NotificationContext {
+            active_count: 1,
+            has_critical: false,
+            latest_app: "Mail".into(),
+            latest_summary: "Hello".into(),
+        };
+        let novice = |skill| {
+            decide(&ctx, &Tuning { skill, ..Default::default() })
+                .items
+                .iter()
+                .find(|a| a.id == "notifications.unread")
+                .map(|a| a.relevance)
+        };
+        let expert_rel = novice(1.0).expect("unread should surface");
+        let novice_rel = novice(0.0).expect("unread should surface");
+        assert!(expert_rel < novice_rel, "ambient info fades for experts");
     }
 
     #[test]
