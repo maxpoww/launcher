@@ -552,8 +552,18 @@ impl App {
         }
     }
 
+    /// Click on the small pill: paste the current clip where the user is
+    /// working. The newest history entry is always exactly the live clipboard
+    /// (we capture every change), so this just injects the paste — no re-copy.
+    pub(crate) fn clip_paste(&self) {
+        if self.clip.history.is_empty() {
+            return;
+        }
+        crate::hypr::paste_active();
+    }
+
     /// Restore history entry `idx` to the system clipboard (a card click).
-    #[allow(dead_code)] // wired to the history box in stage 2.
+    #[allow(dead_code)] // wired to the history box in a later stage.
     pub(crate) fn copy_clip(&self, idx: usize) {
         let Some(e) = self.clip.history.get(idx) else {
             return;

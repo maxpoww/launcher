@@ -115,6 +115,23 @@ pub fn fullscreen_active() {
     dispatch("hl.dsp.window.fullscreen({ action = \"toggle\" })");
 }
 
+/// Inject a paste (Ctrl+V) into the currently focused window via Hyprland's core
+/// `sendshortcut` dispatcher. Best-effort; used by the clipboard OPTION so a
+/// click pastes the current clip where the user is working. Goes through the
+/// `hyprctl` binary (the built-in dispatcher isn't in this fork's Lua API);
+/// clicking the topbar doesn't move keyboard focus, so `activewindow` is still
+/// the app the user was in.
+pub fn paste_active() {
+    match std::process::Command::new("hyprctl")
+        .args(["dispatch", "sendshortcut", "CTRL,V,activewindow"])
+        .output()
+    {
+        Ok(o) if o.status.success() => debug!("paste: sendshortcut Ctrl+V ok"),
+        Ok(o) => debug!("paste: sendshortcut failed: {}", String::from_utf8_lossy(&o.stderr)),
+        Err(e) => warn!("paste: cannot run hyprctl: {e}"),
+    }
+}
+
 /// Give keyboard focus back to a window by address.
 ///
 /// After our layer releases its exclusive keyboard grab the window we
