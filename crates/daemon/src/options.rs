@@ -738,6 +738,11 @@ impl App {
             Some((a, t, fs)) => (Some(a), Some(t), fs),
             None => (None, None, false),
         };
+        if self.options_active_addr != addr {
+            // Focus moved to another window — the selection the action pills were
+            // for is no longer in front, so retire them.
+            self.hide_clip_actions();
+        }
         if self.options_active_addr != addr || self.options_title != title {
             self.options_active_addr = addr;
             self.options_title = title;

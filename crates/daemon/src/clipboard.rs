@@ -54,16 +54,18 @@ const BEAT_DURATION: Duration = Duration::from_millis(500);
 const BEAT_PERIOD: Duration = Duration::from_millis(500);
 /// Gap between the copy/cut/select action pills (and from the small pill).
 pub(crate) const ACTION_GAP: f32 = 6.0;
-/// While the action pills are up, poll the primary selection this often so they
-/// hide as soon as the user deselects (the `--watch` never fires on a clear).
-const SELECTION_POLL: Duration = Duration::from_millis(250);
+/// While the action pills are up, poll the primary selection so they hide as
+/// soon as the user deselects (the `--watch` never fires on a clear). Fast at
+/// first for a snappy hide, then slowed once a selection has stood a while so a
+/// held selection (or an app that never clears its primary) can't keep the poll
+/// spinning at full rate — the pills stay, we just check less often.
+const SELECTION_POLL_FAST: Duration = Duration::from_millis(250);
+const SELECTION_POLL_SLOW: Duration = Duration::from_millis(1000);
+/// After this many fast ticks (~6s) the poll drops to the slow cadence.
+const FAST_POLL_TICKS: u32 = 24;
 /// Consecutive empty polls required before hiding — debounces a single spurious
 /// empty read (e.g. mid-drag, or a transient) so the pills don't flicker.
 const SELECTION_MISS_LIMIT: u32 = 2;
-/// Safety cap on the poll: some apps never clear the primary on deselect, so
-/// without this the pills (and the poll) could linger forever. After this many
-/// ticks (~15s) with the selection still standing, retire them anyway.
-const MAX_POLL_TICKS: u32 = 60;
 /// The three selection-action pills, in slide-out order.
 pub(crate) const ACTIONS: [(PillId, &str); 3] = [
     (PillId::ClipCopy, GLYPH_COPY),
@@ -910,26 +912,31 @@ impl App {
     }
 
     fn schedule_selection_poll(&mut self) {
-        let timer = Timer::from_duration(SELECTION_POLL);
+        // Slow the cadence once a selection has stood for a while, so a held
+        // selection never gets hidden on a timer — it just costs less to watch.
+        let interval = if self.clip.poll_ticks < FAST_POLL_TICKS {
+            SELECTION_POLL_FAST
+        } else {
+            SELECTION_POLL_SLOW
+        };
+        let timer = Timer::from_duration(interval);
         let _ = self
             .loop_handle
             .insert_source(timer, |_, _, app: &mut App| {
-                if !app.clip.selection_active {
-                    app.clip.polling = false;
-                } else if app.clip.poll_ticks >= MAX_POLL_TICKS && !app.clip_cluster_hovered() {
-                    // The app never cleared the primary; stop the runaway poll.
-                    app.clip.polling = false;
-                    app.hide_clip_actions();
-                } else {
-                    app.clip.poll_ticks += 1;
+                if app.clip.selection_active {
+                    app.clip.poll_ticks = app.clip.poll_ticks.saturating_add(1);
                     app.send_clip(ClipCommand::PollSelection);
                     app.schedule_selection_poll();
+                } else {
+                    app.clip.polling = false;
                 }
                 TimeoutAction::Drop
             });
     }
 
-    fn hide_clip_actions(&mut self) {
+    /// Retire the action pills (deselected, an action taken, or the focused
+    /// window changed — the selection context is gone).
+    pub(crate) fn hide_clip_actions(&mut self) {
         if self.clip.selection_active {
             self.clip.selection_active = false;
             self.clip.miss_count = 0;
