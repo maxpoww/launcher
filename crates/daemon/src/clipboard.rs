@@ -54,18 +54,12 @@ const BEAT_DURATION: Duration = Duration::from_millis(500);
 const BEAT_PERIOD: Duration = Duration::from_millis(500);
 /// Gap between the copy/cut/select action pills (and from the small pill).
 pub(crate) const ACTION_GAP: f32 = 6.0;
-/// While the action pills are up, poll the primary selection so they hide as
-/// soon as the user deselects (the `--watch` never fires on a clear). Fast at
-/// first for a snappy hide, then slowed once a selection has stood a while so a
-/// held selection (or an app that never clears its primary) can't keep the poll
-/// spinning at full rate — the pills stay, we just check less often.
-const SELECTION_POLL_FAST: Duration = Duration::from_millis(250);
-const SELECTION_POLL_SLOW: Duration = Duration::from_millis(1000);
-/// After this many fast ticks (~6s) the poll drops to the slow cadence.
-const FAST_POLL_TICKS: u32 = 24;
-/// Consecutive empty polls required before hiding — debounces a single spurious
-/// empty read (e.g. mid-drag, or a transient) so the pills don't flicker.
-const SELECTION_MISS_LIMIT: u32 = 2;
+/// After a selection, the action pills show for this long then fade — a
+/// confirming glance. They don't linger (deselect can't be detected: the
+/// primary selection persists by design), but they re-summon whenever the
+/// pointer returns to the clipboard corner while a selection is in play. Reset
+/// while you keep selecting, and held while the pointer is on the cluster.
+const SHOW_GRACE: Duration = Duration::from_millis(2600);
 /// The three selection-action pills, in slide-out order.
 pub(crate) const ACTIONS: [(PillId, &str); 3] = [
     (PillId::ClipCopy, GLYPH_COPY),
@@ -153,11 +147,6 @@ pub enum ClipCommand {
     /// primary selection rather than injecting a Ctrl+C into the focused app
     /// (whose active highlight may already be gone).
     CopySelection,
-    /// Check whether the primary selection still holds text and report it back as
-    /// a [`ClipEvent::Selection`]. Polled by the UI while the action pills are up
-    /// (the `--watch` never fires on a *clear*, so deselect can only be seen by
-    /// polling).
-    PollSelection,
 }
 
 /// Handle to the clipboard worker: send [`ClipCommand`]s. Dropping it stops the
@@ -190,7 +179,6 @@ pub fn spawn(events: Sender<ClipEvent>) -> ClipHandle {
 /// until the handle is dropped.
 fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) {
     let primary_events = events.clone();
-    let cmd_events = events.clone();
     std::thread::Builder::new()
         .name("clipboard-watch".into())
         .spawn(move || watch_loop(events))
@@ -202,10 +190,6 @@ fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) 
 
     while let Ok(cmd) = commands.recv() {
         match cmd {
-            ClipCommand::PollSelection => {
-                let present = !paste_primary().trim().is_empty();
-                let _ = cmd_events.send(ClipEvent::Selection(present));
-            }
             ClipCommand::Copy {
                 mime,
                 text,
@@ -608,18 +592,19 @@ pub(crate) struct ClipState {
     /// When the fresh-clip beat on the small pill ends (`None` = not beating).
     blink_until: Option<Instant>,
     // ---- selection action pills (copy / cut / select) ----
-    /// The brain has detected a live selection, so the action pills show.
+    /// A selection context is in play (from a fresh selection until the focused
+    /// window changes or an action is taken). While set, moving the pointer to
+    /// the clipboard corner re-summons the pills; the peek preview is suppressed.
+    selection_present: bool,
+    /// Whether the pills are currently shown (the animation target for
+    /// `actions_t`). Toggles within a `selection_present` context: on after a
+    /// selection or a corner hover, off after the show grace elapses un-hovered.
     selection_active: bool,
     /// Slide-out progress of the action pills: 0 = tucked behind the small pill,
     /// 1 = fully fanned out to the right.
     actions_t: f32,
-    /// Whether the primary-selection poll loop is running (so it isn't started
-    /// twice). Runs only while the pills are up.
-    polling: bool,
-    /// Poll ticks since the pills came up, for the runaway safety cap.
-    poll_ticks: u32,
-    /// Consecutive empty selection reads, for the hide debounce.
-    miss_count: u32,
+    /// When the shown pills fade if the pointer hasn't engaged them.
+    grace_deadline: Option<Instant>,
 }
 
 impl ClipState {
@@ -639,11 +624,10 @@ impl ClipState {
             frame_pending: false,
             hold_deadline: None,
             blink_until: None,
+            selection_present: false,
             selection_active: false,
             actions_t: 0.0,
-            polling: false,
-            poll_ticks: 0,
-            miss_count: 0,
+            grace_deadline: None,
         }
     }
 }
@@ -852,16 +836,30 @@ impl App {
     /// after the pointer leaves (mirrors the bell's peek). Hovering either the
     /// small pill or the box it reveals holds it open.
     pub(crate) fn update_clip_reveal(&mut self) {
-        // The hover preview is suppressed while the action pills occupy the space
-        // to the right of the small pill.
-        let on = !self.clip.selection_active
-            && matches!(
-                self.options_hover,
-                Some(PillId::Clipboard | PillId::ClipboardBox)
-            );
+        // While a selection is in play, the clipboard corner is the action pills'
+        // home: hovering it (re-)summons them and holds them; moving away lets
+        // them fade after the grace. The history peek is suppressed in this mode.
+        if self.clip.selection_present {
+            if self.clip_cluster_hovered() {
+                self.clip.grace_deadline = None;
+                if !self.clip.selection_active {
+                    self.clip.selection_active = true;
+                    self.clip.peek_reveal = false;
+                    self.clip.last = None;
+                    self.schedule_clip_frame();
+                }
+            } else if self.clip.selection_active && self.clip.grace_deadline.is_none() {
+                self.arm_actions_grace();
+            }
+            return;
+        }
+        // Normal history peek (no selection context).
+        let on = matches!(
+            self.options_hover,
+            Some(PillId::Clipboard | PillId::ClipboardBox)
+        );
         if on {
             self.clip.hold_deadline = None;
-            // Nothing to preview on an empty history — just the resting glyph.
             if !self.clip.peek_reveal && !self.clip.history.is_empty() {
                 self.clip.peek_reveal = true;
                 self.clip.last = None;
@@ -872,77 +870,58 @@ impl App {
         }
     }
 
-    /// The brain reported the selection's presence: show the copy/cut/select
-    /// pills while there's a selection, hide them when it's gone. Fed both by the
-    /// `--watch` (instant on a new selection) and the poll (which catches the
-    /// deselect the watch never sees).
+    /// A new selection landed (the `--watch` fires on every primary change):
+    /// open the action pills and (re)start their fade grace. `present == false`
+    /// (a rare clear, for apps that do clear their primary) ends the context.
     fn on_clip_selection(&mut self, present: bool) {
-        if present {
-            self.clip.miss_count = 0;
-            if !self.clip.selection_active {
-                self.clip.selection_active = true;
-                self.clip.peek_reveal = false; // the preview yields to the actions
-                self.clip.last = None;
-                self.schedule_clip_frame();
-                self.start_selection_poll();
-            }
-        } else {
-            // Deselected. Debounce a single spurious empty read (mid-drag, or a
-            // transient) so the pills don't flicker; hide only after a couple of
-            // consecutive misses. Held while the pointer is on them so a click
-            // isn't yanked away — the next poll re-checks on leave.
-            self.clip.miss_count += 1;
-            if self.clip.miss_count >= SELECTION_MISS_LIMIT && !self.clip_cluster_hovered() {
-                self.hide_clip_actions();
-            }
-        }
-    }
-
-    /// Poll the primary selection while the pills are up so a deselect hides
-    /// them promptly (`wl-paste --watch` never fires on a clear). Self-stops once
-    /// the pills are down.
-    fn start_selection_poll(&mut self) {
-        if self.clip.polling {
+        if !present {
+            self.end_clip_selection();
             return;
         }
-        self.clip.polling = true;
-        self.clip.poll_ticks = 0;
-        self.clip.miss_count = 0;
-        self.schedule_selection_poll();
+        self.clip.selection_present = true;
+        self.clip.peek_reveal = false; // the preview yields to the actions
+        if !self.clip.selection_active {
+            self.clip.selection_active = true;
+            self.clip.last = None;
+            self.schedule_clip_frame();
+        }
+        self.arm_actions_grace();
     }
 
-    fn schedule_selection_poll(&mut self) {
-        // Slow the cadence once a selection has stood for a while, so a held
-        // selection never gets hidden on a timer — it just costs less to watch.
-        let interval = if self.clip.poll_ticks < FAST_POLL_TICKS {
-            SELECTION_POLL_FAST
-        } else {
-            SELECTION_POLL_SLOW
-        };
-        let timer = Timer::from_duration(interval);
+    /// After the show grace, fade the pills unless the pointer is on the cluster.
+    /// The selection *context* stays, so a corner hover re-summons them.
+    fn arm_actions_grace(&mut self) {
+        let deadline = Instant::now() + SHOW_GRACE;
+        self.clip.grace_deadline = Some(deadline);
+        let timer = Timer::from_duration(SHOW_GRACE);
         let _ = self
             .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                if app.clip.selection_active {
-                    app.clip.poll_ticks = app.clip.poll_ticks.saturating_add(1);
-                    app.send_clip(ClipCommand::PollSelection);
-                    app.schedule_selection_poll();
-                } else {
-                    app.clip.polling = false;
+            .insert_source(timer, move |_, _, app: &mut App| {
+                if app.clip.grace_deadline == Some(deadline) {
+                    app.clip.grace_deadline = None;
+                    if !app.clip_cluster_hovered() {
+                        app.collapse_clip_actions();
+                    }
                 }
                 TimeoutAction::Drop
             });
     }
 
-    /// Retire the action pills (deselected, an action taken, or the focused
-    /// window changed — the selection context is gone).
-    pub(crate) fn hide_clip_actions(&mut self) {
+    /// Fade the pills out but keep the selection context (re-summonable).
+    fn collapse_clip_actions(&mut self) {
         if self.clip.selection_active {
             self.clip.selection_active = false;
-            self.clip.miss_count = 0;
             self.clip.last = None;
             self.schedule_clip_frame();
         }
+    }
+
+    /// End the selection context entirely — the focused window changed or an
+    /// action was taken, so there's nothing left to act on. Also fades the pills.
+    pub(crate) fn end_clip_selection(&mut self) {
+        self.clip.selection_present = false;
+        self.clip.grace_deadline = None;
+        self.collapse_clip_actions();
     }
 
     /// Whether the pointer is over any clipboard element — the small pill, the
@@ -1024,17 +1003,18 @@ impl App {
         match id {
             PillId::ClipCopy => {
                 self.send_clip(ClipCommand::CopySelection);
-                self.hide_clip_actions();
+                self.end_clip_selection();
             }
             PillId::ClipCut => {
                 self.send_clip(ClipCommand::CopySelection);
                 crate::hypr::send_shortcut_active("CTRL", "x");
-                self.hide_clip_actions();
+                self.end_clip_selection();
             }
             PillId::ClipSelectAll => {
-                // Only the app can select-all; the poll keeps the pills up while
-                // the (now full) selection stands, so the user can chain to copy.
+                // Only the app can select-all; it updates the primary, so the
+                // watch re-fires and keeps the pills up for a follow-up copy.
                 crate::hypr::send_shortcut_active("CTRL", "a");
+                self.arm_actions_grace();
             }
             _ => {}
         }
