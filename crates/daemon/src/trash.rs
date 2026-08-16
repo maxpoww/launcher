@@ -110,7 +110,11 @@ impl Trash {
             .flatten()
             .filter_map(|e| {
                 let path = e.path();
-                let name = path.file_name()?.to_str()?.strip_suffix(".trashinfo")?.to_owned();
+                let name = path
+                    .file_name()?
+                    .to_str()?
+                    .strip_suffix(".trashinfo")?
+                    .to_owned();
                 let file = files_dir.join(&name);
                 let meta = fs::symlink_metadata(&file).ok()?; // the trashed file must exist
                 let text = fs::read_to_string(&path).ok()?;
@@ -219,7 +223,9 @@ impl Trash {
             let _ = fs::remove_file(self.info_dir().join(format!("{name}.trashinfo")));
             return Err(e);
         }
-        let is_dir = fs::symlink_metadata(&dest).map(|m| m.is_dir()).unwrap_or(false);
+        let is_dir = fs::symlink_metadata(&dest)
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
         Ok(TrashItem {
             name,
             original_path: abs,
@@ -239,7 +245,11 @@ impl Trash {
                 format!("{base}.{n}")
             };
             let info = self.info_dir().join(format!("{name}.trashinfo"));
-            match fs::OpenOptions::new().write(true).create_new(true).open(&info) {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&info)
+            {
                 Ok(f) => return Ok((name, f)),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e),
@@ -366,7 +376,11 @@ mod tests {
     fn unique_id() -> String {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
-        format!("{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed))
+        format!(
+            "{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     fn temp_trash() -> Trash {
@@ -429,7 +443,10 @@ mod tests {
         }
         let names: Vec<String> = t.list().into_iter().map(|i| i.name).collect();
         assert!(names.contains(&"dup.txt".to_string()));
-        assert!(names.contains(&"dup.txt.2".to_string()), "collision suffixed: {names:?}");
+        assert!(
+            names.contains(&"dup.txt.2".to_string()),
+            "collision suffixed: {names:?}"
+        );
 
         t.empty().unwrap();
         assert!(t.is_empty());

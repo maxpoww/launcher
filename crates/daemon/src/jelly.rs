@@ -65,7 +65,13 @@ impl JellyMembrane {
     ///
     /// Sign convention per edge: left/top positive = inward (right/down);
     /// right/bottom positive = outward (right/down).
-    pub fn poke(&mut self, rect: Rect, pos: (f32, f32), prev_pos: Option<(f32, f32)>, entering: bool) {
+    pub fn poke(
+        &mut self,
+        rect: Rect,
+        pos: (f32, f32),
+        prev_pos: Option<(f32, f32)>,
+        entering: bool,
+    ) {
         let cx = rect.x + rect.w * 0.5;
         let cy = rect.y + rect.h * 0.5;
         let nx = (pos.0 - cx) / (rect.w * 0.5 + 1.0);

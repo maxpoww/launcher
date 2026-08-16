@@ -92,7 +92,9 @@ pub fn create_top_surface(
     // Empty input region: pointer events pass through, never reaching the
     // dock's pointer handlers.
     if let Ok(region) = Region::new(compositor) {
-        layer.wl_surface().set_input_region(Some(region.wl_region()));
+        layer
+            .wl_surface()
+            .set_input_region(Some(region.wl_region()));
     }
     layer.commit();
     layer

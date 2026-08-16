@@ -106,7 +106,9 @@ fn catalog_path() -> PathBuf {
 fn config_dir() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"))
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
+        })
 }
 
 /// `$XDG_DATA_HOME/applications` (falling back to `~/.local/share`).
@@ -177,7 +179,9 @@ pub fn materialize_catalog() {
     for entry in load_catalog() {
         let path = dir.join(format!("{}.desktop", entry.desktop_id()));
         let contents = entry.desktop_contents();
-        let unchanged = std::fs::read_to_string(&path).map(|c| c == contents).unwrap_or(false);
+        let unchanged = std::fs::read_to_string(&path)
+            .map(|c| c == contents)
+            .unwrap_or(false);
         if !unchanged {
             let _ = std::fs::write(&path, contents);
         }

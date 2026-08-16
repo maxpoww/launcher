@@ -106,7 +106,8 @@ pub(crate) fn install_shine(completed_at: Option<Instant>) -> f32 {
             if e < INSTALL_RING_FILL {
                 -1.0
             } else {
-                ((e - INSTALL_RING_FILL).as_secs_f32() / INSTALL_SHINE.as_secs_f32()).clamp(0.0, 1.0)
+                ((e - INSTALL_RING_FILL).as_secs_f32() / INSTALL_SHINE.as_secs_f32())
+                    .clamp(0.0, 1.0)
             }
         }
         None => -1.0,
@@ -162,12 +163,13 @@ impl PendingWebapp {
         const LINEAR_TO: f32 = 0.85;
         match self.completed_at {
             None => {
-                let k = (self.started.elapsed().as_secs_f32() / WEBAPP_BUILD.as_secs_f32()).min(1.0);
+                let k =
+                    (self.started.elapsed().as_secs_f32() / WEBAPP_BUILD.as_secs_f32()).min(1.0);
                 LINEAR_TO * k
             }
             Some(done) => {
-                let k =
-                    (done.elapsed().as_secs_f32() / INSTALL_RING_FILL.as_secs_f32()).clamp(0.0, 1.0);
+                let k = (done.elapsed().as_secs_f32() / INSTALL_RING_FILL.as_secs_f32())
+                    .clamp(0.0, 1.0);
                 let ease = 1.0 - (1.0 - k) * (1.0 - k);
                 LINEAR_TO + (1.0 - LINEAR_TO) * ease
             }
@@ -184,8 +186,8 @@ impl PendingInstall {
             None => install_ring_progress(self.started.elapsed()),
             Some(done) => {
                 let base = install_ring_progress(done.duration_since(self.started));
-                let k =
-                    (done.elapsed().as_secs_f32() / INSTALL_RING_FILL.as_secs_f32()).clamp(0.0, 1.0);
+                let k = (done.elapsed().as_secs_f32() / INSTALL_RING_FILL.as_secs_f32())
+                    .clamp(0.0, 1.0);
                 let ease = 1.0 - (1.0 - k) * (1.0 - k); // ease-out to full
                 base + (1.0 - base) * ease
             }
@@ -275,7 +277,7 @@ impl App {
                     let exec = if terminal {
                         // Drop into a `nix shell` with the tool on PATH so
                         // it can be run repeatedly, with any arguments,
-                        // behind the shared StandardOS banner naming the
+                        // behind the shared Golem banner naming the
                         // command to run. (A bare `nix run` would run it
                         // once into a shell where it isn't on PATH.)
                         let pkg = attr.rsplit('.').next().unwrap_or(&attr);
@@ -581,20 +583,22 @@ impl App {
         // past the drop slot (the make-room gap) on its display page.
         // A page-tail / ghost-page drop → append (no anchor). A dock or box
         // drop rides that surface instead, so it takes no grid anchor.
-        let anchor = (dock_slot.is_none() && box_dest.is_none()).then(|| {
-            self.reorder_slot.and_then(|slot| {
-                let cap = self.apps_cap.max(1);
-                let dp = slot / cap;
-                self.apps_slots
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &s)| s >= slot && s / cap == dp)
-                    .min_by_key(|&(_, &s)| s)
-                    .and_then(|(j, _)| self.search.visible[content::SECTION_APPS].get(j))
-                    .and_then(|&e| self.entries.get(e))
-                    .map(|e| e.id.clone())
+        let anchor = (dock_slot.is_none() && box_dest.is_none())
+            .then(|| {
+                self.reorder_slot.and_then(|slot| {
+                    let cap = self.apps_cap.max(1);
+                    let dp = slot / cap;
+                    self.apps_slots
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &s)| s >= slot && s / cap == dp)
+                        .min_by_key(|&(_, &s)| s)
+                        .and_then(|(j, _)| self.search.visible[content::SECTION_APPS].get(j))
+                        .and_then(|&e| self.entries.get(e))
+                        .map(|e| e.id.clone())
+                })
             })
-        }).flatten();
+            .flatten();
         // The package's own icon, recovered from the hits by attr; no
         // rasterized hit icon falls back to the generic package tile.
         let (icon_pixels, placeholder) = match hit {
@@ -893,7 +897,9 @@ impl App {
             } else {
                 self.just_installed = Some(app_id.clone()); // bounce it in place
             }
-            info!("pending install {attr} resolved as app {app_id} (gui={gui}, dock {dock_slot:?})");
+            info!(
+                "pending install {attr} resolved as app {app_id} (gui={gui}, dock {dock_slot:?})"
+            );
             self.pending_installs.retain(|p| p.attr != attr);
             self.busy_ids.remove(&attr);
         }
@@ -953,8 +959,7 @@ impl App {
         // are never pinned; ones handled by the pending / dock-drop flows
         // above are skipped.
         for attr in self.managed.gui_unknown_attrs() {
-            if self.busy_ids.contains(&attr)
-                || self.pending_installs.iter().any(|p| p.attr == attr)
+            if self.busy_ids.contains(&attr) || self.pending_installs.iter().any(|p| p.attr == attr)
             {
                 continue;
             }

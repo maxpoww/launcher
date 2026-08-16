@@ -130,6 +130,45 @@ pub fn focus_window(addr: &str) {
     dispatch(&format!("hl.dsp.focus({{ window = \"address:{addr}\" }})"));
 }
 
+/// Focus the window whose class **exactly** matches `class` (case-insensitive on
+/// `class`/`initialClass`), preferring the most-recently-focused. Returns whether
+/// one was found and focused. This is how the notification OPTION raises a
+/// webapp's own PWA window precisely (`chrome-<host>__-Default`) instead of the
+/// plain browser — a `false` return means no such window is open, so the caller
+/// can launch the webapp instead.
+pub fn focus_exact_class(class: &str) -> bool {
+    let Ok(reply) = request("j/clients") else {
+        return false;
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+        return false;
+    };
+    let empty = Vec::new();
+    let windows = clients.as_array().unwrap_or(&empty);
+    let mut best: Option<(i64, String)> = None;
+    for c in windows {
+        let matched = ["class", "initialClass"]
+            .iter()
+            .any(|f| c[*f].as_str().unwrap_or("").eq_ignore_ascii_case(class));
+        if !matched {
+            continue;
+        }
+        let Some(addr) = c["address"].as_str() else {
+            continue;
+        };
+        let fh = c["focusHistoryID"].as_i64().unwrap_or(i64::MAX);
+        if best.as_ref().is_none_or(|(bfh, _)| fh < *bfh) {
+            best = Some((fh, addr.to_owned()));
+        }
+    }
+    if let Some((_, addr)) = best {
+        dispatch(&format!("hl.dsp.focus({{ window = \"address:{addr}\" }})"));
+        true
+    } else {
+        false
+    }
+}
+
 /// Address of another mapped window sharing `addr`'s workspace, if any —
 /// a detour target for [`focus_window`]. Restricted to the same
 /// workspace so the bounce never triggers a workspace switch.
@@ -151,7 +190,6 @@ fn same_workspace_neighbor(addr: &str) -> Option<String> {
             (a != addr).then(|| a.to_owned())
         })
 }
-
 
 /// Subscribe to Hyprland's event socket; relevant events re-evaluate
 /// the dock zone via [`App::on_layout_changed`].

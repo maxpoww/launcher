@@ -92,9 +92,8 @@ impl App {
                 if let Some(&dock_rect) = dock {
                     // Use the same side as the grid box (3 scaled cells) so
                     // dock stacks and grid boxes are identical in size.
-                    let side = content::OPEN_BOX_COLS as f32
-                        * content::GRID_CELL_H
-                        * self.icon_scale();
+                    let side =
+                        content::OPEN_BOX_COLS as f32 * content::GRID_CELL_H * self.icon_scale();
                     layout.open_box = Some(content::dock_box_rect(
                         dock_rect,
                         side,
@@ -461,7 +460,8 @@ impl App {
             .map(|w| w.id.clone())
             .collect();
         if !webapp_done.is_empty() {
-            self.pending_webapps.retain(|w| !webapp_done.contains(&w.id));
+            self.pending_webapps
+                .retain(|w| !webapp_done.contains(&w.id));
             for id in webapp_done {
                 if self.ui.target() != Target::Open {
                     // Launcher closed: surface it on the dock with a one-shot
@@ -718,7 +718,11 @@ impl App {
         // whichever pending install/webapp matches (both share the ring +
         // shine flow).
         let install_state = |id: &str| -> (f32, Option<Instant>) {
-            if let Some(p) = self.pending_installs.iter().find(|p| p.attr == id && !p.failed) {
+            if let Some(p) = self
+                .pending_installs
+                .iter()
+                .find(|p| p.attr == id && !p.failed)
+            {
                 (p.ring_fraction(), p.completed_at)
             } else if let Some(w) = self.pending_webapps.iter().find(|w| w.id == id) {
                 (w.ring_fraction(), w.completed_at)
@@ -1016,6 +1020,9 @@ impl App {
         // the input region, and draw.
         self.measure_options_text();
         self.measure_notif();
+        // Any icons resolved before this renderer existed haven't been uploaded
+        // to it yet (their resolve found no renderer); push them now.
+        self.upload_notif_icons();
         self.sync_options_input();
         self.draw_options();
     }

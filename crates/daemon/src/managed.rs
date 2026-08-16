@@ -257,7 +257,7 @@ mod tests {
         let (mut d, dir) = db("crud");
         d.stage("vlc", vec!["vlc".into()]);
         d.stage("google-chrome", vec![]); // attr auto-added as its own id
-        // stage is in-memory only — the sidecar should not exist yet
+                                          // stage is in-memory only — the sidecar should not exist yet
         assert!(!d.json_path.exists());
         d.confirm("vlc");
         d.confirm("google-chrome");
@@ -287,7 +287,10 @@ mod tests {
         // The list drops vlc and adds two new attrs.
         d.adopt_list(&["mpv".to_string(), "fzf".to_string()]);
         assert!(!d.contains("vlc"), "unlisted attr dropped");
-        assert!(d.contains("mpv") && d.contains("fzf"), "listed attrs adopted");
+        assert!(
+            d.contains("mpv") && d.contains("fzf"),
+            "listed attrs adopted"
+        );
         // Adopting an unchanged set is a no-op (still consistent).
         d.adopt_list(&["fzf".to_string(), "mpv".to_string()]);
         assert!(d.contains("mpv") && d.contains("fzf"));
@@ -327,15 +330,16 @@ mod tests {
         let (mut d, dir) = db("note-merge");
         d.stage("chromium", vec!["chromium".into()]);
         // The real launcher differs from the attr (chromium-browser.desktop).
-        d.note_installed("chromium", &["chromium-browser".into(), "chromium".into()], true);
+        d.note_installed(
+            "chromium",
+            &["chromium-browser".into(), "chromium".into()],
+            true,
+        );
         let p = &d.pkgs[0];
         assert!(p.desktop_ids.contains(&"chromium".to_string()));
         assert!(p.desktop_ids.contains(&"chromium-browser".to_string()));
         // No duplicates from re-merging the attr.
-        assert_eq!(
-            p.desktop_ids.iter().filter(|d| *d == "chromium").count(),
-            1
-        );
+        assert_eq!(p.desktop_ids.iter().filter(|d| *d == "chromium").count(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -390,7 +394,11 @@ mod tests {
         d.confirm("chromium"); // chromium's rebuild finished first
         let on_disk: Vec<ManagedPkg> = crate::persist::read_json(&d.json_path).unwrap();
         let attrs: Vec<&str> = on_disk.iter().map(|p| p.attr.as_str()).collect();
-        assert_eq!(attrs, vec!["chromium"], "only the confirmed install written");
+        assert_eq!(
+            attrs,
+            vec!["chromium"],
+            "only the confirmed install written"
+        );
         // Reloaded packages are confirmed by definition.
         assert!(on_disk[0].confirmed);
         // brave lands once its own install confirms.

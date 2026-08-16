@@ -443,10 +443,10 @@ pub fn layout(
     stretch: (f32, f32),
 ) -> Layout {
     // Scaled size metrics — all icon/slot dimensions respond to icon_scale.
-    let dock_slot    = DOCK_SLOT    * icon_scale;
-    let dock_pad_x   = DOCK_PAD_X   * icon_scale;
-    let grid_cell_w  = GRID_CELL_W  * icon_scale;
-    let grid_cell_h  = GRID_CELL_H  * icon_scale;
+    let dock_slot = DOCK_SLOT * icon_scale;
+    let dock_pad_x = DOCK_PAD_X * icon_scale;
+    let grid_cell_w = GRID_CELL_W * icon_scale;
+    let grid_cell_h = GRID_CELL_H * icon_scale;
 
     let (w, h) = surface;
     // The card is centered in the surface with transparent drag margin
@@ -454,8 +454,8 @@ pub fn layout(
     // the full surface.
     let card_w = w - 2.0 * DRAG_MARGIN_X;
     let card_top = h - extent;
-    let dock_h    = config.window.input_bar_height as f32 * icon_scale;
-    let float_gap = config.window.bottom_margin     as f32 * icon_scale;
+    let dock_h = config.window.input_bar_height as f32 * icon_scale;
+    let float_gap = config.window.bottom_margin as f32 * icon_scale;
     // Hidden↔Dock: the bar keeps its full dock height and just slides up
     // out of the screen edge (clipped by it), lifting to float over the
     // last `float_gap` of travel — its shape never changes. Dock↔Open:
@@ -1046,14 +1046,14 @@ pub fn scene(
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     // Scaled drawing metrics — mirrors what layout() received.
-    let dock_icon    = DOCK_ICON   * icon_scale;
-    let dock_slot    = DOCK_SLOT   * icon_scale;
+    let dock_icon = DOCK_ICON * icon_scale;
+    let dock_slot = DOCK_SLOT * icon_scale;
     let dock_magnify = 1.0 + (DOCK_MAGNIFY - 1.0) * icon_scale;
-    let grid_icon    = GRID_ICON   * icon_scale;
+    let grid_icon = GRID_ICON * icon_scale;
     let grid_icon_top = GRID_ICON_TOP * icon_scale;
-    let box_tile     = BOX_TILE    * icon_scale;
-    let grid_cell_w  = GRID_CELL_W * icon_scale;
-    let grid_cell_h  = GRID_CELL_H * icon_scale;
+    let box_tile = BOX_TILE * icon_scale;
+    let grid_cell_w = GRID_CELL_W * icon_scale;
+    let grid_cell_h = GRID_CELL_H * icon_scale;
     // The magnified open box's current rect (grows from the tile into its
     // rest square). Used to draw the box and to hide the grid labels it
     // covers — otherwise those names paint over it in the later text pass.
@@ -1109,7 +1109,7 @@ pub fn scene(
     // Combined with breath (uniform expansion from all edges).
     let (jl, jr, jt, jb) = card_push;
     let card_rect = Rect::new(
-        layout.card_x   - breath_offset + jl,
+        layout.card_x - breath_offset + jl,
         layout.card_top - breath_offset + jt,
         layout.card_w + 2.0 * breath_offset - jl + jr,
         card_h + 2.0 * breath_offset - jt + jb,

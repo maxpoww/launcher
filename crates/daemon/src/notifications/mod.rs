@@ -161,7 +161,9 @@ async fn dispatch(
     let res = match &cmd {
         NotifCommand::Dismiss(id) => dbus_client::dismiss_notification(std, *id).await,
         NotifCommand::Invoke { id, key } => dbus_client::trigger_action(ctl, *id, key).await,
-        NotifCommand::Reply { id, text } => dbus_client::send_inline_reply(ctl, *id, text).await,
+        NotifCommand::InstallPrompt { service } => {
+            dbus_client::post_install_prompt(std, service).await
+        }
     };
     if let Err(e) = res {
         tracing::warn!("notifications: command {cmd:?} failed: {e}");

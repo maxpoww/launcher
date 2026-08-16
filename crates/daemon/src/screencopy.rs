@@ -86,9 +86,8 @@ impl App {
                     // Sample the fullscreen content a few px below the bar —
                     // past the bar's own drawn extent (bar_h + overhang) so a
                     // revealed opaque bar never samples itself.
-                    let sample_y = ((self.config.options.height as f64 + 4.0)
-                        * mon.scale.max(0.1))
-                    .round() as u32;
+                    let sample_y = ((self.config.options.height as f64 + 4.0) * mon.scale.max(0.1))
+                        .round() as u32;
                     self.begin_options_match(output, sample_y);
                     return;
                 }
@@ -121,14 +120,17 @@ impl App {
                     // A row inside the bar itself (mid-height) — always the
                     // blurred wallpaper, since the reserved zone keeps windows
                     // out from under the bar.
-                    let sample_y = ((self.config.options.height as f64 * 0.5)
-                        * mon.scale.max(0.1))
-                    .round()
-                    .max(1.0) as u32;
+                    let sample_y = ((self.config.options.height as f64 * 0.5) * mon.scale.max(0.1))
+                        .round()
+                        .max(1.0) as u32;
                     if had_match {
                         self.draw_options();
                     }
-                    self.options_match = Some(CaptureTarget { output, sample_y, frost: true });
+                    self.options_match = Some(CaptureTarget {
+                        output,
+                        sample_y,
+                        frost: true,
+                    });
                     self.start_options_capture();
                     return;
                 }
@@ -144,14 +146,23 @@ impl App {
     /// Set the colour-match target to `output`/`sample_y` and kick a capture.
     /// The always-on poll (see [`Self::schedule_options_poll`]) drives the
     /// resample cadence, so this doesn't schedule one itself.
-    fn begin_options_match(&mut self, output: wayland_client::protocol::wl_output::WlOutput, sample_y: u32) {
-        self.options_match = Some(CaptureTarget { output, sample_y, frost: false });
+    fn begin_options_match(
+        &mut self,
+        output: wayland_client::protocol::wl_output::WlOutput,
+        sample_y: u32,
+    ) {
+        self.options_match = Some(CaptureTarget {
+            output,
+            sample_y,
+            frost: false,
+        });
         self.start_options_capture();
     }
 
     /// Drop any match and repaint the transparent bar.
     fn clear_options_match(&mut self) {
-        let changed = self.options_match.take().is_some() | self.options_bar_matched.take().is_some();
+        let changed =
+            self.options_match.take().is_some() | self.options_bar_matched.take().is_some();
         self.abort_capture();
         if changed {
             self.draw_options();
@@ -245,8 +256,15 @@ impl App {
                 return;
             }
         }
-        let buffer =
-            pool.create_buffer(0, width as i32, height as i32, stride as i32, fmt, (), &self.qh);
+        let buffer = pool.create_buffer(
+            0,
+            width as i32,
+            height as i32,
+            stride as i32,
+            fmt,
+            (),
+            &self.qh,
+        );
         if let Some(cap) = self.capture.as_mut() {
             cap.frame.copy(&buffer);
             cap.buffer = Some(buffer);
@@ -448,7 +466,9 @@ impl App {
                     }
                 }
                 let (rr, gg, bb) = channels(cap.format, &rowbytes[x * 4..x * 4 + 4]);
-                let e = buckets.entry((rr & 0xF0, gg & 0xF0, bb & 0xF0)).or_insert((0, 0, 0, 0));
+                let e = buckets
+                    .entry((rr & 0xF0, gg & 0xF0, bb & 0xF0))
+                    .or_insert((0, 0, 0, 0));
                 e.0 += 1;
                 e.1 += rr as u32;
                 e.2 += gg as u32;
@@ -495,11 +515,13 @@ impl App {
         }
         self.options_poll_pending = true;
         let timer = Timer::from_duration(POLL);
-        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
-            app.options_poll_pending = false;
-            app.reeval_options_bar();
-            TimeoutAction::Drop
-        });
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.options_poll_pending = false;
+                app.reeval_options_bar();
+                TimeoutAction::Drop
+            });
     }
 }
 

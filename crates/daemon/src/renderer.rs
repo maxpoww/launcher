@@ -28,16 +28,16 @@ use crate::content::Scene;
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Globals {
-    screen:     [f32; 2],
-    alpha:      f32,
-    time:       f32,
-    cursor:     [f32; 2],  // pointer in surface pixels; [-9999,-9999] = absent
-    squircle:   f32,       // icon corner superellipse exponent (icon.wgsl only; 0 = off)
-    thumb_base: f32,       // first thumbnail texture layer (icon.wgsl; ≥ it skips squircle)
+    screen: [f32; 2],
+    alpha: f32,
+    time: f32,
+    cursor: [f32; 2], // pointer in surface pixels; [-9999,-9999] = absent
+    squircle: f32,    // icon corner superellipse exponent (icon.wgsl only; 0 = off)
+    thumb_base: f32,  // first thumbnail texture layer (icon.wgsl; ≥ it skips squircle)
     // Up to 4 simultaneous ripples: (x, y, age, 0); x < -9000 = inactive.
-    ripples:    [[f32; 4]; 4],
+    ripples: [[f32; 4]; 4],
     // Up to 2 box-open/close waves: (cx, cy, age, 0); cx < -9000 = inactive.
-    box_waves:  [[f32; 4]; 2],
+    box_waves: [[f32; 4]; 2],
 }
 
 /// Per-instance data for one rounded rectangle.
@@ -46,10 +46,10 @@ struct Globals {
 struct RectInstance {
     rect_min: [f32; 2],
     rect_max: [f32; 2],
-    color:    [f32; 4],
-    radius:   f32,
-    glass:    f32,         // 0 = solid fill, 1 = liquid-glass material
-    _pad:     [f32; 2],
+    color: [f32; 4],
+    radius: f32,
+    glass: f32, // 0 = solid fill, 1 = liquid-glass material
+    _pad: [f32; 2],
 }
 
 /// Per-instance data for one top-edge shadow band.
@@ -58,10 +58,10 @@ struct RectInstance {
 struct ShadowInstance {
     rect_min: [f32; 2],
     rect_max: [f32; 2],
-    color:    [f32; 4],
-    radius:   f32,
-    blur:     f32,
-    edges:    [f32; 4],
+    color: [f32; 4],
+    radius: f32,
+    blur: f32,
+    edges: [f32; 4],
 }
 
 /// Per-instance data for one icon quad.
@@ -86,9 +86,9 @@ struct IconInstance {
 struct BoxBackdropInstance {
     rect_min: [f32; 2],
     rect_max: [f32; 2],
-    radius:   f32,
-    screen:   [f32; 2],
-    _pad:     f32,
+    radius: f32,
+    screen: [f32; 2],
+    _pad: f32,
 }
 
 pub struct Renderer {
@@ -566,8 +566,14 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
-        let (scene_tex, scene_view, blit_bind) =
-            make_scene_target(&device, config.format, width, height, &blit_layout, &blit_sampler);
+        let (scene_tex, scene_view, blit_bind) = make_scene_target(
+            &device,
+            config.format,
+            width,
+            height,
+            &blit_layout,
+            &blit_sampler,
+        );
 
         // Box frosted backdrop: samples/blurs the scene texture over the box
         // region, premultiplied "over" blend (same as the scene pipelines).
@@ -663,10 +669,22 @@ impl Renderer {
         });
 
         // Separable-Gaussian blur ping-pong targets (frost the box backdrop).
-        let (blur_a_tex, blur_a_view, blur_a_bind) =
-            make_scene_target(&device, config.format, width, height, &blit_layout, &blit_sampler);
-        let (blur_b_tex, blur_b_view, blur_b_bind) =
-            make_scene_target(&device, config.format, width, height, &blit_layout, &blit_sampler);
+        let (blur_a_tex, blur_a_view, blur_a_bind) = make_scene_target(
+            &device,
+            config.format,
+            width,
+            height,
+            &blit_layout,
+            &blit_sampler,
+        );
+        let (blur_b_tex, blur_b_view, blur_b_bind) = make_scene_target(
+            &device,
+            config.format,
+            width,
+            height,
+            &blit_layout,
+            &blit_sampler,
+        );
         let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("waverunner.blur"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
@@ -803,11 +821,26 @@ impl Renderer {
     pub fn set_icons(&mut self, icons: &[Vec<u8>]) {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
-        let layers = (icons.len()
-            + crate::nix::RANK_HITS_MAX
-            + crate::nix::PENDING_INSTALL_CAP
-            + crate::thumbs::THUMB_CAP)
-            .max(1) as u32;
+        let reserved =
+            crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP + crate::thumbs::THUMB_CAP;
+        self.upload_icon_array(icons, reserved);
+    }
+
+    /// Populate the notification OPTION's own icon array on the OPTIONS surface.
+    /// The topbar renderer is a separate instance from the dock's, so this array
+    /// is entirely its own: `chains[i]` becomes texture layer `i`, addressed by
+    /// [`IconInst::layer`] from the notif cards. No reserved tail — the notif set
+    /// is small and re-uploaded wholesale when it changes (see
+    /// `App::upload_notif_icons`).
+    pub fn set_notif_icons(&mut self, chains: &[Vec<u8>]) {
+        self.upload_icon_array(chains, 0);
+    }
+
+    /// Shared core of [`Renderer::set_icons`] / [`Renderer::set_notif_icons`]:
+    /// (re)allocate the icon texture array with `chains.len() + reserved` layers,
+    /// write each chain to its layer, and rebuild the sampler bind group.
+    fn upload_icon_array(&mut self, icons: &[Vec<u8>], reserved: usize) {
+        let layers = (icons.len() + reserved).max(1) as u32;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("waverunner.icons"),
             size: wgpu::Extent3d {
@@ -908,7 +941,14 @@ impl Renderer {
     /// `cursor` is the pointer position in surface pixels, used for the
     /// glass cursor-spotlight effect; `None` when the pointer is outside
     /// the surface.
-    pub fn render(&mut self, scene: &Scene, text_color: [f32; 4], cursor: Option<(f32, f32)>, squircle: f32, thumb_base: u32) -> anyhow::Result<()> {
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        text_color: [f32; 4],
+        cursor: Option<(f32, f32)>,
+        squircle: f32,
+        thumb_base: u32,
+    ) -> anyhow::Result<()> {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -936,7 +976,10 @@ impl Renderer {
         // Advance anim_time only while frames are rendered — no phase jump
         // when the dock hides (no frames) and then reappears.
         let now = std::time::Instant::now();
-        let dt = self.last_render.map(|l| now.duration_since(l).as_secs_f32().min(0.1)).unwrap_or(0.0);
+        let dt = self
+            .last_render
+            .map(|l| now.duration_since(l).as_secs_f32().min(0.1))
+            .unwrap_or(0.0);
         self.last_render = Some(now);
         self.anim_time += dt;
 
@@ -960,10 +1003,10 @@ impl Renderer {
             &self.globals_buf,
             0,
             bytemuck::bytes_of(&Globals {
-                screen:    [lw, lh],
-                alpha:     scene.alpha.clamp(0.0, 1.0),
-                time:      self.anim_time,
-                cursor:    cursor_px,
+                screen: [lw, lh],
+                alpha: scene.alpha.clamp(0.0, 1.0),
+                time: self.anim_time,
+                cursor: cursor_px,
                 squircle,
                 thumb_base: thumb_base as f32,
                 ripples,
@@ -1084,7 +1127,11 @@ impl Renderer {
                 font_system,
                 Metrics::new(label.font_px * scale, label.line_px * scale),
             );
-            buffer.set_size(font_system, Some(label.max_w * scale), Some(label.line_px * scale));
+            buffer.set_size(
+                font_system,
+                Some(label.max_w * scale),
+                Some(label.line_px * scale),
+            );
             let family = label.family.map_or(Family::SansSerif, Family::Name);
             buffer.set_text(
                 font_system,
@@ -1426,7 +1473,11 @@ fn write_icon_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, ch
             wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: mip,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             &chain[offset..offset + len],
@@ -1450,10 +1501,10 @@ fn shadow_instance(s: &crate::content::ShadowInst) -> ShadowInstance {
     ShadowInstance {
         rect_min: [s.rect.x, s.rect.y],
         rect_max: [s.rect.x + s.rect.w, s.rect.y + s.rect.h],
-        color:    s.color,
-        radius:   s.radius,
-        blur:     s.blur,
-        edges:    s.edges,
+        color: s.color,
+        radius: s.radius,
+        blur: s.blur,
+        edges: s.edges,
     }
 }
 
@@ -1461,10 +1512,10 @@ fn rect_instance(r: &crate::content::RectInst) -> RectInstance {
     RectInstance {
         rect_min: [r.rect.x, r.rect.y],
         rect_max: [r.rect.x + r.rect.w, r.rect.y + r.rect.h],
-        color:    r.color,
-        radius:   r.radius,
-        glass:    r.glass,
-        _pad:     [0.0; 2],
+        color: r.color,
+        radius: r.radius,
+        glass: r.glass,
+        _pad: [0.0; 2],
     }
 }
 

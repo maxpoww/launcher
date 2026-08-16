@@ -44,6 +44,12 @@ pub fn write_json(tag: &str, path: &Path, value: &impl Serialize) {
 
 /// Best-effort atomic write (temp + rename), creating parent dirs.
 pub fn write_text(tag: &str, path: &Path, contents: &str) {
+    write_bytes(tag, path, contents.as_bytes());
+}
+
+/// Best-effort atomic binary write (temp + rename), creating parent dirs — for
+/// non-text stores like the notification image cache.
+pub fn write_bytes(tag: &str, path: &Path, bytes: &[u8]) {
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             warn!("{tag}: cannot create {dir:?}: {e}");
@@ -51,7 +57,7 @@ pub fn write_text(tag: &str, path: &Path, contents: &str) {
         }
     }
     let tmp = path.with_extension("tmp");
-    let write = std::fs::write(&tmp, contents).and_then(|()| std::fs::rename(&tmp, path));
+    let write = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
     if let Err(e) = write {
         warn!("{tag}: cannot write {path:?}: {e}");
         let _ = std::fs::remove_file(&tmp);

@@ -52,19 +52,31 @@ pub(crate) const EDGE_PAD: f32 = 6.0;
 /// circles — 3px, so each button keeps its full round outline (and its rim).
 pub(crate) const GROUP_GAP: f32 = 3.0;
 const CTRL_GAP: f32 = 3.0;
+/// The two OPTIONS separation scales. Bonded parts of a *single* OPTION (the
+/// fixed bell and the preview that slides out from behind it) hug close so they
+/// read as one unit; *distinct* OPTIONS (the notification OPTION vs the clock)
+/// sit further apart so the boundary between them is legible.
+pub(crate) const BOND_GAP: f32 = 3.0;
+pub(crate) const OPTION_GAP: f32 = 9.0;
+/// Unified pill hover lift: every hoverable pill grows this much per side while
+/// hovered, so the feedback is one consistent, tactile effect across the bar
+/// (paired with the stronger hover wash). The Notif bell is exempt — its hover
+/// response is the peek metamorphosis, not a lift.
+pub(crate) const PILL_HOVER_GROW: f32 = 2.0;
 const TITLE_MAX: usize = 48;
 
 // Nerd Font glyphs (Font Awesome range, present in JetBrainsMono NF).
-const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
+pub(crate) const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
 const GLYPH_SQUARE: &str = "\u{f096}"; // fa-square-o (pseudotile)
 const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
 const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 pub(crate) const GLYPH_BELL: &str = "\u{f0f3}"; // fa-bell (notification OPTION)
+pub(crate) const GLYPH_BELL_SLASH: &str = "\u{f1f6}"; // fa-bell-slash (mute pill)
 
 // Pill backgrounds (resting + hover) are adaptive washes — see
 // `options_rest_wash` / `options_hover_wash`.
 // The close glyph is red; its pill just brightens on hover like the rest.
-const RED_GLYPH: [f32; 4] = [0.92, 0.30, 0.30, 1.0];
+pub(crate) const RED_GLYPH: [f32; 4] = [0.92, 0.30, 0.30, 1.0];
 
 // --- Control-button reveal animation ---------------------------------------
 // The buttons are hidden by default; hovering the window pill makes them slide
@@ -145,7 +157,10 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Close => 3,
         PillId::Window => 4,
         PillId::Clock => 5,
+        // The preview/box (Notif) draws first; the fixed bell (NotifMute) draws
+        // on top of it, capping its right end as it grows out from behind.
         PillId::Notif => 6,
+        PillId::NotifMute => 7,
     }
 }
 
@@ -170,6 +185,9 @@ pub(crate) enum PillId {
     /// The notification OPTION — a bell that metamorphoses on hover (see
     /// [`crate::notif`]).
     Notif,
+    /// The mute-notifications pill: rests directly *behind* the bell and is
+    /// uncovered (to the bell's right) as the bell slides left to peek open.
+    NotifMute,
     Window,
     Close,
     Pseudo,
@@ -202,11 +220,27 @@ fn clock_now() -> String {
 /// libc so it respects the timezone.
 fn date_now() -> String {
     const WD: [&str; 7] = [
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
     ];
     const MO: [&str; 12] = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     // SAFETY: `localtime_r` fills a caller-owned `tm`; `time` takes null.
     unsafe {
@@ -235,6 +269,18 @@ fn srgb_to_linear(c: f32) -> f32 {
 /// `0.04` shows as ~22% grey on black). Pre-dividing the linearised alpha back
 /// out of the RGB cancels that, so `a` becomes the actual displayed fraction.
 /// Black needs no correction (0 stays 0 through the encode).
+/// Grow a pill's drawn rect outward from its centre by the unified hover lift
+/// ([`PILL_HOVER_GROW`]). Only the drawn geometry grows; layout and hit rects
+/// are unchanged.
+pub(crate) fn hover_grow(rect: Rect) -> Rect {
+    Rect::new(
+        rect.x - PILL_HOVER_GROW,
+        rect.y - PILL_HOVER_GROW,
+        rect.w + 2.0 * PILL_HOVER_GROW,
+        rect.h + 2.0 * PILL_HOVER_GROW,
+    )
+}
+
 pub(crate) fn wash(white: bool, a: f32) -> [f32; 4] {
     if white && a > 0.0 {
         let v = srgb_to_linear(a) / a;
@@ -300,7 +346,11 @@ impl App {
         // the date holds open while the pointer is over it.
         let mut clock_left = w - EDGE_PAD;
         if !self.options_clock.is_empty() {
-            let content_w = lerp(self.options_clock_w, self.options_date_w, self.options_clock_meta.t);
+            let content_w = lerp(
+                self.options_clock_w,
+                self.options_date_w,
+                self.options_clock_meta.t,
+            );
             let cw = (content_w + 2.0 * PILL_PAD_X).max(ph);
             clock_left = w - EDGE_PAD - cw;
             pills.push(Pill {
@@ -318,8 +368,20 @@ impl App {
         // past the bar when expanded), right edge pinned a gap left of the clock.
         pills.push(Pill {
             id: PillId::Notif,
-            rect: self.notif_geom(clock_left - GROUP_GAP, y, ph),
+            rect: self.notif_geom(clock_left - OPTION_GAP, y, ph),
             text: GLYPH_BELL.to_owned(),
+            family: Some(NERD),
+            glyph_color: None,
+        });
+
+        // Mute pill: a fixed circle in the bell's *original* resting slot (right
+        // edge a gap left of the clock). At rest the bell sits exactly on top of
+        // it; as the bell peeks open it slides left (see `notif_geom`) and
+        // uncovers this pill to its right. Drawn under the bell (see `draw_z`).
+        pills.push(Pill {
+            id: PillId::NotifMute,
+            rect: Rect::new(clock_left - OPTION_GAP - ph, y, ph, ph),
+            text: GLYPH_BELL_SLASH.to_owned(),
             family: Some(NERD),
             glyph_color: None,
         });
@@ -342,7 +404,13 @@ impl App {
                 });
             };
             // Close, left of the window name.
-            circle(&mut pills, wx - GROUP_GAP - d, PillId::Close, GLYPH_CLOSE, Some(RED_GLYPH));
+            circle(
+                &mut pills,
+                wx - GROUP_GAP - d,
+                PillId::Close,
+                GLYPH_CLOSE,
+                Some(RED_GLYPH),
+            );
             pills.push(Pill {
                 id: PillId::Window,
                 rect: Rect::new(wx, y, ww, ph),
@@ -371,7 +439,11 @@ impl App {
         }
         let bar_h = self.config.options.height as f32;
         let ph = (bar_h - 2.0 * PILL_MARGIN_Y).max(1.0);
-        let content_w = lerp(self.options_clock_w, self.options_date_w, self.options_clock_meta.t);
+        let content_w = lerp(
+            self.options_clock_w,
+            self.options_date_w,
+            self.options_clock_meta.t,
+        );
         let cw = (content_w + 2.0 * PILL_PAD_X).max(ph);
         w - EDGE_PAD - cw
     }
@@ -433,9 +505,9 @@ impl App {
     /// Hover wash — stronger than the resting wash, with the same asymmetry.
     pub(crate) fn options_hover_wash(&self) -> [f32; 4] {
         if self.options_bar_is_bright() {
-            wash(false, 0.22)
+            wash(false, 0.30)
         } else {
-            wash(true, 0.20)
+            wash(true, 0.27)
         }
     }
 
@@ -466,6 +538,12 @@ impl App {
                 self.push_notif_pill(scene, pill.rect);
                 continue;
             }
+            // The bell (fixed DND toggle) is always drawn, on top of the sliding
+            // preview/box that grows out from behind it.
+            if pill.id == PillId::NotifMute {
+                self.push_notif_mute(scene, pill.rect);
+                continue;
+            }
             // Reveal animation for the control buttons: slide out horizontally
             // from behind the parent's near edge (slide 0 = tucked, 1 = rest),
             // fading in; the glyph is clipped to the emerge side so it reads as
@@ -493,8 +571,7 @@ impl App {
                             (wr - d, wr, false)
                         }
                         PillId::Float => {
-                            let pr =
-                                home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x + r.w);
+                            let pr = home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x + r.w);
                             (pr - d, pr, false)
                         }
                         PillId::Fullscreen => {
@@ -516,13 +593,13 @@ impl App {
                 }
                 None => (pill.rect, 1.0, None, 1.0),
             };
+            // Unified hover lift: a hovered pill grows a touch (drawn geometry
+            // only) so hover reads as a tactile rise, not a shrink.
+            let hovered = self.options_hover == Some(pill.id);
+            let rect = if hovered { hover_grow(rect) } else { rect };
             let radius = rect.h / 2.0; // stadium ⇒ circle when w == h
             push_neumorph(scene, rect, radius, bright, shadow_a);
-            let base = if self.options_hover == Some(pill.id) {
-                hover_wash
-            } else {
-                rest_wash
-            };
+            let base = if hovered { hover_wash } else { rest_wash };
             scene.rects.push(RectInst {
                 rect,
                 radius,
@@ -555,12 +632,17 @@ impl App {
                 let out = (1.0 - t / META_OUT_END).clamp(0.0, 1.0);
                 let inn = ((t - META_IN_START) / (1.0 - META_IN_START)).clamp(0.0, 1.0);
                 if out > 0.001 {
-                    scene.labels.push(mk(self.options_clock.clone(), out, rect.w, Some(rect)));
-                }
-                if inn > 0.001 {
                     scene
                         .labels
-                        .push(mk(self.options_date.clone(), inn, self.options_date_w + 2.0, Some(rect)));
+                        .push(mk(self.options_clock.clone(), out, rect.w, Some(rect)));
+                }
+                if inn > 0.001 {
+                    scene.labels.push(mk(
+                        self.options_date.clone(),
+                        inn,
+                        self.options_date_w + 2.0,
+                        Some(rect),
+                    ));
                 }
             } else {
                 scene.labels.push(mk(pill.text.clone(), 1.0, rect.w, clip));
@@ -613,18 +695,20 @@ impl App {
         let deadline = Instant::now() + REVEAL_DWELL;
         self.options_reveal_deadline = Some(deadline);
         let timer = Timer::from_duration(REVEAL_DWELL);
-        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
-            if app.options_reveal_deadline == Some(deadline) {
-                app.options_reveal_deadline = None;
-                let still_at_top = app.options_ptr.is_some_and(|(_, y)| y <= REVEAL_PX);
-                if app.options_hidden && still_at_top {
-                    app.options_hidden = false;
-                    app.sync_options_input();
-                    app.draw_options();
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                if app.options_reveal_deadline == Some(deadline) {
+                    app.options_reveal_deadline = None;
+                    let still_at_top = app.options_ptr.is_some_and(|(_, y)| y <= REVEAL_PX);
+                    if app.options_hidden && still_at_top {
+                        app.options_hidden = false;
+                        app.sync_options_input();
+                        app.draw_options();
+                    }
                 }
-            }
-            TimeoutAction::Drop
-        });
+                TimeoutAction::Drop
+            });
     }
 
     /// Conceal the revealed bar after the grace period (unless the pointer came
@@ -633,18 +717,20 @@ impl App {
         let deadline = Instant::now() + HIDE_GRACE;
         self.options_hide_deadline = Some(deadline);
         let timer = Timer::from_duration(HIDE_GRACE);
-        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
-            if app.options_hide_deadline == Some(deadline) {
-                app.options_hide_deadline = None;
-                if app.options_fullscreen && !app.options_hidden && app.options_ptr.is_none() {
-                    app.options_hidden = true;
-                    app.options_hover = None;
-                    app.sync_options_input();
-                    app.draw_options();
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                if app.options_hide_deadline == Some(deadline) {
+                    app.options_hide_deadline = None;
+                    if app.options_fullscreen && !app.options_hidden && app.options_ptr.is_none() {
+                        app.options_hidden = true;
+                        app.options_hover = None;
+                        app.sync_options_input();
+                        app.draw_options();
+                    }
                 }
-            }
-            TimeoutAction::Drop
-        });
+                TimeoutAction::Drop
+            });
     }
 
     /// Tick the clock (and refresh the date, which changes at midnight);
@@ -680,7 +766,9 @@ impl App {
             // through. Use the *fully-expanded* bottom (not the live animating
             // height) so the region is stable the instant the box opens —
             // otherwise hover cuts out at an unstable row as it grows.
-            self.notif_input_bottom().ceil().max(self.config.options.height as f32) as i32
+            self.notif_input_bottom()
+                .ceil()
+                .max(self.config.options.height as f32) as i32
         } else {
             self.config.options.height as i32
         };
@@ -734,7 +822,7 @@ impl App {
                     self.update_ctrl_reveal(); // fade the buttons out
                     self.update_clock_meta(); // start the date's hold-then-collapse
                     self.update_notif_reveal(); // collapse the bell's peek/history
-                    self.update_notif_hover_row(); // drop any per-row hover (ptr gone)
+                    self.update_notif_hit(); // drop any card/control hover (ptr gone)
                     self.draw_options();
                     // Revealed in fullscreen: conceal again shortly after leave.
                     if self.options_fullscreen {
@@ -750,13 +838,15 @@ impl App {
                 self.options_click();
             }
             // Scroll over the notification OPTION: browse history / expand the
-            // list. Only when the bell is peeked or its history is open.
+            // list. Works over the bell *or* the mute pill it reveals (both are
+            // the one OPTION), or whenever its history is already open.
             wl_pointer::Event::Axis {
                 axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
                 value,
                 ..
             } if !self.options_hidden
-                && (self.options_hover == Some(PillId::Notif) || self.notif.expanded) =>
+                && (matches!(self.options_hover, Some(PillId::Notif | PillId::NotifMute))
+                    || self.notif.expanded) =>
             {
                 self.notif_axis(value as f32);
             }
@@ -804,16 +894,22 @@ impl App {
         self.update_ctrl_reveal();
         self.update_clock_meta();
         self.update_notif_reveal();
-        // Per-row hover moves within the same (Notif) pill, so redraw on a row
-        // change too — not just when the hovered pill changes.
-        let row_changed = self.update_notif_hover_row();
-        if changed || row_changed {
+        // The hit target (card / control / footer) moves within the same (Notif)
+        // pill, so redraw on a hit change too — not just when the pill changes.
+        let hit_changed = self.update_notif_hit();
+        if changed || hit_changed {
             self.draw_options();
         }
     }
 
     /// A control button is only hoverable/clickable once mostly revealed.
     fn ctrl_pill_visible(&self, id: PillId) -> bool {
+        // The mute pill hides behind the bell at rest; only accept hover/clicks
+        // once it has actually been uncovered, so the resting bell slot always
+        // hits the bell (which is listed first) rather than the pill under it.
+        if id == PillId::NotifMute {
+            return self.notif.peek_progress() > 0.5;
+        }
         match ctrl_index(id) {
             Some(i) => self.options_ctrl.alpha[i] > 0.5,
             None => true, // window / clock always
@@ -869,11 +965,13 @@ impl App {
             self.options_ctrl.last = Some(Instant::now());
         }
         let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
-            app.options_ctrl.frame_pending = false;
-            app.tick_options_ctrl();
-            TimeoutAction::Drop
-        });
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.options_ctrl.frame_pending = false;
+                app.tick_options_ctrl();
+                TimeoutAction::Drop
+            });
     }
 
     /// Advance the control-button reveal one frame and keep frames coming until
@@ -902,8 +1000,13 @@ impl App {
             self.options_ctrl.alpha[i] = na;
             active |= am;
             if due {
-                let (ns, sm) =
-                    ease_toward(self.options_ctrl.slide[i], 1.0, dt, CTRL_SLIDE_RATE, CTRL_EPS);
+                let (ns, sm) = ease_toward(
+                    self.options_ctrl.slide[i],
+                    1.0,
+                    dt,
+                    CTRL_SLIDE_RATE,
+                    CTRL_EPS,
+                );
                 self.options_ctrl.slide[i] = ns;
                 active |= sm;
             } else if reveal {
@@ -933,7 +1036,8 @@ impl App {
                 self.options_clock_meta.last = None;
                 self.schedule_options_clock_frame();
             }
-        } else if self.options_clock_meta.reveal && self.options_clock_meta.hold_deadline.is_none() {
+        } else if self.options_clock_meta.reveal && self.options_clock_meta.hold_deadline.is_none()
+        {
             // Left the clock while showing the date: hold, then collapse.
             self.schedule_clock_collapse();
         }
@@ -945,17 +1049,19 @@ impl App {
         let deadline = Instant::now() + META_HOLD;
         self.options_clock_meta.hold_deadline = Some(deadline);
         let timer = Timer::from_duration(META_HOLD);
-        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
-            if app.options_clock_meta.hold_deadline == Some(deadline) {
-                app.options_clock_meta.hold_deadline = None;
-                if app.options_hover != Some(PillId::Clock) {
-                    app.options_clock_meta.reveal = false;
-                    app.options_clock_meta.last = None;
-                    app.schedule_options_clock_frame();
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                if app.options_clock_meta.hold_deadline == Some(deadline) {
+                    app.options_clock_meta.hold_deadline = None;
+                    if app.options_hover != Some(PillId::Clock) {
+                        app.options_clock_meta.reveal = false;
+                        app.options_clock_meta.last = None;
+                        app.schedule_options_clock_frame();
+                    }
                 }
-            }
-            TimeoutAction::Drop
-        });
+                TimeoutAction::Drop
+            });
     }
 
     fn schedule_options_clock_frame(&mut self) {
@@ -967,11 +1073,13 @@ impl App {
             self.options_clock_meta.last = Some(Instant::now());
         }
         let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
-            app.options_clock_meta.frame_pending = false;
-            app.tick_options_clock_meta();
-            TimeoutAction::Drop
-        });
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.options_clock_meta.frame_pending = false;
+                app.tick_options_clock_meta();
+                TimeoutAction::Drop
+            });
     }
 
     /// Advance the clock↔date metamorphosis one frame; the pill width and the
@@ -983,9 +1091,12 @@ impl App {
             .last
             .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
         self.options_clock_meta.last = Some(now);
-        let target = if self.options_clock_meta.reveal { 1.0 } else { 0.0 };
-        let (nt, moving) =
-            ease_toward(self.options_clock_meta.t, target, dt, META_RATE, META_EPS);
+        let target = if self.options_clock_meta.reveal {
+            1.0
+        } else {
+            0.0
+        };
+        let (nt, moving) = ease_toward(self.options_clock_meta.t, target, dt, META_RATE, META_EPS);
         self.options_clock_meta.t = nt;
         self.draw_options();
         if moving {
@@ -996,6 +1107,11 @@ impl App {
     }
 
     fn options_click(&mut self) {
+        // The open notification box handles its own hits (cards / controls /
+        // footer / menu) first; if it consumes the click, stop.
+        if self.notif_click() {
+            return;
+        }
         match self.options_hover {
             Some(PillId::Close) => {
                 if let Some(addr) = self.options_active_addr.clone() {
@@ -1005,6 +1121,7 @@ impl App {
             Some(PillId::Pseudo) => hypr::pseudo_active(),
             Some(PillId::Float) => hypr::float_active(),
             Some(PillId::Fullscreen) => hypr::fullscreen_active(),
+            Some(PillId::NotifMute) => self.toggle_notif_mute(),
             _ => {}
         }
     }
@@ -1014,9 +1131,16 @@ impl App {
             return;
         };
         let shape = match self.options_hover {
-            Some(PillId::Clock) | Some(PillId::Window) | Some(PillId::Notif) | None => {
-                Shape::Default
+            // Over the notification element: a pointer on a clickable target inside
+            // the open box (an openable card / footer button), else default.
+            Some(PillId::Notif) => {
+                if self.notif_hit_clickable() {
+                    Shape::Pointer
+                } else {
+                    Shape::Default
+                }
             }
+            Some(PillId::Clock) | Some(PillId::Window) | None => Shape::Default,
             Some(_) => Shape::Pointer, // any control circle
         };
         if self.cursor_now != Some(shape) {

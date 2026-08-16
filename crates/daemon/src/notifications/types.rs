@@ -30,8 +30,10 @@ pub enum NotifCommand {
     Dismiss(u32),
     /// Activate one of a card's actions by key (button tap).
     Invoke { id: u32, key: String },
-    /// Submit an inline reply's text.
-    Reply { id: u32, text: String },
+    /// Post an "install this webapp" prompt (opening a notification whose service
+    /// isn't installed as a webapp) — sent back through the daemon as a normal
+    /// notification.
+    InstallPrompt { service: String },
 }
 
 /// Pair a flat `[key, label, key, label, …]` action list into `(key, label)`s —
@@ -56,7 +58,10 @@ mod tests {
             "archive".to_string(),
             "Archive".to_string(),
         ];
-        assert_eq!(action_pairs(&a), vec![("default", "Open"), ("archive", "Archive")]);
+        assert_eq!(
+            action_pairs(&a),
+            vec![("default", "Open"), ("archive", "Archive")]
+        );
     }
 
     #[test]

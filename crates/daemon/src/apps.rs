@@ -241,10 +241,12 @@ fn application_dirs() -> Vec<std::path::PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
         let data_home =
             std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
-        dirs.push(std::path::PathBuf::from(format!("{data_home}/applications")));
+        dirs.push(std::path::PathBuf::from(format!(
+            "{data_home}/applications"
+        )));
     }
-    let data_dirs =
-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
     for base in data_dirs.split(':').filter(|s| !s.is_empty()) {
         dirs.push(std::path::PathBuf::from(format!("{base}/applications")));
     }
@@ -375,7 +377,7 @@ fn icon_assets() -> Vec<AppEntry> {
 /// drag out to uninstall). A tile carries the attr as its id (so
 /// removable/uninstall detection maps straight back to the managed list)
 /// and the generic package icon. Launching opens a terminal on the
-/// user's shell behind the same StandardOS banner as the "try it" nix
+/// user's shell behind the same Golem banner as the "try it" nix
 /// shell — the tool is already on PATH (home-manager installed it), and
 /// the banner names the command to type. Skips any package a real
 /// `.desktop` already covers (`apps` = the scanned entries).
@@ -886,6 +888,52 @@ pub(crate) fn rasterize_icon_file(path: &str, id: &str) -> Option<Vec<u8>> {
     } else {
         finish_tile(tile)
     })
+}
+
+/// Turn straight (non-premultiplied) RGBA8 pixels of size `w×h` — e.g. a
+/// notification's captured avatar / media art — into an uploadable
+/// [`ICON_CHAIN_BYTES`] mip chain: centered in the tile and left UNPLATED (it's
+/// a photo/logo, not an app icon that wants the frosted plate). `None` when the
+/// buffer length doesn't match `w*h*4` or a pixmap can't be built.
+pub(crate) fn rasterize_rgba(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    if w == 0 || h == 0 || rgba.len() != (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    // tiny_skia pixmaps are premultiplied sRGB; the captured pixels are straight.
+    let mut premul = rgba.to_vec();
+    for px in premul.chunks_exact_mut(4) {
+        let a = px[3] as u16;
+        px[0] = (px[0] as u16 * a / 255) as u8;
+        px[1] = (px[1] as u16 * a / 255) as u8;
+        px[2] = (px[2] as u16 * a / 255) as u8;
+    }
+    let size = tiny_skia::IntSize::from_wh(w, h)?;
+    let pixmap = tiny_skia::Pixmap::from_vec(premul, size)?;
+    let mut tile = fit_pixmap(pixmap).take();
+    circle_mask(&mut tile);
+    Some(with_mips(tile))
+}
+
+/// Clip an `ICON_SIZE`² premultiplied tile to its inscribed circle: pixels
+/// outside fade to transparent (a ~1px antialiased edge, further smoothed by the
+/// mip chain). Used to render notification avatars as circles. Scales every
+/// channel (incl. alpha) by coverage since the tile is premultiplied.
+fn circle_mask(tile: &mut [u8]) {
+    let r = ICON_SIZE as f32 / 2.0;
+    let c = r - 0.5; // pixel-center of the tile
+    for y in 0..ICON_SIZE {
+        for x in 0..ICON_SIZE {
+            let (dx, dy) = (x as f32 - c, y as f32 - c);
+            let d = (dx * dx + dy * dy).sqrt();
+            let cov = (r - d + 0.5).clamp(0.0, 1.0); // 1 inside, feather at edge
+            if cov < 1.0 {
+                let i = ((y * ICON_SIZE + x) * 4) as usize;
+                for ch in 0..4 {
+                    tile[i + ch] = (tile[i + ch] as f32 * cov) as u8;
+                }
+            }
+        }
+    }
 }
 
 /// Whether to composite icons onto a frosted plate; set once at startup

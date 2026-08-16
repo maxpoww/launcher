@@ -247,7 +247,8 @@ impl GroupDb {
         let groups_before = self.groups.len();
         // The Recycle Bin is exempt from the under-two dissolution rule — it
         // is a permanent fixture that persists while empty.
-        self.groups.retain(|g| g.members.len() >= 2 || g.id == TRASH_ID);
+        self.groups
+            .retain(|g| g.members.len() >= 2 || g.id == TRASH_ID);
         let changed = self.groups.len() != groups_before
             || self.groups.iter().map(|g| g.members.len()).sum::<usize>() != members_before;
         if changed {
@@ -418,8 +419,8 @@ mod tests {
         let id = g.create("firefox", "grim"); // grim = pending boxed install
         let idx = g.index_by_id(&id).unwrap();
         g.add(idx, "slurp"); // box [firefox, grim, slurp], grim+slurp pending
-        // firefox is installed; grim + slurp are still building, but the
-        // callsite folds their attrs into the exists set.
+                             // firefox is installed; grim + slurp are still building, but the
+                             // callsite folds their attrs into the exists set.
         let exists: HashSet<String> = ["firefox", "grim", "slurp"]
             .iter()
             .map(|s| s.to_string())

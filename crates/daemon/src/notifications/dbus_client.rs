@@ -53,6 +53,21 @@ pub trait StandardNotifications {
     /// `NotificationClosed` with reason 3).
     async fn close_notification(&self, id: u32) -> zbus::Result<()>;
 
+    /// Post a notification (the spec `Notify` method) — used to surface an
+    /// "install this webapp" prompt back through the daemon.
+    #[allow(clippy::too_many_arguments)]
+    async fn notify(
+        &self,
+        app_name: &str,
+        replaces_id: u32,
+        app_icon: &str,
+        summary: &str,
+        body: &str,
+        actions: Vec<&str>,
+        hints: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+        expire_timeout: i32,
+    ) -> zbus::Result<u32>;
+
     /// Emitted when a notification is closed (1 expired, 2 dismissed, 3 via
     /// CloseNotification, 4 undefined).
     #[zbus(signal)]
@@ -82,12 +97,26 @@ pub async fn trigger_action(
     ctl.invoke_action(id, action_key).await
 }
 
-/// Submit an inline reply. The text is carried in the action key behind the
-/// `inline-reply:` prefix the daemon routes to `NotificationReplied`.
-pub async fn send_inline_reply(
-    ctl: &OptionsControlProxy<'_>,
-    id: u32,
-    user_text: &str,
+/// Post an "install this webapp" prompt as a normal notification, so opening a
+/// notification whose service isn't installed as a webapp guides the user rather
+/// than dumping them in the browser.
+pub async fn post_install_prompt(
+    std: &StandardNotificationsProxy<'_>,
+    service: &str,
 ) -> zbus::Result<()> {
-    ctl.invoke_action(id, &format!("inline-reply:{user_text}")).await
+    // Transient: a guidance prompt should flash and not linger in history.
+    let mut hints = std::collections::HashMap::new();
+    hints.insert("transient", zbus::zvariant::Value::Bool(true));
+    std.notify(
+        "OPTIONS",
+        0,
+        "system-software-install",
+        &format!("Install {service}"),
+        &format!("Add {service} as a webapp so its notifications open here."),
+        Vec::new(),
+        hints,
+        8000,
+    )
+    .await
+    .map(|_| ())
 }

@@ -79,9 +79,7 @@ fn status_path() -> PathBuf {
 /// waverunner never writes a line the helper would silently drop.
 fn is_valid_attr(s: &str) -> bool {
     let mut chars = s.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric())
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
@@ -150,7 +148,10 @@ pub fn seed_if_missing(attrs: &[String]) {
         return;
     }
     let valid: Vec<String> = attrs.iter().filter(|a| is_valid_attr(a)).cloned().collect();
-    info!("seeding declarative package list with {} attrs", valid.len());
+    info!(
+        "seeding declarative package list with {} attrs",
+        valid.len()
+    );
     write_list(&valid);
 }
 
@@ -250,7 +251,10 @@ fn wait_for_apply(since: f64) -> bool {
             return false;
         }
         if elapsed > BUILD_TIMEOUT {
-            warn!("waverunner-apply timed out after {}s", BUILD_TIMEOUT.as_secs());
+            warn!(
+                "waverunner-apply timed out after {}s",
+                BUILD_TIMEOUT.as_secs()
+            );
             return false;
         }
     }

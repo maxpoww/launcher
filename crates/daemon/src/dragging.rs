@@ -362,9 +362,7 @@ impl App {
             // Recycle Bin: send it to the FreeDesktop trash. Its entry id is
             // the absolute path (see `push_transient_file`). It vanishes from
             // the Files listing; an open trash view picks it up on refilter.
-            Some(apps::EntryKind::File)
-                if released && self.dropped_on_trash(&layout, drag.pos) =>
-            {
+            Some(apps::EntryKind::File) if released && self.dropped_on_trash(&layout, drag.pos) => {
                 self.trash_file(&id);
             }
             _ => {

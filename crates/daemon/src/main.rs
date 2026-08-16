@@ -33,14 +33,16 @@ mod nix;
 mod notifications;
 // The notification OPTION UI (bell → peek → history dropdown) on the topbar.
 mod notif;
+// Off-thread resolver: a notification's app icon → premultiplied mip chain.
+mod notif_icons;
 mod options;
 mod order;
 mod pager;
-mod screencopy;
 mod pages;
 mod persist;
 mod pins;
 mod renderer;
+mod screencopy;
 mod state;
 mod surface;
 mod thumbs;
@@ -97,8 +99,8 @@ use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{
     wl_data_device, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface,
 };
-use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 use crate::content::Hit;
 use crate::renderer::Renderer;
@@ -217,6 +219,18 @@ fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Notification OPTION icon resolver: turns a notification's app_icon /
+    // desktop_entry into a card-tile mip chain off the compositor thread.
+    let (notif_icons_handle, notif_icon_rx) = if config.options.enabled {
+        let (tx, rx) = channel::channel::<notif_icons::Resolved>();
+        (
+            Some(notif_icons::spawn(config.theme.icon_theme.clone(), tx)),
+            Some(rx),
+        )
+    } else {
+        (None, None)
+    };
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -255,6 +269,10 @@ fn main() -> anyhow::Result<()> {
         options_ctrl: options::CtrlAnim::default(),
         options_clock_meta: options::ClockMeta::default(),
         notif: notif::NotifState::new(notif_handle),
+        notif_icons_handle,
+        notif_icon_chains: Vec::new(),
+        notif_icon_slot: HashMap::new(),
+        notif_icon_pending: HashSet::new(),
         ui: UiState::new(
             config.animation.clone(),
             // Docked, the card is a floating bar: dock height plus the
@@ -442,6 +460,17 @@ fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("registering notif channel: {e}"))?;
     }
 
+    if let Some(notif_icon_rx) = notif_icon_rx {
+        event_loop
+            .handle()
+            .insert_source(notif_icon_rx, |event, _, app| {
+                if let channel::Event::Msg(res) = event {
+                    app.on_notif_icon(res);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("registering notif-icon channel: {e}"))?;
+    }
+
     // Live launcher reload: rescan when a `.desktop` file is added, removed,
     // or rewritten in any XDG application dir, so launcher changes (webapps-gen
     // regenerating from ~/.config/webapps.list, or an external package install)
@@ -450,13 +479,14 @@ fn main() -> anyhow::Result<()> {
     // icon cache so newly added icons resolve.
     if let Some(watch_fd) = apps::watch_application_dirs() {
         let source = Generic::new(watch_fd, Interest::READ, Mode::Level);
-        if let Err(e) = event_loop
-            .handle()
-            .insert_source(source, |_readiness, fd, app: &mut App| {
-                apps::drain_inotify(fd.as_fd());
-                app.indexer.request_rescan_fresh();
-                Ok(PostAction::Continue)
-            })
+        if let Err(e) =
+            event_loop
+                .handle()
+                .insert_source(source, |_readiness, fd, app: &mut App| {
+                    apps::drain_inotify(fd.as_fd());
+                    app.indexer.request_rescan_fresh();
+                    Ok(PostAction::Continue)
+                })
         {
             warn!("cannot watch application dirs for live reload: {e}");
         }
@@ -597,6 +627,18 @@ pub struct App {
     options_clock_meta: options::ClockMeta,
     /// Notification OPTION: bell + peek + history dropdown (see [`crate::notif`]).
     notif: notif::NotifState,
+    /// Off-thread resolver turning a notification's icon hint into a card-tile
+    /// mip chain (`None` when the topbar is disabled).
+    notif_icons_handle: Option<notif_icons::NotifIcons>,
+    /// Resolved notif-icon layers uploaded to the OPTIONS renderer's own icon
+    /// array; `chains[i]` is texture layer `i`. Re-uploaded wholesale as new
+    /// icons resolve (the set is small — one per distinct notifying app).
+    notif_icon_chains: Vec<Vec<u8>>,
+    /// Icon-hint key → its layer index in `notif_icon_chains`.
+    notif_icon_slot: HashMap<String, u32>,
+    /// Icon hints already requested from the resolver, so a redraw before the
+    /// reply lands doesn't re-queue them.
+    notif_icon_pending: HashSet<String>,
 
     ui: UiState,
     config: Config,
@@ -1062,7 +1104,7 @@ const OPTIONS_OVERHANG: u32 = 2;
 /// the exclusive zone) to host the notification history dropdown — same
 /// fixed-surface / animate-content discipline as the dock. Desktop layout is
 /// untouched (Zero Layout Shift); the area is click-through until expanded.
-pub(crate) const OPTIONS_DROPDOWN_H: u32 = 240;
+pub(crate) const OPTIONS_DROPDOWN_H: u32 = 480;
 
 /// After the box closes, the dock rests this long before it hides — a
 /// brief beat parked as a dock instead of vanishing straight away.
@@ -1118,8 +1160,8 @@ impl App {
         let s = self.icon_scale();
         let w = (self.config.window.width as f32 * s).round() as u32
             + 2 * content::DRAG_MARGIN_X as u32;
-        let h = ((self.config.window.height + self.config.window.bottom_margin) as f32 * s)
-            .round() as u32
+        let h = ((self.config.window.height + self.config.window.bottom_margin) as f32 * s).round()
+            as u32
             + content::MAGNIFY_HEADROOM as u32
             + content::DRAG_MARGIN_TOP as u32;
         (w, h)
@@ -1129,7 +1171,8 @@ impl App {
     fn scaled_extents(&self) -> (f32, f32) {
         let s = self.icon_scale();
         let full = (self.config.window.height + self.config.window.bottom_margin) as f32 * s;
-        let dock = (self.config.window.input_bar_height + self.config.window.bottom_margin) as f32 * s;
+        let dock =
+            (self.config.window.input_bar_height + self.config.window.bottom_margin) as f32 * s;
         (dock, full)
     }
 
@@ -1174,8 +1217,7 @@ impl App {
             let is_closing = prev == Target::Open && next != Target::Open;
             if is_opening || is_closing {
                 if let Some(renderer) = self.renderer.as_mut() {
-                    let sw =
-                        self.config.window.width as f32 + 2.0 * content::DRAG_MARGIN_X;
+                    let sw = self.config.window.width as f32 + 2.0 * content::DRAG_MARGIN_X;
                     let sh = self.config.window.height as f32
                         + self.config.window.bottom_margin as f32
                         + content::MAGNIFY_HEADROOM
@@ -1386,6 +1428,13 @@ impl App {
             self.order.forget_dead_boxes(&live);
         }
         self.refilter();
+        // The app index just became available (or changed): re-measure the
+        // notification rows so their icon hints resolve against it. The first
+        // measure can run before the index loads (empty → monogram hints); this
+        // recomputes and fires the resolver requests now that entries exist.
+        if self.config.options.enabled {
+            self.measure_notif();
+        }
         // A just-installed app lands in the dock: bounce its icon in
         // (same as a launch), and if the dock was auto-hidden, flash it
         // into view for a beat so the arrival is seen, then let it hide.
@@ -1879,10 +1928,13 @@ impl App {
         const NOTIFY_DOCK_DWELL: Duration = Duration::from_secs(3);
         self.notify_dock_hide_at = Some(Instant::now() + NOTIFY_DOCK_DWELL);
         let timer = Timer::from_duration(NOTIFY_DOCK_DWELL);
-        if let Err(e) = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
-            app.notify_dock_autohide();
-            TimeoutAction::Drop
-        }) {
+        if let Err(e) = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.notify_dock_autohide();
+                TimeoutAction::Drop
+            })
+        {
             warn!("failed to arm notify-dock hide timer: {e}");
         }
     }
@@ -1940,8 +1992,7 @@ impl App {
             // App entry and stick to the dock. A catalog webapp is never docked
             // — skip the pin so it can't ghost there. (`uninstall_webapp` drops
             // the pin outright; this is the belt-and-suspenders net.)
-            if crate::webapps::slug_of_id(pin_id)
-                .is_some_and(|s| !self.managed_webapps.contains(s))
+            if crate::webapps::slug_of_id(pin_id).is_some_and(|s| !self.managed_webapps.contains(s))
             {
                 continue;
             }
@@ -2040,10 +2091,12 @@ impl App {
 
         if let Some(i) = self.drag_dock_insert(&layout, pos) {
             let origin = self.dock_order.iter().position(|&e| e == drag.entry_idx);
-            let land = i.saturating_sub(usize::from(
-                drag.from_dock && origin.is_some_and(|o| o < i),
-            ));
-            let s = layout.dock_slots.get(land).or_else(|| layout.dock_slots.last())?;
+            let land =
+                i.saturating_sub(usize::from(drag.from_dock && origin.is_some_and(|o| o < i)));
+            let s = layout
+                .dock_slots
+                .get(land)
+                .or_else(|| layout.dock_slots.last())?;
             return Some((s.x + s.w * 0.5, s.y + s.h * 0.5));
         }
 
@@ -2059,8 +2112,10 @@ impl App {
         let cw = content::GRID_CELL_W * self.icon_scale();
         let ch = content::GRID_CELL_H * self.icon_scale();
         Some((
-            sec.viewport.x - sec.scroll + page as f32 * sec.viewport.w
-                + (within % cols) as f32 * cw + cw * 0.5,
+            sec.viewport.x - sec.scroll
+                + page as f32 * sec.viewport.w
+                + (within % cols) as f32 * cw
+                + cw * 0.5,
             sec.viewport.y + (within / cols) as f32 * ch + ch * 0.5,
         ))
     }
@@ -2157,11 +2212,12 @@ impl App {
             Some(apps::EntryKind::Group) => {
                 // The Recycle Bin switches to its trash view (a dir stack), not
                 // a group folder.
-                if self.entries.get(idx).is_some_and(|e| groups::is_trash(&e.id)) {
-                    let already = self
-                        .dir_stack
-                        .as_ref()
-                        .is_some_and(|ds| ds.is_trash);
+                if self
+                    .entries
+                    .get(idx)
+                    .is_some_and(|e| groups::is_trash(&e.id))
+                {
+                    let already = self.dir_stack.as_ref().is_some_and(|ds| ds.is_trash);
                     if !already {
                         self.open_trash_stack();
                     }
@@ -2257,7 +2313,10 @@ impl App {
                     // `group:trash`), not a group box — report it as such so
                     // clicking it again toggles the open stack shut.
                     apps::EntryKind::Group
-                        if self.entries.get(idx).is_some_and(|e| groups::is_trash(&e.id)) =>
+                        if self
+                            .entries
+                            .get(idx)
+                            .is_some_and(|e| groups::is_trash(&e.id)) =>
                     {
                         Some(BoxTarget::Dir(self.entries[idx].id.clone()))
                     }
@@ -2997,8 +3056,12 @@ impl LayerShellHandler for App {
         let (mut width, mut height) = configure.new_size;
         if width == 0 || height == 0 {
             let (sw, sh) = self.scaled_surface_size();
-            if width == 0 { width = sw; }
-            if height == 0 { height = sh; }
+            if width == 0 {
+                width = sw;
+            }
+            if height == 0 {
+                height = sh;
+            }
         }
         debug!("configure: {width}x{height}");
         // `new_size` is logical (surface-local). Input regions and pointer

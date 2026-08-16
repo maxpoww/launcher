@@ -104,18 +104,18 @@ impl App {
     /// so the box collapses back exactly onto the resting tile — no jump.
     pub(crate) fn open_group(&mut self, g: usize) {
         let layout = self.current_layout();
-        self.group_origin = self.pointer_pos.map(|pos| {
-            match self.apps_display_cell(&layout, pos) {
-                Some((_, fx, fy)) => {
-                    let cell_top = pos.1 - fy * content::GRID_CELL_H;
-                    (
-                        pos.0 - (fx - 0.5) * content::GRID_CELL_W,
-                        cell_top + content::GRID_ICON_TOP + content::GRID_ICON / 2.0,
-                    )
-                }
-                None => pos,
-            }
-        });
+        self.group_origin =
+            self.pointer_pos
+                .map(|pos| match self.apps_display_cell(&layout, pos) {
+                    Some((_, fx, fy)) => {
+                        let cell_top = pos.1 - fy * content::GRID_CELL_H;
+                        (
+                            pos.0 - (fx - 0.5) * content::GRID_CELL_W,
+                            cell_top + content::GRID_ICON_TOP + content::GRID_ICON / 2.0,
+                        )
+                    }
+                    None => pos,
+                });
         // Switching from another open box: drop its state so only this one
         // is live (reset_stack_view below rewinds the grow for it).
         self.dock_stack = None;
