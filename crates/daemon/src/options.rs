@@ -1166,9 +1166,11 @@ impl App {
             Some(PillId::Float) => hypr::float_active(),
             Some(PillId::Fullscreen) => hypr::fullscreen_active(),
             Some(PillId::NotifMute) => self.toggle_notif_mute(),
-            // Clicking the small clipboard pill pastes the current clip into the
-            // focused window.
-            Some(PillId::Clipboard) => self.clip_paste(),
+            // Clicking the clipboard element pastes the current clip into the
+            // focused window. Both ids resolve here because the box overlaps the
+            // small pill at rest (a scrollable history box will split these in a
+            // later stage).
+            Some(PillId::Clipboard | PillId::ClipboardBox) => self.clip_paste(),
             _ => {}
         }
     }
@@ -1187,10 +1189,9 @@ impl App {
                     Shape::Default
                 }
             }
-            // The small clipboard pill is clickable (paste) → pointer; the box
-            // only previews on hover for now → default.
-            Some(PillId::Clock | PillId::Window | PillId::ClipboardBox) | None => Shape::Default,
-            Some(_) => Shape::Pointer, // control circle / the small clipboard pill
+            // The clipboard element is clickable (paste) → pointer.
+            Some(PillId::Clock | PillId::Window) | None => Shape::Default,
+            Some(_) => Shape::Pointer, // control circle / clipboard element
         };
         if self.cursor_now != Some(shape) {
             device.set_shape(self.enter_serial, shape);
