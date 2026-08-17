@@ -114,7 +114,7 @@ impl App {
     /// nothing to sample — go idle (the last pill colour is kept, cached).
     fn eval_transparent_bar(&mut self) {
         let had_match = self.options_bar_matched.take().is_some();
-        if self.notif.drawer_open() {
+        if self.notif.drawer_open() || self.clip_drawer_open() {
             if let Ok(mon) = hypr::focused_monitor() {
                 if let Some(output) = self.output_by_name(&mon.name) {
                     // A row inside the bar itself (mid-height) — always the

@@ -844,15 +844,19 @@ impl App {
         };
         let h = if self.options_hidden {
             REVEAL_PX.ceil() as i32
-        } else if self.notif.expanded {
-            // Extend the pointer-sensitive region down over the open history
-            // rectangle so scroll/hover there reach us instead of passing
+        } else if self.notif.expanded || self.clip.expanded {
+            // Extend the pointer-sensitive region down over whichever history
+            // box is open so scroll/hover there reach us instead of passing
             // through. Use the *fully-expanded* bottom (not the live animating
-            // height) so the region is stable the instant the box opens —
-            // otherwise hover cuts out at an unstable row as it grows.
-            self.notif_input_bottom()
-                .ceil()
-                .max(self.config.options.height as f32) as i32
+            // height) so the region is stable the instant a box opens.
+            let mut bottom = self.config.options.height as f32;
+            if self.notif.expanded {
+                bottom = bottom.max(self.notif_input_bottom());
+            }
+            if self.clip.expanded {
+                bottom = bottom.max(self.clip_input_bottom());
+            }
+            bottom.ceil() as i32
         } else {
             self.config.options.height as i32
         };
@@ -908,6 +912,7 @@ impl App {
                     self.update_notif_reveal(); // collapse the bell's peek/history
                     self.update_clip_reveal(); // collapse the clipboard's peek
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
+                    self.update_clip_hit(); // drop any clip row hover (ptr gone)
                     self.draw_options();
                     // Revealed in fullscreen: conceal again shortly after leave.
                     if self.options_fullscreen {
@@ -934,6 +939,17 @@ impl App {
                     || self.notif.expanded) =>
             {
                 self.notif_axis(value as f32);
+            }
+            // Scroll over the clipboard OPTION: open / browse the clip history.
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } if !self.options_hidden
+                && (matches!(self.options_hover, Some(PillId::Clipboard | PillId::ClipboardBox))
+                    || self.clip.expanded) =>
+            {
+                self.clip_axis(value as f32);
             }
             _ => {}
         }
@@ -980,10 +996,11 @@ impl App {
         self.update_clock_meta();
         self.update_notif_reveal();
         self.update_clip_reveal();
-        // The hit target (card / control / footer) moves within the same (Notif)
-        // pill, so redraw on a hit change too — not just when the pill changes.
+        // The hit target (card / control / footer) moves within the same box, so
+        // redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
-        if changed || hit_changed {
+        let clip_hit_changed = self.update_clip_hit();
+        if changed || hit_changed || clip_hit_changed {
             self.draw_options();
         }
     }
@@ -1206,6 +1223,12 @@ impl App {
         if self.notif_click() {
             return;
         }
+        // The open clipboard box handles its own hits (row = copy, × = delete,
+        // clear-all); consume the click so it doesn't fall through to paste.
+        if self.clip.expanded && self.options_hover == Some(PillId::ClipboardBox) {
+            self.clip_box_click();
+            return;
+        }
         match self.options_hover {
             Some(PillId::Close) => {
                 if let Some(addr) = self.options_active_addr.clone() {
@@ -1243,9 +1266,18 @@ impl App {
                     Shape::Default
                 }
             }
-            // The clipboard element is clickable (paste) → pointer.
+            // The open clipboard box: pointer only on a clickable target (a row /
+            // delete / clear-all), default over the empty fill.
+            Some(PillId::ClipboardBox) => {
+                if self.clip_box_hit_clickable() {
+                    Shape::Pointer
+                } else {
+                    Shape::Default
+                }
+            }
+            // The small clipboard pill is clickable (paste) → pointer.
             Some(PillId::Clock | PillId::Window) | None => Shape::Default,
-            Some(_) => Shape::Pointer, // control circle / clipboard element
+            Some(_) => Shape::Pointer, // control circle / small clipboard pill
         };
         if self.cursor_now != Some(shape) {
             device.set_shape(self.enter_serial, shape);

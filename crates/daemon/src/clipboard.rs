@@ -34,17 +34,63 @@ use tracing::{debug, warn};
 use crate::animation::{ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{
-    hover_grow, push_neumorph, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY, GLYPH_CUT,
-    GLYPH_SELECT_ALL, LINE_PX, NERD, PILL_PAD_X,
+    hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_CLOSE,
+    GLYPH_COPY, GLYPH_CUT, GLYPH_SELECT_ALL, LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X, RED_GLYPH,
 };
 use crate::App;
 
 /// Target width of the extended preview pill (mirrors the notification OPTION's
-/// preview so the two elements read as siblings).
+/// preview so the two elements read as siblings). The open history box keeps it.
 const PEEK_W: f32 = 380.0;
 /// Glide rate of the peek morph (exponential approach), matched to the bell.
 const MORPH_RATE: f32 = 13.0;
 const MORPH_EPS: f32 = 0.001;
+
+// ---- history box (mirrors the notification history drawer) ----
+/// Fully-expanded box height (within the reserved dropdown area).
+const EXPANDED_H: f32 = 505.0;
+/// Box height with no clips — a small "Nothing copied yet" panel.
+const EMPTY_H: f32 = 120.0;
+/// Fixed height of one clip row.
+const ROW_H: f32 = 46.0;
+/// Inner horizontal padding of a row / the box.
+const ROW_PAD_X: f32 = 14.0;
+/// Bottom padding below the last row before scrolling stops.
+const LIST_PAD: f32 = 6.0;
+/// Gap between the row text and the trailing time.
+const TEXT_GAP: f32 = 8.0;
+/// The box's corner radius once fully open (the collapsed pill is a stadium).
+const BOX_RADIUS: f32 = 10.0;
+/// Adaptive zebra striping — lighten a dark box, darken a light one.
+const STRIPE_LIGHTEN: f32 = 0.31;
+const STRIPE_DARKEN: f32 = 0.48;
+/// Resting (muted) list-ink opacity; the hovered row pops to full contrast.
+const LIST_DIM: f32 = 0.55;
+const LIST_DIM_LIGHT: f32 = 0.82;
+/// Per-row delete (×) hot-square, top-right.
+const DELETE_SZ: f32 = 18.0;
+/// A multiplication-sign × for the delete controls.
+const GLYPH_X: &str = "\u{00d7}";
+/// Crimson for the × delete when it's the pointer target.
+const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
+/// One wheel notch (`wl_pointer` axis units) — the travel that opens the box.
+const NOTCH: f32 = 15.0;
+/// Pixels of list scroll per axis unit.
+const SCROLL_SPEED: f32 = 3.0;
+/// Exponential approach rate of `list_scroll` toward its target.
+const SCROLL_RATE: f32 = 20.0;
+
+/// What the pointer is over inside the open history box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClipHit {
+    None,
+    /// A clip row (index into `history`) — click copies it to the clipboard.
+    Row(usize),
+    /// A row's × delete control.
+    Delete(usize),
+    /// The footer's ✕ (clear all).
+    ClearAll,
+}
 /// Grace before the preview collapses once the pointer leaves — enough to cross
 /// a small gap, snappy otherwise. Matches the bell's `LEAVE_HOLD`.
 const LEAVE_HOLD: Duration = Duration::from_millis(300);
@@ -605,6 +651,22 @@ pub(crate) struct ClipState {
     actions_t: f32,
     /// When the shown pills fade if the pointer hasn't engaged them.
     grace_deadline: Option<Instant>,
+    // ---- history box ----
+    /// History drawer open (intent), set the instant a scroll opens it.
+    pub(crate) expanded: bool,
+    /// Vertical growth of the box: 0 = preview pill, 1 = full drawer.
+    expand_t: f32,
+    /// The eased full-open box height (px), eased toward the content-fit target
+    /// so a content change (clearing, deleting a row) morphs smoothly.
+    box_h: f32,
+    /// Animated / target vertical scroll (px) within the list.
+    list_scroll: f32,
+    scroll_target: f32,
+    /// Accumulated wheel delta so one notch opens the box.
+    scroll_accum: f32,
+    /// Row under the pointer (for the spotlight), and the fine hit target.
+    hover_row: Option<usize>,
+    hit: ClipHit,
 }
 
 impl ClipState {
@@ -628,6 +690,14 @@ impl ClipState {
             selection_active: false,
             actions_t: 0.0,
             grace_deadline: None,
+            expanded: false,
+            expand_t: 0.0,
+            box_h: 0.0,
+            list_scroll: 0.0,
+            scroll_target: 0.0,
+            scroll_accum: 0.0,
+            hover_row: None,
+            hit: ClipHit::None,
         }
     }
 }
@@ -657,6 +727,14 @@ impl App {
                     }
                 }
                 self.save_clip_history();
+                // Keep the open box fitted to the new content.
+                if self.clip.expanded {
+                    self.clip.box_h = self.clip_full_h();
+                    let span = self.clip_scroll_span();
+                    self.clip.list_scroll = self.clip.list_scroll.min(span);
+                    self.clip.scroll_target = self.clip.scroll_target.min(span);
+                    self.update_clip_hit();
+                }
                 debug!("clipboard: captured; {} entries", self.clip.history.len());
                 // A fresh clip landed: beat the small pill (mirrors the bell's
                 // muted-arrival blink) as a silent "captured" cue.
@@ -675,8 +753,7 @@ impl App {
         crate::hypr::paste_active();
     }
 
-    /// Restore history entry `idx` to the system clipboard (a card click).
-    #[allow(dead_code)] // wired to the history box in a later stage.
+    /// Restore history entry `idx` to the system clipboard (a row click).
     pub(crate) fn copy_clip(&self, idx: usize) {
         let Some(e) = self.clip.history.get(idx) else {
             return;
@@ -706,37 +783,169 @@ impl App {
     pub(crate) fn clip_geom(&self, left0: f32, y: f32, ph: f32) -> Rect {
         let left = left0 + (ph + BOND_GAP) * self.clip.peek_t;
         let w = lerp(ph, PEEK_W, self.clip.peek_t).max(ph);
-        Rect::new(left, y, w, ph)
+        // Grows down into the history drawer with `expand_t`. Use the eased
+        // `box_h` (seeded on open) so a content change morphs smoothly.
+        let full = if self.clip.box_h > 0.0 {
+            self.clip.box_h
+        } else {
+            self.clip_full_h()
+        };
+        let h = lerp(ph, full, self.clip.expand_t);
+        Rect::new(left, y, w, h)
+    }
+
+    /// Band height of the resting pill (bar minus its top/bottom margins).
+    fn clip_band_h(&self) -> f32 {
+        (self.config.options.height as f32 - 2.0 * PILL_MARGIN_Y).max(1.0)
+    }
+
+    /// The element's current rect (used by hit-testing / scroll / input region),
+    /// recomputed from the same anchor the layout uses.
+    fn clip_rect(&self) -> Rect {
+        let ph = self.clip_band_h();
+        self.clip_geom(crate::options::EDGE_PAD, PILL_MARGIN_Y, ph)
+    }
+
+    /// Fully-expanded box height: fit to content (rows + pad + footer, capped),
+    /// or a small panel for the empty state.
+    fn clip_full_h(&self) -> f32 {
+        if self.clip.history.is_empty() {
+            return EMPTY_H;
+        }
+        let content = self.clip.history.len() as f32 * ROW_H + LIST_PAD + self.clip_footer_h();
+        content.clamp(self.clip_band_h(), EXPANDED_H)
+    }
+
+    /// Diameter of the footer ✕ pill (larger than a bar pill — the box's primary
+    /// action).
+    fn clip_footer_button_d(&self) -> f32 {
+        self.clip_band_h() * 1.4
+    }
+
+    /// Height reserved at the box bottom for the floating ✕ pill.
+    fn clip_footer_h(&self) -> f32 {
+        if self.clip.history.is_empty() {
+            return 0.0;
+        }
+        self.clip_footer_button_d() + 3.0 * PILL_MARGIN_Y
+    }
+
+    /// Bottom edge the pointer-input region must reach while the box is open.
+    pub(crate) fn clip_input_bottom(&self) -> f32 {
+        PILL_MARGIN_Y + self.clip_full_h().max(self.clip.box_h)
+    }
+
+    /// The box's content region (above the floating footer, which grows in).
+    fn clip_content_rect(&self, rect: Rect) -> Rect {
+        let foot = self.clip_footer_h() * self.clip.expand_t;
+        Rect::new(rect.x, rect.y, rect.w, (rect.h - foot).max(0.0))
+    }
+
+    /// The footer zone rect at the box bottom.
+    fn clip_footer_rect(&self, rect: Rect) -> Rect {
+        let h = self.clip_footer_h();
+        Rect::new(rect.x, rect.y + rect.h - h, rect.w, h)
+    }
+
+    /// The centred footer ✕ (clear-all) button rect.
+    fn clip_footer_button_rect(&self, rect: Rect) -> Rect {
+        let f = self.clip_footer_rect(rect);
+        let d = self.clip_footer_button_d();
+        Rect::new(f.x + (f.w - d) / 2.0, f.y + (f.h - d) / 2.0, d, d)
+    }
+
+    /// Visible clip rows: `(index, row rect)`, newest (index 0) flush at the
+    /// content top, each stacked below by `ROW_H`, shifted up by `list_scroll`.
+    /// Shared by the draw and the hit-test so they can't disagree.
+    fn clip_rows(&self, rect: Rect) -> Vec<(usize, Rect)> {
+        let content = self.clip_content_rect(rect);
+        let mut out = Vec::new();
+        let mut top = content.y - self.clip.list_scroll;
+        for idx in 0..self.clip.history.len() {
+            let bottom = top + ROW_H;
+            if bottom > content.y && top < content.y + content.h {
+                out.push((idx, Rect::new(rect.x, top, rect.w, ROW_H)));
+            }
+            top = bottom;
+        }
+        out
+    }
+
+    /// Maximum scroll (px): the list bottom past the visible content area.
+    fn clip_scroll_span(&self) -> f32 {
+        let visible = (EXPANDED_H - self.clip_footer_h()).max(0.0);
+        (self.clip.history.len() as f32 * ROW_H + LIST_PAD - visible).max(0.0)
     }
 
     /// Draw the preview/box element: the pill that slides out to the right from
-    /// behind the small clipboard glyph, showing the most-recent clip (fading in
-    /// with the peek). The glyph itself lives on the small fixed pill.
+    /// behind the small clipboard glyph — the most-recent clip while collapsed,
+    /// the browsable history list once it grows down into the drawer. The glyph
+    /// itself lives on the small fixed pill. Mirrors `push_notif_pill`.
     pub(crate) fn push_clip_pill(&self, scene: &mut Scene, rect: Rect) {
+        let ph = self.clip_band_h();
         let bright = self.options_bar_is_bright();
         let peek = self.clip.peek_t;
+        let e = self.clip.expand_t;
         // Nothing to show until it starts sliding out (at rest it hides fully
         // behind the small pill, which draws on top).
-        if peek < 0.001 {
+        if peek < 0.001 && e < 0.001 {
             return;
         }
-        let radius = rect.h / 2.0; // stadium ⇒ circle when w == h
+        let radius = lerp(ph / 2.0, BOX_RADIUS, e);
         push_neumorph(scene, rect, radius, bright, 1.0);
-        // The preview never reacts to hover (mirrors the box): resting wash.
+
+        // Box fill: the pill's apparent colour (its backdrop with the wash
+        // composited on) so the opaque open box reads as the pill grown. Same
+        // maths as the notif box.
+        let pill_base = self.options_rest_wash();
+        let text_color = self.options_text_color();
+        let backdrop = self.options_bar_matched.or(self.options_pill_color);
+        let (fill, box_ink) = match backdrop {
+            Some(c) => {
+                let a = pill_base[3];
+                let blend = [
+                    c[0] * (1.0 - a) + pill_base[0] * a,
+                    c[1] * (1.0 - a) + pill_base[1] * a,
+                    c[2] * (1.0 - a) + pill_base[2] * a,
+                    1.0,
+                ];
+                let ink = if self.options_bar_matched.is_some() {
+                    text_color
+                } else {
+                    let lum = 0.2126 * blend[0] + 0.7152 * blend[1] + 0.0722 * blend[2];
+                    if lum > 0.179 {
+                        [0.0, 0.0, 0.0, 1.0]
+                    } else {
+                        [0.93, 0.93, 0.96, 1.0]
+                    }
+                };
+                (blend, ink)
+            }
+            None => ([0.10, 0.10, 0.12, 1.0], [0.93, 0.93, 0.96, 1.0]),
+        };
         scene.rects.push(RectInst {
             rect,
             radius,
-            color: self.options_rest_wash(),
+            color: lerp4(pill_base, fill, e),
             glass: 0.0,
         });
 
-        // Preview of the newest clip, left-aligned, fading in with the peek.
-        let pa = ((peek - 0.35) / 0.5).clamp(0.0, 1.0);
+        let ink = lerp4(text_color, box_ink, e);
+        let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
+        let hover_ink = if dark_ink {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            [1.0, 1.0, 1.0, 1.0]
+        };
+        let list_dim = if dark_ink { LIST_DIM_LIGHT } else { LIST_DIM };
+        let dim_ink = [ink[0], ink[1], ink[2], ink[3] * list_dim];
+
+        // Collapsed preview of the newest clip, fading out as the box opens.
+        let pa = ((peek - 0.35) / 0.5).clamp(0.0, 1.0) * (1.0 - e);
         if pa > 0.01 {
             if let Some(latest) = self.clip.history.first() {
-                let ink = self.options_text_color();
                 let tx = rect.x + PILL_PAD_X;
-                let gty = rect.y + (rect.h - LINE_PX) / 2.0;
+                let gty = rect.y + (ph - LINE_PX) / 2.0;
                 let max_w = (rect.x + rect.w - PILL_PAD_X - tx).max(0.0);
                 scene.labels.push(Label {
                     text: latest.preview.clone(),
@@ -753,6 +962,361 @@ impl App {
                 });
             }
         }
+
+        // Open box: the list (fading in with the expand) and the footer.
+        if e <= 0.01 {
+            return;
+        }
+        let content = self.clip_content_rect(rect);
+        if self.clip.history.is_empty() {
+            let a = [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * e];
+            scene.labels.push(Label {
+                text: "Nothing copied yet".to_owned(),
+                pos: (
+                    content.x + content.w / 2.0,
+                    content.y + (content.h - LINE_PX) / 2.0,
+                ),
+                max_w: content.w,
+                font_px: FONT_PX,
+                line_px: LINE_PX,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: None,
+                color: Some(a),
+                clip: Some(content),
+            });
+            return;
+        }
+
+        // Adaptive zebra stripe, pre-composited over the fill into an OPAQUE
+        // colour so overlapping pieces overwrite rather than double-blend.
+        let flum = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2];
+        let stripe = if flum <= 0.179 {
+            wash(true, STRIPE_LIGHTEN)
+        } else {
+            wash(false, STRIPE_DARKEN)
+        };
+        let sa = stripe[3];
+        let stripe_opaque = [
+            stripe[0] * sa + fill[0] * (1.0 - sa),
+            stripe[1] * sa + fill[1] * (1.0 - sa),
+            stripe[2] * sa + fill[2] * (1.0 - sa),
+            1.0,
+        ];
+
+        for (idx, rr) in self.clip_rows(rect) {
+            self.push_clip_row(scene, idx, rr, content, e, ink, dim_ink, hover_ink, stripe_opaque);
+        }
+        self.push_clip_footer(scene, rect, e, bright);
+    }
+
+    /// Draw one clip row: zebra background, the clip preview (spotlit when
+    /// hovered), a trailing relative time, and a × delete control on hover.
+    #[allow(clippy::too_many_arguments)]
+    fn push_clip_row(
+        &self,
+        scene: &mut Scene,
+        idx: usize,
+        rr: Rect,
+        content: Rect,
+        e: f32,
+        ink: [f32; 4],
+        dim_ink: [f32; 4],
+        hover_ink: [f32; 4],
+        stripe_opaque: [f32; 4],
+    ) {
+        let Some(entry) = self.clip.history.get(idx) else {
+            return;
+        };
+        let hovered = self.clip.hover_row == Some(idx);
+        // Clip the row to the content region so it can't spill over the footer.
+        let top = rr.y.max(content.y);
+        let bot = (rr.y + rr.h).min(content.y + content.h);
+        if bot <= top {
+            return;
+        }
+        // Zebra on odd rows (newest = 0 stays plain).
+        if idx % 2 == 1 {
+            scene.rects.push(RectInst {
+                rect: Rect::new(rr.x, top, rr.w, bot - top),
+                radius: 0.0,
+                color: stripe_opaque,
+                glass: 0.0,
+            });
+        }
+
+        let col = if hovered {
+            [hover_ink[0], hover_ink[1], hover_ink[2], e]
+        } else {
+            [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * e]
+        };
+        let ty = rr.y + (rr.h - LINE_PX) / 2.0;
+        let row_clip = Rect::new(rr.x, top, rr.w, bot - top);
+
+        // Trailing time (or the × delete on hover) at the right.
+        let right = rr.x + rr.w - ROW_PAD_X;
+        let text_right = if hovered {
+            // Delete hot-square, top-right.
+            let dr = Rect::new(
+                rr.x + rr.w - ROW_PAD_X - DELETE_SZ,
+                rr.y + (rr.h - DELETE_SZ) / 2.0,
+                DELETE_SZ,
+                DELETE_SZ,
+            );
+            let on_x = self.clip.hit == ClipHit::Delete(idx);
+            let xc = if on_x { CRIMSON } else { [ink[0], ink[1], ink[2], ink[3]] };
+            scene.labels.push(Label {
+                text: GLYPH_X.to_owned(),
+                pos: (dr.x + dr.w / 2.0, dr.y + (dr.h - LINE_PX) / 2.0),
+                max_w: dr.w + 6.0,
+                font_px: FONT_PX,
+                line_px: LINE_PX,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: None,
+                color: Some([xc[0], xc[1], xc[2], e]),
+                clip: Some(row_clip),
+            });
+            dr.x - TEXT_GAP
+        } else {
+            let time = fmt_relative(entry.timestamp_ms);
+            let tw = time.chars().count() as f32 * FONT_PX * 0.55;
+            scene.labels.push(Label {
+                text: time,
+                pos: (right - tw, ty),
+                max_w: tw + 6.0,
+                font_px: FONT_PX,
+                line_px: LINE_PX,
+                centered: false,
+                dim: false,
+                cache: false,
+                family: None,
+                color: Some([col[0], col[1], col[2], col[3] * 0.85]),
+                clip: Some(row_clip),
+            });
+            right - tw - TEXT_GAP
+        };
+
+        // The clip preview, left-aligned.
+        let tx = rr.x + ROW_PAD_X;
+        scene.labels.push(Label {
+            text: entry.preview.clone(),
+            pos: (tx, ty),
+            max_w: (text_right - tx).max(0.0),
+            font_px: FONT_PX,
+            line_px: LINE_PX,
+            centered: false,
+            dim: false,
+            cache: false,
+            family: None,
+            color: Some(col),
+            clip: Some(row_clip),
+        });
+    }
+
+    /// Draw the footer ✕ (clear all) — an enlarged circle floating on the fill.
+    fn push_clip_footer(&self, scene: &mut Scene, rect: Rect, alpha: f32, bright: bool) {
+        let hovered = self.clip.hit == ClipHit::ClearAll;
+        let br = self.clip_footer_button_rect(rect);
+        let br = if hovered { hover_grow(br) } else { br };
+        let radius = br.h / 2.0;
+        push_neumorph(scene, br, radius, bright, alpha);
+        let mut base = if hovered {
+            self.options_hover_wash()
+        } else {
+            self.options_rest_wash()
+        };
+        base[3] *= alpha;
+        scene.rects.push(RectInst {
+            rect: br,
+            radius,
+            color: base,
+            glass: 0.0,
+        });
+        let d0 = self.clip_footer_button_d();
+        let gpx = d0 * 0.6;
+        let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
+        scene.labels.push(Label {
+            text: GLYPH_CLOSE.to_owned(),
+            pos: (br.x + br.w / 2.0, br.y + (br.h - gpx) / 2.0),
+            max_w: br.w + 16.0,
+            font_px: gpx,
+            line_px: gpx,
+            centered: true,
+            dim: false,
+            cache: true,
+            family: Some(NERD),
+            color: Some([RED_GLYPH[0], RED_GLYPH[1], RED_GLYPH[2], RED_GLYPH[3] * alpha]),
+            clip: Some(gclip),
+        });
+    }
+
+    /// Whether the history drawer is open (intent) — for the colour-match to
+    /// sample the bar's frosted colour for the box. (The box sits at the far
+    /// left, clear of the centre window-colour sample, so it needs no column
+    /// exclusion the way the right-side notif box does.)
+    pub(crate) fn clip_drawer_open(&self) -> bool {
+        self.clip.expanded
+    }
+
+    /// What the pointer is over inside the open box (footer > row delete > row).
+    fn clip_hit(&self) -> ClipHit {
+        if self.clip.expand_t < 0.5 {
+            return ClipHit::None;
+        }
+        let Some(p) = self.options_ptr else {
+            return ClipHit::None;
+        };
+        let rect = self.clip_rect();
+        if self.clip_footer_rect(rect).contains(p) {
+            if self.clip_footer_button_rect(rect).contains(p) {
+                return ClipHit::ClearAll;
+            }
+            return ClipHit::None;
+        }
+        for (idx, rr) in self.clip_rows(rect) {
+            if rr.contains(p) {
+                let dr = Rect::new(
+                    rr.x + rr.w - ROW_PAD_X - DELETE_SZ,
+                    rr.y + (rr.h - DELETE_SZ) / 2.0,
+                    DELETE_SZ,
+                    DELETE_SZ,
+                );
+                if dr.contains(p) {
+                    return ClipHit::Delete(idx);
+                }
+                return ClipHit::Row(idx);
+            }
+        }
+        ClipHit::None
+    }
+
+    /// Recompute the box hit target + hovered row from the pointer; returns
+    /// whether anything changed (so the caller can redraw). On pointer motion.
+    pub(crate) fn update_clip_hit(&mut self) -> bool {
+        let hit = self.clip_hit();
+        let hover_row = match hit {
+            ClipHit::Row(i) | ClipHit::Delete(i) => Some(i),
+            _ => None,
+        };
+        let changed = hit != self.clip.hit || hover_row != self.clip.hover_row;
+        self.clip.hit = hit;
+        self.clip.hover_row = hover_row;
+        changed
+    }
+
+    /// Whether the pointer is on a clickable box target (for the cursor shape).
+    pub(crate) fn clip_box_hit_clickable(&self) -> bool {
+        !matches!(self.clip.hit, ClipHit::None)
+    }
+
+    /// A wheel event over the clipboard OPTION (raw axis value): opens the box
+    /// from the collapsed preview, then scrolls the list. Mirrors `notif_axis`.
+    pub(crate) fn clip_axis(&mut self, value: f32) {
+        let delta = if self.config.input.natural_scroll {
+            value
+        } else {
+            -value
+        };
+        if self.clip.expanded {
+            self.clip.hold_deadline = None; // a scroll keeps it open
+            let span = self.clip_scroll_span();
+            self.clip.scroll_target =
+                (self.clip.scroll_target + delta * SCROLL_SPEED).clamp(0.0, span);
+            self.clip.scroll_accum = 0.0;
+            self.schedule_clip_frame();
+        } else {
+            self.clip.scroll_accum += delta;
+            if self.clip.scroll_accum.abs() >= NOTCH {
+                self.clip.scroll_accum = 0.0;
+                self.open_clip_box();
+            }
+        }
+    }
+
+    /// Open the history drawer from the collapsed preview, newest flush at top.
+    fn open_clip_box(&mut self) {
+        if self.clip.history.is_empty() {
+            return;
+        }
+        self.clip.hold_deadline = None;
+        self.clip.peek_reveal = true; // keep the preview fully out under the box
+        self.clip.expanded = true;
+        self.clip.box_h = self.clip_full_h();
+        self.clip.list_scroll = 0.0;
+        self.clip.scroll_target = 0.0;
+        self.clip.scroll_accum = 0.0;
+        self.sync_options_input();
+        self.reeval_options_bar();
+        self.schedule_clip_frame();
+    }
+
+    /// Collapse the open history drawer back to the pill.
+    fn close_clip_box(&mut self) {
+        if self.clip.expanded {
+            self.clip.expanded = false;
+            self.clip.hit = ClipHit::None;
+            self.clip.hover_row = None;
+            self.sync_options_input();
+            self.schedule_clip_frame();
+        }
+    }
+
+    /// Handle a click inside the open box (footer / row delete / row). Returns
+    /// whether it consumed the click.
+    pub(crate) fn clip_box_click(&mut self) -> bool {
+        match self.clip.hit {
+            ClipHit::ClearAll => {
+                self.clear_clip_history();
+                true
+            }
+            ClipHit::Delete(i) => {
+                self.delete_clip(i);
+                true
+            }
+            ClipHit::Row(i) => {
+                // Copy the clip back to the clipboard so the user can paste it.
+                self.copy_clip(i);
+                true
+            }
+            ClipHit::None => false,
+        }
+    }
+
+    /// Delete one clip from the history (its × control).
+    fn delete_clip(&mut self, idx: usize) {
+        if idx >= self.clip.history.len() {
+            return;
+        }
+        let entry = self.clip.history.remove(idx);
+        if let Some(p) = &entry.image_path {
+            let _ = std::fs::remove_file(p);
+        }
+        self.save_clip_history();
+        if self.clip.history.is_empty() {
+            self.close_clip_box();
+        } else {
+            self.clip.box_h = self.clip_full_h();
+            let span = self.clip_scroll_span();
+            self.clip.list_scroll = self.clip.list_scroll.min(span);
+            self.clip.scroll_target = self.clip.scroll_target.min(span);
+        }
+        self.update_clip_hit();
+        self.schedule_clip_frame();
+    }
+
+    /// Clear the whole history (footer ✕).
+    fn clear_clip_history(&mut self) {
+        for entry in &self.clip.history {
+            if let Some(p) = &entry.image_path {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        self.clip.history.clear();
+        self.save_clip_history();
+        self.close_clip_box();
     }
 
     /// Draw the small fixed clipboard-glyph pill (the left-edge anchor the box
@@ -874,6 +1438,10 @@ impl App {
     /// open the action pills and (re)start their fade grace. `present == false`
     /// (a rare clear, for apps that do clear their primary) ends the context.
     fn on_clip_selection(&mut self, present: bool) {
+        // Don't pop the action pills over the open history box.
+        if self.clip.expanded {
+            return;
+        }
         if !present {
             self.end_clip_selection();
             return;
@@ -1041,6 +1609,13 @@ impl App {
                         Some(PillId::Clipboard | PillId::ClipboardBox)
                     ) {
                         app.clip.peek_reveal = false;
+                        // Collapse the history drawer too, if it was open.
+                        if app.clip.expanded {
+                            app.clip.expanded = false;
+                            app.clip.hit = ClipHit::None;
+                            app.clip.hover_row = None;
+                            app.sync_options_input();
+                        }
                         app.clip.last = None;
                         app.schedule_clip_frame();
                     }
@@ -1083,17 +1658,55 @@ impl App {
         let atarget = if self.clip.selection_active { 1.0 } else { 0.0 };
         let (at, amoving) = ease_toward(self.clip.actions_t, atarget, dt, MORPH_RATE, MORPH_EPS);
         self.clip.actions_t = at;
+        // Grow / collapse the history drawer.
+        let etarget = if self.clip.expanded { 1.0 } else { 0.0 };
+        let (et, em) = ease_toward(self.clip.expand_t, etarget, dt, MORPH_RATE, MORPH_EPS);
+        self.clip.expand_t = et;
+        // Ease the open-box height toward its content-fit target (smooth on a
+        // content change); only while open, so there's no idle churn collapsed.
+        let bm = if self.clip.expand_t > MORPH_EPS {
+            let (bh, moving) =
+                ease_toward(self.clip.box_h, self.clip_full_h(), dt, MORPH_RATE * 1.3, 0.5);
+            self.clip.box_h = bh;
+            moving
+        } else {
+            false
+        };
+        // Smooth list scrolling.
+        let (ls, lm) = ease_toward(
+            self.clip.list_scroll,
+            self.clip.scroll_target,
+            dt,
+            SCROLL_RATE,
+            0.5,
+        );
+        self.clip.list_scroll = ls;
         // Keep the beat pulsing until its deadline, then clear it.
         let beating = self.clip.blink_until.is_some_and(|u| now < u);
         if !beating {
             self.clip.blink_until = None;
         }
         self.draw_options();
-        if moving || amoving || beating {
+        if moving || amoving || em || bm || lm || beating {
             self.schedule_clip_frame();
         } else {
             self.clip.last = None;
         }
+    }
+}
+
+/// A short relative time for a clip row (e.g. `now`, `5m`, `3h`, `2d`).
+fn fmt_relative(ms: u64) -> String {
+    let now = now_ms();
+    let secs = now.saturating_sub(ms) / 1000;
+    if secs < 45 {
+        "now".to_owned()
+    } else if secs < 3600 {
+        format!("{}m", (secs / 60).max(1))
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
     }
 }
 
