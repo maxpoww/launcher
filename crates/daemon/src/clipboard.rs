@@ -73,6 +73,9 @@ const DELETE_SZ: f32 = 18.0;
 const GLYPH_X: &str = "\u{00d7}";
 /// Crimson for the × delete when it's the pointer target.
 const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
+/// Leading row glyphs distinguishing non-text clips (until thumbnails land).
+const GLYPH_IMAGE: &str = "\u{f03e}"; // fa-image
+const GLYPH_FILES: &str = "\u{f0c6}"; // fa-paperclip
 /// One wheel notch (`wl_pointer` axis units) — the travel that opens the box.
 const NOTCH: f32 = 15.0;
 /// Pixels of list scroll per axis unit.
@@ -1099,8 +1102,25 @@ impl App {
             right - tw - TEXT_GAP
         };
 
+        // Leading kind glyph for non-text clips (image / files), then the text.
+        let mut tx = rr.x + ROW_PAD_X;
+        if let Some(glyph) = kind_glyph(entry.kind) {
+            scene.labels.push(Label {
+                text: glyph.to_owned(),
+                pos: (tx, ty),
+                max_w: FONT_PX + 6.0,
+                font_px: FONT_PX,
+                line_px: LINE_PX,
+                centered: false,
+                dim: false,
+                cache: true,
+                family: Some(NERD),
+                color: Some(col),
+                clip: Some(row_clip),
+            });
+            tx += FONT_PX + TEXT_GAP;
+        }
         // The clip preview, left-aligned.
-        let tx = rr.x + ROW_PAD_X;
         scene.labels.push(Label {
             text: entry.preview.clone(),
             pos: (tx, ty),
@@ -1277,8 +1297,10 @@ impl App {
                 true
             }
             ClipHit::Row(i) => {
-                // Copy the clip back to the clipboard so the user can paste it.
+                // Copy the clip back to the clipboard, then dismiss the picker so
+                // the user can paste straight away.
                 self.copy_clip(i);
+                self.close_clip_box();
                 true
             }
             ClipHit::None => false,
@@ -1692,6 +1714,15 @@ impl App {
         } else {
             self.clip.last = None;
         }
+    }
+}
+
+/// The leading glyph for a non-text clip row (`None` for plain text).
+fn kind_glyph(kind: ClipKind) -> Option<&'static str> {
+    match kind {
+        ClipKind::Image => Some(GLYPH_IMAGE),
+        ClipKind::Files => Some(GLYPH_FILES),
+        ClipKind::Text => None,
     }
 }
 
