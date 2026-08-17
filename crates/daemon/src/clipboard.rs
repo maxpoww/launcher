@@ -51,8 +51,11 @@ const MORPH_EPS: f32 = 0.001;
 const EXPANDED_H: f32 = 505.0;
 /// Box height with no clips — a small "Nothing copied yet" panel.
 const EMPTY_H: f32 = 120.0;
-/// Fixed height of one clip row.
-const ROW_H: f32 = 46.0;
+/// A clip row shows up to this many lines of the clip; the row height grows
+/// with the line count (single-line clips stay compact).
+const MAX_ROW_LINES: usize = 5;
+/// Inner vertical padding of a row (top and bottom).
+const ROW_PAD_Y: f32 = 9.0;
 /// Inner horizontal padding of a row / the box.
 const ROW_PAD_X: f32 = 14.0;
 /// Bottom padding below the last row before scrolling stops.
@@ -670,6 +673,9 @@ pub(crate) struct ClipState {
     /// Row under the pointer (for the spotlight), and the fine hit target.
     hover_row: Option<usize>,
     hit: ClipHit,
+    /// Pre-measured per-row heights (parallel to `history`), so the variable-
+    /// height list lays out identically in the draw and the hit-test.
+    row_heights: Vec<f32>,
 }
 
 impl ClipState {
@@ -679,6 +685,7 @@ impl ClipState {
         history.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms));
         history.truncate(MAX_HISTORY);
         let next_id = history.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+        let row_heights = history.iter().map(row_height_of).collect();
         Self {
             handle,
             history,
@@ -701,8 +708,34 @@ impl ClipState {
             scroll_accum: 0.0,
             hover_row: None,
             hit: ClipHit::None,
+            row_heights,
         }
     }
+}
+
+/// The lines a clip shows in a row: up to [`MAX_ROW_LINES`] physical lines for
+/// text (blank edges trimmed); a single preview line for files / images.
+fn clip_row_lines(entry: &ClipEntry) -> Vec<String> {
+    if entry.kind != ClipKind::Text {
+        return vec![entry.preview.clone()];
+    }
+    let mut lines: Vec<String> = entry.text.lines().map(|l| l.trim_end().to_owned()).collect();
+    while lines.first().is_some_and(|l| l.is_empty()) {
+        lines.remove(0);
+    }
+    lines.truncate(MAX_ROW_LINES);
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        lines.push(entry.preview.clone());
+    }
+    lines
+}
+
+/// The laid-out height of a clip's row (grows with its shown line count).
+fn row_height_of(entry: &ClipEntry) -> f32 {
+    clip_row_lines(entry).len() as f32 * LINE_PX + 2.0 * ROW_PAD_Y
 }
 
 impl App {
@@ -729,6 +762,7 @@ impl App {
                         }
                     }
                 }
+                self.measure_clip_rows();
                 self.save_clip_history();
                 // Keep the open box fitted to the new content.
                 if self.clip.expanded {
@@ -809,13 +843,24 @@ impl App {
         self.clip_geom(crate::options::EDGE_PAD, PILL_MARGIN_Y, ph)
     }
 
+    /// Total stacked height of all rows.
+    fn clip_rows_total_h(&self) -> f32 {
+        self.clip.row_heights.iter().sum()
+    }
+
+    /// Recompute the per-row heights after any history change (the variable-
+    /// height list must lay out identically in the draw and the hit-test).
+    fn measure_clip_rows(&mut self) {
+        self.clip.row_heights = self.clip.history.iter().map(row_height_of).collect();
+    }
+
     /// Fully-expanded box height: fit to content (rows + pad + footer, capped),
     /// or a small panel for the empty state.
     fn clip_full_h(&self) -> f32 {
         if self.clip.history.is_empty() {
             return EMPTY_H;
         }
-        let content = self.clip.history.len() as f32 * ROW_H + LIST_PAD + self.clip_footer_h();
+        let content = self.clip_rows_total_h() + LIST_PAD + self.clip_footer_h();
         content.clamp(self.clip_band_h(), EXPANDED_H)
     }
 
@@ -858,16 +903,17 @@ impl App {
     }
 
     /// Visible clip rows: `(index, row rect)`, newest (index 0) flush at the
-    /// content top, each stacked below by `ROW_H`, shifted up by `list_scroll`.
-    /// Shared by the draw and the hit-test so they can't disagree.
+    /// content top, each stacked below by its own (variable) height, shifted up
+    /// by `list_scroll`. Shared by the draw and the hit-test so they can't
+    /// disagree.
     fn clip_rows(&self, rect: Rect) -> Vec<(usize, Rect)> {
         let content = self.clip_content_rect(rect);
         let mut out = Vec::new();
         let mut top = content.y - self.clip.list_scroll;
-        for idx in 0..self.clip.history.len() {
-            let bottom = top + ROW_H;
+        for (idx, &h) in self.clip.row_heights.iter().enumerate() {
+            let bottom = top + h;
             if bottom > content.y && top < content.y + content.h {
-                out.push((idx, Rect::new(rect.x, top, rect.w, ROW_H)));
+                out.push((idx, Rect::new(rect.x, top, rect.w, h)));
             }
             top = bottom;
         }
@@ -877,7 +923,7 @@ impl App {
     /// Maximum scroll (px): the list bottom past the visible content area.
     fn clip_scroll_span(&self) -> f32 {
         let visible = (EXPANDED_H - self.clip_footer_h()).max(0.0);
-        (self.clip.history.len() as f32 * ROW_H + LIST_PAD - visible).max(0.0)
+        (self.clip_rows_total_h() + LIST_PAD - visible).max(0.0)
     }
 
     /// Draw the preview/box element: the pill that slides out to the right from
@@ -1102,12 +1148,14 @@ impl App {
             right - tw - TEXT_GAP
         };
 
-        // Leading kind glyph for non-text clips (image / files), then the text.
+        // Leading kind glyph on the first line for non-text clips, then the clip
+        // text stacked line by line from the row top.
+        let ty0 = rr.y + ROW_PAD_Y;
         let mut tx = rr.x + ROW_PAD_X;
         if let Some(glyph) = kind_glyph(entry.kind) {
             scene.labels.push(Label {
                 text: glyph.to_owned(),
-                pos: (tx, ty),
+                pos: (tx, ty0),
                 max_w: FONT_PX + 6.0,
                 font_px: FONT_PX,
                 line_px: LINE_PX,
@@ -1120,20 +1168,22 @@ impl App {
             });
             tx += FONT_PX + TEXT_GAP;
         }
-        // The clip preview, left-aligned.
-        scene.labels.push(Label {
-            text: entry.preview.clone(),
-            pos: (tx, ty),
-            max_w: (text_right - tx).max(0.0),
-            font_px: FONT_PX,
-            line_px: LINE_PX,
-            centered: false,
-            dim: false,
-            cache: false,
-            family: None,
-            color: Some(col),
-            clip: Some(row_clip),
-        });
+        let max_w = (text_right - tx).max(0.0);
+        for (i, line) in clip_row_lines(entry).into_iter().enumerate() {
+            scene.labels.push(Label {
+                text: line,
+                pos: (tx, ty0 + i as f32 * LINE_PX),
+                max_w,
+                font_px: FONT_PX,
+                line_px: LINE_PX,
+                centered: false,
+                dim: false,
+                cache: false,
+                family: None,
+                color: Some(col),
+                clip: Some(row_clip),
+            });
+        }
     }
 
     /// Draw the footer ✕ (clear all) — an enlarged circle floating on the fill.
@@ -1316,6 +1366,7 @@ impl App {
         if let Some(p) = &entry.image_path {
             let _ = std::fs::remove_file(p);
         }
+        self.measure_clip_rows();
         self.save_clip_history();
         if self.clip.history.is_empty() {
             self.close_clip_box();
@@ -1337,6 +1388,7 @@ impl App {
             }
         }
         self.clip.history.clear();
+        self.clip.row_heights.clear();
         self.save_clip_history();
         self.close_clip_box();
     }
