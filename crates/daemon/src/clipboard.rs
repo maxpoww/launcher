@@ -82,7 +82,7 @@ const GLYPH_IMAGE: &str = "\u{f03e}"; // fa-image
 const GLYPH_FILES: &str = "\u{f0c6}"; // fa-paperclip
 const GLYPH_FOLDER: &str = "\u{f07b}"; // fa-folder (a directory clip)
 /// Square thumbnail/icon tile size at the left of an image / files row.
-const TILE_SZ: f32 = 40.0;
+const TILE_SZ: f32 = 120.0;
 /// Texture-array slots kept for clipboard thumbnails (recycled round-robin),
 /// appended after the notif card avatars on the OPTIONS renderer.
 const THUMB_CAP: usize = 32;
@@ -1186,7 +1186,6 @@ impl App {
 
         // Left tile (thumbnail / glyph) for image & files clips; text is inset
         // past it. Text-only clips start at the padding.
-        let ty0 = rr.y + ROW_PAD_Y;
         let mut tx = rr.x + ROW_PAD_X;
         match clip_tile(entry) {
             ClipTile::None => {}
@@ -1212,12 +1211,14 @@ impl App {
             }
         }
 
-        // The clip text stacked line by line from the row top.
+        // The clip text, vertically centred against the (possibly tall) tile.
         let max_w = (text_right - tx).max(0.0);
-        for (i, line) in clip_row_lines(entry).into_iter().enumerate() {
+        let lines = clip_row_lines(entry);
+        let text_top = rr.y + (rr.h - lines.len() as f32 * LINE_PX) / 2.0;
+        for (i, line) in lines.into_iter().enumerate() {
             scene.labels.push(Label {
                 text: line,
-                pos: (tx, ty0 + i as f32 * LINE_PX),
+                pos: (tx, text_top + i as f32 * LINE_PX),
                 max_w,
                 font_px: FONT_PX,
                 line_px: LINE_PX,
