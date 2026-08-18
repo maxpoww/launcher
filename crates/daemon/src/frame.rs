@@ -1022,7 +1022,7 @@ impl App {
         self.measure_notif();
         // Any icons resolved before this renderer existed haven't been uploaded
         // to it yet (their resolve found no renderer); push them now.
-        self.upload_notif_icons();
+        self.upload_options_icons();
         self.sync_options_input();
         self.draw_options();
     }

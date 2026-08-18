@@ -823,24 +823,28 @@ impl Renderer {
         self.label_cache.clear();
         let reserved =
             crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP + crate::thumbs::THUMB_CAP;
-        self.upload_icon_array(icons, reserved);
+        self.upload_icon_array(icons.len(), reserved, icons.iter());
     }
 
-    /// Populate the notification OPTION's own icon array on the OPTIONS surface.
-    /// The topbar renderer is a separate instance from the dock's, so this array
-    /// is entirely its own: `chains[i]` becomes texture layer `i`, addressed by
-    /// [`IconInst::layer`] from the notif cards. No reserved tail — the notif set
-    /// is small and re-uploaded wholesale when it changes (see
-    /// `App::upload_notif_icons`).
-    pub fn set_notif_icons(&mut self, chains: &[Vec<u8>]) {
-        self.upload_icon_array(chains, 0);
+    /// Populate the OPTIONS surface's icon array. The topbar renderer is a
+    /// separate instance from the dock's, so this array is entirely its own:
+    /// the notification card avatars occupy layers `[0, notif.len())` and the
+    /// clipboard thumbnails follow at `[notif.len(), notif.len() + clip.len())`,
+    /// each addressed by [`IconInst::layer`]. Re-uploaded wholesale whenever
+    /// either set changes (see `App::upload_options_icons`).
+    pub fn set_options_icons(&mut self, notif: &[Vec<u8>], clip: &[Vec<u8>]) {
+        self.upload_icon_array(notif.len() + clip.len(), 0, notif.iter().chain(clip.iter()));
     }
 
-    /// Shared core of [`Renderer::set_icons`] / [`Renderer::set_notif_icons`]:
-    /// (re)allocate the icon texture array with `chains.len() + reserved` layers,
-    /// write each chain to its layer, and rebuild the sampler bind group.
-    fn upload_icon_array(&mut self, icons: &[Vec<u8>], reserved: usize) {
-        let layers = (icons.len() + reserved).max(1) as u32;
+    /// Shared core: (re)allocate the icon texture array with `count + reserved`
+    /// layers, write each chain to its layer, and rebuild the sampler bind group.
+    fn upload_icon_array<'a>(
+        &mut self,
+        count: usize,
+        reserved: usize,
+        chains: impl Iterator<Item = &'a Vec<u8>>,
+    ) {
+        let layers = (count + reserved).max(1) as u32;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("waverunner.icons"),
             size: wgpu::Extent3d {
@@ -855,7 +859,7 @@ impl Renderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        for (i, chain) in icons.iter().enumerate() {
+        for (i, chain) in chains.enumerate() {
             write_icon_chain(&self.queue, &texture, i as u32, chain);
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor {

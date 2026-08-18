@@ -19,6 +19,7 @@
 //! summary collector and the notification OPTION's live list.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -32,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::animation::{ease_toward, lerp};
-use crate::content::{Label, Rect, RectInst, Scene};
+use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
     hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_CLOSE,
     GLYPH_COPY, GLYPH_CUT, GLYPH_SELECT_ALL, LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X, RED_GLYPH,
@@ -76,9 +77,15 @@ const DELETE_SZ: f32 = 18.0;
 const GLYPH_X: &str = "\u{00d7}";
 /// Crimson for the × delete when it's the pointer target.
 const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
-/// Leading row glyphs distinguishing non-text clips (until thumbnails land).
+/// Leading row glyphs for non-text clips without a thumbnail (dirs / plain files).
 const GLYPH_IMAGE: &str = "\u{f03e}"; // fa-image
 const GLYPH_FILES: &str = "\u{f0c6}"; // fa-paperclip
+const GLYPH_FOLDER: &str = "\u{f07b}"; // fa-folder (a directory clip)
+/// Square thumbnail/icon tile size at the left of an image / files row.
+const TILE_SZ: f32 = 40.0;
+/// Texture-array slots kept for clipboard thumbnails (recycled round-robin),
+/// appended after the notif card avatars on the OPTIONS renderer.
+const THUMB_CAP: usize = 32;
 /// One wheel notch (`wl_pointer` axis units) — the travel that opens the box.
 const NOTCH: f32 = 15.0;
 /// Pixels of list scroll per axis unit.
@@ -676,10 +683,26 @@ pub(crate) struct ClipState {
     /// Pre-measured per-row heights (parallel to `history`), so the variable-
     /// height list lays out identically in the draw and the hit-test.
     row_heights: Vec<f32>,
+    // ---- thumbnails (image / file previews) ----
+    /// Background thumbnailer (reuses the Files-section worker). `None` when the
+    /// topbar is off.
+    pub(crate) thumbs: Option<crate::thumbs::Thumbs>,
+    /// Resolved thumbnail mip chains, appended to the OPTIONS icon array after
+    /// the notif avatars; `icon_chains[slot]` is at renderer layer
+    /// `notif_icon_chains.len() + slot`. Capped at [`THUMB_CAP`], recycled.
+    pub(crate) icon_chains: Vec<Vec<u8>>,
+    /// Thumbnail source path (hashed) → slot in `icon_chains`.
+    icon_slot: HashMap<u64, u32>,
+    /// slot → the key currently in it, for eviction on recycle.
+    icon_key_at: Vec<u64>,
+    /// Round-robin cursor for slot recycling once `icon_chains` is full.
+    icon_next: usize,
+    /// Source keys with a thumbnail request in flight (dedup).
+    icon_pending: HashSet<u64>,
 }
 
 impl ClipState {
-    pub fn new(handle: Option<ClipHandle>) -> Self {
+    pub fn new(handle: Option<ClipHandle>, thumbs: Option<crate::thumbs::Thumbs>) -> Self {
         let mut history: Vec<ClipEntry> =
             crate::persist::read_json(&crate::persist::data_path(HISTORY_FILE)).unwrap_or_default();
         history.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms));
@@ -709,6 +732,12 @@ impl ClipState {
             hover_row: None,
             hit: ClipHit::None,
             row_heights,
+            thumbs,
+            icon_chains: Vec::new(),
+            icon_slot: HashMap::new(),
+            icon_key_at: Vec::new(),
+            icon_next: 0,
+            icon_pending: HashSet::new(),
         }
     }
 }
@@ -733,9 +762,16 @@ fn clip_row_lines(entry: &ClipEntry) -> Vec<String> {
     lines
 }
 
-/// The laid-out height of a clip's row (grows with its shown line count).
+/// The laid-out height of a clip's row (grows with its shown line count, and is
+/// at least the tile height for image / files rows).
 fn row_height_of(entry: &ClipEntry) -> f32 {
-    clip_row_lines(entry).len() as f32 * LINE_PX + 2.0 * ROW_PAD_Y
+    let text_h = clip_row_lines(entry).len() as f32 * LINE_PX;
+    let h = if matches!(clip_tile(entry), ClipTile::None) {
+        text_h
+    } else {
+        text_h.max(TILE_SZ)
+    };
+    h + 2.0 * ROW_PAD_Y
 }
 
 impl App {
@@ -1148,26 +1184,35 @@ impl App {
             right - tw - TEXT_GAP
         };
 
-        // Leading kind glyph on the first line for non-text clips, then the clip
-        // text stacked line by line from the row top.
+        // Left tile (thumbnail / glyph) for image & files clips; text is inset
+        // past it. Text-only clips start at the padding.
         let ty0 = rr.y + ROW_PAD_Y;
         let mut tx = rr.x + ROW_PAD_X;
-        if let Some(glyph) = kind_glyph(entry.kind) {
-            scene.labels.push(Label {
-                text: glyph.to_owned(),
-                pos: (tx, ty0),
-                max_w: FONT_PX + 6.0,
-                font_px: FONT_PX,
-                line_px: LINE_PX,
-                centered: false,
-                dim: false,
-                cache: true,
-                family: Some(NERD),
-                color: Some(col),
-                clip: Some(row_clip),
-            });
-            tx += FONT_PX + TEXT_GAP;
+        match clip_tile(entry) {
+            ClipTile::None => {}
+            ClipTile::Glyph(glyph) => {
+                let tile = Rect::new(tx, rr.y + (rr.h - TILE_SZ) / 2.0, TILE_SZ, TILE_SZ);
+                self.push_clip_tile_glyph(scene, tile, glyph, ink, e, row_clip);
+                tx += TILE_SZ + TEXT_GAP;
+            }
+            ClipTile::Thumb { key, glyph, .. } => {
+                let tile = Rect::new(tx, rr.y + (rr.h - TILE_SZ) / 2.0, TILE_SZ, TILE_SZ);
+                if let Some(layer) = self.clip_thumb_layer(key) {
+                    clip_grid(scene, content).icons.push(IconInst {
+                        rect: tile,
+                        layer,
+                        tint: [0.0; 4],
+                        ring: -1.0,
+                    });
+                } else {
+                    // Not resolved yet — a soft placeholder with the kind glyph.
+                    self.push_clip_tile_glyph(scene, tile, glyph, ink, e, row_clip);
+                }
+                tx += TILE_SZ + TEXT_GAP;
+            }
         }
+
+        // The clip text stacked line by line from the row top.
         let max_w = (text_right - tx).max(0.0);
         for (i, line) in clip_row_lines(entry).into_iter().enumerate() {
             scene.labels.push(Label {
@@ -1184,6 +1229,39 @@ impl App {
                 clip: Some(row_clip),
             });
         }
+    }
+
+    /// A soft rounded placeholder tile with a centred kind glyph (a directory /
+    /// plain file, or an image thumbnail that hasn't resolved yet).
+    fn push_clip_tile_glyph(
+        &self,
+        scene: &mut Scene,
+        tile: Rect,
+        glyph: &str,
+        ink: [f32; 4],
+        e: f32,
+        clip: Rect,
+    ) {
+        scene.rects.push(RectInst {
+            rect: tile,
+            radius: 6.0,
+            color: [ink[0], ink[1], ink[2], 0.10 * e],
+            glass: 0.0,
+        });
+        let gpx = TILE_SZ * 0.5;
+        scene.labels.push(Label {
+            text: glyph.to_owned(),
+            pos: (tile.x + tile.w / 2.0, tile.y + (tile.h - gpx) / 2.0),
+            max_w: tile.w + 6.0,
+            font_px: gpx,
+            line_px: gpx,
+            centered: true,
+            dim: false,
+            cache: true,
+            family: Some(NERD),
+            color: Some([ink[0], ink[1], ink[2], ink[3] * 0.7 * e]),
+            clip: Some(clip),
+        });
     }
 
     /// Draw the footer ✕ (clear all) — an enlarged circle floating on the fill.
@@ -1296,6 +1374,7 @@ impl App {
             self.clip.scroll_target =
                 (self.clip.scroll_target + delta * SCROLL_SPEED).clamp(0.0, span);
             self.clip.scroll_accum = 0.0;
+            self.request_clip_thumbs();
             self.schedule_clip_frame();
         } else {
             self.clip.scroll_accum += delta;
@@ -1320,6 +1399,7 @@ impl App {
         self.clip.scroll_accum = 0.0;
         self.sync_options_input();
         self.reeval_options_bar();
+        self.request_clip_thumbs();
         self.schedule_clip_frame();
     }
 
@@ -1391,6 +1471,75 @@ impl App {
         self.clip.row_heights.clear();
         self.save_clip_history();
         self.close_clip_box();
+    }
+
+    /// The OPTIONS renderer layer of a resolved clip thumbnail (clipboard
+    /// thumbnails follow the notif avatars in the shared array), or `None`.
+    fn clip_thumb_layer(&self, key: u64) -> Option<u32> {
+        self.clip
+            .icon_slot
+            .get(&key)
+            .map(|s| self.notif_icon_chains.len() as u32 + s)
+    }
+
+    /// A thumbnail arrived from the worker: cache it in a (recycling) slot and
+    /// re-upload the shared OPTIONS icon array.
+    pub(crate) fn on_clip_thumb(&mut self, ev: crate::thumbs::Event) {
+        let crate::thumbs::Event::Thumb { path, pixels } = ev else {
+            return; // AudioOnly etc. — no thumbnail
+        };
+        let key = hash_bytes(path.as_bytes());
+        self.clip.icon_pending.remove(&key);
+        if self.clip.icon_slot.contains_key(&key) {
+            return;
+        }
+        let slot = if self.clip.icon_chains.len() < THUMB_CAP {
+            let s = self.clip.icon_chains.len();
+            self.clip.icon_chains.push(pixels);
+            self.clip.icon_key_at.push(key);
+            s
+        } else {
+            let s = self.clip.icon_next % THUMB_CAP;
+            self.clip.icon_next = self.clip.icon_next.wrapping_add(1);
+            let old = self.clip.icon_key_at[s];
+            self.clip.icon_slot.remove(&old);
+            self.clip.icon_chains[s] = pixels;
+            self.clip.icon_key_at[s] = key;
+            s
+        };
+        self.clip.icon_slot.insert(key, slot as u32);
+        self.upload_options_icons();
+        self.draw_options();
+    }
+
+    /// Request thumbnails for the currently-visible rows that still need one.
+    fn request_clip_thumbs(&mut self) {
+        if self.clip.thumbs.is_none() {
+            return;
+        }
+        let rect = self.clip_rect();
+        let reqs: Vec<(String, u64)> = self
+            .clip_rows(rect)
+            .into_iter()
+            .filter_map(|(idx, _)| {
+                let entry = self.clip.history.get(idx)?;
+                match clip_tile(entry) {
+                    ClipTile::Thumb { path, key, .. }
+                        if !self.clip.icon_slot.contains_key(&key)
+                            && !self.clip.icon_pending.contains(&key) =>
+                    {
+                        Some((path, key))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        for (path, key) in reqs {
+            self.clip.icon_pending.insert(key);
+            if let Some(t) = &self.clip.thumbs {
+                t.request(&path);
+            }
+        }
     }
 
     /// Draw the small fixed clipboard-glyph pill (the left-edge anchor the box
@@ -1769,13 +1918,77 @@ impl App {
     }
 }
 
-/// The leading glyph for a non-text clip row (`None` for plain text).
-fn kind_glyph(kind: ClipKind) -> Option<&'static str> {
-    match kind {
-        ClipKind::Image => Some(GLYPH_IMAGE),
-        ClipKind::Files => Some(GLYPH_FILES),
-        ClipKind::Text => None,
+/// What a clip row shows at its left: nothing (text), a glyph tile (a directory
+/// or a non-previewable file), or a thumbnail (image / previewable file) with a
+/// glyph placeholder until it resolves.
+enum ClipTile {
+    None,
+    Glyph(&'static str),
+    Thumb {
+        path: String,
+        key: u64,
+        glyph: &'static str,
+    },
+}
+
+/// Classify a clip's left tile (see [`ClipTile`]). `key` is the source path's
+/// hash — the thumbnail cache key.
+fn clip_tile(entry: &ClipEntry) -> ClipTile {
+    match entry.kind {
+        ClipKind::Text => ClipTile::None,
+        ClipKind::Image => match &entry.image_path {
+            Some(p) => {
+                let path = p.to_string_lossy().into_owned();
+                let key = hash_bytes(path.as_bytes());
+                ClipTile::Thumb {
+                    path,
+                    key,
+                    glyph: GLYPH_IMAGE,
+                }
+            }
+            None => ClipTile::Glyph(GLYPH_IMAGE),
+        },
+        ClipKind::Files => {
+            let Some(path) = first_file_path(&entry.text) else {
+                return ClipTile::Glyph(GLYPH_FILES);
+            };
+            if std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+                ClipTile::Glyph(GLYPH_FOLDER)
+            } else if crate::thumbs::thumbable(&path) {
+                let key = hash_bytes(path.as_bytes());
+                ClipTile::Thumb {
+                    path,
+                    key,
+                    glyph: GLYPH_FILES,
+                }
+            } else {
+                ClipTile::Glyph(GLYPH_FILES)
+            }
+        }
     }
+}
+
+/// The first real path in a `text/uri-list` (percent-decoded `file://`).
+fn first_file_path(uri_list: &str) -> Option<String> {
+    uri_list
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| percent_decode(l.strip_prefix("file://").unwrap_or(l)))
+}
+
+/// The box's content-scissored grid the row thumbnails ride, so they clip to the
+/// list interior (mirrors the notif box's grid). Reuses the last grid only if
+/// it's already ours (same clip rect), else pushes a fresh one — so an open
+/// notif box's grid (a different rect) can't clip the clip thumbnails.
+fn clip_grid(scene: &mut Scene, content: Rect) -> &mut GridContent {
+    if scene.grids.last().map(|g| g.clip) != Some(content) {
+        scene.grids.push(GridContent {
+            clip: content,
+            ..Default::default()
+        });
+    }
+    scene.grids.last_mut().expect("grid just ensured")
 }
 
 /// A short relative time for a clip row (e.g. `now`, `5m`, `3h`, `2d`).

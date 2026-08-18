@@ -229,6 +229,14 @@ fn main() -> anyhow::Result<()> {
     } else {
         (None, None)
     };
+    // Clipboard OPTION thumbnailer: its own instance of the Files-section
+    // thumbnail worker, for image/file clip previews in the history box.
+    let (clip_thumbs, clip_thumb_rx) = if config.options.enabled {
+        let (tx, rx) = channel::channel::<thumbs::Event>();
+        (Some(thumbs::spawn(tx)), Some(rx))
+    } else {
+        (None, None)
+    };
 
     // Notification OPTION icon resolver: turns a notification's app_icon /
     // desktop_entry into a card-tile mip chain off the compositor thread.
@@ -280,7 +288,7 @@ fn main() -> anyhow::Result<()> {
         options_ctrl: options::CtrlAnim::default(),
         options_clock_meta: options::ClockMeta::default(),
         notif: notif::NotifState::new(notif_handle),
-        clip: clipboard::ClipState::new(clip_handle),
+        clip: clipboard::ClipState::new(clip_handle, clip_thumbs),
         notif_icons_handle,
         notif_icon_chains: Vec::new(),
         notif_icon_slot: HashMap::new(),
@@ -481,6 +489,17 @@ fn main() -> anyhow::Result<()> {
                 }
             })
             .map_err(|e| anyhow::anyhow!("registering clipboard channel: {e}"))?;
+    }
+
+    if let Some(clip_thumb_rx) = clip_thumb_rx {
+        event_loop
+            .handle()
+            .insert_source(clip_thumb_rx, |event, _, app| {
+                if let channel::Event::Msg(ev) = event {
+                    app.on_clip_thumb(ev);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("registering clip-thumb channel: {e}"))?;
     }
 
     if let Some(notif_icon_rx) = notif_icon_rx {

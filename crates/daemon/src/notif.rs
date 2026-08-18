@@ -854,7 +854,7 @@ impl App {
             added = true;
         }
         if added {
-            self.upload_notif_icons();
+            self.upload_options_icons();
         }
     }
 
@@ -997,17 +997,18 @@ impl App {
         let slot = self.notif_icon_chains.len() as u32;
         self.notif_icon_chains.push(chain);
         self.notif_icon_slot.insert(res.key, slot);
-        self.upload_notif_icons();
+        self.upload_options_icons();
         self.draw_options();
     }
 
-    /// Push the resolved notif-icon chains to the OPTIONS renderer's icon array.
-    /// A no-op until that renderer exists — so it must also be called once the
-    /// renderer is created (see `frame.rs`), since a resolve can land first and
-    /// its chain would otherwise never reach the GPU.
-    pub(crate) fn upload_notif_icons(&mut self) {
+    /// Push the OPTIONS renderer's icon array: the notif card avatars first, then
+    /// the clipboard thumbnails. A no-op until that renderer exists — so it must
+    /// also be called once the renderer is created (see `frame.rs`), since a
+    /// resolve can land first and its chain would otherwise never reach the GPU.
+    /// Shared by both the notif icon resolver and the clipboard thumbnailer.
+    pub(crate) fn upload_options_icons(&mut self) {
         if let Some(r) = self.options_renderer.as_mut() {
-            r.set_notif_icons(&self.notif_icon_chains);
+            r.set_options_icons(&self.notif_icon_chains, &self.clip.icon_chains);
         }
     }
 
