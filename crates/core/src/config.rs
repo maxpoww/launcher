@@ -81,6 +81,11 @@ pub struct OptionsConfig {
     /// Integer supersampling factor, matching [`WindowConfig::render_scale`]
     /// so text and icons stay crisp on HiDPI/fractional outputs.
     pub render_scale: u32,
+    /// Opt-in: enrich copied links by fetching their page metadata over the
+    /// network (OpenGraph `og:title`/`og:description`/`og:image`, with an
+    /// oEmbed fast-path for known providers). **Off by default** — enabling it
+    /// makes the daemon issue an outbound request to every URL you copy.
+    pub link_unfurl: bool,
 }
 
 impl Default for OptionsConfig {
@@ -89,6 +94,7 @@ impl Default for OptionsConfig {
             enabled: true,
             height: 28,
             render_scale: 2,
+            link_unfurl: false,
         }
     }
 }

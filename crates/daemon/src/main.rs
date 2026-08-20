@@ -48,6 +48,7 @@ mod screencopy;
 mod state;
 mod surface;
 mod thumbs;
+mod unfurl;
 // FreeDesktop trash backend. Read (`list`/`file_path`) and trash (drop a file
 // on the bin) are wired; `restore`/`erase`/`empty`/`is_empty` are complete and
 // tested but not yet triggered from the UI — drop this allow once the
@@ -239,6 +240,15 @@ fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Clipboard link unfurl worker (opt-in via `[options] link_unfurl`): fetches
+    // page metadata for copied links off the loop. Absent unless enabled.
+    let (clip_unfurl, clip_unfurl_rx) = if config.options.enabled && config.options.link_unfurl {
+        let (tx, rx) = channel::channel::<unfurl::Event>();
+        (Some(unfurl::spawn(tx)), Some(rx))
+    } else {
+        (None, None)
+    };
+
     // Notification OPTION icon resolver: turns a notification's app_icon /
     // desktop_entry into a card-tile mip chain off the compositor thread.
     let (notif_icons_handle, notif_icon_rx) = if config.options.enabled {
@@ -289,7 +299,7 @@ fn main() -> anyhow::Result<()> {
         options_ctrl: options::CtrlAnim::default(),
         options_clock_meta: options::ClockMeta::default(),
         notif: notif::NotifState::new(notif_handle),
-        clip: clipboard::ClipState::new(clip_handle, clip_thumbs),
+        clip: clipboard::ClipState::new(clip_handle, clip_thumbs, clip_unfurl),
         notif_icons_handle,
         notif_icon_chains: Vec::new(),
         notif_icon_slot: HashMap::new(),
@@ -505,6 +515,17 @@ fn main() -> anyhow::Result<()> {
                 }
             })
             .map_err(|e| anyhow::anyhow!("registering clip-thumb channel: {e}"))?;
+    }
+
+    if let Some(clip_unfurl_rx) = clip_unfurl_rx {
+        event_loop
+            .handle()
+            .insert_source(clip_unfurl_rx, |event, _, app| {
+                if let channel::Event::Msg(ev) = event {
+                    app.on_unfurl(ev);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("registering clip-unfurl channel: {e}"))?;
     }
 
     if let Some(notif_icon_rx) = notif_icon_rx {

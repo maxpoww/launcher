@@ -268,6 +268,10 @@ pub struct ClipEntry {
     /// thumbnail pipeline as image clips. `None` until enrichment produces one.
     #[serde(default)]
     pub preview_image: Option<PathBuf>,
+    /// For a link clip: the page description from a network unfurl
+    /// (`og:description`). Empty unless unfurl is enabled and succeeded.
+    #[serde(default)]
+    pub description: String,
 }
 
 impl ClipEntry {
@@ -852,6 +856,7 @@ fn base_entry() -> ClipEntry {
         pastes: Vec::new(),
         title: String::new(),
         preview_image: None,
+        description: String::new(),
     }
 }
 
@@ -1077,6 +1082,11 @@ pub(crate) struct ClipState {
     /// Scroll offset (px) inside the metadata sheet once risen, eased to target.
     detail_meta_scroll: f32,
     detail_meta_scroll_target: f32,
+    /// Network link-unfurl worker. `Some` only when `[options] link_unfurl` is
+    /// enabled; `None` (the default) means links are never fetched.
+    unfurl: Option<crate::unfurl::Unfurl>,
+    /// Link clip ids with an unfurl already dispatched (dedup across recaptures).
+    unfurl_sent: HashSet<u64>,
     // ---- thumbnails (image / file previews) ----
     /// Background thumbnailer (reuses the Files-section worker). `None` when the
     /// topbar is off.
@@ -1096,7 +1106,11 @@ pub(crate) struct ClipState {
 }
 
 impl ClipState {
-    pub fn new(handle: Option<ClipHandle>, thumbs: Option<crate::thumbs::Thumbs>) -> Self {
+    pub fn new(
+        handle: Option<ClipHandle>,
+        thumbs: Option<crate::thumbs::Thumbs>,
+        unfurl: Option<crate::unfurl::Unfurl>,
+    ) -> Self {
         let mut history: Vec<ClipEntry> =
             crate::persist::read_json(&crate::persist::data_path(HISTORY_FILE)).unwrap_or_default();
         history.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms));
@@ -1126,6 +1140,8 @@ impl ClipState {
         let row_heights = history.iter().map(row_height_of).collect();
         Self {
             handle,
+            unfurl,
+            unfurl_sent: HashSet::new(),
             history,
             next_id,
             served_hash: None,
@@ -1270,6 +1286,17 @@ impl App {
                     self.update_clip_hit();
                 }
                 debug!("clipboard: captured; {} entries", self.clip.history.len());
+                // Opt-in: kick off a network unfurl for a fresh link (clean
+                // title + official og:image, replacing the window snapshot).
+                let fresh_link = self
+                    .clip
+                    .history
+                    .first()
+                    .filter(|e| e.is_link())
+                    .map(|e| (e.id, e.link_url().unwrap_or_default().to_owned()));
+                if let Some((id, url)) = fresh_link {
+                    self.request_clip_unfurl(id, &url);
+                }
                 // A fresh clip landed: beat the small pill (mirrors the bell's
                 // muted-arrival blink) as a silent "captured" cue.
                 self.trigger_clip_beat();
@@ -2127,9 +2154,11 @@ impl App {
     fn clip_detail_meta_natural(&self) -> f32 {
         let entry = self.clip_detail_entry();
         let logs = entry.map(|e| e.pastes.len()).unwrap_or(0);
-        // Title (link only), Source, Copied, Pasted-header, then a row per paste.
+        // Title + About (link only), Source, Copied, Pasted-header, then a row
+        // per paste.
         let title = entry.is_some_and(|e| e.is_link() && !e.title.is_empty());
-        let base = 3 + usize::from(title);
+        let about = entry.is_some_and(|e| e.is_link() && !e.description.is_empty());
+        let base = 3 + usize::from(title) + usize::from(about);
         META_INNER_TOP + (base + logs) as f32 * META_ROW_H + META_INNER_BOT
     }
 
@@ -2378,6 +2407,11 @@ impl App {
         // window at copy time and refined by the network unfurl when enabled.
         if entry.is_link() && !entry.title.is_empty() {
             row(scene, y, "Title:", entry.title.clone());
+            y += META_ROW_H;
+        }
+        // About row (link only): the unfurled page description, one clipped line.
+        if entry.is_link() && !entry.description.is_empty() {
+            row(scene, y, "About:", entry.description.clone());
             y += META_ROW_H;
         }
         // Always show the Source row — the window couldn't always be identified
@@ -2657,6 +2691,54 @@ impl App {
         self.clip.icon_slot.insert(key, slot as u32);
         self.upload_options_icons();
         self.draw_options();
+    }
+
+    /// Dispatch a network unfurl for link clip `id` (opt-in; no-op when the
+    /// worker is absent). Deduped so a re-copy doesn't refetch.
+    fn request_clip_unfurl(&mut self, id: u64, url: &str) {
+        if url.is_empty() || self.clip.unfurl_sent.contains(&id) {
+            return;
+        }
+        if let Some(u) = &self.clip.unfurl {
+            u.request(id, url);
+            self.clip.unfurl_sent.insert(id);
+        }
+    }
+
+    /// A network unfurl resolved: fold its title/description/image into the clip
+    /// (the cleaner `og:image` supersedes the window snapshot). Applied by id, so
+    /// an evicted clip's late result is discarded (and its image cleaned up).
+    pub(crate) fn on_unfurl(&mut self, ev: crate::unfurl::Event) {
+        let crate::unfurl::Event::Done {
+            id,
+            title,
+            description,
+            image_path,
+        } = ev;
+        let Some(pos) = self.clip.history.iter().position(|e| e.id == id) else {
+            if let Some(p) = image_path {
+                let _ = std::fs::remove_file(p);
+            }
+            return;
+        };
+        {
+            let entry = &mut self.clip.history[pos];
+            if !title.is_empty() {
+                entry.title = cap(&title, 120);
+            }
+            if !description.is_empty() {
+                entry.description = cap(&description, 300);
+            }
+            if let Some(new_img) = image_path {
+                if let Some(old) = entry.preview_image.replace(new_img) {
+                    let _ = std::fs::remove_file(old);
+                }
+            }
+        }
+        self.measure_clip_rows();
+        self.save_clip_history();
+        self.request_clip_thumbs();
+        self.schedule_clip_frame();
     }
 
     /// Request thumbnails for the currently-visible rows that still need one.
