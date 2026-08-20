@@ -116,6 +116,25 @@ pub fn active_window_where() -> Option<(String, String)> {
     Some((class, title))
 }
 
+/// The focused window's geometry in logical compositor coordinates
+/// (`(x, y, w, h)`) — the space `grim -g` expects — for a window snapshot.
+/// `None` if no real window is focused or it reports a zero size.
+pub fn active_window_geom() -> Option<(i32, i32, i32, i32)> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let address = json["address"].as_str()?;
+    if address.is_empty() || address == "0x0" {
+        return None;
+    }
+    let x = json["at"][0].as_i64()? as i32;
+    let y = json["at"][1].as_i64()? as i32;
+    let w = json["size"][0].as_i64()? as i32;
+    let h = json["size"][1].as_i64()? as i32;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    Some((x, y, w, h))
+}
+
 /// Toggle pseudotile on the focused window (the OPTIONS square control).
 pub fn pseudo_active() {
     dispatch("hl.dsp.window.pseudo()");
