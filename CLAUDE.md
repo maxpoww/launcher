@@ -45,6 +45,23 @@ drag-out = "try" (launch, window shows in dock unpinned); drag to grid = install
 (`managed_webapps.add` → `waverunner-webapps.nix`); drag installed → Install = uninstall.
 Files: `webapps.rs`, `managed_webapps.rs`, routing in `main.rs::refilter`, drag arms in `dragging.rs`.
 
+## Clipboard link enrichment (the link "share card")
+A text clip that is a single bare http(s) URL (`ClipEntry::is_link`) becomes a *link
+clip*: it grows a `title` + hero `preview_image` shown as the row thumbnail and detail
+hero, plus Title/About rows in the metadata sheet. Two tiers:
+- **Phase 1 (always on, local, private):** the `title` is seeded from the source
+  window's title at copy time (browser suffix stripped); the source window is
+  snapshotted with **`grim`** into `preview_image`. No network.
+- **Phase 2 (opt-in, network):** `[options] link_unfurl` (**default false**) spawns
+  the `unfurl.rs` worker — shells out to **`curl`**, oEmbed fast-path for YouTube then a
+  small OpenGraph/`<title>` scrape, downloads `og:image`; `on_unfurl` folds the clean
+  title/description/image in (og:image supersedes the snapshot). Enabling it means one
+  outbound request per copied URL — hence off by default.
+
+Runtime deps (best-effort, absent → graceful fallback): **`grim`** (P1), **`curl`** (P2).
+Files: `unfurl.rs`, link arms in `clipboard.rs` (`detect_url`, `capture_window_snapshot`,
+`on_unfurl`, `clip_tile`), `hypr::active_window_geom`, flag in `core::config`.
+
 ## Conventions
 Edition 2021, rustfmt, clippy clean at `-D warnings`. `anyhow` in the binary, `thiserror` in
 libs; no `unwrap` outside `main` startup/tests. One event loop; all shared state lives on it.
@@ -79,7 +96,9 @@ The big daemon files are cohesive but long — go straight to the function:
 - `main.rs` — event loop, App struct + init, `refilter` (section routing), channel wiring.
 - `options.rs` — OPTIONS topbar pills (window/clock/controls), hit-testing, `options_text_color`.
 - `clipboard.rs` — clipboard OPTION: capture/serve worker, history, box + `push_clip_detail`
-  (metadata detail view/animation), `serve_newest_clip` (keeps newest pasteable).
+  (metadata detail view/animation), `serve_newest_clip` (keeps newest pasteable), link
+  enrichment (detect/snapshot/hero — see the link "share card" section).
+- `unfurl.rs` — opt-in link unfurl worker (`link_unfurl`): curl + oEmbed/OpenGraph → `og:image`.
 - `notif.rs` — notification OPTION: bell/DND, card rendering, footer, content preview.
 - `renderer.rs` + `shaders/*.wgsl` — wgpu pipelines; frosted glass (`box_backdrop.wgsl`), SDF
   rounded rects, separable blur, neumorph/edge shadows, icon atlas.
