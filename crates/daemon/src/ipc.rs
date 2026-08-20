@@ -5,9 +5,12 @@
 //! brief blocking read with a timeout is fine and keeps the daemon
 //! single-threaded.
 
+use std::ffi::CString;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
@@ -38,6 +41,45 @@ impl Drop for SocketGuard {
     }
 }
 
+/// The socket path as a leaked C string, read by the async-signal-safe handler
+/// below. `Drop` covers a clean exit, but a `kill`/`pkill` (SIGTERM) unwinds
+/// nothing, so without this a killed daemon would leave a stale socket that a
+/// fast restart could race. Set once in [`listen`].
+static SOCKET_CPATH: AtomicPtr<libc::c_char> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Remove the socket on a terminating signal, then restore the default action
+/// and re-raise so the exit status still reflects the signal. Only calls
+/// async-signal-safe libc functions (`unlink`/`signal`/`raise`).
+extern "C" fn remove_socket_on_signal(sig: libc::c_int) {
+    let p = SOCKET_CPATH.load(Ordering::Relaxed);
+    if !p.is_null() {
+        // SAFETY: `p` points at a leaked, NUL-terminated C string that lives for
+        // the whole process; `unlink` is async-signal-safe.
+        unsafe { libc::unlink(p) };
+    }
+    // SAFETY: restoring SIG_DFL and re-raising is async-signal-safe.
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// Install the terminating-signal cleanup so a killed daemon still removes its
+/// socket. Idempotent per process (the last path set wins).
+fn install_signal_cleanup(path: &Path) {
+    let Ok(cpath) = CString::new(path.as_os_str().as_bytes()) else {
+        return; // a path with an interior NUL can't be a socket anyway
+    };
+    SOCKET_CPATH.store(cpath.into_raw(), Ordering::Relaxed);
+    let handler = remove_socket_on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    // SAFETY: installing a signal handler that only does async-signal-safe work.
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGHUP, handler);
+    }
+}
+
 /// Bind the control socket at `path` and register it with the event loop.
 ///
 /// A pre-existing socket file is probed with a `connect()` first: if a
@@ -65,6 +107,8 @@ pub fn listen(handle: &LoopHandle<'static, App>, path: &Path) -> anyhow::Result<
     listener
         .set_nonblocking(true)
         .context("cannot set control socket non-blocking")?;
+    // Remove the socket on a kill signal too (Drop only runs on a clean exit).
+    install_signal_cleanup(path);
     info!("listening on {}", path.display());
 
     handle

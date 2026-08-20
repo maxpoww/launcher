@@ -1,14 +1,14 @@
-//! The waverunner-managed package list — apps the user installed through
-//! the launcher via `nix profile`.
+//! The waverunner-managed package cache — apps the user installed through
+//! the launcher.
 //!
-//! The **declarative record** lives at
-//! `~/.config/home-manager/waverunner-packages.nix` — a home-manager
-//! module that travels to a new machine for reproducibility. Actual
-//! installation and removal use `nix profile install/remove`; the `.nix`
-//! is regenerated on every mutation as a portable snapshot only.
-//! A JSON sidecar in the daemon's data dir caches each attr's shipped
-//! desktop-entry ids so an uninstall drag can map an app back to the attr
-//! that provides it. Writes are best-effort (logged, never fatal).
+//! The **declarative record** is `~/.config/waverunner/packages.list` (one
+//! nixpkgs attr per line); installs/removes edit that file and a privileged
+//! `nixos-rebuild` reconciles the system (see [`crate::applier`]). This module
+//! is only a JSON sidecar in the daemon's data dir that caches each attr's
+//! shipped desktop-entry ids so an uninstall drag can map an app back to the
+//! attr that provides it (and so CLI-only tools get a launch tile).
+//! [`ManagedDb::adopt_list`] reconciles the cache to the list at startup.
+//! Writes are best-effort (logged, never fatal).
 
 use std::collections::HashSet;
 use std::path::PathBuf;

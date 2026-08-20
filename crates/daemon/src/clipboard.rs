@@ -36,7 +36,7 @@ use crate::animation::{ease_toward, lerp};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
     hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_CLOSE,
-    GLYPH_COPY, GLYPH_CUT, GLYPH_SELECT_ALL, LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X, RED_GLYPH,
+    GLYPH_COPY, GLYPH_CUT, GLYPH_SELECT_ALL, LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
 
@@ -81,8 +81,36 @@ const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
 const GLYPH_IMAGE: &str = "\u{f03e}"; // fa-image
 const GLYPH_FILES: &str = "\u{f0c6}"; // fa-paperclip
 const GLYPH_FOLDER: &str = "\u{f07b}"; // fa-folder (a directory clip)
-/// Square thumbnail/icon tile size at the left of an image / files row.
-const TILE_SZ: f32 = 120.0;
+/// Square icon/thumbnail tile at the left of every image / files row. The list
+/// stays compact — the full-size preview lives in the metadata detail view.
+const TILE_SZ: f32 = 56.0;
+/// Detail view: top pill-row gap + left inset (pill diameter matches the paste
+/// pill = `clip_band_h`). The row-grow open animation runs over this many secs.
+const DETAIL_PILL_GAP: f32 = 6.0;
+const DETAIL_PILL_X: f32 = 12.0;
+const DETAIL_OPEN_SECS: f32 = 0.34;
+/// Height of one metadata row in the detail view.
+const META_ROW_H: f32 = 30.0;
+/// Detail text box insets: side margins (centred column) and top/bottom.
+const DETAIL_TEXT_MX: f32 = 34.0;
+const DETAIL_TEXT_MY: f32 = 30.0;
+/// The metadata sheet's inner top inset + bottom pad.
+const META_INNER_TOP: f32 = 16.0;
+const META_INNER_BOT: f32 = 14.0;
+/// The metadata sheet: resting height (fraction of box, clamped) and the max
+/// it rises to when hovered.
+const META_REST_FRAC: f32 = 0.30;
+const META_REST_MIN: f32 = 128.0;
+const META_REST_MAX: f32 = 176.0;
+const META_FULL_FRAC: f32 = 0.62;
+/// Left align of the metadata (matches the text box's left margin) + the label
+/// column width, and the paste-log indent under the values.
+const META_LABEL_W: f32 = 62.0;
+const META_LOG_INDENT: f32 = 70.0;
+/// fa-chevron-left, the back-pill glyph.
+const GLYPH_BACK: &str = "\u{f053}";
+/// fa-ellipsis, the placeholder 4th top pill.
+const GLYPH_MORE: &str = "\u{f141}";
 /// Texture-array slots kept for clipboard thumbnails (recycled round-robin),
 /// appended after the notif card avatars on the OPTIONS renderer.
 const THUMB_CAP: usize = 32;
@@ -103,6 +131,11 @@ pub(crate) enum ClipHit {
     Delete(usize),
     /// The footer's ✕ (clear all).
     ClearAll,
+    /// The detail view's top-strip pills.
+    Back,
+    DetailDelete,
+    DetailCopy,
+    DetailMore,
 }
 /// Grace before the preview collapses once the pointer leaves — enough to cross
 /// a small gap, snappy otherwise. Matches the bell's `LEAVE_HOLD`.
@@ -149,6 +182,22 @@ pub enum ClipKind {
     Image,
 }
 
+/// One recorded paste of a clip: where it landed and when. Drives the "pasted
+/// N times — where & when" section of the metadata detail view.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PasteRecord {
+    /// The window it was pasted into (app class / title), best-effort.
+    #[serde(default)]
+    pub target: String,
+    /// Unix-ms when the paste happened.
+    #[serde(default)]
+    pub when_ms: u64,
+}
+
+/// How many recent paste records to keep per clip (the total count is tracked
+/// separately so it stays accurate even past this cap).
+const PASTE_LOG_CAP: usize = 20;
+
 /// One captured clipboard entry. Serialized directly to the history store; image
 /// pixels live in a side file (`image_path`), never inline, so the JSON stays
 /// small.
@@ -167,8 +216,16 @@ pub struct ClipEntry {
     #[serde(default)]
     pub text: String,
     /// The MIME type to restore the clip with (`text/plain;charset=utf-8`,
-    /// `text/uri-list`, `image/png`, …).
+    /// `text/uri-list`, `image/png`, …). Legacy: a restored clip now advertises
+    /// a whole set of types at once (see [`clip_offers`]); this is kept for the
+    /// image byte-type and for back-compat of stored history.
     pub mime: String,
+    /// For a [`ClipKind::Files`] clip: the file-manager operation — `false` =
+    /// copy, `true` = cut (move). Captured from `x-special/gnome-copied-files`
+    /// (defaults to copy) and re-served in that type so a paste from history
+    /// moves rather than copies, matching a real Ctrl+X.
+    #[serde(default)]
+    pub cut: bool,
     /// Side file holding the original image bytes, for an image clip.
     #[serde(default)]
     pub image_path: Option<PathBuf>,
@@ -180,6 +237,17 @@ pub struct ClipEntry {
     /// Content hash, for dedup (a re-copied clip moves to the top instead of
     /// piling up).
     pub hash: u64,
+    /// Where it was copied from — a file clip's source directory, or the focused
+    /// window (app / title) at copy time. Best-effort; empty if unknown.
+    #[serde(default)]
+    pub source: String,
+    /// Total number of times this clip has been pasted (may exceed
+    /// `pastes.len()`, which is capped at [`PASTE_LOG_CAP`]).
+    #[serde(default)]
+    pub paste_count: u64,
+    /// The most recent pastes (where & when), newest first, capped.
+    #[serde(default)]
+    pub pastes: Vec<PasteRecord>,
 }
 
 /// Something the worker observed.
@@ -189,18 +257,19 @@ pub enum ClipEvent {
     /// The *primary* (highlight) selection went non-empty (`true`, the user just
     /// selected something) or empty (`false`). Drives the copy/cut/select pills.
     Selection(bool),
+    /// An app read (pasted) the clip we're currently serving via the native
+    /// data-control source — best-effort, debounced, our own re-reads excluded.
+    /// Recorded against the current clip (where & when).
+    Pasted,
 }
 
 /// A UI intent for the worker.
 pub enum ClipCommand {
-    /// Restore this payload to the system clipboard (`wl-copy`). Used by the
-    /// history box (a later stage); wired end to end now.
-    #[allow(dead_code)]
-    Copy {
-        mime: String,
-        text: String,
-        image_path: Option<PathBuf>,
-    },
+    /// Restore this clip to the system clipboard. The worker advertises the
+    /// full set of types the clip should offer (see [`clip_offers`]) via a
+    /// native data-control source, so a file clip pastes into thunar/nautilus
+    /// (`x-special/gnome-copied-files`) *and* editors (`text/plain`) alike.
+    Copy(ClipEntry),
     /// Copy the current *primary* (highlight) selection to the clipboard — the
     /// copy-pill action. Robust: it lifts the selected text straight from the
     /// primary selection rather than injecting a Ctrl+C into the focused app
@@ -238,6 +307,7 @@ pub fn spawn(events: Sender<ClipEvent>) -> ClipHandle {
 /// until the handle is dropped.
 fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) {
     let primary_events = events.clone();
+    let source_events = events.clone();
     std::thread::Builder::new()
         .name("clipboard-watch".into())
         .spawn(move || watch_loop(events))
@@ -247,29 +317,27 @@ fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) 
         .spawn(move || primary_watch_loop(primary_events))
         .expect("spawn clipboard primary thread");
 
+    // A native wlr-data-control source lets us own the selection with *every*
+    // MIME type at once (so a file clip pastes into thunar AND editors). If the
+    // compositor lacks the protocol we degrade to single-type `wl-copy`. The
+    // source also reports pastes of what it serves back over `events`.
+    let source = crate::clip_source::spawn(source_events);
+    let serve = |offers: Vec<(String, Vec<u8>)>| match &source {
+        Some(s) => s.serve(offers),
+        None => {
+            if let Some((mime, data)) = offers.first() {
+                wl_copy(mime, data);
+            }
+        }
+    };
+
     while let Ok(cmd) = commands.recv() {
         match cmd {
-            ClipCommand::Copy {
-                mime,
-                text,
-                image_path,
-            } => {
-                let data = match &image_path {
-                    Some(path) => match std::fs::read(path) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            warn!("clipboard: cannot read image {path:?}: {e}");
-                            continue;
-                        }
-                    },
-                    None => text.into_bytes(),
-                };
-                wl_copy(&mime, &data);
-            }
+            ClipCommand::Copy(entry) => serve(clip_offers(&entry)),
             ClipCommand::CopySelection => {
                 let text = paste_primary();
                 if !text.trim().is_empty() {
-                    wl_copy("text/plain;charset=utf-8", text.as_bytes());
+                    serve(text_offers(&text));
                 }
             }
         }
@@ -403,10 +471,11 @@ fn capture(last_hash: &mut Option<u64>) -> Option<ClipEntry> {
     if types.is_empty() {
         return None;
     }
-    let entry = if let Some(mime) = image_mime(&types) {
+    let mut entry = if let Some(mime) = image_mime(&types) {
         classify_image(&mime)?
-    } else if types.iter().any(|t| t == "text/uri-list") {
-        classify_files(&paste_text(Some("text/uri-list")))?
+    } else if types.iter().any(|t| t == "text/uri-list" || t == GNOME_COPIED) {
+        let (cut, uri_list) = read_file_clip(&types);
+        classify_files(&uri_list, cut)?
     } else if types.iter().any(|t| t.starts_with("text/")) {
         classify_text(&paste_text(None), best_text_mime(&types))?
     } else {
@@ -418,7 +487,50 @@ fn capture(last_hash: &mut Option<u64>) -> Option<ClipEntry> {
         return None;
     }
     *last_hash = Some(entry.hash);
+    entry.source = capture_source(&entry);
     Some(entry)
+}
+
+/// The "copied from" folder for a file clip: the parent directory of its first
+/// path (falling back to the path itself if it has no parent). A file clip
+/// always carries its own path, so — unlike a window source the compositor may
+/// not report — this is always recoverable, even for clips restored from disk.
+fn file_source(uri_list: &str) -> String {
+    let Some(path) = first_file_path(uri_list) else {
+        return String::new();
+    };
+    std::path::Path::new(&path)
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or(path)
+}
+
+/// Best-effort "copied from" for a fresh capture: a file clip's source
+/// directory, otherwise the focused window (app / title) at copy time.
+fn capture_source(entry: &ClipEntry) -> String {
+    if entry.kind == ClipKind::Files {
+        let dir = file_source(&entry.text);
+        if !dir.is_empty() {
+            return dir;
+        }
+    }
+    match crate::hypr::active_window_where() {
+        Some((class, title)) => window_label(&class, &title),
+        None => String::new(),
+    }
+}
+
+/// `"Class — Title"`, omitting an empty part; the title is trimmed to length.
+fn window_label(class: &str, title: &str) -> String {
+    let class = class.trim();
+    let title = cap(title.trim(), 60);
+    match (class.is_empty(), title.is_empty()) {
+        (false, false) => format!("{class} — {title}"),
+        (false, true) => class.to_owned(),
+        (true, false) => title,
+        (true, true) => String::new(),
+    }
 }
 
 fn classify_text(content: &str, mime: String) -> Option<ClipEntry> {
@@ -436,19 +548,130 @@ fn classify_text(content: &str, mime: String) -> Option<ClipEntry> {
     })
 }
 
-fn classify_files(uri_list: &str) -> Option<ClipEntry> {
+fn classify_files(uri_list: &str, cut: bool) -> Option<ClipEntry> {
     let names = file_names(uri_list);
     if names.is_empty() {
         return None;
     }
     Some(ClipEntry {
-        hash: hash_bytes(uri_list.as_bytes()),
+        // Fold the verb into the hash so copy vs cut of the same files are
+        // distinct history entries (and dedup doesn't stick to a stale verb).
+        hash: hash_bytes(format!("{}\n{uri_list}", verb(cut)).as_bytes()),
         preview: cap(&names.join(", "), PREVIEW_CAP),
         kind: ClipKind::Files,
         mime: "text/uri-list".into(),
         text: uri_list.to_owned(),
+        cut,
         ..base_entry()
     })
+}
+
+/// The nixpkgs file-manager clipboard MIME that carries the copy/cut verb — the
+/// type thunar (and nautilus/nemo/caja) actually paste files from.
+const GNOME_COPIED: &str = "x-special/gnome-copied-files";
+
+/// `"cut"` or `"copy"` — the verb word used by `x-special/gnome-copied-files`.
+fn verb(cut: bool) -> &'static str {
+    if cut {
+        "cut"
+    } else {
+        "copy"
+    }
+}
+
+/// Read the current file clip as `(cut, uri_list)`. Prefers
+/// `x-special/gnome-copied-files` (which encodes the copy/cut verb); falls back
+/// to a bare `text/uri-list` (always a copy).
+fn read_file_clip(types: &[String]) -> (bool, String) {
+    if types.iter().any(|t| t == GNOME_COPIED) {
+        parse_gnome_copied(&paste_text(Some(GNOME_COPIED)))
+    } else {
+        (false, paste_text(Some("text/uri-list")))
+    }
+}
+
+/// Parse an `x-special/gnome-copied-files` payload — a `copy`/`cut` verb line
+/// followed by `file://` URIs — into `(cut, uri_list)`, where `uri_list` is the
+/// newline-joined URIs (which [`file_names`]/[`file_offers`] then consume). A
+/// missing/unknown verb line is treated as copy and kept as a URI.
+fn parse_gnome_copied(raw: &str) -> (bool, String) {
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let (cut, uris): (bool, &[&str]) = match lines.split_first() {
+        Some((first, rest)) if first.eq_ignore_ascii_case("copy") => (false, rest),
+        Some((first, rest)) if first.eq_ignore_ascii_case("cut") => (true, rest),
+        _ => (false, &lines[..]),
+    };
+    (cut, uris.join("\n"))
+}
+
+/// The full set of `(mime, bytes)` a restored clip should advertise so it
+/// pastes like a real Ctrl+V everywhere: file managers read
+/// `x-special/gnome-copied-files`, GTK choosers/browsers read `text/uri-list`,
+/// editors/terminals read `text/plain`.
+fn clip_offers(entry: &ClipEntry) -> Vec<(String, Vec<u8>)> {
+    match entry.kind {
+        ClipKind::Text => text_offers(&entry.text),
+        ClipKind::Files => file_offers(&entry.text, entry.cut),
+        ClipKind::Image => match &entry.image_path {
+            Some(path) => match std::fs::read(path) {
+                Ok(bytes) => vec![(entry.mime.clone(), bytes)],
+                Err(e) => {
+                    warn!("clipboard: cannot read image {path:?}: {e}");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        },
+    }
+}
+
+/// Text offered under its canonical type plus the legacy X11 aliases apps still
+/// ask for (`UTF8_STRING`/`STRING`/`TEXT`) — all the same UTF-8 bytes.
+fn text_offers(text: &str) -> Vec<(String, Vec<u8>)> {
+    let bytes = text.as_bytes().to_vec();
+    [
+        "text/plain;charset=utf-8",
+        "text/plain",
+        "UTF8_STRING",
+        "STRING",
+        "TEXT",
+    ]
+    .iter()
+    .map(|m| ((*m).to_owned(), bytes.clone()))
+    .collect()
+}
+
+/// A file clip offered as `x-special/gnome-copied-files` (verb + URIs, the type
+/// thunar pastes from), `text/uri-list` (CRLF-terminated URIs), and the decoded
+/// local paths as `text/plain*` for editors/terminals.
+fn file_offers(uri_list: &str, cut: bool) -> Vec<(String, Vec<u8>)> {
+    let uris: Vec<String> = uri_list
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect();
+    if uris.is_empty() {
+        return Vec::new();
+    }
+    let gnome = format!("{}\n{}", verb(cut), uris.join("\n"));
+    let urilist = format!("{}\r\n", uris.join("\r\n"));
+    let paths = uris
+        .iter()
+        .map(|u| percent_decode(u.strip_prefix("file://").unwrap_or(u)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    vec![
+        (GNOME_COPIED.to_owned(), gnome.into_bytes()),
+        ("text/uri-list".to_owned(), urilist.into_bytes()),
+        ("text/plain;charset=utf-8".to_owned(), paths.clone().into_bytes()),
+        ("text/plain".to_owned(), paths.clone().into_bytes()),
+        ("UTF8_STRING".to_owned(), paths.into_bytes()),
+    ]
 }
 
 fn classify_image(mime: &str) -> Option<ClipEntry> {
@@ -487,10 +710,14 @@ fn base_entry() -> ClipEntry {
         preview: String::new(),
         text: String::new(),
         mime: String::new(),
+        cut: false,
         image_path: None,
         width: 0,
         height: 0,
         hash: 0,
+        source: String::new(),
+        paste_count: 0,
+        pastes: Vec::new(),
     }
 }
 
@@ -639,6 +866,11 @@ pub(crate) struct ClipState {
     pub history: Vec<ClipEntry>,
     /// Next id to hand a freshly captured entry (monotonic, past any reloaded).
     next_id: u64,
+    /// Hash of the clip we've handed our data-control source to own, so the
+    /// newest content stays pasteable even after the app that produced it drops
+    /// the selection. `None` until we've served one (avoids re-serving the same
+    /// clip on our own capture re-read).
+    served_hash: Option<u64>,
     // ---- peek metamorphosis (bell-style) ----
     /// Preview open (hovered, or held briefly after the pointer leaves).
     peek_reveal: bool,
@@ -683,6 +915,34 @@ pub(crate) struct ClipState {
     /// Pre-measured per-row heights (parallel to `history`), so the variable-
     /// height list lays out identically in the draw and the hit-test.
     row_heights: Vec<f32>,
+    // ---- metadata detail view ----
+    /// The clip (by stable id) whose metadata detail is showing, if any. A
+    /// right-click on a row opens it; the back button closes it.
+    detail_id: Option<u64>,
+    /// Intent: is the detail meant to be open? Separate from `detail_id`, which
+    /// stays set through the whole close animation (so the shrink-back renders)
+    /// and is cleared only once `detail_p` reaches 0.
+    detail_open: bool,
+    /// Open progress: 0 = list, 1 = detail. Drives the row-grows-into-card
+    /// morph, the top pills, and the metadata sheet sliding up.
+    detail_t: f32,
+    /// Linear open progress (0..1) advanced at a constant rate; `detail_t` is its
+    /// smoothstep, so the row-grow eases in and out instead of snapping.
+    detail_p: f32,
+    /// The clicked row's rect at open time — the content card grows from it.
+    detail_src: Rect,
+    /// Whether the clicked row was a zebra (striped) row, so the growing card
+    /// keeps its exact tone (and the strip/metadata take the other tone).
+    detail_src_striped: bool,
+    /// Scroll offset (px) of the detail view's text content.
+    detail_scroll: f32,
+    /// Metadata sheet rise: 0 = resting (short), 1 = risen. Eased toward
+    /// `detail_meta_target`, which the wheel drives (manual scroll-rise).
+    detail_meta_t: f32,
+    detail_meta_target: f32,
+    /// Scroll offset (px) inside the metadata sheet once risen, eased to target.
+    detail_meta_scroll: f32,
+    detail_meta_scroll_target: f32,
     // ---- thumbnails (image / file previews) ----
     /// Background thumbnailer (reuses the Files-section worker). `None` when the
     /// topbar is off.
@@ -707,12 +967,45 @@ impl ClipState {
             crate::persist::read_json(&crate::persist::data_path(HISTORY_FILE)).unwrap_or_default();
         history.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms));
         history.truncate(MAX_HISTORY);
+        // Backfill the source for file clips saved before it was derived (or
+        // captured with the window unknown): a file clip's folder is always
+        // recoverable from its own path, so no file clip should show "unknown".
+        // Persist once if anything changed, so it's saved for good.
+        let mut backfilled = false;
+        for e in &mut history {
+            if e.kind == ClipKind::Files && e.source.is_empty() {
+                let dir = file_source(&e.text);
+                if !dir.is_empty() {
+                    e.source = dir;
+                    backfilled = true;
+                }
+            }
+        }
+        if backfilled {
+            crate::persist::write_json(
+                "clipboard-history",
+                &crate::persist::data_path(HISTORY_FILE),
+                &history,
+            );
+        }
         let next_id = history.iter().map(|e| e.id).max().unwrap_or(0) + 1;
         let row_heights = history.iter().map(row_height_of).collect();
         Self {
             handle,
             history,
             next_id,
+            served_hash: None,
+            detail_id: None,
+            detail_open: false,
+            detail_t: 0.0,
+            detail_p: 0.0,
+            detail_src: Rect::new(0.0, 0.0, 0.0, 0.0),
+            detail_src_striped: false,
+            detail_scroll: 0.0,
+            detail_meta_t: 0.0,
+            detail_meta_target: 0.0,
+            detail_meta_scroll: 0.0,
+            detail_meta_scroll_target: 0.0,
             peek_reveal: false,
             peek_t: 0.0,
             last: None,
@@ -766,12 +1059,12 @@ fn clip_row_lines(entry: &ClipEntry) -> Vec<String> {
 /// at least the tile height for image / files rows).
 fn row_height_of(entry: &ClipEntry) -> f32 {
     let text_h = clip_row_lines(entry).len() as f32 * LINE_PX;
-    let h = if matches!(clip_tile(entry), ClipTile::None) {
-        text_h
+    let tile_h = if matches!(clip_tile(entry), ClipTile::None) {
+        0.0
     } else {
-        text_h.max(TILE_SZ)
+        TILE_SZ
     };
-    h + 2.0 * ROW_PAD_Y
+    text_h.max(tile_h) + 2.0 * ROW_PAD_Y
 }
 
 impl App {
@@ -780,11 +1073,19 @@ impl App {
     pub(crate) fn on_clip_event(&mut self, ev: ClipEvent) {
         match ev {
             ClipEvent::Selection(present) => self.on_clip_selection(present),
+            ClipEvent::Pasted => self.record_clip_paste(),
             ClipEvent::Captured(mut entry) => {
                 // A re-copied clip moves to the top rather than piling up; it
-                // keeps its original id so any UI reference stays valid.
+                // keeps its original id (so any UI reference stays valid) and its
+                // accumulated metadata (original source + paste log).
                 if let Some(pos) = self.clip.history.iter().position(|e| e.hash == entry.hash) {
-                    entry.id = self.clip.history.remove(pos).id;
+                    let old = self.clip.history.remove(pos);
+                    entry.id = old.id;
+                    if !old.source.is_empty() {
+                        entry.source = old.source;
+                    }
+                    entry.paste_count = old.paste_count;
+                    entry.pastes = old.pastes;
                 } else {
                     entry.id = self.clip.next_id;
                     self.clip.next_id += 1;
@@ -800,6 +1101,12 @@ impl App {
                 }
                 self.measure_clip_rows();
                 self.save_clip_history();
+                // Own the freshly captured clip ourselves so it stays pasteable
+                // after the app that produced it drops the selection (a plain
+                // capture leaves us owning nothing → Ctrl+V finds an empty
+                // clipboard). We advertise the full type set, so a file clip
+                // still pastes into thunar & co.
+                self.serve_newest_clip();
                 // Keep the open box fitted to the new content.
                 if self.clip.expanded {
                     self.clip.box_h = self.clip_full_h();
@@ -816,6 +1123,27 @@ impl App {
         }
     }
 
+    /// The source thread reported a paste of what it serves (the current clip =
+    /// `history[0]`). Record where (the now-focused window) and when, and bump
+    /// the count. Best-effort: only clips we serve are tracked (see
+    /// [`ClipEvent::Pasted`]).
+    fn record_clip_paste(&mut self) {
+        let target = match crate::hypr::active_window_where() {
+            Some((class, title)) => window_label(&class, &title),
+            None => String::new(),
+        };
+        let Some(entry) = self.clip.history.first_mut() else {
+            return;
+        };
+        entry.paste_count += 1;
+        entry.pastes.insert(0, PasteRecord { target, when_ms: now_ms() });
+        entry.pastes.truncate(PASTE_LOG_CAP);
+        self.save_clip_history();
+        if self.clip.expanded && self.clip.detail_id.is_some() {
+            self.schedule_clip_frame();
+        }
+    }
+
     /// Click on the small pill: paste the current clip where the user is
     /// working. The newest history entry is always exactly the live clipboard
     /// (we capture every change), so this just injects the paste — no re-copy.
@@ -827,17 +1155,36 @@ impl App {
     }
 
     /// Restore history entry `idx` to the system clipboard (a row click).
-    pub(crate) fn copy_clip(&self, idx: usize) {
-        let Some(e) = self.clip.history.get(idx) else {
+    pub(crate) fn copy_clip(&mut self, idx: usize) {
+        let Some(e) = self.clip.history.get(idx).cloned() else {
             return;
         };
+        self.serve_clip(e);
+    }
+
+    /// Hand `entry` to our data-control source so it owns the selection with its
+    /// full advertised type set, and remember it as the served clip.
+    fn serve_clip(&mut self, entry: ClipEntry) {
+        self.clip.served_hash = Some(entry.hash);
         if let Some(h) = &self.clip.handle {
-            h.send(ClipCommand::Copy {
-                mime: e.mime.clone(),
-                text: e.text.clone(),
-                image_path: e.image_path.clone(),
-            });
+            h.send(ClipCommand::Copy(entry));
         }
+    }
+
+    /// Keep the newest clip owned by our source so it stays pasteable even after
+    /// the app that produced it releases the selection. Idempotent per clip (our
+    /// own post-serve capture re-read hashes identically and is skipped). Also
+    /// called once at startup: our source drops the selection when the daemon
+    /// exits, so re-owning the newest on launch keeps it loaded across restarts.
+    pub(crate) fn serve_newest_clip(&mut self) {
+        let Some(entry) = self.clip.history.first() else {
+            return;
+        };
+        if self.clip.served_hash == Some(entry.hash) {
+            return;
+        }
+        let entry = entry.clone();
+        self.serve_clip(entry);
     }
 
     fn save_clip_history(&self) {
@@ -1090,10 +1437,40 @@ impl App {
             1.0,
         ];
 
-        for (idx, rr) in self.clip_rows(rect) {
-            self.push_clip_row(scene, idx, rr, content, e, ink, dim_ink, hover_ink, stripe_opaque);
+        // The content card grows out of the clicked row; the list is clipped to
+        // the strip ABOVE the card (a hard partition, no cross-fade ghosting), so
+        // the opaque card visibly *eats* the list as it grows.
+        let dt = self.clip.detail_t;
+        let (list_top, card_top) = if dt > 0.001 {
+            let (content_full, _) = self.clip_detail_regions(rect);
+            let ct = lerp(self.clip.detail_src.y, content_full.y, dt);
+            // The top pill strip wipes DOWN from the box edge as it opens; keep
+            // the list clear of the part already swept (its lower edge rides
+            // `dt`), so the band eats the list from the top as the card eats it
+            // from the bottom — no plain-fill sliver in between.
+            (rect.y + self.clip_detail_top_h() * dt, ct)
+        } else {
+            (content.y, content.y + content.h)
+        };
+        let list_clip = Rect::new(content.x, list_top, content.w, (card_top - list_top).max(0.0));
+        if list_clip.h > 0.5 {
+            for (idx, rr) in self.clip_rows(rect) {
+                self.push_clip_row(
+                    scene, idx, rr, list_clip, e, ink, dim_ink, hover_ink, stripe_opaque,
+                );
+            }
         }
-        self.push_clip_footer(scene, rect, e, bright);
+        if dt < 0.02 {
+            self.push_clip_footer(scene, rect, e, bright);
+        }
+        // Metadata detail view: the card keeps the clicked row's zebra tone; the
+        // strip + metadata take the other tone.
+        let (card_col, sheet_col) = if self.clip.detail_src_striped {
+            (stripe_opaque, fill)
+        } else {
+            (fill, stripe_opaque)
+        };
+        self.push_clip_detail(scene, rect, e, ink, dim_ink, card_col, sheet_col, bright);
     }
 
     /// Draw one clip row: zebra background, the clip preview (spotlit when
@@ -1137,7 +1514,11 @@ impl App {
             [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * e]
         };
         let ty = rr.y + (rr.h - LINE_PX) / 2.0;
-        let row_clip = Rect::new(rr.x, top, rr.w, bot - top);
+        // Clip to the (possibly narrowed) content width so labels are masked at
+        // the detail-wipe boundary rather than bleeding under the panel.
+        let row_clip = Rect::new(content.x, top, content.w, bot - top);
+
+        let tile = clip_tile(entry);
 
         // Trailing time (or the × delete on hover) at the right.
         let right = rr.x + rr.w - ROW_PAD_X;
@@ -1184,28 +1565,28 @@ impl App {
             right - tw - TEXT_GAP
         };
 
-        // Left tile (thumbnail / glyph) for image & files clips; text is inset
-        // past it. Text-only clips start at the padding.
+        // Left icon tile for image & files clips; text is inset past it.
+        // Text-only clips start at the padding.
         let mut tx = rr.x + ROW_PAD_X;
-        match clip_tile(entry) {
+        match tile {
             ClipTile::None => {}
             ClipTile::Glyph(glyph) => {
-                let tile = Rect::new(tx, rr.y + (rr.h - TILE_SZ) / 2.0, TILE_SZ, TILE_SZ);
-                self.push_clip_tile_glyph(scene, tile, glyph, ink, e, row_clip);
+                let t = Rect::new(tx, rr.y + (rr.h - TILE_SZ) / 2.0, TILE_SZ, TILE_SZ);
+                self.push_clip_tile_glyph(scene, t, glyph, ink, e, row_clip);
                 tx += TILE_SZ + TEXT_GAP;
             }
             ClipTile::Thumb { key, glyph, .. } => {
-                let tile = Rect::new(tx, rr.y + (rr.h - TILE_SZ) / 2.0, TILE_SZ, TILE_SZ);
+                let t = Rect::new(tx, rr.y + (rr.h - TILE_SZ) / 2.0, TILE_SZ, TILE_SZ);
                 if let Some(layer) = self.clip_thumb_layer(key) {
                     clip_grid(scene, content).icons.push(IconInst {
-                        rect: tile,
+                        rect: t,
                         layer,
                         tint: [0.0; 4],
                         ring: -1.0,
                     });
                 } else {
                     // Not resolved yet — a soft placeholder with the kind glyph.
-                    self.push_clip_tile_glyph(scene, tile, glyph, ink, e, row_clip);
+                    self.push_clip_tile_glyph(scene, t, glyph, ink, e, row_clip);
                 }
                 tx += TILE_SZ + TEXT_GAP;
             }
@@ -1249,7 +1630,7 @@ impl App {
             color: [ink[0], ink[1], ink[2], 0.10 * e],
             glass: 0.0,
         });
-        let gpx = TILE_SZ * 0.5;
+        let gpx = tile.w * 0.5;
         scene.labels.push(Label {
             text: glyph.to_owned(),
             pos: (tile.x + tile.w / 2.0, tile.y + (tile.h - gpx) / 2.0),
@@ -1287,6 +1668,7 @@ impl App {
         let d0 = self.clip_footer_button_d();
         let gpx = d0 * 0.6;
         let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
+        let g = self.options_text_color();
         scene.labels.push(Label {
             text: GLYPH_CLOSE.to_owned(),
             pos: (br.x + br.w / 2.0, br.y + (br.h - gpx) / 2.0),
@@ -1297,7 +1679,7 @@ impl App {
             dim: false,
             cache: true,
             family: Some(NERD),
-            color: Some([RED_GLYPH[0], RED_GLYPH[1], RED_GLYPH[2], RED_GLYPH[3] * alpha]),
+            color: Some([g[0], g[1], g[2], g[3] * alpha]),
             clip: Some(gclip),
         });
     }
@@ -1319,6 +1701,15 @@ impl App {
             return ClipHit::None;
         };
         let rect = self.clip_rect();
+        // Detail view: only the top pills are hittable; the list is hidden.
+        if self.clip.detail_open {
+            for (hit, prect) in self.clip_detail_pills(rect) {
+                if prect.contains(p) {
+                    return hit;
+                }
+            }
+            return ClipHit::None;
+        }
         if self.clip_footer_rect(rect).contains(p) {
             if self.clip_footer_button_rect(rect).contains(p) {
                 return ClipHit::ClearAll;
@@ -1371,6 +1762,42 @@ impl App {
         };
         if self.clip.expanded {
             self.clip.hold_deadline = None; // a scroll keeps it open
+            // In the detail view, the wheel scrolls whichever region the pointer
+            // is over: the risen metadata sheet, else the text content.
+            if self.clip.detail_open {
+                if self.clip_detail_meta_hovered() {
+                    // Manual scroll-rise: raise the sheet first, then scroll its
+                    // log in place (targets; `tick_clip` eases toward them).
+                    let d = delta * SCROLL_SPEED;
+                    let rise_px = 170.0;
+                    if d > 0.0 {
+                        let room = (1.0 - self.clip.detail_meta_target) * rise_px;
+                        let grow = d.min(room);
+                        self.clip.detail_meta_target += grow / rise_px;
+                        let rest = d - grow;
+                        if rest > 0.0 {
+                            self.clip.detail_meta_scroll_target += rest;
+                        }
+                    } else {
+                        let back = (-d).min(self.clip.detail_meta_scroll_target);
+                        self.clip.detail_meta_scroll_target -= back;
+                        let rest = -d - back;
+                        if rest > 0.0 {
+                            self.clip.detail_meta_target -= rest / rise_px;
+                        }
+                    }
+                    self.clip.detail_meta_target = self.clip.detail_meta_target.clamp(0.0, 1.0);
+                    let span = self.clip_detail_meta_scroll_span();
+                    self.clip.detail_meta_scroll_target =
+                        self.clip.detail_meta_scroll_target.clamp(0.0, span);
+                } else {
+                    let span = self.clip_detail_scroll_span();
+                    self.clip.detail_scroll =
+                        (self.clip.detail_scroll + delta * SCROLL_SPEED).clamp(0.0, span);
+                }
+                self.schedule_clip_frame();
+                return;
+            }
             let span = self.clip_scroll_span();
             self.clip.scroll_target =
                 (self.clip.scroll_target + delta * SCROLL_SPEED).clamp(0.0, span);
@@ -1387,11 +1814,17 @@ impl App {
     }
 
     /// Open the history drawer from the collapsed preview, newest flush at top.
-    fn open_clip_box(&mut self) {
+    pub(crate) fn open_clip_box(&mut self) {
         if self.clip.history.is_empty() {
             return;
         }
         self.clip.hold_deadline = None;
+        // The drawer takes over the corner from any selection-pill context, so
+        // the peek isn't suppressed under the open box (which would leave it a
+        // tall, thin stripe).
+        self.clip.selection_present = false;
+        self.clip.selection_active = false;
+        self.clip.grace_deadline = None;
         self.clip.peek_reveal = true; // keep the preview fully out under the box
         self.clip.expanded = true;
         self.clip.box_h = self.clip_full_h();
@@ -1410,8 +1843,455 @@ impl App {
             self.clip.expanded = false;
             self.clip.hit = ClipHit::None;
             self.clip.hover_row = None;
+            // Reset the detail view so a reopened box starts on the list.
+            self.clip.detail_id = None;
+            self.clip.detail_open = false;
+            self.clip.detail_t = 0.0;
+            self.clip.detail_p = 0.0;
+            self.clip.detail_meta_t = 0.0;
+            self.clip.detail_meta_target = 0.0;
+            self.clip.detail_meta_scroll = 0.0;
+            self.clip.detail_meta_scroll_target = 0.0;
             self.sync_options_input();
             self.schedule_clip_frame();
+        }
+    }
+
+    /// Open the metadata detail for history row `idx` (a right-click on a row):
+    /// the clicked row grows into the content card, the pills drop in on top,
+    /// and the metadata sheet slides up from the bottom.
+    pub(crate) fn open_clip_detail(&mut self, idx: usize) {
+        let Some(entry) = self.clip.history.get(idx) else {
+            return;
+        };
+        let id = entry.id;
+        // Capture the clicked row's rect so the content card can grow from it.
+        let rect = self.clip_rect();
+        let src = self
+            .clip_rows(rect)
+            .into_iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, rr)| rr)
+            .unwrap_or_else(|| self.clip_detail_regions(rect).0);
+        self.clip.detail_id = Some(id);
+        self.clip.detail_open = true;
+        self.clip.detail_src = src;
+        self.clip.detail_src_striped = idx % 2 == 1; // matches the zebra in push_clip_row
+        self.clip.detail_scroll = 0.0;
+        self.clip.detail_meta_t = 0.0;
+        self.clip.detail_meta_target = 0.0;
+        self.clip.detail_meta_scroll = 0.0;
+        self.clip.detail_meta_scroll_target = 0.0;
+        self.clip.hover_row = None;
+        self.clip.hit = ClipHit::None;
+        self.schedule_clip_frame();
+    }
+
+    /// Close the detail view, sliding back to the list (the back button).
+    fn close_clip_detail(&mut self) {
+        // Keep `detail_id` set so the shrink-back animation can still render;
+        // `tick_clip` clears it once the morph finishes.
+        self.clip.detail_open = false;
+        self.clip.detail_meta_target = 0.0;
+        self.clip.detail_meta_scroll_target = 0.0;
+        self.update_clip_hit();
+        self.schedule_clip_frame();
+    }
+
+    /// The history entry the detail view is showing, if any.
+    fn clip_detail_entry(&self) -> Option<&ClipEntry> {
+        let id = self.clip.detail_id?;
+        self.clip.history.iter().find(|e| e.id == id)
+    }
+
+    /// Height of the top pill-row zone: tight to the pill height (the pills sit
+    /// flush at the top, aligned with the paste pill; the strip is just a hair
+    /// taller so it reads as the pill row, not a big band).
+    fn clip_detail_top_h(&self) -> f32 {
+        self.clip_band_h() + 2.0 * PILL_MARGIN_Y
+    }
+
+    /// The settled content and metadata regions of the detail view within box
+    /// `rect`: the top pill row, then the content card, then the metadata sheet
+    /// (down to the box bottom). The sheet rests short and rises with
+    /// `detail_meta_t`, shrinking the content.
+    fn clip_detail_regions(&self, rect: Rect) -> (Rect, Rect) {
+        let top_h = self.clip_detail_top_h();
+        let inner_h = (rect.h - top_h).max(0.0);
+        let rest = (rect.h * META_REST_FRAC)
+            .clamp(META_REST_MIN, META_REST_MAX)
+            .min(inner_h);
+        // The cap can dip below `rest` while the box is mid-collapse (small
+        // `rect.h`); keep it ≥ rest so the clamp below never panics.
+        let cap = (rect.h * META_FULL_FRAC).min(inner_h).max(rest);
+        let full = self.clip_detail_meta_natural().clamp(rest, cap);
+        let meta_h = lerp(rest, full, self.clip.detail_meta_t).min(inner_h);
+        let content_h = (inner_h - meta_h).max(0.0);
+        let top = rect.y + top_h;
+        let content = Rect::new(rect.x, top, rect.w, content_h);
+        let meta = Rect::new(rect.x, top + content_h, rect.w, meta_h);
+        (content, meta)
+    }
+
+    /// The natural (fully-shown) height of the metadata sheet content: the
+    /// Source/Copied/Pasted rows plus one row per logged paste.
+    fn clip_detail_meta_natural(&self) -> f32 {
+        let logs = self
+            .clip_detail_entry()
+            .map(|e| e.pastes.len())
+            .unwrap_or(0);
+        // Source, Copied, Pasted-header, then a row per paste.
+        META_INNER_TOP + (3 + logs) as f32 * META_ROW_H + META_INNER_BOT
+    }
+
+    /// Max scroll (px) inside the metadata sheet once risen (0 if it all fits).
+    fn clip_detail_meta_scroll_span(&self) -> f32 {
+        let rect = self.clip_rect();
+        let (_, meta) = self.clip_detail_regions(rect);
+        (self.clip_detail_meta_natural() - meta.h).max(0.0)
+    }
+
+    /// Whether the pointer is over the metadata sheet (so it should rise).
+    fn clip_detail_meta_hovered(&self) -> bool {
+        if self.clip.detail_id.is_none() {
+            return false;
+        }
+        let Some(p) = self.options_ptr else {
+            return false;
+        };
+        let rect = self.clip_rect();
+        let (_, meta) = self.clip_detail_regions(rect);
+        p.0 >= rect.x && p.0 <= rect.x + rect.w && p.1 >= meta.y && p.1 <= rect.y + rect.h
+    }
+
+    /// The four top-row pill rects with their hit targets (back, delete, copy,
+    /// more — left to right, aligned with the paste pill).
+    fn clip_detail_pills(&self, rect: Rect) -> [(ClipHit, Rect); 4] {
+        // Same diameter and top as the paste pill, so all read as one row.
+        let d = self.clip_band_h();
+        let y = rect.y;
+        let x0 = rect.x + DETAIL_PILL_X;
+        let at = |i: f32| Rect::new(x0 + i * (d + DETAIL_PILL_GAP), y, d, d);
+        [
+            (ClipHit::Back, at(0.0)),
+            (ClipHit::DetailDelete, at(1.0)),
+            (ClipHit::DetailCopy, at(2.0)),
+            (ClipHit::DetailMore, at(3.0)),
+        ]
+    }
+
+    /// Max scroll (px) of the detail text (0 for non-text or short clips).
+    fn clip_detail_scroll_span(&self) -> f32 {
+        let Some(entry) = self.clip_detail_entry() else {
+            return 0.0;
+        };
+        if entry.kind != ClipKind::Text {
+            return 0.0;
+        }
+        let rect = self.clip_rect();
+        let (content, _) = self.clip_detail_regions(rect);
+        let max_w = (content.w - 2.0 * DETAIL_TEXT_MX).max(1.0);
+        let text_h = wrap_text(&entry.text, max_w, FONT_PX).len() as f32 * LINE_PX;
+        let view_h = (content.h - 2.0 * DETAIL_TEXT_MY).max(0.0);
+        (text_h - view_h).max(0.0)
+    }
+
+    /// Draw the metadata detail view as it opens over the list (`detail_t`):
+    /// the clicked row grows into the content card, the top pills fade in, and
+    /// the metadata sheet slides up from the bottom edge. The sheet rises further
+    /// with `detail_meta_t`; a text clip's content scrolls with `detail_scroll`.
+    #[allow(clippy::too_many_arguments)]
+    fn push_clip_detail(
+        &self,
+        scene: &mut Scene,
+        rect: Rect,
+        e: f32,
+        ink: [f32; 4],
+        dim_ink: [f32; 4],
+        card_col: [f32; 4],
+        sheet_col: [f32; 4],
+        bright: bool,
+    ) {
+        let dt = self.clip.detail_t;
+        if dt <= 0.001 || e <= 0.01 {
+            return;
+        }
+        let Some(entry) = self.clip_detail_entry() else {
+            return;
+        };
+        // Solid content — no fade; the card genuinely morphs, it doesn't dissolve.
+        let a = e;
+        let inkc = [ink[0], ink[1], ink[2], ink[3] * a];
+        // Two opaque tones: `card_col` is the clicked row's zebra tone; `sheet_col`
+        // is the other tone, for the top strip + metadata sheet.
+        let card_c = [card_col[0], card_col[1], card_col[2], e];
+        let sheet_c = [sheet_col[0], sheet_col[1], sheet_col[2], e];
+        let (content_full, meta_full) = self.clip_detail_regions(rect);
+
+        // ---- content card: grows from the clicked row into place ----
+        let src = self.clip.detail_src;
+        let card = Rect::new(
+            lerp(src.x, content_full.x, dt),
+            lerp(src.y, content_full.y, dt),
+            lerp(src.w, content_full.w, dt),
+            lerp(src.h, content_full.h, dt),
+        );
+        // Opaque backing — the card keeps the clicked row's zebra tone;
+        // a solid panel that grows, not a fade.
+        scene.rects.push(RectInst {
+            rect: card,
+            radius: 0.0,
+            color: card_c,
+            glass: 0.0,
+        });
+
+        if entry.kind == ClipKind::Text {
+            let tx = card.x + DETAIL_TEXT_MX;
+            let max_w = (card.w - 2.0 * DETAIL_TEXT_MX).max(1.0);
+            let view = Rect::new(
+                card.x,
+                card.y + DETAIL_TEXT_MY,
+                card.w,
+                (card.h - 2.0 * DETAIL_TEXT_MY).max(0.0),
+            );
+            let top = view.y - self.clip.detail_scroll;
+            for (i, line) in wrap_text(&entry.text, max_w, FONT_PX).iter().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+                let ly = top + i as f32 * LINE_PX;
+                if ly + LINE_PX < view.y || ly > view.y + view.h {
+                    continue;
+                }
+                scene.labels.push(Label {
+                    text: line.clone(),
+                    pos: (tx, ly),
+                    max_w,
+                    font_px: FONT_PX,
+                    line_px: LINE_PX,
+                    centered: false,
+                    dim: false,
+                    cache: false,
+                    family: None,
+                    color: Some(inkc),
+                    clip: Some(view),
+                });
+            }
+        } else {
+            let side = (card.h - 2.0 * DETAIL_TEXT_MY)
+                .min(card.w - 2.0 * DETAIL_TEXT_MX)
+                .clamp(32.0, 300.0);
+            let tile = Rect::new(
+                card.x + (card.w - side) / 2.0,
+                card.y + (card.h - side) / 2.0,
+                side,
+                side,
+            );
+            match clip_tile(entry) {
+                ClipTile::Glyph(g) => self.push_clip_tile_glyph(scene, tile, g, ink, a, card),
+                ClipTile::Thumb { key, glyph, .. } => {
+                    if let Some(layer) = self.clip_thumb_layer(key) {
+                        clip_grid(scene, card).icons.push(IconInst {
+                            rect: tile,
+                            layer,
+                            tint: [0.0; 4],
+                            ring: -1.0,
+                        });
+                    } else {
+                        self.push_clip_tile_glyph(scene, tile, glyph, ink, a, card);
+                    }
+                }
+                ClipTile::None => {}
+            }
+        }
+
+        // ---- metadata sheet: slides up from the bottom edge (the other tone) ----
+        let vis_h = meta_full.h * dt;
+        let mtop = rect.y + rect.h - vis_h;
+        let mclip = Rect::new(rect.x, mtop, rect.w, vis_h);
+        push_bottom_rounded(scene, mclip, BOX_RADIUS, sheet_c);
+        scene.rects.push(RectInst {
+            rect: Rect::new(rect.x, mtop, rect.w, 1.0),
+            radius: 0.0,
+            color: [ink[0], ink[1], ink[2], 0.12 * e],
+            glass: 0.0,
+        });
+
+        let mx = rect.x + DETAIL_TEXT_MX;
+        let vx = mx + META_LOG_INDENT;
+        let mright = rect.x + rect.w - ROW_PAD_X;
+        let mbot = rect.y + rect.h;
+        let inkm = [ink[0], ink[1], ink[2], ink[3] * e];
+        let dimm = [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * e];
+        let row = |scene: &mut Scene, y: f32, label: &str, value: String| {
+            if value.is_empty() || y + META_ROW_H <= mtop || y >= mbot {
+                return;
+            }
+            scene.labels.push(Label {
+                text: label.to_owned(),
+                pos: (mx, y),
+                max_w: META_LABEL_W,
+                font_px: FONT_PX,
+                line_px: LINE_PX,
+                centered: false,
+                dim: false,
+                cache: true,
+                family: None,
+                color: Some(dimm),
+                clip: Some(mclip),
+            });
+            scene.labels.push(Label {
+                text: value,
+                pos: (vx, y),
+                max_w: (mright - vx).max(0.0),
+                font_px: FONT_PX,
+                line_px: LINE_PX,
+                centered: false,
+                dim: false,
+                cache: false,
+                family: None,
+                color: Some(inkm),
+                clip: Some(mclip),
+            });
+        };
+        let mut y = mtop + META_INNER_TOP - self.clip.detail_meta_scroll;
+        // Always show the Source row — the window couldn't always be identified
+        // at copy time (empty workspace, a client with no class/title, a missed
+        // query), and an empty value would silently drop the row while its slot
+        // still advances, leaving a blank gap. Mirror the paste log's "somewhere".
+        let source = if entry.source.is_empty() {
+            "unknown".to_owned()
+        } else {
+            entry.source.clone()
+        };
+        row(scene, y, "Source:", source);
+        y += META_ROW_H;
+        let copied = {
+            let b = fmt_datetime(entry.timestamp_ms);
+            if entry.kind == ClipKind::Files && entry.cut {
+                format!("{b} · cut")
+            } else {
+                b
+            }
+        };
+        row(scene, y, "Copied:", copied);
+        y += META_ROW_H;
+        let pasted = match entry.paste_count {
+            0 => "not yet".to_owned(),
+            1 => "1 time".to_owned(),
+            n => format!("{n} times"),
+        };
+        row(scene, y, "Pasted:", pasted);
+        y += META_ROW_H;
+        for rec in &entry.pastes {
+            if y + META_ROW_H > mtop && y < mbot {
+                let w = if rec.target.is_empty() {
+                    "somewhere".to_owned()
+                } else {
+                    cap(&rec.target, 40)
+                };
+                let t = fmt_datetime(rec.when_ms);
+                let tw = t.chars().count() as f32 * FONT_PX * 0.5;
+                scene.labels.push(Label {
+                    text: w,
+                    pos: (vx, y),
+                    max_w: (mright - vx - tw - 12.0).max(0.0),
+                    font_px: FONT_PX * 0.95,
+                    line_px: LINE_PX,
+                    centered: false,
+                    dim: false,
+                    cache: false,
+                    family: None,
+                    color: Some(dimm),
+                    clip: Some(mclip),
+                });
+                scene.labels.push(Label {
+                    text: t,
+                    pos: (mright - tw, y),
+                    max_w: tw + 8.0,
+                    font_px: FONT_PX * 0.9,
+                    line_px: LINE_PX,
+                    centered: false,
+                    dim: false,
+                    cache: false,
+                    family: None,
+                    color: Some(dimm),
+                    clip: Some(mclip),
+                });
+            }
+            y += META_ROW_H;
+        }
+
+        // ---- top pill strip: a solid band (the other tone) that WIPES DOWN
+        // from the box's top edge as the detail opens (the "from-above" flow),
+        // matching the mockup. Its rounded top corners stay pinned to the box;
+        // its lower edge — and the divider that rides it — descend with `dt`. ----
+        let top_h = self.clip_detail_top_h();
+        let band_h = top_h * dt;
+        let band_bottom = rect.y + band_h;
+        push_top_rounded(
+            scene,
+            Rect::new(rect.x, rect.y, rect.w, band_h),
+            BOX_RADIUS,
+            sheet_c,
+        );
+        if band_h > 1.0 {
+            scene.rects.push(RectInst {
+                rect: Rect::new(rect.x, band_bottom - 1.0, rect.w, 1.0),
+                radius: 0.0,
+                color: [ink[0], ink[1], ink[2], 0.12 * e * dt],
+                glass: 0.0,
+            });
+        }
+
+        // ---- top pills: seat in over the last few px of the wipe (once the
+        // descending band fully covers them), so they arrive WITH the strip
+        // instead of fading onto an already-open bar. ----
+        let seat = ((band_h - self.clip_band_h()) / (2.0 * PILL_MARGIN_Y)).clamp(0.0, 1.0);
+        let pa = seat * seat * (3.0 - 2.0 * seat) * e;
+        if pa > 0.01 {
+            let ink0 = self.options_text_color();
+            for (hit, prect) in self.clip_detail_pills(rect) {
+                let hv = self.clip.hit == hit;
+                let pr = if hv { hover_grow(prect) } else { prect };
+                let radius = pr.h / 2.0;
+                push_neumorph(scene, pr, radius, bright, pa);
+                // Contrast against the strip: recess the pill (darker on a dark
+                // bar, lighter on a light one), brighten on hover.
+                let base = if hv {
+                    self.options_hover_wash()
+                } else if bright {
+                    [1.0, 1.0, 1.0, 0.18]
+                } else {
+                    [0.0, 0.0, 0.0, 0.22]
+                };
+                scene.rects.push(RectInst {
+                    rect: pr,
+                    radius,
+                    color: [base[0], base[1], base[2], base[3] * pa],
+                    glass: 0.0,
+                });
+                let (glyph, gcol) = match hit {
+                    ClipHit::Back => (GLYPH_BACK, ink0),
+                    ClipHit::DetailDelete => (GLYPH_CLOSE, ink0),
+                    ClipHit::DetailMore => (GLYPH_MORE, ink0),
+                    _ => (GLYPH_COPY, ink0),
+                };
+                let gclip = Rect::new(pr.x - 4.0, pr.y - 4.0, pr.w + 8.0, pr.h + 8.0);
+                scene.labels.push(Label {
+                    text: glyph.to_owned(),
+                    pos: (pr.x + pr.w / 2.0, pr.y + (pr.h - LINE_PX) / 2.0),
+                    max_w: pr.w + 6.0,
+                    font_px: FONT_PX * 0.92,
+                    line_px: LINE_PX,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: Some(NERD),
+                    color: Some([gcol[0], gcol[1], gcol[2], gcol[3] * pa]),
+                    clip: Some(gclip),
+                });
+            }
         }
     }
 
@@ -1434,7 +2314,51 @@ impl App {
                 self.close_clip_box();
                 true
             }
+            ClipHit::Back => {
+                self.close_clip_detail();
+                true
+            }
+            ClipHit::DetailCopy => {
+                if let Some(idx) = self
+                    .clip
+                    .detail_id
+                    .and_then(|id| self.clip.history.iter().position(|e| e.id == id))
+                {
+                    self.copy_clip(idx);
+                }
+                self.close_clip_box();
+                true
+            }
+            ClipHit::DetailDelete => {
+                self.delete_detail_clip();
+                true
+            }
+            // Placeholder 4th pill — reserved for a later action.
+            ClipHit::DetailMore => true,
             ClipHit::None => false,
+        }
+    }
+
+    /// Delete the clip the detail view is showing, then return to the list.
+    fn delete_detail_clip(&mut self) {
+        let idx = self
+            .clip
+            .detail_id
+            .and_then(|id| self.clip.history.iter().position(|e| e.id == id));
+        self.close_clip_detail();
+        if let Some(idx) = idx {
+            self.delete_clip(idx);
+        }
+    }
+
+    /// Right-click inside the open box: open the hovered row's metadata detail.
+    /// Returns whether it consumed the click.
+    pub(crate) fn clip_box_right_click(&mut self) -> bool {
+        if let ClipHit::Row(i) = self.clip.hit {
+            self.open_clip_detail(i);
+            true
+        } else {
+            false
         }
     }
 
@@ -1627,7 +2551,10 @@ impl App {
         // While a selection is in play, the clipboard corner is the action pills'
         // home: hovering it (re-)summons them and holds them; moving away lets
         // them fade after the grace. The history peek is suppressed in this mode.
-        if self.clip.selection_present {
+        // Never while the drawer is open, though — suppressing the peek there
+        // leaves `peek_reveal` false against an `expanded` box, i.e. a tall, thin
+        // stripe that never opens or closes.
+        if self.clip.selection_present && !self.clip.expanded {
             if self.clip_cluster_hovered() {
                 self.clip.grace_deadline = None;
                 if !self.clip.selection_active {
@@ -1886,6 +2813,43 @@ impl App {
         let etarget = if self.clip.expanded { 1.0 } else { 0.0 };
         let (et, em) = ease_toward(self.clip.expand_t, etarget, dt, MORPH_RATE, MORPH_EPS);
         self.clip.expand_t = et;
+        // Open/close the detail: advance a LINEAR progress at a constant rate,
+        // then smoothstep it into `detail_t` so the row-grow eases in *and* out
+        // (constant-rate ease_toward snapped at the start).
+        let ptarget = if self.clip.detail_open { 1.0 } else { 0.0 };
+        let dm = self.clip.detail_p != ptarget;
+        if dm {
+            let step = dt / DETAIL_OPEN_SECS;
+            self.clip.detail_p = if ptarget > self.clip.detail_p {
+                (self.clip.detail_p + step).min(1.0)
+            } else {
+                (self.clip.detail_p - step).max(0.0)
+            };
+        }
+        let p = self.clip.detail_p;
+        self.clip.detail_t = p * p * (3.0 - 2.0 * p); // smoothstep
+        // The close morph is done: drop the entry reference.
+        if !self.clip.detail_open && self.clip.detail_p <= 0.0 {
+            self.clip.detail_id = None;
+        }
+        // Ease the metadata rise + its internal scroll toward the wheel targets.
+        let (nmt, mm1) = ease_toward(
+            self.clip.detail_meta_t,
+            self.clip.detail_meta_target,
+            dt,
+            MORPH_RATE,
+            MORPH_EPS,
+        );
+        self.clip.detail_meta_t = nmt;
+        let (nms, mm2) = ease_toward(
+            self.clip.detail_meta_scroll,
+            self.clip.detail_meta_scroll_target,
+            dt,
+            SCROLL_RATE,
+            0.5,
+        );
+        self.clip.detail_meta_scroll = nms;
+        let mm = mm1 || mm2;
         // Ease the open-box height toward its content-fit target (smooth on a
         // content change); only while open, so there's no idle churn collapsed.
         let bm = if self.clip.expand_t > MORPH_EPS {
@@ -1911,7 +2875,7 @@ impl App {
             self.clip.blink_until = None;
         }
         self.draw_options();
-        if moving || amoving || em || bm || lm || beating {
+        if moving || amoving || em || bm || lm || dm || mm || beating {
             self.schedule_clip_frame();
         } else {
             self.clip.last = None;
@@ -2007,6 +2971,60 @@ fn fmt_relative(ms: u64) -> String {
     }
 }
 
+/// Word-wrap `text` to a pixel width, honouring existing newlines. Uses an
+/// average-glyph-width estimate (the proportional UI font isn't measurable
+/// here); the label's own `max_w` clips any line that estimates slightly long,
+/// so wrapping is never wider than the region.
+fn wrap_text(text: &str, max_w: f32, font_px: f32) -> Vec<String> {
+    let max_chars = ((max_w / (font_px * 0.5)).floor() as usize).max(8);
+    let mut out = Vec::new();
+    for raw in text.split('\n') {
+        let line = raw.trim_end();
+        if line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut cur = String::new();
+        for word in line.split_whitespace() {
+            let joined = if cur.is_empty() {
+                word.chars().count()
+            } else {
+                cur.chars().count() + 1 + word.chars().count()
+            };
+            if !cur.is_empty() && joined > max_chars {
+                out.push(std::mem::take(&mut cur));
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+        }
+        out.push(cur);
+    }
+    out
+}
+
+/// Local absolute date + time for a unix-millis timestamp, e.g. `"Aug 18 · 14:32"`.
+fn fmt_datetime(ms: u64) -> String {
+    if ms == 0 {
+        return String::new();
+    }
+    const MON: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // SAFETY: `localtime_r` fills a caller-owned `tm`.
+    unsafe {
+        let t = (ms / 1000) as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        let mon = MON.get(tm.tm_mon as usize).copied().unwrap_or("");
+        format!(
+            "{mon} {} · {:02}:{:02}",
+            tm.tm_mday, tm.tm_hour, tm.tm_min
+        )
+    }
+}
+
 fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [
         lerp(a[0], b[0], t),
@@ -2014,6 +3032,47 @@ fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
         lerp(a[2], b[2], t),
         lerp(a[3], b[3], t),
     ]
+}
+
+/// Draw an OPAQUE band with only its TOP corners rounded (the bottom is squared
+/// off by a second rect). Colour must be opaque — the two rects overlap, so a
+/// translucent colour would double up.
+fn push_top_rounded(scene: &mut Scene, r: Rect, radius: f32, color: [f32; 4]) {
+    scene.rects.push(RectInst {
+        rect: r,
+        radius,
+        color,
+        glass: 0.0,
+    });
+    let h = r.h - radius;
+    if h > 0.0 {
+        scene.rects.push(RectInst {
+            rect: Rect::new(r.x, r.y + radius, r.w, h),
+            radius: 0.0,
+            color,
+            glass: 0.0,
+        });
+    }
+}
+
+/// Draw an OPAQUE band with only its BOTTOM corners rounded (see
+/// [`push_top_rounded`]).
+fn push_bottom_rounded(scene: &mut Scene, r: Rect, radius: f32, color: [f32; 4]) {
+    scene.rects.push(RectInst {
+        rect: r,
+        radius,
+        color,
+        glass: 0.0,
+    });
+    let h = r.h - radius;
+    if h > 0.0 {
+        scene.rects.push(RectInst {
+            rect: Rect::new(r.x, r.y, r.w, h),
+            radius: 0.0,
+            color,
+            glass: 0.0,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -2036,15 +3095,90 @@ mod tests {
     #[test]
     fn files_show_basenames() {
         let list = "file:///home/max/a%20b.txt\nfile:///home/max/photos/pic.png\n";
-        let e = classify_files(list).unwrap();
+        let e = classify_files(list, false).unwrap();
         assert_eq!(e.kind, ClipKind::Files);
         assert_eq!(e.preview, "a b.txt, pic.png");
         assert_eq!(e.mime, "text/uri-list");
+        assert!(!e.cut);
     }
 
     #[test]
     fn empty_uri_list_is_dropped() {
-        assert!(classify_files("# comment only\n").is_none());
+        assert!(classify_files("# comment only\n", false).is_none());
+    }
+
+    #[test]
+    fn copy_and_cut_of_same_files_are_distinct() {
+        let list = "file:///home/max/a.txt\n";
+        let copy = classify_files(list, false).unwrap();
+        let cut = classify_files(list, true).unwrap();
+        assert!(cut.cut && !copy.cut);
+        assert_ne!(copy.hash, cut.hash, "verb must affect dedup hash");
+    }
+
+    #[test]
+    fn parses_gnome_copied_verb_and_uris() {
+        let (cut, uris) =
+            parse_gnome_copied("cut\nfile:///home/max/a.txt\nfile:///home/max/b.txt");
+        assert!(cut);
+        assert_eq!(uris, "file:///home/max/a.txt\nfile:///home/max/b.txt");
+
+        let (cut, uris) = parse_gnome_copied("copy\nfile:///home/max/a.txt");
+        assert!(!cut);
+        assert_eq!(uris, "file:///home/max/a.txt");
+    }
+
+    #[test]
+    fn gnome_copied_without_verb_keeps_all_uris() {
+        // A malformed payload (no copy/cut header) must not eat the first URI.
+        let (cut, uris) = parse_gnome_copied("file:///home/max/a.txt");
+        assert!(!cut);
+        assert_eq!(uris, "file:///home/max/a.txt");
+    }
+
+    #[test]
+    fn file_offers_carry_verb_and_all_types() {
+        let offers = file_offers("file:///home/max/a%20b.txt\nfile:///home/max/c.txt", true);
+        let by = |m: &str| -> Vec<u8> {
+            offers.iter().find(|(k, _)| k == m).map(|(_, v)| v.clone()).unwrap()
+        };
+        // x-special/gnome-copied-files carries the cut verb + raw URIs.
+        assert_eq!(
+            String::from_utf8(by(GNOME_COPIED)).unwrap(),
+            "cut\nfile:///home/max/a%20b.txt\nfile:///home/max/c.txt"
+        );
+        // text/uri-list is CRLF-terminated.
+        assert_eq!(
+            String::from_utf8(by("text/uri-list")).unwrap(),
+            "file:///home/max/a%20b.txt\r\nfile:///home/max/c.txt\r\n"
+        );
+        // text/plain gives decoded local paths, one per line.
+        assert_eq!(
+            String::from_utf8(by("text/plain")).unwrap(),
+            "/home/max/a b.txt\n/home/max/c.txt"
+        );
+    }
+
+    #[test]
+    fn text_offers_include_legacy_aliases() {
+        let offers = text_offers("hello");
+        let mimes: Vec<&str> = offers.iter().map(|(m, _)| m.as_str()).collect();
+        assert!(mimes.contains(&"text/plain;charset=utf-8"));
+        assert!(mimes.contains(&"UTF8_STRING"));
+        assert!(offers.iter().all(|(_, v)| v == b"hello"));
+    }
+
+    #[test]
+    fn empty_file_offer_is_empty() {
+        assert!(file_offers("# comment only\n", false).is_empty());
+    }
+
+    #[test]
+    fn window_label_joins_and_omits_empty() {
+        assert_eq!(window_label("firefox", "GitHub"), "firefox — GitHub");
+        assert_eq!(window_label("firefox", ""), "firefox");
+        assert_eq!(window_label("", "Just a title"), "Just a title");
+        assert_eq!(window_label("", ""), "");
     }
 
     #[test]

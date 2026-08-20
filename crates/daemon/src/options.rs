@@ -23,7 +23,7 @@ use wayland_client::WEnum;
 
 use crate::animation::{ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene, ShadowInst};
-use crate::{hypr, surface, App, BTN_LEFT};
+use crate::{hypr, surface, App, BTN_LEFT, BTN_RIGHT};
 
 /// Thickness of the top reveal strip (logical px) — the only pointer-sensitive
 /// band while the bar is hidden in fullscreen.
@@ -79,8 +79,6 @@ pub(crate) const GLYPH_SELECT_ALL: &str = "\u{f247}"; // fa-object-group (select
 
 // Pill backgrounds (resting + hover) are adaptive washes — see
 // `options_rest_wash` / `options_hover_wash`.
-// The close glyph is red; its pill just brightens on hover like the rest.
-pub(crate) const RED_GLYPH: [f32; 4] = [0.92, 0.30, 0.30, 1.0];
 
 // --- Control-button reveal animation ---------------------------------------
 // The buttons are hidden by default; hovering the window pill makes them slide
@@ -470,7 +468,7 @@ impl App {
                 wx - GROUP_GAP - d,
                 PillId::Close,
                 GLYPH_CLOSE,
-                Some(RED_GLYPH),
+                None,
             );
             pills.push(Pill {
                 id: PillId::Window,
@@ -927,6 +925,13 @@ impl App {
             {
                 self.options_click();
             }
+            wl_pointer::Event::Button { button, state, .. }
+                if button == BTN_RIGHT
+                    && state == WEnum::Value(wl_pointer::ButtonState::Released)
+                    && !self.options_hidden =>
+            {
+                self.options_right_click();
+            }
             // Scroll over the notification OPTION: browse history / expand the
             // list. Works over the bell *or* the mute pill it reveals (both are
             // the one OPTION), or whenever its history is already open.
@@ -1249,6 +1254,13 @@ impl App {
                 self.clip_action(id)
             }
             _ => {}
+        }
+    }
+
+    /// Right-click: over an open clipboard row, open its metadata detail view.
+    fn options_right_click(&mut self) {
+        if self.clip.expanded && self.options_hover == Some(PillId::ClipboardBox) {
+            self.clip_box_right_click();
         }
     }
 

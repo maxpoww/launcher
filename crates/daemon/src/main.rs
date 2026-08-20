@@ -12,6 +12,7 @@ mod animation;
 mod applier;
 mod apps;
 mod boxes;
+mod clip_source;
 mod clipboard;
 mod content;
 mod dragging;
@@ -429,6 +430,10 @@ fn main() -> anyhow::Result<()> {
     if app.icon_size != 1 {
         app.apply_icon_size_change();
     }
+
+    // Own the newest clip up front so it's pasteable from a fresh session (our
+    // data-control source releases the selection when the previous daemon exits).
+    app.serve_newest_clip();
 
     let socket_path = waverunner_proto::socket_path();
     let _socket_guard = ipc::listen(&event_loop.handle(), &socket_path)?;
@@ -1233,6 +1238,25 @@ impl App {
     /// Entry point for IPC commands (called from ipc.rs) and for
     /// internally generated commands (Escape, focus loss, scroll).
     pub fn handle_command(&mut self, command: Command) {
+        // Debug/verification verbs force-open an OPTIONS surface (clipboard /
+        // notification box) so it can be screenshotted — they don't touch the
+        // launcher rest-state machine, so handle and return before `ui.apply`.
+        match command {
+            Command::DebugClip => {
+                self.open_clip_box();
+                return;
+            }
+            Command::DebugClipDetail => {
+                self.open_clip_box();
+                self.open_clip_detail(0);
+                return;
+            }
+            Command::DebugNotif => {
+                self.open_notif_box();
+                return;
+            }
+            _ => {}
+        }
         // Summoning or expanding is the moment freshness matters:
         // rescan (coalesced, cooldown-limited) so newly installed and
         // uninstalled apps are reflected without a restart.

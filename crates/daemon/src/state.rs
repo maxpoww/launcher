@@ -157,6 +157,9 @@ impl UiState {
                 Target::Open => self.set_target(Target::Dock),
                 Target::Hidden | Target::Dock => false,
             },
+            // Debug/verification verbs open an OPTIONS box, not the launcher —
+            // intercepted in `handle_command` before reaching here.
+            Command::DebugClip | Command::DebugClipDetail | Command::DebugNotif => false,
         }
     }
 

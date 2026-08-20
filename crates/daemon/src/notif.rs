@@ -37,7 +37,7 @@ use crate::notifications::{
 };
 use crate::options::{
     hover_grow, push_neumorph, wash, PillId, BOND_GAP, EDGE_PAD, FONT_PX, GLYPH_BELL,
-    GLYPH_BELL_SLASH, GLYPH_CLOSE, LINE_PX, NERD, OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X, RED_GLYPH,
+    GLYPH_BELL_SLASH, GLYPH_CLOSE, LINE_PX, NERD, OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
 
@@ -1791,7 +1791,7 @@ impl App {
             color: base,
             glass: 0.0,
         });
-        // The red fa-times glyph, scaled to the enlarged pill so it reads as a
+        // The fa-times glyph, scaled to the enlarged pill so it reads as a
         // bold ✕. Sized off the resting diameter (not the hover-grown one) so it
         // stays steady, and clipped a touch wider than the pill so the arms aren't
         // shaved.
@@ -1800,6 +1800,7 @@ impl App {
         let cx = br.x + br.w / 2.0;
         let ty = br.y + (br.h - gpx) / 2.0;
         let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
+        let g = self.options_text_color();
         scene.labels.push(Label {
             text: GLYPH_CLOSE.to_owned(),
             pos: (cx, ty),
@@ -1810,7 +1811,7 @@ impl App {
             dim: false,
             cache: true,
             family: Some(NERD),
-            color: Some([RED_GLYPH[0], RED_GLYPH[1], RED_GLYPH[2], RED_GLYPH[3] * alpha]),
+            color: Some([g[0], g[1], g[2], g[3] * alpha]),
             clip: Some(gclip),
         });
     }
@@ -2275,7 +2276,7 @@ impl App {
 
     /// Open the history box from the collapsed preview, anchored with the newest
     /// notification flush at the top (`list_scroll = 0`).
-    fn open_notif_box(&mut self) {
+    pub(crate) fn open_notif_box(&mut self) {
         self.notif.hold_deadline = None;
         self.notif.expanded = true;
         self.mark_notif_read(); // opening the box = reading them

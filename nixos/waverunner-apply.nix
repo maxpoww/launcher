@@ -61,6 +61,26 @@ let
         chmod 644 "$status" 2>/dev/null || true
       }
 
+      # Reconcile in a settle loop. A packages.list edit that lands *while* a
+      # rebuild is already running would otherwise be lost: for the duration of
+      # this oneshot the systemd path unit is inactive, so a change during the
+      # run never re-triggers it and the generated Nix silently diverges from
+      # the list (exactly the interrupted-install desync this guards against).
+      # After each successful switch we re-hash the list; if it changed under
+      # us we reconcile again, so the generated Nix always converges to the
+      # latest list. Capped so a pathological edit-loop can't spin forever.
+      max_passes=5
+      pass=0
+      while :; do
+      pass=$((pass + 1))
+
+      # Snapshot the exact list contents this pass is about to consume.
+      if [[ -f "$list" ]]; then
+        consumed=$(sha256sum < "$list")
+      else
+        consumed="absent"
+      fi
+
       write_status "building" null null
 
       # 1. Validate: keep only strict nixpkgs attr tokens; anything else is
@@ -99,7 +119,19 @@ let
       #    the next rebuild (e.g. autoUpgrade) is never poisoned by a bad add.
       if err=$(nixos-rebuild switch 2>&1); then
         cp -f "$gen" "$lastgood"
+        # Did the list change while this pass was building? If so, a late edit
+        # (e.g. an uninstall issued during an in-flight install) needs its own
+        # rebuild — loop and reconcile again instead of reporting stale success.
+        if [[ -f "$list" ]]; then
+          current=$(sha256sum < "$list")
+        else
+          current="absent"
+        fi
+        if [[ "$current" != "$consumed" && "$pass" -lt "$max_passes" ]]; then
+          continue
+        fi
         write_status "done" true null
+        exit 0
       else
         if [[ -f "$lastgood" ]]; then
           cp -f "$lastgood" "$gen"
@@ -109,6 +141,7 @@ let
         echo "$err" >&2
         exit 1
       fi
+      done
     '';
   };
 in

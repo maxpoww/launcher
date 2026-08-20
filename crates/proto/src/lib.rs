@@ -40,6 +40,14 @@ pub enum Command {
     Expand,
     /// Slide from the open popup back down to the dock (no-op unless open).
     Collapse,
+    /// Debug/verification: force-open the clipboard history box, so the OPTIONS
+    /// surfaces (normally pointer-only) can be screenshotted deterministically.
+    DebugClip,
+    /// Debug/verification: force-open the clipboard box on the newest row's
+    /// metadata detail view.
+    DebugClipDetail,
+    /// Debug/verification: force-open the notification history box.
+    DebugNotif,
 }
 
 impl fmt::Display for Command {
@@ -50,6 +58,9 @@ impl fmt::Display for Command {
             Command::Hide => f.write_str("hide"),
             Command::Expand => f.write_str("expand"),
             Command::Collapse => f.write_str("collapse"),
+            Command::DebugClip => f.write_str("debug-clip"),
+            Command::DebugClipDetail => f.write_str("debug-clip-detail"),
+            Command::DebugNotif => f.write_str("debug-notif"),
         }
     }
 }
@@ -64,6 +75,9 @@ impl FromStr for Command {
             "hide" => Ok(Command::Hide),
             "expand" => Ok(Command::Expand),
             "collapse" => Ok(Command::Collapse),
+            "debug-clip" => Ok(Command::DebugClip),
+            "debug-clip-detail" => Ok(Command::DebugClipDetail),
+            "debug-notif" => Ok(Command::DebugNotif),
             other => Err(ParseError::UnknownCommand(other.to_owned())),
         }
     }
@@ -135,6 +149,9 @@ mod tests {
             Command::Hide,
             Command::Expand,
             Command::Collapse,
+            Command::DebugClip,
+            Command::DebugClipDetail,
+            Command::DebugNotif,
         ] {
             assert_eq!(cmd.to_string().parse::<Command>().unwrap(), cmd);
         }

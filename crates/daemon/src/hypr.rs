@@ -73,7 +73,7 @@ pub fn dispatch(lua: &str) {
 /// on screen with nothing behind it.
 pub fn close_window(addr: &str) {
     dispatch(&format!(
-        "hl.dsp.closewindow({{ window = \"address:{addr}\" }})"
+        "hl.dsp.window.close({{ window = \"address:{addr}\" }})"
     ));
 }
 
@@ -98,6 +98,22 @@ pub fn active_window_info() -> Option<(String, String, bool)> {
     // should trigger the auto-hide.
     let fullscreen = json["fullscreen"].as_i64().unwrap_or(0) >= 2;
     Some((address, title, fullscreen))
+}
+
+/// The focused window's app class and title — the clipboard OPTION's
+/// "copied/pasted from where" metadata. `None` when nothing is focused.
+pub fn active_window_where() -> Option<(String, String)> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let address = json["address"].as_str()?;
+    if address.is_empty() || address == "0x0" {
+        return None;
+    }
+    let class = json["class"].as_str().unwrap_or("").to_owned();
+    let title = json["title"].as_str().unwrap_or("").to_owned();
+    if class.is_empty() && title.is_empty() {
+        return None;
+    }
+    Some((class, title))
 }
 
 /// Toggle pseudotile on the focused window (the OPTIONS square control).
