@@ -26,6 +26,44 @@
 
       # ── Nix packages ────────────────────────────────────────────────────────
       packages = forAllSystems (pkgs: rec {
+        # Offline dictionary data for the clipboard "define a word" panel, built
+        # declaratively from pinned upstream sources: Webster's 1913 (English,
+        # public domain) copied as-is, and the RAE dump (Spanish) parsed by
+        # tools/rae-parse into `{word: {e,d}}` JSON. Installed to
+        # $out/share/waverunner/, pointed at by $WAVERUNNER_DICT[_ES].
+        dictionaries =
+          let
+            english = pkgs.fetchurl {
+              url = "https://raw.githubusercontent.com/matthewreagan/WebstersEnglishDictionary/6fb9c92420c3a323e74ffb9d577409f4431cc42a/dictionary_compact.json";
+              hash = "sha256-FrEoR6R8wSAuXkCjpEue0vdJ0jwKXwrRH8vU6MbD4z0=";
+            };
+            raeSource = pkgs.fetchurl {
+              url = "https://raw.githubusercontent.com/eneko98/RAE-Corpus/7cc61043a0a6379108ced0a83c77d9dbdbfe0835/RealAcademiaEspanola-DiccionarioLlenguaEspanola.txt";
+              hash = "sha256-ZWxY8mExCM9i/SQIkfVHoQfAIKTYX/fYqHpu1eUz0ik=";
+            };
+          in
+          pkgs.stdenv.mkDerivation {
+            pname = "waverunner-dictionaries";
+            version = "0.1.0";
+            dontUnpack = true;
+            # rustc (with the stdenv `cc` for linking) compiles the single-file,
+            # dependency-free parser; no cargo/workspace needed.
+            nativeBuildInputs = [ pkgs.rustc ];
+            buildPhase = ''
+              runHook preBuild
+              rustc -O --edition 2021 ${./tools/rae-parse/parse_rae.rs} -o parse_rae
+              ./parse_rae ${raeSource} dictionary-es.json
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/share/waverunner
+              cp ${english} $out/share/waverunner/dictionary.json
+              cp dictionary-es.json $out/share/waverunner/dictionary-es.json
+              runHook postInstall
+            '';
+          };
+
         waverunner-daemon = pkgs.rustPlatform.buildRustPackage {
           pname = "waverunner-daemon";
           version = "0.1.0";
@@ -40,12 +78,15 @@
           doCheck = false;
 
           # wgpu uses dlopen for Vulkan/Wayland; wrap so store paths are found.
-          # Also put the thumbnailer tools on PATH so previews work whatever
-          # the launching environment.
+          # Also put the thumbnailer tools on PATH so previews work whatever the
+          # launching environment, and point the dictionary panel at the
+          # declaratively-built data (a user's own env override still wins).
           postInstall = ''
             wrapProgram $out/bin/waverunner \
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (runtimeLibs pkgs)} \
-              --prefix PATH : ${pkgs.lib.makeBinPath (runtimeTools pkgs)}
+              --prefix PATH : ${pkgs.lib.makeBinPath (runtimeTools pkgs)} \
+              --set-default WAVERUNNER_DICT ${dictionaries}/share/waverunner/dictionary.json \
+              --set-default WAVERUNNER_DICT_ES ${dictionaries}/share/waverunner/dictionary-es.json
           '';
         };
 

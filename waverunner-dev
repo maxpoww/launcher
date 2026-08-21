@@ -3,4 +3,15 @@
 # the daemon can find libwayland, libxkbcommon, and vulkan-loader without
 # requiring nix develop. Paths are pinned by flake.lock.
 export LD_LIBRARY_PATH=/nix/store/clvzgv5kqq953s4azqhkg3ddgpvgl9wc-wayland-1.25.0/lib:/nix/store/3kncz3fkk7sv9xc61x096jnbxvxfnx1k-libxkbcommon-1.13.1/lib:/nix/store/y5a34h6vgvsc1pmfmvcqfcvxy2grg3hx-vulkan-loader-1.4.341.0/lib
+
+# Point the clipboard dictionary panel at the flake-built, declaratively-pinned
+# data (English Webster + Spanish RAE). Built + cached by Nix; if the build is
+# unavailable (offline first run) the vars stay empty and the daemon falls back
+# to ~/.local/share/waverunner/.
+DICTS="$(nix build --no-link --print-out-paths /home/max/launcher#dictionaries 2>/dev/null)"
+if [ -n "$DICTS" ]; then
+  export WAVERUNNER_DICT="$DICTS/share/waverunner/dictionary.json"
+  export WAVERUNNER_DICT_ES="$DICTS/share/waverunner/dictionary-es.json"
+fi
+
 exec /home/max/launcher/target/debug/waverunner "$@"
