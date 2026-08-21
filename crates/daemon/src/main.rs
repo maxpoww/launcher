@@ -15,6 +15,7 @@ mod boxes;
 mod clip_source;
 mod clipboard;
 mod content;
+mod dict;
 mod dragging;
 mod files;
 mod frame;
@@ -249,6 +250,16 @@ fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Offline dictionary loader for the clipboard "define a word" panel. The
+    // worker is spawned lazily (first panel open); here we only make the channel
+    // whose finished map the loop folds in via `on_dict_loaded`.
+    let (dict_tx, dict_rx) = if config.options.enabled {
+        let (tx, rx) = channel::channel::<dict::Event>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
     // Notification OPTION icon resolver: turns a notification's app_icon /
     // desktop_entry into a card-tile mip chain off the compositor thread.
     let (notif_icons_handle, notif_icon_rx) = if config.options.enabled {
@@ -300,6 +311,7 @@ fn main() -> anyhow::Result<()> {
         options_clock_meta: options::ClockMeta::default(),
         notif: notif::NotifState::new(notif_handle),
         clip: clipboard::ClipState::new(clip_handle, clip_thumbs, clip_unfurl),
+        dict_tx,
         notif_icons_handle,
         notif_icon_chains: Vec::new(),
         notif_icon_slot: HashMap::new(),
@@ -539,6 +551,17 @@ fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("registering notif-icon channel: {e}"))?;
     }
 
+    if let Some(dict_rx) = dict_rx {
+        event_loop
+            .handle()
+            .insert_source(dict_rx, |event, _, app| {
+                if let channel::Event::Msg(ev) = event {
+                    app.on_dict_loaded(ev);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("registering dict channel: {e}"))?;
+    }
+
     // Live launcher reload: rescan when a `.desktop` file is added, removed,
     // or rewritten in any XDG application dir, so launcher changes (webapps-gen
     // regenerating from ~/.config/webapps.list, or an external package install)
@@ -697,6 +720,10 @@ pub struct App {
     notif: notif::NotifState,
     /// Clipboard OPTION: watched history + copy-back (see [`crate::clipboard`]).
     clip: clipboard::ClipState,
+    /// Sender for the offline dictionary load worker (clipboard "define a word"
+    /// panel). `None` when the topbar is disabled; the load is kicked lazily the
+    /// first time the panel opens, and the finished map arrives on the loop.
+    dict_tx: Option<channel::Sender<dict::Event>>,
     /// Off-thread resolver turning a notification's icon hint into a card-tile
     /// mip chain (`None` when the topbar is disabled).
     notif_icons_handle: Option<notif_icons::NotifIcons>,
@@ -1274,6 +1301,13 @@ impl App {
             }
             Command::DebugNotif => {
                 self.open_notif_box();
+                return;
+            }
+            Command::DebugDict => {
+                self.open_clip_box();
+                self.open_dict();
+                // A word in both dictionaries, to exercise the bilingual answer.
+                self.clip.dict_query = "pie".to_owned();
                 return;
             }
             _ => {}
@@ -2876,6 +2910,12 @@ impl App {
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // The clipboard "define a word" panel grabs the keyboard while open, so
+        // its search field consumes every key before the launcher's shortcuts.
+        if self.clip.dict_open {
+            self.dict_key(keysym, utf8);
+            return;
+        }
         // Ctrl+Plus/Minus cycles icon size through 4 levels.
         if self.modifiers.ctrl {
             match keysym {

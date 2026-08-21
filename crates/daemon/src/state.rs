@@ -159,7 +159,10 @@ impl UiState {
             },
             // Debug/verification verbs open an OPTIONS box, not the launcher —
             // intercepted in `handle_command` before reaching here.
-            Command::DebugClip | Command::DebugClipDetail | Command::DebugNotif => false,
+            Command::DebugClip
+            | Command::DebugClipDetail
+            | Command::DebugNotif
+            | Command::DebugDict => false,
         }
     }
 

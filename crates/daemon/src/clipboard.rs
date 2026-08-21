@@ -30,12 +30,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use calloop::channel::Sender;
 use calloop::timer::{TimeoutAction, Timer};
 use serde::{Deserialize, Serialize};
+use smithay_client_toolkit::seat::keyboard::Keysym;
 use tracing::{debug, warn};
 
 use crate::animation::{ease_toward, lerp};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
-    hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_CLOSE,
+    hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD,
     GLYPH_COPY, GLYPH_CUT, GLYPH_SELECT_ALL, LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
@@ -52,17 +53,26 @@ const MORPH_EPS: f32 = 0.001;
 const EXPANDED_H: f32 = 505.0;
 /// Box height with no clips — a small "Nothing copied yet" panel.
 const EMPTY_H: f32 = 120.0;
-/// A clip row shows up to this many lines of the clip; the row height grows
-/// with the line count (single-line clips stay compact).
-const MAX_ROW_LINES: usize = 5;
+/// A clip row shows up to this many lines of the clip (text word-wrapped to the
+/// row width so a paragraph fills the card); the row height grows with the line
+/// count and short clips stay compact.
+const MAX_ROW_LINES: usize = 4;
 /// Inner vertical padding of a row (top and bottom).
 const ROW_PAD_Y: f32 = 9.0;
 /// Inner horizontal padding of a row / the box.
 const ROW_PAD_X: f32 = 14.0;
 /// Bottom padding below the last row before scrolling stops.
 const LIST_PAD: f32 = 6.0;
+/// Right inset for the trailing time / delete can — tighter than `ROW_PAD_X` so
+/// they hug the row's right edge (top-right corner).
+const TRAIL_PAD_X: f32 = 6.0;
 /// Gap between the row text and the trailing time.
 const TEXT_GAP: f32 = 8.0;
+/// Width reserved at a row's right edge for the trailing relative-time label (or
+/// the hover delete square). Wrapping uses this fixed reserve — independent of the
+/// actual time string and of hover — so the measured row height and the drawn text
+/// can't disagree on where lines break.
+const TIME_COL_W: f32 = 52.0;
 /// The box's corner radius once fully open (the collapsed pill is a stadium).
 const BOX_RADIUS: f32 = 10.0;
 /// Adaptive zebra striping — lighten a dark box, darken a light one.
@@ -73,10 +83,18 @@ const LIST_DIM: f32 = 0.55;
 const LIST_DIM_LIGHT: f32 = 0.82;
 /// Per-row delete (×) hot-square, top-right.
 const DELETE_SZ: f32 = 18.0;
-/// A multiplication-sign × for the delete controls.
-const GLYPH_X: &str = "\u{00d7}";
-/// Crimson for the × delete when it's the pointer target.
-const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
+/// fa-trash-o (outline can with vertical lines) — the per-item delete controls
+/// (row + detail).
+const GLYPH_TRASH: &str = "\u{f014}";
+/// fa-pencil — the footer "new note" button (opens the note editor).
+const GLYPH_NOTE: &str = "\u{f040}";
+/// fa-book — the footer "dictionary" button.
+const GLYPH_BOOK: &str = "\u{f02d}";
+/// Gap between the two footer buttons (new note / dictionary).
+const FOOTER_GAP: f32 = 26.0;
+/// Height of the dictionary panel's search field — taller than a clip row for a
+/// comfortable, obvious input box.
+const DICT_FIELD_H: f32 = 46.0;
 /// Leading row glyphs for non-text clips without a thumbnail (dirs / plain files).
 const GLYPH_IMAGE: &str = "\u{f03e}"; // fa-image
 const GLYPH_FILES: &str = "\u{f0c6}"; // fa-paperclip
@@ -89,6 +107,10 @@ const TILE_SZ: f32 = 56.0;
 /// pill = `clip_band_h`). The row-grow open animation runs over this many secs.
 const DETAIL_PILL_GAP: f32 = 6.0;
 const DETAIL_PILL_X: f32 = 12.0;
+/// Width of the "‹ Back" text button's hit area at the detail view's top-left.
+const DETAIL_BACK_W: f32 = 78.0;
+/// Downward nudge of the top-row controls from the box's top edge.
+const DETAIL_PILL_Y: f32 = 7.0;
 const DETAIL_OPEN_SECS: f32 = 0.34;
 /// Height of one metadata row in the detail view.
 const META_ROW_H: f32 = 30.0;
@@ -112,6 +134,8 @@ const META_LOG_INDENT: f32 = 70.0;
 const GLYPH_BACK: &str = "\u{f053}";
 /// fa-ellipsis, the placeholder 4th top pill.
 const GLYPH_MORE: &str = "\u{f141}";
+/// fa-external-link, the link "open in browser" pill (links only).
+const GLYPH_OPEN: &str = "\u{f08e}";
 /// Texture-array slots kept for clipboard thumbnails (recycled round-robin),
 /// appended after the notif card avatars on the OPTIONS renderer.
 const THUMB_CAP: usize = 32;
@@ -139,13 +163,17 @@ pub(crate) enum ClipHit {
     Row(usize),
     /// A row's × delete control.
     Delete(usize),
-    /// The footer's ✕ (clear all).
-    ClearAll,
+    /// The footer's "new note" button — opens the floating note editor.
+    NewNote,
+    /// The footer's "dictionary" button.
+    Dictionary,
     /// The detail view's top-strip pills.
     Back,
     DetailDelete,
     DetailCopy,
     DetailMore,
+    /// Open the link in a browser (links only).
+    DetailOpen,
 }
 /// Grace before the preview collapses once the pointer leaves — enough to cross
 /// a small gap, snappy otherwise. Matches the bell's `LEAVE_HOLD`.
@@ -557,20 +585,27 @@ fn capture(last_hash: &mut Option<u64>) -> Option<ClipEntry> {
     };
     entry.source = capture_source(&entry, win.as_ref());
     if entry.is_link() {
-        if let Some((_, title)) = &win {
+        if let Some((class, title)) = &win {
             entry.title = clean_link_title(title);
+            // Fallback hero: snapshot the source window, but only when the copy
+            // came from a browser (where the window depicts the page — e.g.
+            // Facebook and other sites that serve no og:image). If the opt-in
+            // network unfurl later finds an og:image it supersedes this snapshot
+            // (`on_unfurl`); a URL copied from a terminal/editor gets no snapshot
+            // (just the glyph, or a miniature if unfurl resolves one). Best-effort
+            // and synchronous on this worker thread (the render loop is untouched);
+            // the focused window is still the copy source at this instant.
+            if is_browser_source(class, title) {
+                entry.preview_image = capture_window_snapshot(entry.hash);
+            }
         }
-        // Snapshot the source window as the link's hero image. Best-effort and
-        // synchronous on this worker thread (the render loop is untouched); the
-        // focused window is still the copy source at this instant.
-        entry.preview_image = capture_window_snapshot(entry.hash);
     }
     Some(entry)
 }
 
 /// Snapshot the focused window to a side file via `grim`, for a link clip's
-/// hero image. Best-effort: `None` if the geometry is unavailable or `grim`
-/// fails / isn't installed.
+/// fallback hero image (used when no og:image is available). Best-effort: `None`
+/// if the geometry is unavailable or `grim` fails / isn't installed.
 fn capture_window_snapshot(hash: u64) -> Option<PathBuf> {
     let (x, y, w, h) = crate::hypr::active_window_geom()?;
     let path = crate::persist::data_path(&format!("clipboard-previews/{hash:016x}.png"));
@@ -592,6 +627,23 @@ fn capture_window_snapshot(hash: u64) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Whether a link was copied from a browser window — the only source whose live
+/// snapshot depicts the page (so it makes a useful fallback hero). Matches the
+/// window's app-class against known browser classes, then falls back to a known
+/// browser title suffix (see [`BROWSER_SUFFIXES`]).
+fn is_browser_source(class: &str, title: &str) -> bool {
+    const BROWSER_CLASSES: &[&str] = &[
+        "firefox", "chrome", "chromium", "brave", "edge", "vivaldi", "opera",
+        "librewolf", "zen",
+    ];
+    let c = class.to_lowercase();
+    if BROWSER_CLASSES.iter().any(|b| c.contains(b)) {
+        return true;
+    }
+    let t = title.trim().to_lowercase();
+    BROWSER_SUFFIXES.iter().any(|s| t.ends_with(s))
 }
 
 /// Browser chrome appended to tab titles, stripped from a seeded link title so
@@ -1082,6 +1134,28 @@ pub(crate) struct ClipState {
     /// Scroll offset (px) inside the metadata sheet once risen, eased to target.
     detail_meta_scroll: f32,
     detail_meta_scroll_target: f32,
+    // ---- dictionary ("define a word") panel ----
+    /// Intent: is the dictionary panel open? While set, the OPTIONS surface holds
+    /// the keyboard and every key routes to `dict_query`.
+    pub(crate) dict_open: bool,
+    /// Open progress: 0 = list, 1 = dictionary panel (smoothstep of `dict_p`).
+    dict_t: f32,
+    /// Linear open progress advanced at a constant rate; `dict_t` is its
+    /// smoothstep so the panel wipe eases in and out.
+    dict_p: f32,
+    /// The word being typed into the panel's search field.
+    pub(crate) dict_query: String,
+    /// Answer scroll: animated offset (px) and wheel target; reset to 0 whenever
+    /// the query changes so a new lookup starts at the top.
+    dict_scroll: f32,
+    dict_scroll_target: f32,
+    /// The resident word→definition map, loaded lazily on first open. `None`
+    /// until the worker delivers it (or if the data file is missing/bad).
+    dict_data: Option<crate::dict::Dict>,
+    /// A load is in flight (so the panel shows "Loading…" and we don't re-spawn).
+    dict_loading: bool,
+    /// Reason the load failed (missing file / bad JSON), for the panel hint.
+    dict_error: Option<String>,
     /// Network link-unfurl worker. `Some` only when `[options] link_unfurl` is
     /// enabled; `None` (the default) means links are never fetched.
     unfurl: Option<crate::unfurl::Unfurl>,
@@ -1140,6 +1214,15 @@ impl ClipState {
         let row_heights = history.iter().map(row_height_of).collect();
         Self {
             handle,
+            dict_open: false,
+            dict_t: 0.0,
+            dict_p: 0.0,
+            dict_query: String::new(),
+            dict_scroll: 0.0,
+            dict_scroll_target: 0.0,
+            dict_data: None,
+            dict_loading: false,
+            dict_error: None,
             unfurl,
             unfurl_sent: HashSet::new(),
             history,
@@ -1197,19 +1280,24 @@ fn remove_clip_side_files(entry: &ClipEntry) {
     }
 }
 
-/// The lines a clip shows in a row: up to [`MAX_ROW_LINES`] physical lines for
-/// text (blank edges trimmed); a single preview line for files / images.
-fn clip_row_lines(entry: &ClipEntry) -> Vec<String> {
+/// The lines a clip shows in a row: the text word-wrapped to the row width `max_w`
+/// and packed into up to [`MAX_ROW_LINES`] lines so a paragraph fills the card
+/// instead of showing as one clipped line. Blank lines are dropped here (they're
+/// honoured only in the metadata view and when the clip is copied). Files / images
+/// show their single preview line.
+fn clip_row_lines(entry: &ClipEntry, max_w: f32) -> Vec<String> {
     if entry.kind != ClipKind::Text {
         return vec![entry.preview.clone()];
     }
-    let mut lines: Vec<String> = entry.text.lines().map(|l| l.trim_end().to_owned()).collect();
-    while lines.first().is_some_and(|l| l.is_empty()) {
-        lines.remove(0);
-    }
-    lines.truncate(MAX_ROW_LINES);
-    while lines.last().is_some_and(|l| l.is_empty()) {
-        lines.pop();
+    let mut lines: Vec<String> = wrap_text(&entry.text, max_w, FONT_PX)
+        .into_iter()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if lines.len() > MAX_ROW_LINES {
+        lines.truncate(MAX_ROW_LINES);
+        if let Some(last) = lines.last_mut() {
+            last.push('…');
+        }
     }
     if lines.is_empty() {
         lines.push(entry.preview.clone());
@@ -1217,15 +1305,21 @@ fn clip_row_lines(entry: &ClipEntry) -> Vec<String> {
     lines
 }
 
-/// The laid-out height of a clip's row (grows with its shown line count, and is
-/// at least the tile height for image / files rows).
+/// Width available for a row's wrapped text: the expanded box width less the
+/// horizontal padding, the leading tile (if any) and the trailing time column.
+/// Shared by the height measure and the draw so their line-wrapping matches.
+fn clip_text_col_w(has_tile: bool) -> f32 {
+    let lead = ROW_PAD_X + if has_tile { TILE_SZ + TEXT_GAP } else { 0.0 };
+    (PEEK_W - lead - ROW_PAD_X - TIME_COL_W).max(40.0)
+}
+
+/// The laid-out height of a clip's row: grows with its wrapped line count (up to
+/// [`MAX_ROW_LINES`]), and is at least the tile height for image / files / link
+/// rows. Short clips stay compact rather than padding out to a fixed height.
 fn row_height_of(entry: &ClipEntry) -> f32 {
-    let text_h = clip_row_lines(entry).len() as f32 * LINE_PX;
-    let tile_h = if matches!(clip_tile(entry), ClipTile::None) {
-        0.0
-    } else {
-        TILE_SZ
-    };
+    let has_tile = !matches!(clip_tile(entry), ClipTile::None);
+    let text_h = clip_row_lines(entry, clip_text_col_w(has_tile)).len() as f32 * LINE_PX;
+    let tile_h = if has_tile { TILE_SZ } else { 0.0 };
     text_h.max(tile_h) + 2.0 * ROW_PAD_Y
 }
 
@@ -1459,11 +1553,19 @@ impl App {
         Rect::new(rect.x, rect.y + rect.h - h, rect.w, h)
     }
 
-    /// The centred footer ✕ (clear-all) button rect.
-    fn clip_footer_button_rect(&self, rect: Rect) -> Rect {
+    /// The two footer buttons — `[new note] [dictionary]` — a centred pair of
+    /// equal circles with [`FOOTER_GAP`] between them, vertically centred in the
+    /// footer zone. Shared by the draw and the hit-test.
+    fn clip_footer_buttons(&self, rect: Rect) -> [(ClipHit, Rect); 2] {
         let f = self.clip_footer_rect(rect);
         let d = self.clip_footer_button_d();
-        Rect::new(f.x + (f.w - d) / 2.0, f.y + (f.h - d) / 2.0, d, d)
+        let total = 2.0 * d + FOOTER_GAP;
+        let x0 = f.x + (f.w - total) / 2.0;
+        let y = f.y + (f.h - d) / 2.0;
+        [
+            (ClipHit::NewNote, Rect::new(x0, y, d, d)),
+            (ClipHit::Dictionary, Rect::new(x0 + d + FOOTER_GAP, y, d, d)),
+        ]
     }
 
     /// Visible clip rows: `(index, row rect)`, newest (index 0) flush at the
@@ -1610,6 +1712,15 @@ impl App {
             return;
         }
 
+        // Dictionary panel is a full-cover mode: it replaces the list/footer/
+        // detail entirely (the renderer draws all labels in one late pass, so an
+        // overlay rect can't mask row text — the rows must simply not be drawn).
+        // It fades in over the box fill via `dict_t`.
+        if self.clip.dict_open {
+            self.push_clip_dict(scene, rect, e, ink, dim_ink, fill, bright);
+            return;
+        }
+
         // Adaptive zebra stripe, pre-composited over the fill into an OPAQUE
         // colour so overlapping pieces overwrite rather than double-blend.
         let flum = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2];
@@ -1704,7 +1815,8 @@ impl App {
         } else {
             [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * e]
         };
-        let ty = rr.y + (rr.h - LINE_PX) / 2.0;
+        // Trailing time / delete can sit in the row's top-right corner.
+        let ty = rr.y + ROW_PAD_Y;
         // Clip to the (possibly narrowed) content width so labels are masked at
         // the detail-wipe boundary rather than bleeding under the panel.
         let row_clip = Rect::new(content.x, top, content.w, bot - top);
@@ -1712,27 +1824,29 @@ impl App {
         let tile = clip_tile(entry);
 
         // Trailing time (or the × delete on hover) at the right.
-        let right = rr.x + rr.w - ROW_PAD_X;
+        let right = rr.x + rr.w - TRAIL_PAD_X;
         let text_right = if hovered {
             // Delete hot-square, top-right.
             let dr = Rect::new(
-                rr.x + rr.w - ROW_PAD_X - DELETE_SZ,
-                rr.y + (rr.h - DELETE_SZ) / 2.0,
+                rr.x + rr.w - TRAIL_PAD_X - DELETE_SZ,
+                rr.y + ROW_PAD_Y,
                 DELETE_SZ,
                 DELETE_SZ,
             );
             let on_x = self.clip.hit == ClipHit::Delete(idx);
-            let xc = if on_x { CRIMSON } else { [ink[0], ink[1], ink[2], ink[3]] };
+            // No red on the target — brighten to the hover ink instead. The list
+            // can is also a touch larger than the detail/footer ones.
+            let xc = if on_x { hover_ink } else { [ink[0], ink[1], ink[2], ink[3]] };
             scene.labels.push(Label {
-                text: GLYPH_X.to_owned(),
+                text: GLYPH_TRASH.to_owned(),
                 pos: (dr.x + dr.w / 2.0, dr.y + (dr.h - LINE_PX) / 2.0),
                 max_w: dr.w + 6.0,
-                font_px: FONT_PX,
+                font_px: FONT_PX * 1.3,
                 line_px: LINE_PX,
                 centered: true,
                 dim: false,
                 cache: true,
-                family: None,
+                family: Some(NERD),
                 color: Some([xc[0], xc[1], xc[2], e]),
                 clip: Some(row_clip),
             });
@@ -1784,8 +1898,10 @@ impl App {
         }
 
         // The clip text, vertically centred against the (possibly tall) tile.
+        // Wrap to the shared column width (so line breaks match `row_height_of`),
+        // but mask each label to the actual gap before the trailing time.
         let max_w = (text_right - tx).max(0.0);
-        let lines = clip_row_lines(entry);
+        let lines = clip_row_lines(entry, clip_text_col_w(!matches!(tile, ClipTile::None)));
         let text_top = rr.y + (rr.h - lines.len() as f32 * LINE_PX) / 2.0;
         for (i, line) in lines.into_iter().enumerate() {
             scene.labels.push(Label {
@@ -1837,42 +1953,209 @@ impl App {
         });
     }
 
-    /// Draw the footer ✕ (clear all) — an enlarged circle floating on the fill.
+    /// Draw the two footer buttons — `[new note] [dictionary]` — a centred pair
+    /// of enlarged circles floating on the fill.
     fn push_clip_footer(&self, scene: &mut Scene, rect: Rect, alpha: f32, bright: bool) {
-        let hovered = self.clip.hit == ClipHit::ClearAll;
-        let br = self.clip_footer_button_rect(rect);
-        let br = if hovered { hover_grow(br) } else { br };
-        let radius = br.h / 2.0;
-        push_neumorph(scene, br, radius, bright, alpha);
-        let mut base = if hovered {
-            self.options_hover_wash()
-        } else {
-            self.options_rest_wash()
-        };
-        base[3] *= alpha;
+        let d0 = self.clip_footer_button_d();
+        let gpx = d0 * 0.62;
+        let g = self.options_text_color();
+        for (hit, br0) in self.clip_footer_buttons(rect) {
+            let hovered = self.clip.hit == hit;
+            let br = if hovered { hover_grow(br0) } else { br0 };
+            let radius = br.h / 2.0;
+            push_neumorph(scene, br, radius, bright, alpha);
+            let mut base = if hovered {
+                self.options_hover_wash()
+            } else {
+                self.options_rest_wash()
+            };
+            base[3] *= alpha;
+            scene.rects.push(RectInst {
+                rect: br,
+                radius,
+                color: base,
+                glass: 0.0,
+            });
+            let glyph = match hit {
+                ClipHit::Dictionary => GLYPH_BOOK,
+                _ => GLYPH_NOTE,
+            };
+            let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
+            scene.labels.push(Label {
+                text: glyph.to_owned(),
+                pos: (br.x + br.w / 2.0, br.y + (br.h - gpx) / 2.0),
+                max_w: br.w + 16.0,
+                font_px: gpx,
+                line_px: gpx,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: Some(NERD),
+                color: Some([g[0], g[1], g[2], g[3] * alpha]),
+                clip: Some(gclip),
+            });
+        }
+    }
+
+    /// Draw the dictionary "define a word" panel over the list: an opaque cover
+    /// (wiping the rows/footer), a "‹ Back" button, the typed search field, and
+    /// the resident definition — or a loading / not-installed / no-match hint.
+    #[allow(clippy::too_many_arguments)]
+    fn push_clip_dict(
+        &self,
+        scene: &mut Scene,
+        rect: Rect,
+        e: f32,
+        ink: [f32; 4],
+        dim_ink: [f32; 4],
+        fill: [f32; 4],
+        bright: bool,
+    ) {
+        let a = (self.clip.dict_t * e).clamp(0.0, 1.0);
+        if a <= 0.001 {
+            return;
+        }
+        // Opaque cover wiping the list/footer beneath (rounded like the box).
         scene.rects.push(RectInst {
-            rect: br,
-            radius,
-            color: base,
+            rect,
+            radius: BOX_RADIUS,
+            color: [fill[0], fill[1], fill[2], a],
             glass: 0.0,
         });
-        let d0 = self.clip_footer_button_d();
-        let gpx = d0 * 0.6;
-        let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
-        let g = self.options_text_color();
+
+        // ---- "‹ Back" button (same seat / visuals as the detail view) ----
+        let back = self.clip_dict_back_rect(rect);
+        let hv = self.clip.hit == ClipHit::Back;
+        let bcol = [ink[0], ink[1], ink[2], ink[3] * if hv { 1.0 } else { 0.72 } * a];
+        let cy = back.y + (back.h - LINE_PX) / 2.0;
+        let gclip = Rect::new(back.x - 4.0, back.y - 4.0, back.w + 8.0, back.h + 8.0);
         scene.labels.push(Label {
-            text: GLYPH_CLOSE.to_owned(),
-            pos: (br.x + br.w / 2.0, br.y + (br.h - gpx) / 2.0),
-            max_w: br.w + 16.0,
-            font_px: gpx,
-            line_px: gpx,
-            centered: true,
+            text: GLYPH_BACK.to_owned(),
+            pos: (back.x, cy),
+            max_w: 20.0,
+            font_px: FONT_PX * 0.92,
+            line_px: LINE_PX,
+            centered: false,
             dim: false,
             cache: true,
             family: Some(NERD),
-            color: Some([g[0], g[1], g[2], g[3] * alpha]),
+            color: Some(bcol),
             clip: Some(gclip),
         });
+        scene.labels.push(Label {
+            text: "Back".to_owned(),
+            pos: (back.x + 16.0, cy),
+            max_w: back.w,
+            font_px: FONT_PX * 0.95,
+            line_px: LINE_PX,
+            centered: false,
+            dim: false,
+            cache: true,
+            family: None,
+            color: Some(bcol),
+            clip: Some(gclip),
+        });
+
+        // ---- typed search field (a taller stadium input under the back row) ----
+        let (field, res) = self.clip_dict_layout(rect);
+        push_neumorph(scene, field, field.h / 2.0, bright, a);
+        let mut wash_c = self.options_rest_wash();
+        wash_c[3] *= a;
+        scene.rects.push(RectInst {
+            rect: field,
+            radius: field.h / 2.0,
+            color: wash_c,
+            glass: 0.0,
+        });
+        let field_font = FONT_PX * 1.12;
+        let tx = field.x + PILL_PAD_X + 4.0;
+        let ty = field.y + (field.h - LINE_PX) / 2.0;
+        let fclip = Rect::new(field.x, field.y, field.w, field.h);
+        let empty = self.clip.dict_query.is_empty();
+        let (text, col) = if empty {
+            ("Type a word…".to_owned(), dim_ink)
+        } else {
+            (self.clip.dict_query.clone(), ink)
+        };
+        scene.labels.push(Label {
+            text,
+            pos: (tx, ty),
+            max_w: field.w - 2.0 * PILL_PAD_X,
+            font_px: field_font,
+            line_px: LINE_PX,
+            centered: false,
+            dim: false,
+            cache: empty,
+            family: None,
+            color: Some([col[0], col[1], col[2], col[3] * a]),
+            clip: Some(fclip),
+        });
+        // Caret: a thin bar after the estimated query width (no live measure on a
+        // `&self` draw — the half-em estimate matches the row-time width guess).
+        let cw = self.clip.dict_query.chars().count() as f32 * field_font * 0.5;
+        let caret_x = (tx + cw).min(field.x + field.w - PILL_PAD_X);
+        scene.rects.push(RectInst {
+            rect: Rect::new(caret_x, field.y + field.h * 0.26, 2.0, field.h * 0.48),
+            radius: 1.0,
+            color: [ink[0], ink[1], ink[2], ink[3] * a * 0.8],
+            glass: 0.0,
+        });
+
+        // ---- answer: scrollable per-language definitions, or a one-line hint ----
+        let lines = self.dict_answer_lines(res.w);
+        if lines.is_empty() {
+            let query = self.clip.dict_query.trim();
+            if query.is_empty() {
+                return;
+            }
+            let msg = if self.clip.dict_data.is_some() {
+                format!("No definition for “{query}”.")
+            } else if self.clip.dict_loading {
+                "Loading dictionary…".to_owned()
+            } else {
+                "Dictionary data not installed.".to_owned()
+            };
+            scene.labels.push(Label {
+                text: msg,
+                pos: (res.x, res.y + 2.0),
+                max_w: res.w,
+                font_px: FONT_PX,
+                line_px: LINE_PX,
+                centered: false,
+                dim: false,
+                cache: true,
+                family: None,
+                color: Some([dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * a]),
+                clip: Some(res),
+            });
+            return;
+        }
+        // Draw the answer clipped to `res`, offset by the (eased) scroll. Only
+        // lines whose band intersects the area are pushed.
+        let mut y = res.y - self.clip.dict_scroll;
+        for line in lines {
+            if !line.text.is_empty() && y + line.advance > res.y && y < res.y + res.h {
+                let c = match line.kind {
+                    DictLineKind::Lang => [ink[0], ink[1], ink[2], ink[3] * 0.85 * a],
+                    DictLineKind::Etym => [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * 0.8 * a],
+                    DictLineKind::Body => [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * a],
+                };
+                scene.labels.push(Label {
+                    text: line.text,
+                    pos: (res.x, y),
+                    max_w: res.w,
+                    font_px: line.font_px,
+                    line_px: LINE_PX,
+                    centered: false,
+                    dim: false,
+                    cache: false,
+                    family: None,
+                    color: Some(c),
+                    clip: Some(res),
+                });
+            }
+            y += line.advance;
+        }
     }
 
     /// Whether the history drawer is open (intent) — for the colour-match to
@@ -1892,6 +2175,14 @@ impl App {
             return ClipHit::None;
         };
         let rect = self.clip_rect();
+        // Dictionary panel: only the "‹ Back" button is hittable; typing drives
+        // the rest, and the list is hidden behind the panel.
+        if self.clip.dict_open {
+            if self.clip_dict_back_rect(rect).contains(p) {
+                return ClipHit::Back;
+            }
+            return ClipHit::None;
+        }
         // Detail view: only the top pills are hittable; the list is hidden.
         if self.clip.detail_open {
             for (hit, prect) in self.clip_detail_pills(rect) {
@@ -1902,8 +2193,10 @@ impl App {
             return ClipHit::None;
         }
         if self.clip_footer_rect(rect).contains(p) {
-            if self.clip_footer_button_rect(rect).contains(p) {
-                return ClipHit::ClearAll;
+            for (hit, br) in self.clip_footer_buttons(rect) {
+                if br.contains(p) {
+                    return hit;
+                }
             }
             return ClipHit::None;
         }
@@ -1953,6 +2246,14 @@ impl App {
         };
         if self.clip.expanded {
             self.clip.hold_deadline = None; // a scroll keeps it open
+            // In the dictionary panel, the wheel scrolls the answer.
+            if self.clip.dict_open {
+                let span = self.clip_dict_scroll_span();
+                self.clip.dict_scroll_target =
+                    (self.clip.dict_scroll_target + delta * SCROLL_SPEED).clamp(0.0, span);
+                self.schedule_clip_frame();
+                return;
+            }
             // In the detail view, the wheel scrolls whichever region the pointer
             // is over: the risen metadata sheet, else the text content.
             if self.clip.detail_open {
@@ -2035,6 +2336,14 @@ impl App {
         self.clip.detail_meta_target = 0.0;
         self.clip.detail_meta_scroll = 0.0;
         self.clip.detail_meta_scroll_target = 0.0;
+        // A fresh box never carries a dictionary panel over (the loaded word list
+        // is kept — only the open state and query reset).
+        self.clip.dict_open = false;
+        self.clip.dict_t = 0.0;
+        self.clip.dict_p = 0.0;
+        self.clip.dict_query.clear();
+        self.clip.dict_scroll = 0.0;
+        self.clip.dict_scroll_target = 0.0;
         self.sync_options_input();
         self.reeval_options_bar();
         self.request_clip_thumbs();
@@ -2047,6 +2356,14 @@ impl App {
             self.clip.expanded = false;
             self.clip.hit = ClipHit::None;
             self.clip.hover_row = None;
+            // Release the keyboard grab if the dictionary panel held it (it fades
+            // away with the collapsing box; `open_clip_box` clears the rest).
+            if self.clip.dict_open {
+                self.clip.dict_open = false;
+                if let Some(layer) = &self.options_layer {
+                    crate::surface::set_interactive(layer, false);
+                }
+            }
             // The detail view (and scroll) are NOT reset here: the box collapses
             // showing whatever was on screen (the detail shrinks + fades away with
             // it), and `open_clip_box` wipes it back to a fresh list on the next
@@ -2104,6 +2421,165 @@ impl App {
     fn clip_detail_entry(&self) -> Option<&ClipEntry> {
         let id = self.clip.detail_id?;
         self.clip.history.iter().find(|e| e.id == id)
+    }
+
+    /// The dictionary panel's "‹ Back" button rect — same seat as the detail
+    /// view's back button (top-left, aligned with the pill row).
+    fn clip_dict_back_rect(&self, rect: Rect) -> Rect {
+        let d = self.clip_band_h();
+        Rect::new(rect.x + DETAIL_PILL_X, rect.y + DETAIL_PILL_Y, DETAIL_BACK_W, d)
+    }
+
+    /// The dictionary panel's geometry: `(search field, answer area)`. Shared by
+    /// the draw and the scroll-span so line breaks and bounds always agree.
+    fn clip_dict_layout(&self, rect: Rect) -> (Rect, Rect) {
+        let back = self.clip_dict_back_rect(rect);
+        let field = Rect::new(
+            rect.x + ROW_PAD_X,
+            back.y + back.h + DETAIL_PILL_GAP + 6.0,
+            rect.w - 2.0 * ROW_PAD_X,
+            DICT_FIELD_H,
+        );
+        let res_top = field.y + field.h + 14.0;
+        let res = Rect::new(
+            rect.x + ROW_PAD_X,
+            res_top,
+            rect.w - 2.0 * ROW_PAD_X,
+            (rect.y + rect.h - res_top - LIST_PAD).max(0.0),
+        );
+        (field, res)
+    }
+
+    /// The laid-out answer for the current query: a language subheading + wrapped
+    /// definition lines per language that defines the word (a word in both shows
+    /// both). Empty when there's no query, no data, or no match — those states
+    /// draw a one-line hint instead. Shared by the draw and the scroll span.
+    fn dict_answer_lines(&self, res_w: f32) -> Vec<DictLine> {
+        let mut out = Vec::new();
+        let query = self.clip.dict_query.trim();
+        if query.is_empty() {
+            return out;
+        }
+        let Some(dict) = self.clip.dict_data.as_ref() else {
+            return out;
+        };
+        for (i, entry) in dict.lookup(query).into_iter().enumerate() {
+            if i > 0 {
+                out.push(DictLine::spacer(LINE_PX * 0.6));
+            }
+            out.push(DictLine {
+                text: entry.lang.to_owned(),
+                font_px: FONT_PX * 0.82,
+                advance: LINE_PX * 1.15,
+                kind: DictLineKind::Lang,
+            });
+            // Etymology (faint, in parentheses) between the label and the senses.
+            if let Some(etym) = entry.etymology {
+                for line in wrap_text(&format!("({etym})"), res_w, FONT_PX * 0.9) {
+                    out.push(DictLine {
+                        text: line,
+                        font_px: FONT_PX * 0.9,
+                        advance: LINE_PX * 0.95,
+                        kind: DictLineKind::Etym,
+                    });
+                }
+            }
+            for line in wrap_text(entry.definition, res_w, FONT_PX) {
+                out.push(DictLine {
+                    text: line,
+                    font_px: FONT_PX,
+                    advance: LINE_PX,
+                    kind: DictLineKind::Body,
+                });
+            }
+        }
+        out
+    }
+
+    /// Max scroll (px) of the dictionary answer — its total height past the
+    /// visible answer area (0 for short answers / hints).
+    fn clip_dict_scroll_span(&self) -> f32 {
+        let rect = self.clip_rect();
+        let (_, res) = self.clip_dict_layout(rect);
+        let total: f32 = self.dict_answer_lines(res.w).iter().map(|l| l.advance).sum();
+        (total - res.h).max(0.0)
+    }
+
+    /// Open the dictionary "define a word" panel: grab the keyboard on the
+    /// OPTIONS surface so the search field can type, and kick a lazy load of the
+    /// offline word list the first time.
+    pub(crate) fn open_dict(&mut self) {
+        self.clip.dict_open = true;
+        self.clip.dict_query.clear();
+        self.clip.dict_scroll = 0.0;
+        self.clip.dict_scroll_target = 0.0;
+        if self.clip.dict_data.is_none() && !self.clip.dict_loading {
+            if let Some(tx) = &self.dict_tx {
+                self.clip.dict_loading = true;
+                crate::dict::spawn_load(tx.clone());
+            }
+        }
+        if let Some(layer) = &self.options_layer {
+            crate::surface::set_interactive(layer, true);
+        }
+        self.update_clip_hit();
+        self.schedule_clip_frame();
+    }
+
+    /// Close the dictionary panel and release the keyboard grab.
+    pub(crate) fn close_dict(&mut self) {
+        self.clip.dict_open = false;
+        if let Some(layer) = &self.options_layer {
+            crate::surface::set_interactive(layer, false);
+        }
+        self.update_clip_hit();
+        self.schedule_clip_frame();
+    }
+
+    /// Fold a finished dictionary load into the panel (or record why it failed).
+    pub(crate) fn on_dict_loaded(&mut self, ev: crate::dict::Event) {
+        let crate::dict::Event::Loaded(result) = ev;
+        match result {
+            Ok(d) => {
+                self.clip.dict_data = Some(d);
+                self.clip.dict_error = None;
+            }
+            Err(e) => {
+                warn!("dict: {e}");
+                self.clip.dict_error = Some(e);
+            }
+        }
+        self.clip.dict_loading = false;
+        self.schedule_clip_frame();
+    }
+
+    /// Handle one key while the dictionary panel owns the keyboard: Escape backs
+    /// out, Backspace edits the query, printable characters extend it; the lookup
+    /// itself is recomputed live at draw against the resident map.
+    pub(crate) fn dict_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        match keysym {
+            Keysym::Escape => {
+                self.close_dict();
+                return;
+            }
+            Keysym::BackSpace => {
+                self.clip.dict_query.pop();
+            }
+            _ => {
+                // Accept a single printable grapheme (letters, hyphen, apostrophe
+                // — anything a headword may contain); ignore control keys, Enter,
+                // navigation, and modifiers-only presses.
+                if let Some(s) = utf8 {
+                    if !s.is_empty() && !s.chars().any(|c| c.is_control()) {
+                        self.clip.dict_query.push_str(s);
+                    }
+                }
+            }
+        }
+        // A new lookup starts at the top of its answer.
+        self.clip.dict_scroll = 0.0;
+        self.clip.dict_scroll_target = 0.0;
+        self.schedule_clip_frame();
     }
 
     /// Height of the top pill-row zone: tight to the pill height (the pills sit
@@ -2182,20 +2658,30 @@ impl App {
         p.0 >= rect.x && p.0 <= rect.x + rect.w && p.1 >= meta.y && p.1 <= rect.y + rect.h
     }
 
-    /// The four top-row pill rects with their hit targets (back, delete, copy,
-    /// more — left to right, aligned with the paste pill).
-    fn clip_detail_pills(&self, rect: Rect) -> [(ClipHit, Rect); 4] {
-        // Same diameter and top as the paste pill, so all read as one row.
+    /// The top-row hit targets: a "‹ Back" text button pinned to the left, and
+    /// the action pills clustered at the right — `[copy] [more] [×]`, with an
+    /// extra `[open]` after copy for link clips (`[copy] [open] [more] [×]`).
+    /// Pill diameter/top match the paste pill so all read as one row.
+    fn clip_detail_pills(&self, rect: Rect) -> Vec<(ClipHit, Rect)> {
         let d = self.clip_band_h();
-        let y = rect.y;
-        let x0 = rect.x + DETAIL_PILL_X;
-        let at = |i: f32| Rect::new(x0 + i * (d + DETAIL_PILL_GAP), y, d, d);
-        [
-            (ClipHit::Back, at(0.0)),
-            (ClipHit::DetailDelete, at(1.0)),
-            (ClipHit::DetailCopy, at(2.0)),
-            (ClipHit::DetailMore, at(3.0)),
-        ]
+        let y = rect.y + DETAIL_PILL_Y;
+        // Left: the text back button.
+        let mut out = vec![(ClipHit::Back, Rect::new(rect.x + DETAIL_PILL_X, y, DETAIL_BACK_W, d))];
+        // Right cluster, in left→right order.
+        let mut cluster = vec![ClipHit::DetailCopy];
+        if self.clip_detail_entry().is_some_and(|e| e.is_link()) {
+            cluster.push(ClipHit::DetailOpen);
+        }
+        cluster.push(ClipHit::DetailMore);
+        cluster.push(ClipHit::DetailDelete);
+        // Right-align the cluster: the last item sits flush at the right edge.
+        let rx = rect.x + rect.w - DETAIL_PILL_X;
+        let n = cluster.len();
+        for (i, hit) in cluster.into_iter().enumerate() {
+            let j = (n - 1 - i) as f32; // 0 = rightmost
+            out.push((hit, Rect::new(rx - (j + 1.0) * d - j * DETAIL_PILL_GAP, y, d, d)));
+        }
+        out
     }
 
     /// Max scroll (px) of the detail text (0 for non-text or short clips).
@@ -2488,21 +2974,15 @@ impl App {
         // trailing `chrome_t`, a beat behind the card. ----
         let top_h = self.clip_detail_top_h();
         let band_h = top_h * chrome_t;
-        let band_bottom = rect.y + band_h;
+        // The top strip takes the *content card* tone (not the sheet tone) so it
+        // reads as one surface with the card behind it rather than a contrasting
+        // band across the top.
         push_top_rounded(
             scene,
             Rect::new(rect.x, rect.y, rect.w, band_h),
             BOX_RADIUS,
-            sheet_c,
+            card_c,
         );
-        if band_h > 1.0 {
-            scene.rects.push(RectInst {
-                rect: Rect::new(rect.x, band_bottom - 1.0, rect.w, 1.0),
-                radius: 0.0,
-                color: [ink[0], ink[1], ink[2], 0.12 * e * chrome_t],
-                glass: 0.0,
-            });
-        }
 
         // ---- top pills: seat in over the last few px of the wipe (once the
         // descending band fully covers them), so they arrive WITH the strip
@@ -2513,6 +2993,43 @@ impl App {
             let ink0 = self.options_text_color();
             for (hit, prect) in self.clip_detail_pills(rect) {
                 let hv = self.clip.hit == hit;
+                // The left control is a plain "‹ Back" text button, not a pill:
+                // brighter on hover, muted at rest, left-aligned in its hit area.
+                // The chevron is the Nerd `fa-chevron-left` glyph (fills its em box,
+                // so it doesn't read tiny next to the word) drawn as its own label.
+                if hit == ClipHit::Back {
+                    let a = if hv { 1.0 } else { 0.72 };
+                    let col = [ink0[0], ink0[1], ink0[2], ink0[3] * a * pa];
+                    let cy = prect.y + (prect.h - LINE_PX) / 2.0;
+                    let gclip = Rect::new(prect.x - 4.0, prect.y - 4.0, prect.w + 8.0, prect.h + 8.0);
+                    scene.labels.push(Label {
+                        text: GLYPH_BACK.to_owned(),
+                        pos: (prect.x, cy),
+                        max_w: 20.0,
+                        font_px: FONT_PX * 0.92,
+                        line_px: LINE_PX,
+                        centered: false,
+                        dim: false,
+                        cache: true,
+                        family: Some(NERD),
+                        color: Some(col),
+                        clip: Some(gclip),
+                    });
+                    scene.labels.push(Label {
+                        text: "Back".to_owned(),
+                        pos: (prect.x + 16.0, cy),
+                        max_w: prect.w,
+                        font_px: FONT_PX * 0.95,
+                        line_px: LINE_PX,
+                        centered: false,
+                        dim: false,
+                        cache: true,
+                        family: None,
+                        color: Some(col),
+                        clip: Some(gclip),
+                    });
+                    continue;
+                }
                 let pr = if hv { hover_grow(prect) } else { prect };
                 let radius = pr.h / 2.0;
                 push_neumorph(scene, pr, radius, bright, pa);
@@ -2532,9 +3049,9 @@ impl App {
                     glass: 0.0,
                 });
                 let (glyph, gcol) = match hit {
-                    ClipHit::Back => (GLYPH_BACK, ink0),
-                    ClipHit::DetailDelete => (GLYPH_CLOSE, ink0),
+                    ClipHit::DetailDelete => (GLYPH_TRASH, ink0),
                     ClipHit::DetailMore => (GLYPH_MORE, ink0),
+                    ClipHit::DetailOpen => (GLYPH_OPEN, ink0),
                     _ => (GLYPH_COPY, ink0),
                 };
                 let gclip = Rect::new(pr.x - 4.0, pr.y - 4.0, pr.w + 8.0, pr.h + 8.0);
@@ -2559,8 +3076,13 @@ impl App {
     /// whether it consumed the click.
     pub(crate) fn clip_box_click(&mut self) -> bool {
         match self.clip.hit {
-            ClipHit::ClearAll => {
-                self.clear_clip_history();
+            ClipHit::NewNote => {
+                // TODO: open the floating centred note editor.
+                debug!("clip: new-note button (editor not yet wired)");
+                true
+            }
+            ClipHit::Dictionary => {
+                self.open_dict();
                 true
             }
             ClipHit::Delete(i) => {
@@ -2575,7 +3097,11 @@ impl App {
                 true
             }
             ClipHit::Back => {
-                self.close_clip_detail();
+                if self.clip.dict_open {
+                    self.close_dict();
+                } else {
+                    self.close_clip_detail();
+                }
                 true
             }
             ClipHit::DetailCopy => {
@@ -2593,7 +3119,27 @@ impl App {
                 self.delete_detail_clip();
                 true
             }
-            // Placeholder 4th pill — reserved for a later action.
+            ClipHit::DetailOpen => {
+                // Open the link in the default browser, then dismiss the picker.
+                let url = self
+                    .clip_detail_entry()
+                    .filter(|e| e.is_link())
+                    .map(|e| e.text.trim().to_owned());
+                if let Some(url) = url {
+                    let exec = format!("xdg-open {}", crate::launch::shell_quote(&url));
+                    if let Err(e) = crate::launch::launch(&exec, false, "") {
+                        warn!("clip: open link failed: {e}");
+                    } else {
+                        // Raise the browser so the opened tab comes to the front
+                        // (a running browser opens the tab in the background; a
+                        // cold launch focuses its own new window).
+                        crate::hypr::focus_browser();
+                    }
+                }
+                self.close_clip_box();
+                true
+            }
+            // Placeholder pill — reserved for a later action.
             ClipHit::DetailMore => true,
             ClipHit::None => false,
         }
@@ -2641,17 +3187,6 @@ impl App {
         }
         self.update_clip_hit();
         self.schedule_clip_frame();
-    }
-
-    /// Clear the whole history (footer ✕).
-    fn clear_clip_history(&mut self) {
-        for entry in &self.clip.history {
-            remove_clip_side_files(entry);
-        }
-        self.clip.history.clear();
-        self.clip.row_heights.clear();
-        self.save_clip_history();
-        self.close_clip_box();
     }
 
     /// The OPTIONS renderer layer of a resolved clip thumbnail (clipboard
@@ -2884,7 +3419,10 @@ impl App {
                 self.clip.last = None;
                 self.schedule_clip_frame();
             }
-        } else if self.clip.peek_reveal && self.clip.hold_deadline.is_none() {
+        } else if self.clip.peek_reveal && self.clip.hold_deadline.is_none() && !self.clip.dict_open
+        {
+            // The dictionary panel holds the box open regardless of the pointer —
+            // the user has to leave the box to reach the keyboard to type.
             self.schedule_clip_collapse(LEAVE_HOLD);
         }
     }
@@ -3059,10 +3597,12 @@ impl App {
             .insert_source(timer, move |_, _, app: &mut App| {
                 if app.clip.hold_deadline == Some(deadline) {
                     app.clip.hold_deadline = None;
-                    if !matches!(
-                        app.options_hover,
-                        Some(PillId::Clipboard | PillId::ClipboardBox)
-                    ) {
+                    if !app.clip.dict_open
+                        && !matches!(
+                            app.options_hover,
+                            Some(PillId::Clipboard | PillId::ClipboardBox)
+                        )
+                    {
                         app.clip.peek_reveal = false;
                         // Collapse the history drawer too, if it was open.
                         if app.clip.expanded {
@@ -3136,6 +3676,20 @@ impl App {
         if !self.clip.detail_open && self.clip.detail_p <= 0.0 {
             self.clip.detail_id = None;
         }
+        // Dictionary panel wipe: same constant-rate linear progress smoothstepped
+        // into `dict_t`, so it eases in and out over the list.
+        let dicttarget = if self.clip.dict_open { 1.0 } else { 0.0 };
+        let dictm = self.clip.dict_p != dicttarget;
+        if dictm {
+            let step = dt / DETAIL_OPEN_SECS;
+            self.clip.dict_p = if dicttarget > self.clip.dict_p {
+                (self.clip.dict_p + step).min(1.0)
+            } else {
+                (self.clip.dict_p - step).max(0.0)
+            };
+        }
+        let dp = self.clip.dict_p;
+        self.clip.dict_t = dp * dp * (3.0 - 2.0 * dp);
         // Ease the metadata rise + its internal scroll toward the wheel targets.
         let (nmt, mm1) = ease_toward(
             self.clip.detail_meta_t,
@@ -3173,16 +3727,57 @@ impl App {
             0.5,
         );
         self.clip.list_scroll = ls;
+        // Smooth dictionary-answer scrolling.
+        let (ds, dsm) = ease_toward(
+            self.clip.dict_scroll,
+            self.clip.dict_scroll_target,
+            dt,
+            SCROLL_RATE,
+            0.5,
+        );
+        self.clip.dict_scroll = ds;
         // Keep the beat pulsing until its deadline, then clear it.
         let beating = self.clip.blink_until.is_some_and(|u| now < u);
         if !beating {
             self.clip.blink_until = None;
         }
         self.draw_options();
-        if moving || amoving || em || bm || lm || dm || mm || beating {
+        if moving || amoving || em || bm || lm || dm || dictm || dsm || mm || beating {
             self.schedule_clip_frame();
         } else {
             self.clip.last = None;
+        }
+    }
+}
+
+/// One laid-out line of the dictionary answer (a language subheading, a wrapped
+/// definition line, or a blank spacer between languages).
+enum DictLineKind {
+    /// A language label ("English" / "Español"), drawn brighter as a subheading.
+    Lang,
+    /// The etymology ("Del lat. cor"), drawn faint and small under the label.
+    Etym,
+    /// A definition line, drawn in the dimmer body ink.
+    Body,
+}
+
+/// A dictionary answer line with its own type size + vertical advance, so the
+/// answer can be measured (for the scroll span) and drawn identically.
+struct DictLine {
+    text: String,
+    font_px: f32,
+    advance: f32,
+    kind: DictLineKind,
+}
+
+impl DictLine {
+    /// A blank vertical gap (no text) of `advance` px.
+    fn spacer(advance: f32) -> Self {
+        DictLine {
+            text: String::new(),
+            font_px: FONT_PX,
+            advance,
+            kind: DictLineKind::Body,
         }
     }
 }
@@ -3274,18 +3869,32 @@ fn clip_grid(scene: &mut Scene, content: Rect) -> &mut GridContent {
     scene.grids.last_mut().expect("grid just ensured")
 }
 
-/// A short relative time for a clip row (e.g. `now`, `5m`, `3h`, `2d`).
+/// Local day-number (days since the epoch in *local* time) and clock hour/minute
+/// for a unix-ms stamp — via `tm_gmtoff` so the day boundary is local midnight.
+fn local_day_hm(ms: u64) -> (i64, i32, i32) {
+    // SAFETY: `localtime_r` fills a caller-owned `tm`.
+    unsafe {
+        let t = (ms / 1000) as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        let local = t as i64 + tm.tm_gmtoff as i64;
+        (local.div_euclid(86_400), tm.tm_hour, tm.tm_min)
+    }
+}
+
+/// The time label for a clip row: same-day items show the clock time (`14:32`),
+/// older items a compact day count (`1d`/`2d`) — a full date would be too much.
 fn fmt_relative(ms: u64) -> String {
-    let now = now_ms();
-    let secs = now.saturating_sub(ms) / 1000;
-    if secs < 45 {
-        "now".to_owned()
-    } else if secs < 3600 {
-        format!("{}m", (secs / 60).max(1))
-    } else if secs < 86_400 {
-        format!("{}h", secs / 3600)
+    if ms == 0 {
+        return String::new();
+    }
+    let (day, hh, mm) = local_day_hm(ms);
+    let (today, ..) = local_day_hm(now_ms());
+    let diff = today - day;
+    if diff <= 0 {
+        format!("{hh:02}:{mm:02}")
     } else {
-        format!("{}d", secs / 86_400)
+        format!("{diff}d")
     }
 }
 

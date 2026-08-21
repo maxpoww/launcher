@@ -48,19 +48,44 @@ Files: `webapps.rs`, `managed_webapps.rs`, routing in `main.rs::refilter`, drag 
 ## Clipboard link enrichment (the link "share card")
 A text clip that is a single bare http(s) URL (`ClipEntry::is_link`) becomes a *link
 clip*: it grows a `title` + hero `preview_image` shown as the row thumbnail and detail
-hero, plus Title/About rows in the metadata sheet. Two tiers:
+hero, plus Title/About rows in the metadata sheet. Hero precedence: **og:image miniature → browser-window screenshot → link glyph.** Two tiers:
 - **Phase 1 (always on, local, private):** the `title` is seeded from the source
-  window's title at copy time (browser suffix stripped); the source window is
-  snapshotted with **`grim`** into `preview_image`. No network.
+  window's title at copy time (browser suffix stripped); when the copy came from a
+  **browser** (`is_browser_source`) the source window is snapshotted with **`grim`**
+  into `preview_image` as a fallback hero (useful for pages with no og:image, e.g.
+  Facebook). *A URL copied from a terminal/editor is **not** snapshotted — that would
+  just capture an unrelated window — so it shows the glyph until unfurl resolves.* No
+  network.
 - **Phase 2 (opt-in, network):** `[options] link_unfurl` (**default false**) spawns
   the `unfurl.rs` worker — shells out to **`curl`**, oEmbed fast-path for YouTube then a
   small OpenGraph/`<title>` scrape, downloads `og:image`; `on_unfurl` folds the clean
-  title/description/image in (og:image supersedes the snapshot). Enabling it means one
-  outbound request per copied URL — hence off by default.
+  title/description/image in (og:image **supersedes** the Phase-1 snapshot). Enabling it
+  means one outbound request per copied URL — hence off by default.
 
 Runtime deps (best-effort, absent → graceful fallback): **`grim`** (P1), **`curl`** (P2).
 Files: `unfurl.rs`, link arms in `clipboard.rs` (`detect_url`, `capture_window_snapshot`,
-`on_unfurl`, `clip_tile`), `hypr::active_window_geom`, flag in `core::config`.
+`is_browser_source`, `on_unfurl`, `clip_tile`), `hypr::active_window_geom`, flag in `core::config`.
+
+## Clipboard footer buttons + dictionary ("define a word")
+The open history box's footer holds two circular buttons (replacing the old clear-all
+can): **new note** (pencil, stub) and **dictionary** (book). The dictionary opens an
+in-box **type-to-look-up** panel (`dict_open`, wipes over the list since the renderer
+draws all labels in one late pass — the list must be *skipped*, not painted over): a
+`‹ Back` button, a search field, and a **scrollable** answer. Typing works because the
+panel grabs the keyboard on the OPTIONS surface (`open_dict` → `set_interactive`; keys
+route via `handle_key_event`'s `dict_open` branch → `dict_key`); the box's pointer-leave
+auto-collapse is guarded while it's open. Lookup (`dict.rs`) is offline, multi-language
+(shows every language that has the word), **accent-insensitive** (`corazon`→`corazón`;
+`ñ`≠`n`), and shows the **etymology** when present. `debug-dict` (ctl verb) force-opens it.
+- Data: two JSON files, English `dictionary.json` (Webster 1913, plain `{word:def}`) and
+  Spanish `dictionary-es.json` (RAE, `{word:{e,d}}` with etymology). Loaded lazily on a
+  worker thread from `$WAVERUNNER_DICT[_ES]` (else the data dir). **Built declaratively**
+  by the flake's `dictionaries` package from pinned upstreams (`tools/rae-parse` compiles
+  with `rustc` and parses the RAE dump); `waverunner-daemon`'s wrapper + `waverunner-dev`
+  set the env vars. Regenerate the ES data with `nix build .#dictionaries`.
+Files: `dict.rs`, panel in `clipboard.rs` (`open_dict`/`dict_key`/`push_clip_dict`/
+`dict_answer_lines`/`clip_dict_scroll_span`), `tools/rae-parse/parse_rae.rs`, flake
+`dictionaries` pkg. See memory `dict_data_provisioning`.
 
 ## Conventions
 Edition 2021, rustfmt, clippy clean at `-D warnings`. `anyhow` in the binary, `thiserror` in

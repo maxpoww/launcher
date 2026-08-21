@@ -225,6 +225,49 @@ pub fn focus_exact_class(class: &str) -> bool {
     }
 }
 
+/// Known browser window classes (lowercased substrings) for [`focus_browser`].
+const BROWSER_CLASSES: &[&str] = &[
+    "firefox", "chrome", "chromium", "brave", "edge", "vivaldi", "opera", "librewolf", "zen",
+];
+
+/// Raise/focus the most-recently-focused browser window (any known browser
+/// class) — used after opening a link so the freshly-loaded tab comes to the
+/// front. Returns whether one was found; `false` means no browser is open yet
+/// (a cold launch will focus its own new window).
+pub fn focus_browser() -> bool {
+    let Ok(reply) = request("j/clients") else {
+        return false;
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+        return false;
+    };
+    let empty = Vec::new();
+    let windows = clients.as_array().unwrap_or(&empty);
+    let mut best: Option<(i64, String)> = None;
+    for c in windows {
+        let is_browser = ["class", "initialClass"].iter().any(|f| {
+            let v = c[*f].as_str().unwrap_or("").to_lowercase();
+            BROWSER_CLASSES.iter().any(|b| v.contains(b))
+        });
+        if !is_browser {
+            continue;
+        }
+        let Some(addr) = c["address"].as_str() else {
+            continue;
+        };
+        let fh = c["focusHistoryID"].as_i64().unwrap_or(i64::MAX);
+        if best.as_ref().is_none_or(|(bfh, _)| fh < *bfh) {
+            best = Some((fh, addr.to_owned()));
+        }
+    }
+    if let Some((_, addr)) = best {
+        focus_window(&addr);
+        true
+    } else {
+        false
+    }
+}
+
 /// Address of another mapped window sharing `addr`'s workspace, if any —
 /// a detour target for [`focus_window`]. Restricted to the same
 /// workspace so the bounce never triggers a workspace switch.

@@ -48,6 +48,9 @@ pub enum Command {
     DebugClipDetail,
     /// Debug/verification: force-open the notification history box.
     DebugNotif,
+    /// Debug/verification: force-open the clipboard box on the dictionary
+    /// "define a word" panel, pre-filled with a sample query.
+    DebugDict,
 }
 
 impl fmt::Display for Command {
@@ -61,6 +64,7 @@ impl fmt::Display for Command {
             Command::DebugClip => f.write_str("debug-clip"),
             Command::DebugClipDetail => f.write_str("debug-clip-detail"),
             Command::DebugNotif => f.write_str("debug-notif"),
+            Command::DebugDict => f.write_str("debug-dict"),
         }
     }
 }
@@ -78,6 +82,7 @@ impl FromStr for Command {
             "debug-clip" => Ok(Command::DebugClip),
             "debug-clip-detail" => Ok(Command::DebugClipDetail),
             "debug-notif" => Ok(Command::DebugNotif),
+            "debug-dict" => Ok(Command::DebugDict),
             other => Err(ParseError::UnknownCommand(other.to_owned())),
         }
     }
@@ -152,6 +157,7 @@ mod tests {
             Command::DebugClip,
             Command::DebugClipDetail,
             Command::DebugNotif,
+            Command::DebugDict,
         ] {
             assert_eq!(cmd.to_string().parse::<Command>().unwrap(), cmd);
         }

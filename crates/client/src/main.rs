@@ -13,7 +13,7 @@ use anyhow::{bail, Context};
 use waverunner_proto::{Command, Response};
 
 const USAGE: &str =
-    "usage: waverunner-ctl [--time] <toggle|show|hide|expand|collapse|debug-clip|debug-clip-detail|debug-notif>";
+    "usage: waverunner-ctl [--time] <toggle|show|hide|expand|collapse|debug-clip|debug-clip-detail|debug-notif|debug-dict>";
 
 fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

@@ -37,7 +37,7 @@ use crate::notifications::{
 };
 use crate::options::{
     hover_grow, push_neumorph, wash, PillId, BOND_GAP, EDGE_PAD, FONT_PX, GLYPH_BELL,
-    GLYPH_BELL_SLASH, GLYPH_CLOSE, LINE_PX, NERD, OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X,
+    GLYPH_BELL_SLASH, LINE_PX, NERD, OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
 
@@ -45,6 +45,9 @@ use crate::App;
 /// no compact mode). Horizontal on both sides; vertical top and bottom.
 const CARD_PAD_X: f32 = 14.0;
 const CARD_PAD_Y: f32 = 11.0;
+/// Right inset for the trailing time / dismiss can — tighter than `CARD_PAD_X`
+/// so they hug the card's top-right corner (matches the clipboard list).
+const TRAIL_PAD_X: f32 = 6.0;
 /// The app-identity tile at the card's top-left — a real avatar (circular) /
 /// app icon, or the initial-letter monogram fallback.
 const ICON_SZ: f32 = 40.0;
@@ -57,8 +60,8 @@ const BODY_GAP: f32 = 3.0;
 /// Per-card control (×) hot-square and the gap to the header text.
 const CTRL_SZ: f32 = 18.0;
 const CTRL_GAP_N: f32 = 6.0;
-/// A multiplication-sign × for the dismiss controls.
-const GLYPH_X: &str = "\u{00d7}";
+/// fa-trash-o (outline can with vertical lines) — the per-card delete control.
+const GLYPH_TRASH: &str = "\u{f014}";
 
 /// Crimson for destructive controls (× dismiss), Shinings "Live" `#E05252`.
 const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
@@ -233,7 +236,7 @@ impl From<StoredNotification> for ActiveNotification {
 
 /// Per-history-item inputs `measure_notif` computes before the renderer borrow:
 /// `(app, summary, body, time, icon_key)`.
-type NotifRowInput = (String, String, String, String, Option<String>);
+type NotifRowInput = (String, String, String, u64, Option<String>);
 
 /// One notification's pre-measured render fields. The collapsed preview pill
 /// uses the single-line fields (`summary`/`body`/`time`); the open box uses the
@@ -245,7 +248,9 @@ struct RowInfo {
     /// the latest message and updates as new ones land. The open card uses the
     /// wrapped `body_lines` instead.
     preview: String,
-    time: String,
+    /// Copy time (unix ms) — the compact relative label ("15m"/"2h"/"1d") is
+    /// computed live at render, like the clipboard list, so it stays current.
+    timestamp_ms: u64,
     /// First letter of the app/summary, for the identity tile (the fallback
     /// when no real icon resolves).
     initial: String,
@@ -257,7 +262,6 @@ struct RowInfo {
     /// [`MAX_BODY_LINES`] (last line ellipsised on overflow).
     body_lines: Vec<String>,
     summary_w: f32,
-    time_w: f32,
     /// Full card height in the open box: padding + header + wrapped body.
     height: f32,
 }
@@ -378,7 +382,7 @@ impl NotifState {
         // Clean up a stack that predates the conversation-collapse: newest-first,
         // then one card per conversation.
         history.sort_by_key(|h| std::cmp::Reverse(h.timestamp_ms));
-        collapse_conversations(&mut history);
+        collapse_stacks(&mut history);
         // Restore DND + read-state so the whole OPTION looks identical after a
         // restart/reboot (a fresh install with no file defaults to: not muted,
         // everything currently in history already read). The default baseline is
@@ -462,17 +466,40 @@ fn now_ms() -> u64 {
 }
 
 /// Local `HH:MM` for a unix-millis timestamp, via libc (respects timezone).
-fn fmt_time(ms: u64) -> String {
-    if ms == 0 {
-        return String::new();
-    }
+/// Local day-number (days since the epoch in *local* time) and clock hour/minute
+/// for a unix-ms stamp — via `tm_gmtoff` so the day boundary is local midnight.
+fn local_day_hm(ms: u64) -> (i64, i32, i32) {
     // SAFETY: `localtime_r` fills a caller-owned `tm`.
     unsafe {
         let t = (ms / 1000) as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
-        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+        let local = t as i64 + tm.tm_gmtoff as i64;
+        (local.div_euclid(86_400), tm.tm_hour, tm.tm_min)
     }
+}
+
+/// Time label — matches the clipboard list. Same-day items show the clock time
+/// (`14:32`); older items show a compact day count (`1d`/`2d`), since a full date
+/// is too much. Computed live at render. Empty for a zero stamp.
+fn fmt_relative(ms: u64) -> String {
+    if ms == 0 {
+        return String::new();
+    }
+    let (day, hh, mm) = local_day_hm(ms);
+    let (today, ..) = local_day_hm(now_ms());
+    let diff = today - day;
+    if diff <= 0 {
+        format!("{hh:02}:{mm:02}")
+    } else {
+        format!("{diff}d")
+    }
+}
+
+/// Approx label width for a relative-time string (chars × ~half em), the same
+/// cheap estimate the clipboard list uses so no renderer is needed at draw time.
+fn rel_time_w(time: &str) -> f32 {
+    time.chars().count() as f32 * FONT_PX * 0.55
 }
 
 fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
@@ -513,16 +540,26 @@ impl App {
                             // below); it just must not pop the preview a *second*
                             // time. A genuinely new message (different text) still
                             // pops.
-                            let (_, nbody) = web_format(n);
-                            let nbody = nbody.trim().to_lowercase();
                             let nkey = conversation_key(n);
-                            let echo = nkey.is_some()
-                                && !nbody.is_empty()
-                                && self.notif.history.iter().any(|h| {
-                                    n.timestamp_ms.saturating_sub(h.timestamp_ms) < DUP_WINDOW_MS
-                                        && conversation_key(h) == nkey
-                                        && web_format(h).1.trim().to_lowercase() == nbody
-                                });
+                            let echo = if nkey.is_some() {
+                                // Chat: the SAME message text mirrored by another
+                                // source (webapp + KDE Connect). It merges but must
+                                // not pop twice; a new message (different text) pops.
+                                let nbody = web_format(n).1.trim().to_lowercase();
+                                !nbody.is_empty()
+                                    && self.notif.history.iter().any(|h| {
+                                        n.timestamp_ms.saturating_sub(h.timestamp_ms)
+                                            < DUP_WINDOW_MS
+                                            && conversation_key(h) == nkey
+                                            && web_format(h).1.trim().to_lowercase() == nbody
+                                    })
+                            } else {
+                                // Non-chat: an identical alert is already in history
+                                // (same app + summary + body). Its card's time just
+                                // refreshes — don't re-announce the preview.
+                                let nk = stack_key(n);
+                                self.notif.history.iter().any(|h| stack_key(h) == nk)
+                            };
                             self.notif.history.insert(0, n.clone());
                             arrived = true;
                             changed = true;
@@ -585,7 +622,7 @@ impl App {
             // One card per conversation: the newest wins, older same-conversation
             // cards (the KDE Connect message stack, or a phone+desktop duplicate of
             // the same chat) are dropped. Runs after the sort so "newest" is first.
-            let removed = collapse_conversations(&mut self.notif.history);
+            let removed = collapse_stacks(&mut self.notif.history);
             for id in &removed {
                 self.notif.seen.remove(id);
             }
@@ -760,7 +797,7 @@ impl App {
                     n.app_name.clone(),
                     summary,
                     body,
-                    fmt_time(n.timestamp_ms),
+                    n.timestamp_ms,
                     // Icon priority: a real per-contact avatar wins; but a captured
                     // browser logo (shared image) is NOT used — those fall to the
                     // web service icon / resolved app icon.
@@ -778,9 +815,8 @@ impl App {
         let body_w = (EXTENDED_W - 2.0 * CARD_PAD_X - ICON_SZ - ICON_GAP).max(1.0);
         let mut rows = Vec::with_capacity(items.len());
         if let Some(r) = self.options_renderer.as_mut() {
-            for (app, summary, body, time, icon_key) in items {
+            for (app, summary, body, timestamp_ms, icon_key) in items {
                 let summary_w = r.measure_text(&summary, FONT_PX, None);
-                let time_w = r.measure_text(&time, FONT_PX, None);
                 let mut m = |s: &str| r.measure_text(s, FONT_PX, None);
                 let body_lines = wrap_text(&mut m, &body, body_w);
                 let initial = card_initial(&app, &summary);
@@ -789,28 +825,26 @@ impl App {
                 rows.push(RowInfo {
                     summary,
                     preview,
-                    time,
+                    timestamp_ms,
                     initial,
                     icon_key,
                     body_lines,
                     summary_w,
-                    time_w,
                     height,
                 });
             }
         } else {
-            for (app, summary, body, time, icon_key) in items {
+            for (app, summary, body, timestamp_ms, icon_key) in items {
                 let initial = card_initial(&app, &summary);
                 let preview = newest_line(&body);
                 rows.push(RowInfo {
                     summary,
                     preview,
-                    time,
+                    timestamp_ms,
                     initial,
                     icon_key,
                     body_lines: Vec::new(),
                     summary_w: 0.0,
-                    time_w: 0.0,
                     height: card_height(&[]),
                 });
             }
@@ -1356,7 +1390,7 @@ impl App {
                         let crect = Rect::new(rect.x, y, rect.w, h);
                         self.push_notif_card(
                             scene, idx, crect, content, radius, e, ink, dim_ink, hover_ink,
-                            stripe_opaque,
+                            stripe_opaque, expanded_fill,
                         );
                     }
                     y += h;
@@ -1368,6 +1402,7 @@ impl App {
             for (idx, crect) in self.notif_cards(rect) {
                 self.push_notif_card(
                     scene, idx, crect, content, radius, e, ink, dim_ink, hover_ink, stripe_opaque,
+                    expanded_fill,
                 );
             }
         }
@@ -1404,12 +1439,11 @@ impl App {
         let placeholder = RowInfo {
             summary: "No notifications".to_owned(),
             preview: String::new(),
-            time: String::new(),
+            timestamp_ms: 0,
             initial: String::new(),
             icon_key: None,
             body_lines: Vec::new(),
             summary_w: 0.0,
-            time_w: 0.0,
             height: card_height(&[]),
         };
         let info = self.notif.rows.get(idx).unwrap_or(&placeholder);
@@ -1544,18 +1578,20 @@ impl App {
         // Time: right-aligned, just left of the badge on the preview, sliding to the
         // header edge as the box opens.
         let mut sum_right = header_right;
-        if !info.time.is_empty() {
+        let time = fmt_relative(info.timestamp_ms);
+        if !time.is_empty() {
+            let time_w = rel_time_w(&time);
             let time_right = if has_badge {
                 lerp(badge_x - TEXT_GAP, header_right, e)
             } else {
                 header_right
             };
-            let time_x = (time_right - info.time_w).max(header_x);
+            let time_x = (time_right - time_w).max(header_x);
             scene.labels.push(mk_line(
-                info.time.clone(),
+                time,
                 time_x,
                 header_y,
-                info.time_w + 2.0,
+                time_w + 2.0,
                 dim,
                 content,
             ));
@@ -1621,7 +1657,7 @@ impl App {
             };
             scene
                 .labels
-                .push(centered_glyph(GLYPH_X, close, None, xc, content));
+                .push(centered_glyph(GLYPH_TRASH, close, Some(NERD), xc, content));
         }
     }
 
@@ -1641,6 +1677,7 @@ impl App {
         dim_ink: [f32; 4],
         hover_ink: [f32; 4],
         stripe_opaque: [f32; 4],
+        fill: [f32; 4],
     ) {
         let Some(info) = self.notif.rows.get(idx) else {
             return;
@@ -1687,6 +1724,27 @@ impl App {
         // Identity tile: a real app icon once the resolver has one for this row,
         // else the monogram fallback (a soft rounded square + the initial).
         let icon = Rect::new(rect.x + CARD_PAD_X, rect.y + CARD_PAD_Y, ICON_SZ, ICON_SZ);
+        // Opaque disc behind every icon so a transparent icon (a themed glyph, a
+        // round avatar's corners, or the monogram fallback) shows this consistent
+        // tone rather than letting the zebra stripe bleed through it. Composited on
+        // the base card fill (not the stripe) plus the usual faint ink tint, so it
+        // reads identically on striped and plain cards. Rides the same content
+        // scissor as the icons so it clips to the list, never over the footer.
+        push_notif_grid_rect(
+            scene,
+            content,
+            RectInst {
+                rect: icon,
+                radius: ICON_SZ / 2.0, // circle, matching the round avatars
+                color: [
+                    ink[0] * 0.10 + fill[0] * 0.90,
+                    ink[1] * 0.10 + fill[1] * 0.90,
+                    ink[2] * 0.10 + fill[2] * 0.90,
+                    alpha,
+                ],
+                glass: 0.0,
+            },
+        );
         let layer = info
             .icon_key
             .as_ref()
@@ -1696,42 +1754,52 @@ impl App {
             // Textured quads clip via a grid scissor, not per-item, so they must
             // ride a grid pinned to the box interior (they scroll with the list).
             push_notif_icon(scene, content, icon, layer);
-        } else {
-            // Ride the same content scissor as real avatars so the circle clips to
-            // the list and never bleeds over the footer ✕.
-            push_notif_grid_rect(
-                scene,
-                content,
-                RectInst {
-                    rect: icon,
-                    radius: ICON_SZ / 2.0, // circle, matching the round avatars
-                    color: [ink[0], ink[1], ink[2], 0.10 * alpha],
-                    glass: 0.0,
-                },
-            );
-            if !info.initial.is_empty() {
-                scene
-                    .labels
-                    .push(centered_glyph(&info.initial, icon, None, prim, content));
-            }
+        } else if !info.initial.is_empty() {
+            scene
+                .labels
+                .push(centered_glyph(&info.initial, icon, None, prim, content));
         }
 
-        // Header: summary (primary) + a right cluster [time] [×].
+        // Header: summary (primary) + a single trailing control at the right.
+        // Like the clipboard list, the relative time shows by default and swaps
+        // to the dismiss can on hover (only ever one of the two, never both).
         let text_x = icon.x + ICON_SZ + ICON_GAP;
+        // The trailing time / dismiss can sits in the card's top-right corner, on
+        // the summary's header line.
         let header_ty = rect.y + CARD_PAD_Y;
         let close = card_close_rect(rect);
-        let mut header_right = close.x - CTRL_GAP_N;
-        if !info.time.is_empty() {
-            let time_x = (header_right - info.time_w).max(text_x);
-            scene.labels.push(mk_line(
-                info.time.clone(),
-                time_x,
-                header_ty,
-                info.time_w + 2.0,
-                dim,
-                content,
-            ));
-            header_right = time_x - TEXT_GAP;
+        let mut header_right = rect.x + rect.w - TRAIL_PAD_X;
+        if hovered {
+            // Dismiss can — no red, brighten to the hover ink on the target.
+            // Drawn directly (not via `centered_glyph`) so it matches the clip
+            // list: the larger `FONT_PX * 1.3` glyph, centred in the row.
+            let on_x = self.notif.hit == NotifHit::Close(idx);
+            let xc = if on_x { hover_ink } else { dim_ink };
+            scene.labels.push(Label {
+                text: GLYPH_TRASH.to_owned(),
+                pos: (close.x + close.w / 2.0, header_ty),
+                max_w: close.w + 8.0,
+                font_px: FONT_PX * 1.3,
+                line_px: LINE_PX,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: Some(NERD),
+                color: Some([xc[0], xc[1], xc[2], xc[3] * alpha]),
+                clip: Some(content),
+            });
+            header_right = close.x - CTRL_GAP_N;
+        } else {
+            // Compact relative time ("15m"/"2h"/"1d"), computed live, centred.
+            let time = fmt_relative(info.timestamp_ms);
+            if !time.is_empty() {
+                let time_w = rel_time_w(&time);
+                let time_x = (header_right - time_w).max(text_x);
+                scene
+                    .labels
+                    .push(mk_line(time, time_x, header_ty, time_w + 2.0, dim, content));
+                header_right = time_x - TEXT_GAP;
+            }
         }
         let sum_max = (header_right - text_x).max(0.0);
         scene.labels.push(mk_line(
@@ -1752,20 +1820,6 @@ impl App {
                 .labels
                 .push(mk_line(line.clone(), text_x, ly, body_max, dim, content));
         }
-
-        // × dismiss (reddens on hover).
-        let xc = if self.notif.hit == NotifHit::Close(idx) {
-            CRIMSON
-        } else {
-            dim_ink
-        };
-        scene.labels.push(centered_glyph(
-            GLYPH_X,
-            close,
-            None,
-            [xc[0], xc[1], xc[2], xc[3] * alpha],
-            content,
-        ));
     }
 
     /// Draw the single footer option — the "Clear all" ✕ pill — styled exactly
@@ -1791,18 +1845,17 @@ impl App {
             color: base,
             glass: 0.0,
         });
-        // The fa-times glyph, scaled to the enlarged pill so it reads as a
-        // bold ✕. Sized off the resting diameter (not the hover-grown one) so it
-        // stays steady, and clipped a touch wider than the pill so the arms aren't
-        // shaved.
+        // The trash-can glyph, scaled to the enlarged pill. Sized off the resting
+        // diameter (not the hover-grown one) so it stays steady, and clipped a
+        // touch wider than the pill so it isn't shaved.
         let d0 = self.footer_button_d();
-        let gpx = d0 * 0.6;
+        let gpx = d0 * 0.68;
         let cx = br.x + br.w / 2.0;
         let ty = br.y + (br.h - gpx) / 2.0;
         let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
         let g = self.options_text_color();
         scene.labels.push(Label {
-            text: GLYPH_CLOSE.to_owned(),
+            text: GLYPH_TRASH.to_owned(),
             pos: (cx, ty),
             max_w: br.w + 16.0,
             font_px: gpx,
@@ -2453,7 +2506,7 @@ impl App {
 /// A card's × dismiss hot-square (top-right).
 fn card_close_rect(card: Rect) -> Rect {
     Rect::new(
-        card.x + card.w - CARD_PAD_X - CTRL_SZ,
+        card.x + card.w - TRAIL_PAD_X - CTRL_SZ,
         card.y + CARD_PAD_Y - 1.0,
         CTRL_SZ,
         CTRL_SZ,
@@ -2720,19 +2773,34 @@ fn conversation_key(n: &ActiveNotification) -> Option<(String, String)> {
 /// phone+desktop duplicate of the same chat. `history` must be newest-first;
 /// non-message notifications (no conversation key) are always kept. Returns the
 /// removed ids so the caller can clear them from `seen`.
-fn collapse_conversations(history: &mut Vec<ActiveNotification>) -> Vec<u32> {
+/// The key two notifications must share to stack into a single card: a chat's
+/// conversation, or — for everything else — identical content (app + summary +
+/// body). The content key is namespaced (`\u{1}`) so it can never collide with a
+/// conversation key.
+fn stack_key(n: &ActiveNotification) -> (String, String) {
+    if let Some(key) = conversation_key(n) {
+        return key;
+    }
+    let app = collapse_ws(&strip_markup(&n.app_name)).to_lowercase();
+    let summary = collapse_ws(&strip_markup(&n.summary)).to_lowercase();
+    let body = collapse_ws(&web_format(n).1).to_lowercase();
+    (format!("{app}\u{1}{summary}"), body)
+}
+
+/// Collapse the history so each stack ([`stack_key`]) keeps only its newest card;
+/// older duplicates — a chat's message pile, or a service re-firing the same alert
+/// (battery, sync, "build done") — are removed, folding their time onto the one
+/// survivor. Returns the removed ids. Runs after the newest-first sort.
+fn collapse_stacks(history: &mut Vec<ActiveNotification>) -> Vec<u32> {
     let mut seen: HashSet<(String, String)> = HashSet::new();
     let mut removed = Vec::new();
-    history.retain(|h| match conversation_key(h) {
-        Some(key) => {
-            if seen.insert(key) {
-                true // first (newest) card for this conversation
-            } else {
-                removed.push(h.id);
-                false
-            }
+    history.retain(|h| {
+        if seen.insert(stack_key(h)) {
+            true // first (newest) card for this stack
+        } else {
+            removed.push(h.id);
+            false
         }
-        None => true,
     });
     removed
 }
