@@ -23,6 +23,7 @@ pub fn launch(exec: &str, needs_terminal: bool, terminal: &str) -> anyhow::Resul
         exec.to_owned()
     };
     info!("launching: {line}");
+    warn_if_unresolvable(&line);
     let sh = CString::new("/bin/sh").context("sh path")?;
     let dash_c = CString::new("-c").context("-c arg")?;
     let cmd = CString::new(line).context("exec line contains a NUL byte")?;
@@ -68,6 +69,33 @@ pub fn launch(exec: &str, needs_terminal: bool, terminal: &str) -> anyhow::Resul
 /// Single-quote `s` for a POSIX shell (embedded quotes become `'\''`).
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Whether `bin` resolves to a file on `$PATH` (or exists, if it has a slash).
+pub(crate) fn on_path(bin: &str) -> bool {
+    if bin.contains('/') {
+        return std::path::Path::new(bin).exists();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+}
+
+/// Best-effort visibility for a detached launch: the grandchild's exit is
+/// swallowed by design (double-fork, fds on /dev/null), so a missing binary
+/// means "nothing happens" with no trace anywhere. If the command's first
+/// token clearly can't resolve, say so in the log before launching anyway.
+/// Skipped for lines starting with an env assignment or shell syntax — those
+/// are for `sh` to judge.
+fn warn_if_unresolvable(line: &str) {
+    let Some(tok) = line.split_whitespace().next() else {
+        return;
+    };
+    if tok.contains('=') || tok.starts_with(['(', '{', '!']) {
+        return;
+    }
+    if !on_path(tok) {
+        tracing::warn!("launch: '{tok}' not found on PATH — the command will exit 127 silently");
+    }
 }
 
 /// Shell command printing the Golem tool banner, shared by every

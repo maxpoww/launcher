@@ -18,10 +18,14 @@
       # Runtime libs wgpu dlopens; must be on LD_LIBRARY_PATH at process start.
       runtimeLibs = pkgs: with pkgs; [ wayland vulkan-loader libxkbcommon ];
 
-      # External tools the daemon shells out to for Files-section thumbnails:
-      # ffmpegthumbnailer for videos, poppler's pdftoppm for PDFs. Missing
-      # ones just fall back to the file's type icon.
-      runtimeTools = pkgs: with pkgs; [ ffmpegthumbnailer poppler-utils ];
+      # External tools the daemon shells out to. Everything degrades gracefully
+      # when absent, but "gracefully" can mean a whole OPTION silently doing
+      # nothing on a machine that lacks the tool — so ship them all:
+      #  - wl-clipboard (wl-paste/wl-copy): the clipboard OPTION's capture/serve
+      #  - grim: link-clip window snapshots (share-card hero)
+      #  - curl: opt-in link unfurl + Flathub/store icon fetch
+      #  - ffmpegthumbnailer / poppler's pdftoppm: Files-section thumbnails
+      runtimeTools = pkgs: with pkgs; [ wl-clipboard grim curl ffmpegthumbnailer poppler-utils ];
     in {
 
       # ── Nix packages ────────────────────────────────────────────────────────

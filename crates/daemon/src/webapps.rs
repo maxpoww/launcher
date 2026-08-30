@@ -17,8 +17,26 @@ use std::process::Command;
 
 use tracing::{debug, info, warn};
 
-const BROWSER: &str = "google-chrome-stable";
+/// App-mode browsers in preference order: Chrome (the reference for our CDP +
+/// CSD flags), then Chromium (flag-compatible, and the free one a Golem install
+/// can actually ship). Resolved against PATH once per process — on a machine
+/// with neither, webapp launches used to no-op silently (SH audit F2).
+const BROWSERS: [&str; 3] = ["google-chrome-stable", "chromium", "chromium-browser"];
 const FLAG: &str = "--disable-client-side-decorations";
+
+/// The first [`BROWSERS`] entry present on PATH (falls back to the first and
+/// warns when none are — the launch will then fail visibly in the log).
+fn browser() -> &'static str {
+    static RESOLVED: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    RESOLVED.get_or_init(|| {
+        if let Some(b) = BROWSERS.into_iter().find(|b| crate::launch::on_path(b)) {
+            debug!("webapps: using {b}");
+            return b;
+        }
+        warn!("webapps: none of {BROWSERS:?} on PATH; webapp launches will fail");
+        BROWSERS[0]
+    })
+}
 /// Fixed CDP port the shared webapp Chrome instance listens on, so the clipboard
 /// "copy link" pill can read an app-mode window's current URL (no address bar to
 /// `Ctrl+L`). See [`crate::clipboard`]'s `copy_active_link`.
@@ -120,7 +138,8 @@ pub fn exec_app_host(exec: &str) -> Option<&str> {
 /// webapp".
 fn app_exec_with(url_token: &str) -> String {
     format!(
-        "{BROWSER} --app={} {FLAG} --user-data-dir={} --remote-debugging-port={CDP_PORT}",
+        "{} --app={} {FLAG} --user-data-dir={} --remote-debugging-port={CDP_PORT}",
+        browser(),
         url_token,
         profile_dir().display(),
     )

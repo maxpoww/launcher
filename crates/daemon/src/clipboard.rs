@@ -423,11 +423,18 @@ fn wl_copy(mime: &str, data: &[u8]) {
 /// each change, re-read + classify the clipboard. Respawns on exit/error.
 fn watch_loop(events: Sender<ClipEvent>) {
     let mut last_hash: Option<u64> = None;
+    // First failure warns (a missing wl-paste otherwise kills the clipboard
+    // OPTION in silence — SH audit F1); the 3 s respawn retries stay at debug.
+    let mut warned = false;
     loop {
         match run_watch(&events, &mut last_hash) {
             // UI gone (channel closed): stop for good.
             Ok(false) => return,
             Ok(true) => debug!("clipboard: wl-paste --watch ended; respawning"),
+            Err(e) if !warned => {
+                warned = true;
+                warn!("clipboard: watch failed ({e}) — is wl-paste installed? retrying");
+            }
             Err(e) => debug!("clipboard: watch error: {e}"),
         }
         std::thread::sleep(RESPAWN);
