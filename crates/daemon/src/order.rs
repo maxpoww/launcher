@@ -80,6 +80,20 @@ impl OrderDb {
         }
     }
 
+    /// Ensure `id` owns a slot (appended to the last page if absent).
+    /// The self-heal for boxes whose slot was lost: a box only enters the
+    /// order at creation, so a dropped slot meant invisible *forever* —
+    /// found in the wild when the Recycle Bin vanished (SH). Returns
+    /// whether a slot was created.
+    pub fn adopt(&mut self, id: &str) -> bool {
+        if self.list.contains(id) {
+            return false;
+        }
+        self.list.push(id);
+        self.save();
+        true
+    }
+
     /// Forget the grid slot of any box no longer alive: a `group:` id not
     /// in `live` is dropped (a deleted box keeps nothing). App ids are
     /// always kept — a vanished app returns to its slot on reinstall.

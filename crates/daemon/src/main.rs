@@ -1522,6 +1522,22 @@ impl App {
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
         info!("app index ready: {} entries", loaded.entries.len());
 
+        // Self-heal: every live box must own a grid slot. A box's slot can
+        // only be created at fold time, so one lost to a transient (the
+        // Recycle Bin's was, in the wild) meant the box was invisible
+        // forever. Cheap, saves only when something was actually missing.
+        let box_ids: Vec<String> = self
+            .groups
+            .groups()
+            .iter()
+            .map(|g| format!("group:{}", g.id))
+            .collect();
+        for gid in box_ids {
+            if self.order.adopt(&gid) {
+                info!("order: re-adopted boxless {gid}");
+            }
+        }
+
         // The common case: a summon-triggered rescan that changed nothing.
         // Swap in the fresh file index and re-rank, but skip the rebuild —
         // its wholesale icon re-upload + label-cache clear cost one long
