@@ -179,6 +179,7 @@ mod tests {
     #[tokio::test]
     async fn aggregates_delta_and_stamps_health() {
         let win = ActiveWindow {
+            address: "0x1".into(),
             class: "foot".into(),
             title: "zsh".into(),
             pid: 42,

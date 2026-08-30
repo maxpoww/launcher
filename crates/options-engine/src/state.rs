@@ -15,8 +15,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveWindow {
+    /// Compositor window address (`0x…`) — the stable handle consumers need
+    /// to *act* on the window (focus/close dispatches target it). Empty when
+    /// nothing is focused.
+    #[serde(default)]
+    pub address: String,
     pub class: String,
     pub title: String,
     pub pid: u32,

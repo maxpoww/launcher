@@ -15,6 +15,9 @@ tracing-subscriber = { workspace = true }
 
 waverunner-core = { workspace = true }
 waverunner-proto = { workspace = true }
+# The Brain: the daemon subscribes to the OPTIONS Context Core's context
+# snapshots (see brain.rs — the S2 "Spine" wiring).
+options-engine = { workspace = true }
 # The notification OPTION talks to the options-notify daemon over session D-Bus;
 # we depend on it only for the shared wire type (`ActiveNotification`).
 options-notify = { workspace = true }

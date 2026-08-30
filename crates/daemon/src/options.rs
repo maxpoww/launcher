@@ -714,20 +714,43 @@ impl App {
         }
     }
 
-    /// Refresh the focused-window pill (title + address) on layout changes.
+    /// Refresh the focused-window pill (title + address) on layout changes
+    /// and on Brain snapshots.
+    ///
+    /// Data source: the Brain's context snapshot when its compositor layer
+    /// is alive (event-driven, no socket round-trips — the S2 Spine's first
+    /// consumer); otherwise the original direct `hyprctl` poll, so the pill
+    /// keeps working if the engine goes dark (degrade path).
     pub(crate) fn refresh_options_content(&mut self) {
         if self.options_layer.is_none() {
             return;
         }
-        let (addr, title, fullscreen) = match hypr::active_window_info() {
-            Some((a, t, fs)) => (Some(a), Some(t), fs),
-            None => (None, None, false),
+        let (addr, title, class, fullscreen) = match self.brain.as_ref() {
+            Some(ctx) if crate::brain::hypr_alive(ctx) => {
+                let w = &ctx.window;
+                if w.address.is_empty() {
+                    (None, None, None, false)
+                } else {
+                    (
+                        Some(w.address.clone()),
+                        Some(w.title.clone()),
+                        Some(w.class.clone()),
+                        w.is_fullscreen,
+                    )
+                }
+            }
+            _ => match hypr::active_window_info() {
+                Some((a, t, fs)) => {
+                    let class = hypr::active_window_where().map(|(c, _)| c);
+                    (Some(a), Some(t), class, fs)
+                }
+                None => (None, None, None, false),
+            },
         };
         if self.options_active_addr != addr {
             // Focus moved — re-derive the copy-link affordance from the new app's
             // class (only browsers expose a copyable page URL).
-            let is_browser = hypr::active_window_where()
-                .is_some_and(|(class, _)| hypr::is_browser_class(&class));
+            let is_browser = class.is_some_and(|c| hypr::is_browser_class(&c));
             self.set_clip_link_available(is_browser);
         }
         if self.options_active_addr != addr || self.options_title != title {

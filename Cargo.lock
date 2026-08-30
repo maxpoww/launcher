@@ -2607,6 +2607,7 @@ dependencies = [
  "image",
  "libc",
  "md5",
+ "options-engine",
  "options-notify",
  "pollster",
  "raw-window-handle",

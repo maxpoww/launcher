@@ -182,6 +182,7 @@ fn active_window_from_json(v: &serde_json::Value) -> Option<(String, ActiveWindo
         .unwrap_or("")
         .to_owned();
     let window = ActiveWindow {
+        address: address.to_owned(),
         class,
         title: v["title"].as_str().unwrap_or("").to_owned(),
         pid: v["pid"].as_i64().unwrap_or(0).max(0) as u32,

@@ -12,6 +12,7 @@ mod animation;
 mod applier;
 mod apps;
 mod boxes;
+mod brain;
 mod clip_source;
 mod clipboard;
 mod content;
@@ -205,6 +206,11 @@ fn main() -> anyhow::Result<()> {
     // over this channel.
     let (nix_tx, nix_rx) = channel::channel::<nix::Event>();
     let nix = nix::spawn(nix_tx, config.theme.icon_theme.clone());
+
+    // The Brain (options-engine) streams whole context snapshots from its
+    // own tokio thread; the first consumer is the OPTIONS window pill.
+    let (brain_tx, brain_rx) = channel::channel::<options_engine::ContextState>();
+    brain::start(brain_tx);
 
     // File thumbnails arrive from their own worker as they render.
     let (thumb_tx, thumb_rx) = channel::channel::<thumbs::Event>();
@@ -429,6 +435,7 @@ fn main() -> anyhow::Result<()> {
         closing_members: None,
         pending_icons: None,
         apps_fingerprint: None,
+        brain: None,
         restore_workspace: None,
         close_site: None,
         hover: None,
@@ -471,6 +478,15 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("registering apps channel: {e}"))?;
+
+    event_loop
+        .handle()
+        .insert_source(brain_rx, |event, _, app| {
+            if let channel::Event::Msg(ctx) = event {
+                app.on_brain(ctx);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering brain channel: {e}"))?;
 
     event_loop
         .handle()
@@ -1050,6 +1066,10 @@ pub struct App {
     /// Fingerprint of the last consumed [`apps::LoadedApps`], to skip the
     /// full rebuild + icon re-upload when a rescan reproduces the same index.
     apps_fingerprint: Option<u64>,
+    /// The Brain's latest whole context snapshot (None until first light).
+    /// Surfaces read it instead of sensing for themselves whenever its
+    /// health says the relevant layer is alive (see `brain.rs`).
+    brain: Option<options_engine::ContextState>,
     /// Workspace the user was on when the keyboard grab began, paired with
     /// [`Self::restore_window`] — so a close can tell "still where they
     /// opened us" from "travelled while we were open" (rofi behavior).
@@ -1449,6 +1469,39 @@ impl App {
 
     /// The indexer thread finished: adopt the entries and upload icons
     /// (or stash them until the renderer exists).
+    /// A fresh context snapshot from the Brain. Store it and let the
+    /// surfaces that read it react; the window pill is the first (its
+    /// refresh short-circuits when nothing it shows changed).
+    fn on_brain(&mut self, ctx: options_engine::ContextState) {
+        if self.brain.is_none() {
+            info!(
+                "brain first light: window '{}' ({}), compositor alive: {}",
+                ctx.window.title,
+                ctx.window.class,
+                brain::hypr_alive(&ctx)
+            );
+        }
+        let window_changed = self
+            .brain
+            .as_ref()
+            .is_none_or(|prev| prev.window != ctx.window);
+        // One line when the compositor layer first comes alive — the moment
+        // the pill's data source switches from polling to the Brain.
+        if brain::hypr_alive(&ctx)
+            && !self.brain.as_ref().is_some_and(brain::hypr_alive)
+        {
+            info!(
+                "brain: compositor layer alive — window pill is engine-driven \
+                 (window '{}' [{}])",
+                ctx.window.title, ctx.window.class
+            );
+        }
+        self.brain = Some(ctx);
+        if window_changed {
+            self.refresh_options_content();
+        }
+    }
+
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
         info!("app index ready: {} entries", loaded.entries.len());
 
