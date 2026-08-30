@@ -11,6 +11,7 @@
 mod animation;
 mod applier;
 mod apps;
+mod battery;
 mod boxes;
 mod brain;
 mod clip_source;
@@ -436,6 +437,9 @@ fn main() -> anyhow::Result<()> {
         pending_icons: None,
         apps_fingerprint: None,
         brain: None,
+        battery_low: false,
+        battery_suspend_armed: true,
+        battery_last_suspend: None,
         restore_workspace: None,
         close_site: None,
         hover: None,
@@ -1070,6 +1074,11 @@ pub struct App {
     /// Surfaces read it instead of sensing for themselves whenever its
     /// health says the relevant layer is alive (see `brain.rs`).
     brain: Option<options_engine::ContextState>,
+    /// Battery OPTION v1 (see `battery.rs`): red badge on the clock while
+    /// ≤10% discharging; ≤5% suspends (armed/latched with a wake grace).
+    battery_low: bool,
+    battery_suspend_armed: bool,
+    battery_last_suspend: Option<Instant>,
     /// Workspace the user was on when the keyboard grab began, paired with
     /// [`Self::restore_window`] — so a close can tell "still where they
     /// opened us" from "travelled while we were open" (rofi behavior).
@@ -1496,6 +1505,7 @@ impl App {
                 ctx.window.title, ctx.window.class
             );
         }
+        self.check_battery(&ctx);
         self.brain = Some(ctx);
         if window_changed {
             self.refresh_options_content();

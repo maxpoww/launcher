@@ -670,6 +670,17 @@ impl App {
                 color: [base[0], base[1], base[2], base[3] * a],
                 glass: 0.0,
             });
+            // Battery OPTION v1 (`battery.rs`): a red badge riding the clock
+            // pill's left edge while the battery is low and discharging.
+            if pill.id == PillId::Clock && self.battery_low {
+                let d = 8.0;
+                scene.rects.push(RectInst {
+                    rect: Rect::new(rect.x - d * 0.5, rect.y + (rect.h - d) / 2.0, d, d),
+                    radius: d / 2.0,
+                    color: [0.86, 0.16, 0.16, 0.95 * a],
+                    glass: 0.0,
+                });
+            }
             let g = pill.glyph_color.unwrap_or(text_color);
             let family = pill.family;
             let cx = rect.x + rect.w / 2.0;
