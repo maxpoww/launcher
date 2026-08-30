@@ -529,16 +529,17 @@ impl App {
         }
         // Edge-paging: holding the drag in the grid's edge band turns
         // the page every DRAG_PAGE_COOLDOWN, carrying the icon across
-        // pages (shared band + dwell with the open-box drag). No wrap
-        // while dragging: the walk stops at the ghost page (or page 0),
-        // so over-holding at the edge can never cycle you back to where
-        // the drag started — reveal the new page, drop, done (SH).
+        // pages (shared band + dwell with the open-box drag). The cycle
+        // is: real pages, then the single ghost page, then back around
+        // to the first page — one empty page in the loop, never two
+        // (Max wants the cycle; the drop always lands on the page
+        // that's live at release).
         let vp = layout.sections[content::SECTION_APPS].viewport;
         if layout.sections[content::SECTION_APPS].n_pages > 1 {
             let dir = edge_page_dir(vp.x, vp.w, pos.0);
             if edge_page_due(&mut self.grid_drag_page_at, dir) {
                 info!("drag page turn: dir {dir}");
-                self.page_by(content::SECTION_APPS, dir, false);
+                self.page_by(content::SECTION_APPS, dir, true);
             }
             if dir != 0 {
                 // Keep frames coming while the dwell clock runs (a
@@ -555,8 +556,34 @@ impl App {
 
         // Off the grid: rest the gap (a reorder at its slot, an insert to
         // none) — you may be reaching for the dock, so the grid closes up.
+        // EXCEPT beside the grid in the edge-paging overshoot: the pointer
+        // there is actively flipping pages, so it targets the live page's
+        // append slot — the SH edge-drop bug was exactly this zone
+        // resolving to "outside" (the drop no-op'd and snapped back).
         let Some((d, fx, _fy)) = self.apps_display_cell(layout, pos) else {
-            self.reorder_slot = orig_slot;
+            let beside = pos.1 >= vp.y
+                && pos.1 <= vp.y + vp.h
+                && edge_page_dir(vp.x, vp.w, pos.0) != 0;
+            let want = beside.then(|| {
+                let cap = self.apps_cap.max(1);
+                let page_start = self
+                    .scroll.per[content::SECTION_APPS]
+                    .page(vp.w.max(1.0))
+                    .min(layout.sections[content::SECTION_APPS].n_pages.saturating_sub(1))
+                    * cap;
+                self.apps_slots
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, &s)| Some(j) != orig && s >= page_start && s < page_start + cap)
+                    .map(|(_, &s)| s + 1)
+                    .max()
+                    .unwrap_or(page_start)
+            });
+            let want = want.or(orig_slot);
+            if self.reorder_slot != want {
+                self.reorder_slot = want;
+                self.dirty = true;
+            }
             return None;
         };
         // The hovered page's append position: one past its last occupied
@@ -650,10 +677,15 @@ impl App {
         // A grid app/box knows its own cell; a dock app dragged in to
         // unpin has none (`orig` == None) and lands as a fresh insert.
         let orig = visible.iter().position(|&v| v == entry_idx);
-        let inside = layout.sections[content::SECTION_APPS]
-            .viewport
-            .contains(pos);
-        if !inside {
+        let vp = layout.sections[content::SECTION_APPS].viewport;
+        // The edge-paging overshoot beside the grid counts as ON the grid:
+        // a release there lands on the live page (the pointer was parked
+        // there flipping pages — treating it as "outside" silently no-op'd
+        // the whole drag-to-new-page gesture; SH edge-drop bug).
+        let beside = pos.1 >= vp.y
+            && pos.1 <= vp.y + vp.h
+            && edge_page_dir(vp.x, vp.w, pos.0) != 0;
+        if !vp.contains(pos) && !beside {
             // Dropped outside the grid (a dock app snaps back and stays
             // pinned; a grid member dragged out just returns): no-op.
             return false;
@@ -672,6 +704,17 @@ impl App {
         let slot = self
             .reorder_slot
             .unwrap_or(orig_slot.unwrap_or(self.apps_span));
+        // SH diagnostics for the edge-drop bug: what the drop resolved to.
+        info!(
+            "grid drop {id}: slot {slot} (reorder_slot {:?}, orig_slot {orig_slot:?}), \
+             display page {} (cap {}), pager target {}, page_map {:?}",
+            self.reorder_slot,
+            slot / self.apps_cap.max(1),
+            self.apps_cap,
+            self.scroll.per[content::SECTION_APPS]
+                .page(self.current_layout().sections[content::SECTION_APPS].viewport.w.max(1.0)),
+            self.apps_page_map,
+        );
         // Fold wins when the pointer sits on a foldable item's centre —
         // the exact same detection and box create/join the Install drops
         // use, so every placement shares one path. (Boxes don't nest, so
@@ -703,6 +746,16 @@ impl App {
             self.place_in_grid_at_slot(id, entry_idx, slot);
         }
         self.refilter();
+        // SH diagnostics: where the id actually lives after the refilter.
+        let storage_page = self
+            .order
+            .pages()
+            .iter()
+            .position(|p| p.iter().any(|i| i == id));
+        info!(
+            "grid drop {id}: post-refilter storage page {storage_page:?}, page_map {:?}",
+            self.apps_page_map
+        );
         true
     }
 
