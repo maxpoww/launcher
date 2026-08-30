@@ -35,7 +35,9 @@
 //! (its [`Health`] goes dark) instead of stalling the engine.
 //!
 //! Implemented today: the spine (aggregator + `watch` + [`Collector`] trait)
-//! and **Layer 1 (Hyprland)**. Layers 2–4 land next behind the same trait.
+//! and all nine collectors (hyprland, system, git, media, bridge, selection,
+//! audio, deploy, notifications), plus the [`Mind`] decision layer. What
+//! remains is the *consumer*: the waverunner daemon does not subscribe yet.
 //!
 //! ## Usage
 //!

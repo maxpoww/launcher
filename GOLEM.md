@@ -26,8 +26,8 @@ you're doing and offers exactly what helps, then gets out of the way.
 It is not a launcher, a menu, or a widget board. It's an ambient layer of
 affordances (window controls, clipboard, notifications, and more to come) that
 appear where they belong, move with intent, and never yank you out of flow. The
-canonical definition and its five pillars live in the `options-definition`
-memory; the motion/feel language lives in `options-ux-guidelines`.
+canonical definition lives in the manifesto (`~/Golem/Golem.md`, published at
+golem-os.com); the motion/feel language lives in the `animation` skill.
 
 ## The Brain — `options-engine`
 
@@ -66,8 +66,9 @@ One layer-shell surface, one event loop, idle at rest. This repo *is* the body.
 - `core` — config, `.desktop` index, fuzzy search.
 - `proto` / `client` — the `waverunner-ctl` socket protocol + CLI.
 
-See `CLAUDE.md` "where things live" for the per-file map, and
-`IMPLEMENTATION_PLAN.md` / the `options-roadmap` memory for phased status.
+See `CLAUDE.md` "where things live" for the per-file map. Phased status:
+**`~/Golem/roadmap.md`** (the living plan, S1–S11 + W-A);
+`IMPLEMENTATION_PLAN.md` is the P1–P4 historical record.
 
 ---
 
@@ -94,5 +95,6 @@ See `CLAUDE.md` "where things live" for the per-file map, and
 - **materials** — the wgpu/WGSL render architecture + shader-validation loop.
 - **wayland-system** — Wayland/wlr/Hyprland IPC + NixOS install flow + safety.
 
-Plus `docs/hypr-api.md` (the compositor's dispatchers) and the memory notes
-(`golem-project`, `options-definition`, `options-engine`, `options-roadmap`, …).
+Plus `docs/hypr-api.md` (the compositor's dispatchers) and the planning
+directory **`~/Golem/`** (manifesto, roadmap, features/apps/android strategy,
+per-section todos) — read `roadmap.md` + the current todo first.
