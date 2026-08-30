@@ -138,6 +138,16 @@ mod tests {
     }
 
     #[test]
+    fn on_path_resolves_absolute_and_searches_path() {
+        // Absolute paths short-circuit the PATH walk.
+        assert!(on_path("/bin/sh"));
+        assert!(!on_path("/definitely/not/a/binary"));
+        // `sh` exists on any PATH these tests run under; gibberish doesn't.
+        assert!(on_path("sh"));
+        assert!(!on_path("waverunner-no-such-binary-xyzzy"));
+    }
+
+    #[test]
     fn banner_quotes_args_and_matches_placeholders() {
         let with = banner_cmd("ripgrep", Some("14.1"), "rg");
         // Three %s placeholders, three quoted args, trailing `;`.
