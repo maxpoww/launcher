@@ -437,9 +437,12 @@ fn main() -> anyhow::Result<()> {
         pending_icons: None,
         apps_fingerprint: None,
         brain: None,
-        battery_low: false,
+        battery_alarm: battery::BatteryAlarm::default(),
+        battery_beat_epoch: None,
+        battery_beat_pending: false,
         battery_suspend_armed: true,
-        battery_last_suspend: None,
+        battery_aware_until: None,
+        battery_last_snapshot: None,
         restore_workspace: None,
         close_site: None,
         hover: None,
@@ -1074,11 +1077,15 @@ pub struct App {
     /// Surfaces read it instead of sensing for themselves whenever its
     /// health says the relevant layer is alive (see `brain.rs`).
     brain: Option<options_engine::ContextState>,
-    /// Battery OPTION v1 (see `battery.rs`): red badge on the clock while
-    /// ≤10% discharging; ≤5% suspends (armed/latched with a wake grace).
-    battery_low: bool,
+    /// Battery OPTION (see `battery.rs`): the alarm ladder state, the beat
+    /// animation epoch + frame latch, the suspend arm, the post-wake
+    /// awareness window, and the wake detector's last-snapshot stamp.
+    battery_alarm: battery::BatteryAlarm,
+    battery_beat_epoch: Option<Instant>,
+    battery_beat_pending: bool,
     battery_suspend_armed: bool,
-    battery_last_suspend: Option<Instant>,
+    battery_aware_until: Option<Instant>,
+    battery_last_snapshot: Option<Instant>,
     /// Workspace the user was on when the keyboard grab began, paired with
     /// [`Self::restore_window`] — so a close can tell "still where they
     /// opened us" from "travelled while we were open" (rofi behavior).

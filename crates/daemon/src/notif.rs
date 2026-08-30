@@ -69,6 +69,10 @@ const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
 /// Matched to the user's Hyprland active window-border colour (`#ffbe98`, a warm
 /// peach) so the unread cue speaks the same accent as the rest of the desktop.
 const AMBER: [f32; 4] = [1.0, 0.745, 0.596, 1.0];
+/// The battery alarm's red (the bell accent while low/beating/critical).
+const BATTERY_RED: [f32; 4] = [0.92, 0.26, 0.21, 1.0];
+/// fa-triangle-exclamation — the battery awareness symbol.
+const GLYPH_BATTERY_WARN: &str = "\u{f071}";
 
 /// Glide rate of the two morph progresses (exponential approach; a springier
 /// curve with overshoot is a later polish pass).
@@ -1920,7 +1924,24 @@ impl App {
         // big pill slides out (`peek_t` → 1) — on hover OR an auto-pop — the bell's
         // amber fades to nothing (the "+N" badge carries it there instead), and it
         // returns as the preview collapses.
-        if self.notif_unread() > 0 {
+        // Battery alarm owns the bell's accent when active (`battery.rs`):
+        // the fill and glow go RED — steady at Low, breathing at Beating+ —
+        // replacing (not stacking on) the unread amber. Always full strength:
+        // a dying battery outranks the peek fade.
+        if let Some(s) = self.battery_pulse() {
+            let red_fill = [BATTERY_RED[0], BATTERY_RED[1], BATTERY_RED[2], 0.78];
+            base = lerp4(base, red_fill, 0.55 * s * alpha);
+            let g = 0.30 * s * alpha;
+            if g > 0.001 {
+                scene.overlay_shadows.push(ShadowInst {
+                    rect,
+                    radius,
+                    blur: 3.0,
+                    color: [BATTERY_RED[0], BATTERY_RED[1], BATTERY_RED[2], g],
+                    edges: [1.0, 1.0, 1.0, 1.0],
+                });
+            }
+        } else if self.notif_unread() > 0 {
             // Unread accent strength (shared by bell, muted bell, and "+N" badge).
             // Starting strong to match the window-border colour; will be softened.
             let soft = 1.0;
@@ -1954,7 +1975,11 @@ impl App {
         // `fa-bell-slash` sits smaller in its em box than `fa-bell`, so scale the
         // muted glyph up to read at the same size as the open bell (the normal
         // bell keeps its exact original metrics).
-        let (glyph, gpx, glh) = if self.notif.muted {
+        // Battery Critical (or the post-wake awareness pause) replaces the
+        // bell with the warning triangle — the awareness symbol.
+        let (glyph, gpx, glh) = if self.battery_warning() {
+            (GLYPH_BATTERY_WARN, FONT_PX, LINE_PX)
+        } else if self.notif.muted {
             (GLYPH_BELL_SLASH, FONT_PX * 1.4, LINE_PX * 1.4)
         } else {
             (GLYPH_BELL, FONT_PX, LINE_PX)
