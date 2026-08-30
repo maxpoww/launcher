@@ -1505,9 +1505,12 @@ impl App {
     /// The indexer thread finished: adopt the entries and upload icons
     /// (or stash them until the renderer exists).
     /// The compositor overview opened/closed (waveview writes the ctl
-    /// verbs). Open: hide the dock, conceal the topbar, deafen reveals.
-    /// Close: restore the topbar and let intellihide re-evaluate the zone
-    /// (a parked dock returns on its own if the zone is free).
+    /// verbs). Open: hide the dock and deafen its reveals — but the topbar
+    /// STAYS (waveview lays its grid below the bar's reserved strip, so
+    /// OPTIONS keeps its own place over the overview), un-concealing even
+    /// over a fullscreen window, and the window pill becomes
+    /// overview-aware. Close: restore, and let intellihide re-evaluate
+    /// the zone (a parked dock returns on its own if the zone is free).
     fn set_overview(&mut self, active: bool) {
         if self.overview_active == active {
             return;
@@ -1517,14 +1520,13 @@ impl App {
         if active && self.ui.target() != Target::Hidden {
             self.handle_command(Command::Hide);
         }
-        // Topbar conceal mirrors the fullscreen conceal (shared flag OR).
-        self.options_hidden = self.options_fullscreen || active;
+        // The bar is always visible over the overview (even when the
+        // focused window is fullscreen — the overview covers it anyway).
+        self.options_hidden = self.options_fullscreen && !active;
         self.options_reveal_deadline = None;
         self.options_hide_deadline = None;
-        if active {
-            self.options_hover = None;
-        }
         self.sync_options_input();
+        self.refresh_options_content();
         self.draw_options();
         self.sync_input_region();
         if !active {

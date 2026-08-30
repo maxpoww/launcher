@@ -725,6 +725,21 @@ impl App {
         if self.options_layer.is_none() {
             return;
         }
+        // Overview-aware: while waveview owns the screen the pill's focus IS
+        // the overview — no window address (the control pills stand down)
+        // and no fullscreen conceal.
+        if self.overview_active {
+            let title = Some("Overview".to_owned());
+            if self.options_active_addr.is_some() || self.options_title != title {
+                self.options_active_addr = None;
+                self.options_title = title;
+                self.set_clip_link_available(false);
+                self.measure_options_text();
+                self.sync_options_input();
+                self.draw_options();
+            }
+            return;
+        }
         let (addr, title, class, fullscreen) = match self.brain.as_ref() {
             Some(ctx) if crate::brain::hypr_alive(ctx) => {
                 let w = &ctx.window;
@@ -773,8 +788,9 @@ impl App {
         self.options_fullscreen = fs;
         self.options_reveal_deadline = None;
         self.options_hide_deadline = None;
-        // The overview conceal (main.rs::set_overview) shares this flag.
-        self.options_hidden = fs || self.overview_active;
+        // While the overview is open the bar always shows (it has its own
+        // reserved strip there) — fullscreen conceal resumes after.
+        self.options_hidden = fs && !self.overview_active;
         if fs {
             self.options_hover = None;
         }
