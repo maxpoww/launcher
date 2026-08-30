@@ -159,9 +159,11 @@ impl PagedList {
 
     /// Cascade over-full pages forward so every page shows at most
     /// `cap` items, counting only ids `visible` accepts (hidden ids
-    /// occupy no display cell and ride along). Then fold pages with no
-    /// visible ids into a neighbor so they can't fragment the layout.
-    /// Under-full pages stay under-full. Returns whether anything moved.
+    /// occupy no display cell and ride along). Hidden-only pages are
+    /// kept (the display skips them; folding them on a transient
+    /// visibility flicker destroyed user layouts). Truly-empty pages
+    /// drop. Under-full pages stay under-full. Returns whether anything
+    /// moved.
     pub fn normalize(&mut self, cap: usize, visible: impl Fn(&str) -> bool) -> bool {
         let cap = cap.max(1);
         let mut changed = false;
@@ -191,25 +193,15 @@ impl PagedList {
             }
             i += 1;
         }
-        // Hidden-only pages display as nothing: fold them into the
-        // previous page's tail (the first page into the next head).
-        let mut i = 1;
-        while i < self.pages.len() {
-            if self.pages[i].iter().any(|id| visible(id)) {
-                i += 1;
-            } else {
-                let orphan = self.pages.remove(i);
-                self.pages[i - 1].extend(orphan);
-                changed = true;
-            }
-        }
-        while self.pages.len() > 1 && !self.pages[0].iter().any(|id| visible(id)) {
-            let orphan = self.pages.remove(0);
-            for (k, id) in orphan.into_iter().enumerate() {
-                self.pages[0].insert(k, id);
-            }
-            changed = true;
-        }
+        // Hidden-only pages are NOT folded away. `visible` reflects the
+        // *current* classification, and that flickers (a webapp hopping
+        // between grid and Install while managed-state settles, pinned or
+        // grouped ids, a partial scan) — folding on a transient
+        // permanently shredded user-made pages and saved the damage
+        // ("moved Messenger to a new page; next day it was back"). The
+        // display already skips all-hidden pages, so keeping them in
+        // storage costs nothing and the page reappears intact when its
+        // members return. Only truly-empty pages drop.
         changed |= self.drop_empty_pages();
         changed
     }
@@ -311,14 +303,20 @@ mod tests {
     }
 
     #[test]
-    fn normalize_cascades_and_folds_hidden_only_pages() {
+    fn normalize_cascades_but_keeps_hidden_only_pages() {
         let mut l = list(&[&["a", "h1", "b", "h2", "c", "d"], &["h3"]]);
         assert!(l.normalize(3, |id| !id.starts_with('h')));
-        // d (4th visible) cascades; h3's page folds into its neighbor.
+        // d (4th visible) cascades into h3's page; the hidden-only page
+        // itself is preserved — a transient visibility flicker must never
+        // destroy a user-made page (it reappears when members return).
         assert_eq!(
             l.pages(),
             &[vec!["a", "h1", "b", "h2", "c"], vec!["d", "h3"]]
         );
+        // A page that is hidden-only stays; only truly-empty pages drop.
+        let mut l2 = list(&[&["a"], &["h1"], &["b"]]);
+        assert!(!l2.normalize(3, |id| !id.starts_with('h')));
+        assert_eq!(l2.pages(), &[vec!["a"], vec!["h1"], vec!["b"]]);
     }
 
     #[test]

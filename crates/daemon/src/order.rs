@@ -71,8 +71,9 @@ impl OrderDb {
     }
 
     /// Cascade over-full pages by the display capacity, counting only
-    /// visible ids; fold hidden-only pages into a neighbor (see
-    /// [`PagedList::normalize`]).
+    /// visible ids; hidden-only pages are preserved (see
+    /// [`PagedList::normalize`] — folding them on a classification
+    /// flicker used to shred user-made pages).
     pub fn normalize(&mut self, cap: usize, visible: impl Fn(&str) -> bool) {
         if self.list.normalize(cap, visible) {
             self.save();
