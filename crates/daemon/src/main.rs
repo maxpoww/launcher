@@ -428,6 +428,7 @@ fn main() -> anyhow::Result<()> {
         group_origin: None,
         closing_members: None,
         pending_icons: None,
+        apps_fingerprint: None,
         hover: None,
         pointer_pos: None,
         pointer_inside_card: false,
@@ -1044,6 +1045,9 @@ pub struct App {
     closing_members: Option<Vec<usize>>,
     /// Icons that arrived before the renderer existed.
     pending_icons: Option<Vec<Vec<u8>>>,
+    /// Fingerprint of the last consumed [`apps::LoadedApps`], to skip the
+    /// full rebuild + icon re-upload when a rescan reproduces the same index.
+    apps_fingerprint: Option<u64>,
     /// Item currently under the pointer.
     hover: Option<Hit>,
     /// Pointer position in surface coordinates, while inside.
@@ -1436,6 +1440,20 @@ impl App {
     /// (or stash them until the renderer exists).
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
         info!("app index ready: {} entries", loaded.entries.len());
+
+        // The common case: a summon-triggered rescan that changed nothing.
+        // Swap in the fresh file index and re-rank, but skip the rebuild —
+        // its wholesale icon re-upload + label-cache clear cost one long
+        // frame that used to land as a visible cut in the open animation,
+        // and the gesture drop below would cancel an innocent in-flight drag.
+        if self.apps_fingerprint == Some(loaded.fingerprint) {
+            debug!("app index unchanged; skipping rebuild");
+            self.file_index = loaded.files;
+            self.refilter();
+            self.schedule_frame();
+            return;
+        }
+        self.apps_fingerprint = Some(loaded.fingerprint);
 
         // Sort by descending launch frequency so the most-used entries
         // appear first in both the dock and the unfiltered grids. Ties

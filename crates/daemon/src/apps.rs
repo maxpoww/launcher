@@ -105,6 +105,43 @@ pub struct LoadedApps {
     pub cli_ids: Vec<String>,
     /// Home-tree file index for search (fresh every rescan).
     pub files: Vec<FileEntry>,
+    /// Content fingerprint of everything *except* `files` (entries, kinds,
+    /// icon bytes, placeholders, cli ids), computed on the indexer thread.
+    /// Most rescans (every dock summon requests one) reproduce the identical
+    /// index; the event loop compares this against the previous load and
+    /// skips the expensive rebuild — the full-array icon re-upload +
+    /// label-cache clear used to land mid-open-animation as one long frame
+    /// (SH: "box opening cuts at ~1/4").
+    pub fingerprint: u64,
+}
+
+/// Hash the parts of a load that would require the event loop to rebuild
+/// state and re-upload textures. `files` is deliberately excluded — it is
+/// fresh every scan and cheap to swap in.
+fn load_fingerprint(
+    entries: &[AppEntry],
+    kinds: &[EntryKind],
+    icons: &[Vec<u8>],
+    placeholders: &[bool],
+    cli_ids: &[String],
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for e in entries {
+        e.id.hash(&mut h);
+        e.name.hash(&mut h);
+        e.exec.hash(&mut h);
+        e.description.hash(&mut h);
+    }
+    for k in kinds {
+        std::mem::discriminant(k).hash(&mut h);
+    }
+    for i in icons {
+        i.hash(&mut h);
+    }
+    placeholders.hash(&mut h);
+    cli_ids.hash(&mut h);
+    h.finish()
 }
 
 /// Handle to the long-lived indexer thread.
@@ -210,6 +247,8 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                     scanned - started,
                     scanned.elapsed()
                 );
+                let fingerprint =
+                    load_fingerprint(&entries, &kinds, &icons, &placeholders, &cli_ids);
                 if results
                     .send(LoadedApps {
                         entries,
@@ -218,6 +257,7 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                         placeholders,
                         cli_ids,
                         files,
+                        fingerprint,
                     })
                     .is_err()
                 {
