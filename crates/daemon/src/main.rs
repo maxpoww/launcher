@@ -1531,6 +1531,15 @@ impl App {
         self.sync_input_region();
         if !active {
             self.on_layout_changed();
+            // The workspace-switch event often lands BEFORE this overview-off
+            // (two racing channels): the zone-free reveal was gated then, and
+            // on_layout_changed above early-outs because zone_free didn't
+            // change again. If the zone is free now, show the dock — this is
+            // the "jumped to an empty workspace" landing (Max: the dock must
+            // greet you there, not hide until an edge touch).
+            if self.zone_free && self.ui.target() == Target::Hidden {
+                self.handle_command(Command::Show);
+            }
         }
     }
 
