@@ -2747,29 +2747,17 @@ impl App {
             } else {
                 // We-initiated close (a click-elsewhere close cleared
                 // restore_window in `leave` before getting here): capture
-                // where the user IS right now, before the release below —
-                // the compositor's release-refocus returns to the *origin*
-                // window, yanking the workspace back within this same tick.
-                // If they travelled while we were open, pre-seed focus onto
-                // the current workspace's window while we still hold the
-                // grab, so that release-refocus lands here instead (rofi
-                // behavior); the settle re-asserts in case it's dropped.
+                // where the user IS — workspace and its last window — before
+                // the release, while it still reflects their travel. The
+                // settle-time refocus in frame.rs uses it to stay on a
+                // travelled workspace instead of yanking back to the origin.
                 if self.restore_window.is_some() {
                     self.close_site = hypr::active_workspace();
-                    if let Some((ws, last)) = &self.close_site {
-                        if Some(*ws) != self.restore_workspace {
-                            if let Some(last) = last {
-                                debug!("travelled to ws {ws}; pre-seeding focus to {last}");
-                                hypr::focus_window(last);
-                            }
-                        }
-                    }
                 }
-                // Release the grab. The same-workspace hand-back happens in
-                // the keyboard `leave` handler → settle, which fires once
-                // the compositor has actually taken our keyboard away —
-                // dispatching that focus before then races the release and
-                // Hyprland drops it.
+                // Release the grab. The hand-back itself happens at the
+                // settle (frame.rs), once the compositor has actually taken
+                // our keyboard away — dispatching a focus before that races
+                // the release and Hyprland drops it.
                 surface::set_interactive(&self.layer, false);
             }
             self.interactive = interactive;
@@ -3192,30 +3180,6 @@ impl CompositorHandler for App {
             // clobbered by follow-mouse. Without this, closing the box left
             // keyboard focus on *nothing* whenever the pointer wasn't parked
             // over a window (SH: "the focus after opening").
-            match (self.pending_refocus.take(), self.close_site.take()) {
-                (Some(addr), site) if self.ui.target() != Target::Open => {
-                    match site {
-                        // Travelled while open: stay there — undo the
-                        // compositor's release-yank if the pre-seed was
-                        // dropped, and seat the keyboard on that
-                        // workspace's window.
-                        Some((ws, last)) if Some(ws) != self.restore_workspace => {
-                            debug!("close-site ws {ws}: staying (origin dropped)");
-                            hypr::focus_workspace(ws);
-                            if let Some(last) = last {
-                                hypr::focus_window(&last);
-                            }
-                        }
-                        // Same workspace: classic hand-back to the origin
-                        // window (seat re-routed via the focus detour).
-                        _ => {
-                            debug!("returning focus to {addr}");
-                            hypr::focus_window(&addr);
-                        }
-                    }
-                }
-                _ => {} // reopened before settling: the new grab owns focus now
-            }
             debug!("settled in {:?}, going idle", self.ui.target());
         }
     }

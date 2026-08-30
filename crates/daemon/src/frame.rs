@@ -211,13 +211,26 @@ impl App {
             // mouse moves.
             self.reconcile_stale_pointer();
             // The layer just shrank off the cursor and stopped committing
-            // frames. Force focus back to the window we opened over now:
-            // this is the quiet moment where a forced re-bind of the
-            // keyboard seat won't be clobbered by follow_mouse or an
-            // in-flight surface commit.
+            // frames. Force focus back now: this is the quiet moment where a
+            // forced re-bind of the keyboard seat won't be clobbered by
+            // follow_mouse or an in-flight surface commit. Rofi behavior
+            // (SH): if the user travelled to another workspace while we were
+            // open, they STAY there — seat the keyboard on that workspace's
+            // window instead of yanking them back to the origin.
             if let Some(addr) = self.pending_refocus.take() {
-                debug!("settled ({:?}); forcing focus to {addr}", self.ui.target());
-                hypr::focus_window(&addr);
+                match self.close_site.take() {
+                    Some((ws, last)) if Some(ws) != self.restore_workspace => {
+                        debug!("settled ({:?}); staying on travelled ws {ws}", self.ui.target());
+                        hypr::focus_workspace(ws);
+                        if let Some(last) = last {
+                            hypr::focus_window(&last);
+                        }
+                    }
+                    _ => {
+                        debug!("settled ({:?}); forcing focus to {addr}", self.ui.target());
+                        hypr::focus_window(&addr);
+                    }
+                }
             }
             // A box close settling to the dock rests a beat, then hides
             // (the timer's guard keeps it if the pointer is on the dock).
