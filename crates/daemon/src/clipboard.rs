@@ -37,7 +37,7 @@ use crate::animation::{ease_toward, lerp};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
     hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD,
-    GLYPH_COPY, GLYPH_CUT, GLYPH_SELECT_ALL, LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
+    GLYPH_COPY, LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
 
@@ -182,20 +182,8 @@ const LEAVE_HOLD: Duration = Duration::from_millis(300);
 /// settle), the same single-period pulse as the bell's muted-arrival blink.
 const BEAT_DURATION: Duration = Duration::from_millis(500);
 const BEAT_PERIOD: Duration = Duration::from_millis(500);
-/// Gap between the copy/cut/select action pills (and from the small pill).
-pub(crate) const ACTION_GAP: f32 = 6.0;
-/// After a selection, the action pills show for this long then fade — a
-/// confirming glance. They don't linger (deselect can't be detected: the
-/// primary selection persists by design), but they re-summon whenever the
-/// pointer returns to the clipboard corner while a selection is in play. Reset
-/// while you keep selecting, and held while the pointer is on the cluster.
-const SHOW_GRACE: Duration = Duration::from_millis(2600);
-/// The three selection-action pills, in slide-out order.
-pub(crate) const ACTIONS: [(PillId, &str); 3] = [
-    (PillId::ClipCopy, GLYPH_COPY),
-    (PillId::ClipCut, GLYPH_CUT),
-    (PillId::ClipSelectAll, GLYPH_SELECT_ALL),
-];
+/// Gap between the copy-link pill and the small clipboard pill.
+pub(crate) const LINK_GAP: f32 = 6.0;
 
 /// On-disk history store (in the daemon's XDG data dir, beside the notif one).
 const HISTORY_FILE: &str = "clipboard-history.json";
@@ -342,9 +330,6 @@ pub enum ClipEvent {
     /// A new clip landed on the clipboard. Boxed: `ClipEntry` is large relative
     /// to the other variants.
     Captured(Box<ClipEntry>),
-    /// The *primary* (highlight) selection went non-empty (`true`, the user just
-    /// selected something) or empty (`false`). Drives the copy/cut/select pills.
-    Selection(bool),
     /// An app read (pasted) the clip we're currently serving via the native
     /// data-control source — best-effort, debounced, our own re-reads excluded.
     /// Recorded against the current clip (where & when).
@@ -359,11 +344,6 @@ pub enum ClipCommand {
     /// (`x-special/gnome-copied-files`) *and* editors (`text/plain`) alike.
     /// Boxed: `ClipEntry` is large relative to the other variants.
     Copy(Box<ClipEntry>),
-    /// Copy the current *primary* (highlight) selection to the clipboard — the
-    /// copy-pill action. Robust: it lifts the selected text straight from the
-    /// primary selection rather than injecting a Ctrl+C into the focused app
-    /// (whose active highlight may already be gone).
-    CopySelection,
 }
 
 /// Handle to the clipboard worker: send [`ClipCommand`]s. Dropping it stops the
@@ -391,20 +371,14 @@ pub fn spawn(events: Sender<ClipEvent>) -> ClipHandle {
     ClipHandle { tx }
 }
 
-/// Worker entry: two detached watch loops feeding `events` (the clipboard and
-/// the primary/highlight selection), and this thread serving copy-back commands
-/// until the handle is dropped.
+/// Worker entry: a detached clipboard watch loop feeding `events`, and this
+/// thread serving copy-back commands until the handle is dropped.
 fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) {
-    let primary_events = events.clone();
     let source_events = events.clone();
     std::thread::Builder::new()
         .name("clipboard-watch".into())
         .spawn(move || watch_loop(events))
         .expect("spawn clipboard watch thread");
-    std::thread::Builder::new()
-        .name("clipboard-primary".into())
-        .spawn(move || primary_watch_loop(primary_events))
-        .expect("spawn clipboard primary thread");
 
     // A native wlr-data-control source lets us own the selection with *every*
     // MIME type at once (so a file clip pastes into thunar AND editors). If the
@@ -423,72 +397,8 @@ fn run_worker(events: Sender<ClipEvent>, commands: mpsc::Receiver<ClipCommand>) 
     while let Ok(cmd) = commands.recv() {
         match cmd {
             ClipCommand::Copy(entry) => serve(clip_offers(&entry)),
-            ClipCommand::CopySelection => {
-                let text = paste_primary();
-                if !text.trim().is_empty() {
-                    serve(text_offers(&text));
-                }
-            }
         }
     }
-}
-
-/// Watch the *primary* (highlight) selection and report whether it holds text —
-/// this is the "brain" detecting that the user selected something. We only need
-/// the presence, never the content, so nothing is stored. Respawns on
-/// exit/error like the clipboard watcher.
-fn primary_watch_loop(events: Sender<ClipEvent>) {
-    // The last selection we reported (`None` = empty), by content hash — so each
-    // *distinct* new selection re-triggers the pills, while an app re-asserting
-    // the identical selection doesn't. (Edge-only detection was wrong: the
-    // primary stays non-empty across selections, so it fired only once.)
-    let mut last: Option<u64> = None;
-    loop {
-        match run_primary_watch(&events, &mut last) {
-            Ok(false) => return, // UI gone
-            Ok(true) => debug!("clipboard: primary watch ended; respawning"),
-            Err(e) => debug!("clipboard: primary watch error: {e}"),
-        }
-        std::thread::sleep(RESPAWN);
-    }
-}
-
-fn run_primary_watch(events: &Sender<ClipEvent>, last: &mut Option<u64>) -> std::io::Result<bool> {
-    let mut child = Command::new("wl-paste")
-        .args(["--primary", "--watch", "sh", "-c", "printf '\\n'"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("no stdout"))?;
-    let reader = BufReader::new(stdout);
-    for line in reader.lines() {
-        line?;
-        // Re-read in Rust (a trigger fires on every selection change). Hash the
-        // content so a genuinely new selection lands even while primary stays
-        // non-empty; identical re-asserts are dropped.
-        let text = paste_primary();
-        let hash = (!text.trim().is_empty()).then(|| hash_bytes(text.as_bytes()));
-        if hash == *last {
-            continue;
-        }
-        *last = hash;
-        if events.send(ClipEvent::Selection(hash.is_some())).is_err() {
-            let _ = child.kill();
-            return Ok(false);
-        }
-    }
-    let _ = child.wait();
-    Ok(true)
-}
-
-/// Read the primary selection as text (empty on error / no owner).
-fn paste_primary() -> String {
-    run_stdout(Command::new("wl-paste").args(["--primary", "--no-newline"]))
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default()
 }
 
 /// Set the clipboard to `data` with `wl-copy` (which forks to serve the
@@ -1073,20 +983,13 @@ pub(crate) struct ClipState {
     hold_deadline: Option<Instant>,
     /// When the fresh-clip beat on the small pill ends (`None` = not beating).
     blink_until: Option<Instant>,
-    // ---- selection action pills (copy / cut / select) ----
-    /// A selection context is in play (from a fresh selection until the focused
-    /// window changes or an action is taken). While set, moving the pointer to
-    /// the clipboard corner re-summons the pills; the peek preview is suppressed.
-    selection_present: bool,
-    /// Whether the pills are currently shown (the animation target for
-    /// `actions_t`). Toggles within a `selection_present` context: on after a
-    /// selection or a corner hover, off after the show grace elapses un-hovered.
-    selection_active: bool,
-    /// Slide-out progress of the action pills: 0 = tucked behind the small pill,
-    /// 1 = fully fanned out to the right.
-    actions_t: f32,
-    /// When the shown pills fade if the pointer hasn't engaged them.
-    grace_deadline: Option<Instant>,
+    // ---- copy-link affordance ----
+    /// The focused window is a browser (has a copyable page URL), so the
+    /// "copy link" pill should be out. Set from `refresh_options_content`.
+    link_available: bool,
+    /// Slide-out progress of the copy-link pill: 0 = tucked behind the small
+    /// pill, 1 = fully out to its right.
+    link_t: f32,
     // ---- history box ----
     /// History drawer open (intent), set the instant a scroll opens it.
     pub(crate) expanded: bool,
@@ -1245,10 +1148,8 @@ impl ClipState {
             frame_pending: false,
             hold_deadline: None,
             blink_until: None,
-            selection_present: false,
-            selection_active: false,
-            actions_t: 0.0,
-            grace_deadline: None,
+            link_available: false,
+            link_t: 0.0,
             expanded: false,
             expand_t: 0.0,
             box_h: 0.0,
@@ -1328,7 +1229,6 @@ impl App {
     /// (newest first, de-duplicated) and persist.
     pub(crate) fn on_clip_event(&mut self, ev: ClipEvent) {
         match ev {
-            ClipEvent::Selection(present) => self.on_clip_selection(present),
             ClipEvent::Pasted => self.record_clip_paste(),
             ClipEvent::Captured(entry) => {
                 let mut entry = *entry;
@@ -2311,12 +2211,6 @@ impl App {
             return;
         }
         self.clip.hold_deadline = None;
-        // The drawer takes over the corner from any selection-pill context, so
-        // the peek isn't suppressed under the open box (which would leave it a
-        // tall, thin stripe).
-        self.clip.selection_present = false;
-        self.clip.selection_active = false;
-        self.clip.grace_deadline = None;
         self.clip.peek_reveal = true; // keep the preview fully out under the box
         self.clip.expanded = true;
         self.clip.box_h = self.clip_full_h();
@@ -2421,6 +2315,22 @@ impl App {
     fn clip_detail_entry(&self) -> Option<&ClipEntry> {
         let id = self.clip.detail_id?;
         self.clip.history.iter().find(|e| e.id == id)
+    }
+
+    /// Whether a copied link's `host` belongs to an installed webapp — so "Open"
+    /// routes it to that webapp rather than the plain browser. Hosts compared
+    /// www-normalized and suffix-tolerant (a `youtube.com` webapp covers
+    /// `www.youtube.com` / `music.youtube.com` links).
+    fn link_has_webapp(&self, host: &str) -> bool {
+        let norm = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_owned();
+        let h = norm(host);
+        self.entries.iter().any(|e| {
+            e.id.starts_with("webapp-")
+                && crate::webapps::exec_app_host(&e.exec).is_some_and(|wh| {
+                    let wh = norm(wh);
+                    h == wh || h.ends_with(&format!(".{wh}")) || wh.ends_with(&format!(".{h}"))
+                })
+        })
     }
 
     /// The dictionary panel's "‹ Back" button rect — same seat as the detail
@@ -3120,19 +3030,28 @@ impl App {
                 true
             }
             ClipHit::DetailOpen => {
-                // Open the link in the default browser, then dismiss the picker.
+                // Open the link where it belongs, then dismiss the picker. If its
+                // host matches an installed webapp, open it *as that webapp*
+                // (frameless, shared profile — logged in, uBlock, copy-link), the
+                // way notifications route to their webapp. Otherwise fall back to
+                // the default browser.
                 let url = self
                     .clip_detail_entry()
                     .filter(|e| e.is_link())
                     .map(|e| e.text.trim().to_owned());
                 if let Some(url) = url {
-                    let exec = format!("xdg-open {}", crate::launch::shell_quote(&url));
+                    let as_webapp = crate::webapps::url_host(&url)
+                        .is_some_and(|h| self.link_has_webapp(h));
+                    let exec = if as_webapp {
+                        crate::webapps::app_open_exec(&url)
+                    } else {
+                        format!("xdg-open {}", crate::launch::shell_quote(&url))
+                    };
                     if let Err(e) = crate::launch::launch(&exec, false, "") {
                         warn!("clip: open link failed: {e}");
-                    } else {
+                    } else if !as_webapp {
                         // Raise the browser so the opened tab comes to the front
-                        // (a running browser opens the tab in the background; a
-                        // cold launch focuses its own new window).
+                        // (the app-mode window focuses itself; the browser doesn't).
                         crate::hypr::focus_browser();
                     }
                 }
@@ -3387,27 +3306,6 @@ impl App {
     /// after the pointer leaves (mirrors the bell's peek). Hovering either the
     /// small pill or the box it reveals holds it open.
     pub(crate) fn update_clip_reveal(&mut self) {
-        // While a selection is in play, the clipboard corner is the action pills'
-        // home: hovering it (re-)summons them and holds them; moving away lets
-        // them fade after the grace. The history peek is suppressed in this mode.
-        // Never while the drawer is open, though — suppressing the peek there
-        // leaves `peek_reveal` false against an `expanded` box, i.e. a tall, thin
-        // stripe that never opens or closes.
-        if self.clip.selection_present && !self.clip.expanded {
-            if self.clip_cluster_hovered() {
-                self.clip.grace_deadline = None;
-                if !self.clip.selection_active {
-                    self.clip.selection_active = true;
-                    self.clip.peek_reveal = false;
-                    self.clip.last = None;
-                    self.schedule_clip_frame();
-                }
-            } else if self.clip.selection_active && self.clip.grace_deadline.is_none() {
-                self.arm_actions_grace();
-            }
-            return;
-        }
-        // Normal history peek (no selection context).
         let on = matches!(
             self.options_hover,
             Some(PillId::Clipboard | PillId::ClipboardBox)
@@ -3427,97 +3325,33 @@ impl App {
         }
     }
 
-    /// A new selection landed (the `--watch` fires on every primary change):
-    /// open the action pills and (re)start their fade grace. `present == false`
-    /// (a rare clear, for apps that do clear their primary) ends the context.
-    fn on_clip_selection(&mut self, present: bool) {
-        // Don't pop the action pills over the open history box.
-        if self.clip.expanded {
-            return;
-        }
-        if !present {
-            self.end_clip_selection();
-            return;
-        }
-        self.clip.selection_present = true;
-        self.clip.peek_reveal = false; // the preview yields to the actions
-        if !self.clip.selection_active {
-            self.clip.selection_active = true;
-            self.clip.last = None;
-            self.schedule_clip_frame();
-        }
-        self.arm_actions_grace();
-    }
-
-    /// After the show grace, fade the pills unless the pointer is on the cluster.
-    /// The selection *context* stays, so a corner hover re-summons them.
-    fn arm_actions_grace(&mut self) {
-        let deadline = Instant::now() + SHOW_GRACE;
-        self.clip.grace_deadline = Some(deadline);
-        let timer = Timer::from_duration(SHOW_GRACE);
-        let _ = self
-            .loop_handle
-            .insert_source(timer, move |_, _, app: &mut App| {
-                if app.clip.grace_deadline == Some(deadline) {
-                    app.clip.grace_deadline = None;
-                    if !app.clip_cluster_hovered() {
-                        app.collapse_clip_actions();
-                    }
-                }
-                TimeoutAction::Drop
-            });
-    }
-
-    /// Fade the pills out but keep the selection context (re-summonable).
-    fn collapse_clip_actions(&mut self) {
-        if self.clip.selection_active {
-            self.clip.selection_active = false;
+    /// Set whether the focused app has a copyable link (a browser is up), sliding
+    /// the copy-link pill in/out. Called from `refresh_options_content` on focus
+    /// changes; only kicks a frame when the state actually flips.
+    pub(crate) fn set_clip_link_available(&mut self, available: bool) {
+        if self.clip.link_available != available {
+            self.clip.link_available = available;
             self.clip.last = None;
             self.schedule_clip_frame();
         }
     }
 
-    /// End the selection context entirely — the focused window changed or an
-    /// action was taken, so there's nothing left to act on. Also fades the pills.
-    pub(crate) fn end_clip_selection(&mut self) {
-        self.clip.selection_present = false;
-        self.clip.grace_deadline = None;
-        self.collapse_clip_actions();
+    /// Slide-out progress of the copy-link pill (0 hidden → 1 out), for the layout.
+    pub(crate) fn clip_link_t(&self) -> f32 {
+        self.clip.link_t
     }
 
-    /// Whether the pointer is over any clipboard element — the small pill, the
-    /// preview box, or one of the action pills.
-    fn clip_cluster_hovered(&self) -> bool {
-        matches!(
-            self.options_hover,
-            Some(
-                PillId::Clipboard
-                    | PillId::ClipboardBox
-                    | PillId::ClipCopy
-                    | PillId::ClipCut
-                    | PillId::ClipSelectAll
-            )
-        )
-    }
-
-    /// Slide-out progress of the action pills (0 hidden → 1 fanned out), read by
-    /// the layout to place them.
-    pub(crate) fn clip_actions_t(&self) -> f32 {
-        self.clip.actions_t
-    }
-
-    /// Draw one selection-action pill (copy / cut / select), fading + sliding in
-    /// with the shared `actions_t`. Emerges from behind the small pill, which
-    /// draws on top.
-    pub(crate) fn push_clip_action(&self, scene: &mut Scene, rect: Rect, id: PillId, glyph: &str) {
+    /// Draw the copy-link pill, fading + sliding in with `link_t`. Emerges from
+    /// behind the small clipboard pill, which draws on top.
+    pub(crate) fn push_clip_link(&self, scene: &mut Scene, rect: Rect, glyph: &str) {
         // Fade in a touch after the slide begins, so it reads as coming out from
         // under the small pill rather than blinking on.
-        let a = ((self.clip.actions_t - 0.15) / 0.6).clamp(0.0, 1.0);
+        let a = ((self.clip.link_t - 0.15) / 0.6).clamp(0.0, 1.0);
         if a <= 0.01 {
             return;
         }
         let bright = self.options_bar_is_bright();
-        let hovered = self.options_hover == Some(id);
+        let hovered = self.options_hover == Some(PillId::ClipCopyLink);
         let rect = if hovered { hover_grow(rect) } else { rect };
         let radius = rect.h / 2.0;
         push_neumorph(scene, rect, radius, bright, a);
@@ -3548,43 +3382,41 @@ impl App {
         });
     }
 
-    /// Click on an action pill.
+    /// Copy the focused browser's current URL to the clipboard — the copy-link
+    /// pill's action. The copied URL flows back through the watcher, landing in
+    /// the history as an (enriched) link clip.
     ///
-    /// - **Copy** lifts the selected text straight from the *primary* selection
-    ///   into the clipboard (robust — no dependence on the focused app still
-    ///   showing an active highlight, which is why injecting Ctrl+C was flaky).
-    /// - **Cut** does the same robust copy, then injects Ctrl+X so the app also
-    ///   removes the selection.
-    /// - **Select-all** injects Ctrl+A (only the app can do it), and keeps the
-    ///   pills up so the user can chain into copy.
-    ///
-    /// Copy/cut retire the pills once done; the resulting clipboard change flows
-    /// back through the watcher (history + beat).
-    pub(crate) fn clip_action(&mut self, id: PillId) {
-        match id {
-            PillId::ClipCopy => {
-                self.send_clip(ClipCommand::CopySelection);
-                self.end_clip_selection();
-            }
-            PillId::ClipCut => {
-                self.send_clip(ClipCommand::CopySelection);
-                crate::hypr::send_shortcut_active("CTRL", "x");
-                self.end_clip_selection();
-            }
-            PillId::ClipSelectAll => {
-                // Only the app can select-all; it updates the primary, so the
-                // watch re-fires and keeps the pills up for a follow-up copy.
-                crate::hypr::send_shortcut_active("CTRL", "a");
-                self.arm_actions_grace();
-            }
-            _ => {}
+    /// - **Full browser** (address bar): inject Ctrl+L (focus + select the URL),
+    ///   then Ctrl+C, then Escape, spaced so the browser processes one before the
+    ///   next.
+    /// - **App-mode webapp** (no address bar): read the live URL off-thread from
+    ///   the shared webapp Chrome's DevTools endpoint and put it on the clipboard.
+    pub(crate) fn copy_active_link(&mut self) {
+        let (class, title) = crate::hypr::active_window_where().unwrap_or_default();
+        if crate::webapps::is_app_window(&class) {
+            std::thread::spawn(move || {
+                match crate::webapps::active_app_url(&class, &title) {
+                    Some(url) => wl_copy("text/plain;charset=utf-8", url.as_bytes()),
+                    None => warn!("copy-link: no URL for webapp {class} (debug port up?)"),
+                }
+            });
+            return;
         }
+        crate::hypr::send_shortcut_active("CTRL", "l");
+        self.after_ms(90, |_| crate::hypr::send_shortcut_active("CTRL", "c"));
+        self.after_ms(200, |_| crate::hypr::send_shortcut_active("", "escape"));
     }
 
-    fn send_clip(&self, cmd: ClipCommand) {
-        if let Some(h) = &self.clip.handle {
-            h.send(cmd);
-        }
+    /// Run `f` on the event loop once, after `ms` milliseconds (one-shot timer).
+    fn after_ms(&self, ms: u64, f: impl FnOnce(&mut App) + 'static) {
+        let timer = Timer::from_duration(Duration::from_millis(ms));
+        let mut f = Some(f);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if let Some(f) = f.take() {
+                f(app);
+            }
+            TimeoutAction::Drop
+        });
     }
 
     /// After the pointer leaves, hold briefly then collapse the preview.
@@ -3649,10 +3481,10 @@ impl App {
         let target = if self.clip.peek_reveal { 1.0 } else { 0.0 };
         let (pt, moving) = ease_toward(self.clip.peek_t, target, dt, MORPH_RATE, MORPH_EPS);
         self.clip.peek_t = pt;
-        // Slide the action pills toward their selection-driven target.
-        let atarget = if self.clip.selection_active { 1.0 } else { 0.0 };
-        let (at, amoving) = ease_toward(self.clip.actions_t, atarget, dt, MORPH_RATE, MORPH_EPS);
-        self.clip.actions_t = at;
+        // Slide the copy-link pill toward its target (out when a browser is up).
+        let ltarget = if self.clip.link_available { 1.0 } else { 0.0 };
+        let (lt, lmoving) = ease_toward(self.clip.link_t, ltarget, dt, MORPH_RATE, MORPH_EPS);
+        self.clip.link_t = lt;
         // Grow / collapse the history drawer.
         let etarget = if self.clip.expanded { 1.0 } else { 0.0 };
         let (et, em) = ease_toward(self.clip.expand_t, etarget, dt, MORPH_RATE, MORPH_EPS);
@@ -3742,7 +3574,7 @@ impl App {
             self.clip.blink_until = None;
         }
         self.draw_options();
-        if moving || amoving || em || bm || lm || dm || dictm || dsm || mm || beating {
+        if moving || lmoving || em || bm || lm || dm || dictm || dsm || mm || beating {
             self.schedule_clip_frame();
         } else {
             self.clip.last = None;

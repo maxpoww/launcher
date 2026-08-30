@@ -12,10 +12,164 @@
 //! --disable-client-side-decorations` (the `--app-id` form Chrome installs
 //! keeps a title bar; only `--app=<URL>` honours the flag).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use tracing::{debug, info, warn};
 
 const BROWSER: &str = "google-chrome-stable";
 const FLAG: &str = "--disable-client-side-decorations";
+/// Fixed CDP port the shared webapp Chrome instance listens on, so the clipboard
+/// "copy link" pill can read an app-mode window's current URL (no address bar to
+/// `Ctrl+L`). See [`crate::clipboard`]'s `copy_active_link`.
+pub const CDP_PORT: u16 = 9333;
+
+/// Absolute path of the dedicated Chrome profile all webapps share — separate
+/// from the user's main browser so this one instance can own the debug port
+/// (`--remote-debugging-port`). Keeps the profile dir named `Default`, so the
+/// window `StartupWMClass` (`chrome-<host>__-Default`) is unchanged.
+fn profile_dir() -> PathBuf {
+    crate::persist::data_path("webapp-chrome")
+}
+
+/// Clear a *stale* Chrome `SingletonLock` from the shared webapp profile before
+/// a webapp launch, so webapps still open after an unclean Chrome exit or a
+/// machine rename. Called from [`crate::launch::launch`] for every launch; a
+/// no-op unless `exec` targets our profile dir, so ordinary app launches pay
+/// nothing.
+///
+/// Chrome encodes the lock as a `SingletonLock -> <hostname>-<pid>` symlink and
+/// refuses to start while it looks live. It only reclaims a lock that names a
+/// *dead* PID *on this host* — if the hostname differs it assumes the profile is
+/// open "on another computer" and never clears it, so a single rename (this box
+/// went `Golum` → `Golem`) permanently breaks every webapp launch. Because this
+/// profile is waverunner-owned and single-purpose, we can safely clear a lock
+/// that names a dead PID *or* a foreign host. A genuinely live instance (our
+/// hostname + a live PID) is left intact, so a second webapp window still
+/// attaches to it instead of spawning a rival process.
+pub fn clear_stale_profile_lock_for(exec: &str) {
+    let profile = profile_dir();
+    let Some(profile_str) = profile.to_str() else { return };
+    if !exec.contains(profile_str) {
+        return; // not a webapp launch
+    }
+    let lock = profile.join("SingletonLock");
+    let Ok(target) = std::fs::read_link(&lock) else { return }; // no lock → nothing to clear
+    let target = target.to_string_lossy();
+    if lock_is_live(&target, &hostname()) {
+        return;
+    }
+    match std::fs::remove_file(&lock) {
+        Ok(()) => info!("cleared stale Chrome webapp SingletonLock ({target})"),
+        Err(e) => warn!("could not clear stale webapp SingletonLock: {e}"),
+    }
+}
+
+/// Whether a `SingletonLock` target (`<hostname>-<pid>`) names a live instance
+/// on this host: our hostname AND a live PID. A foreign hostname is never live
+/// for us (the machine-rename bug), so we may reclaim it. Split on the LAST '-'
+/// since hostnames may contain '-' but a PID never does.
+fn lock_is_live(target: &str, this_host: &str) -> bool {
+    target
+        .rsplit_once('-')
+        .is_some_and(|(host, pid)| host == this_host && pid.parse::<i32>().is_ok_and(pid_alive))
+}
+
+/// This machine's hostname (Linux: `/proc/sys/kernel/hostname`).
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// Whether `pid` is a live process.
+fn pid_alive(pid: i32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Whether a window class is an app-mode Chrome webapp (`--app=` window), whose
+/// URL must be read via CDP — as opposed to a full browser (`google-chrome` /
+/// `firefox`), where the address bar (`Ctrl+L`) works. The `--app` WM_CLASS is
+/// always `chrome-<host>__-<profile>`.
+pub fn is_app_window(class: &str) -> bool {
+    class.starts_with("chrome-") && class.contains("__")
+}
+
+/// The host encoded in an app window's class (`chrome-www.youtube.com__-Default`
+/// → `www.youtube.com`).
+fn class_host(class: &str) -> Option<&str> {
+    class.strip_prefix("chrome-")?.split("__").next()
+}
+
+/// The host of an http(s) URL.
+pub fn url_host(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    Some(rest.split(['/', '?', '#']).next().unwrap_or(""))
+}
+
+/// The host of the `--app=<url>` in a webapp launcher's `Exec` line, for
+/// matching a copied link against an installed webapp.
+pub fn exec_app_host(exec: &str) -> Option<&str> {
+    let url = exec.split("--app=").nth(1)?.split_whitespace().next()?;
+    url_host(url)
+}
+
+/// Build the frameless app-mode launch command for `url_token` (already a single
+/// shell token) in the shared webapp profile + debug port — the one place the
+/// browser flags live, used by installed webapps and by opening a link "as a
+/// webapp".
+fn app_exec_with(url_token: &str) -> String {
+    format!(
+        "{BROWSER} --app={} {FLAG} --user-data-dir={} --remote-debugging-port={CDP_PORT}",
+        url_token,
+        profile_dir().display(),
+    )
+}
+
+/// Open an arbitrary link as a webapp (app-mode, shared profile) — the clipboard
+/// "Open" pill's route for links that belong to a webapp. Shell-quoted because
+/// link URLs carry `&`/`?` query strings and `launch` runs via `sh -c`.
+pub fn app_open_exec(url: &str) -> String {
+    app_exec_with(&crate::launch::shell_quote(url))
+}
+
+/// The live URL of the focused app-mode webapp window, read from the shared
+/// Chrome instance's DevTools endpoint (`/json/list`). Best-effort: `None` if
+/// the instance isn't up (webapp launched before this landed, so no debug port),
+/// `curl` is missing, or no page matches. Matches the focused window by its host
+/// (from the class) then its title, so the right one is picked when several
+/// webapp windows are open. Blocking (localhost `curl`) — worker-thread only.
+pub fn active_app_url(class: &str, title: &str) -> Option<String> {
+    let host = class_host(class)?;
+    let out = Command::new("curl")
+        .args(["-s", "--max-time", "2", &format!("http://127.0.0.1:{CDP_PORT}/json/list")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let targets: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).ok()?;
+    let url = pick_page_url(&targets, host, title)?;
+    debug!("webapp copy-link: {host} -> {url}");
+    Some(url)
+}
+
+/// Pick the focused webapp window's URL from CDP `/json/list` targets: among
+/// `page` targets on `host` with an http(s) URL (the webapp's own windows),
+/// prefer the one whose title matches the focused window, else the first.
+fn pick_page_url(targets: &[serde_json::Value], host: &str, title: &str) -> Option<String> {
+    let pages: Vec<&serde_json::Value> = targets
+        .iter()
+        .filter(|t| t["type"] == "page")
+        .filter(|t| t["url"].as_str().and_then(url_host).is_some_and(|h| h == host))
+        .collect();
+    let pick = pages
+        .iter()
+        .find(|t| t["title"].as_str() == Some(title))
+        .or_else(|| pages.first());
+    pick?.get("url")?.as_str().map(str::to_owned)
+}
+
 
 /// One curated web-app from the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +194,12 @@ impl WebappEntry {
         id_for_slug(&self.slug)
     }
 
-    /// The frameless `Exec=` command — also used for a "try it" launch.
+    /// The frameless `Exec=` command — also used for a "try it" launch. Runs in
+    /// the shared webapp profile with the CDP port so the "copy link" pill can
+    /// read the window's live URL. Catalog URLs are clean (no query string), so
+    /// they need no quoting.
     pub fn exec(&self) -> String {
-        format!("{BROWSER} --app={} {FLAG}", self.url)
+        app_exec_with(&self.url)
     }
 
     /// `StartupWMClass` Chrome reports for an `--app=<URL>` window.
@@ -223,6 +380,54 @@ mod tests {
     }
 
     #[test]
+    fn app_window_detection_and_host_parse() {
+        assert!(is_app_window("chrome-www.youtube.com__-Default"));
+        assert!(!is_app_window("google-chrome"));
+        assert!(!is_app_window("firefox"));
+        assert_eq!(class_host("chrome-www.youtube.com__-Default"), Some("www.youtube.com"));
+        assert_eq!(url_host("https://www.youtube.com/watch?v=x"), Some("www.youtube.com"));
+    }
+
+    #[test]
+    fn singleton_lock_liveness() {
+        let host = "Golem";
+        let me = std::process::id();
+        // Our host + our own (live) PID → live, keep it.
+        assert!(lock_is_live(&format!("{host}-{me}"), host));
+        // Foreign host, even with a live PID → stale (the machine-rename bug).
+        assert!(!lock_is_live(&format!("Golum-{me}"), host));
+        // Our host but a dead PID → stale.
+        assert!(!lock_is_live(&format!("{host}-2147483647"), host));
+        // Hostname with a '-' is parsed correctly (split on the last '-').
+        assert!(lock_is_live(&format!("my-box-{me}"), "my-box"));
+        // Garbage → not live (don't leave a lock we can't understand).
+        assert!(!lock_is_live("garbage", host));
+    }
+
+    #[test]
+    fn picks_the_focused_webapp_page_by_host_then_title() {
+        let targets = serde_json::json!([
+            { "type": "service_worker", "title": "sw", "url": "chrome-extension://x/sw.js" },
+            { "type": "page", "title": "Home - YouTube", "url": "https://www.youtube.com/" },
+            { "type": "page", "title": "Cool Video - YouTube", "url": "https://www.youtube.com/watch?v=abc" },
+            { "type": "page", "title": "Spotify", "url": "https://open.spotify.com/" }
+        ]);
+        let targets = targets.as_array().unwrap();
+        // Title match wins among same-host pages.
+        assert_eq!(
+            pick_page_url(targets, "www.youtube.com", "Cool Video - YouTube").as_deref(),
+            Some("https://www.youtube.com/watch?v=abc")
+        );
+        // No title match → first page on the host.
+        assert_eq!(
+            pick_page_url(targets, "www.youtube.com", "nonexistent").as_deref(),
+            Some("https://www.youtube.com/")
+        );
+        // Host with no page → None.
+        assert_eq!(pick_page_url(targets, "example.com", "x"), None);
+    }
+
+    #[test]
     fn parses_recommended_star_prefix_and_columns() {
         let cat = parse_catalog(
             "# comment\n\
@@ -251,10 +456,11 @@ mod tests {
             recommended: false,
         };
         assert_eq!(e.desktop_id(), "webapp-netflix");
-        assert_eq!(
-            e.exec(),
-            "google-chrome-stable --app=https://www.netflix.com --disable-client-side-decorations"
-        );
+        let exec = e.exec();
+        assert!(exec
+            .starts_with("google-chrome-stable --app=https://www.netflix.com --disable-client-side-decorations"));
+        assert!(exec.contains(&format!("--remote-debugging-port={CDP_PORT}")));
+        assert!(exec.contains("--user-data-dir="));
         assert_eq!(e.wm_class(), "chrome-www.netflix.com__-Default");
         assert!(e.desktop_contents().contains("Icon=netflix"));
     }

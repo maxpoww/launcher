@@ -73,9 +73,8 @@ const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 pub(crate) const GLYPH_BELL: &str = "\u{f0f3}"; // fa-bell (notification OPTION)
 pub(crate) const GLYPH_BELL_SLASH: &str = "\u{f1f6}"; // fa-bell-slash (mute pill)
 pub(crate) const GLYPH_CLIPBOARD: &str = "\u{f0ea}"; // fa-clipboard (clipboard OPTION)
-pub(crate) const GLYPH_COPY: &str = "\u{f0c5}"; // fa-copy (copy selection)
-pub(crate) const GLYPH_CUT: &str = "\u{f0c4}"; // fa-scissors (cut selection)
-pub(crate) const GLYPH_SELECT_ALL: &str = "\u{f247}"; // fa-object-group (select all)
+pub(crate) const GLYPH_COPY: &str = "\u{f0c5}"; // fa-copy (detail-view copy)
+pub(crate) const GLYPH_COPY_LINK: &str = "\u{f0c1}"; // fa-link (copy the page URL)
 
 // Pill backgrounds (resting + hover) are adaptive washes — see
 // `options_rest_wash` / `options_hover_wash`.
@@ -163,11 +162,10 @@ fn draw_z(id: PillId) -> u8 {
         // on top of it, capping its right end as it grows out from behind.
         PillId::Notif => 6,
         PillId::NotifMute => 7,
-        // Mirror of the bell on the left edge: the box draws first, then the
-        // action pills emerging from behind, then the small fixed glyph pill on
-        // top of them all, capping their left end as they slide out.
+        // Mirror of the bell on the left edge: the box + copy-link pill draw
+        // first (emerging from behind), then the small fixed glyph pill on top.
         PillId::ClipboardBox => 8,
-        PillId::ClipCopy | PillId::ClipCut | PillId::ClipSelectAll => 8,
+        PillId::ClipCopyLink => 8,
         PillId::Clipboard => 9,
     }
 }
@@ -203,12 +201,9 @@ pub(crate) enum PillId {
     /// The clipboard OPTION's morphing preview/history box (rests behind the
     /// small pill, slides out rightward). Mirrors `Notif`.
     ClipboardBox,
-    /// Selection-action pills that slide out from behind the small clipboard
-    /// pill when the brain detects a highlight: copy, cut, select-all. Each
-    /// injects its chord into the focused window.
-    ClipCopy,
-    ClipCut,
-    ClipSelectAll,
+    /// The "copy link" pill that slides out from behind the small clipboard pill
+    /// when the focused app is a browser; a click copies its current page URL.
+    ClipCopyLink,
     Window,
     Close,
     Pseudo,
@@ -426,23 +421,18 @@ impl App {
             glyph_color: None,
         });
 
-        // Selection-action pills (copy / cut / select), fanned out to the right
-        // of the small pill when the brain has detected a selection. They lerp
-        // from tucked behind the small pill (at rest x) out to their slots.
-        let at = self.clip_actions_t();
-        if at > 0.01 {
-            for (i, (id, glyph)) in crate::clipboard::ACTIONS.iter().enumerate() {
-                let rest_x = EDGE_PAD + ph + crate::clipboard::ACTION_GAP
-                    + i as f32 * (ph + crate::clipboard::ACTION_GAP);
-                let x = lerp(EDGE_PAD, rest_x, at);
-                pills.push(Pill {
-                    id: *id,
-                    rect: Rect::new(x, y, ph, ph),
-                    text: (*glyph).to_owned(),
-                    family: Some(NERD),
-                    glyph_color: None,
-                });
-            }
+        // Copy-link pill: slides out from behind the small clipboard pill to its
+        // right when the focused app is a browser (has a copyable page URL).
+        let lt = self.clip_link_t();
+        if lt > 0.01 {
+            let out_x = EDGE_PAD + ph + crate::clipboard::LINK_GAP;
+            pills.push(Pill {
+                id: PillId::ClipCopyLink,
+                rect: Rect::new(lerp(EDGE_PAD, out_x, lt), y, ph, ph),
+                text: GLYPH_COPY_LINK.to_owned(),
+                family: Some(NERD),
+                glyph_color: None,
+            });
         }
 
         // The window name pill is centred *alone* (so it doesn't shift when the
@@ -614,11 +604,8 @@ impl App {
                 self.push_clip_glyph(scene, pill.rect);
                 continue;
             }
-            if matches!(
-                pill.id,
-                PillId::ClipCopy | PillId::ClipCut | PillId::ClipSelectAll
-            ) {
-                self.push_clip_action(scene, pill.rect, pill.id, &pill.text);
+            if pill.id == PillId::ClipCopyLink {
+                self.push_clip_link(scene, pill.rect, &pill.text);
                 continue;
             }
             // Reveal animation for the control buttons: slide out horizontally
@@ -737,9 +724,11 @@ impl App {
             None => (None, None, false),
         };
         if self.options_active_addr != addr {
-            // Focus moved to another window — the selection the action pills were
-            // for is no longer in front, so end the context.
-            self.end_clip_selection();
+            // Focus moved — re-derive the copy-link affordance from the new app's
+            // class (only browsers expose a copyable page URL).
+            let is_browser = hypr::active_window_where()
+                .is_some_and(|(class, _)| hypr::is_browser_class(&class));
+            self.set_clip_link_available(is_browser);
         }
         if self.options_active_addr != addr || self.options_title != title {
             self.options_active_addr = addr;
@@ -1018,13 +1007,11 @@ impl App {
         if id == PillId::NotifMute {
             return self.notif.peek_progress() > 0.5;
         }
-        // Action pills are only hittable once mostly slid out (so the resting
-        // small-pill slot always hits the small pill, listed after them).
-        if matches!(
-            id,
-            PillId::ClipCopy | PillId::ClipCut | PillId::ClipSelectAll
-        ) {
-            return self.clip_actions_t() > 0.5;
+        // The copy-link pill hides behind the clipboard pill at rest; only accept
+        // hits once it's mostly slid out (so the resting slot hits the clipboard
+        // pill, listed after it).
+        if id == PillId::ClipCopyLink {
+            return self.clip_link_t() > 0.5;
         }
         match ctrl_index(id) {
             Some(i) => self.options_ctrl.alpha[i] > 0.5,
@@ -1249,10 +1236,8 @@ impl App {
             // small pill at rest (a scrollable history box will split these in a
             // later stage).
             Some(PillId::Clipboard | PillId::ClipboardBox) => self.clip_paste(),
-            // The selection-action pills inject their chord into the focused app.
-            Some(id @ (PillId::ClipCopy | PillId::ClipCut | PillId::ClipSelectAll)) => {
-                self.clip_action(id)
-            }
+            // Copy the focused browser's current page URL to the clipboard.
+            Some(PillId::ClipCopyLink) => self.copy_active_link(),
             _ => {}
         }
     }

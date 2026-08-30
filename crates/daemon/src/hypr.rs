@@ -225,10 +225,18 @@ pub fn focus_exact_class(class: &str) -> bool {
     }
 }
 
-/// Known browser window classes (lowercased substrings) for [`focus_browser`].
+/// Known browser window classes (lowercased substrings) for [`focus_browser`]
+/// and [`is_browser_class`].
 const BROWSER_CLASSES: &[&str] = &[
     "firefox", "chrome", "chromium", "brave", "edge", "vivaldi", "opera", "librewolf", "zen",
 ];
+
+/// Whether a window's app class is a known browser — the apps whose focused
+/// window has a copyable page URL (the clipboard "copy link" affordance).
+pub fn is_browser_class(class: &str) -> bool {
+    let c = class.to_lowercase();
+    BROWSER_CLASSES.iter().any(|b| c.contains(b))
+}
 
 /// Raise/focus the most-recently-focused browser window (any known browser
 /// class) — used after opening a link so the freshly-loaded tab comes to the

@@ -13,6 +13,10 @@ use tracing::info;
 /// fully detached from the daemon. `Terminal=true` entries run inside
 /// the configured `terminal` command instead of headless.
 pub fn launch(exec: &str, needs_terminal: bool, terminal: &str) -> anyhow::Result<()> {
+    // Self-heal a stale Chrome profile lock before a webapp launch (no-op for
+    // everything else) so webapps keep opening after an unclean Chrome exit or
+    // a machine rename. See webapps::clear_stale_profile_lock_for.
+    crate::webapps::clear_stale_profile_lock_for(exec);
     let line = if needs_terminal {
         format!("{terminal} sh -c {}", shell_quote(exec))
     } else {
