@@ -167,6 +167,8 @@ pub(crate) enum ClipHit {
     NewNote,
     /// The footer's "dictionary" button.
     Dictionary,
+    /// The footer's "clear all" can (mirrors the notification box's).
+    ClearAll,
     /// The detail view's top-strip pills.
     Back,
     DetailDelete,
@@ -1463,16 +1465,34 @@ impl App {
     /// The two footer buttons — `[new note] [dictionary]` — a centred pair of
     /// equal circles with [`FOOTER_GAP`] between them, vertically centred in the
     /// footer zone. Shared by the draw and the hit-test.
-    fn clip_footer_buttons(&self, rect: Rect) -> [(ClipHit, Rect); 2] {
+    fn clip_footer_buttons(&self, rect: Rect) -> [(ClipHit, Rect); 3] {
         let f = self.clip_footer_rect(rect);
         let d = self.clip_footer_button_d();
-        let total = 2.0 * d + FOOTER_GAP;
+        let total = 3.0 * d + 2.0 * FOOTER_GAP;
         let x0 = f.x + (f.w - total) / 2.0;
         let y = f.y + (f.h - d) / 2.0;
+        let step = d + FOOTER_GAP;
         [
             (ClipHit::NewNote, Rect::new(x0, y, d, d)),
-            (ClipHit::Dictionary, Rect::new(x0 + d + FOOTER_GAP, y, d, d)),
+            (ClipHit::Dictionary, Rect::new(x0 + step, y, d, d)),
+            (ClipHit::ClearAll, Rect::new(x0 + 2.0 * step, y, d, d)),
         ]
+    }
+
+    /// A history row's delete-can rect — ONE definition for the draw and the
+    /// hit-test (they used to disagree in both axes: the drawn can sat
+    /// top-aligned at `TRAIL_PAD_X` while the hit rect was vertically
+    /// centred at `ROW_PAD_X`, so clicking the visible can on a tall row
+    /// registered as a row click and *copied* instead of deleting — SH).
+    /// Slightly outset for a forgiving click target.
+    fn clip_row_can_rect(rr: Rect) -> Rect {
+        let dr = Rect::new(
+            rr.x + rr.w - TRAIL_PAD_X - DELETE_SZ,
+            rr.y + ROW_PAD_Y,
+            DELETE_SZ,
+            DELETE_SZ,
+        );
+        Rect::new(dr.x - 3.0, dr.y - 3.0, dr.w + 6.0, dr.h + 6.0)
     }
 
     /// Visible clip rows: `(index, row rect)`, newest (index 0) flush at the
@@ -1740,6 +1760,10 @@ impl App {
                 DELETE_SZ,
                 DELETE_SZ,
             );
+            debug_assert!(
+                Self::clip_row_can_rect(rr).contains((dr.x + dr.w / 2.0, dr.y + dr.h / 2.0)),
+                "drawn can must sit inside its hit rect"
+            );
             let on_x = self.clip.hit == ClipHit::Delete(idx);
             // No red on the target — brighten to the hover ink instead. The list
             // can is also a touch larger than the detail/footer ones.
@@ -1885,6 +1909,7 @@ impl App {
             });
             let glyph = match hit {
                 ClipHit::Dictionary => GLYPH_BOOK,
+                ClipHit::ClearAll => GLYPH_TRASH,
                 _ => GLYPH_NOTE,
             };
             let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
@@ -2109,13 +2134,9 @@ impl App {
         }
         for (idx, rr) in self.clip_rows(rect) {
             if rr.contains(p) {
-                let dr = Rect::new(
-                    rr.x + rr.w - ROW_PAD_X - DELETE_SZ,
-                    rr.y + (rr.h - DELETE_SZ) / 2.0,
-                    DELETE_SZ,
-                    DELETE_SZ,
-                );
-                if dr.contains(p) {
+                // Same rect the can is DRAWN at (top-aligned, TRAIL_PAD_X)
+                // plus click slack — see `clip_row_can_rect`.
+                if Self::clip_row_can_rect(rr).contains(p) {
                     return ClipHit::Delete(idx);
                 }
                 return ClipHit::Row(idx);
@@ -3002,6 +3023,10 @@ impl App {
                 self.open_dict();
                 true
             }
+            ClipHit::ClearAll => {
+                self.clear_all_clips();
+                true
+            }
             ClipHit::Delete(i) => {
                 self.delete_clip(i);
                 true
@@ -3095,6 +3120,20 @@ impl App {
     }
 
     /// Delete one clip from the history (its × control).
+    /// The footer can: wipe the whole history (side files included) and
+    /// close the box — the clipboard's own contents stay served.
+    fn clear_all_clips(&mut self) {
+        debug!("clip: clear all ({} entries)", self.clip.history.len());
+        for entry in std::mem::take(&mut self.clip.history) {
+            remove_clip_side_files(&entry);
+        }
+        self.measure_clip_rows();
+        self.save_clip_history();
+        self.close_clip_box();
+        self.update_clip_hit();
+        self.schedule_clip_frame();
+    }
+
     fn delete_clip(&mut self, idx: usize) {
         if idx >= self.clip.history.len() {
             return;
