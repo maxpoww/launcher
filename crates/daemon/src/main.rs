@@ -3154,6 +3154,19 @@ impl CompositorHandler for App {
             self.draw();
         } else {
             self.last_frame = None;
+            // The deferred half of the focus hand-back (armed in the keyboard
+            // `leave` handler): now that the card has shrunk out from under
+            // the pointer and gone quiet, a dispatched focus won't be
+            // clobbered by follow-mouse. Without this, closing the box left
+            // keyboard focus on *nothing* whenever the pointer wasn't parked
+            // over a window (SH: "the focus after opening").
+            match self.pending_refocus.take() {
+                Some(addr) if self.ui.target() != Target::Open => {
+                    debug!("returning focus to {addr}");
+                    hypr::refocus_after_grab(&addr);
+                }
+                _ => {} // reopened before settling: the new grab owns focus now
+            }
             debug!("settled in {:?}, going idle", self.ui.target());
         }
     }
