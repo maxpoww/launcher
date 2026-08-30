@@ -437,6 +437,7 @@ fn main() -> anyhow::Result<()> {
         pending_icons: None,
         apps_fingerprint: None,
         brain: None,
+        overview_active: false,
         battery_alarm: battery::BatteryAlarm::default(),
         battery_beat_epoch: None,
         battery_beat_pending: false,
@@ -1077,6 +1078,9 @@ pub struct App {
     /// Surfaces read it instead of sensing for themselves whenever its
     /// health says the relevant layer is alive (see `brain.rs`).
     brain: Option<options_engine::ContextState>,
+    /// The compositor overview (waveview) is open: every waverunner surface
+    /// stays concealed and reveals are ignored until it closes.
+    overview_active: bool,
     /// Battery OPTION (see `battery.rs`): the alarm ladder state, the beat
     /// animation epoch + frame latch, the suspend arm, the post-wake
     /// awareness window, and the wake detector's last-snapshot stamp.
@@ -1354,6 +1358,20 @@ impl App {
                 self.open_notif_box();
                 return;
             }
+            Command::OverviewOn => {
+                self.set_overview(true);
+                return;
+            }
+            Command::OverviewOff => {
+                self.set_overview(false);
+                return;
+            }
+            // While the overview owns the screen, ignore reveals (its close
+            // signal restores things); Hide stays allowed.
+            Command::Show | Command::Toggle | Command::Expand if self.overview_active => {
+                debug!("overview active: ignoring {command}");
+                return;
+            }
             Command::DebugDict => {
                 self.open_clip_box();
                 self.open_dict();
@@ -1450,9 +1468,10 @@ impl App {
         if free {
             // Zone cleared — cancel any pending dodge and reveal the dock
             // so it parks visible (classic macOS intellihide: dock returns
-            // when the covering window is moved or closed).
+            // when the covering window is moved or closed). Not while the
+            // overview owns the screen (its close re-evaluates the zone).
             self.hide_deadline = None;
-            if self.ui.target() == Target::Hidden {
+            if self.ui.target() == Target::Hidden && !self.overview_active {
                 self.handle_command(Command::Show);
             }
         } else if self.ui.target() == Target::Dock && self.pointer_pos.is_none() {
@@ -1485,6 +1504,34 @@ impl App {
 
     /// The indexer thread finished: adopt the entries and upload icons
     /// (or stash them until the renderer exists).
+    /// The compositor overview opened/closed (waveview writes the ctl
+    /// verbs). Open: hide the dock, conceal the topbar, deafen reveals.
+    /// Close: restore the topbar and let intellihide re-evaluate the zone
+    /// (a parked dock returns on its own if the zone is free).
+    fn set_overview(&mut self, active: bool) {
+        if self.overview_active == active {
+            return;
+        }
+        info!("overview: {}", if active { "open" } else { "closed" });
+        self.overview_active = active;
+        if active && self.ui.target() != Target::Hidden {
+            self.handle_command(Command::Hide);
+        }
+        // Topbar conceal mirrors the fullscreen conceal (shared flag OR).
+        self.options_hidden = self.options_fullscreen || active;
+        self.options_reveal_deadline = None;
+        self.options_hide_deadline = None;
+        if active {
+            self.options_hover = None;
+        }
+        self.sync_options_input();
+        self.draw_options();
+        self.sync_input_region();
+        if !active {
+            self.on_layout_changed();
+        }
+    }
+
     /// A fresh context snapshot from the Brain. Store it and let the
     /// surfaces that read it react; the window pill is the first (its
     /// refresh short-circuits when nothing it shows changed).
@@ -2864,7 +2911,10 @@ impl App {
             .extent_of(self.ui.target())
             .max(self.ui.extent())
             .round() as u32;
-        if self.ui.target() == Target::Hidden && self.config.input.edge_reveal {
+        if self.ui.target() == Target::Hidden
+            && self.config.input.edge_reveal
+            && !self.overview_active
+        {
             extent = extent.max(self.config.input.edge_reveal_px);
         }
         // While a box floats above the dock, extend the input region to cover

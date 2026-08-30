@@ -51,6 +51,11 @@ pub enum Command {
     /// Debug/verification: force-open the clipboard box on the dictionary
     /// "define a word" panel, pre-filled with a sample query.
     DebugDict,
+    /// The compositor overview opened: conceal every waverunner surface
+    /// (topbar + dock) and ignore reveals until `OverviewOff`.
+    OverviewOn,
+    /// The compositor overview closed: surfaces may return.
+    OverviewOff,
 }
 
 impl fmt::Display for Command {
@@ -65,6 +70,8 @@ impl fmt::Display for Command {
             Command::DebugClipDetail => f.write_str("debug-clip-detail"),
             Command::DebugNotif => f.write_str("debug-notif"),
             Command::DebugDict => f.write_str("debug-dict"),
+            Command::OverviewOn => f.write_str("overview-on"),
+            Command::OverviewOff => f.write_str("overview-off"),
         }
     }
 }
@@ -83,6 +90,8 @@ impl FromStr for Command {
             "debug-clip-detail" => Ok(Command::DebugClipDetail),
             "debug-notif" => Ok(Command::DebugNotif),
             "debug-dict" => Ok(Command::DebugDict),
+            "overview-on" => Ok(Command::OverviewOn),
+            "overview-off" => Ok(Command::OverviewOff),
             other => Err(ParseError::UnknownCommand(other.to_owned())),
         }
     }
@@ -158,6 +167,8 @@ mod tests {
             Command::DebugClipDetail,
             Command::DebugNotif,
             Command::DebugDict,
+            Command::OverviewOn,
+            Command::OverviewOff,
         ] {
             assert_eq!(cmd.to_string().parse::<Command>().unwrap(), cmd);
         }

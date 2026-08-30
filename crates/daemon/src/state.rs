@@ -158,11 +158,14 @@ impl UiState {
                 Target::Hidden | Target::Dock => false,
             },
             // Debug/verification verbs open an OPTIONS box, not the launcher —
-            // intercepted in `handle_command` before reaching here.
+            // intercepted in `handle_command` before reaching here; overview
+            // signals likewise drive concealment there, never the launcher.
             Command::DebugClip
             | Command::DebugClipDetail
             | Command::DebugNotif
-            | Command::DebugDict => false,
+            | Command::DebugDict
+            | Command::OverviewOn
+            | Command::OverviewOff => false,
         }
     }
 

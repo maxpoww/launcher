@@ -773,7 +773,8 @@ impl App {
         self.options_fullscreen = fs;
         self.options_reveal_deadline = None;
         self.options_hide_deadline = None;
-        self.options_hidden = fs;
+        // The overview conceal (main.rs::set_overview) shares this flag.
+        self.options_hidden = fs || self.overview_active;
         if fs {
             self.options_hover = None;
         }
