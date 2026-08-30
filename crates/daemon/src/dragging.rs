@@ -704,17 +704,6 @@ impl App {
         let slot = self
             .reorder_slot
             .unwrap_or(orig_slot.unwrap_or(self.apps_span));
-        // SH diagnostics for the edge-drop bug: what the drop resolved to.
-        info!(
-            "grid drop {id}: slot {slot} (reorder_slot {:?}, orig_slot {orig_slot:?}), \
-             display page {} (cap {}), pager target {}, page_map {:?}",
-            self.reorder_slot,
-            slot / self.apps_cap.max(1),
-            self.apps_cap,
-            self.scroll.per[content::SECTION_APPS]
-                .page(self.current_layout().sections[content::SECTION_APPS].viewport.w.max(1.0)),
-            self.apps_page_map,
-        );
         // Fold wins when the pointer sits on a foldable item's centre —
         // the exact same detection and box create/join the Install drops
         // use, so every placement shares one path. (Boxes don't nest, so
@@ -746,16 +735,6 @@ impl App {
             self.place_in_grid_at_slot(id, entry_idx, slot);
         }
         self.refilter();
-        // SH diagnostics: where the id actually lives after the refilter.
-        let storage_page = self
-            .order
-            .pages()
-            .iter()
-            .position(|p| p.iter().any(|i| i == id));
-        info!(
-            "grid drop {id}: post-refilter storage page {storage_page:?}, page_map {:?}",
-            self.apps_page_map
-        );
         true
     }
 
