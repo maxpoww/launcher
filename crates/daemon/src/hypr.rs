@@ -186,46 +186,21 @@ pub fn focus_window(addr: &str) {
     dispatch(&format!("hl.dsp.focus({{ window = \"address:{addr}\" }})"));
 }
 
-/// Hand keyboard focus back after our layer released its exclusive grab —
-/// rofi behavior: if the user is still on the workspace they opened us from,
-/// return focus (keyboard seat included) to `origin`. If they travelled to
-/// another workspace while we were open, *leave them there* and re-seat the
-/// keyboard on that workspace's most-recent window instead — never yank them
-/// back. The seat needs explicit re-routing either way: after a grab release
-/// the compositor still considers the old window "active", so a same-window
-/// focus is a no-op that leaves the keyboard stranded on the dead layer (the
-/// "can't refocus even by clicking the same window" symptom) — hence
-/// [`focus_window`]'s detour underneath.
-pub fn refocus_after_grab(origin: &str) {
-    let origin_ws = serde_json::from_str::<serde_json::Value>(&request("j/clients").ok().unwrap_or_default())
-        .ok()
-        .and_then(|clients| {
-            clients.as_array()?.iter().find_map(|c| {
-                (c["address"].as_str() == Some(origin))
-                    .then(|| c["workspace"]["id"].as_i64())
-                    .flatten()
-            })
-        });
-    let active: Option<serde_json::Value> = request("j/activeworkspace")
-        .ok()
-        .and_then(|r| serde_json::from_str(&r).ok());
-    let cur_ws = active.as_ref().and_then(|w| w["id"].as_i64());
-    match (origin_ws, cur_ws) {
-        (Some(o), Some(c)) if o != c => {
-            // Travelled while we were open: stay on this workspace.
-            let last = active
-                .as_ref()
-                .and_then(|w| w["lastwindow"].as_str())
-                .filter(|a| !a.is_empty() && *a != "0x0");
-            match last {
-                Some(a) => focus_window(a),
-                // Empty workspace: nothing to seat the keyboard on; leaving
-                // the seat unclaimed here is correct (typing has no target).
-                None => debug!("refocus: stayed on empty workspace {c}"),
-            }
-        }
-        _ => focus_window(origin),
-    }
+/// The active workspace's id and its most-recent window address, if any.
+pub fn active_workspace() -> Option<(i64, Option<String>)> {
+    let ws: serde_json::Value = serde_json::from_str(&request("j/activeworkspace").ok()?).ok()?;
+    let id = ws["id"].as_i64()?;
+    let last = ws["lastwindow"]
+        .as_str()
+        .filter(|a| !a.is_empty() && *a != "0x0")
+        .map(str::to_owned);
+    Some((id, last))
+}
+
+/// Switch to a workspace by id (`hl.dsp.focus` with a `workspace` field —
+/// verified in the fork's example config, mainMod+[0-9] binds).
+pub fn focus_workspace(id: i64) {
+    dispatch(&format!("hl.dsp.focus({{ workspace = {id} }})"));
 }
 
 /// Focus the window whose class **exactly** matches `class` (case-insensitive on
