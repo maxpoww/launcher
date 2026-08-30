@@ -372,7 +372,9 @@ impl App {
     pub(crate) fn box_drag_edge_page(&mut self, box_rect: content::Rect, pos: (f32, f32)) {
         let dir = edge_page_dir(box_rect.x, box_rect.w, pos.0);
         if edge_page_due(&mut self.box_drag_page_at, dir) {
-            self.turn_box_page(dir, true);
+            // No wrap while dragging (same rule as the grid): the walk
+            // stops at the ghost page so over-holding can't cycle back.
+            self.turn_box_page(dir, false);
         }
         if dir != 0 {
             // Keep frames coming while the dwell clock runs (a stationary

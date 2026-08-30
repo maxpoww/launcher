@@ -447,14 +447,21 @@ impl App {
             return None;
         }
         let page_w = sec.viewport.w.max(1.0);
-        let ax = (pos.0 - sec.viewport.x + sec.scroll).max(0.0);
-        let page = ((ax / page_w).floor() as usize) % sec.n_pages.max(1);
+        // The page is the pager's TARGET (where a turn is headed), not the
+        // eased scroll's image: mid-flip the eased position still reads as
+        // the outgoing page, so a drop right after an edge-hold page turn
+        // used to land back on the page the drag came from (SH). Columns
+        // are viewport-relative for the same reason; at rest both formulas
+        // agree exactly.
+        let page = self.scroll.per[content::SECTION_APPS]
+            .page(page_w)
+            .min(sec.n_pages.saturating_sub(1));
         // Cell size must match what's on screen — the grid renders at
         // `icon_scale`, so map the pointer through the *scaled* cell, not the
         // raw constants (otherwise every row/column is mis-counted at any
         // non-default icon size, and the make-room reacts on the wrong cell).
         let scale = self.icon_scale();
-        let fx = (ax.rem_euclid(page_w)) / (content::GRID_CELL_W * scale);
+        let fx = (pos.0 - sec.viewport.x) / (content::GRID_CELL_W * scale);
         let fy = (pos.1 - sec.viewport.y) / (content::GRID_CELL_H * scale);
         let col = (fx.floor() as usize).min(sec.cols.saturating_sub(1));
         let row = (fy.floor() as usize).min(sec.rows.saturating_sub(1));
@@ -522,15 +529,16 @@ impl App {
         }
         // Edge-paging: holding the drag in the grid's edge band turns
         // the page every DRAG_PAGE_COOLDOWN, carrying the icon across
-        // pages (shared band + dwell with the open-box drag). The cycle
-        // is: real pages, then the single ghost page, then back around
-        // to the first page — one empty page in the loop, never two.
+        // pages (shared band + dwell with the open-box drag). No wrap
+        // while dragging: the walk stops at the ghost page (or page 0),
+        // so over-holding at the edge can never cycle you back to where
+        // the drag started — reveal the new page, drop, done (SH).
         let vp = layout.sections[content::SECTION_APPS].viewport;
         if layout.sections[content::SECTION_APPS].n_pages > 1 {
             let dir = edge_page_dir(vp.x, vp.w, pos.0);
             if edge_page_due(&mut self.grid_drag_page_at, dir) {
                 info!("drag page turn: dir {dir}");
-                self.page_by(content::SECTION_APPS, dir, true);
+                self.page_by(content::SECTION_APPS, dir, false);
             }
             if dir != 0 {
                 // Keep frames coming while the dwell clock runs (a
