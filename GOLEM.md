@@ -81,10 +81,12 @@ See `CLAUDE.md` "where things live" for the per-file map. Phased status:
 - **Mockups are the acceptance target** for OPTIONS surfaces (`~/*-mockup`).
 - **Coherence over features.** Match the design language (3 flows, Shinings,
   flow-protection); the right tool at the right moment, remove the rest.
-- **Safety at the OS edge.** Never `nixos-rebuild switch`/`sudo`/edit `/etc/nixos`
-  or the flake unprompted — a bad generation can pin the boot. Own the fast, safe
-  loops (`cargo build|clippy|test`, `verify-ui`, `grim`, `ctl`); leave the switch
-  to the user.
+- **Safety at the OS edge.** Since 2026-08-29 Claude has standing access
+  (`/etc/nixos` writable, passwordless `nixos-rebuild` — see the
+  `golem-system-access` memory). The discipline replaces the prohibition:
+  always `nixos-rebuild build` before `switch`, never touch
+  `hardware-configuration.nix`/bootloader, announce big system changes before
+  making them; generations remain the safety net.
 - **Token economy.** Jump via the `CLAUDE.md` map instead of re-reading big files;
   prefer tight `--geom` screenshot crops; keep memory current so sessions start warm.
 
