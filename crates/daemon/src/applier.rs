@@ -5,11 +5,18 @@
 //! package list `~/.config/waverunner/packages.list` (one nixpkgs attr per
 //! line). waverunner only ever edits *that* file — it never runs a rebuild
 //! or touches anything root-owned. A root systemd `.path` unit watches the
-//! list; when it changes, the privileged `waverunner-apply` helper (defined
-//! in `/etc/nixos/waverunner-apply.nix`) validates it, regenerates the
-//! root-owned `/etc/nixos/waverunner-packages.nix` that `home.nix` imports,
-//! runs `nixos-rebuild switch`, and writes the result to
+//! list; when it changes, the privileged `waverunner-apply` helper (the
+//! system flake's `waverunner-apply.nix`) validates it, regenerates the
+//! `waverunner-packages.nix` that the home config imports, rebuilds the
+//! system, and writes the result to
 //! `~/.config/waverunner/apply-status.json`.
+//!
+//! The status file is the truth the daemon trusts (F9/F10/F11, 2026-08-30):
+//! declared-in-the-list only counts as installed once a successful run
+//! postdates the list write; a busy helper means QUEUED, not failed (and
+//! systemd drops path triggers that fire mid-run, so the waiter re-trips
+//! the watch when the foreign run lands); an empty first-boot seed writes
+//! nothing at all.
 //!
 //! The privilege boundary is the file: the helper parses the list as *data*
 //! (strict attr charset) and generates the Nix itself, so a user-writable
@@ -148,6 +155,13 @@ pub fn seed_if_missing(attrs: &[String]) {
         return;
     }
     let valid: Vec<String> = attrs.iter().filter(|a| is_valid_attr(a)).cloned().collect();
+    // An EMPTY seed writes nothing (F11): the write itself trips the apply
+    // watch, and a fresh machine's 0-attr seed was triggering a pointless
+    // multi-minute first-boot rebuild — the first real install creates the
+    // file instead.
+    if valid.is_empty() {
+        return;
+    }
     info!(
         "seeding declarative package list with {} attrs",
         valid.len()
@@ -172,9 +186,16 @@ fn now_epoch() -> f64 {
 pub fn apply_install(attr: &str) -> bool {
     let mut attrs = list_attrs();
     if attrs.iter().any(|a| a == attr) {
-        // Already declared — assume applied (idempotent re-drop).
-        info!("{attr} already in package list; treating as installed");
-        return true;
+        // Declared ≠ applied (F9): the line may be mid-rebuild, or may
+        // never have been picked up at all (external edit, dropped path
+        // trigger). Fast-true only when a successful run postdates the
+        // list; otherwise join/re-trigger and block like a normal install.
+        if applied_since_list_write() {
+            info!("{attr} already in package list and applied; treating as installed");
+            return true;
+        }
+        info!("{attr} declared but not yet applied; ensuring rebuild");
+        return wait_for_apply(now_epoch());
     }
     let since = now_epoch();
     attrs.push(attr.to_owned());
@@ -197,8 +218,14 @@ pub fn apply_install(attr: &str) -> bool {
 pub fn apply_uninstall(attr: &str) -> bool {
     let attrs = list_attrs();
     if !attrs.iter().any(|a| a == attr) {
-        info!("{attr} not in package list; treating as already removed");
-        return true;
+        // Same F9 rule in reverse: absent from the list only means gone
+        // once a successful run postdates the list write that removed it.
+        if applied_since_list_write() {
+            info!("{attr} not in package list and applied; treating as already removed");
+            return true;
+        }
+        info!("{attr} absent but list not yet applied; ensuring rebuild");
+        return wait_for_apply(now_epoch());
     }
     let since = now_epoch();
     let pruned: Vec<String> = attrs.into_iter().filter(|a| a != attr).collect();
@@ -221,31 +248,88 @@ fn read_status() -> Option<ApplyStatus> {
     crate::persist::read_json(&status_path())
 }
 
+/// The list file's mtime as fractional epoch seconds (0.0 when missing).
+fn list_mtime_epoch() -> f64 {
+    std::fs::metadata(list_path())
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Whether a SUCCESSFUL apply run finished after the last list write —
+/// i.e. what the list declares is what the system actually has.
+fn applied_since_list_write() -> bool {
+    read_status().is_some_and(|st| {
+        st.phase == "done" && st.ok == Some(true) && st.finished >= list_mtime_epoch()
+    })
+}
+
+/// How long to observe an untouched, idle status before re-tripping the
+/// watch (the initial write may have raced the helper's own read).
+const NUDGE_AFTER: Duration = Duration::from_secs(5);
+/// Give up re-tripping after this many attempts — past that the trigger
+/// really is unwired.
+const MAX_NUDGES: u32 = 3;
+
 /// Block until the apply helper reports a terminal status for a run that
-/// started at or after `since`. Returns the rebuild's success. Gives up
-/// (false) if the helper never starts within [`START_TIMEOUT`] (trigger not
-/// wired) or a run runs past [`BUILD_TIMEOUT`].
+/// covers a list write made at `since`. Returns the rebuild's success.
+///
+/// F10 rules: a run that STARTED BEFORE `since` and is still `building` is
+/// someone else's rebuild, not a missing trigger — our edit is already on
+/// disk, but systemd DROPS path triggers that fire while the service is
+/// active, so when that run completes we re-trip the watch by rewriting
+/// the (unchanged) list and keep waiting. Only a status that never moves
+/// at all fails the [`START_TIMEOUT`] "trigger not wired" escape; a run
+/// past [`BUILD_TIMEOUT`] is a hard timeout.
 fn wait_for_apply(since: f64) -> bool {
     let start = Instant::now();
-    let mut saw_run = false;
+    let mut saw_ours = false;
+    let mut nudges = 0u32;
+    let mut idle_since = Instant::now();
     loop {
         std::thread::sleep(POLL);
-        if let Some(st) = read_status() {
-            let ours = st.started >= since || st.finished >= since;
-            if ours {
-                saw_run = true;
+        let mut foreign_building = false;
+        let status = read_status();
+        if let Some(st) = &status {
+            if st.started >= since || st.finished >= since {
+                saw_ours = true;
                 if st.phase == "done" && st.finished >= since {
                     if let Some(err) = st.error.as_deref().filter(|_| st.ok != Some(true)) {
                         warn!("apply failed: {}", err.trim());
                     }
                     return st.ok.unwrap_or(false);
                 }
+            } else if st.phase == "building" {
+                // A pre-existing run is mid-flight; our trigger was
+                // swallowed. Wait it out — the nudge below fires once it
+                // lands.
+                foreign_building = true;
+                idle_since = Instant::now();
             }
         }
+        // Idle helper (stale terminal status or no status at all) and our
+        // run never appeared: the write raced the helper's read or the
+        // trigger was dropped — re-trip the watch with an identical
+        // rewrite.
+        if !saw_ours
+            && !foreign_building
+            && nudges < MAX_NUDGES
+            && idle_since.elapsed() > NUDGE_AFTER
+        {
+            info!(
+                "apply run not picked up; re-tripping the watch (nudge {})",
+                nudges + 1
+            );
+            write_list(&list_attrs());
+            nudges += 1;
+            idle_since = Instant::now();
+        }
         let elapsed = start.elapsed();
-        if !saw_run && elapsed > START_TIMEOUT {
+        if !saw_ours && !foreign_building && elapsed > START_TIMEOUT {
             warn!(
-                "waverunner-apply did not start within {}s — is the systemd path unit installed?",
+                "waverunner-apply never started (after {nudges} nudges, {}s) — is the systemd path unit installed?",
                 START_TIMEOUT.as_secs()
             );
             return false;
