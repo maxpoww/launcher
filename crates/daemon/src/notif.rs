@@ -1254,41 +1254,11 @@ impl App {
         // always uses the resting wash, matched or frosted alike.
         let pill_base = self.options_rest_wash();
         // The open box MIMICS THE BUBBLE LIVE, opaque so text doesn't bleed
-        // through. Its fill is the pill's *exact* apparent colour: the pill's
-        // backdrop with the same wash composited on top — identical maths in
-        // both cases, so the box is literally the pill grown. The backdrop is
-        // the matched window colour when the bar is colour-matched, else the
-        // bar's own sampled frosted/wallpaper shade (`options_pill_color`).
+        // through: it is literally the pill grown, so its fill and ink both
+        // follow the bar's regime (see `options_box_surface`) and the two can
+        // never disagree.
         let text_color = self.options_text_color();
-        let backdrop = self.options_bar_matched.or(self.options_pill_color);
-        let (expanded_fill, expanded_ink) = match backdrop {
-            Some(c) => {
-                // Composite the (translucent) pill wash over the backdrop so the
-                // opaque box equals what the translucent pill shows.
-                let a = pill_base[3];
-                let blend = [
-                    c[0] * (1.0 - a) + pill_base[0] * a,
-                    c[1] * (1.0 - a) + pill_base[1] * a,
-                    c[2] * (1.0 - a) + pill_base[2] * a,
-                    1.0,
-                ];
-                // Matched: bar text colour already adapts to it. Frosted: adapt
-                // ink to the blended shade so it stays legible on any wallpaper.
-                let ink = if self.options_bar_matched.is_some() {
-                    text_color
-                } else {
-                    let lum = 0.2126 * blend[0] + 0.7152 * blend[1] + 0.0722 * blend[2];
-                    if lum > 0.179 {
-                        [0.0, 0.0, 0.0, 1.0]
-                    } else {
-                        [0.93, 0.93, 0.96, 1.0]
-                    }
-                };
-                (blend, ink)
-            }
-            // Not sampled yet (first frames after opening): neutral dark.
-            None => ([0.10, 0.10, 0.12, 1.0], [0.93, 0.93, 0.96, 1.0]),
-        };
+        let (expanded_fill, expanded_ink) = self.options_box_surface();
         scene.rects.push(RectInst {
             rect,
             radius,

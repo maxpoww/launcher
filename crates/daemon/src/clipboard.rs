@@ -1548,30 +1548,9 @@ impl App {
         // maths as the notif box.
         let pill_base = self.options_rest_wash();
         let text_color = self.options_text_color();
-        let backdrop = self.options_bar_matched.or(self.options_pill_color);
-        let (fill, box_ink) = match backdrop {
-            Some(c) => {
-                let a = pill_base[3];
-                let blend = [
-                    c[0] * (1.0 - a) + pill_base[0] * a,
-                    c[1] * (1.0 - a) + pill_base[1] * a,
-                    c[2] * (1.0 - a) + pill_base[2] * a,
-                    1.0,
-                ];
-                let ink = if self.options_bar_matched.is_some() {
-                    text_color
-                } else {
-                    let lum = 0.2126 * blend[0] + 0.7152 * blend[1] + 0.0722 * blend[2];
-                    if lum > 0.179 {
-                        [0.0, 0.0, 0.0, 1.0]
-                    } else {
-                        [0.93, 0.93, 0.96, 1.0]
-                    }
-                };
-                (blend, ink)
-            }
-            None => ([0.10, 0.10, 0.12, 1.0], [0.93, 0.93, 0.96, 1.0]),
-        };
+        // The box is the pill grown: fill + ink both follow the bar's regime
+        // (see `options_box_surface`), so the two never disagree.
+        let (fill, box_ink) = self.options_box_surface();
         scene.rects.push(RectInst {
             rect,
             radius,

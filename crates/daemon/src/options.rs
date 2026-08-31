@@ -638,6 +638,63 @@ impl App {
         }
     }
 
+    /// The open OPTIONS boxes' fill + ink (clipboard, notifications).
+    ///
+    /// A box is "the pill grown", so it follows the BAR'S REGIME instead of
+    /// deciding its ink independently — that divergence was a real bug (Max,
+    /// 2026-08-31: the bar's text white while both boxes' text was black):
+    ///
+    /// - **Colour-matched bar** — the matched window colour with the pill
+    ///   wash composited on, and the bar's own adaptive ink. These agree by
+    ///   construction, since both derive from the same matched colour.
+    /// - **Transparent bar** (the theme is in charge, so the bar paints its
+    ///   text from the theme) — the theme slab TINTED by the sampled
+    ///   wallpaper frost. Taking that frost raw is what broke: over a light
+    ///   wallpaper the box became a pale slab and flipped its ink to black
+    ///   while the bar, which never consults the frost, stayed white. Tinting
+    ///   keeps the wallpaper's character while guaranteeing the box stays a
+    ///   dark OPTIONS surface the theme's ink is legible on.
+    ///
+    /// (The slab is dark because Golem's theme is: a light theme would flip
+    /// both this constant and the ink together.)
+    pub(crate) fn options_box_surface(&self) -> ([f32; 4], [f32; 4]) {
+        /// The theme's own box colour — the neutral OPTIONS slab.
+        const SLAB: [f32; 3] = [0.10, 0.10, 0.12];
+        /// How much of the sampled wallpaper frost tints the slab. Kept low:
+        /// the colours are LINEAR, so a little goes a long way once encoded,
+        /// and the list's resting text sits at `LIST_DIM` — the box has to
+        /// stay dark enough for dimmed ink to read.
+        const TINT: f32 = 0.25;
+
+        let ink = self.options_text_color();
+        let wash = self.options_rest_wash();
+        match (self.options_bar_matched, self.options_pill_color) {
+            // Composite the (translucent) pill wash over the matched colour so
+            // the opaque box equals what the translucent pill shows.
+            (Some(c), _) => {
+                let a = wash[3];
+                let blend = [
+                    c[0] * (1.0 - a) + wash[0] * a,
+                    c[1] * (1.0 - a) + wash[1] * a,
+                    c[2] * (1.0 - a) + wash[2] * a,
+                    1.0,
+                ];
+                (blend, ink)
+            }
+            (None, Some(frost)) => {
+                let fill = [
+                    SLAB[0] * (1.0 - TINT) + frost[0] * TINT,
+                    SLAB[1] * (1.0 - TINT) + frost[1] * TINT,
+                    SLAB[2] * (1.0 - TINT) + frost[2] * TINT,
+                    1.0,
+                ];
+                (fill, ink)
+            }
+            // Not sampled yet (the first frames after opening): plain slab.
+            (None, None) => ([SLAB[0], SLAB[1], SLAB[2], 1.0], ink),
+        }
+    }
+
     /// Hover wash — stronger than the resting wash, with the same asymmetry.
     pub(crate) fn options_hover_wash(&self) -> [f32; 4] {
         if self.options_bar_is_bright() {
