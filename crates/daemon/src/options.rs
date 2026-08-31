@@ -3,8 +3,9 @@
 //! OPTIONS is the context-aware layer that lives on the topbar (see
 //! [`crate::screencopy`] for the bar's diegetic colour-matching). Its UI is
 //! built from independent **pill** modules; which ones show depends on context.
-//! For now: a clock pill (far right), the focused window's name (centre), and
-//! two control circles just right of it — a red close and a pseudotile toggle.
+//! For now: a clock pill (far right), the focused window's name (centre)
+//! flanked by its control circles — the window-mode toggles (fullscreen,
+//! float, pseudotile) to its left, the close button to its right.
 //!
 //! Text pills use the **dock's font** (the default SansSerif — DejaVu Sans);
 //! icon pills use a **Nerd Font**. Backgrounds are transparent, brightening on
@@ -437,12 +438,12 @@ impl App {
 
         // The window name pill is centred *alone* (so it doesn't shift when the
         // buttons reveal); the control circles flank it at fixed resting spots:
-        //   [X] [window name] [pseudo] [float] [fullscreen]
+        //   [fullscreen] [float] [pseudo] [window name] [X]
         if let Some(title) = &self.options_title {
             let shown = truncate(title, TITLE_MAX);
             let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
-            let wx = ((w - ww) / 2.0).max(EDGE_PAD + d + GROUP_GAP);
+            let wx = ((w - ww) / 2.0).max(EDGE_PAD + 3.0 * d + 2.0 * CTRL_GAP + GROUP_GAP);
             let circle = |pills: &mut Vec<Pill>, x: f32, id, glyph: &str, color| {
                 pills.push(Pill {
                     id,
@@ -452,14 +453,14 @@ impl App {
                     glyph_color: color,
                 });
             };
-            // Close, left of the window name.
-            circle(
-                &mut pills,
-                wx - GROUP_GAP - d,
-                PillId::Close,
-                GLYPH_CLOSE,
-                None,
-            );
+            // Window-mode toggles, left of the window name (pseudo nearest,
+            // fullscreen outermost).
+            let mut cx = wx - GROUP_GAP - d;
+            circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
+            cx -= d + CTRL_GAP;
+            circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
+            cx -= d + CTRL_GAP;
+            circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
             pills.push(Pill {
                 id: PillId::Window,
                 rect: Rect::new(wx, y, ww, ph),
@@ -467,13 +468,14 @@ impl App {
                 family: TEXT_FONT,
                 glyph_color: None,
             });
-            // Window-mode toggles, right of the window name.
-            let mut cx = wx + ww + GROUP_GAP;
-            circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
-            cx += d + CTRL_GAP;
-            circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
-            cx += d + CTRL_GAP;
-            circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
+            // Close, right of the window name.
+            circle(
+                &mut pills,
+                wx + ww + GROUP_GAP,
+                PillId::Close,
+                GLYPH_CLOSE,
+                None,
+            );
         }
         pills
     }
@@ -623,24 +625,24 @@ impl App {
                     // `origin` = tucked-x behind the parent; `edge`/`left` =
                     // the vertical line the glyph emerges past, and which side.
                     let (origin, edge, left) = match pill.id {
-                        // Close emerges leftward from the window pill's left edge.
+                        // Close emerges rightward from the window pill's right edge.
                         PillId::Close => {
-                            let wx = window.map_or(pill.rect.x, |w| w.x);
-                            (wx, wx, true)
-                        }
-                        // Mode toggles emerge rightward, each from behind the
-                        // previous pill's right edge.
-                        PillId::Pseudo => {
                             let wr = window.map_or(pill.rect.x + d, |w| w.x + w.w);
                             (wr - d, wr, false)
                         }
+                        // Mode toggles emerge leftward, each from behind the
+                        // previous pill's left edge.
+                        PillId::Pseudo => {
+                            let wx = window.map_or(pill.rect.x, |w| w.x);
+                            (wx, wx, true)
+                        }
                         PillId::Float => {
-                            let pr = home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x + r.w);
-                            (pr - d, pr, false)
+                            let pl = home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x);
+                            (pl, pl, true)
                         }
                         PillId::Fullscreen => {
-                            let fr = home(PillId::Float).map_or(pill.rect.x, |r| r.x + r.w);
-                            (fr - d, fr, false)
+                            let fl = home(PillId::Float).map_or(pill.rect.x, |r| r.x);
+                            (fl, fl, true)
                         }
                         _ => (pill.rect.x, pill.rect.x, false),
                     };
