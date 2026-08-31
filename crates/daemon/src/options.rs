@@ -235,6 +235,55 @@ struct Pill {
     glyph_color: Option<[f32; 4]>,
 }
 
+/// The situations an OPTIONS element belongs in.
+///
+/// This is the bar's **presence contract**: every element declares where it
+/// makes sense, and [`App::options_pills`] filters the list once — the one
+/// place the bar's composition is decided, and the only input to drawing,
+/// hit-testing, hover, and clicks. An element that isn't present cannot be
+/// seen or touched, so nothing downstream needs a situation check.
+///
+/// It replaces scattered `if overview_active` special-casing (Max,
+/// 2026-08-31: "i dont want to start patching OPTIONS"), and it is the seam
+/// the Brain plugs into: today presence is a static answer, later the same
+/// call site asks `options_engine`'s mind for relevance instead — without
+/// any call site moving.
+#[derive(Clone, Copy)]
+struct Presence {
+    /// The normal session.
+    desktop: bool,
+    /// While the waveview overview owns the screen.
+    overview: bool,
+}
+
+/// Present everywhere.
+const BOTH: Presence = Presence {
+    desktop: true,
+    overview: true,
+};
+/// Only over the live desktop.
+const DESKTOP_ONLY: Presence = Presence {
+    desktop: true,
+    overview: false,
+};
+
+/// Where each element belongs. Read it top to bottom to know the bar.
+fn presence(id: PillId) -> Presence {
+    match id {
+        // The overview needs a label for what you're pointing at, its exit
+        // (the X closes it), and the clock as furniture.
+        PillId::Window | PillId::Close | PillId::Clock => BOTH,
+        // A notification arriving while you pick a window is still worth
+        // seeing, and the bell doesn't act on the focused window.
+        PillId::Notif | PillId::NotifMute => BOTH,
+        // Window-mode controls act on the FOCUSED window — meaningless while
+        // you're above the desktop choosing one.
+        PillId::Pseudo | PillId::Fullscreen => DESKTOP_ONLY,
+        // The clipboard serves the window you're working in, not the map.
+        PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => DESKTOP_ONLY,
+    }
+}
+
 /// Local time as `HH:MM`, via libc so it respects the timezone.
 fn clock_now() -> String {
     // SAFETY: `localtime_r` fills a caller-owned `tm`; `time` takes null.
@@ -485,6 +534,17 @@ impl App {
             cx += d + CTRL_GAP;
             circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
         }
+        // The presence contract, applied once: everything downstream (draw,
+        // hit-test, hover, click) reads this list, so an element that does
+        // not belong in the current situation simply isn't there.
+        pills.retain(|p| {
+            let pres = presence(p.id);
+            if self.overview_active {
+                pres.overview
+            } else {
+                pres.desktop
+            }
+        });
         pills
     }
 
@@ -743,8 +803,10 @@ impl App {
             return;
         }
         // Overview-aware: while waveview owns the screen the pill's focus IS
-        // the overview — no window address (the control pills stand down)
-        // and no fullscreen conceal.
+        // the overview, so "Overview" is the label a pointer resting on no
+        // thumbnail falls back to (a hovered one supersedes it), and there is
+        // no window address to act on. Which CONTROLS survive up here is not
+        // decided here — see `presence`.
         if self.overview_active {
             let title = Some("Overview".to_owned());
             if self.options_active_addr.is_some() || self.options_title != title {

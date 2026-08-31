@@ -1651,6 +1651,12 @@ impl App {
         if active && self.ui.target() != Target::Hidden {
             self.handle_command(Command::Hide);
         }
+        // The clipboard isn't present in the overview (see `options::
+        // presence`), so an open drawer must collapse rather than linger
+        // invisible with its input region still claimed.
+        if active {
+            self.close_clip_box();
+        }
         // The bar is always visible over the overview (even when the
         // focused window is fullscreen — the overview covers it anyway).
         self.options_hidden = self.options_fullscreen && !active;

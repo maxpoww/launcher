@@ -2273,7 +2273,7 @@ impl App {
     }
 
     /// Collapse the open history drawer back to the pill.
-    fn close_clip_box(&mut self) {
+    pub(crate) fn close_clip_box(&mut self) {
         if self.clip.expanded {
             self.clip.expanded = false;
             self.clip.hit = ClipHit::None;
