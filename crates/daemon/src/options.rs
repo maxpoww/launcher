@@ -181,6 +181,8 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Fullscreen => 1,
         PillId::Pseudo => 2,
         PillId::Close => 3,
+        // The size readout emerges from behind the window pill's left edge.
+        PillId::Resize => 3,
         PillId::Window => 4,
         PillId::Clock => 5,
         // The preview/box (Notif) draws first; the fixed bell (NotifMute) draws
@@ -233,6 +235,10 @@ pub(crate) enum PillId {
     Close,
     Pseudo,
     Fullscreen,
+    /// The live-resize readout (`957 × 1203`): slides out leftward from
+    /// behind the window pill while the pointer is on a resize border /
+    /// a resize is in flight. Display-only — never hoverable or clickable.
+    Resize,
 }
 
 struct Pill {
@@ -463,10 +469,8 @@ impl App {
         // toggles reveal); close rests beside it, ALWAYS visible; the mode
         // toggles hide until hover, at fixed resting spots right of the close:
         //   [window name] [X] [pseudo] [fullscreen]
-        if self.options_title.is_some() {
-            // The live resize readout (`W × H`) supersedes the title while
-            // the focused window is being resized.
-            let shown = self.options_window_text().unwrap_or_default();
+        if let Some(title) = &self.options_title {
+            let shown = truncate(title, TITLE_MAX);
             let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
             let wx = ((w - ww) / 2.0).max(EDGE_PAD);
@@ -479,6 +483,21 @@ impl App {
                     glyph_color: color,
                 });
             };
+            // The live-resize readout, left of the window name: it slides
+            // out from behind the pill while the pointer is on a resize
+            // border (see `tick_resize_watch`); tucked away otherwise.
+            if self.options_resize_t > 0.01 {
+                if let Some(text) = self.options_resize_text() {
+                    let rw = (self.options_resize_w + 2.0 * PILL_PAD_X).max(ph);
+                    pills.push(Pill {
+                        id: PillId::Resize,
+                        rect: Rect::new(wx - GROUP_GAP - rw, y, rw, ph),
+                        text,
+                        family: TEXT_FONT,
+                        glyph_color: None,
+                    });
+                }
+            }
             pills.push(Pill {
                 id: PillId::Window,
                 rect: Rect::new(wx, y, ww, ph),
@@ -518,13 +537,9 @@ impl App {
         w - EDGE_PAD - cw
     }
 
-    /// What the window pill shows right now: the live `W × H` readout while
-    /// the focused window is being resized, else the window title.
-    fn options_window_text(&self) -> Option<String> {
-        match self.options_resize_live {
-            Some((w, h)) => Some(format!("{w} × {h}")),
-            None => self.options_title.as_ref().map(|t| truncate(t, TITLE_MAX)),
-        }
+    /// The live-resize pill's text (`957 × 1203`), when the readout is up.
+    fn options_resize_text(&self) -> Option<String> {
+        self.options_resize_live.map(|(w, h)| format!("{w} × {h}"))
     }
 
     /// Re-measure the clock + window-title text widths (proportional font, so
@@ -532,7 +547,8 @@ impl App {
     pub(crate) fn measure_options_text(&mut self) {
         let clock = self.options_clock.clone();
         let date = self.options_date.clone();
-        let title = self.options_window_text();
+        let title = self.options_title.as_ref().map(|t| truncate(t, TITLE_MAX));
+        let resize = self.options_resize_text();
         let Some(r) = self.options_renderer.as_mut() else {
             return;
         };
@@ -541,9 +557,13 @@ impl App {
         let tw = title
             .as_deref()
             .map_or(0.0, |t| r.measure_text(t, FONT_PX, TEXT_FONT));
+        let rw = resize
+            .as_deref()
+            .map_or(0.0, |t| r.measure_text(t, FONT_PX, TEXT_FONT));
         self.options_clock_w = cw;
         self.options_date_w = dw;
         self.options_title_w = tw;
+        self.options_resize_w = rw;
     }
 
     /// Whether the matched bar is bright enough to want dark text/ink.
@@ -641,6 +661,51 @@ impl App {
             // from behind the parent's near edge (slide 0 = tucked, 1 = rest),
             // fading in; the glyph is clipped to the emerge side so it reads as
             // coming out from under the parent rather than through it.
+            // The size readout rides its own progress: it emerges LEFTWARD
+            // from behind the window pill (same t-driven metamorphosis as
+            // the toggles), display-only.
+            if pill.id == PillId::Resize {
+                let t = self.options_resize_t;
+                let a = ((t - 0.15) / 0.6).clamp(0.0, 1.0);
+                if a <= 0.01 {
+                    continue;
+                }
+                let wx = home(PillId::Window).map_or(pill.rect.x + pill.rect.w, |r| r.x);
+                let x = lerp(wx, pill.rect.x, t);
+                let rect = Rect::new(x, pill.rect.y, pill.rect.w, pill.rect.h);
+                let clip = Rect::new(0.0, 0.0, wx, bar_h);
+                let radius = rect.h / 2.0;
+                push_neumorph(scene, rect, radius, bright, a * t);
+                scene.rects.push(RectInst {
+                    rect,
+                    radius,
+                    color: [rest_wash[0], rest_wash[1], rest_wash[2], rest_wash[3] * a],
+                    glass: 0.0,
+                });
+                let cx = rect.x + rect.w / 2.0;
+                let ty = rect.y + (rect.h - LINE_PX) / 2.0;
+                scene.labels.push(Label {
+                    text: pill.text.clone(),
+                    pos: (cx, ty),
+                    max_w: rect.w,
+                    font_px: FONT_PX,
+                    line_px: LINE_PX,
+                    centered: true,
+                    dim: false,
+                    // The digits change every fast tick mid-drag — not
+                    // worth caching shaped glyphs for.
+                    cache: false,
+                    family: pill.family,
+                    color: Some([
+                        text_color[0],
+                        text_color[1],
+                        text_color[2],
+                        text_color[3] * a,
+                    ]),
+                    clip: Some(clip),
+                });
+                continue;
+            }
             let (rect, a, clip, shadow_a) = match ctrl_index(pill.id) {
                 Some(i) => {
                     let t = self.options_ctrl.t[i];
@@ -838,21 +903,43 @@ impl App {
         let resizing = self
             .options_resize_at
             .is_some_and(|t| t.elapsed() < SIZE_HOLD);
-        let live = (on_border || resizing)
-            .then(|| cur.as_ref().map(|(_, _, _, w, h)| (*w, *h)))
-            .flatten();
-        self.options_size_seen = cur;
-        if live != self.options_resize_live {
-            self.options_resize_live = live;
-            if live.is_none() {
-                self.options_resize_at = None;
+        let want = (on_border || resizing) && cur.is_some();
+        let mut redraw = false;
+        if want {
+            // Update the displayed value (kept through the fade-out so the
+            // pill doesn't blank while sliding back behind the title).
+            let live = cur.as_ref().map(|(_, _, _, w, h)| (*w, *h));
+            if live != self.options_resize_live {
+                self.options_resize_live = live;
+                self.measure_options_text();
+                redraw = true;
             }
-            self.measure_options_text();
+        }
+        self.options_size_seen = cur;
+        // Slide the pill out/back — the same eased metamorphosis as the
+        // window-mode toggles.
+        let now = Instant::now();
+        let dt = self
+            .options_resize_tick
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+        self.options_resize_tick = Some(now);
+        let target = if want { 1.0 } else { 0.0 };
+        let (nt, sliding) =
+            ease_toward(self.options_resize_t, target, dt, CTRL_RATE, CTRL_EPS);
+        redraw |= nt != self.options_resize_t;
+        self.options_resize_t = nt;
+        if !want && !sliding && self.options_resize_live.is_some() {
+            // Fully tucked away: forget the value.
+            self.options_resize_live = None;
+            self.options_resize_at = None;
+        }
+        if redraw {
             self.draw_options();
         }
-        if self.options_resize_live.is_some() {
+        if want || sliding {
             SIZE_POLL_FAST
         } else {
+            self.options_resize_tick = None;
             SIZE_POLL_SLOW
         }
     }
@@ -1382,7 +1469,8 @@ impl App {
                 }
             }
             // The small clipboard pill is clickable (paste) → pointer.
-            Some(PillId::Clock | PillId::Window) | None => Shape::Default,
+            // The resize readout is display-only — no pointer affordance.
+            Some(PillId::Clock | PillId::Window | PillId::Resize) | None => Shape::Default,
             Some(_) => Shape::Pointer, // control circle / small clipboard pill
         };
         if self.cursor_now != Some(shape) {
