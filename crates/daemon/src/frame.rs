@@ -2,7 +2,7 @@
 //! glides, scene-input building, render submission) and the layout
 //! helpers every other module reads the geometry through.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::shell::wlr_layer::LayerSurfaceConfigure;
 use smithay_client_toolkit::shell::WaylandSurface;
@@ -17,6 +17,10 @@ use crate::{App, BOUNCE_DURATION, BOUNCE_HEIGHT, DOCK_REST_AFTER_CLOSE};
 /// reflow while dragging — higher is snappier, lower is slower. Kept brisk
 /// so the icons part right under the dragged ghost instead of lagging it.
 pub(crate) const MAKEROOM_RATE: f32 = 34.0;
+
+/// Minimum spacing between frames on a SOFTWARE (CPU) renderer — ~10fps.
+/// See the F12 throttle at the top of [`App::draw`].
+const SOFTWARE_FRAME_MIN: Duration = Duration::from_millis(100);
 
 impl App {
     /// Layout for an arbitrary card extent at the current scroll offsets.
@@ -144,6 +148,39 @@ impl App {
     pub(crate) fn draw(&mut self) {
         if self.renderer.is_none() {
             return;
+        }
+
+        // F12: on a software (CPU) adapter every frame costs real cores —
+        // a minutes-long install animation ran the daemon at 450% CPU in
+        // the 8-core VM and throttled its own install's download ~35x.
+        // Space sustained redraws to SOFTWARE_FRAME_MIN with a timer; the
+        // first frame after a quiet spell still draws immediately, so
+        // input-driven redraws stay snappy. dt keeps accumulating across
+        // skipped frames, so animations advance by real elapsed time.
+        if self.renderer.as_ref().is_some_and(|r| r.is_software()) {
+            if let Some(remaining) = self
+                .last_frame
+                .and_then(|t| SOFTWARE_FRAME_MIN.checked_sub(t.elapsed()))
+            {
+                if self.soft_frame_timer {
+                    return;
+                }
+                let timer = calloop::timer::Timer::from_duration(remaining);
+                let armed = self
+                    .loop_handle
+                    .insert_source(timer, |_, _, app: &mut App| {
+                        app.soft_frame_timer = false;
+                        app.draw();
+                        calloop::timer::TimeoutAction::Drop
+                    })
+                    .is_ok();
+                if armed {
+                    self.soft_frame_timer = true;
+                    return;
+                }
+                // No timer = no throttle; draw rather than stall.
+                error!("soft-frame timer failed to arm; drawing unthrottled");
+            }
         }
 
         let now = Instant::now();

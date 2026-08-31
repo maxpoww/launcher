@@ -96,6 +96,9 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// The adapter renders on the CPU (llvmpipe & friends): every frame
+    /// costs real cores, so sustained animations must be throttled (F12).
+    software: bool,
     /// Integer supersampling factor. `config.width/height` are physical
     /// (`logical × scale`); geometry is authored in logical px and scaled
     /// up automatically (see [`Renderer::render`]).
@@ -244,6 +247,7 @@ impl Renderer {
         }))
         .ok_or_else(|| anyhow!("no suitable GPU adapter (is vulkan-loader on LD_LIBRARY_PATH?)"))?;
         tracing::info!("using adapter: {:?}", adapter.get_info());
+        let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -739,6 +743,7 @@ impl Renderer {
             device,
             queue,
             config,
+            software,
             scale: scale.max(1),
             globals_buf,
             globals_bind,
@@ -887,6 +892,11 @@ impl Renderer {
     /// Width in pixels of `text` shaped at `font_px` — the same family
     /// and shaping the labels render with, so the search caret can sit
     /// exactly after the glyphs instead of guessing from char counts.
+    /// Whether frames are rendered on the CPU (see the `software` field).
+    pub fn is_software(&self) -> bool {
+        self.software
+    }
+
     pub fn measure_text(&mut self, text: &str, font_px: f32, family: Option<&str>) -> f32 {
         if text.is_empty() {
             return 0.0;

@@ -371,6 +371,7 @@ fn main() -> anyhow::Result<()> {
         data_device: None,
         paste_tx,
         hide_deadline: None,
+        soft_frame_timer: false,
         rest_hide_pending: false,
         restore_window: None,
         pending_refocus: None,
@@ -835,6 +836,9 @@ pub struct App {
     /// Deadline of the pending auto-hide, if the pointer has left the
     /// dock. Re-entry clears it, invalidating the in-flight timer.
     hide_deadline: Option<Instant>,
+    /// A frame-spacing timer is armed (software renderer, F12) — draw
+    /// calls in the window coalesce into the timer's single redraw.
+    soft_frame_timer: bool,
     /// A box close is settling to the dock and should rest a beat, then
     /// hide, once the collapse animation finishes.
     rest_hide_pending: bool,
