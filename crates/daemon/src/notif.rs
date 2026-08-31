@@ -130,6 +130,11 @@ const BOX_RADIUS: f32 = 10.0;
 /// black one at equal alpha (same reasoning as the pill washes).
 const STRIPE_LIGHTEN: f32 = 0.31;
 const STRIPE_DARKEN: f32 = 0.48;
+/// Hover highlight strength, applied in the direction OPPOSITE the zebra (see
+/// where it's mixed): it must be unmistakable without dragging the row toward
+/// the ink's own value.
+const HOVER_ROW_LIGHTEN: f32 = 0.30;
+const HOVER_ROW_DARKEN: f32 = 0.42;
 /// Resting text opacity of the open box's lines (band + list). The whole list
 /// sits muted as soon as it opens; the hovered line pops back to full contrast.
 /// Lower = more muted rest / stronger hover pop. `LIST_DIM` is tuned for dark
@@ -1300,6 +1305,25 @@ impl App {
         } else {
             wash(false, STRIPE_DARKEN)
         };
+        // Hover highlight for the pointed-at card. It moves the OPPOSITE way
+        // to the zebra — a light box's hovered card gets lighter, a dark
+        // box's darker — so it deepens the contrast with the ink instead of
+        // muddying it, and never reads as just another stripe. The hint has
+        // to live in the background now: resting text sits near full alpha
+        // for legibility, so the old "pop the ink" spotlight was invisible
+        // (Max, 2026-08-31: "i have no hover hint now").
+        let hover_bg = if flum <= 0.179 {
+            wash(false, HOVER_ROW_DARKEN)
+        } else {
+            wash(true, HOVER_ROW_LIGHTEN)
+        };
+        let ha = hover_bg[3];
+        let hover_opaque = [
+            hover_bg[0] * ha + expanded_fill[0] * (1.0 - ha),
+            hover_bg[1] * ha + expanded_fill[1] * (1.0 - ha),
+            hover_bg[2] * ha + expanded_fill[2] * (1.0 - ha),
+            1.0,
+        ];
         let sa = stripe[3];
         let stripe_opaque = [
             stripe[0] * sa + expanded_fill[0] * (1.0 - sa),
@@ -1359,7 +1383,7 @@ impl App {
                         let crect = Rect::new(rect.x, y, rect.w, h);
                         self.push_notif_card(
                             scene, idx, crect, content, radius, e, ink, dim_ink, hover_ink,
-                            stripe_opaque, expanded_fill,
+                            stripe_opaque, hover_opaque, expanded_fill,
                         );
                     }
                     y += h;
@@ -1371,7 +1395,7 @@ impl App {
             for (idx, crect) in self.notif_cards(rect) {
                 self.push_notif_card(
                     scene, idx, crect, content, radius, e, ink, dim_ink, hover_ink, stripe_opaque,
-                    expanded_fill,
+                    hover_opaque, expanded_fill,
                 );
             }
         }
@@ -1607,10 +1631,12 @@ impl App {
             );
             let body_top = rect.y + CARD_PAD_Y + LINE_PX + BODY_GAP;
             let body_max = (rect.x + rect.w - CARD_PAD_X - text_x).max(0.0);
-            // The body is the notification's CONTENT — it may sit a step under
-            // the summary, but not so far that it stops reading on a mid-tone
-            // box (it used to land near 0.5 alpha once the list dim compounded).
-            let bink = [base_ink[0], base_ink[1], base_ink[2], base_ink[3] * 0.85 * e];
+            // The body IS the notification — it carries the message, so it
+            // gets the same weight as the summary rather than a fraction of
+            // it. Every discount here compounds onto the list dim, and on a
+            // mid-tone box that is what made the content unreadable; the
+            // hierarchy comes from position and the hover highlight instead.
+            let bink = [base_ink[0], base_ink[1], base_ink[2], base_ink[3] * e];
             for (li, line) in info.body_lines.iter().enumerate() {
                 let ly = body_top + li as f32 * LINE_PX;
                 scene
@@ -1649,6 +1675,7 @@ impl App {
         dim_ink: [f32; 4],
         hover_ink: [f32; 4],
         stripe_opaque: [f32; 4],
+        hover_opaque: [f32; 4],
         fill: [f32; 4],
     ) {
         let Some(info) = self.notif.rows.get(idx) else {
@@ -1684,6 +1711,20 @@ impl App {
         }
 
         let hovered = self.notif.hover_card == Some(idx);
+        // Hover highlight, over the zebra: the visible hint (the ink barely
+        // changes now that resting text is near full alpha).
+        if hovered {
+            let top = rect.y.max(content.y);
+            let bot = (rect.y + rect.h).min(content.y + content.h);
+            if bot > top {
+                scene.rects.push(RectInst {
+                    rect: Rect::new(rect.x, top, rect.w, bot - top),
+                    radius: 0.0,
+                    color: hover_opaque,
+                    glass: 0.0,
+                });
+            }
+        }
         let card_ink = if hovered { hover_ink } else { dim_ink };
         let prim = [card_ink[0], card_ink[1], card_ink[2], card_ink[3] * alpha];
         let dim = [
@@ -1783,14 +1824,18 @@ impl App {
             content,
         ));
 
-        // Wrapped body beneath the header.
+        // Wrapped body beneath the header — at PRIMARY weight, not `dim`.
+        // The body IS the message; `dim` (0.6 of an already-dimmed list ink)
+        // left it around 0.57 alpha, which on a backdrop-coloured box is the
+        // "content is weak" Max kept seeing. `dim` stays for the timestamp,
+        // which really is secondary.
         let body_top = rect.y + CARD_PAD_Y + LINE_PX + BODY_GAP;
         let body_max = (rect.x + rect.w - CARD_PAD_X - text_x).max(0.0);
         for (li, line) in info.body_lines.iter().enumerate() {
             let ly = body_top + li as f32 * LINE_PX;
             scene
                 .labels
-                .push(mk_line(line.clone(), text_x, ly, body_max, dim, content));
+                .push(mk_line(line.clone(), text_x, ly, body_max, prim, content));
         }
     }
 
