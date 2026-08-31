@@ -763,8 +763,35 @@ impl App {
                     }
                 }
                 None => {
-                    slots.push(slots.last().map_or(0, |s| s + 1));
-                    cells.push(idx);
+                    // An anchorless grid drop still targets its page
+                    // (grid_page): the tile sits at that display page's
+                    // end. Pushing it to the grid's last cell rendered it
+                    // on the LAST page — the visible half of the page-2
+                    // teleport (the resolve's landing was the other).
+                    // A grid_page not in the map is the ghost page: one
+                    // past the last display page, same formula.
+                    let dp = self.pending_installs[i].grid_page.map(|sp| {
+                        self.apps_page_map
+                            .iter()
+                            .position(|&p| p == sp)
+                            .unwrap_or(self.apps_page_map.len())
+                    });
+                    match dp {
+                        Some(dp) => {
+                            let at = slots.partition_point(|&s| s / cap <= dp);
+                            let s = if at > 0 && slots[at - 1] / cap == dp {
+                                slots[at - 1] + 1
+                            } else {
+                                dp * cap
+                            };
+                            cells.insert(at, idx);
+                            slots.insert(at, s);
+                        }
+                        None => {
+                            slots.push(slots.last().map_or(0, |s| s + 1));
+                            cells.push(idx);
+                        }
+                    }
                 }
             }
         }
