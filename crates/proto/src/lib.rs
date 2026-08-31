@@ -28,7 +28,9 @@ pub enum ParseError {
 /// between hidden and dock; `expand`/`collapse` move between dock and
 /// open (normally driven by scrolling on the dock, exposed here for
 /// scripting and testing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Note: not `Copy` — the overview verbs carry a payload (a window title,
+/// a size); clone at the few call sites that need the value twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Show the dock if hidden, hide the launcher entirely otherwise.
     Toggle,
@@ -72,6 +74,14 @@ pub enum Command {
     /// Cycle focus into the other workspaces' windows, most-used first
     /// (the pill's right click).
     FocusOther,
+    /// Overview: the window under the pointer changed — the topbar's
+    /// current-task pill shows this title while the overview owns the
+    /// screen. Empty payload = nothing hovered (back to the focused
+    /// window's title).
+    OverviewHover(String),
+    /// Overview: a thumbnail is being resized at this size (`"1240x1000"`),
+    /// shown as the pill's live readout. Empty payload = resize ended.
+    OverviewResize(String),
 }
 
 impl fmt::Display for Command {
@@ -93,6 +103,8 @@ impl fmt::Display for Command {
             Command::Interacted => f.write_str("interacted"),
             Command::FocusNext => f.write_str("focus-next"),
             Command::FocusOther => f.write_str("focus-other"),
+            Command::OverviewHover(t) => write!(f, "overview-hover {t}"),
+            Command::OverviewResize(s) => write!(f, "overview-resize {s}"),
         }
     }
 }
@@ -101,6 +113,25 @@ impl FromStr for Command {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Payload verbs first: the rest of the line is the value, so only
+        // the trailing newline is stripped (a window title keeps its own
+        // spacing).
+        let line = s.trim_end_matches(['\n', '\r']);
+        for (verb, wrap) in [
+            ("overview-hover", Command::OverviewHover as fn(String) -> Command),
+            ("overview-resize", Command::OverviewResize as fn(String) -> Command),
+        ] {
+            if let Some(rest) = line.strip_prefix(verb) {
+                // `verb` alone (or `verb ` + text) — anything else is a
+                // different command that merely shares the prefix.
+                if rest.is_empty() {
+                    return Ok(wrap(String::new()));
+                }
+                if let Some(payload) = rest.strip_prefix(' ') {
+                    return Ok(wrap(payload.to_owned()));
+                }
+            }
+        }
         match s.trim() {
             "toggle" => Ok(Command::Toggle),
             "show" => Ok(Command::Show),

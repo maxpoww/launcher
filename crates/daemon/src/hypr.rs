@@ -68,6 +68,14 @@ pub fn dispatch(lua: &str) {
     }
 }
 
+/// Close the waveview overview (its Lua toggle, which closes when open) —
+/// the topbar's X while the overview owns the screen.
+pub fn close_overview() {
+    if let Err(e) = request("eval hl.plugin.waveview.toggle()") {
+        debug!("overview close failed: {e:#}");
+    }
+}
+
 /// Close a window by address (best effort) — used when uninstalling an app
 /// that's still open, so it goes away with its package instead of lingering
 /// on screen with nothing behind it.

@@ -319,6 +319,7 @@ fn main() -> anyhow::Result<()> {
         options_date: App::options_date_init(),
         options_title: None,
         options_resize_live: None,
+        overview_hover: None,
         resize_drag: false,
         resize_watch_running: false,
         frecency: focus_cycle::Frecency::default(),
@@ -766,6 +767,10 @@ pub struct App {
     /// (`current task (342x343)`) while a resize drag is in flight
     /// (`None` = title alone).
     options_resize_live: Option<(i32, i32)>,
+    /// While the overview owns the screen, the title of the thumbnail
+    /// under the pointer — the pill follows the pointer instead of the
+    /// focused window (waveview reports it; `None` = nothing hovered).
+    overview_hover: Option<String>,
     /// Whether a resize drag is in flight (waveview watches the
     /// compositor's drag state and writes resize-drag-on/off to the socket).
     resize_drag: bool,
@@ -1453,6 +1458,23 @@ impl App {
                 self.note_interaction();
                 return;
             }
+            // Overview: the pill follows the pointer across the grid, and
+            // shows the live size while a thumbnail is resized.
+            Command::OverviewHover(title) => {
+                self.set_overview_hover((!title.is_empty()).then_some(title));
+                return;
+            }
+            Command::OverviewResize(size) => {
+                let live = size.split_once('x').and_then(|(w, h)| {
+                    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+                });
+                if live != self.options_resize_live {
+                    self.options_resize_live = live;
+                    self.measure_options_text();
+                    self.draw_options();
+                }
+                return;
+            }
             // The usage-aware focus cycle, exposed for keybinds (the same
             // brain the current-task pill's clicks use).
             Command::FocusNext => {
@@ -1614,6 +1636,13 @@ impl App {
         }
         info!("overview: {}", if active { "open" } else { "closed" });
         self.overview_active = active;
+        // The pointer-follow title and any thumbnail-resize readout belong
+        // to the overview; drop them with it.
+        if !active {
+            self.overview_hover = None;
+            self.options_resize_live = None;
+            self.measure_options_text();
+        }
         if active && self.ui.target() != Target::Hidden {
             self.handle_command(Command::Hide);
         }

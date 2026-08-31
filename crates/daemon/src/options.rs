@@ -453,7 +453,7 @@ impl App {
         // toggles reveal); close rests beside it, ALWAYS visible; the mode
         // toggles hide until hover, at fixed resting spots right of the close:
         //   [window name] [X] [pseudo] [fullscreen]
-        if self.options_title.is_some() {
+        if self.options_title.is_some() || self.overview_hover.is_some() {
             // Title, with the live resize readout appended while active.
             let shown = self.options_window_text().unwrap_or_default();
             let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
@@ -508,10 +508,16 @@ impl App {
     }
 
     /// The window pill's text: the (truncated) title, with the live size
-    /// appended — `current task (342x343)` — while the pointer is on a
-    /// resize border or a resize is in flight.
+    /// appended — `current task (342x343)` — while a resize is in flight.
+    /// In the overview the pill follows the POINTER instead of the focused
+    /// window, so a hovered thumbnail's title supersedes it.
     fn options_window_text(&self) -> Option<String> {
-        let title = self.options_title.as_ref().map(|t| truncate(t, TITLE_MAX))?;
+        let title = self
+            .overview_hover
+            .as_ref()
+            .filter(|_| self.overview_active)
+            .or(self.options_title.as_ref())
+            .map(|t| truncate(t, TITLE_MAX))?;
         Some(match self.options_resize_live {
             Some((w, h)) => format!("{title} ({w}x{h})"),
             None => title,
@@ -840,6 +846,17 @@ impl App {
             self.resize_watch_running = false;
             warn!("resize-watch timer failed ({e}); no live size readout");
         }
+    }
+
+    /// The overview's hovered thumbnail changed: the pill follows the
+    /// pointer while the overview owns the screen.
+    pub(crate) fn set_overview_hover(&mut self, title: Option<String>) {
+        if self.overview_hover == title {
+            return;
+        }
+        self.overview_hover = title;
+        self.measure_options_text();
+        self.draw_options();
     }
 
     /// React to the focused window entering/leaving fullscreen: conceal the
@@ -1317,6 +1334,10 @@ impl App {
             return;
         }
         match self.options_hover {
+            // While the overview owns the screen the X closes the OVERVIEW,
+            // not the window under it — the bar is the overview's only
+            // on-screen exit affordance (Esc/Super+R being the others).
+            Some(PillId::Close) if self.overview_active => hypr::close_overview(),
             Some(PillId::Close) => {
                 if let Some(addr) = self.options_active_addr.clone() {
                     hypr::close_window(&addr);

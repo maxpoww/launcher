@@ -170,7 +170,9 @@ impl UiState {
             | Command::ResizeDragOff
             | Command::Interacted
             | Command::FocusNext
-            | Command::FocusOther => false,
+            | Command::FocusOther
+            | Command::OverviewHover(_)
+            | Command::OverviewResize(_) => false,
         }
     }
 

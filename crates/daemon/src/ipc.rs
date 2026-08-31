@@ -141,8 +141,9 @@ fn handle_client(stream: UnixStream, app: &mut App) {
             // handle_command draws and commits the first frame before
             // returning, so this covers command-to-first-frame-submitted.
             let start = Instant::now();
+            let shown = command.to_string();
             app.handle_command(command);
-            debug!("ipc command {command} handled in {:?}", start.elapsed());
+            debug!("ipc command {shown} handled in {:?}", start.elapsed());
             Response::Ok
         }
         Err(e) => {
