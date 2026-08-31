@@ -16,7 +16,9 @@ args in Lua and does **not** accept the classic `movecursor 5 5` syntax.
 |---|---|
 | `hl.dsp.window.close({ window = "address:0x…" })` | Close a window by address. `hl.dsp.window.close()` closes the focused one. |
 | `hl.dsp.window.float({ action = "toggle" })` | Toggle floating on the focused window. |
-| `hl.dsp.window.pseudo()` | Toggle pseudotile on the focused window. |
+| `hl.dsp.window.pseudo({ action = "toggle"\|"on"\|"off", window? })` | Pseudotile the focused (or given) window. **Prefer explicit on/off** — pseudo state is NOT readable anywhere (not in clients JSON, not on HL.Window), so toggles are blind. The Golem pill routes through `golemPseudoToggle()` in hyprland.lua (tag = state). |
+| `hl.dsp.window.resize({ x, y, relative?, window? })` | Resize a window. Absolute by default (delta computed against the goal size); `relative = true` for deltas (negatives allowed there only). On a **pseudo** window this sets the pseudo size (clamped to the tile); on a tiled window it resizes the layout node. GOTCHA: `clients -j` `size` reports the mid-ANIMATION value — sleep ~1s before reading back. |
+| `hl.dsp.window.tag({ tag = "+name"\|"-name"\|"name", window? })` | Set/unset/toggle a window tag. Tags show in `clients -j` and are matchable in `hl.window_rule` (`match = { tag = "name" }`, no negation). Dynamic rule props (rounding, border_size) re-apply on tag flips; static ones (pseudo, size) apply at map only. |
 | `hl.dsp.window.fullscreen({ action = "toggle" })` | Toggle fullscreen on the focused window. |
 | `hl.dsp.window.move({ workspace = N \| "special:magic" })` | Move focused window to a workspace. |
 | `hl.dsp.window.resize()` / `hl.dsp.window.drag()` | Interactive mouse resize / move (bound to mouse). |

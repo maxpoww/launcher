@@ -136,8 +136,12 @@ pub fn active_window_geom() -> Option<(i32, i32, i32, i32)> {
 }
 
 /// Toggle pseudotile on the focused window (the OPTIONS square control).
+/// The Golem policy lives in the compositor config: `golemPseudoToggle()`
+/// (hyprland.lua) tags the window, applies the proportional default size,
+/// and the tag-matched frame rule restores rounding + border under smart
+/// gaps. On a config without the function, falls back to a plain toggle.
 pub fn pseudo_active() {
-    dispatch("hl.dsp.window.pseudo()");
+    dispatch("golemPseudoToggle and golemPseudoToggle() or hl.dsp.window.pseudo()");
 }
 
 /// Toggle fullscreen on the focused window.
