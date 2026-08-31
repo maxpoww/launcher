@@ -290,10 +290,14 @@ fn box_fill(backdrop: [f32; 4], wash: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-/// Light ink — a hair off pure white so it doesn't glare.
-const INK_LIGHT: [f32; 4] = [0.93, 0.93, 0.96, 1.0];
-/// Dark ink.
-const INK_DARK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+// OPTIONS' ink: never pure black or white, and always a touch WARM (r > g >
+// b) so the text sits in the room's light instead of glaring out of it (Max,
+// 2026-08-31). LINEAR values — the swapchain encodes sRGB on write — so the
+// sRGB the eye gets is in each comment.
+/// Warm off-white ≈ #E8E5DE.
+const INK_LIGHT: [f32; 4] = [0.807, 0.787, 0.728, 1.0];
+/// Warm near-black ≈ #262220.
+const INK_DARK: [f32; 4] = [0.019, 0.016, 0.014, 1.0];
 
 /// Relative luminance of a LINEAR colour (the space every colour here lives
 /// in — the swapchain encodes sRGB on write).
@@ -1589,6 +1593,21 @@ mod tests {
         // case that was unreadable while the bar used a static theme white.
         assert_eq!(ink_on([0.7, 0.75, 0.8, 1.0]), INK_DARK);
         assert_eq!(ink_on([0.05, 0.06, 0.08, 1.0]), INK_LIGHT);
+    }
+
+    #[test]
+    fn ink_is_softened_and_warm() {
+        for ink in [INK_LIGHT, INK_DARK] {
+            // Never pure black or white...
+            assert!(ink[0] > 0.0 && ink[0] < 1.0);
+            // ...and warm: red leads, blue trails.
+            assert!(
+                ink[0] > ink[1] && ink[1] > ink[2],
+                "ink {ink:?} is not warm"
+            );
+        }
+        // Still separated far enough to carry contrast on either surface.
+        assert!(luminance(INK_LIGHT) > 0.6 && luminance(INK_DARK) < 0.05);
     }
 
     #[test]

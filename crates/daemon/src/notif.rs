@@ -1262,14 +1262,11 @@ impl App {
         // fill: steady when the box mimics the (already-legible) bar colour,
         // else brightening as the fallback panel darkens.
         let ink = lerp4(text_color, expanded_ink, e);
-        // Spotlight ink: the open box rests muted; the hovered card pops to full
-        // contrast (white on a dark box, black on a light one).
+        // Spotlight ink: the open box rests muted; the hovered card pops to
+        // FULL ALPHA rather than switching to a pure black/white, so the ink
+        // keeps its warm tone throughout.
         let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
-        let hover_ink = if dark_ink {
-            [0.0, 0.0, 0.0, 1.0]
-        } else {
-            [1.0, 1.0, 1.0, 1.0]
-        };
+        let hover_ink = [ink[0], ink[1], ink[2], 1.0];
         // Dark ink on a light box needs more presence than light ink on a dark one
         // to read at the same muting (a black wash is perceptually weaker than a
         // white one at equal alpha) — so lift the resting dim on light boxes and

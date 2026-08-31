@@ -1560,11 +1560,9 @@ impl App {
 
         let ink = lerp4(text_color, box_ink, solid);
         let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
-        let hover_ink = if dark_ink {
-            [0.0, 0.0, 0.0, 1.0]
-        } else {
-            [1.0, 1.0, 1.0, 1.0]
-        };
+        // The hovered row pops by going to FULL ALPHA, not by switching to a
+        // pure black/white — the ink keeps its warm tone throughout.
+        let hover_ink = [ink[0], ink[1], ink[2], 1.0];
         let list_dim = if dark_ink { LIST_DIM_LIGHT } else { LIST_DIM };
         let dim_ink = [ink[0], ink[1], ink[2], ink[3] * list_dim];
 
