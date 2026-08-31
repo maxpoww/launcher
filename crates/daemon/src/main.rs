@@ -1458,6 +1458,11 @@ impl App {
                 self.note_interaction();
                 return;
             }
+            // Golem pseudo (the square pill's policy), for the keybind.
+            Command::PseudoToggle => {
+                hypr::toggle_golem_pseudo();
+                return;
+            }
             // Overview: the pill follows the pointer across the grid, and
             // shows the live size while a thumbnail is resized.
             Command::OverviewHover(title) => {

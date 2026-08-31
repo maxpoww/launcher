@@ -169,6 +169,7 @@ impl UiState {
             | Command::ResizeDragOn
             | Command::ResizeDragOff
             | Command::Interacted
+            | Command::PseudoToggle
             | Command::FocusNext
             | Command::FocusOther
             | Command::OverviewHover(_)

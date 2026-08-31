@@ -74,6 +74,9 @@ pub enum Command {
     /// Cycle focus into the other workspaces' windows, most-used first
     /// (the pill's right click).
     FocusOther,
+    /// Toggle Golem pseudo (tag + proportional size + framed) on the
+    /// focused window — the topbar's square pill, bindable as Super+P.
+    PseudoToggle,
     /// Overview: the window under the pointer changed — the topbar's
     /// current-task pill shows this title while the overview owns the
     /// screen. Empty payload = nothing hovered (back to the focused
@@ -103,6 +106,7 @@ impl fmt::Display for Command {
             Command::Interacted => f.write_str("interacted"),
             Command::FocusNext => f.write_str("focus-next"),
             Command::FocusOther => f.write_str("focus-other"),
+            Command::PseudoToggle => f.write_str("pseudo-toggle"),
             Command::OverviewHover(t) => write!(f, "overview-hover {t}"),
             Command::OverviewResize(s) => write!(f, "overview-resize {s}"),
         }
@@ -147,6 +151,7 @@ impl FromStr for Command {
             "resize-drag-on" => Ok(Command::ResizeDragOn),
             "resize-drag-off" => Ok(Command::ResizeDragOff),
             "interacted" => Ok(Command::Interacted),
+            "pseudo-toggle" => Ok(Command::PseudoToggle),
             "focus-next" => Ok(Command::FocusNext),
             "focus-other" => Ok(Command::FocusOther),
             other => Err(ParseError::UnknownCommand(other.to_owned())),

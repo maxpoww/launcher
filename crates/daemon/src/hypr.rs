@@ -68,6 +68,71 @@ pub fn dispatch(lua: &str) {
     }
 }
 
+/// Golem's pseudo size, as a fraction of the window's tile: the
+/// "frame inset" look Max picked live (2026-08-31) — proportional, so it
+/// reads the same on every screen and inside any split.
+const PSEUDO_W: f64 = 0.89;
+const PSEUDO_H: f64 = 0.84;
+/// The tag that marks a Golem-pseudo window. It is BOTH the state (read
+/// back from `clients` JSON) and the match key for hyprland.lua's frame
+/// rule, which restores rounding + border under smart gaps.
+const PSEUDO_TAG: &str = "golem-pseudo";
+
+/// Toggle Golem pseudo on the focused window: tag it, pseudotile it, and
+/// size it to [`PSEUDO_W`]×[`PSEUDO_H`] of its tile — or undo all of that
+/// when it is already tagged.
+///
+/// The policy lives HERE rather than in hyprland.lua because the state is
+/// only readable from this side: the Lua `window.tags` field reads as an
+/// empty table even for a tagged window (verified 2026-08-31), and pseudo
+/// state is exposed nowhere at all — so a config-side toggle could never
+/// tell "on" from "off" and always re-applied "on". The topbar pill and
+/// Super+P both route through this one function.
+pub fn toggle_golem_pseudo() {
+    let Ok(raw) = request("j/activewindow") else {
+        return;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(addr) = json["address"].as_str().filter(|a| !a.is_empty() && *a != "0x0") else {
+        return;
+    };
+    if json["fullscreen"].as_i64().unwrap_or(0) != 0 {
+        debug!("pseudo: skipped, {addr} is fullscreen");
+        return;
+    }
+    let tagged = json["tags"]
+        .as_array()
+        .is_some_and(|t| t.iter().any(|v| v.as_str() == Some(PSEUDO_TAG)));
+    // One eval chunk so the tag, the mode, and the size land together.
+    let lua = if tagged {
+        format!(
+            "hl.dispatch(hl.dsp.window.tag({{ tag = \"-{PSEUDO_TAG}\", window = \"address:{addr}\" }})) \
+             hl.dispatch(hl.dsp.window.pseudo({{ action = \"off\", window = \"address:{addr}\" }}))"
+        )
+    } else {
+        // The tile size, read BEFORE pseudo shrinks the window into it.
+        let (w, h) = (
+            json["size"][0].as_f64().unwrap_or(0.0),
+            json["size"][1].as_f64().unwrap_or(0.0),
+        );
+        if w < 1.0 || h < 1.0 {
+            return;
+        }
+        format!(
+            "hl.dispatch(hl.dsp.window.tag({{ tag = \"+{PSEUDO_TAG}\", window = \"address:{addr}\" }})) \
+             hl.dispatch(hl.dsp.window.pseudo({{ action = \"on\", window = \"address:{addr}\" }})) \
+             hl.dispatch(hl.dsp.window.resize({{ x = {}, y = {}, window = \"address:{addr}\" }}))",
+            (w * PSEUDO_W) as i64,
+            (h * PSEUDO_H) as i64,
+        )
+    };
+    if let Err(e) = request(&format!("eval {lua}")) {
+        debug!("pseudo toggle failed: {e:#}");
+    }
+}
+
 /// Close the waveview overview (its Lua toggle, which closes when open) —
 /// the topbar's X while the overview owns the screen.
 pub fn close_overview() {
@@ -203,13 +268,10 @@ pub fn active_window_geom() -> Option<(i32, i32, i32, i32)> {
     Some((x, y, w, h))
 }
 
-/// Toggle pseudotile on the focused window (the OPTIONS square control).
-/// The Golem policy lives in the compositor config: `golemPseudoToggle()`
-/// (hyprland.lua) tags the window, applies the proportional default size,
-/// and the tag-matched frame rule restores rounding + border under smart
-/// gaps. On a config without the function, falls back to a plain toggle.
+/// Toggle pseudotile on the focused window (the OPTIONS square control) —
+/// Golem's policy version: see [`toggle_golem_pseudo`].
 pub fn pseudo_active() {
-    dispatch("golemPseudoToggle and golemPseudoToggle() or hl.dsp.window.pseudo()");
+    toggle_golem_pseudo();
 }
 
 /// Toggle fullscreen on the focused window.
