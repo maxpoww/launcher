@@ -7,9 +7,16 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Prebuilt nix-index file database (weekly): lets package-index bake
+    # desktop-file stems + icon paths at build time, offline. Without
+    # them multi-desktop suites (libreoffice) can't resolve gui.
+    nix-index-database = {
+      url = "github:nix-community/nix-index-database";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, home-manager }:
+  outputs = { self, nixpkgs, home-manager, nix-index-database }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f:
@@ -128,7 +135,7 @@
         # icons lazily.
         package-index = pkgs.runCommand "waverunner-package-index"
           {
-            nativeBuildInputs = [ pkgs.nix pkgs.jq waverunner-daemon ];
+            nativeBuildInputs = [ pkgs.nix pkgs.jq pkgs.nix-index waverunner-daemon ];
           } ''
           export HOME=$TMPDIR NIX_STATE_DIR=$TMPDIR/nix
           nix-env -f ${nixpkgs} -qa --json --meta \
@@ -140,6 +147,14 @@
                              version: (.value.version // ""),
                              description: (.value.meta.description // "") } })
             | from_entries' raw.json > search.json
+          # Desktop stems + in-package icon paths from the offline file
+          # database (nix-locate wants a dir containing `files`) —
+          # without them multi-desktop suites can't resolve gui.
+          mkdir db
+          ln -s ${
+            nix-index-database.packages.${pkgs.stdenv.hostPlatform.system}.nix-index-database
+          } db/files
+          export WAVERUNNER_NIX_INDEX_DB=$PWD/db
           waverunner build-index search.json \
             $out/share/waverunner/nixpkgs-index.tsv
         '';

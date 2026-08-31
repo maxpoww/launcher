@@ -945,7 +945,16 @@ fn keep_attr(attr: &str) -> bool {
 /// runtimeTools), else via `nix shell nixpkgs#nix-index`, which costs a
 /// full nixpkgs eval (~3GB) and is only acceptable on dev machines.
 fn nix_locate(regex: &str) -> anyhow::Result<std::process::Output> {
-    match Command::new("nix-locate").args(["--regex", regex]).output() {
+    // WAVERUNNER_NIX_INDEX_DB: a directory holding the `files` database.
+    // Set by the flake's package-index derivation (build sandbox: the
+    // nix-index-database input, no download) — unset at runtime, where
+    // ensure_file_index has downloaded into nix-locate's default dir.
+    let db = std::env::var("WAVERUNNER_NIX_INDEX_DB").ok();
+    let mut cmd = Command::new("nix-locate");
+    if let Some(db) = &db {
+        cmd.args(["--db", db]);
+    }
+    match cmd.args(["--regex", regex]).output() {
         Ok(out) => Ok(out),
         Err(_) => Ok(Command::new("nix")
             .args(["shell", "nixpkgs#nix-index", "-c", "nix-locate", "--regex", regex])
@@ -986,6 +995,13 @@ fn ensure_file_index() -> anyhow::Result<()> {
 /// packages.
 fn desktop_icon_hints() -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
     ensure_file_index()?;
+    desktop_icon_hints_offline()
+}
+
+/// [`desktop_icon_hints`] without the database download — the caller
+/// guarantees nix-locate can find one (WAVERUNNER_NIX_INDEX_DB in the
+/// build sandbox).
+fn desktop_icon_hints_offline() -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
     let out = nix_locate(r"share/applications/[^/]*\.desktop$")?;
     anyhow::ensure!(
         out.status.success(),
@@ -1105,12 +1121,27 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
 /// `nix search --json` dump into the TSV cache the daemon loads
 /// instantly. Run at flake build time (the launcher flake's
 /// `package-index` derivation) so a fresh machine never evaluates
-/// nixpkgs — the ~3GB eval OOM-crash-looped a 4G VM (2026-08-30). No
-/// icon hints here (nix-locate needs its downloaded file database);
-/// the runtime flathub/store icon fetchers cover icons lazily.
+/// nixpkgs — the ~3GB eval OOM-crash-looped a 4G VM (2026-08-30).
+/// With WAVERUNNER_NIX_INDEX_DB set (the nix-index-database input) the
+/// index also carries desktop-file stems + in-package icon paths —
+/// without them, multi-desktop suites can't resolve gui (libreoffice's
+/// startcenter/writer/calc share no substring with the attr, so its
+/// install landed as a CLI terminal tile, 2026-08-31).
 pub fn build_index(json_path: &Path, out_path: &Path) -> anyhow::Result<()> {
     let json = std::fs::read(json_path)?;
-    let pkgs = parse_search_json(&json, Default::default(), Default::default())?;
+    let (desktops, icon_paths) = if std::env::var("WAVERUNNER_NIX_INDEX_DB").is_ok() {
+        let desktops = desktop_icon_hints_offline()?;
+        let icon_paths = package_icon_paths()?;
+        println!(
+            "desktop hints for {} attrs, icon paths for {}",
+            desktops.len(),
+            icon_paths.len()
+        );
+        (desktops, icon_paths)
+    } else {
+        Default::default()
+    };
+    let pkgs = parse_search_json(&json, desktops, icon_paths)?;
     if let Some(dir) = out_path.parent() {
         std::fs::create_dir_all(dir)?;
     }

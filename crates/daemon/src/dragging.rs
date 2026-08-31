@@ -708,6 +708,11 @@ impl App {
         if !vp.contains(pos) && !beside {
             // Dropped outside the grid (a dock app snaps back and stays
             // pinned; a grid member dragged out just returns): no-op.
+            // DIAG (end-of-grid drop bug, 2026-08-31): say exactly where.
+            info!(
+                "grid drop NO-OP: pos ({:.0},{:.0}) outside apps vp ({:.0},{:.0} {:.0}x{:.0})",
+                pos.0, pos.1, vp.x, vp.y, vp.w, vp.h
+            );
             return false;
         }
         // A dock app that lands in the grid unpins as it does.
@@ -724,6 +729,11 @@ impl App {
         let slot = self
             .reorder_slot
             .unwrap_or(orig_slot.unwrap_or(self.apps_span));
+        // DIAG (end-of-grid drop bug, 2026-08-31): the resolved landing.
+        info!(
+            "grid drop: slot {slot} (reorder_slot {:?}, orig_slot {:?}, pos ({:.0},{:.0}))",
+            self.reorder_slot, orig_slot, pos.0, pos.1
+        );
         // Fold wins when the pointer sits on a foldable item's centre —
         // the exact same detection and box create/join the Install drops
         // use, so every placement shares one path. (Boxes don't nest, so

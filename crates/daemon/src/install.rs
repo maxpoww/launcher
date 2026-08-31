@@ -32,6 +32,11 @@ pub(crate) struct PendingInstall {
     /// Grid id the installed app should land *before* (`None` = end) —
     /// the app displayed at the drop slot when it was let go.
     pub(crate) anchor: Option<String>,
+    /// Storage page of a grid drop with no anchor (a page's empty tail,
+    /// or the ghost page): the app lands at THIS page's end. Without it,
+    /// anchorless installs fell to the order's default — the LAST page —
+    /// teleporting an end-of-page-1 drop onto page 2 (Max, 2026-08-31).
+    pub(crate) grid_page: Option<usize>,
     /// Dropped on the dock instead of the grid: the tile pins there at this
     /// slot (not a grid cell), and the finished app takes the same slot.
     pub(crate) dock_slot: Option<usize>,
@@ -599,6 +604,20 @@ impl App {
                 })
             })
             .flatten();
+        // An anchorless grid drop still names its PAGE (see grid_page on
+        // the struct): the storage page under the drop slot, or a fresh
+        // page for the ghost-page gesture.
+        let grid_page = (dock_slot.is_none() && box_dest.is_none() && anchor.is_none())
+            .then(|| {
+                self.reorder_slot.map(|slot| {
+                    let dp = slot / self.apps_cap.max(1);
+                    self.apps_page_map
+                        .get(dp)
+                        .copied()
+                        .unwrap_or_else(|| self.order.pages().len())
+                })
+            })
+            .flatten();
         // The package's own icon, recovered from the hits by attr; no
         // rasterized hit icon falls back to the generic package tile.
         let (icon_pixels, placeholder) = match hit {
@@ -614,13 +633,16 @@ impl App {
                 renderer.update_icon_layer(layer, &icon_pixels);
             }
         }
-        info!("installing {attr} (slot {icon_slot}, anchor {anchor:?}, dock {dock_slot:?})");
+        info!(
+            "installing {attr} (slot {icon_slot}, anchor {anchor:?}, page {grid_page:?}, dock {dock_slot:?})"
+        );
         self.pending_installs.push(PendingInstall {
             attr: attr.to_owned(),
             name,
             version,
             desktop_ids: desktop_ids.clone(),
             anchor,
+            grid_page,
             dock_slot,
             box_dest,
             icon_slot,
@@ -849,14 +871,19 @@ impl App {
             // swaps the placeholder member for the real app in place; a grid
             // drop keeps it in the grid at its anchor and never pins — so it
             // stays exactly where it was dropped instead of teleporting.
-            let (dock_slot, box_dest) = self
+            let (dock_slot, box_dest, grid_page) = self
                 .pending_installs
                 .iter()
                 .find(|p| p.attr == attr)
-                .map(|p| (p.dock_slot, p.box_dest.clone()))
-                .unwrap_or((None, None));
+                .map(|p| (p.dock_slot, p.box_dest.clone(), p.grid_page))
+                .unwrap_or((None, None, None));
             if let Some(anchor) = anchor {
                 self.order.insert_before(&app_id, &anchor);
+            } else if let Some(page) = grid_page {
+                // Page-tail / ghost-page drop: land at the end of the page
+                // the user dropped on — the order's default (last page)
+                // teleported end-of-page-1 drops onto page 2.
+                self.order.move_to_page_end(&app_id, page);
             }
             // Record the real app id and whether it is a GUI app, so a
             // wrapped package (chromium → chromium-browser) never regrows a
