@@ -114,6 +114,20 @@ pub(crate) struct CtrlAnim {
     frame_pending: bool,
 }
 
+// --- Live resize readout ----------------------------------------------------
+// While the focused window is being resized, the window pill shows its size
+// (`1992 × 1199`) live instead of the title. Detection is a size-change poll
+// keyed by window address (the compositor emits no drag/resize events; same
+// precedent as the intellihide zone poll): slow at rest, fast while the size
+// is actually moving.
+/// Sampling interval at rest (one tiny `j/activewindow` read).
+pub(crate) const SIZE_POLL_SLOW: Duration = Duration::from_millis(500);
+/// Sampling interval while a resize is live — fast enough to read as a
+/// continuous counter tracking the drag.
+const SIZE_POLL_FAST: Duration = Duration::from_millis(40);
+/// How long the size must hold still before the pill reverts to the title.
+const SIZE_HOLD: Duration = Duration::from_millis(700);
+
 // --- Clock↔date metamorphosis ----------------------------------------------
 // Hovering the clock pill grows it horizontally and crossfades HH:MM into the
 // full date; it holds as the date for a few seconds after the pointer leaves,
@@ -441,8 +455,10 @@ impl App {
         // toggles reveal); close rests beside it, ALWAYS visible; the mode
         // toggles hide until hover, at fixed resting spots right of the close:
         //   [window name] [X] [pseudo] [fullscreen]
-        if let Some(title) = &self.options_title {
-            let shown = truncate(title, TITLE_MAX);
+        if self.options_title.is_some() {
+            // The live resize readout (`W × H`) supersedes the title while
+            // the focused window is being resized.
+            let shown = self.options_window_text().unwrap_or_default();
             let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
             let wx = ((w - ww) / 2.0).max(EDGE_PAD);
@@ -494,12 +510,21 @@ impl App {
         w - EDGE_PAD - cw
     }
 
+    /// What the window pill shows right now: the live `W × H` readout while
+    /// the focused window is being resized, else the window title.
+    fn options_window_text(&self) -> Option<String> {
+        match self.options_resize_live {
+            Some((w, h)) => Some(format!("{w} × {h}")),
+            None => self.options_title.as_ref().map(|t| truncate(t, TITLE_MAX)),
+        }
+    }
+
     /// Re-measure the clock + window-title text widths (proportional font, so
     /// widths must be measured, not estimated). Cheap; only on data change.
     pub(crate) fn measure_options_text(&mut self) {
         let clock = self.options_clock.clone();
         let date = self.options_date.clone();
-        let title = self.options_title.as_ref().map(|t| truncate(t, TITLE_MAX));
+        let title = self.options_window_text();
         let Some(r) = self.options_renderer.as_mut() else {
             return;
         };
@@ -763,6 +788,48 @@ impl App {
             self.draw_options();
         }
         self.set_options_fullscreen(fullscreen);
+    }
+
+    /// One tick of the live-resize watcher; returns the delay until the next
+    /// tick. At rest it samples the focused window's size slowly; when the
+    /// SAME window's size changes between samples (a border/corner drag, a
+    /// keyboard resize — a focus switch changes address and never triggers),
+    /// the window pill flips to a live `W × H` readout and the sampling goes
+    /// fast so the numbers track the drag. Once the size holds still for
+    /// [`SIZE_HOLD`], the pill reverts to the title and the watcher slows
+    /// back down.
+    pub(crate) fn tick_resize_watch(&mut self) -> Duration {
+        let cur = hypr::active_window_size();
+        let mut changed = false;
+        if let (Some((pa, pw, ph)), Some((a, w, h))) = (&self.options_size_seen, &cur) {
+            if pa == a && (pw != w || ph != h) {
+                changed = true;
+                self.options_resize_at = Some(Instant::now());
+                if self.options_resize_live != Some((*w, *h)) {
+                    self.options_resize_live = Some((*w, *h));
+                    self.measure_options_text();
+                    self.draw_options();
+                }
+            }
+        }
+        self.options_size_seen = cur;
+        if self.options_resize_live.is_some() && !changed {
+            let settled = self
+                .options_resize_at
+                .is_none_or(|t| t.elapsed() >= SIZE_HOLD);
+            if settled {
+                // Resize over: back to the title.
+                self.options_resize_live = None;
+                self.options_resize_at = None;
+                self.measure_options_text();
+                self.draw_options();
+            }
+        }
+        if self.options_resize_live.is_some() {
+            SIZE_POLL_FAST
+        } else {
+            SIZE_POLL_SLOW
+        }
     }
 
     /// React to the focused window entering/leaving fullscreen: conceal the
