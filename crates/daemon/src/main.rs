@@ -318,9 +318,6 @@ fn main() -> anyhow::Result<()> {
         options_date: App::options_date_init(),
         options_title: None,
         options_resize_live: None,
-        options_resize_t: 0.0,
-        options_resize_tick: None,
-        options_resize_w: 0.0,
         options_size_seen: None,
         options_resize_at: None,
         options_active_addr: None,
@@ -770,16 +767,10 @@ pub struct App {
     /// Full date shown when the clock pill is hovered ("Friday, 31 July 2026").
     options_date: String,
     options_title: Option<String>,
-    /// Live-resize readout: the size shown on the resize pill while the
-    /// pointer is on a resize border / a resize is in flight (kept through
-    /// the pill's fade-out; `None` = fully tucked away).
+    /// Live-resize readout: the size appended to the window pill's title
+    /// (`current task (342x343)`) while the pointer is on a resize border /
+    /// a resize is in flight (`None` = title alone).
     options_resize_live: Option<(i32, i32)>,
-    /// The resize pill's slide progress (0 = tucked behind the window pill,
-    /// 1 = resting) and the last watcher tick (for dt), plus the measured
-    /// text width of the readout.
-    options_resize_t: f32,
-    options_resize_tick: Option<Instant>,
-    options_resize_w: f32,
     /// Last `(address, x, y, w, h)` sample of the focused window — the
     /// resize watcher's comparison point and border-band geometry (see
     /// `options::tick_resize_watch`).
