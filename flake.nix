@@ -25,7 +25,9 @@
       #  - grim: link-clip window snapshots (share-card hero)
       #  - curl: opt-in link unfurl + Flathub/store icon fetch
       #  - ffmpegthumbnailer / poppler's pdftoppm: Files-section thumbnails
-      runtimeTools = pkgs: with pkgs; [ wl-clipboard grim curl ffmpegthumbnailer poppler-utils ];
+      #  - nix-index (nix-locate): icon/desktop hints for the package index
+      #    without `nix shell nixpkgs#nix-index` (a ~3GB nixpkgs eval)
+      runtimeTools = pkgs: with pkgs; [ wl-clipboard grim curl ffmpegthumbnailer poppler-utils nix-index ];
     in {
 
       # ── Nix packages ────────────────────────────────────────────────────────
@@ -115,6 +117,33 @@
           doCheck = false;
         };
 
+        # The nixpkgs package index, prebuilt from THIS flake's pinned
+        # nixpkgs (a distro flake's `follows` makes it match exactly what
+        # the system installs from). The daemon loads it instantly via
+        # WAVERUNNER_PKG_INDEX (the home-manager module wires this) instead
+        # of running the ~3GB `nix search nixpkgs ^` eval at cold start —
+        # which OOM-crash-looped the whole shell on a 4G machine
+        # (2026-08-30). No icon hints at build time (nix-locate needs its
+        # downloaded database); the runtime flathub/store fetchers cover
+        # icons lazily.
+        package-index = pkgs.runCommand "waverunner-package-index"
+          {
+            nativeBuildInputs = [ pkgs.nix pkgs.jq waverunner-daemon ];
+          } ''
+          export HOME=$TMPDIR NIX_STATE_DIR=$TMPDIR/nix
+          nix-env -f ${nixpkgs} -qa --json --meta \
+            --arg config '{ allowUnfree = true; }' > raw.json
+          jq --arg sys ${pkgs.stdenv.hostPlatform.system} '
+            to_entries
+            | map({ key: ("legacyPackages." + $sys + "." + .key),
+                    value: { pname: (.value.pname // ""),
+                             version: (.value.version // ""),
+                             description: (.value.meta.description // "") } })
+            | from_entries' raw.json > search.json
+          waverunner build-index search.json \
+            $out/share/waverunner/nixpkgs-index.tsv
+        '';
+
         default = waverunner-daemon;
       });
 
@@ -147,6 +176,7 @@
           sys = pkgs.stdenv.hostPlatform.system;
           defaultPkg = self.packages.${sys}.waverunner-daemon;
           defaultCtl = self.packages.${sys}.waverunner-ctl;
+          defaultIdx = self.packages.${sys}.package-index;
         in {
           options.programs.waverunner = {
             enable = lib.mkEnableOption "waverunner dock launcher";
@@ -161,6 +191,16 @@
               type = lib.types.package;
               default = defaultCtl;
               description = "The waverunner-ctl package to use.";
+            };
+
+            packageIndex = lib.mkOption {
+              type = lib.types.nullOr lib.types.package;
+              default = defaultIdx;
+              description = ''
+                Prebuilt nixpkgs package index (WAVERUNNER_PKG_INDEX).
+                null = the daemon dumps its own index at runtime — a ~3GB
+                nixpkgs eval; never do that on small machines.
+              '';
             };
           };
 
@@ -178,6 +218,10 @@
                 ExecStart = "${cfg.package}/bin/waverunner";
                 Restart   = "on-failure";
                 RestartSec = "1s";
+              } // lib.optionalAttrs (cfg.packageIndex != null) {
+                Environment = [
+                  "WAVERUNNER_PKG_INDEX=${cfg.packageIndex}/share/waverunner/nixpkgs-index.tsv"
+                ];
               };
               Install.WantedBy = [ "graphical-session.target" ];
             };

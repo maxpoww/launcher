@@ -120,6 +120,17 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Build-time mode (the flake's package-index derivation): convert a
+    // raw `nix search --json` dump into the daemon's TSV index and exit.
+    // No Wayland, no config — must run inside a build sandbox.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("build-index") {
+        let (Some(json), Some(out)) = (args.get(2), args.get(3)) else {
+            anyhow::bail!("usage: waverunner build-index <search-json> <out-tsv>");
+        };
+        return nix::build_index(std::path::Path::new(json), std::path::Path::new(out));
+    }
+
     let config = Config::load().context("loading config.toml")?;
     info!(
         "config loaded: {}x{} popup",

@@ -309,22 +309,49 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
 /// service until the daemon goes away.
 fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_theme: String) {
     let cache = cache_path();
-    let mut pkgs = match load_cache(&cache) {
-        Ok(pkgs) => {
-            info!("nixpkgs index: {} packages (cache)", pkgs.len());
-            if events.send(Event::IndexReady(pkgs.len())).is_err() {
-                return;
+    // A distribution-prebuilt index (WAVERUNNER_PKG_INDEX, set by the
+    // flake) is authoritative: it was built from the exact nixpkgs the
+    // system installs from, so a fresh dump could only diverge — and it
+    // spares the machine the ~3GB `nix search` eval entirely (which
+    // OOM-crash-looped the whole service on a 4G machine, 2026-08-30).
+    let mut from_prebuilt = false;
+    let mut pkgs = Vec::new();
+    if let Some(path) = std::env::var("WAVERUNNER_PKG_INDEX")
+        .ok()
+        .filter(|p| !p.is_empty())
+    {
+        match load_cache(Path::new(&path)) {
+            Ok(p) if !p.is_empty() => {
+                info!("nixpkgs index: {} packages (prebuilt {path})", p.len());
+                if events.send(Event::IndexReady(p.len())).is_err() {
+                    return;
+                }
+                pkgs = p;
+                from_prebuilt = true;
             }
-            pkgs
+            Ok(_) => warn!("prebuilt index is empty, ignoring: {path}"),
+            Err(e) => warn!("prebuilt index unreadable ({path}): {e:#}"),
         }
-        Err(e) => {
-            debug!("no nixpkgs cache: {e:#}");
-            Vec::new()
-        }
-    };
+    }
+    if !from_prebuilt {
+        pkgs = match load_cache(&cache) {
+            Ok(pkgs) => {
+                info!("nixpkgs index: {} packages (cache)", pkgs.len());
+                if events.send(Event::IndexReady(pkgs.len())).is_err() {
+                    return;
+                }
+                pkgs
+            }
+            Err(e) => {
+                debug!("no nixpkgs cache: {e:#}");
+                Vec::new()
+            }
+        };
+    }
     // A cache that failed to load (missing, unreadable, or an old
     // format) must dump regardless of its file age.
-    if pkgs.is_empty() || cache_age(&cache).is_none_or(|age| age > REFRESH_AFTER) {
+    if !from_prebuilt && (pkgs.is_empty() || cache_age(&cache).is_none_or(|age| age > REFRESH_AFTER))
+    {
         match dump_index() {
             Ok(fresh) => {
                 info!("nixpkgs index: {} packages (fresh dump)", fresh.len());
@@ -914,6 +941,18 @@ fn keep_attr(attr: &str) -> bool {
     }
 }
 
+/// Run `nix-locate` — straight from PATH when shipped (the flake's
+/// runtimeTools), else via `nix shell nixpkgs#nix-index`, which costs a
+/// full nixpkgs eval (~3GB) and is only acceptable on dev machines.
+fn nix_locate(regex: &str) -> anyhow::Result<std::process::Output> {
+    match Command::new("nix-locate").args(["--regex", regex]).output() {
+        Ok(out) => Ok(out),
+        Err(_) => Ok(Command::new("nix")
+            .args(["shell", "nixpkgs#nix-index", "-c", "nix-locate", "--regex", regex])
+            .output()?),
+    }
+}
+
 /// Make sure the prebuilt nix-index file database is present and
 /// reasonably fresh at `~/.cache/nix-index/files` (where `nix-locate`
 /// expects it).
@@ -947,16 +986,7 @@ fn ensure_file_index() -> anyhow::Result<()> {
 /// packages.
 fn desktop_icon_hints() -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
     ensure_file_index()?;
-    let out = Command::new("nix")
-        .args([
-            "shell",
-            "nixpkgs#nix-index",
-            "-c",
-            "nix-locate",
-            "--regex",
-            r"share/applications/[^/]*\.desktop$",
-        ])
-        .output()?;
+    let out = nix_locate(r"share/applications/[^/]*\.desktop$")?;
     anyhow::ensure!(
         out.status.success(),
         "nix-locate failed: {}",
@@ -1016,16 +1046,7 @@ fn icon_path_score(path: &str) -> u32 {
 /// Every package's best in-package icon file (attr → store path), from
 /// one `nix-locate` sweep over hicolor and pixmaps.
 fn package_icon_paths() -> anyhow::Result<std::collections::HashMap<String, String>> {
-    let out = Command::new("nix")
-        .args([
-            "shell",
-            "nixpkgs#nix-index",
-            "-c",
-            "nix-locate",
-            "--regex",
-            r"share/(icons/hicolor/[^/]*/apps|pixmaps)/[^/]*\.(png|svg)$",
-        ])
-        .output()?;
+    let out = nix_locate(r"share/(icons/hicolor/[^/]*/apps|pixmaps)/[^/]*\.(png|svg)$")?;
     anyhow::ensure!(
         out.status.success(),
         "nix-locate failed: {}",
@@ -1067,15 +1088,46 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
         "nix search failed: {}",
         String::from_utf8_lossy(&out.stderr).trim().to_owned()
     );
-    let mut desktops = desktop_icon_hints().unwrap_or_else(|e| {
+    let desktops = desktop_icon_hints().unwrap_or_else(|e| {
         warn!("desktop-file hints unavailable: {e:#}");
         Default::default()
     });
-    let mut icon_paths = package_icon_paths().unwrap_or_else(|e| {
+    let icon_paths = package_icon_paths().unwrap_or_else(|e| {
         warn!("in-package icon paths unavailable: {e:#}");
         Default::default()
     });
-    let raw: std::collections::HashMap<String, SearchMeta> = serde_json::from_slice(&out.stdout)?;
+    let pkgs = parse_search_json(&out.stdout, desktops, icon_paths)?;
+    debug!("nixpkgs dump finished in {:?}", started.elapsed());
+    Ok(pkgs)
+}
+
+/// `waverunner build-index <search-json> <out-tsv>`: turn a raw
+/// `nix search --json` dump into the TSV cache the daemon loads
+/// instantly. Run at flake build time (the launcher flake's
+/// `package-index` derivation) so a fresh machine never evaluates
+/// nixpkgs — the ~3GB eval OOM-crash-looped a 4G VM (2026-08-30). No
+/// icon hints here (nix-locate needs its downloaded file database);
+/// the runtime flathub/store icon fetchers cover icons lazily.
+pub fn build_index(json_path: &Path, out_path: &Path) -> anyhow::Result<()> {
+    let json = std::fs::read(json_path)?;
+    let pkgs = parse_search_json(&json, Default::default(), Default::default())?;
+    if let Some(dir) = out_path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    save_cache(out_path, &pkgs)?;
+    println!("{} packages -> {}", pkgs.len(), out_path.display());
+    Ok(())
+}
+
+/// The shared tail of a dump: parse the `nix search --json` map, keep
+/// installable attrs, attach icon hints, sort shallow-first and dedupe
+/// name+version pairs.
+fn parse_search_json(
+    json: &[u8],
+    mut desktops: std::collections::HashMap<String, Vec<String>>,
+    mut icon_paths: std::collections::HashMap<String, String>,
+) -> anyhow::Result<Vec<PkgEntry>> {
+    let raw: std::collections::HashMap<String, SearchMeta> = serde_json::from_slice(json)?;
     let total = raw.len();
     let mut pkgs: Vec<PkgEntry> = raw
         .into_iter()
@@ -1103,11 +1155,7 @@ fn dump_index() -> anyhow::Result<Vec<PkgEntry>> {
     });
     let mut seen = std::collections::HashSet::new();
     pkgs.retain(|p| seen.insert((p.name.clone(), p.version.clone())));
-    debug!(
-        "nixpkgs dump: {} of {total} packages kept, in {:?}",
-        pkgs.len(),
-        started.elapsed()
-    );
+    debug!("nixpkgs index: {} of {total} packages kept", pkgs.len());
     Ok(pkgs)
 }
 
