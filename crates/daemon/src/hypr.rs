@@ -157,14 +157,22 @@ pub fn workspace_windows() -> Option<(Vec<WsWindow>, Option<String>)> {
 /// neighbor-bounce: the focus cycle needs exactly one clean focus change
 /// (its stats hook suppresses one pending address, and a detour would leak
 /// a phantom focus event into the frecency scores).
+///
+/// The pointer stays where it is: the focus dispatch normally warps the
+/// cursor into the window, but a pill-driven cycle must leave the mouse on
+/// the pill (Max, 2026-08-31). One atomic Lua chunk flips
+/// `cursor.no_warps` around the dispatch — Golem's config never sets it,
+/// so restoring to false is restoring the default.
 pub fn focus_window_direct(addr: &str) -> anyhow::Result<()> {
     let reply = request(&format!(
-        "dispatch hl.dsp.focus({{ window = \"address:{addr}\" }})"
+        "eval hl.config({{ [\"cursor.no_warps\"] = true }}) \
+         hl.dispatch(hl.dsp.focus({{ window = \"address:{addr}\" }})) \
+         hl.config({{ [\"cursor.no_warps\"] = false }})"
     ))?;
     if reply.trim() == "ok" {
         Ok(())
     } else {
-        anyhow::bail!("focus dispatch replied: {}", reply.trim())
+        anyhow::bail!("focus eval replied: {}", reply.trim())
     }
 }
 
