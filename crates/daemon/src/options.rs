@@ -270,9 +270,25 @@ const DESKTOP_ONLY: Presence = Presence {
 /// The theme's own box colour — the neutral OPTIONS slab, used when nothing
 /// has been sampled yet.
 const BOX_SLAB: [f32; 3] = [0.10, 0.10, 0.12];
-/// Target linear luminance of a frosted box: dark enough that light ink reads
-/// over it even at the list's resting dim, while the sample's hue survives.
-const BOX_LUM: f32 = 0.07;
+/// An open box's fill: the backdrop it floats on with the pill's wash
+/// composited over it, so the box reads as **the pill grown** and sits close
+/// to the surrounding colour (Max, 2026-08-31: "we want a similar color to
+/// the bg color").
+///
+/// No darkening: forcing the sample to a target luminance made the boxes
+/// heavy slabs that no longer belonged to the wallpaper. It is safe to stay
+/// this close now because the INK measures each surface (see [`ink_on`]) —
+/// a light box simply takes dark text, exactly as the bar does over the same
+/// light wallpaper. Chroma survives because the wash is weak.
+fn box_fill(backdrop: [f32; 4], wash: [f32; 4]) -> [f32; 4] {
+    let a = wash[3];
+    [
+        backdrop[0] * (1.0 - a) + wash[0] * a,
+        backdrop[1] * (1.0 - a) + wash[1] * a,
+        backdrop[2] * (1.0 - a) + wash[2] * a,
+        1.0,
+    ]
+}
 
 /// Light ink — a hair off pure white so it doesn't glare.
 const INK_LIGHT: [f32; 4] = [0.93, 0.93, 0.96, 1.0];
@@ -300,30 +316,6 @@ fn ink_on(bg: [f32; 4]) -> [f32; 4] {
     } else {
         INK_LIGHT
     }
-}
-
-/// Darken a sampled wallpaper frost into a box fill by SCALING it, never by
-/// mixing it toward grey.
-///
-/// In linear light a uniform scale preserves chromaticity exactly, so the box
-/// keeps the wallpaper's actual colour at a legible darkness. Mixing toward
-/// the neutral slab pulls every channel toward the same value — which is
-/// literally desaturation, and is what made the boxes look washed out (Max,
-/// 2026-08-31: "the color of the boxes (zebras) need more saturation, its too
-/// gray").
-fn frosted_box_fill(frost: [f32; 4]) -> [f32; 4] {
-    let lum = 0.2126 * frost[0] + 0.7152 * frost[1] + 0.0722 * frost[2];
-    if lum <= 0.001 {
-        // An (almost) black sample has no chroma to keep.
-        return [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
-    }
-    let k = BOX_LUM / lum;
-    [
-        (frost[0] * k).min(1.0),
-        (frost[1] * k).min(1.0),
-        (frost[2] * k).min(1.0),
-        1.0,
-    ]
 }
 
 /// Where each element belongs. Read it top to bottom to know the bar.
@@ -735,28 +727,18 @@ impl App {
     /// both that constant and the ink together.)
     pub(crate) fn options_box_surface(&self) -> ([f32; 4], [f32; 4]) {
         let wash = self.options_rest_wash();
-        let fill = match (self.options_bar_matched, self.options_pill_color) {
-            // Composite the (translucent) pill wash over the matched colour so
-            // the opaque box equals what the translucent pill shows.
-            (Some(c), _) => {
-                let a = wash[3];
-                [
-                    c[0] * (1.0 - a) + wash[0] * a,
-                    c[1] * (1.0 - a) + wash[1] * a,
-                    c[2] * (1.0 - a) + wash[2] * a,
-                    1.0,
-                ]
-            }
-            (None, Some(frost)) => frosted_box_fill(frost),
+        // One formula for both regimes: the backdrop (matched window colour,
+        // else the sampled wallpaper) with the pill wash over it — the opaque
+        // box equals what the translucent pill shows.
+        let fill = match self.options_backdrop() {
+            Some(backdrop) => box_fill(backdrop, wash),
             // Not sampled yet (the first frames after opening): plain slab.
-            (None, None) => [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0],
+            None => [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0],
         };
-        // The ink is measured against the box's OWN fill, not borrowed from
-        // the bar: the box is an opaque panel, the bar is a transparent strip
-        // on the wallpaper, and over a light wallpaper those want opposite
-        // inks. Both are then right where they are — which is the point, and
-        // the frosted fill's guaranteed darkness keeps this answer stable
-        // instead of flipping with the wallpaper.
+        // Ink measured against the box's OWN fill. Since that fill is now the
+        // backdrop plus a weak wash, this lands on the same answer the bar
+        // reaches for the same backdrop — the two agree by measurement rather
+        // than by one borrowing the other's decision.
         (fill, ink_on(fill))
     }
 
@@ -1595,28 +1577,10 @@ impl App {
 mod tests {
     use super::*;
 
-    fn luminance(c: [f32; 4]) -> f32 {
-        0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
-    }
-
-    #[test]
-    fn frosted_fill_keeps_the_wallpaper_colour() {
-        // The live sample that exposed the bug: a blue wallpaper.
-        let frost = [0.130, 0.352, 0.558, 1.0];
-        let fill = frosted_box_fill(frost);
-        // Darkened to the target, so the theme's ink reads over it.
-        assert!((luminance(fill) - BOX_LUM).abs() < 0.001);
-        // ...but the HUE is untouched: channel ratios survive the scale.
-        // (Mixing toward the neutral slab is what flattened these.)
-        let ratio_in = frost[2] / frost[0];
-        let ratio_out = fill[2] / fill[0];
-        assert!(
-            (ratio_in - ratio_out).abs() < 0.01,
-            "chromaticity drifted: {ratio_in} vs {ratio_out}"
-        );
-        // Concretely more saturated than the old mix-toward-grey would give:
-        // that produced a 2.1x blue:red spread, scaling keeps the full 4.3x.
-        assert!(fill[2] / fill[0] > 4.0);
+    /// The bar's resting wash for a dark (unmatched) bar — what the box
+    /// composites over its backdrop.
+    fn dark_bar_wash() -> [f32; 4] {
+        wash(true, 0.11)
     }
 
     #[test]
@@ -1628,31 +1592,41 @@ mod tests {
     }
 
     #[test]
-    fn a_frosted_box_always_takes_light_ink() {
-        // Whatever the wallpaper, the box fill is darkened to BOX_LUM, so its
-        // ink never flips — the stability the bar's backdrop can't offer.
-        for sample in [
-            [0.9, 0.9, 0.95, 1.0],  // bright sky
-            [0.13, 0.35, 0.56, 1.0], // the live blue
-            [0.02, 0.02, 0.03, 1.0], // near-black
+    fn box_and_bar_reach_the_same_ink_on_one_backdrop() {
+        // The original defect: the bar said white while both boxes said black
+        // over the same wallpaper. The box's fill is now that backdrop plus a
+        // weak wash, so measuring each independently must agree. (Samples are
+        // kept off the 0.179 flip point, where a wash CAN legitimately tip
+        // one side.)
+        for backdrop in [
+            [0.70, 0.72, 0.66, 1.0], // the cream wallpaper
+            [0.13, 0.35, 0.56, 1.0], // the blue sky
+            [0.02, 0.02, 0.03, 1.0], // a dark window
         ] {
-            assert_eq!(ink_on(frosted_box_fill(sample)), INK_LIGHT);
+            let fill = box_fill(backdrop, dark_bar_wash());
+            assert_eq!(
+                ink_on(fill),
+                ink_on(backdrop),
+                "box and bar disagreed on {backdrop:?}"
+            );
         }
     }
 
     #[test]
-    fn frosted_fill_falls_back_on_a_black_sample() {
-        // No chroma to keep (and no dividing by ~zero).
-        let fill = frosted_box_fill([0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(fill, [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0]);
-    }
-
-    #[test]
-    fn frosted_fill_darkens_a_bright_sample_and_brightens_a_dim_one() {
-        // Both directions land on the same legible darkness.
-        let bright = frosted_box_fill([0.9, 0.9, 0.95, 1.0]);
-        let dim = frosted_box_fill([0.02, 0.03, 0.05, 1.0]);
-        assert!((luminance(bright) - BOX_LUM).abs() < 0.001);
-        assert!((luminance(dim) - BOX_LUM).abs() < 0.001);
+    fn box_fill_stays_close_to_the_backdrop() {
+        // "A similar color to the bg": the wash may not drag the fill far
+        // from what it floats on, and must not flatten its chroma.
+        let backdrop = [0.13, 0.35, 0.56, 1.0];
+        let fill = box_fill(backdrop, dark_bar_wash());
+        for i in 0..3 {
+            assert!(
+                (fill[i] - backdrop[i]).abs() < 0.12,
+                "channel {i} drifted: {} vs {}",
+                fill[i],
+                backdrop[i]
+            );
+        }
+        // Chroma survives: still clearly blue, not pulled toward grey.
+        assert!(fill[2] / fill[0] > 2.5);
     }
 }
