@@ -115,18 +115,26 @@ pub(crate) struct CtrlAnim {
 }
 
 // --- Live resize readout ----------------------------------------------------
-// While the focused window is being resized, the window pill shows its size
-// (`1992 × 1199`) live instead of the title. Detection is a size-change poll
-// keyed by window address (the compositor emits no drag/resize events; same
-// precedent as the intellihide zone poll): slow at rest, fast while the size
-// is actually moving.
-/// Sampling interval at rest (one tiny `j/activewindow` read).
-pub(crate) const SIZE_POLL_SLOW: Duration = Duration::from_millis(500);
-/// Sampling interval while a resize is live — fast enough to read as a
+// The window pill shows the focused window's size (`1992 × 1199`) instead of
+// its title whenever the pointer could grab a border — the same geometric
+// band the compositor uses to flip the cursor to a resize arrow — and while
+// the size is actually changing (a drag in progress, a keyboard resize).
+// Detection is a poll keyed by window address (the compositor emits no
+// drag/resize/cursor events; same precedent as the intellihide zone poll):
+// slow at rest, fast while the readout is up so the numbers track the drag.
+/// Sampling interval at rest (a `j/activewindow` + `j/cursorpos` read).
+pub(crate) const SIZE_POLL_SLOW: Duration = Duration::from_millis(250);
+/// Sampling interval while the readout is up — fast enough to read as a
 /// continuous counter tracking the drag.
 const SIZE_POLL_FAST: Duration = Duration::from_millis(40);
-/// How long the size must hold still before the pill reverts to the title.
+/// How long the size must hold still (with the pointer off the border)
+/// before the pill reverts to the title.
 const SIZE_HOLD: Duration = Duration::from_millis(700);
+/// Half-width of the border grab band, matching the compositor's resize
+/// cursor: `general.border_size` (3) + `extend_border_grab_area` (10), plus
+/// a pixel of slack. Within this distance of the window's edge ring, the
+/// pointer shows a resize arrow — and the pill shows the size.
+const BORDER_BAND: i32 = 14;
 
 // --- Clock↔date metamorphosis ----------------------------------------------
 // Hovering the clock pill grows it horizontally and crossfades HH:MM into the
@@ -791,39 +799,56 @@ impl App {
     }
 
     /// One tick of the live-resize watcher; returns the delay until the next
-    /// tick. At rest it samples the focused window's size slowly; when the
-    /// SAME window's size changes between samples (a border/corner drag, a
-    /// keyboard resize — a focus switch changes address and never triggers),
-    /// the window pill flips to a live `W × H` readout and the sampling goes
-    /// fast so the numbers track the drag. Once the size holds still for
-    /// [`SIZE_HOLD`], the pill reverts to the title and the watcher slows
-    /// back down.
+    /// tick. The readout shows while the pointer sits in the focused
+    /// window's border grab band (the moment the cursor turns into a resize
+    /// arrow — showing the CURRENT size before anything moves) and while the
+    /// SAME window's size is changing (the drag itself, a keyboard resize —
+    /// a focus switch changes address and never triggers). It reverts to
+    /// the title once the pointer is off the border and the size has held
+    /// still for [`SIZE_HOLD`]. Sampling is slow at rest, fast while the
+    /// readout is up so the numbers track the drag.
     pub(crate) fn tick_resize_watch(&mut self) -> Duration {
-        let cur = hypr::active_window_size();
-        let mut changed = false;
-        if let (Some((pa, pw, ph)), Some((a, w, h))) = (&self.options_size_seen, &cur) {
+        let cur = hypr::active_window_box();
+        // A size change of the SAME window marks a resize in progress.
+        if let (Some((pa, _, _, pw, ph)), Some((a, _, _, w, h))) =
+            (&self.options_size_seen, &cur)
+        {
             if pa == a && (pw != w || ph != h) {
-                changed = true;
                 self.options_resize_at = Some(Instant::now());
-                if self.options_resize_live != Some((*w, *h)) {
-                    self.options_resize_live = Some((*w, *h));
-                    self.measure_options_text();
-                    self.draw_options();
-                }
             }
         }
+        // Pointer within the border grab band = the resize cursor is up.
+        // (Not meaningful on a fullscreen window — its edges hug the
+        // screen's, and there is nothing to resize.)
+        let on_border = !self.options_fullscreen
+            && match (&cur, hypr::cursor_pos()) {
+                (Some((_, x, y, w, h)), Some((px, py))) => {
+                    let near = px >= x - BORDER_BAND
+                        && px <= x + w + BORDER_BAND
+                        && py >= y - BORDER_BAND
+                        && py <= y + h + BORDER_BAND;
+                    let inside = px >= x + BORDER_BAND
+                        && px <= x + w - BORDER_BAND
+                        && py >= y + BORDER_BAND
+                        && py <= y + h - BORDER_BAND;
+                    near && !inside
+                }
+                _ => false,
+            };
+        let resizing = self
+            .options_resize_at
+            .is_some_and(|t| t.elapsed() < SIZE_HOLD);
+        let live = (on_border || resizing)
+            .then(|| cur.as_ref().map(|(_, _, _, w, h)| (*w, *h)))
+            .flatten();
         self.options_size_seen = cur;
-        if self.options_resize_live.is_some() && !changed {
-            let settled = self
-                .options_resize_at
-                .is_none_or(|t| t.elapsed() >= SIZE_HOLD);
-            if settled {
-                // Resize over: back to the title.
-                self.options_resize_live = None;
+        if live != self.options_resize_live {
+            self.options_resize_live = live;
+            if live.is_none() {
                 self.options_resize_at = None;
-                self.measure_options_text();
-                self.draw_options();
             }
+            self.measure_options_text();
+            self.draw_options();
         }
         if self.options_resize_live.is_some() {
             SIZE_POLL_FAST

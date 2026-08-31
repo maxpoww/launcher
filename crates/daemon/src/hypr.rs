@@ -116,23 +116,33 @@ pub fn active_window_where() -> Option<(String, String)> {
     Some((class, title))
 }
 
-/// The focused window's address and size (`(address, w, h)`) — the live
-/// resize watcher's sample (see `options.rs::tick_resize_watch`). The
-/// address keys the comparison: a focus switch changes the size without
-/// any resize happening. NOTE: mid-resize this is the animated current
-/// value, which is exactly what a live readout wants.
-pub fn active_window_size() -> Option<(String, i32, i32)> {
+/// The focused window's address and box (`(address, x, y, w, h)`) — the
+/// live resize watcher's sample (see `options.rs::tick_resize_watch`). The
+/// address keys the size comparison (a focus switch changes the size
+/// without any resize happening); the box also feeds the border-band test
+/// that shows the readout as soon as the pointer could grab a border.
+/// NOTE: mid-resize the size is the animated current value, which is
+/// exactly what a live readout wants.
+pub fn active_window_box() -> Option<(String, i32, i32, i32, i32)> {
     let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
     let address = json["address"].as_str()?;
     if address.is_empty() || address == "0x0" {
         return None;
     }
+    let x = json["at"][0].as_i64()? as i32;
+    let y = json["at"][1].as_i64()? as i32;
     let w = json["size"][0].as_i64()? as i32;
     let h = json["size"][1].as_i64()? as i32;
     if w <= 0 || h <= 0 {
         return None;
     }
-    Some((address.to_owned(), w, h))
+    Some((address.to_owned(), x, y, w, h))
+}
+
+/// The pointer's position in global layout coordinates.
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/cursorpos").ok()?).ok()?;
+    Some((json["x"].as_i64()? as i32, json["y"].as_i64()? as i32))
 }
 
 /// The focused window's geometry in logical compositor coordinates

@@ -770,9 +770,10 @@ pub struct App {
     /// Live-resize readout: the size shown on the window pill while the
     /// focused window is being resized (`None` = show the title).
     options_resize_live: Option<(i32, i32)>,
-    /// Last `(address, w, h)` sample of the focused window — the resize
-    /// watcher's comparison point (see `options::tick_resize_watch`).
-    options_size_seen: Option<(String, i32, i32)>,
+    /// Last `(address, x, y, w, h)` sample of the focused window — the
+    /// resize watcher's comparison point and border-band geometry (see
+    /// `options::tick_resize_watch`).
+    options_size_seen: Option<(String, i32, i32, i32, i32)>,
     /// When the size last moved; the readout reverts after a still period.
     options_resize_at: Option<Instant>,
     options_active_addr: Option<String>,
