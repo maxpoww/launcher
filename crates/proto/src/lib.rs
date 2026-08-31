@@ -61,6 +61,11 @@ pub enum Command {
     ResizeDragOn,
     /// The resize drag ended.
     ResizeDragOff,
+    /// The user interacted with the focused window — a key, click, or
+    /// scroll aimed at it (waveview watches compositor input and sends one
+    /// per window visit). Commits an in-flight focus walk and earns the
+    /// window its usage point: only windows actually worked in rank.
+    Interacted,
     /// Cycle focus through the current workspace's windows, most-used
     /// first (the current-task pill's left click; bindable as Super+Tab).
     FocusNext,
@@ -85,6 +90,7 @@ impl fmt::Display for Command {
             Command::OverviewOff => f.write_str("overview-off"),
             Command::ResizeDragOn => f.write_str("resize-drag-on"),
             Command::ResizeDragOff => f.write_str("resize-drag-off"),
+            Command::Interacted => f.write_str("interacted"),
             Command::FocusNext => f.write_str("focus-next"),
             Command::FocusOther => f.write_str("focus-other"),
         }
@@ -109,6 +115,7 @@ impl FromStr for Command {
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
             "resize-drag-off" => Ok(Command::ResizeDragOff),
+            "interacted" => Ok(Command::Interacted),
             "focus-next" => Ok(Command::FocusNext),
             "focus-other" => Ok(Command::FocusOther),
             other => Err(ParseError::UnknownCommand(other.to_owned())),

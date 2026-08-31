@@ -1448,6 +1448,11 @@ impl App {
                 self.kick_resize_watch();
                 return;
             }
+            // waveview saw the user actually use the focused window.
+            Command::Interacted => {
+                self.note_interaction();
+                return;
+            }
             // The usage-aware focus cycle, exposed for keybinds (the same
             // brain the current-task pill's clicks use).
             Command::FocusNext => {
