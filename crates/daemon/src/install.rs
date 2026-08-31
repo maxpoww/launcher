@@ -3,9 +3,11 @@
 //! launch, and the nix worker's event handling.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
 use calloop::timer::{TimeoutAction, Timer};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 use waverunner_core::index::AppEntry;
 
@@ -63,6 +65,58 @@ pub(crate) struct PendingInstall {
     pub(crate) completed_at: Option<Instant>,
     /// Whether the post-fill rescan has been fired (so it fires just once).
     pub(crate) rescan_fired: bool,
+}
+
+/// On-disk snapshot of one [`PendingInstall`] tile (`pending-installs.json`):
+/// everything needed to re-arm the install after a daemon restart — an HM
+/// switch restarts changed user units mid-session, but the root helper's
+/// rebuild continues regardless, so on restart the re-armed
+/// [`crate::applier::apply_install`] fast-completes (a run landed while we
+/// were dead), joins the still-building run, or retries a failed one.
+/// The tile's icon pixels live in a sidecar `pending-icon-<attr>.rgba`.
+#[derive(Serialize, Deserialize)]
+struct SavedPending {
+    attr: String,
+    name: String,
+    version: String,
+    desktop_ids: Vec<String>,
+    anchor: Option<String>,
+    grid_page: Option<usize>,
+    dock_slot: Option<usize>,
+    box_dest: Option<String>,
+    /// Unix epoch the (current) attempt began — restored so the progress
+    /// ring resumes where it was instead of restarting from zero.
+    started_epoch: f64,
+    failed: bool,
+    placeholder: bool,
+}
+
+/// Everything install-related that must survive a daemon restart: the
+/// pending grid tiles and the tile-less managed installs (dock drops /
+/// slots-full fallback).
+#[derive(Serialize, Deserialize, Default)]
+struct SavedInstallState {
+    tiles: Vec<SavedPending>,
+    managed: Vec<String>,
+}
+
+/// `pending-installs.json` in the daemon's data dir.
+fn pending_state_path() -> PathBuf {
+    crate::persist::data_path("pending-installs.json")
+}
+
+/// Sidecar holding one pending tile's raw RGBA icon pixels. The attr
+/// charset (`[A-Za-z0-9._-]`, see [`crate::applier`]) is filename-safe.
+fn pending_icon_path(attr: &str) -> PathBuf {
+    crate::persist::data_path(&format!("pending-icon-{attr}.rgba"))
+}
+
+/// Current unix epoch as fractional seconds.
+fn epoch_now() -> f64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Progress fraction for an install's ring, given how long it has been
@@ -305,6 +359,17 @@ impl App {
                 self.update_hover();
                 self.schedule_frame();
             }
+            // A startup-reconcile run (F13), not a user install: on success
+            // the system now provably matches the list — rescan so any app
+            // the run (re)materialized appears. No tile, no busy id.
+            nix::Event::Done { id, ok, .. } if id == nix::RECONCILE_ID => {
+                if ok {
+                    info!("startup reconcile applied; rescanning");
+                    self.indexer.request_rescan_fresh();
+                } else {
+                    warn!("startup reconcile failed; leaving state for the next run");
+                }
+            }
             nix::Event::Done {
                 id,
                 ok,
@@ -372,6 +437,7 @@ impl App {
                         self.flash_failed(id);
                     }
                 }
+                self.save_install_state();
                 self.update_hover();
                 self.schedule_frame();
             }
@@ -541,6 +607,7 @@ impl App {
             id: attr.to_owned(),
             attr: attr.to_owned(),
         });
+        self.save_install_state();
     }
 
     /// Begin a drag-to-install: reserve a grid tile at the drop slot for
@@ -664,6 +731,7 @@ impl App {
             id: attr.to_owned(),
             attr: attr.to_owned(),
         });
+        self.save_install_state();
         self.refilter();
     }
 
@@ -692,6 +760,7 @@ impl App {
                 .collect();
             self.order.forget_dead_boxes(&live);
         }
+        self.save_install_state();
         self.refilter();
     }
 
@@ -892,6 +961,7 @@ impl App {
 
         let mut linked_real = false;
         let mut changed = false;
+        let any_resolved = !resolved.is_empty();
         for (attr, app_id, anchor, gui) in resolved {
             // Where the tile was dropped decides where the app lands: a dock
             // drop re-pins the finished app at the same slot; a box drop
@@ -1002,6 +1072,9 @@ impl App {
         }
         self.managed_install_attrs
             .retain(|a| !resolved_managed.contains(a));
+        if any_resolved || !resolved_managed.is_empty() {
+            self.save_install_state();
+        }
 
         // Reconcile managed apps whose GUI-ness was never learned (adopted
         // from the package list on startup, or a migrated legacy entry):
@@ -1054,6 +1127,36 @@ impl App {
             self.indexer.request_rescan();
         }
 
+        // F13 drift sweep, once per daemon lifetime on the first (non-empty)
+        // scan: a confirmed GUI package none of whose apps are live means the
+        // profile drifted under a truthful status — a boot into an older
+        // generation, or state left by a crash. One forced apply
+        // rematerializes the whole list (which is why a single nudge covers
+        // every drifted attr). Skipped when a startup path already armed an
+        // apply — that run reconciles everything on its own.
+        if !self.reconciled && !current.is_empty() {
+            self.reconciled = true;
+            let drifted: Vec<String> = self
+                .managed
+                .confirmed_gui_attrs()
+                .into_iter()
+                .filter(|(attr, ids)| {
+                    !self.busy_ids.contains(attr)
+                        && !self.pending_installs.iter().any(|p| &p.attr == attr)
+                        && !self.uninstalling.values().any(|a| a == attr)
+                        && !ids.iter().any(|d| current.contains(d))
+                })
+                .map(|(attr, _)| attr)
+                .collect();
+            if !drifted.is_empty() {
+                warn!(
+                    "reconcile: installed packages with no live app: {}; forcing one apply",
+                    drifted.join(", ")
+                );
+                self.nix.request(nix::Request::EnsureApplied { force: true });
+            }
+        }
+
         self.known_app_ids = current;
     }
 
@@ -1069,5 +1172,144 @@ impl App {
                 renderer.update_icon_layer(base + p.icon_slot as u32, &p.icon_pixels);
             }
         }
+    }
+
+    /// Persist the in-flight install state (pending tiles + tile-less
+    /// managed installs) so a daemon restart can restore and re-arm it.
+    /// Call after every material change: start, retry, fail, dismiss,
+    /// resolve. With nothing in flight the file is removed. Icon sidecars
+    /// are written once per tile and stale ones swept out.
+    pub(crate) fn save_install_state(&self) {
+        let path = pending_state_path();
+        let state = SavedInstallState {
+            tiles: self
+                .pending_installs
+                .iter()
+                .map(|p| SavedPending {
+                    attr: p.attr.clone(),
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    desktop_ids: p.desktop_ids.clone(),
+                    anchor: p.anchor.clone(),
+                    grid_page: p.grid_page,
+                    dock_slot: p.dock_slot,
+                    box_dest: p.box_dest.clone(),
+                    started_epoch: epoch_now() - p.started.elapsed().as_secs_f64(),
+                    failed: p.failed,
+                    placeholder: p.placeholder,
+                })
+                .collect(),
+            managed: self.managed_install_attrs.clone(),
+        };
+        if state.tiles.is_empty() && state.managed.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            crate::persist::write_json("pending", &path, &state);
+        }
+        for p in &self.pending_installs {
+            let icon = pending_icon_path(&p.attr);
+            if !p.icon_pixels.is_empty() && !icon.exists() {
+                crate::persist::write_bytes("pending", &icon, &p.icon_pixels);
+            }
+        }
+        // Sweep icon sidecars whose tile is gone (resolved / dismissed).
+        if let Some(dir) = path.parent() {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let Some(attr) = name
+                        .to_str()
+                        .and_then(|n| n.strip_prefix("pending-icon-"))
+                        .and_then(|n| n.strip_suffix(".rgba"))
+                    else {
+                        continue;
+                    };
+                    if !self.pending_installs.iter().any(|p| p.attr == attr) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Restore installs that were mid-flight when the daemon last stopped:
+    /// recreate each pending tile at its saved placement, re-stage it in the
+    /// managed cache (unconfirmed — it never reaches `managed.json` before
+    /// its rebuild lands), and re-arm the install through the normal
+    /// mutation path, whose status-file rules make the re-arm exact: a
+    /// rebuild that finished while we were dead fast-completes, a
+    /// still-running one is joined, a failed one retries once. A tile saved
+    /// as failed is restored failed (click retries), not re-armed.
+    ///
+    /// Returns whether any install was re-armed — the caller then skips the
+    /// startup reconcile, since the re-armed apply proves the whole list.
+    pub(crate) fn restore_install_state(&mut self) -> bool {
+        let Some(state) = crate::persist::read_json::<SavedInstallState>(&pending_state_path())
+        else {
+            return false;
+        };
+        let mut rearmed = false;
+        for (slot, t) in state
+            .tiles
+            .into_iter()
+            .take(nix::PENDING_INSTALL_CAP)
+            .enumerate()
+        {
+            if self.pending_installs.iter().any(|p| p.attr == t.attr) {
+                continue;
+            }
+            let icon_pixels = std::fs::read(pending_icon_path(&t.attr)).unwrap_or_default();
+            // Resume the ring from where the attempt actually started
+            // (clamped sane; a bogus epoch just restarts it).
+            let elapsed = (epoch_now() - t.started_epoch).clamp(0.0, 86_400.0);
+            let started = Instant::now()
+                .checked_sub(Duration::from_secs_f64(elapsed))
+                .unwrap_or_else(Instant::now);
+            info!(
+                "restoring pending install {} (failed={})",
+                t.attr, t.failed
+            );
+            self.managed.stage(&t.attr, t.desktop_ids.clone());
+            if !t.failed {
+                self.busy_ids.insert(t.attr.clone());
+                self.nix.request(nix::Request::Install {
+                    id: t.attr.clone(),
+                    attr: t.attr.clone(),
+                });
+                rearmed = true;
+            }
+            self.pending_installs.push(PendingInstall {
+                attr: t.attr,
+                name: t.name,
+                version: t.version,
+                desktop_ids: t.desktop_ids,
+                anchor: t.anchor,
+                grid_page: t.grid_page,
+                dock_slot: t.dock_slot,
+                box_dest: t.box_dest,
+                icon_slot: slot,
+                placeholder: t.placeholder || icon_pixels.is_empty(),
+                icon_pixels,
+                failed: t.failed,
+                started,
+                completed_at: None,
+                rescan_fired: false,
+            });
+        }
+        for attr in state.managed {
+            if self.busy_ids.contains(&attr) || self.managed_install_attrs.contains(&attr) {
+                continue;
+            }
+            info!("restoring tile-less managed install {attr}");
+            self.managed.stage(&attr, Vec::new());
+            self.busy_ids.insert(attr.clone());
+            self.managed_install_attrs.push(attr.clone());
+            self.nix.request(nix::Request::Install {
+                id: attr.clone(),
+                attr,
+            });
+            rearmed = true;
+        }
+        rearmed
     }
 }

@@ -73,11 +73,16 @@ impl ManagedDb {
     /// Reconcile the cache with the declarative package list (the source of
     /// truth): adopt any listed attr the cache is missing (mapping by its own
     /// name until an app resolves), and drop cached attrs no longer listed
-    /// (uninstalled out-of-band, or a hand-edited list). Persists on change.
+    /// (uninstalled out-of-band, or a hand-edited list). A *staged*
+    /// (unconfirmed) entry is kept even when unlisted — it is an install in
+    /// flight whose list write may not have landed yet (a restored
+    /// mid-install stage racing the mutation thread at startup). Persists on
+    /// change.
     pub fn adopt_list(&mut self, attrs: &[String]) {
         let listed: HashSet<&str> = attrs.iter().map(String::as_str).collect();
         let before = self.pkgs.len();
-        self.pkgs.retain(|p| listed.contains(p.attr.as_str()));
+        self.pkgs
+            .retain(|p| !p.confirmed || listed.contains(p.attr.as_str()));
         let known: HashSet<String> = self.pkgs.iter().map(|p| p.attr.clone()).collect();
         let mut changed = self.pkgs.len() != before;
         for attr in attrs {
@@ -176,6 +181,20 @@ impl ManagedDb {
     /// All managed attrs currently staged or confirmed.
     pub fn all_attrs(&self) -> Vec<String> {
         self.pkgs.iter().map(|p| p.attr.clone()).collect()
+    }
+
+    /// Confirmed GUI packages, each with the desktop ids it ships — the set
+    /// the F13 drift sweep can verify against the scanned profile (a
+    /// confirmed GUI attr none of whose apps are live means the profile
+    /// drifted under the list, e.g. a boot into an older generation).
+    /// CLI-only and gui-unknown entries are excluded: they have no scanned
+    /// `.desktop` to check for.
+    pub fn confirmed_gui_attrs(&self) -> Vec<(String, Vec<String>)> {
+        self.pkgs
+            .iter()
+            .filter(|p| p.confirmed && p.gui == Some(true))
+            .map(|p| (p.attr.clone(), p.desktop_ids.clone()))
+            .collect()
     }
 
     /// Attrs whose GUI-ness was never learned (`gui == None`): adopted from
@@ -294,6 +313,49 @@ mod tests {
         // Adopting an unchanged set is a no-op (still consistent).
         d.adopt_list(&["fzf".to_string(), "mpv".to_string()]);
         assert!(d.contains("mpv") && d.contains("fzf"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn adopt_list_keeps_staged_entries_not_yet_listed() {
+        // A restored mid-flight install is staged before its re-armed list
+        // write lands on the mutation thread: adopting the (older) list must
+        // not drop the stage, or the resolve loses its desktop-id mapping.
+        let (mut d, dir) = db("adopt-staged");
+        d.stage("signal-desktop", vec!["signal".into()]);
+        d.adopt_list(&["mpv".to_string()]);
+        assert!(d.contains("signal-desktop"), "staged entry survives adopt");
+        assert!(d.contains("mpv"));
+        // Still unconfirmed → still never written to disk.
+        assert_eq!(
+            d.gui_unknown_attrs().len(),
+            2,
+            "both entries still unclassified"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn confirmed_gui_attrs_covers_only_verifiable_packages() {
+        let (mut d, dir) = db("gui-attrs");
+        // Confirmed GUI app: in the sweep set, with its real desktop id.
+        d.stage("chromium", vec![]);
+        d.note_installed("chromium", &["chromium-browser".into()], true);
+        // Confirmed CLI tool: excluded (no .desktop to check for).
+        d.stage("fzf", vec![]);
+        d.note_installed("fzf", &[], false);
+        // Adopted, gui unknown: excluded.
+        d.adopt_list(&[
+            "chromium".to_string(),
+            "fzf".to_string(),
+            "mystery".to_string(),
+        ]);
+        // Staged, unconfirmed: excluded (its install is still in flight).
+        d.stage("brave", vec!["brave".into()]);
+        let gui = d.confirmed_gui_attrs();
+        assert_eq!(gui.len(), 1);
+        assert_eq!(gui[0].0, "chromium");
+        assert!(gui[0].1.contains(&"chromium-browser".to_string()));
         std::fs::remove_dir_all(&dir).ok();
     }
 

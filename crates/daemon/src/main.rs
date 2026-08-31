@@ -424,6 +424,7 @@ fn main() -> anyhow::Result<()> {
         notify_dock_hide_at: None,
         managed_install_attrs: Vec::new(),
         known_app_ids: HashSet::new(),
+        reconciled: false,
         cli_ids: HashSet::new(),
         uninstalling: HashMap::new(),
         just_installed: None,
@@ -669,15 +670,32 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Declarative installs: the package list is the source of truth. Seed
-    // it once from the managed set (the migration from the old imperative
-    // `nix profile` era), then adopt any attr in the list that the managed
-    // cache is missing — covers a hand-edited list or a daemon killed
-    // mid-install (the root helper's rebuild completes independently, so on
-    // restart the app is simply present and the cache catches up).
+    // Declarative installs: the package list is the source of truth.
+    // Restore installs that were mid-flight when the daemon last stopped
+    // (an HM switch restarts changed user units; the root helper's rebuild
+    // continues regardless — the re-arm joins or fast-completes it), seed
+    // the list once from the managed set (the migration from the old
+    // imperative `nix profile` era), then adopt any attr in the list that
+    // the managed cache is missing (a hand-edited list, or an install whose
+    // rebuild landed while the daemon was away).
+    let rearmed = app.restore_install_state();
     applier::seed_if_missing(&app.managed.all_attrs());
     app.managed.adopt_list(&applier::list_attrs());
     app.recompute_removable();
+    // F13 startup reconcile: a re-armed install already proves the whole
+    // list once its apply lands. Otherwise, a list newer than the last
+    // successful apply run means an edit never got applied (a failed run's
+    // revert lost with the daemon, an uninstall the helper never saw) —
+    // arm one blocking ensure-apply on the mutation thread. When neither
+    // fires, the first app scan still runs the profile-drift sweep
+    // (`resolve_pending_installs`).
+    if rearmed {
+        app.reconciled = true;
+    } else if applier::needs_apply() {
+        app.reconciled = true;
+        info!("package list not yet proven applied; reconciling");
+        app.nix.request(nix::Request::EnsureApplied { force: false });
+    }
     // Surface the Recycle Bin on the dock the first time (a one-shot pin; the
     // user can move or unpin it freely afterwards — we never re-pin it).
     app.pin_trash_once();
@@ -1006,6 +1024,12 @@ pub struct App {
     /// appeared*, even when its desktop id differs from the attr and the
     /// package index carried no desktop hints (e.g. `chromium`).
     known_app_ids: HashSet<String>,
+    /// Whether the F13 startup reconcile has been decided this lifetime —
+    /// set when any startup path arms an apply (restored installs, the
+    /// timestamp check) or when the first-scan drift sweep runs. At most
+    /// one reconcile apply per daemon start, so a genuinely broken package
+    /// can never loop rebuilds.
+    reconciled: bool,
     /// Ids of the synthetic CLI-tool tiles in the current scan
     /// ([`apps::LoadedApps::cli_ids`]). Excluded when matching a pending
     /// install to its real app so a wrapped package never resolves to its
@@ -2813,6 +2837,7 @@ impl App {
                     id: attr.clone(),
                     attr,
                 });
+                self.save_install_state();
                 self.refilter();
             }
             return;

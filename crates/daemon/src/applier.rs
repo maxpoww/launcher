@@ -266,6 +266,41 @@ fn applied_since_list_write() -> bool {
     })
 }
 
+/// Whether the startup reconcile (F13) has anything to prove: a non-empty
+/// declared list with no successful apply run postdating its last write —
+/// a daemon killed mid-install, a failed run whose revert never landed, or
+/// an uninstall edit the helper never picked up. A missing/empty list needs
+/// nothing (and must trigger nothing — F11).
+pub fn needs_apply() -> bool {
+    list_path().exists() && !list_attrs().is_empty() && !applied_since_list_write()
+}
+
+/// F13: make the system provably match the list, blocking like an install.
+/// Fast-true when a successful run already postdates the last list write.
+/// Otherwise join the in-flight rebuild or (via [`wait_for_apply`]'s nudge)
+/// trip a fresh one. `force` re-trips the watch even when the status claims
+/// applied — for drift the status file cannot see (a boot into an older
+/// generation reverts the profile under a truthful "done ok" status).
+pub fn ensure_applied(force: bool) -> bool {
+    if !force && applied_since_list_write() {
+        return true;
+    }
+    // Never CREATE the list here (F11: an empty write would trigger a
+    // pointless first-boot rebuild); with nothing declared there is nothing
+    // to reconcile.
+    if !list_path().exists() {
+        return true;
+    }
+    let since = now_epoch();
+    if force {
+        info!("reconcile: re-tripping the apply watch (profile drift)");
+        write_list(&list_attrs());
+    } else {
+        info!("reconcile: list newer than last successful apply; ensuring rebuild");
+    }
+    wait_for_apply(since)
+}
+
 /// How long to observe an untouched, idle status before re-tripping the
 /// watch (the initial write may have raced the helper's own read).
 const NUDGE_AFTER: Duration = Duration::from_secs(5);

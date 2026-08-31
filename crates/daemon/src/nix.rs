@@ -133,7 +133,18 @@ pub enum Request {
     /// build lands. This is the slow, cacheable part — the "Launching…"
     /// note covers it.
     Realize { attr: String },
+    /// F13 startup reconcile: make the system provably match the declared
+    /// package list (see [`crate::applier::ensure_applied`]). Serialized on
+    /// the mutation thread like an install; answered with
+    /// `Done { id: RECONCILE_ID, .. }`. `force` re-trips the apply watch
+    /// even when the status file claims applied (profile drift).
+    EnsureApplied { force: bool },
 }
+
+/// The `Done` id an [`Request::EnsureApplied`] run answers with. Contains
+/// `:` — an invalid attr character — so it can never collide with a real
+/// package install's id.
+pub const RECONCILE_ID: &str = "waverunner:reconcile";
 
 /// How many top-ranked packages a `Ranked` reply carries. The renderer
 /// reserves this many texture-array layers for their icons.
@@ -261,6 +272,14 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                         let ok = crate::applier::apply_uninstall(&attr);
                         Event::Done {
                             id,
+                            ok,
+                            desktop_ids: None,
+                        }
+                    }
+                    Request::EnsureApplied { force } => {
+                        let ok = crate::applier::ensure_applied(force);
+                        Event::Done {
+                            id: RECONCILE_ID.to_owned(),
                             ok,
                             desktop_ids: None,
                         }
