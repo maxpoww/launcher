@@ -267,6 +267,37 @@ const DESKTOP_ONLY: Presence = Presence {
     overview: false,
 };
 
+/// The theme's own box colour — the neutral OPTIONS slab, used when nothing
+/// has been sampled yet.
+const BOX_SLAB: [f32; 3] = [0.10, 0.10, 0.12];
+/// Target linear luminance of a frosted box: dark enough that the theme's ink
+/// reads over it even at the list's resting dim.
+const BOX_LUM: f32 = 0.15;
+
+/// Darken a sampled wallpaper frost into a box fill by SCALING it, never by
+/// mixing it toward grey.
+///
+/// In linear light a uniform scale preserves chromaticity exactly, so the box
+/// keeps the wallpaper's actual colour at a legible darkness. Mixing toward
+/// the neutral slab pulls every channel toward the same value — which is
+/// literally desaturation, and is what made the boxes look washed out (Max,
+/// 2026-08-31: "the color of the boxes (zebras) need more saturation, its too
+/// gray").
+fn frosted_box_fill(frost: [f32; 4]) -> [f32; 4] {
+    let lum = 0.2126 * frost[0] + 0.7152 * frost[1] + 0.0722 * frost[2];
+    if lum <= 0.001 {
+        // An (almost) black sample has no chroma to keep.
+        return [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
+    }
+    let k = BOX_LUM / lum;
+    [
+        (frost[0] * k).min(1.0),
+        (frost[1] * k).min(1.0),
+        (frost[2] * k).min(1.0),
+        1.0,
+    ]
+}
+
 /// Where each element belongs. Read it top to bottom to know the bar.
 fn presence(id: PillId) -> Presence {
     match id {
@@ -648,24 +679,15 @@ impl App {
     ///   wash composited on, and the bar's own adaptive ink. These agree by
     ///   construction, since both derive from the same matched colour.
     /// - **Transparent bar** (the theme is in charge, so the bar paints its
-    ///   text from the theme) — the theme slab TINTED by the sampled
-    ///   wallpaper frost. Taking that frost raw is what broke: over a light
-    ///   wallpaper the box became a pale slab and flipped its ink to black
-    ///   while the bar, which never consults the frost, stayed white. Tinting
-    ///   keeps the wallpaper's character while guaranteeing the box stays a
-    ///   dark OPTIONS surface the theme's ink is legible on.
+    ///   text from the theme) — the sampled wallpaper frost, darkened to a
+    ///   legible box by [`frosted_box_fill`]. Taking that frost raw is what
+    ///   broke: over a light wallpaper the box became a pale slab and flipped
+    ///   its ink to black while the bar, which never consults the frost,
+    ///   stayed white.
     ///
     /// (The slab is dark because Golem's theme is: a light theme would flip
-    /// both this constant and the ink together.)
+    /// both that constant and the ink together.)
     pub(crate) fn options_box_surface(&self) -> ([f32; 4], [f32; 4]) {
-        /// The theme's own box colour — the neutral OPTIONS slab.
-        const SLAB: [f32; 3] = [0.10, 0.10, 0.12];
-        /// How much of the sampled wallpaper frost tints the slab. Kept low:
-        /// the colours are LINEAR, so a little goes a long way once encoded,
-        /// and the list's resting text sits at `LIST_DIM` — the box has to
-        /// stay dark enough for dimmed ink to read.
-        const TINT: f32 = 0.25;
-
         let ink = self.options_text_color();
         let wash = self.options_rest_wash();
         match (self.options_bar_matched, self.options_pill_color) {
@@ -681,17 +703,9 @@ impl App {
                 ];
                 (blend, ink)
             }
-            (None, Some(frost)) => {
-                let fill = [
-                    SLAB[0] * (1.0 - TINT) + frost[0] * TINT,
-                    SLAB[1] * (1.0 - TINT) + frost[1] * TINT,
-                    SLAB[2] * (1.0 - TINT) + frost[2] * TINT,
-                    1.0,
-                ];
-                (fill, ink)
-            }
+            (None, Some(frost)) => (frosted_box_fill(frost), ink),
             // Not sampled yet (the first frames after opening): plain slab.
-            (None, None) => ([SLAB[0], SLAB[1], SLAB[2], 1.0], ink),
+            (None, None) => ([BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0], ink),
         }
     }
 
@@ -1523,5 +1537,50 @@ impl App {
             device.set_shape(self.enter_serial, shape);
             self.cursor_now = Some(shape);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(c: [f32; 4]) -> f32 {
+        0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    }
+
+    #[test]
+    fn frosted_fill_keeps_the_wallpaper_colour() {
+        // The live sample that exposed the bug: a blue wallpaper.
+        let frost = [0.130, 0.352, 0.558, 1.0];
+        let fill = frosted_box_fill(frost);
+        // Darkened to the target, so the theme's ink reads over it.
+        assert!((luminance(fill) - BOX_LUM).abs() < 0.001);
+        // ...but the HUE is untouched: channel ratios survive the scale.
+        // (Mixing toward the neutral slab is what flattened these.)
+        let ratio_in = frost[2] / frost[0];
+        let ratio_out = fill[2] / fill[0];
+        assert!(
+            (ratio_in - ratio_out).abs() < 0.01,
+            "chromaticity drifted: {ratio_in} vs {ratio_out}"
+        );
+        // Concretely more saturated than the old mix-toward-grey would give:
+        // that produced a 2.1x blue:red spread, scaling keeps the full 4.3x.
+        assert!(fill[2] / fill[0] > 4.0);
+    }
+
+    #[test]
+    fn frosted_fill_falls_back_on_a_black_sample() {
+        // No chroma to keep (and no dividing by ~zero).
+        let fill = frosted_box_fill([0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(fill, [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0]);
+    }
+
+    #[test]
+    fn frosted_fill_darkens_a_bright_sample_and_brightens_a_dim_one() {
+        // Both directions land on the same legible darkness.
+        let bright = frosted_box_fill([0.9, 0.9, 0.95, 1.0]);
+        let dim = frosted_box_fill([0.02, 0.03, 0.05, 1.0]);
+        assert!((luminance(bright) - BOX_LUM).abs() < 0.001);
+        assert!((luminance(dim) - BOX_LUM).abs() < 0.001);
     }
 }
