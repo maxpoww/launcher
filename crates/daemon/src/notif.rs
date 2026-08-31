@@ -135,8 +135,14 @@ const STRIPE_DARKEN: f32 = 0.48;
 /// Lower = more muted rest / stronger hover pop. `LIST_DIM` is tuned for dark
 /// boxes (light ink); light boxes (dark ink) use the stronger `LIST_DIM_LIGHT`
 /// so dark-on-light text stays legible at the same perceived muting.
-const LIST_DIM: f32 = 0.55;
-const LIST_DIM_LIGHT: f32 = 0.82;
+///
+/// Raised 2026-08-31 (Max: "the notification content and the clipboard have
+/// poor contrast"): these were tuned when a box was a near-black slab, where
+/// light ink at 0.55 still read easily. A box now sits at its BACKDROP's
+/// luminance — often mid-tone — and the same alphas washed the text out. The
+/// spotlight still works: the hovered line goes to full alpha.
+const LIST_DIM: f32 = 0.85;
+const LIST_DIM_LIGHT: f32 = 0.95;
 
 /// How recently a matching message must have been surfaced for a new arrival to
 /// count as its *echo* (same chat mirrored by the webapp + KDE Connect) and skip
@@ -1601,7 +1607,10 @@ impl App {
             );
             let body_top = rect.y + CARD_PAD_Y + LINE_PX + BODY_GAP;
             let body_max = (rect.x + rect.w - CARD_PAD_X - text_x).max(0.0);
-            let bink = [base_ink[0], base_ink[1], base_ink[2], base_ink[3] * 0.6 * e];
+            // The body is the notification's CONTENT — it may sit a step under
+            // the summary, but not so far that it stops reading on a mid-tone
+            // box (it used to land near 0.5 alpha once the list dim compounded).
+            let bink = [base_ink[0], base_ink[1], base_ink[2], base_ink[3] * 0.85 * e];
             for (li, line) in info.body_lines.iter().enumerate() {
                 let ly = body_top + li as f32 * LINE_PX;
                 scene

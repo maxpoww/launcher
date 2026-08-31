@@ -79,8 +79,11 @@ const BOX_RADIUS: f32 = 10.0;
 const STRIPE_LIGHTEN: f32 = 0.31;
 const STRIPE_DARKEN: f32 = 0.48;
 /// Resting (muted) list-ink opacity; the hovered row pops to full contrast.
-const LIST_DIM: f32 = 0.55;
-const LIST_DIM_LIGHT: f32 = 0.82;
+/// Raised 2026-08-31 with the notif box's twins (Max: "poor contrast"): a box
+/// now sits at its backdrop's luminance rather than being a near-black slab,
+/// so the old alphas washed the rows out. Hover still pops to full.
+const LIST_DIM: f32 = 0.85;
+const LIST_DIM_LIGHT: f32 = 0.95;
 /// Per-row delete (×) hot-square, top-right.
 const DELETE_SZ: f32 = 18.0;
 /// fa-trash-o (outline can with vertical lines) — the per-item delete controls
