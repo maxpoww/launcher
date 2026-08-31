@@ -571,13 +571,22 @@ impl App {
                     .page(vp.w.max(1.0))
                     .min(layout.sections[content::SECTION_APPS].n_pages.saturating_sub(1))
                     * cap;
-                self.apps_slots
+                let append = self
+                    .apps_slots
                     .iter()
                     .enumerate()
                     .filter(|&(j, &s)| Some(j) != orig && s >= page_start && s < page_start + cap)
                     .map(|(_, &s)| s + 1)
                     .max()
-                    .unwrap_or(page_start)
+                    .unwrap_or(page_start);
+                // Same-page guard as below: a reorder within the live
+                // page must not target one past its last slot.
+                match orig_slot {
+                    Some(o) if (page_start..page_start + cap).contains(&o) => {
+                        append.saturating_sub(1).max(o)
+                    }
+                    _ => append,
+                }
             });
             let want = want.or(orig_slot);
             if self.reorder_slot != want {
@@ -600,6 +609,17 @@ impl App {
             .map(|(_, &s)| s + 1)
             .max()
             .unwrap_or(page_start);
+        // One past the last occupied slot is only landable when the page
+        // GAINS an item (insert / cross-page move). A same-page reorder
+        // neither grows nor shrinks the page, so its last landable slot
+        // is the page's current last — clamping to `append` sent an
+        // end-of-page drop one slot too far: onto the next page.
+        let last_slot = match orig_slot {
+            Some(o) if (page_start..page_start + cap).contains(&o) => {
+                append.saturating_sub(1).max(o)
+            }
+            _ => append,
+        };
         // Make room continuously (Launchpad). Continuous row-major position
         // of the pointer (monotonic across row wraps): `d` is the cell, `fx`
         // the fraction across it.
@@ -621,7 +641,7 @@ impl App {
                 } else {
                     0
                 };
-                (o as i64 + steps).clamp(page_start as i64, append as i64) as usize
+                (o as i64 + steps).clamp(page_start as i64, last_slot as i64) as usize
             }
             // Insert (dock / package / webapp drag): no hole to close, so
             // icon centres are the seam boundaries directly.
