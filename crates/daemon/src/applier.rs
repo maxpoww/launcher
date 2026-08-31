@@ -307,6 +307,25 @@ const NUDGE_AFTER: Duration = Duration::from_secs(5);
 /// Give up re-tripping after this many attempts — past that the trigger
 /// really is unwired.
 const MAX_NUDGES: u32 = 3;
+/// How often to re-verify that a foreign "building" status corresponds to a
+/// live helper unit (one `systemctl` fork per poll would be noise).
+const LIVENESS_EVERY: Duration = Duration::from_secs(5);
+
+/// Whether the privileged apply helper's oneshot is actually running. A
+/// status file stuck on "building" with the service inactive is a corpse —
+/// the machine (or the helper) died mid-run and never wrote a terminal
+/// status; honoring it would block every waiter for the full
+/// [`BUILD_TIMEOUT`] (seen on the host, 2026-08-31: a shutdown mid-rebuild
+/// left `building` behind and the next morning's startup reconcile hung on
+/// it). Query failures err on "alive", so an environment without systemd
+/// degrades to the old timeout behavior instead of spuriously nudging.
+fn helper_active() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "waverunner-apply.service"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true)
+}
 
 /// Block until the apply helper reports a terminal status for a run that
 /// covers a list write made at `since`. Returns the rebuild's success.
@@ -323,6 +342,7 @@ fn wait_for_apply(since: f64) -> bool {
     let mut saw_ours = false;
     let mut nudges = 0u32;
     let mut idle_since = Instant::now();
+    let mut liveness: Option<(Instant, bool)> = None;
     loop {
         std::thread::sleep(POLL);
         let mut foreign_building = false;
@@ -339,9 +359,28 @@ fn wait_for_apply(since: f64) -> bool {
             } else if st.phase == "building" {
                 // A pre-existing run is mid-flight; our trigger was
                 // swallowed. Wait it out — the nudge below fires once it
-                // lands.
-                foreign_building = true;
-                idle_since = Instant::now();
+                // lands. But only if the helper is actually ALIVE: a
+                // "building" status with the service inactive is a corpse
+                // (died mid-run, no terminal status ever written) — treat
+                // it as idle so the nudge re-trips the watch instead of
+                // blocking on a run that will never finish.
+                let alive = match liveness {
+                    Some((at, alive)) if at.elapsed() < LIVENESS_EVERY => alive,
+                    _ => {
+                        let alive = helper_active();
+                        if !alive {
+                            warn!(
+                                "stale apply status: phase 'building' but the helper is not running; treating as idle"
+                            );
+                        }
+                        liveness = Some((Instant::now(), alive));
+                        alive
+                    }
+                };
+                if alive {
+                    foreign_building = true;
+                    idle_since = Instant::now();
+                }
             }
         }
         // Idle helper (stale terminal status or no status at all) and our
