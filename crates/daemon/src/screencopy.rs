@@ -107,33 +107,34 @@ impl App {
         }
     }
 
-    /// No window to match ⇒ the bar stays transparent. But if the notification
-    /// drawer is open, sample the bar's *own* frosted colour (the blurred
-    /// wallpaper the pills float on) so the box can continue the pill's colour
-    /// rather than dropping to a flat slab. When the drawer is closed there's
-    /// nothing to sample — go idle (the last pill colour is kept, cached).
+    /// No window to match ⇒ the bar stays transparent, floating on the
+    /// blurred wallpaper. Sample that backdrop — the bar's *own* frosted
+    /// colour — CONTINUOUSLY, not just while a drawer is open: it is what the
+    /// pills' text and washes have to contrast against, so without it the bar
+    /// paints a static theme ink and goes unreadable over a light wallpaper
+    /// (Max, 2026-08-31: "with the bg i set up, the contrast is garbage").
+    /// The boxes use the same sample for their fill. Same 700ms cadence the
+    /// matched path already pays.
     fn eval_transparent_bar(&mut self) {
         let had_match = self.options_bar_matched.take().is_some();
-        if self.notif.drawer_open() || self.clip_drawer_open() {
-            if let Ok(mon) = hypr::focused_monitor() {
-                if let Some(output) = self.output_by_name(&mon.name) {
-                    // A row inside the bar itself (mid-height) — always the
-                    // blurred wallpaper, since the reserved zone keeps windows
-                    // out from under the bar.
-                    let sample_y = ((self.config.options.height as f64 * 0.5) * mon.scale.max(0.1))
-                        .round()
-                        .max(1.0) as u32;
-                    if had_match {
-                        self.draw_options();
-                    }
-                    self.options_match = Some(CaptureTarget {
-                        output,
-                        sample_y,
-                        frost: true,
-                    });
-                    self.start_options_capture();
-                    return;
+        if let Ok(mon) = hypr::focused_monitor() {
+            if let Some(output) = self.output_by_name(&mon.name) {
+                // A row inside the bar itself (mid-height) — always the
+                // blurred wallpaper, since the reserved zone keeps windows
+                // out from under the bar.
+                let sample_y = ((self.config.options.height as f64 * 0.5) * mon.scale.max(0.1))
+                    .round()
+                    .max(1.0) as u32;
+                if had_match {
+                    self.draw_options();
                 }
+                self.options_match = Some(CaptureTarget {
+                    output,
+                    sample_y,
+                    frost: true,
+                });
+                self.start_options_capture();
+                return;
             }
         }
         self.options_match = None;

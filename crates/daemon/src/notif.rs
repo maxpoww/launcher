@@ -444,14 +444,6 @@ impl NotifState {
         self.expand_t > 0.01
     }
 
-    /// Whether the history drawer is open (intent), so the colour-match should
-    /// sample the bar's frosted colour for the box. Uses `expanded` (set the
-    /// instant the user scrolls open) rather than `expand_t` (which lags behind
-    /// as it animates), so the box has its colour ready before it finishes
-    /// growing.
-    pub(crate) fn drawer_open(&self) -> bool {
-        self.expanded
-    }
 
     /// Peek-morph progress (0 = bell at rest, 1 = fully-grown preview pill). The
     /// mute pill behind the bell is uncovered by exactly this fraction, so the

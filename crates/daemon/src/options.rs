@@ -270,9 +270,37 @@ const DESKTOP_ONLY: Presence = Presence {
 /// The theme's own box colour — the neutral OPTIONS slab, used when nothing
 /// has been sampled yet.
 const BOX_SLAB: [f32; 3] = [0.10, 0.10, 0.12];
-/// Target linear luminance of a frosted box: dark enough that the theme's ink
-/// reads over it even at the list's resting dim.
-const BOX_LUM: f32 = 0.15;
+/// Target linear luminance of a frosted box: dark enough that light ink reads
+/// over it even at the list's resting dim, while the sample's hue survives.
+const BOX_LUM: f32 = 0.07;
+
+/// Light ink — a hair off pure white so it doesn't glare.
+const INK_LIGHT: [f32; 4] = [0.93, 0.93, 0.96, 1.0];
+/// Dark ink.
+const INK_DARK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// Relative luminance of a LINEAR colour (the space every colour here lives
+/// in — the swapchain encodes sRGB on write).
+fn luminance(c: [f32; 4]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+/// The ink that reads on `bg`: dark on a bright surface, light on a dark one.
+/// 0.179 is the WCAG flip point where black and white contrast equally.
+///
+/// THE rule for every OPTIONS surface — each asks about the background it
+/// actually sits on, and gets an answer that is legible there. The bar's
+/// pills sit on the (transparent) bar's backdrop; an open box sits on its own
+/// opaque fill. They can therefore differ, and should: that is not the
+/// inconsistency Max hit earlier, which was a surface using a *stale, static*
+/// answer (the theme's white over a light wallpaper) instead of measuring.
+fn ink_on(bg: [f32; 4]) -> [f32; 4] {
+    if luminance(bg) > 0.179 {
+        INK_DARK
+    } else {
+        INK_LIGHT
+    }
+}
 
 /// Darken a sampled wallpaper frost into a box fill by SCALING it, never by
 /// mixing it toward grey.
@@ -639,19 +667,28 @@ impl App {
     /// luminance; 0.179 is the WCAG flip point where black and white contrast
     /// equally.) A transparent bar counts as dark.
     pub(crate) fn options_bar_is_bright(&self) -> bool {
-        match self.options_bar_matched {
-            Some(c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] > 0.179,
-            None => false,
-        }
+        self.options_backdrop().is_some_and(|c| luminance(c) > 0.179)
     }
 
-    /// Adaptive default text colour: black on a bright matched bar, white on a
-    /// dark one, so the pills stay legible against the window they blend into.
-    /// Falls back to the theme colour when the bar is transparent.
+    /// What the BAR's own pills sit on: the matched window colour when the bar
+    /// is painted, else the blurred wallpaper it floats on (sampled
+    /// continuously by [`crate::screencopy`]). `None` only before the first
+    /// sample lands.
+    ///
+    /// Consulting the frost here is the fix for unreadable pills over a light
+    /// wallpaper: the bar used to fall back to a STATIC theme ink whenever it
+    /// wasn't colour-matched, so it painted white text on whatever happened to
+    /// be behind it (Max, 2026-08-31: "the contrast is garbage").
+    fn options_backdrop(&self) -> Option<[f32; 4]> {
+        self.options_bar_matched.or(self.options_pill_color)
+    }
+
+    /// Adaptive text colour for the BAR's pills: measured against whatever
+    /// they float on, so they stay legible over a matched window or a bare
+    /// wallpaper alike. Only an unsampled bar falls back to the theme.
     pub(crate) fn options_text_color(&self) -> [f32; 4] {
-        match self.options_bar_matched {
-            Some(_) if self.options_bar_is_bright() => [0.0, 0.0, 0.0, 1.0],
-            Some(_) => [1.0, 1.0, 1.0, 1.0],
+        match self.options_backdrop() {
+            Some(bg) => ink_on(bg),
             None => self.config.theme.text_rgba(),
         }
     }
@@ -688,25 +725,30 @@ impl App {
     /// (The slab is dark because Golem's theme is: a light theme would flip
     /// both that constant and the ink together.)
     pub(crate) fn options_box_surface(&self) -> ([f32; 4], [f32; 4]) {
-        let ink = self.options_text_color();
         let wash = self.options_rest_wash();
-        match (self.options_bar_matched, self.options_pill_color) {
+        let fill = match (self.options_bar_matched, self.options_pill_color) {
             // Composite the (translucent) pill wash over the matched colour so
             // the opaque box equals what the translucent pill shows.
             (Some(c), _) => {
                 let a = wash[3];
-                let blend = [
+                [
                     c[0] * (1.0 - a) + wash[0] * a,
                     c[1] * (1.0 - a) + wash[1] * a,
                     c[2] * (1.0 - a) + wash[2] * a,
                     1.0,
-                ];
-                (blend, ink)
+                ]
             }
-            (None, Some(frost)) => (frosted_box_fill(frost), ink),
+            (None, Some(frost)) => frosted_box_fill(frost),
             // Not sampled yet (the first frames after opening): plain slab.
-            (None, None) => ([BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0], ink),
-        }
+            (None, None) => [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0],
+        };
+        // The ink is measured against the box's OWN fill, not borrowed from
+        // the bar: the box is an opaque panel, the bar is a transparent strip
+        // on the wallpaper, and over a light wallpaper those want opposite
+        // inks. Both are then right where they are — which is the point, and
+        // the frosted fill's guaranteed darkness keeps this answer stable
+        // instead of flipping with the wallpaper.
+        (fill, ink_on(fill))
     }
 
     /// Hover wash — stronger than the resting wash, with the same asymmetry.
@@ -1566,6 +1608,27 @@ mod tests {
         // Concretely more saturated than the old mix-toward-grey would give:
         // that produced a 2.1x blue:red spread, scaling keeps the full 4.3x.
         assert!(fill[2] / fill[0] > 4.0);
+    }
+
+    #[test]
+    fn ink_reads_on_whatever_it_sits_on() {
+        // A light wallpaper behind the transparent bar takes dark ink — the
+        // case that was unreadable while the bar used a static theme white.
+        assert_eq!(ink_on([0.7, 0.75, 0.8, 1.0]), INK_DARK);
+        assert_eq!(ink_on([0.05, 0.06, 0.08, 1.0]), INK_LIGHT);
+    }
+
+    #[test]
+    fn a_frosted_box_always_takes_light_ink() {
+        // Whatever the wallpaper, the box fill is darkened to BOX_LUM, so its
+        // ink never flips — the stability the bar's backdrop can't offer.
+        for sample in [
+            [0.9, 0.9, 0.95, 1.0],  // bright sky
+            [0.13, 0.35, 0.56, 1.0], // the live blue
+            [0.02, 0.02, 0.03, 1.0], // near-black
+        ] {
+            assert_eq!(ink_on(frosted_box_fill(sample)), INK_LIGHT);
+        }
     }
 
     #[test]

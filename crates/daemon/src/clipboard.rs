@@ -2069,14 +2069,6 @@ impl App {
         }
     }
 
-    /// Whether the history drawer is open (intent) — for the colour-match to
-    /// sample the bar's frosted colour for the box. (The box sits at the far
-    /// left, clear of the centre window-colour sample, so it needs no column
-    /// exclusion the way the right-side notif box does.)
-    pub(crate) fn clip_drawer_open(&self) -> bool {
-        self.clip.expanded
-    }
-
     /// What the pointer is over inside the open box (footer > row delete > row).
     fn clip_hit(&self) -> ClipHit {
         if self.clip.expand_t < 0.5 {
