@@ -5,8 +5,9 @@
 //! built from independent **pill** modules; which ones show depends on context.
 //! For now: a clock pill (far right), the focused window's name (centre) with
 //! the red close button always beside it on the right; the window-mode
-//! toggles (fullscreen, pseudotile, float) hide to the close's right and
-//! reveal when the name or close is hovered.
+//! toggles (pseudotile, fullscreen) hide to the close's right and reveal
+//! when the name or close is hovered. (Floating was cut 2026-08-31 — Golem
+//! has no drag-a-titlebar story, and pseudo covers "own size, in place".)
 //!
 //! Text pills use the **dock's font** (the default SansSerif — DejaVu Sans);
 //! icon pills use a **Nerd Font**. Backgrounds are transparent, brightening on
@@ -70,7 +71,6 @@ const TITLE_MAX: usize = 48;
 // Nerd Font glyphs (Font Awesome range, present in JetBrainsMono NF).
 pub(crate) const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
 const GLYPH_SQUARE: &str = "\u{f096}"; // fa-square-o (pseudotile)
-const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
 const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 pub(crate) const GLYPH_BELL: &str = "\u{f0f3}"; // fa-bell (notification OPTION)
 pub(crate) const GLYPH_BELL_SLASH: &str = "\u{f1f6}"; // fa-bell-slash (mute pill)
@@ -85,31 +85,31 @@ pub(crate) const GLYPH_COPY_LINK: &str = "\u{f0c1}"; // fa-link (copy the page U
 // The mode toggles are hidden by default (close is NOT — it rests beside the
 // window name, always visible); hovering the window pill or the close button
 // makes the toggles slide out rightward from behind their parent pill,
-// staggered (fullscreen from behind the close, then pseudo from behind
-// fullscreen, then float from behind pseudo). Leaving fades them out. All
-// dt-based.
-const CTRL_STAGGER: f32 = 0.085; // s between stagger stages
-/// Per-button reveal delay, indexed by [`ctrl_index`]: fullscreen, pseudo,
-/// float — each one stagger behind the pill it emerges from.
-const CTRL_DELAY: [f32; 3] = [0.0, CTRL_STAGGER, 2.0 * CTRL_STAGGER];
-const CTRL_SLIDE_RATE: f32 = 17.0; // ease-out fall
-const CTRL_ALPHA_IN: f32 = 34.0; // opaque quickly as it falls
-const CTRL_ALPHA_OUT: f32 = 13.0; // graceful fade on leave
+// staggered (pseudo from behind the close, then fullscreen from behind
+// pseudo). Leaving plays the same slide backward — the chain retracts
+// outermost-first, each tucking back behind its parent while it fades. One
+// progress value per button drives both position and opacity, the same
+// metamorphosis feel as the copy-link pill and the bell peek. All dt-based.
+const CTRL_STAGGER: f32 = 0.06; // s between stagger stages
+/// Glide rate of a toggle's progress (exponential approach) — matches the
+/// bar's other metamorphoses (`MORPH_RATE`).
+const CTRL_RATE: f32 = 13.0;
 const CTRL_EPS: f32 = 0.002;
+/// How many toggles ride the reveal chain.
+const CTRL_N: usize = 2;
 
-/// Per-button slide/opacity state for the reveal animation. Buttons are
-/// ordered [fullscreen, pseudo, float] (see [`ctrl_index`]); close is not
-/// animated — it is always at rest.
+/// Per-button progress for the reveal animation. Buttons are ordered
+/// [pseudo, fullscreen] (see [`ctrl_index`]); close is not animated — it is
+/// always at rest.
 #[derive(Debug, Default)]
 pub(crate) struct CtrlAnim {
     /// Whether the cluster should be revealed (pointer on the window/cluster).
     reveal: bool,
-    /// When the current reveal began, for the stagger.
-    reveal_at: Option<std::time::Instant>,
-    /// Slide progress 0 (above the top edge) → 1 (resting).
-    slide: [f32; 3],
-    /// Opacity 0 → 1.
-    alpha: [f32; 3],
+    /// When `reveal` last flipped — drives the stagger in both directions.
+    changed_at: Option<std::time::Instant>,
+    /// Slide progress 0 (tucked behind the parent) → 1 (resting); opacity is
+    /// derived from it, so the hide plays the slide backward.
+    t: [f32; CTRL_N],
     last: Option<std::time::Instant>,
     frame_pending: bool,
 }
@@ -145,21 +145,19 @@ pub(crate) struct ClockMeta {
 /// close is a resting pill, always visible beside the window name).
 fn ctrl_index(id: PillId) -> Option<usize> {
     match id {
-        PillId::Fullscreen => Some(0),
-        PillId::Pseudo => Some(1),
-        PillId::Float => Some(2),
+        PillId::Pseudo => Some(0),
+        PillId::Fullscreen => Some(1),
         _ => None,
     }
 }
 
 /// Back-to-front draw order so each parent pill occludes the control emerging
-/// from behind it: float ← pseudo ← fullscreen ← close. (Window and clock are
+/// from behind it: fullscreen ← pseudo ← close. (Window and clock are
 /// independent resting pills — they never overlap the emerge chain.)
 fn draw_z(id: PillId) -> u8 {
     match id {
-        PillId::Float => 0,
-        PillId::Pseudo => 1,
-        PillId::Fullscreen => 2,
+        PillId::Fullscreen => 1,
+        PillId::Pseudo => 2,
         PillId::Close => 3,
         PillId::Window => 4,
         PillId::Clock => 5,
@@ -212,7 +210,6 @@ pub(crate) enum PillId {
     Window,
     Close,
     Pseudo,
-    Float,
     Fullscreen,
 }
 
@@ -443,7 +440,7 @@ impl App {
         // The window name pill is centred *alone* (so it doesn't shift when the
         // toggles reveal); close rests beside it, ALWAYS visible; the mode
         // toggles hide until hover, at fixed resting spots right of the close:
-        //   [window name] [X] [fullscreen] [pseudo] [float]
+        //   [window name] [X] [pseudo] [fullscreen]
         if let Some(title) = &self.options_title {
             let shown = truncate(title, TITLE_MAX);
             let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
@@ -468,14 +465,12 @@ impl App {
             // Close, right of the window name — a resting pill, no reveal.
             let close_x = wx + ww + GROUP_GAP;
             circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
-            // Window-mode toggles, right of the close (fullscreen nearest,
-            // float outermost).
+            // Window-mode toggles, right of the close (pseudo nearest,
+            // fullscreen outermost).
             let mut cx = close_x + d + GROUP_GAP;
-            circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
-            cx += d + CTRL_GAP;
             circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
             cx += d + CTRL_GAP;
-            circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
+            circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
         }
         pills
     }
@@ -615,43 +610,37 @@ impl App {
             // coming out from under the parent rather than through it.
             let (rect, a, clip, shadow_a) = match ctrl_index(pill.id) {
                 Some(i) => {
-                    let a = self.options_ctrl.alpha[i];
+                    let t = self.options_ctrl.t[i];
+                    // Opacity rides the slide (the same mapping as the
+                    // copy-link pill), so show and hide are one symmetric
+                    // metamorphosis — the hide tucks back while fading.
+                    let a = ((t - 0.15) / 0.6).clamp(0.0, 1.0);
                     if a <= 0.01 {
                         continue; // fully hidden — don't draw
                     }
-                    let s = self.options_ctrl.slide[i];
                     let d = pill.rect.w;
-                    // `origin` = tucked-x behind the parent; `edge`/`left` =
-                    // the vertical line the glyph emerges past, and which side.
-                    // Mode toggles emerge rightward, each from behind the
-                    // previous pill's right edge, starting at the close
-                    // (which never gets here — it has no ctrl slot).
-                    let (origin, edge, left) = match pill.id {
-                        PillId::Fullscreen => {
-                            let cr = home(PillId::Close).map_or(pill.rect.x + d, |r| r.x + r.w);
-                            (cr - d, cr, false)
-                        }
+                    // `origin` = tucked-x behind the parent; `edge` = the
+                    // vertical line the glyph emerges past. Mode toggles
+                    // emerge rightward, each from behind the previous pill's
+                    // right edge, starting at the close (which never gets
+                    // here — it has no ctrl slot).
+                    let (origin, edge) = match pill.id {
                         PillId::Pseudo => {
-                            let fr =
-                                home(PillId::Fullscreen).map_or(pill.rect.x, |r| r.x + r.w);
-                            (fr - d, fr, false)
+                            let cr = home(PillId::Close).map_or(pill.rect.x + d, |r| r.x + r.w);
+                            (cr - d, cr)
                         }
-                        PillId::Float => {
+                        PillId::Fullscreen => {
                             let pr = home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x + r.w);
-                            (pr - d, pr, false)
+                            (pr - d, pr)
                         }
-                        _ => (pill.rect.x, pill.rect.x, false),
+                        _ => (pill.rect.x, pill.rect.x),
                     };
-                    let x = lerp(origin, pill.rect.x, s);
+                    let x = lerp(origin, pill.rect.x, t);
                     let rect = Rect::new(x, pill.rect.y, d, pill.rect.h);
-                    let clip = if left {
-                        Rect::new(0.0, 0.0, edge, bar_h)
-                    } else {
-                        Rect::new(edge, 0.0, (full_w - edge).max(0.0), bar_h)
-                    };
+                    let clip = Rect::new(edge, 0.0, (full_w - edge).max(0.0), bar_h);
                     // Gate the depth shadow by slide so a tucked button's halo
                     // doesn't leak over the parent (overlay shadows draw on top).
-                    (rect, a, Some(clip), a * s)
+                    (rect, a, Some(clip), a * t)
                 }
                 None => (pill.rect, 1.0, None, 1.0),
             };
@@ -1052,8 +1041,8 @@ impl App {
             return self.clip_link_t() > 0.5;
         }
         match ctrl_index(id) {
-            Some(i) => self.options_ctrl.alpha[i] > 0.5,
-            None => true, // window / clock always
+            Some(i) => self.options_ctrl.t[i] > 0.5,
+            None => true, // window / clock / close always
         }
     }
 
@@ -1091,11 +1080,9 @@ impl App {
         };
         if want != self.options_ctrl.reveal {
             self.options_ctrl.reveal = want;
-            if want {
-                self.options_ctrl.reveal_at = Some(Instant::now());
-                self.options_ctrl.slide = [0.0; 3];
-                self.options_ctrl.alpha = [0.0; 3];
-            }
+            // Progress is NOT reset: a flip mid-flight continues from where
+            // each button is, so quick hover in/out reverses smoothly.
+            self.options_ctrl.changed_at = Some(Instant::now());
             self.options_ctrl.last = None;
             self.schedule_options_ctrl_frame();
         }
@@ -1130,36 +1117,25 @@ impl App {
         self.options_ctrl.last = Some(now);
         let elapsed = self
             .options_ctrl
-            .reveal_at
-            .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+            .changed_at
+            .map_or(f32::MAX, |t| now.duration_since(t).as_secs_f32());
         let reveal = self.options_ctrl.reveal;
         let mut active = false;
-        for (i, &delay) in CTRL_DELAY.iter().enumerate() {
-            let due = reveal && elapsed >= delay;
-            let (atarget, arate) = if due {
-                (1.0, CTRL_ALPHA_IN)
-            } else {
-                (0.0, CTRL_ALPHA_OUT)
-            };
-            let (na, am) = ease_toward(self.options_ctrl.alpha[i], atarget, dt, arate, CTRL_EPS);
-            self.options_ctrl.alpha[i] = na;
-            active |= am;
-            if due {
-                let (ns, sm) = ease_toward(
-                    self.options_ctrl.slide[i],
-                    1.0,
-                    dt,
-                    CTRL_SLIDE_RATE,
-                    CTRL_EPS,
-                );
-                self.options_ctrl.slide[i] = ns;
-                active |= sm;
-            } else if reveal {
-                // Waiting for its turn: parked above the edge; keep ticking.
-                self.options_ctrl.slide[i] = 0.0;
-                active = true;
+        for i in 0..CTRL_N {
+            // The reveal chain emerges inner-first; the hide retracts
+            // outermost-first — each button waits its stagger turn and holds
+            // where it is until then.
+            let order = if reveal { i } else { CTRL_N - 1 - i };
+            let due = elapsed >= order as f32 * CTRL_STAGGER;
+            if !due {
+                active = true; // its turn is coming — keep ticking
+                continue;
             }
-            // Concealing: slide stays frozen while alpha fades.
+            let target = if reveal { 1.0 } else { 0.0 };
+            let (nt, moving) =
+                ease_toward(self.options_ctrl.t[i], target, dt, CTRL_RATE, CTRL_EPS);
+            self.options_ctrl.t[i] = nt;
+            active |= moving;
         }
         self.draw_options();
         if active {
@@ -1270,7 +1246,6 @@ impl App {
                 }
             }
             Some(PillId::Pseudo) => hypr::pseudo_active(),
-            Some(PillId::Float) => hypr::float_active(),
             Some(PillId::Fullscreen) => hypr::fullscreen_active(),
             Some(PillId::NotifMute) => self.toggle_notif_mute(),
             // Clicking the clipboard element pastes the current clip into the

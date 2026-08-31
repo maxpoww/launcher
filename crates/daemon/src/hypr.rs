@@ -140,11 +140,6 @@ pub fn pseudo_active() {
     dispatch("hl.dsp.window.pseudo()");
 }
 
-/// Toggle floating on the focused window.
-pub fn float_active() {
-    dispatch("hl.dsp.window.float({ action = \"toggle\" })");
-}
-
 /// Toggle fullscreen on the focused window.
 pub fn fullscreen_active() {
     dispatch("hl.dsp.window.fullscreen({ action = \"toggle\" })");
