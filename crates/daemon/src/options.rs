@@ -666,8 +666,15 @@ impl App {
     /// (`options_bar_matched` is stored linear, so this is true relative
     /// luminance; 0.179 is the WCAG flip point where black and white contrast
     /// equally.) A transparent bar counts as dark.
+    /// MATCHED COLOUR ONLY, on purpose: this drives the pills' washes and
+    /// their neumorph shadows, i.e. how the bar *looks*. Only the INK
+    /// measures the frosted wallpaper (see [`Self::options_text_color`]) —
+    /// teaching this the frost too would restyle every pill on a light
+    /// wallpaper, which is not the contrast problem (Max, 2026-08-31: "the
+    /// change i asked you is only on the text color").
     pub(crate) fn options_bar_is_bright(&self) -> bool {
-        self.options_backdrop().is_some_and(|c| luminance(c) > 0.179)
+        self.options_bar_matched
+            .is_some_and(|c| luminance(c) > 0.179)
     }
 
     /// What the BAR's own pills sit on: the matched window colour when the bar
@@ -684,8 +691,10 @@ impl App {
     }
 
     /// Adaptive text colour for the BAR's pills: measured against whatever
-    /// they float on, so they stay legible over a matched window or a bare
-    /// wallpaper alike. Only an unsampled bar falls back to the theme.
+    /// they float on, so the words stay legible over a matched window or a
+    /// bare wallpaper alike. Only an unsampled bar falls back to the theme.
+    /// This is the ONLY thing the frost sample feeds — the pills' own washes
+    /// and shadows keep their matched-only behaviour.
     pub(crate) fn options_text_color(&self) -> [f32; 4] {
         match self.options_backdrop() {
             Some(bg) => ink_on(bg),
