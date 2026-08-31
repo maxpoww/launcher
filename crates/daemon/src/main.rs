@@ -20,6 +20,7 @@ mod content;
 mod dict;
 mod dragging;
 mod files;
+mod focus_cycle;
 mod frame;
 mod groups;
 mod hypr;
@@ -320,6 +321,9 @@ fn main() -> anyhow::Result<()> {
         options_resize_live: None,
         resize_drag: false,
         resize_watch_running: false,
+        frecency: focus_cycle::Frecency::default(),
+        focus_walk: None,
+        walk_focus_pending: None,
         options_active_addr: None,
         options_clock_w: 0.0,
         options_date_w: 0.0,
@@ -767,6 +771,15 @@ pub struct App {
     resize_drag: bool,
     /// Whether the fast sampling mini-loop behind the readout is armed.
     resize_watch_running: bool,
+    /// Decaying focus-frequency scores driving the usage-aware focus cycle
+    /// (clicking the current-task pill; see `focus_cycle`).
+    frecency: focus_cycle::Frecency,
+    /// An in-flight focus walk: the frozen ranked order consecutive pill
+    /// clicks advance through.
+    focus_walk: Option<focus_cycle::FocusWalk>,
+    /// Address our own walk dispatch is focusing — that change is the
+    /// walk's doing, not user signal, so the stats hook skips it.
+    walk_focus_pending: Option<String>,
     options_active_addr: Option<String>,
     /// Measured (logical px) widths of the clock, date, and window-title text,
     /// so the proportional-font pills can be sized without re-measuring every
@@ -1433,6 +1446,16 @@ impl App {
             Command::ResizeDragOff => {
                 self.resize_drag = false;
                 self.kick_resize_watch();
+                return;
+            }
+            // The usage-aware focus cycle, exposed for keybinds (the same
+            // brain the current-task pill's clicks use).
+            Command::FocusNext => {
+                self.cycle_focus(true);
+                return;
+            }
+            Command::FocusOther => {
+                self.cycle_focus(false);
                 return;
             }
             // While the overview owns the screen, ignore reveals (its close

@@ -116,6 +116,58 @@ pub fn active_window_where() -> Option<(String, String)> {
     Some((class, title))
 }
 
+/// One mapped window's focus-cycle inputs (see `crate::focus_cycle`).
+pub struct WsWindow {
+    pub addr: String,
+    /// Workspace id (special workspaces are negative).
+    pub workspace: i32,
+    /// Compositor focus recency (0 = focused, 1 = previous, …).
+    pub history: i32,
+}
+
+/// Every mapped window with its workspace and focus-history rank, plus the
+/// focused window's address — one `clients` read, the focus cycle's
+/// snapshot.
+pub fn workspace_windows() -> Option<(Vec<WsWindow>, Option<String>)> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    let mut windows = Vec::new();
+    let mut focused = None;
+    for w in json.as_array()? {
+        if !w["mapped"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        let Some(addr) = w["address"].as_str() else {
+            continue;
+        };
+        let history = w["focusHistoryID"].as_i64().unwrap_or(i64::MAX) as i32;
+        if history == 0 {
+            focused = Some(addr.to_owned());
+        }
+        windows.push(WsWindow {
+            addr: addr.to_owned(),
+            workspace: w["workspace"]["id"].as_i64().unwrap_or(0) as i32,
+            history,
+        });
+    }
+    Some((windows, focused))
+}
+
+/// Focus a window by address, directly and with a checked reply (switching
+/// workspaces if it lives elsewhere). Unlike [`focus_window`], no
+/// neighbor-bounce: the focus cycle needs exactly one clean focus change
+/// (its stats hook suppresses one pending address, and a detour would leak
+/// a phantom focus event into the frecency scores).
+pub fn focus_window_direct(addr: &str) -> anyhow::Result<()> {
+    let reply = request(&format!(
+        "dispatch hl.dsp.focus({{ window = \"address:{addr}\" }})"
+    ))?;
+    if reply.trim() == "ok" {
+        Ok(())
+    } else {
+        anyhow::bail!("focus dispatch replied: {}", reply.trim())
+    }
+}
+
 /// The focused window's geometry in logical compositor coordinates
 /// (`(x, y, w, h)`) — the space `grim -g` expects — for a window snapshot.
 /// `None` if no real window is focused or it reports a zero size.

@@ -167,7 +167,9 @@ impl UiState {
             | Command::OverviewOn
             | Command::OverviewOff
             | Command::ResizeDragOn
-            | Command::ResizeDragOff => false,
+            | Command::ResizeDragOff
+            | Command::FocusNext
+            | Command::FocusOther => false,
         }
     }
 

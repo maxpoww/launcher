@@ -778,6 +778,10 @@ impl App {
             // class (only browsers expose a copyable page URL).
             let is_browser = class.is_some_and(|c| hypr::is_browser_class(&c));
             self.set_clip_link_available(is_browser);
+            // Feed the usage-aware focus cycle (walk-driven hops excluded).
+            if let Some(a) = addr.clone() {
+                self.note_focus_change(&a);
+            }
         }
         if self.options_active_addr != addr || self.options_title != title {
             self.options_active_addr = addr;
@@ -1318,6 +1322,9 @@ impl App {
                     hypr::close_window(&addr);
                 }
             }
+            // The current-task pill cycles focus through this workspace's
+            // windows, most-used first (see `crate::focus_cycle`).
+            Some(PillId::Window) => self.cycle_focus(true),
             Some(PillId::Pseudo) => hypr::pseudo_active(),
             Some(PillId::Fullscreen) => hypr::fullscreen_active(),
             Some(PillId::NotifMute) => self.toggle_notif_mute(),
@@ -1333,9 +1340,15 @@ impl App {
     }
 
     /// Right-click: over an open clipboard row, open its metadata detail view.
+    /// On the current-task pill: cycle focus into the OTHER workspaces'
+    /// windows, most-used first (the cross-workspace bounce).
     fn options_right_click(&mut self) {
         if self.clip.expanded && self.options_hover == Some(PillId::ClipboardBox) {
             self.clip_box_right_click();
+            return;
+        }
+        if self.options_hover == Some(PillId::Window) {
+            self.cycle_focus(false);
         }
     }
 
@@ -1363,7 +1376,7 @@ impl App {
                 }
             }
             // The small clipboard pill is clickable (paste) → pointer.
-            Some(PillId::Clock | PillId::Window) | None => Shape::Default,
+            Some(PillId::Clock) | None => Shape::Default,
             Some(_) => Shape::Pointer, // control circle / small clipboard pill
         };
         if self.cursor_now != Some(shape) {
