@@ -372,6 +372,7 @@ fn main() -> anyhow::Result<()> {
         paste_tx,
         hide_deadline: None,
         soft_frame_timer: false,
+        last_input: Instant::now(),
         rest_hide_pending: false,
         restore_window: None,
         pending_refocus: None,
@@ -839,6 +840,11 @@ pub struct App {
     /// A frame-spacing timer is armed (software renderer, F12) — draw
     /// calls in the window coalesce into the timer's single redraw.
     soft_frame_timer: bool,
+    /// Last pointer/keyboard activity — the F12 throttle stands down
+    /// while the user is interacting, so scrolls and drags stay smooth
+    /// even on a software renderer; only ambient animations (install
+    /// ring, idle springs) get spaced out.
+    last_input: Instant,
     /// A box close is settling to the dock and should rest a beat, then
     /// hide, once the collapse animation finishes.
     rest_hide_pending: bool,
@@ -3562,6 +3568,7 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
+        self.last_input = Instant::now();
         self.handle_key_event(event.keysym, event.utf8.as_deref());
     }
 
@@ -3605,6 +3612,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        app.last_input = Instant::now();
         // Latch which surface the pointer entered; the OPTIONS topbar owns its
         // own pointer handling and must never fall through into the dock's.
         if let wl_pointer::Event::Enter { surface, .. } = &event {

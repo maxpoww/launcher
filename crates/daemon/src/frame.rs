@@ -22,6 +22,11 @@ pub(crate) const MAKEROOM_RATE: f32 = 34.0;
 /// See the F12 throttle at the top of [`App::draw`].
 const SOFTWARE_FRAME_MIN: Duration = Duration::from_millis(100);
 
+/// How long after the last pointer/keyboard event the F12 throttle stays
+/// down. Covers smooth-scroll ease tails; a minutes-long install ring
+/// with nobody at the wheel throttles after this.
+const INPUT_ACTIVE_WINDOW: Duration = Duration::from_secs(2);
+
 impl App {
     /// Layout for an arbitrary card extent at the current scroll offsets.
     /// Whether a drag that can land on the Apps grid is in flight — the
@@ -153,11 +158,13 @@ impl App {
         // F12: on a software (CPU) adapter every frame costs real cores —
         // a minutes-long install animation ran the daemon at 450% CPU in
         // the 8-core VM and throttled its own install's download ~35x.
-        // Space sustained redraws to SOFTWARE_FRAME_MIN with a timer; the
-        // first frame after a quiet spell still draws immediately, so
-        // input-driven redraws stay snappy. dt keeps accumulating across
-        // skipped frames, so animations advance by real elapsed time.
-        if self.renderer.as_ref().is_some_and(|r| r.is_software()) {
+        // While the user is actively interacting the throttle stands down
+        // (scrolls/drags stay smooth); ambient animation streams get
+        // spaced to SOFTWARE_FRAME_MIN with a timer. dt keeps accumulating
+        // across skipped frames, so animations advance by real time.
+        if self.renderer.as_ref().is_some_and(|r| r.is_software())
+            && self.last_input.elapsed() > INPUT_ACTIVE_WINDOW
+        {
             if let Some(remaining) = self
                 .last_frame
                 .and_then(|t| SOFTWARE_FRAME_MIN.checked_sub(t.elapsed()))
