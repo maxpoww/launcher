@@ -165,7 +165,9 @@ impl UiState {
             | Command::DebugNotif
             | Command::DebugDict
             | Command::OverviewOn
-            | Command::OverviewOff => false,
+            | Command::OverviewOff
+            | Command::ResizeDragOn
+            | Command::ResizeDragOff => false,
         }
     }
 

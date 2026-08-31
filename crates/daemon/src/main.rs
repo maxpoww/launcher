@@ -318,8 +318,8 @@ fn main() -> anyhow::Result<()> {
         options_date: App::options_date_init(),
         options_title: None,
         options_resize_live: None,
-        options_size_seen: None,
-        options_resize_at: None,
+        resize_drag: false,
+        resize_watch_running: false,
         options_active_addr: None,
         options_clock_w: 0.0,
         options_date_w: 0.0,
@@ -671,15 +671,6 @@ fn main() -> anyhow::Result<()> {
             }
             Err(e) => warn!("Hyprland IPC unavailable: {e:#}"),
         }
-        // Live-resize readout: the compositor emits no drag/resize events,
-        // so the window pill's `W × H` display rides a size-change poll —
-        // slow at rest, fast while a resize is actually moving.
-        if let Err(e) = event_loop.handle().insert_source(
-            Timer::from_duration(options::SIZE_POLL_SLOW),
-            |_, _, app: &mut App| TimeoutAction::ToDuration(app.tick_resize_watch()),
-        ) {
-            warn!("resize-watch timer failed ({e}); no live size readout");
-        }
     }
 
     // Declarative installs: the package list is the source of truth.
@@ -768,15 +759,14 @@ pub struct App {
     options_date: String,
     options_title: Option<String>,
     /// Live-resize readout: the size appended to the window pill's title
-    /// (`current task (342x343)`) while the pointer is on a resize border /
-    /// a resize is in flight (`None` = title alone).
+    /// (`current task (342x343)`) while a resize drag is in flight
+    /// (`None` = title alone).
     options_resize_live: Option<(i32, i32)>,
-    /// Last `(address, x, y, w, h)` sample of the focused window — the
-    /// resize watcher's comparison point and border-band geometry (see
-    /// `options::tick_resize_watch`).
-    options_size_seen: Option<(String, i32, i32, i32, i32)>,
-    /// When the size last moved; the readout reverts after a still period.
-    options_resize_at: Option<Instant>,
+    /// Whether a resize drag is in flight (waveview watches the
+    /// compositor's drag state and writes resize-drag-on/off to the socket).
+    resize_drag: bool,
+    /// Whether the fast sampling mini-loop behind the readout is armed.
+    resize_watch_running: bool,
     options_active_addr: Option<String>,
     /// Measured (logical px) widths of the clock, date, and window-title text,
     /// so the proportional-font pills can be sized without re-measuring every
@@ -1431,6 +1421,18 @@ impl App {
             }
             Command::OverviewOff => {
                 self.set_overview(false);
+                return;
+            }
+            // waveview watches the compositor's drag state: a resize drag
+            // began/ended — show/tuck the topbar's live size readout.
+            Command::ResizeDragOn => {
+                self.resize_drag = true;
+                self.kick_resize_watch();
+                return;
+            }
+            Command::ResizeDragOff => {
+                self.resize_drag = false;
+                self.kick_resize_watch();
                 return;
             }
             // While the overview owns the screen, ignore reveals (its close

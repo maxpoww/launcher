@@ -56,6 +56,11 @@ pub enum Command {
     OverviewOn,
     /// The compositor overview closed: surfaces may return.
     OverviewOff,
+    /// A window resize drag began (waveview watches the compositor's drag
+    /// state): the topbar shows the live size readout until the drop.
+    ResizeDragOn,
+    /// The resize drag ended.
+    ResizeDragOff,
 }
 
 impl fmt::Display for Command {
@@ -72,6 +77,8 @@ impl fmt::Display for Command {
             Command::DebugDict => f.write_str("debug-dict"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
+            Command::ResizeDragOn => f.write_str("resize-drag-on"),
+            Command::ResizeDragOff => f.write_str("resize-drag-off"),
         }
     }
 }
@@ -92,6 +99,8 @@ impl FromStr for Command {
             "debug-dict" => Ok(Command::DebugDict),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
+            "resize-drag-on" => Ok(Command::ResizeDragOn),
+            "resize-drag-off" => Ok(Command::ResizeDragOff),
             other => Err(ParseError::UnknownCommand(other.to_owned())),
         }
     }

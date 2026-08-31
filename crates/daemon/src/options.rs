@@ -19,6 +19,7 @@
 use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
+use tracing::warn;
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_pointer;
@@ -115,26 +116,15 @@ pub(crate) struct CtrlAnim {
 }
 
 // --- Live resize readout ----------------------------------------------------
-// The window pill shows the focused window's size (`1992 × 1199`) instead of
-// its title whenever the pointer could grab a border — the same geometric
-// band the compositor uses to flip the cursor to a resize arrow — and while
-// the size is actually changing (a drag in progress, a keyboard resize).
-// Detection is a poll keyed by window address (the compositor emits no
-// drag/resize/cursor events; same precedent as the intellihide zone poll):
-// slow at rest, fast while the readout is up so the numbers track the drag.
-/// Sampling interval at rest (a `j/activewindow` + `j/cursorpos` read).
-pub(crate) const SIZE_POLL_SLOW: Duration = Duration::from_millis(250);
+// While a resize DRAG is in flight (click on a border / Super+RMB — waveview
+// watches the compositor's drag state and writes resize-drag-on/off to the
+// control socket), the window pill appends the focused window's live size:
+// `current task (1992x1199)`. Event-driven: nothing polls at rest; the
+// readout appears at the click, before anything moves (Max, 2026-08-31 —
+// the earlier hover-band trigger fired involuntarily near the topbar).
 /// Sampling interval while the readout is up — fast enough to read as a
 /// continuous counter tracking the drag.
 const SIZE_POLL_FAST: Duration = Duration::from_millis(40);
-/// How long the size must hold still (with the pointer off the border)
-/// before the pill reverts to the title.
-const SIZE_HOLD: Duration = Duration::from_millis(700);
-/// Half-width of the border grab band, matching the compositor's resize
-/// cursor: `general.border_size` (3) + `extend_border_grab_area` (10), plus
-/// a pixel of slack. Within this distance of the window's edge ring, the
-/// pointer shows a resize arrow — and the pill shows the size.
-const BORDER_BAND: i32 = 14;
 
 // --- Clock↔date metamorphosis ----------------------------------------------
 // Hovering the clock pill grows it horizontally and crossfades HH:MM into the
@@ -799,62 +789,52 @@ impl App {
         self.set_options_fullscreen(fullscreen);
     }
 
-    /// One tick of the live-resize watcher; returns the delay until the next
-    /// tick. The readout shows while the pointer sits in the focused
-    /// window's border grab band (the moment the cursor turns into a resize
-    /// arrow — showing the CURRENT size before anything moves) and while the
-    /// SAME window's size is changing (the drag itself, a keyboard resize —
-    /// a focus switch changes address and never triggers). It reverts to
-    /// the title once the pointer is off the border and the size has held
-    /// still for [`SIZE_HOLD`]. Sampling is slow at rest, fast while the
-    /// readout is up so the numbers track the drag.
-    pub(crate) fn tick_resize_watch(&mut self) -> Duration {
-        let cur = hypr::active_window_box();
-        // A size change of the SAME window marks a resize in progress.
-        if let (Some((pa, _, _, pw, ph)), Some((a, _, _, w, h))) =
-            (&self.options_size_seen, &cur)
-        {
-            if pa == a && (pw != w || ph != h) {
-                self.options_resize_at = Some(Instant::now());
-            }
-        }
-        // Pointer within the border grab band = the resize cursor is up.
-        // (Not meaningful on a fullscreen window — its edges hug the
-        // screen's, and there is nothing to resize.)
-        let on_border = !self.options_fullscreen
-            && match (&cur, hypr::cursor_pos()) {
-                (Some((_, x, y, w, h)), Some((px, py))) => {
-                    let near = px >= x - BORDER_BAND
-                        && px <= x + w + BORDER_BAND
-                        && py >= y - BORDER_BAND
-                        && py <= y + h + BORDER_BAND;
-                    let inside = px >= x + BORDER_BAND
-                        && px <= x + w - BORDER_BAND
-                        && py >= y + BORDER_BAND
-                        && py <= y + h - BORDER_BAND;
-                    near && !inside
-                }
-                _ => false,
-            };
-        let resizing = self
-            .options_resize_at
-            .is_some_and(|t| t.elapsed() < SIZE_HOLD);
-        let live = ((on_border || resizing) && cur.is_some())
-            .then(|| cur.as_ref().map(|(_, _, _, w, h)| (*w, *h)))
+    /// One tick of the live-resize watcher: sample the focused window's
+    /// size and update the pill; returns the next delay while the drag is
+    /// still in flight, `None` when done (the readout tucks away and the
+    /// mini-loop drops).
+    fn tick_resize_watch(&mut self) -> Option<Duration> {
+        let live = self
+            .resize_drag
+            .then(|| hypr::active_window_geom().map(|(_, _, w, h)| (w, h)))
             .flatten();
-        self.options_size_seen = cur;
         if live != self.options_resize_live {
             self.options_resize_live = live;
-            if live.is_none() {
-                self.options_resize_at = None;
-            }
             self.measure_options_text();
             self.draw_options();
         }
-        if self.options_resize_live.is_some() {
-            SIZE_POLL_FAST
+        if self.resize_drag {
+            Some(SIZE_POLL_FAST)
         } else {
-            SIZE_POLL_SLOW
+            self.resize_watch_running = false;
+            None
+        }
+    }
+
+    /// Start (or let run) the fast sampling mini-loop behind the live
+    /// readout. Called when waveview reports a resize drag beginning or
+    /// ending: the first tick runs immediately (the size shows at the CLICK,
+    /// before anything moves), then the loop ticks fast until the drag ends
+    /// and drops itself — nothing runs at rest.
+    pub(crate) fn kick_resize_watch(&mut self) {
+        if self.resize_watch_running {
+            return; // the live loop will pick the state change up itself
+        }
+        let Some(delay) = self.tick_resize_watch() else {
+            return; // drag already over (or no window): readout cleared
+        };
+        self.resize_watch_running = true;
+        let armed = self
+            .loop_handle
+            .insert_source(Timer::from_duration(delay), |_, _, app: &mut App| {
+                match app.tick_resize_watch() {
+                    Some(d) => TimeoutAction::ToDuration(d),
+                    None => TimeoutAction::Drop,
+                }
+            });
+        if let Err(e) = armed {
+            self.resize_watch_running = false;
+            warn!("resize-watch timer failed ({e}); no live size readout");
         }
     }
 
