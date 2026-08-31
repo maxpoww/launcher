@@ -5,8 +5,8 @@
 //! built from independent **pill** modules; which ones show depends on context.
 //! For now: a clock pill (far right), the focused window's name (centre) with
 //! the red close button always beside it on the right; the window-mode
-//! toggles (fullscreen, pseudotile, float) hide to its left and reveal when
-//! the name or close is hovered.
+//! toggles (fullscreen, pseudotile, float) hide to the close's right and
+//! reveal when the name or close is hovered.
 //!
 //! Text pills use the **dock's font** (the default SansSerif — DejaVu Sans);
 //! icon pills use a **Nerd Font**. Backgrounds are transparent, brightening on
@@ -84,13 +84,13 @@ pub(crate) const GLYPH_COPY_LINK: &str = "\u{f0c1}"; // fa-link (copy the page U
 // --- Control-button reveal animation ---------------------------------------
 // The mode toggles are hidden by default (close is NOT — it rests beside the
 // window name, always visible); hovering the window pill or the close button
-// makes the toggles slide out leftward from behind their parent pill,
-// staggered (float from behind the window name, then pseudo from behind
-// float, then fullscreen from behind pseudo). Leaving fades them out. All
+// makes the toggles slide out rightward from behind their parent pill,
+// staggered (fullscreen from behind the close, then pseudo from behind
+// fullscreen, then float from behind pseudo). Leaving fades them out. All
 // dt-based.
 const CTRL_STAGGER: f32 = 0.085; // s between stagger stages
-/// Per-button reveal delay, indexed by [`ctrl_index`]: float, pseudo,
-/// fullscreen — each one stagger behind the pill it emerges from.
+/// Per-button reveal delay, indexed by [`ctrl_index`]: fullscreen, pseudo,
+/// float — each one stagger behind the pill it emerges from.
 const CTRL_DELAY: [f32; 3] = [0.0, CTRL_STAGGER, 2.0 * CTRL_STAGGER];
 const CTRL_SLIDE_RATE: f32 = 17.0; // ease-out fall
 const CTRL_ALPHA_IN: f32 = 34.0; // opaque quickly as it falls
@@ -98,7 +98,7 @@ const CTRL_ALPHA_OUT: f32 = 13.0; // graceful fade on leave
 const CTRL_EPS: f32 = 0.002;
 
 /// Per-button slide/opacity state for the reveal animation. Buttons are
-/// ordered [float, pseudo, fullscreen] (see [`ctrl_index`]); close is not
+/// ordered [fullscreen, pseudo, float] (see [`ctrl_index`]); close is not
 /// animated — it is always at rest.
 #[derive(Debug, Default)]
 pub(crate) struct CtrlAnim {
@@ -145,21 +145,21 @@ pub(crate) struct ClockMeta {
 /// close is a resting pill, always visible beside the window name).
 fn ctrl_index(id: PillId) -> Option<usize> {
     match id {
-        PillId::Float => Some(0),
+        PillId::Fullscreen => Some(0),
         PillId::Pseudo => Some(1),
-        PillId::Fullscreen => Some(2),
+        PillId::Float => Some(2),
         _ => None,
     }
 }
 
 /// Back-to-front draw order so each parent pill occludes the control emerging
-/// from behind it: fullscreen ← pseudo ← float ← window. (Close and clock are
+/// from behind it: float ← pseudo ← fullscreen ← close. (Window and clock are
 /// independent resting pills — they never overlap the emerge chain.)
 fn draw_z(id: PillId) -> u8 {
     match id {
-        PillId::Fullscreen => 0,
+        PillId::Float => 0,
         PillId::Pseudo => 1,
-        PillId::Float => 2,
+        PillId::Fullscreen => 2,
         PillId::Close => 3,
         PillId::Window => 4,
         PillId::Clock => 5,
@@ -442,13 +442,13 @@ impl App {
 
         // The window name pill is centred *alone* (so it doesn't shift when the
         // toggles reveal); close rests beside it, ALWAYS visible; the mode
-        // toggles hide until hover, at fixed resting spots to the left:
-        //   [fullscreen] [pseudo] [float] [window name] [X]
+        // toggles hide until hover, at fixed resting spots right of the close:
+        //   [window name] [X] [fullscreen] [pseudo] [float]
         if let Some(title) = &self.options_title {
             let shown = truncate(title, TITLE_MAX);
             let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
-            let wx = ((w - ww) / 2.0).max(EDGE_PAD + 3.0 * d + 2.0 * CTRL_GAP + GROUP_GAP);
+            let wx = ((w - ww) / 2.0).max(EDGE_PAD);
             let circle = |pills: &mut Vec<Pill>, x: f32, id, glyph: &str, color| {
                 pills.push(Pill {
                     id,
@@ -458,14 +458,6 @@ impl App {
                     glyph_color: color,
                 });
             };
-            // Window-mode toggles, left of the window name (float nearest,
-            // fullscreen outermost).
-            let mut cx = wx - GROUP_GAP - d;
-            circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
-            cx -= d + CTRL_GAP;
-            circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
-            cx -= d + CTRL_GAP;
-            circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
             pills.push(Pill {
                 id: PillId::Window,
                 rect: Rect::new(wx, y, ww, ph),
@@ -474,13 +466,16 @@ impl App {
                 glyph_color: None,
             });
             // Close, right of the window name — a resting pill, no reveal.
-            circle(
-                &mut pills,
-                wx + ww + GROUP_GAP,
-                PillId::Close,
-                GLYPH_CLOSE,
-                None,
-            );
+            let close_x = wx + ww + GROUP_GAP;
+            circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
+            // Window-mode toggles, right of the close (fullscreen nearest,
+            // float outermost).
+            let mut cx = close_x + d + GROUP_GAP;
+            circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
+            cx += d + CTRL_GAP;
+            circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
+            cx += d + CTRL_GAP;
+            circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
         }
         pills
     }
@@ -583,7 +578,6 @@ impl App {
         // Resting rect of a pill by id, for computing where each control is
         // tucked (behind its parent) and the edge it emerges past.
         let home = |id: PillId| pills.iter().find(|p| p.id == id).map(|p| p.rect);
-        let window = home(PillId::Window);
         // Draw parents last so they occlude the buttons emerging behind them.
         let mut order: Vec<&Pill> = pills.iter().collect();
         order.sort_by_key(|p| draw_z(p.id));
@@ -629,21 +623,22 @@ impl App {
                     let d = pill.rect.w;
                     // `origin` = tucked-x behind the parent; `edge`/`left` =
                     // the vertical line the glyph emerges past, and which side.
-                    // Mode toggles emerge leftward, each from behind the
-                    // previous pill's left edge (close never gets here — it
-                    // has no ctrl slot).
+                    // Mode toggles emerge rightward, each from behind the
+                    // previous pill's right edge, starting at the close
+                    // (which never gets here — it has no ctrl slot).
                     let (origin, edge, left) = match pill.id {
-                        PillId::Float => {
-                            let wx = window.map_or(pill.rect.x, |w| w.x);
-                            (wx, wx, true)
+                        PillId::Fullscreen => {
+                            let cr = home(PillId::Close).map_or(pill.rect.x + d, |r| r.x + r.w);
+                            (cr - d, cr, false)
                         }
                         PillId::Pseudo => {
-                            let fl = home(PillId::Float).map_or(pill.rect.x, |r| r.x);
-                            (fl, fl, true)
+                            let fr =
+                                home(PillId::Fullscreen).map_or(pill.rect.x, |r| r.x + r.w);
+                            (fr - d, fr, false)
                         }
-                        PillId::Fullscreen => {
-                            let pl = home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x);
-                            (pl, pl, true)
+                        PillId::Float => {
+                            let pr = home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x + r.w);
+                            (pr - d, pr, false)
                         }
                         _ => (pill.rect.x, pill.rect.x, false),
                     };
