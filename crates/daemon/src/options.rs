@@ -324,15 +324,9 @@ pub(crate) fn push_hover_frame(scene: &mut Scene, r: Rect, ink: [f32; 4], alpha:
     /// Line thickness and corner radius, logical px.
     const W: f32 = 1.0;
     const RADIUS: f32 = 7.0;
-    /// Inset from the row's edges, so the frame reads as a marker around the
-    /// content rather than a lid on the row boundary.
-    const INSET: f32 = 2.0;
-    let r = Rect::new(
-        r.x + INSET,
-        r.y + INSET,
-        r.w - 2.0 * INSET,
-        r.h - 2.0 * INSET,
-    );
+    // No inset: the frame sits ON the card's own edge (the stroke occupies
+    // the outermost pixel), so it traces the card rather than floating
+    // inside it.
     if r.w <= 2.0 * W || r.h <= 2.0 * W {
         return;
     }
@@ -347,7 +341,7 @@ pub(crate) fn push_hover_frame(scene: &mut Scene, r: Rect, ink: [f32; 4], alpha:
 
 /// How present the hovered row's frame is. Restrained, but it has to read at
 /// a glance: a hairline only marks the row if you can actually see it.
-pub(crate) const HOVER_FRAME_ALPHA: f32 = 0.68;
+pub(crate) const HOVER_FRAME_ALPHA: f32 = 0.55;
 
 /// The hovered line's ink: the SAME colour at full strength — the hover
 /// always moves the text AWAY from its background, never toward it.
