@@ -413,7 +413,6 @@ fn main() -> anyhow::Result<()> {
         removable_ids: HashSet::new(),
         installed_app_ids: HashSet::new(),
         file_index: Vec::new(),
-        files_dir: None,
         groups: groups::GroupDb::load(),
         app_group: None,
         dock_stack: None,
@@ -997,9 +996,6 @@ pub struct App {
     installed_app_ids: HashSet<String>,
     /// Home-tree file index the search ranks against (fresh per rescan).
     file_index: Vec<apps::FileEntry>,
-    /// Directory the Files section is navigated into (`None` = the
-    /// top-level home-folder strip).
-    files_dir: Option<std::path::PathBuf>,
     /// Persistent app groups ("boxes") shown in the Apps grid.
     groups: groups::GroupDb,
     /// Group the Apps section is navigated into (index into `groups`).
@@ -2033,8 +2029,8 @@ impl App {
             ranked
         };
         for idx in grid_ranked {
-            // The Files section is a live directory listing (home root or a
-            // navigated folder), built below — File entries add nothing here.
+            // The Files section is a live listing of the home root,
+            // built below — File entries add nothing here.
             if self.kinds.get(idx) == Some(&apps::EntryKind::App)
                 && !self.is_catalog_webapp(idx)
                 && !self.is_removing(idx)
@@ -2150,9 +2146,9 @@ impl App {
                 self.apps_slots = slots;
                 visible[content::SECTION_APPS] = arranged;
             }
-            // The Files section: a live listing of the navigated folder, or
-            // of `$HOME` itself at the root (everything but dotfiles).
-            visible[content::SECTION_FILES] = self.dir_listing();
+            // The Files section: a live listing of `$HOME` itself
+            // (everything but dotfiles).
+            visible[content::SECTION_FILES] = self.home_listing();
         }
         // Pinned filesystem paths render on the dock through transient
         // entries; an open directory stack lists its contents the same way.
@@ -2901,12 +2897,9 @@ impl App {
             }
             Hit::GridCell(s, i) => {
                 if let Some(entry_idx) = self.search.visible[s].get(i).copied() {
-                    // Folders in the Files section navigate instead of
-                    // launching (the popup stays open); boxes in the
-                    // Apps grid open the same way.
-                    if s == content::SECTION_FILES && self.try_navigate(entry_idx) {
-                        return;
-                    }
+                    // Files-section folders launch like anything else:
+                    // xdg-open hands them to the file manager. Boxes in
+                    // the Apps grid open in place.
                     if self.kinds.get(entry_idx) == Some(&apps::EntryKind::Group) {
                         let g = self
                             .entries
@@ -3059,9 +3052,6 @@ impl App {
             self.scroll.reset_sections();
             self.hover = None;
             self.search.open = false;
-            if self.files_dir.take().is_some() {
-                self.refilter();
-            }
         }
         if self.ui.target() == Target::Open {
             self.scroll.reset_sections();
@@ -3908,14 +3898,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     }
                                     Hit::SearchButton | Hit::OpenBoxCell(_) => None,
                                 };
-                                // Cells with a profile mutation in flight
-                                // can't start a new drag.
-                                // Busy cells (mutation in flight) and the
-                                // ".." navigation tile never start a drag.
+                                // Busy cells (a profile mutation in
+                                // flight) never start a drag.
                                 let undraggable = entry_idx.is_some_and(|i| {
-                                    app.entries.get(i).is_some_and(|e| {
-                                        app.busy_ids.contains(&e.id) || e.id == files::FILES_UP_ID
-                                    })
+                                    app.entries
+                                        .get(i)
+                                        .is_some_and(|e| app.busy_ids.contains(&e.id))
                                 });
                                 if let (Some(entry_idx), false) = (entry_idx, undraggable) {
                                     let from_dock = matches!(hit, Hit::DockIcon(_));

@@ -1,5 +1,8 @@
-//! The Files section: the home-strip listing, directory navigation, and
-//! the transient file entries search results ride on.
+//! The Files section: the home-strip listing and the transient file
+//! entries search results ride on. Browsing is handed off: activating a
+//! folder opens it in the system file manager (`xdg-open`, which the
+//! shipped Nautilus owns for `inode/directory`) — the launcher does not
+//! navigate directories itself.
 
 use std::time::Instant;
 
@@ -15,15 +18,11 @@ use crate::BOUNCE_DURATION;
 /// Cap on file-search results shown in the Files section.
 pub(crate) const FILE_RESULTS_MAX: usize = 24;
 
-/// Cap on entries listed when navigated into a directory.
+/// Cap on entries in the home-strip listing.
 pub(crate) const FILES_LIST_MAX: usize = 300;
 
 /// Cap on a pinned directory's dock-stack listing (five 3×3 pages).
 pub(crate) const DIR_STACK_MAX: usize = 45;
-
-/// Entry id of the ".." tile leading a navigated listing — clicking it
-/// goes up one level (back to the home strip from the top).
-pub(crate) const FILES_UP_ID: &str = "files-up";
 
 /// The icon-carrier asset for a file, by extension: media, documents,
 /// archives and code each get their own themed icon; everything else
@@ -109,22 +108,13 @@ impl App {
         out
     }
 
-    /// Transient listing of the navigated directory's visible children —
-    /// a ".." tile leading *every page* (the same entry interleaved at
-    /// each page's first slot, so it stays put while paging: browsing
-    /// exits through it), then folders, then files, each alphabetical.
-    pub(crate) fn dir_listing(&mut self) -> Vec<usize> {
-        // Not navigated ⇒ the home root: list `$HOME` itself (everything but
-        // dotfiles), with no ".." lead cell (can't go above home).
-        let navigated = self.files_dir.is_some();
-        let dir = self
-            .files_dir
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()));
+    /// Transient listing of `$HOME`'s visible children (everything but
+    /// dotfiles) — folders first, then files, each alphabetical. Every
+    /// entry opens through `xdg-open`: files in their default app,
+    /// folders in the file manager.
+    pub(crate) fn home_listing(&mut self) -> Vec<usize> {
+        let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
         let mut out = Vec::new();
-        if navigated {
-            out.push(self.push_transient_file(FILES_UP_ID, "..", "true".to_owned(), true));
-        }
         let mut children: Vec<(bool, String, String)> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -138,9 +128,6 @@ impl App {
                 Some((is_dir, name, e.path().to_string_lossy().into_owned()))
             })
             .collect();
-        // Folders first, then files, each alphabetical. The ".." tile is
-        // cell 0; the layout pins it as a static lead cell (the rest of
-        // the listing pages beside it — see `SectionLayout::lead`).
         children.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         for (is_dir, name, path) in children.into_iter().take(FILES_LIST_MAX) {
             let exec = format!("xdg-open {}", launch::shell_quote(&path));
@@ -309,59 +296,6 @@ impl App {
         }
     }
 
-    /// Files-section navigation: returns true when the hit was a folder
-    /// and the strip navigated into it (plain files fall through to the
-    /// launch path). Clicking a folder in search results jumps there
-    /// too, clearing the query.
-    pub(crate) fn try_navigate(&mut self, entry_idx: usize) -> bool {
-        if self.kinds.get(entry_idx) != Some(&apps::EntryKind::File) {
-            return false;
-        }
-        // The ".." tile leads every navigated listing: go up a level.
-        if self
-            .entries
-            .get(entry_idx)
-            .is_some_and(|e| e.id == FILES_UP_ID)
-        {
-            self.files_nav_up();
-            return true;
-        }
-        let Some(path) = self
-            .entries
-            .get(entry_idx)
-            .and_then(|e| e.description.clone())
-        else {
-            return false;
-        };
-        if !std::fs::metadata(&path)
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-        {
-            return false;
-        }
-        self.files_dir = Some(std::path::PathBuf::from(path));
-        // A folder clicked in search results jumps navigation there;
-        // the query has done its job.
-        self.search.query.clear();
-        self.search.open = false;
-        self.refilter();
-        true
-    }
-
-    /// Go up one level from the navigated directory; reaching (or
-    /// escaping) home lands back on the home-folder strip.
-    pub(crate) fn files_nav_up(&mut self) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        self.files_dir = self
-            .files_dir
-            .as_ref()
-            .and_then(|d| d.parent().map(std::path::Path::to_path_buf))
-            .filter(|p| {
-                !home.is_empty() && p.starts_with(&home) && *p != std::path::Path::new(&home)
-            });
-        self.refilter();
-    }
-
     /// The directory a Files-section entry stands for: the folder itself,
     /// or the containing folder of a plain file. `None` for non-File
     /// entries. (The path lives in `description`; the id is a path only
@@ -409,20 +343,6 @@ impl App {
             .is_err()
         {
             self.dismiss();
-        }
-    }
-
-    /// Display string of the navigated directory ("~/Documents/x"),
-    /// empty at the top level.
-    pub(crate) fn files_path_display(&self) -> String {
-        let Some(dir) = &self.files_dir else {
-            return String::new();
-        };
-        let home = std::env::var("HOME").unwrap_or_default();
-        let s = dir.to_string_lossy();
-        match s.strip_prefix(&home) {
-            Some(rest) if !home.is_empty() => format!("~{rest}"),
-            _ => s.into_owned(),
         }
     }
 }

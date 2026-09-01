@@ -66,11 +66,7 @@ impl App {
                 self.search.visible[content::SECTION_FILES].len(),
             ],
             std::array::from_fn(|s| self.scroll.per[s].pos),
-            [
-                self.stack_open() || self.closing_members.is_some(),
-                false,
-                self.files_dir.is_some(),
-            ],
+            self.stack_open() || self.closing_members.is_some(),
             (self.agua_card.pos, self.agua_content.pos),
         );
         // Position the open box's rest square. A grid box anchors to the
@@ -960,7 +956,6 @@ impl App {
                 search_expand: self.search.expand,
                 placeholders: &self.placeholders,
                 layers: &self.icon_layers,
-                files_path: &self.files_path_display(),
                 dock_order: &self.dock_order,
                 dock_running: &dock_running,
                 dock_divider: self.dock_divider,

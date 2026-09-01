@@ -170,7 +170,6 @@ pub enum Hit {
     /// that section's visible list).
     GridCell(usize, usize),
     SearchButton,
-    /// The "‹ Back" button beside the Files title (navigated dirs only).
     /// A member cell of the magnified open box: the 3×3 slot index under
     /// the pointer (0..9). Clicking a filled slot launches it; dragging
     /// pulls the app out of the box. A click on an empty slot is inert —
@@ -389,10 +388,6 @@ pub struct SectionLayout {
     pub scroll: f32,
     /// Total number of grid cells (the *visible*, filtered entries).
     pub cells: usize,
-    /// Static lead cells pinned at the viewport's start (the navigated
-    /// Files listing's ".." tile): they ignore the scroll, and the
-    /// remaining cells page in the strip beside them.
-    pub lead: usize,
 }
 
 /// Geometry shared by scene assembly and hit-testing.
@@ -423,7 +418,6 @@ pub struct Layout {
     pub search_box: Rect,
     /// Compact search button (circle, same center-x and y as search_box).
     pub search_btn: Rect,
-    /// "‹ Back" button beside the Files title; present only while the
     /// The rectangle the magnified box fills — the Apps grid for a grid box,
     /// or a square above the dock for a dock folder's stack. Present only
     /// while a box is open. A click inside is inert (only outside closes).
@@ -450,9 +444,8 @@ pub fn layout(
     n_entries: usize,
     n_visible: [usize; N_SECTIONS],
     scroll: [f32; N_SECTIONS],
-    // Which sections are navigated into a sub-view (open app group,
-    // entered directory).
-    navigated: [bool; N_SECTIONS],
+    // Whether an app group ("box") is open over the Apps grid.
+    box_open: bool,
     // AGUA deformation, (card silhouette, content ride) — 1.0 = rest.
     stretch: (f32, f32),
 ) -> Layout {
@@ -579,14 +572,10 @@ pub fn layout(
         // cyclically (infinite scroll), so the offset is normalized into
         // [0, n_pages * viewport.w) rather than clamped.
         let cells_per_page = cols * rows;
-        // A navigated Files listing pins its ".." as a static lead cell;
-        // only the strip beside it pages.
-        let lead = usize::from(navigated[s] && s == SECTION_FILES);
         let n_pages = if n_visible[s] == 0 {
             0
         } else {
-            let strip_cpp = cells_per_page.saturating_sub(lead).max(1);
-            n_visible[s].saturating_sub(lead).div_ceil(strip_cpp).max(1)
+            n_visible[s].div_ceil(cells_per_page.max(1)).max(1)
         };
         let total_w = n_pages as f32 * viewport.w;
         let scroll = if total_w > 0.0 {
@@ -602,14 +591,13 @@ pub fn layout(
             n_pages,
             scroll,
             cells: n_visible[s],
-            lead,
         }
     });
 
     // A box open shows a square as tall as the whole Apps grid (top to
     // bottom edges), centered horizontally — its rest rect, which the
     // magnified box grows into and which swallows clicks.
-    let open_box = navigated[SECTION_APPS].then(|| {
+    let open_box = box_open.then(|| {
         let vp = sections[SECTION_APPS].viewport;
         // Size the box at exactly 3 scaled cells (OPEN_BOX_COLS rows/cols)
         // so icons inside track icon_scale directly. Cap at the viewport.
@@ -635,12 +623,7 @@ pub fn layout(
 /// `cell` visible in its section, snapping to the page containing it.
 pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
     let cells_per_page = (section.cols * section.rows).max(1);
-    // Lead cells are static (page 0); strip cells page past the lead.
-    let page = if cell < section.lead {
-        0
-    } else {
-        (cell - section.lead) / cells_per_page.saturating_sub(section.lead).max(1)
-    };
+    let page = cell / cells_per_page;
     let max_page = section.n_pages.saturating_sub(1);
     (page.min(max_page) as f32 * section.viewport.w).max(0.0)
 }
@@ -718,25 +701,9 @@ pub fn hit_test(
             let col_f = (adjusted_x - page as f32 * page_w) / cell_w;
             let row = ((pos.1 - sec.viewport.y) / cell_h).floor() as usize;
             let col = col_f.floor() as usize;
-            // Static lead cells claim the viewport's first columns on
-            // every page (the strip slides beneath them).
-            if sec.lead > 0 {
-                let screen_col = ((pos.0 - sec.viewport.x) / cell_w).floor() as usize;
-                if pos.0 >= sec.viewport.x && screen_col < sec.lead {
-                    return (screen_col < sec.cells).then_some(Hit::GridCell(s, screen_col));
-                }
-            }
             if col_f >= 0.0 && col < sec.cols && row < sec.rows {
                 let cells_per_page = sec.cols * sec.rows;
-                let i = if sec.lead > 0 {
-                    if col < sec.lead {
-                        return None; // page-space under the lead: nothing
-                    }
-                    let strip_cpp = cells_per_page.saturating_sub(sec.lead).max(1);
-                    sec.lead + page * strip_cpp + (row * sec.cols + col - sec.lead)
-                } else {
-                    page * cells_per_page + row * sec.cols + col
-                };
+                let i = page * cells_per_page + row * sec.cols + col;
                 if i < sec.cells {
                     // Apps cells are display slots: resolve to the item
                     // occupying the slot (an empty tail cell is no hit).
@@ -821,9 +788,6 @@ pub struct FrameInput<'a> {
     /// file-search results borrow a generic asset icon's layer. Empty
     /// slice = identity (entry index is the layer).
     pub layers: &'a [u32],
-    /// Directory the Files section is navigated into ("~/…"), shown in
-    /// its title; empty at the top level.
-    pub files_path: &'a str,
     /// Dock display order: maps slot position → entry index. Empty slice
     /// renders no dock icons (safe default for tests / pre-load frames).
     pub dock_order: &'a [usize],
@@ -1023,7 +987,6 @@ pub fn scene(
         search_expand,
         placeholders,
         layers,
-        files_path,
         dock_order,
         dock_running,
         dock_divider,
@@ -1608,9 +1571,7 @@ pub fn scene(
     // The three sections: title, grid cells with per-section horizontal
     // paging, page dots, and per-section empty states.
     for (s, sec) in layout.sections.iter().enumerate() {
-        let title = if s == SECTION_FILES && !files_path.is_empty() {
-            format!("{} — {}", SECTION_TITLES[s], files_path)
-        } else if s == SECTION_APPS && !apps_group.is_empty() {
+        let title = if s == SECTION_APPS && !apps_group.is_empty() {
             format!("{} — {}", SECTION_TITLES[s], apps_group)
         } else {
             SECTION_TITLES[s].to_string()
@@ -1667,25 +1628,6 @@ pub fn scene(
         let page_w = sec.viewport.w;
         let cells_per_page = (sec.cols * sec.rows).max(1);
         let total_w = (sec.n_pages as f32 * page_w).max(1.0);
-        // Static lead cells (the navigated Files ".."): pinned at the
-        // viewport start; the strip beside them pages. They render in
-        // their own grid so the strip can clip against their columns
-        // (paging cells slide *under* the lead, not across it).
-        let lead = sec.lead;
-        let strip_cpp = cells_per_page.saturating_sub(lead).max(1);
-        let strip_cols = sec.cols.saturating_sub(lead).max(1);
-        let mut leadgrid = GridContent {
-            clip: reveal_clip(sec.viewport),
-            ..Default::default()
-        };
-        if lead > 0 {
-            grid.clip = reveal_clip(Rect::new(
-                sec.viewport.x + lead as f32 * grid_cell_w,
-                sec.viewport.y,
-                sec.viewport.w - lead as f32 * grid_cell_w,
-                sec.viewport.h,
-            ));
-        }
         // A cell's place comes from its display index — fractional
         // while reorder-gliding, so cells ease between grid slots.
         // Pages wrap cyclically; off-screen cells cull.
@@ -1693,14 +1635,9 @@ pub fn scene(
             let i0 = idx.max(0.0).floor() as usize;
             let frac = (idx - i0 as f32).clamp(0.0, 1.0);
             let corner = |i: usize| -> (f32, f32) {
-                if i < lead {
-                    // A lead cell ignores the scroll entirely.
-                    return (sec.viewport.x + i as f32 * grid_cell_w, sec.viewport.y);
-                }
-                let j = i - lead;
-                let page = j / strip_cpp;
-                let within = j % strip_cpp;
-                let (row, col) = (within / strip_cols, lead + within % strip_cols);
+                let page = i / cells_per_page;
+                let within = i % cells_per_page;
+                let (row, col) = (within / sec.cols, within % sec.cols);
                 let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
                 let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
                 (
@@ -1727,9 +1664,7 @@ pub fn scene(
             if drag_hidden == Some(entry_idx) || open_box_hidden == Some(entry_idx) {
                 continue;
             }
-            // Lead cells draw in their own (unclipped) grid, above the
-            // strip sliding beneath them.
-            let g = if i < lead { &mut leadgrid } else { &mut grid };
+            let g = &mut grid;
             let di = if s == SECTION_APPS {
                 apps_slide.get(i).copied().unwrap_or(i as f32)
             } else {
@@ -1967,9 +1902,6 @@ pub fn scene(
             }
         }
         scene.grids.push(grid);
-        if lead > 0 {
-            scene.grids.push(leadgrid);
-        }
 
         // Page indicator dots in the gap beneath the section — gated by
         // the reveal edge (they ride the same fixed layout as the grid,
@@ -2268,7 +2200,7 @@ mod tests {
             n,
             [n, 0, 0],
             [scroll, 0.0, 0.0],
-            [false; N_SECTIONS],
+            false,
             (1.0, 1.0),
         )
     }
@@ -2284,7 +2216,7 @@ mod tests {
             20,
             [20, 0, 6],
             [0.0; N_SECTIONS],
-            [false; N_SECTIONS],
+            false,
             (1.0, 1.0),
         );
         assert!(!l.dock_slots.is_empty());
@@ -2352,7 +2284,7 @@ mod tests {
             10,
             [4, 0, 6],
             [0.0; N_SECTIONS],
-            [false; N_SECTIONS],
+            false,
             (1.0, 1.0),
         );
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
@@ -2406,7 +2338,7 @@ mod tests {
             10,
             [10, 0, 6],
             [0.0; N_SECTIONS],
-            [false; N_SECTIONS],
+            false,
             (1.0, 1.0),
         );
         let slot = l.dock_slots[0];
@@ -2445,39 +2377,6 @@ mod tests {
     }
 
     #[test]
-    fn navigation_does_not_shift_the_files_title() {
-        // Browsing exits through the ".." tile (the listing's first
-        // cell), not a Back pill — the title stays put either way.
-        let cfg = config();
-        let flat = layout(
-            &cfg,
-            1.0,
-            SURFACE,
-            OPEN,
-            10,
-            [10, 0, 6],
-            [0.0; N_SECTIONS],
-            [false; N_SECTIONS],
-            (1.0, 1.0),
-        );
-        let nav = layout(
-            &cfg,
-            1.0,
-            SURFACE,
-            OPEN,
-            10,
-            [10, 0, 6],
-            [0.0; N_SECTIONS],
-            [false, false, true],
-            (1.0, 1.0),
-        );
-        assert_eq!(
-            nav.sections[SECTION_FILES].title_pos,
-            flat.sections[SECTION_FILES].title_pos
-        );
-    }
-
-    #[test]
     fn section_at_routes_scroll_bands() {
         let cfg = config();
         let l = layout(
@@ -2488,7 +2387,7 @@ mod tests {
             10,
             [10, 0, 6],
             [0.0; N_SECTIONS],
-            [false; N_SECTIONS],
+            false,
             (1.0, 1.0),
         );
         let apps = &l.sections[SECTION_APPS];
