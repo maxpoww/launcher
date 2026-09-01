@@ -23,6 +23,7 @@ struct Instance {
     @location(2) color:    vec4<f32>,
     @location(3) radius:   f32,
     @location(4) glass:    f32,     // 0 = solid fill, 1 = liquid-glass material
+    @location(5) border:   f32,     // 0 = filled; >0 = stroke width inside the edge
 };
 
 struct VsOut {
@@ -33,6 +34,7 @@ struct VsOut {
     @location(3) @interpolate(flat) color:    vec4<f32>,
     @location(4) @interpolate(flat) radius:   f32,
     @location(5) @interpolate(flat) glass:    f32,
+    @location(6) @interpolate(flat) border:   f32,
 };
 
 @vertex
@@ -48,6 +50,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.color    = inst.color;
     out.radius   = inst.radius;
     out.glass    = inst.glass;
+    out.border   = inst.border;
     return out;
 }
 
@@ -61,7 +64,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let q = abs(p) - half + vec2<f32>(r);
     let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 
-    let coverage = clamp(0.5 - d, 0.0, 1.0);
+    // A stroke keeps only a band of `border` px just INSIDE the edge: fold
+    // the signed distance about the band's midline, so the outline follows
+    // the rounded corners exactly (four straight rects cannot).
+    var sd = d;
+    if in.border > 0.0 {
+        sd = abs(d + in.border * 0.5) - in.border * 0.5;
+    }
+    let coverage = clamp(0.5 - sd, 0.0, 1.0);
 
     // Box open/close wave: applied to ALL rects so the effect is visible
     // even when the box overlay covers the card background.
@@ -100,7 +110,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // a crisp cut between two identical colours is invisible instead.
         var cov = coverage;
         if in.glass < -0.5 {
-            cov = select(0.0, 1.0, d < 0.0);
+            cov = select(0.0, 1.0, sd < 0.0);
         }
         let a   = in.color.a * globals.alpha * cov;
         return vec4<f32>(rgb * a, a);

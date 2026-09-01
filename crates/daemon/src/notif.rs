@@ -1272,6 +1272,7 @@ impl App {
                 e,
             ),
             glass: 0.0,
+            border: 0.0,
         });
 
         // The bell, top-left, is the constant identity anchor. Ink tracks the
@@ -1460,6 +1461,7 @@ impl App {
                     radius: sr,
                     color: stripe_opaque,
                     glass: 0.0,
+                    border: 0.0,
                 });
                 if at_top {
                     let y = top + radius;
@@ -1469,6 +1471,7 @@ impl App {
                             radius: 0.0,
                             color: stripe_opaque,
                             glass: 0.0,
+                            border: 0.0,
                         });
                     }
                 }
@@ -1483,6 +1486,7 @@ impl App {
                 radius: ICON_SZ / 2.0, // circle, matching the round avatars
                 color: [ink[0], ink[1], ink[2], 0.10 * e],
                 glass: 0.0,
+                border: 0.0,
             });
             if !info.initial.is_empty() {
                 scene.labels.push(centered_glyph(
@@ -1538,6 +1542,7 @@ impl App {
                     // flat chip reads stronger than the bell's blended tint).
                     color: [AMBER[0], AMBER[1], AMBER[2], 0.2 * a],
                     glass: 0.0,
+                    border: 0.0,
                 });
                 scene.labels.push(Label {
                     text: n,
@@ -1682,6 +1687,7 @@ impl App {
                     radius: sr,
                     color: stripe_opaque,
                     glass: 0.0,
+                    border: 0.0,
                 });
                 if at_top {
                     let y = top + radius;
@@ -1691,6 +1697,7 @@ impl App {
                             radius: 0.0,
                             color: stripe_opaque,
                             glass: 0.0,
+                            border: 0.0,
                         });
                     }
                 }
@@ -1742,6 +1749,7 @@ impl App {
                     alpha,
                 ],
                 glass: 0.0,
+                border: 0.0,
             },
         );
         let layer = info
@@ -1850,6 +1858,7 @@ impl App {
             radius,
             color: base,
             glass: 0.0,
+            border: 0.0,
         });
         // The trash-can glyph, scaled to the enlarged pill. Sized off the resting
         // diameter (not the hover-grown one) so it stays steady, and clipped a
@@ -1969,6 +1978,7 @@ impl App {
             radius,
             color: base,
             glass: 0.0,
+            border: 0.0,
         });
 
         // The glyph keeps a steady colour — unread is signalled by the pill's amber

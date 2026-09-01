@@ -313,36 +313,41 @@ fn luminance(c: [f32; 4]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
-/// Hairline frame around the hovered row/card, in the box's own ink at
+/// Rounded frame around the hovered row/card, in the box's own ink at
 /// [`HOVER_FRAME_ALPHA`].
 ///
-/// Four thin rects rather than a stroked rounded rect: the rect pipeline has
-/// no stroke mode, and the outer-plus-inner trick would need an OPAQUE inner
-/// fill — which would punch a hole in the box's frosted blur.
+/// One STROKED instance ([`RectInst::border`]), so the outline follows its
+/// rounded corners exactly — four thin rects can only ever draw a square
+/// one, and the outer-plus-inner trick would need an opaque inner fill that
+/// would punch a hole in the box's frosted blur.
 pub(crate) fn push_hover_frame(scene: &mut Scene, r: Rect, ink: [f32; 4], alpha: f32) {
-    /// Line thickness, logical px.
+    /// Line thickness and corner radius, logical px.
     const W: f32 = 1.0;
+    const RADIUS: f32 = 7.0;
+    /// Inset from the row's edges, so the frame reads as a marker around the
+    /// content rather than a lid on the row boundary.
+    const INSET: f32 = 2.0;
+    let r = Rect::new(
+        r.x + INSET,
+        r.y + INSET,
+        r.w - 2.0 * INSET,
+        r.h - 2.0 * INSET,
+    );
     if r.w <= 2.0 * W || r.h <= 2.0 * W {
         return;
     }
-    let color = [ink[0], ink[1], ink[2], alpha];
-    let mut line = |x: f32, y: f32, w: f32, h: f32| {
-        scene.rects.push(RectInst {
-            rect: Rect::new(x, y, w, h),
-            radius: 0.0,
-            color,
-            glass: 0.0,
-        });
-    };
-    line(r.x, r.y, r.w, W); // top
-    line(r.x, r.y + r.h - W, r.w, W); // bottom
-    line(r.x, r.y, W, r.h); // left
-    line(r.x + r.w - W, r.y, W, r.h); // right
+    scene.rects.push(RectInst {
+        rect: r,
+        radius: RADIUS,
+        color: [ink[0], ink[1], ink[2], alpha],
+        glass: 0.0,
+        border: W,
+    });
 }
 
 /// How present the hovered row's frame is. Restrained, but it has to read at
 /// a glance: a hairline only marks the row if you can actually see it.
-pub(crate) const HOVER_FRAME_ALPHA: f32 = 0.52;
+pub(crate) const HOVER_FRAME_ALPHA: f32 = 0.68;
 
 /// The hovered line's ink: the SAME colour at full strength — the hover
 /// always moves the text AWAY from its background, never toward it.
@@ -923,6 +928,7 @@ impl App {
                 radius,
                 color: [base[0], base[1], base[2], base[3] * a],
                 glass: 0.0,
+                border: 0.0,
             });
             let g = pill.glyph_color.unwrap_or(text_color);
             let family = pill.family;

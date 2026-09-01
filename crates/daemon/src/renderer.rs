@@ -50,7 +50,8 @@ struct RectInstance {
     color: [f32; 4],
     radius: f32,
     glass: f32, // 0 = solid fill, 1 = liquid-glass material
-    _pad: [f32; 2],
+    border: f32, // 0 = filled; >0 = stroke width just inside the edge
+    _pad: f32,
 }
 
 /// Per-instance data for one top-edge shadow band.
@@ -415,7 +416,8 @@ impl Renderer {
                     array_stride: std::mem::size_of::<RectInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32, 4 => Float32
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
+                        4 => Float32, 5 => Float32
                     ],
                 }],
             },
@@ -1530,7 +1532,8 @@ fn rect_instance(r: &crate::content::RectInst) -> RectInstance {
         color: r.color,
         radius: r.radius,
         glass: r.glass,
-        _pad: [0.0; 2],
+        border: r.border,
+        _pad: 0.0,
     }
 }
 

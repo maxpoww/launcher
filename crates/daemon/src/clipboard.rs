@@ -1565,6 +1565,7 @@ impl App {
                 solid,
             ),
             glass: 0.0,
+            border: 0.0,
         });
 
         let ink = lerp4(text_color, box_ink, solid);
@@ -1730,6 +1731,7 @@ impl App {
                 radius: 0.0,
                 color: stripe_opaque,
                 glass: 0.0,
+                border: 0.0,
             });
         }
 
@@ -1874,6 +1876,7 @@ impl App {
             radius: 6.0,
             color: [ink[0], ink[1], ink[2], 0.10 * e],
             glass: 0.0,
+            border: 0.0,
         });
         let gpx = tile.w * 0.5;
         scene.labels.push(Label {
@@ -1913,6 +1916,7 @@ impl App {
                 radius,
                 color: base,
                 glass: 0.0,
+                border: 0.0,
             });
             let glyph = match hit {
                 ClipHit::Dictionary => GLYPH_BOOK,
@@ -1960,6 +1964,7 @@ impl App {
             radius: BOX_RADIUS,
             color: [fill[0], fill[1], fill[2], a],
             glass: 0.0,
+            border: 0.0,
         });
 
         // ---- "‹ Back" button (same seat / visuals as the detail view) ----
@@ -2005,6 +2010,7 @@ impl App {
             radius: field.h / 2.0,
             color: wash_c,
             glass: 0.0,
+            border: 0.0,
         });
         let field_font = FONT_PX * 1.12;
         let tx = field.x + PILL_PAD_X + 4.0;
@@ -2038,6 +2044,7 @@ impl App {
             radius: 1.0,
             color: [ink[0], ink[1], ink[2], ink[3] * a * 0.8],
             glass: 0.0,
+            border: 0.0,
         });
 
         // ---- answer: scrollable per-language definitions, or a one-line hint ----
@@ -2688,6 +2695,7 @@ impl App {
             radius: 0.0,
             color: card_c,
             glass: 0.0,
+            border: 0.0,
         });
 
         // A link whose window snapshot has resolved shows it as a hero image;
@@ -2786,6 +2794,7 @@ impl App {
             radius: 0.0,
             color: [ink[0], ink[1], ink[2], 0.12 * e],
             glass: 0.0,
+            border: 0.0,
         });
 
         let mx = rect.x + DETAIL_TEXT_MX;
@@ -2984,6 +2993,7 @@ impl App {
                     radius,
                     color: [base[0], base[1], base[2], base[3] * pa],
                     glass: 0.0,
+                    border: 0.0,
                 });
                 let (glyph, gcol) = match hit {
                     ClipHit::DetailDelete => (GLYPH_TRASH, ink0),
@@ -3305,6 +3315,7 @@ impl App {
             radius,
             color: base,
             glass: 0.0,
+            border: 0.0,
         });
 
         let ink = self.options_text_color();
@@ -3410,6 +3421,7 @@ impl App {
             radius,
             color: [base[0], base[1], base[2], base[3] * a],
             glass: 0.0,
+            border: 0.0,
         });
         let ink = self.options_text_color();
         scene.labels.push(Label {
@@ -3847,6 +3859,7 @@ fn push_top_rounded(scene: &mut Scene, r: Rect, radius: f32, color: [f32; 4]) {
         radius,
         color,
         glass: 0.0,
+        border: 0.0,
     });
     let h = r.h - radius;
     if h > 0.0 {
@@ -3855,6 +3868,7 @@ fn push_top_rounded(scene: &mut Scene, r: Rect, radius: f32, color: [f32; 4]) {
             radius: 0.0,
             color,
             glass: 0.0,
+            border: 0.0,
         });
     }
 }
@@ -3867,6 +3881,7 @@ fn push_bottom_rounded(scene: &mut Scene, r: Rect, radius: f32, color: [f32; 4])
         radius,
         color,
         glass: 0.0,
+        border: 0.0,
     });
     let h = r.h - radius;
     if h > 0.0 {
@@ -3875,6 +3890,7 @@ fn push_bottom_rounded(scene: &mut Scene, r: Rect, radius: f32, color: [f32; 4])
             radius: 0.0,
             color,
             glass: 0.0,
+            border: 0.0,
         });
     }
 }

@@ -1127,6 +1127,7 @@ impl App {
                 radius: 0.0,
                 color,
                 glass: if matched { -1.0 } else { 0.0 },
+                border: 0.0,
             }],
             ..Default::default()
         };

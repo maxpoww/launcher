@@ -40,6 +40,11 @@ pub struct RectInst {
     /// half the rainbow shimmer (used for the group-box panel, which is
     /// smaller so edge effects already read more strongly).
     pub glass: f32,
+    /// Stroke width in logical px: `0.0` fills the shape, anything larger
+    /// draws only a band of that thickness just inside the edge — a real
+    /// rounded outline, corners included, which is why the hovered row's
+    /// frame is one instance rather than four thin rects.
+    pub border: f32,
 }
 
 /// One icon quad, referencing a texture-array layer.
@@ -1149,6 +1154,7 @@ pub fn scene(
         radius: card_radius,
         color: config.theme.background_rgba(),
         glass: 1.0,
+        border: 0.0,
     });
 
     // Dock row: per-icon magnification scales, then spread visual centers.
@@ -1215,6 +1221,7 @@ pub fn scene(
                     radius: DOCK_DIVIDER_W / 2.0,
                     color: [fg[0], fg[1], fg[2], 0.22],
                     glass: 0.0,
+                    border: 0.0,
                 });
             }
         }
@@ -1228,6 +1235,7 @@ pub fn scene(
                     radius: 12.0,
                     color: config.theme.highlight_rgba(),
                     glass: 0.0,
+                    border: 0.0,
                 });
             }
         }
@@ -1259,6 +1267,7 @@ pub fn scene(
                 radius: DOCK_DOT_R,
                 color: [fg[0], fg[1], fg[2], 0.55],
                 glass: 0.0,
+                border: 0.0,
             });
         }
         let scale = dock_scales[slot];
@@ -1286,6 +1295,7 @@ pub fn scene(
                 radius: 14.0,
                 color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
                 glass: 0.0,
+                border: 0.0,
             });
         }
         // The Recycle Bin: the same rounded "squircle" tile the box/folder
@@ -1302,6 +1312,7 @@ pub fn scene(
                 radius: rect.h * 0.22,
                 color: trash_tile_color(config.theme.highlight_rgba(), trash_react),
                 glass: 0.5,
+                border: 0.0,
             });
             scene.icons.push(bin_icon(rect, trash_react));
             continue;
@@ -1314,6 +1325,7 @@ pub fn scene(
                 radius: size * 0.22,
                 color: [hl[0], hl[1], hl[2], (hl[3] * 4.0).min(0.72)],
                 glass: 0.5,
+                border: 0.0,
             });
             let (cx, cy) = (icon_rect.x + size / 2.0, icon_rect.y + size / 2.0);
             let m = size * 0.40;
@@ -1413,6 +1425,7 @@ pub fn scene(
                         radius: pill_h / 2.0,
                         color: bg,
                         glass: 0.0,
+                        border: 0.0,
                     });
                     scene.labels.push(Label {
                         text: name,
@@ -1443,6 +1456,7 @@ pub fn scene(
                 radius: 14.0,
                 color: [hl[0], hl[1], hl[2], (hl[3] * 1.4).min(0.3)],
                 glass: 0.0,
+                border: 0.0,
             });
         }
         // Over an uninstall target, flush the ghost red — the icon in hand is
@@ -1532,6 +1546,7 @@ pub fn scene(
             radius: SEARCH_H / 2.0,
             color: box_color,
             glass: 0.0,
+            border: 0.0,
         });
 
         if search_expand < 0.5 {
@@ -1583,6 +1598,7 @@ pub fn scene(
                     radius: 0.75,
                     color: [t[0], t[1], t[2], 0.9],
                     glass: 0.0,
+                    border: 0.0,
                 });
             }
         }
@@ -1731,6 +1747,7 @@ pub fn scene(
                     radius: 14.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
                     glass: 0.0,
+                    border: 0.0,
                 });
             } else if hover == Some(Hit::GridCell(s, i)) {
                 g.rects.push(RectInst {
@@ -1738,6 +1755,7 @@ pub fn scene(
                     radius: 14.0,
                     color: config.theme.highlight_rgba(),
                     glass: 0.0,
+                    border: 0.0,
                 });
             }
             // A drag hovering a cell that would take a drop
@@ -1749,6 +1767,7 @@ pub fn scene(
                     radius: 16.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 2.2).min(0.5)],
                     glass: 0.0,
+                    border: 0.0,
                 });
             }
             let cx = cell.x + cell.w / 2.0;
@@ -1777,6 +1796,7 @@ pub fn scene(
                     radius: 14.0,
                     color: trash_tile_color(config.theme.highlight_rgba(), trash_react),
                     glass: 0.5,
+                    border: 0.0,
                 });
                 g.icons.push(bin_icon(rect, trash_react));
                 if !covered {
@@ -1806,6 +1826,7 @@ pub fn scene(
                     radius: 14.0,
                     color: [hl[0], hl[1], hl[2], (hl[3] * 4.0).min(0.72)],
                     glass: 0.5,
+                    border: 0.0,
                 });
                 let m = grid_icon * 0.42;
                 let gap = grid_icon * 0.10;
@@ -1972,6 +1993,7 @@ pub fn scene(
                     radius: dot_r,
                     color: [hl[0], hl[1], hl[2], hl[3] * alpha],
                     glass: 0.0,
+                    border: 0.0,
                 });
             }
         }
@@ -2040,6 +2062,7 @@ pub fn scene(
             radius,
             color: panel,
             glass: 0.5,
+            border: 0.0,
         });
         // The 3×3 slot each member takes, by the grid side the box sits on:
         // left pins member 0 (A) top-left and fills row-major; right pins
@@ -2176,6 +2199,7 @@ pub fn scene(
                     radius: dot_r,
                     color: [hl[0], hl[1], hl[2], a],
                     glass: 0.0,
+                    border: 0.0,
                 });
             }
             scene.grids.push(dots);
