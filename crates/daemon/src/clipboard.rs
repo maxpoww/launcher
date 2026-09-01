@@ -1553,22 +1553,31 @@ impl App {
         // The box is the pill grown: fill + ink both follow the bar's regime
         // (see `options_box_surface`), so the two never disagree.
         let (fill, box_ink) = self.options_box_surface();
+        // The pill earns its SURFACE from the peek, not only from the expand.
+        // Peeking pulls a clip's text (and thumbnail) out onto the bar, but
+        // the fill only ramped with `solid` — so until the box actually
+        // opened the content sat on the bare 0.11 wash, i.e. straight on the
+        // desktop (Max, 2026-09-01: "it looks transparent"). Leads the
+        // content ramp slightly so the surface is there before the text is.
+        let surface = solid.max(((peek - 0.15) / 0.45).clamp(0.0, 1.0));
         scene.rects.push(RectInst {
             rect,
             radius,
-            // The PANEL is the only thing that goes translucent (frosted
-            // glass); the pill it grows from keeps its own wash, and the
-            // detail card / dict panel drawn later stay opaque.
+            // Translucent, so the compositor's blur frosts it exactly like
+            // the box it grows into; the detail card / dict panel drawn
+            // later stay opaque.
             color: lerp4(
                 pill_base,
                 [fill[0], fill[1], fill[2], crate::options::BOX_ALPHA],
-                solid,
+                surface,
             ),
             glass: 0.0,
             border: 0.0,
         });
 
-        let ink = lerp4(text_color, box_ink, solid);
+        // Ink follows the same ramp: once the surface is the box's colour,
+        // the box's ink is the one that reads on it.
+        let ink = lerp4(text_color, box_ink, surface);
         let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
         // The list rests at its darkest/strongest; the hovered row's text goes
         // LIGHTER (Max, 2026-08-31) — one clear direction, no row tinting.
