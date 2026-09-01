@@ -1795,9 +1795,12 @@ impl App {
         let body_max = (rect.x + rect.w - CARD_PAD_X - text_x).max(0.0);
         for (li, line) in info.body_lines.iter().enumerate() {
             let ly = body_top + li as f32 * LINE_PX;
+            // Body stays regular even when hovered: bolding a whole wrapped
+            // message turns the card into a slab. The summary carries the
+            // weight change on its own.
             scene
                 .labels
-                .push(line_of(line.clone(), text_x, ly, body_max, prim, content));
+                .push(mk_line(line.clone(), text_x, ly, body_max, prim, content));
         }
     }
 

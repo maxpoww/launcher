@@ -324,26 +324,12 @@ fn luminance(c: [f32; 4]) -> f32 {
 /// brightens toward white. One rule, correct in both regimes, and no row or
 /// card tinting.
 pub(crate) fn hover_ink_for(ink: [f32; 4]) -> [f32; 4] {
-    // Full alpha alone was still weak, because it stops at the RESTING ink's
-    // colour — and that colour is deliberately softened (warm near-black /
-    // warm off-white), leaving a whole stretch of range unused. Hover spends
-    // that too, pushing past the resting ink toward the extreme: measured on
-    // a light box, sRGB 0.26 at rest -> 0.06 hovered, where alpha alone only
-    // reached 0.14. Toward black this is a uniform scale, so the warm cast
-    // survives; toward white it naturally washes out, as a highlight should.
-    const PUSH_DARK: f32 = 0.70;
-    const PUSH_LIGHT: f32 = 0.85;
-    let (target, t) = if luminance(ink) > 0.179 {
-        ([1.0, 1.0, 1.0], PUSH_LIGHT)
-    } else {
-        ([0.0, 0.0, 0.0], PUSH_DARK)
-    };
-    [
-        ink[0] + (target[0] - ink[0]) * t,
-        ink[1] + (target[1] - ink[1]) * t,
-        ink[2] + (target[2] - ink[2]) * t,
-        1.0,
-    ]
+    // Just full strength — the colour itself doesn't move. Pushing it past
+    // the resting ink (toward black/white) was needed back when lightness
+    // was carrying the hint alone; with WEIGHT doing that job the extra
+    // darkening only made the hover heavy (Max, 2026-09-01: "the bold is too
+    // agresive", and the colours now read well as they are).
+    [ink[0], ink[1], ink[2], 1.0]
 }
 
 /// The ink that reads on `bg`: dark on a bright surface, light on a dark one.
@@ -1650,19 +1636,15 @@ mod tests {
 
     #[test]
     fn hover_strengthens_the_ink_it_never_fades_it() {
-        // The hovered line moves AWAY from its background in both regimes —
-        // darker on a light box, brighter on a dark one — and spends real
-        // colour range, not just alpha (which topped out at the resting
-        // ink's own softened value and read as weak).
-        let hov_dark = hover_ink_for([INK_DARK[0], INK_DARK[1], INK_DARK[2], 0.88]);
-        assert!(luminance(hov_dark) < luminance(INK_DARK));
-        assert_eq!(hov_dark[3], 1.0);
-        // Scaling toward black keeps the warm cast.
-        assert!(hov_dark[0] > hov_dark[1] && hov_dark[1] > hov_dark[2]);
-
-        let hov_light = hover_ink_for([INK_LIGHT[0], INK_LIGHT[1], INK_LIGHT[2], 0.82]);
-        assert!(luminance(hov_light) > luminance(INK_LIGHT));
-        assert!(hov_light.iter().take(3).all(|&c| c <= 1.0));
+        // Hover takes the ink to full strength and leaves its COLOUR alone:
+        // weight carries the emphasis, so moving the colour as well made the
+        // hover heavy. It must never fade — that was the original defect,
+        // where lightening dark ink pushed it toward a light background.
+        for (ink, rest) in [(INK_DARK, 0.88), (INK_LIGHT, 0.67)] {
+            let hov = hover_ink_for([ink[0], ink[1], ink[2], rest]);
+            assert_eq!([hov[0], hov[1], hov[2]], [ink[0], ink[1], ink[2]]);
+            assert!(hov[3] > rest, "hover must gain strength, not lose it");
+        }
     }
 
     #[test]

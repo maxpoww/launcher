@@ -1831,10 +1831,10 @@ impl App {
                 centered: false,
                 dim: false,
                 cache: false,
-                // Hovered rows go BOLD as well as full-strength: weight is
-                // the one emphasis channel still free once lightness has
-                // spent its contrast.
-                family: hovered.then_some(crate::content::FONT_BOLD),
+                // Hovered rows carry the weight change on their FIRST line
+                // only — bolding a whole wrapped clip turns the row into a
+                // slab, which read as too aggressive.
+                family: (hovered && i == 0).then_some(crate::content::FONT_BOLD),
                 color: Some(col),
                 clip: Some(row_clip),
             });
