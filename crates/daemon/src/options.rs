@@ -305,6 +305,15 @@ fn luminance(c: [f32; 4]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
+/// Golem's accent — the compositor's active-border peach, already the
+/// notification unread cue. The hovered row marks itself with a slim bar of
+/// it (see [`HOVER_BAR_W`]).
+pub(crate) const ACCENT: [f32; 4] = [1.0, 0.745, 0.596, 1.0];
+/// Width of the hovered row's accent marker, and its inset from the row's
+/// top/bottom edges.
+pub(crate) const HOVER_BAR_W: f32 = 3.0;
+pub(crate) const HOVER_BAR_INSET: f32 = 4.0;
+
 /// The hovered line's ink: the SAME colour at full strength — the hover
 /// always moves the text AWAY from its background, never toward it.
 ///

@@ -1714,8 +1714,7 @@ impl App {
         if bot <= top {
             return;
         }
-        // Zebra on odd rows (newest = 0 stays plain). Hover tints no
-        // background — it lightens the row's TEXT instead (see hover_ink).
+        // Zebra on odd rows (newest = 0 stays plain).
         if idx % 2 == 1 {
             scene.rects.push(RectInst {
                 rect: Rect::new(rr.x, top, rr.w, bot - top),
@@ -1723,6 +1722,32 @@ impl App {
                 color: stripe_opaque,
                 glass: 0.0,
             });
+        }
+        // The hovered row marks itself with a slim ACCENT BAR at its left
+        // edge, on top of the ink strengthening — the notif box's twin. Past
+        // ~4:1 the eye barely registers further darkening, so on a light box
+        // lightness alone couldn't carry the hint; a hue the box never
+        // otherwise shows does.
+        if hovered {
+            let bh = bot - top - 2.0 * crate::options::HOVER_BAR_INSET;
+            if bh > 0.0 {
+                scene.rects.push(RectInst {
+                    rect: Rect::new(
+                        rr.x + crate::options::HOVER_BAR_INSET,
+                        top + crate::options::HOVER_BAR_INSET,
+                        crate::options::HOVER_BAR_W,
+                        bh,
+                    ),
+                    radius: crate::options::HOVER_BAR_W / 2.0,
+                    color: [
+                        crate::options::ACCENT[0],
+                        crate::options::ACCENT[1],
+                        crate::options::ACCENT[2],
+                        e,
+                    ],
+                    glass: 0.0,
+                });
+            }
         }
 
         let col = if hovered {

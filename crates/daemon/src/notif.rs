@@ -1685,8 +1685,34 @@ impl App {
         }
 
         let hovered = self.notif.hover_card == Some(idx);
-        // Hover tints no background — it lightens the card's TEXT instead
-        // (see hover_ink), so the hint is a step in one direction.
+        // The hovered card marks itself with a slim ACCENT BAR at its left
+        // edge, on top of the ink strengthening. Lightness alone couldn't
+        // carry the hint on a light box: past ~4:1 the eye barely registers
+        // further darkening, so "even darker text" reads as no change at all
+        // (Max, 2026-09-01). A hue the box never otherwise shows does.
+        if hovered {
+            let top = rect.y.max(content.y);
+            let bot = (rect.y + rect.h).min(content.y + content.h);
+            let h = bot - top - 2.0 * crate::options::HOVER_BAR_INSET;
+            if h > 0.0 {
+                scene.rects.push(RectInst {
+                    rect: Rect::new(
+                        rect.x + crate::options::HOVER_BAR_INSET,
+                        top + crate::options::HOVER_BAR_INSET,
+                        crate::options::HOVER_BAR_W,
+                        h,
+                    ),
+                    radius: crate::options::HOVER_BAR_W / 2.0,
+                    color: [
+                        crate::options::ACCENT[0],
+                        crate::options::ACCENT[1],
+                        crate::options::ACCENT[2],
+                        alpha,
+                    ],
+                    glass: 0.0,
+                });
+            }
+        }
         let card_ink = if hovered { hover_ink } else { dim_ink };
         let prim = [card_ink[0], card_ink[1], card_ink[2], card_ink[3] * alpha];
         let dim = [
