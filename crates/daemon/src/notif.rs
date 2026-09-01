@@ -1698,6 +1698,19 @@ impl App {
         }
 
         let hovered = self.notif.hover_card == Some(idx);
+        // Hover marker: a hairline frame in the box's own ink, plus the ink
+        // firming below. Nothing behind the text changes, so the frosted
+        // blur reads through the card exactly as it does elsewhere.
+        if hovered {
+            let top = rect.y.max(content.y);
+            let bot = (rect.y + rect.h).min(content.y + content.h);
+            crate::options::push_hover_frame(
+                scene,
+                Rect::new(rect.x, top, rect.w, bot - top),
+                hover_ink,
+                crate::options::HOVER_FRAME_ALPHA * alpha,
+            );
+        }
         let card_ink = if hovered { hover_ink } else { dim_ink };
         let prim = [card_ink[0], card_ink[1], card_ink[2], card_ink[3] * alpha];
         let dim = [

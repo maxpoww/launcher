@@ -1733,6 +1733,17 @@ impl App {
             });
         }
 
+        // Hover marker: a hairline frame in the box's own ink, plus the ink
+        // firming below. Nothing behind the text changes, so the frosted
+        // blur reads through the row exactly as it does everywhere else.
+        if hovered {
+            crate::options::push_hover_frame(
+                scene,
+                Rect::new(rr.x, top, rr.w, bot - top),
+                hover_ink,
+                crate::options::HOVER_FRAME_ALPHA * e,
+            );
+        }
         let col = if hovered {
             [hover_ink[0], hover_ink[1], hover_ink[2], e]
         } else {

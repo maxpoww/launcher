@@ -313,6 +313,37 @@ fn luminance(c: [f32; 4]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
+/// Hairline frame around the hovered row/card, in the box's own ink at
+/// [`HOVER_FRAME_ALPHA`].
+///
+/// Four thin rects rather than a stroked rounded rect: the rect pipeline has
+/// no stroke mode, and the outer-plus-inner trick would need an OPAQUE inner
+/// fill — which would punch a hole in the box's frosted blur.
+pub(crate) fn push_hover_frame(scene: &mut Scene, r: Rect, ink: [f32; 4], alpha: f32) {
+    /// Line thickness, logical px.
+    const W: f32 = 1.0;
+    if r.w <= 2.0 * W || r.h <= 2.0 * W {
+        return;
+    }
+    let color = [ink[0], ink[1], ink[2], alpha];
+    let mut line = |x: f32, y: f32, w: f32, h: f32| {
+        scene.rects.push(RectInst {
+            rect: Rect::new(x, y, w, h),
+            radius: 0.0,
+            color,
+            glass: 0.0,
+        });
+    };
+    line(r.x, r.y, r.w, W); // top
+    line(r.x, r.y + r.h - W, r.w, W); // bottom
+    line(r.x, r.y, W, r.h); // left
+    line(r.x + r.w - W, r.y, W, r.h); // right
+}
+
+/// How present the hovered row's frame is. Subtle on purpose — it marks the
+/// row without drawing a box around it.
+pub(crate) const HOVER_FRAME_ALPHA: f32 = 0.32;
+
 /// The hovered line's ink: the SAME colour at full strength — the hover
 /// always moves the text AWAY from its background, never toward it.
 ///
