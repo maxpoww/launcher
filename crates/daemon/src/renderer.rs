@@ -307,6 +307,16 @@ impl Renderer {
                 required_limits: wgpu::Limits {
                     // Allow surface expansion to full screen height (>2048 on 4K displays).
                     max_texture_dimension_2d: 8192,
+                    // The icon array is one texture layer per app icon plus a
+                    // reserved block (rank hits + pending installs + thumbs =
+                    // 97). downlevel_defaults() caps texture_array_layers at
+                    // 256, so a machine with ~160+ .desktop entries overflowed
+                    // it — create_texture("waverunner.icons") panicked the
+                    // daemon on cold start (267 layers on a 170-app machine,
+                    // 2026-09-01). Request what the adapter actually offers
+                    // (2048 on any real GPU, incl. this Iris Xe / RTX 4050);
+                    // this never exceeds hardware, so device creation is safe.
+                    max_texture_array_layers: adapter.limits().max_texture_array_layers,
                     ..wgpu::Limits::downlevel_defaults()
                 },
                 memory_hints: wgpu::MemoryHints::default(),
