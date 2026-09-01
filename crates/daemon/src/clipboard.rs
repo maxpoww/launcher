@@ -1610,7 +1610,7 @@ impl App {
         if self.clip.history.is_empty() {
             let a = [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * solid];
             scene.labels.push(Label {
-                text: "Nothing copied yet".to_owned(),
+                text: crate::i18n::tr("Nothing copied yet").to_owned(),
                 pos: (
                     content.x + content.w / 2.0,
                     content.y + (content.h - LINE_PX) / 2.0,
@@ -1989,7 +1989,7 @@ impl App {
             clip: Some(gclip),
         });
         scene.labels.push(Label {
-            text: "Back".to_owned(),
+            text: crate::i18n::tr("Back").to_owned(),
             pos: (back.x + 16.0, cy),
             max_w: back.w,
             font_px: FONT_PX * 0.95,
@@ -2020,7 +2020,7 @@ impl App {
         let fclip = Rect::new(field.x, field.y, field.w, field.h);
         let empty = self.clip.dict_query.is_empty();
         let (text, col) = if empty {
-            ("Type a word…".to_owned(), dim_ink)
+            (crate::i18n::tr("Type a word…").to_owned(), dim_ink)
         } else {
             (self.clip.dict_query.clone(), ink)
         };
@@ -2057,11 +2057,11 @@ impl App {
                 return;
             }
             let msg = if self.clip.dict_data.is_some() {
-                format!("No definition for “{query}”.")
+                crate::i18n::tr("No definition for “{query}”.").replace("{query}", query)
             } else if self.clip.dict_loading {
-                "Loading dictionary…".to_owned()
+                crate::i18n::tr("Loading dictionary…").to_owned()
             } else {
-                "Dictionary data not installed.".to_owned()
+                crate::i18n::tr("Dictionary data not installed.").to_owned()
             };
             scene.labels.push(Label {
                 text: msg,
@@ -2840,12 +2840,13 @@ impl App {
         // Title row (link clips only): the page title, seeded from the source
         // window at copy time and refined by the network unfurl when enabled.
         if entry.is_link() && !entry.title.is_empty() {
-            row(scene, y, "Title:", entry.title.clone());
+            row(scene, y, crate::i18n::tr("Title:"), entry.title.clone());
             y += META_ROW_H;
         }
         // About row (link only): the unfurled page description, one clipped line.
         if entry.is_link() && !entry.description.is_empty() {
-            row(scene, y, "About:", entry.description.clone());
+            let about = entry.description.clone();
+            row(scene, y, crate::i18n::tr("About:"), about);
             y += META_ROW_H;
         }
         // Always show the Source row — the window couldn't always be identified
@@ -2853,33 +2854,33 @@ impl App {
         // query), and an empty value would silently drop the row while its slot
         // still advances, leaving a blank gap. Mirror the paste log's "somewhere".
         let source = if entry.source.is_empty() {
-            "unknown".to_owned()
+            crate::i18n::tr("unknown").to_owned()
         } else {
             entry.source.clone()
         };
-        row(scene, y, "Source:", source);
+        row(scene, y, crate::i18n::tr("Source:"), source);
         y += META_ROW_H;
         let copied = {
             let b = fmt_datetime(entry.timestamp_ms);
             if entry.kind == ClipKind::Files && entry.cut {
-                format!("{b} · cut")
+                format!("{b} · {}", crate::i18n::tr("cut"))
             } else {
                 b
             }
         };
-        row(scene, y, "Copied:", copied);
+        row(scene, y, crate::i18n::tr("Copied:"), copied);
         y += META_ROW_H;
         let pasted = match entry.paste_count {
-            0 => "not yet".to_owned(),
-            1 => "1 time".to_owned(),
-            n => format!("{n} times"),
+            0 => crate::i18n::tr("not yet").to_owned(),
+            1 => crate::i18n::tr("1 time").to_owned(),
+            n => crate::i18n::tr("{n} times").replace("{n}", &n.to_string()),
         };
-        row(scene, y, "Pasted:", pasted);
+        row(scene, y, crate::i18n::tr("Pasted:"), pasted);
         y += META_ROW_H;
         for rec in &entry.pastes {
             if y + META_ROW_H > mtop && y < mbot {
                 let w = if rec.target.is_empty() {
-                    "somewhere".to_owned()
+                    crate::i18n::tr("somewhere").to_owned()
                 } else {
                     cap(&rec.target, 40)
                 };
@@ -2964,7 +2965,7 @@ impl App {
                         clip: Some(gclip),
                     });
                     scene.labels.push(Label {
-                        text: "Back".to_owned(),
+                        text: crate::i18n::tr("Back").to_owned(),
                         pos: (prect.x + 16.0, cy),
                         max_w: prect.w,
                         font_px: FONT_PX * 0.95,
@@ -3844,7 +3845,11 @@ fn fmt_datetime(ms: u64) -> String {
         let t = (ms / 1000) as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
-        let mon = MON.get(tm.tm_mon as usize).copied().unwrap_or("");
+        let mon = MON
+            .get(tm.tm_mon as usize)
+            .copied()
+            .map(crate::i18n::tr)
+            .unwrap_or("");
         format!(
             "{mon} {} · {:02}:{:02}",
             tm.tm_mday, tm.tm_hour, tm.tm_min

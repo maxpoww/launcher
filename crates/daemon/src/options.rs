@@ -985,7 +985,7 @@ impl App {
         // no window address to act on. Which CONTROLS survive up here is not
         // decided here — see `presence`.
         if self.overview_active {
-            let title = Some("Overview".to_owned());
+            let title = Some(crate::i18n::tr("Overview").to_owned());
             if self.options_active_addr.is_some() || self.options_title != title {
                 self.options_active_addr = None;
                 self.options_title = title;

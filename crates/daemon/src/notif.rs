@@ -1342,7 +1342,7 @@ impl App {
             if pa > 0.01 {
                 let a = [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * pa];
                 scene.labels.push(Label {
-                    text: "No notifications".to_owned(),
+                    text: crate::i18n::tr("No notifications").to_owned(),
                     pos: (content.x + content.w / 2.0, content.y + (content.h - LINE_PX) / 2.0),
                     max_w: content.w,
                     font_px: FONT_PX,
@@ -1419,7 +1419,7 @@ impl App {
         stripe_opaque: [f32; 4],
     ) {
         let placeholder = RowInfo {
-            summary: "No notifications".to_owned(),
+            summary: crate::i18n::tr("No notifications").to_owned(),
             preview: String::new(),
             timestamp_ms: 0,
             initial: String::new(),

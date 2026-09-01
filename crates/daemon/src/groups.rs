@@ -262,8 +262,14 @@ impl GroupDb {
     /// `name_of` resolves a member id to its display name.
     pub fn label(&self, index: usize, name_of: impl Fn(&str) -> Option<String>) -> String {
         let Some(group) = self.groups.get(index) else {
-            return "Box".to_owned();
+            return crate::i18n::tr("Box").to_owned();
         };
+        // Trash is the one group whose name is ours, not the user's — its
+        // stored name stays English (locale-independent on disk) and gets
+        // translated here, at display time.
+        if group.id == TRASH_ID {
+            return crate::i18n::tr("Recycle Bin").to_owned();
+        }
         if let Some(name) = &group.name {
             return name.clone();
         }
@@ -271,7 +277,7 @@ impl GroupDb {
             .members
             .iter()
             .find_map(|m| name_of(m))
-            .unwrap_or_else(|| "Box".to_owned());
+            .unwrap_or_else(|| crate::i18n::tr("Box").to_owned());
         match group.members.len() {
             0 | 1 => first,
             n => format!("{first} +{}", n - 1),

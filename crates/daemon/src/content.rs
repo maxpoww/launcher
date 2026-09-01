@@ -1515,7 +1515,7 @@ pub fn scene(
         if search_expand < 0.5 {
             // Compact button: "Search" label.
             sgrid.labels.push(Label {
-                text: "Search".to_string(),
+                text: crate::i18n::tr("Search").to_string(),
                 pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
                 max_w: btn.w,
                 font_px: SEARCH_FONT_PX,
@@ -1533,7 +1533,7 @@ pub fn scene(
             // (`query_px`, measured by the renderer, not estimated), so
             // it hugs the last glyph as the pill grows around them.
             let (text, dim) = if query.is_empty() {
-                ("Search".to_string(), true)
+                (crate::i18n::tr("Search").to_string(), true)
             } else {
                 (query.to_string(), false)
             };
@@ -1572,9 +1572,9 @@ pub fn scene(
     // paging, page dots, and per-section empty states.
     for (s, sec) in layout.sections.iter().enumerate() {
         let title = if s == SECTION_APPS && !apps_group.is_empty() {
-            format!("{} — {}", SECTION_TITLES[s], apps_group)
+            format!("{} — {}", crate::i18n::tr(SECTION_TITLES[s]), apps_group)
         } else {
-            SECTION_TITLES[s].to_string()
+            crate::i18n::tr(SECTION_TITLES[s]).to_string()
         };
         scene.labels.push(Label {
             text: title,
@@ -1599,7 +1599,7 @@ pub fn scene(
             // Apps/Files show one only when a search matched nothing.
             let text = match s {
                 SECTION_INSTALL if !install_hint.is_empty() => install_hint,
-                _ if !query.is_empty() => "No results",
+                _ if !query.is_empty() => crate::i18n::tr("No results"),
                 _ => {
                     scene.grids.push(grid);
                     continue;
@@ -1875,13 +1875,13 @@ pub fn scene(
                 });
             }
             let name = if is_busy && is_launching {
-                "Launching…".to_string()
+                crate::i18n::tr("Launching…").to_string()
             } else if is_busy && (s == SECTION_INSTALL || is_installing) {
-                "Installing…".to_string()
+                crate::i18n::tr("Installing…").to_string()
             } else if is_busy {
-                "Removing…".to_string()
+                crate::i18n::tr("Removing…").to_string()
             } else if is_failed {
-                "Failed".to_string()
+                crate::i18n::tr("Failed").to_string()
             } else {
                 truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
             };

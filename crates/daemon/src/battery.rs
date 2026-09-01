@@ -81,7 +81,10 @@ impl App {
         // One notification on entering the ladder (not on every state walk).
         if prev == BatteryAlarm::None && alarm >= BatteryAlarm::Low {
             info!("battery: {pct}% discharging — notifying");
-            notify(&format!("Battery at {pct}% — plug in soon."));
+            notify(
+                &crate::i18n::tr("Battery at {pct}% — plug in soon.")
+                    .replace("{pct}", &pct.to_string()),
+            );
         }
 
         // Re-arm whenever we're out of the critical band.
@@ -185,7 +188,8 @@ fn notify(body: &str) {
             "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
             "org.freedesktop.Notifications", "Notify",
             "susssasa{sv}i",
-            "waverunner", "0", "battery-caution", "Battery low", body,
+            "waverunner", "0", "battery-caution",
+            crate::i18n::tr("Battery low"), body,
             "0", "0", "10000",
         ])
         .stdout(std::process::Stdio::null())

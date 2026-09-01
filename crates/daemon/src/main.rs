@@ -24,6 +24,7 @@ mod focus_cycle;
 mod frame;
 mod groups;
 mod hypr;
+mod i18n;
 mod install;
 mod ipc;
 mod jelly;
@@ -120,6 +121,10 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "waverunner=info".into()),
         )
         .init();
+
+    // Translation table for every tr() below — before the first draw and
+    // before any worker thread that renders text exists.
+    i18n::init();
 
     // Build-time mode (the flake's package-index derivation): convert a
     // raw `nix search --json` dump into the daemon's TSV index and exit.
@@ -2255,13 +2260,13 @@ impl App {
     /// Hint shown centered in an empty Install section.
     fn install_hint(&self) -> &'static str {
         match self.pkg_state {
-            PkgIndexState::Loading => "Indexing nixpkgs…",
-            PkgIndexState::Failed => "Package search unavailable",
+            PkgIndexState::Loading => i18n::tr("Indexing nixpkgs…"),
+            PkgIndexState::Failed => i18n::tr("Package search unavailable"),
             PkgIndexState::Ready if self.search.query.is_empty() => {
-                "Search to install from nixpkgs"
+                i18n::tr("Search to install from nixpkgs")
             }
             PkgIndexState::Ready if self.search.query.chars().count() < PKG_QUERY_MIN => {
-                "Keep typing…"
+                i18n::tr("Keep typing…")
             }
             // A live query with zero matches: the generic "No results".
             PkgIndexState::Ready => "",
