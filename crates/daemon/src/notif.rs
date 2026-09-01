@@ -2512,6 +2512,15 @@ impl App {
             0.5,
         );
         self.notif.list_scroll = ls;
+        // The content moved under a possibly-stationary pointer — scrolling,
+        // or the box growing/collapsing. Re-run the hit-test so every card
+        // that passes beneath the pointer picks up the hover, and so a box
+        // that opens under it is hovered at once. Motion events alone can't
+        // do this: here it is the CONTENT that moves, not the pointer (Max,
+        // 2026-09-01).
+        if lm || em || bm {
+            self.update_notif_hit();
+        }
 
         // The frame it finishes collapsing back to the bell (fully hidden): reset
         // the box scroll so it reopens fresh at the newest. Only on the

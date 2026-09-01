@@ -3616,6 +3616,15 @@ impl App {
             0.5,
         );
         self.clip.list_scroll = ls;
+        // The content moved under a possibly-stationary pointer — scrolling,
+        // or the drawer growing/collapsing. Re-run the hit-test so every row
+        // that passes beneath the pointer picks up the hover, and so a box
+        // that opens under it is hovered at once. Motion events alone can't
+        // do this: here it is the CONTENT that moves, not the pointer (Max,
+        // 2026-09-01).
+        if lm || em {
+            self.update_clip_hit();
+        }
         // Smooth dictionary-answer scrolling.
         let (ds, dsm) = ease_toward(
             self.clip.dict_scroll,
