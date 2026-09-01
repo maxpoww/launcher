@@ -140,8 +140,8 @@ const STRIPE_DARKEN: f32 = 0.48;
 /// light ink at 0.55 still read easily. A box now sits at its BACKDROP's
 /// luminance — often mid-tone — and the same alphas washed the text out. The
 /// spotlight still works: the hovered line goes to full alpha.
-const LIST_DIM: f32 = 0.85;
-const LIST_DIM_LIGHT: f32 = 1.0;
+const LIST_DIM: f32 = 0.82;
+const LIST_DIM_LIGHT: f32 = 0.88;
 
 /// How recently a matching message must have been surfaced for a new arrival to
 /// count as its *echo* (same chat mirrored by the webapp + KDE Connect) and skip

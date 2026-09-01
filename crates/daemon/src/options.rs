@@ -305,28 +305,22 @@ fn luminance(c: [f32; 4]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
-/// The hovered line's ink: a SUBTLE lift toward light. Dark ink eases part
-/// of the way to the warm off-white, light ink part of the way to white —
-/// the text stays recognisably itself, just lifted. A full flip to the
-/// opposite ink read as "too much" (Max, 2026-08-31). The resting text is
-/// meanwhile drawn at full strength, so the hint is this one step; nothing
-/// tints the row or card behind it.
+/// The hovered line's ink: the SAME colour at full strength — the hover
+/// always moves the text AWAY from its background, never toward it.
+///
+/// Two attempts failed before this one, both for the same reason. "Lighter
+/// on hover" reads as emphasis only on a dark box; on a light one it drops
+/// the text from 5.5:1 to 2.5:1, so the hovered row looks *faded* rather
+/// than picked (Max, 2026-08-31: "in black text there is no hover"). And
+/// with the resting text already at full strength there was no headroom
+/// left in the direction that does read.
+///
+/// So the resting list sits a little under full (see each box's `LIST_DIM*`)
+/// and hover spends that headroom: dark ink deepens toward black, light ink
+/// brightens toward white. One rule, correct in both regimes, and no row or
+/// card tinting.
 pub(crate) fn hover_ink_for(ink: [f32; 4]) -> [f32; 4] {
-    // Two factors because these are LINEAR values and sRGB encoding
-    // compresses the dark end hard: a 0.10 step off near-black is already a
-    // clear lift (sRGB 0.15 -> 0.35), while the same step off near-white
-    // would be invisible.
-    let (target, t) = if luminance(ink) > 0.179 {
-        ([1.0, 1.0, 1.0], 0.30)
-    } else {
-        ([INK_LIGHT[0], INK_LIGHT[1], INK_LIGHT[2]], 0.10)
-    };
-    [
-        ink[0] + (target[0] - ink[0]) * t,
-        ink[1] + (target[1] - ink[1]) * t,
-        ink[2] + (target[2] - ink[2]) * t,
-        ink[3],
-    ]
+    [ink[0], ink[1], ink[2], 1.0]
 }
 
 /// The ink that reads on `bg`: dark on a bright surface, light on a dark one.
@@ -1620,19 +1614,17 @@ mod tests {
     }
 
     #[test]
-    fn hover_lifts_the_ink_without_flipping_it() {
-        // Lighter than rest — the hint — but still far nearer the resting
-        // ink than the opposite one, so it reads as a lift, not a flip.
-        let hov = hover_ink_for(INK_DARK);
-        assert!(luminance(hov) > luminance(INK_DARK));
-        assert!(
-            luminance(hov) < luminance(INK_LIGHT) * 0.25,
-            "hover flipped instead of lifting: {hov:?}"
-        );
-        // The already-light ink lifts too, and never blows past white.
-        let hov_l = hover_ink_for(INK_LIGHT);
-        assert!(luminance(hov_l) > luminance(INK_LIGHT));
-        assert!(hov_l.iter().take(3).all(|&c| c <= 1.0));
+    fn hover_strengthens_the_ink_it_never_fades_it() {
+        // The hovered line keeps its colour and goes to full strength, so it
+        // moves AWAY from the background in both regimes. Lightening dark
+        // ink (the earlier attempt) moved it toward a light background and
+        // read as fading, not selection.
+        for ink in [INK_DARK, INK_LIGHT] {
+            let dimmed = [ink[0], ink[1], ink[2], 0.88];
+            let hov = hover_ink_for(dimmed);
+            assert_eq!([hov[0], hov[1], hov[2]], [ink[0], ink[1], ink[2]]);
+            assert!(hov[3] > dimmed[3], "hover must gain strength");
+        }
     }
 
     #[test]

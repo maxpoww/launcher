@@ -82,8 +82,8 @@ const STRIPE_DARKEN: f32 = 0.48;
 /// Raised 2026-08-31 with the notif box's twins (Max: "poor contrast"): a box
 /// now sits at its backdrop's luminance rather than being a near-black slab,
 /// so the old alphas washed the rows out. Hover still pops to full.
-const LIST_DIM: f32 = 0.85;
-const LIST_DIM_LIGHT: f32 = 1.0;
+const LIST_DIM: f32 = 0.82;
+const LIST_DIM_LIGHT: f32 = 0.88;
 const DELETE_SZ: f32 = 18.0;
 /// fa-trash-o (outline can with vertical lines) — the per-item delete controls
 /// (row + detail).
