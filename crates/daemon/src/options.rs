@@ -305,24 +305,28 @@ fn luminance(c: [f32; 4]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
-/// The hovered line's ink: LIGHTER than the resting text (Max's call,
-/// 2026-08-31). On a light box that flips the dark resting ink to the warm
-/// off-white — an unmistakable change with no row tinting; on a dark box the
-/// already-light ink brightens further. The resting text is meanwhile drawn
-/// as dark/strong as it goes, so the hint is a real step in one direction
-/// rather than a background wash.
+/// The hovered line's ink: a SUBTLE lift toward light. Dark ink eases part
+/// of the way to the warm off-white, light ink part of the way to white —
+/// the text stays recognisably itself, just lifted. A full flip to the
+/// opposite ink read as "too much" (Max, 2026-08-31). The resting text is
+/// meanwhile drawn at full strength, so the hint is this one step; nothing
+/// tints the row or card behind it.
 pub(crate) fn hover_ink_for(ink: [f32; 4]) -> [f32; 4] {
-    if luminance(ink) > 0.179 {
-        // Already light: brighten, keeping the warm cast.
-        [
-            (ink[0] * 1.28).min(1.0),
-            (ink[1] * 1.28).min(1.0),
-            (ink[2] * 1.28).min(1.0),
-            ink[3],
-        ]
+    // Two factors because these are LINEAR values and sRGB encoding
+    // compresses the dark end hard: a 0.10 step off near-black is already a
+    // clear lift (sRGB 0.15 -> 0.35), while the same step off near-white
+    // would be invisible.
+    let (target, t) = if luminance(ink) > 0.179 {
+        ([1.0, 1.0, 1.0], 0.30)
     } else {
-        [INK_LIGHT[0], INK_LIGHT[1], INK_LIGHT[2], ink[3]]
-    }
+        ([INK_LIGHT[0], INK_LIGHT[1], INK_LIGHT[2]], 0.10)
+    };
+    [
+        ink[0] + (target[0] - ink[0]) * t,
+        ink[1] + (target[1] - ink[1]) * t,
+        ink[2] + (target[2] - ink[2]) * t,
+        ink[3],
+    ]
 }
 
 /// The ink that reads on `bg`: dark on a bright surface, light on a dark one.
@@ -1613,6 +1617,22 @@ mod tests {
         // case that was unreadable while the bar used a static theme white.
         assert_eq!(ink_on([0.7, 0.75, 0.8, 1.0]), INK_DARK);
         assert_eq!(ink_on([0.05, 0.06, 0.08, 1.0]), INK_LIGHT);
+    }
+
+    #[test]
+    fn hover_lifts_the_ink_without_flipping_it() {
+        // Lighter than rest — the hint — but still far nearer the resting
+        // ink than the opposite one, so it reads as a lift, not a flip.
+        let hov = hover_ink_for(INK_DARK);
+        assert!(luminance(hov) > luminance(INK_DARK));
+        assert!(
+            luminance(hov) < luminance(INK_LIGHT) * 0.25,
+            "hover flipped instead of lifting: {hov:?}"
+        );
+        // The already-light ink lifts too, and never blows past white.
+        let hov_l = hover_ink_for(INK_LIGHT);
+        assert!(luminance(hov_l) > luminance(INK_LIGHT));
+        assert!(hov_l.iter().take(3).all(|&c| c <= 1.0));
     }
 
     #[test]
