@@ -133,6 +133,21 @@ pub fn toggle_golem_pseudo() {
     }
 }
 
+/// Put a message on the COMPOSITOR's own notification OSD.
+///
+/// Deliberately not our own notification stack: waverunner IS the surface
+/// that draws those, so when the renderer is the thing that failed, a
+/// notification routed through us would be invisible — the exact silence
+/// F8 is about. Hyprland draws this one itself.
+pub fn notify_user(msg: &str) {
+    // `notify <icon> <ms> <colour> <message>`; icon 3 = error, colour 0 =
+    // the theme's default.
+    let msg = msg.replace('\n', " ");
+    if let Err(e) = request(&format!("notify 3 8000 0 {msg}")) {
+        debug!("compositor notify failed: {e:#}");
+    }
+}
+
 /// Close the waveview overview (its Lua toggle, which closes when open) —
 /// the topbar's X while the overview owns the screen.
 pub fn close_overview() {

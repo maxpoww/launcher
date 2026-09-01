@@ -433,6 +433,8 @@ fn main() -> anyhow::Result<()> {
         managed_install_attrs: Vec::new(),
         known_app_ids: HashSet::new(),
         reconciled: false,
+        renderer_fails: 0,
+        renderer_retry_pending: false,
         cli_ids: HashSet::new(),
         uninstalling: HashMap::new(),
         just_installed: None,
@@ -1054,6 +1056,11 @@ pub struct App {
     /// appeared*, even when its desktop id differs from the attr and the
     /// package index carried no desktop hints (e.g. `chromium`).
     known_app_ids: HashSet<String>,
+    /// How many times the main renderer has failed to initialise. Drives the
+    /// retry backoff and makes sure the user is told exactly once (F8).
+    renderer_fails: u32,
+    /// Whether a renderer retry is already queued.
+    renderer_retry_pending: bool,
     /// Whether the F13 startup reconcile has been decided this lifetime —
     /// set when any startup path arms an apply (restored installs, the
     /// timestamp check) or when the first-scan drift sweep runs. At most
@@ -1623,6 +1630,57 @@ impl App {
         if self.last_rescan.elapsed() >= RESCAN_COOLDOWN {
             self.last_rescan = Instant::now();
             self.indexer.request_rescan();
+        }
+    }
+
+    /// The main renderer failed to initialise: say so once, then keep
+    /// trying on a backoff (F8).
+    ///
+    /// The breadcrumb goes through the COMPOSITOR's notification OSD, not
+    /// ours — waverunner draws our notifications, so a renderer-less daemon
+    /// announcing itself through its own surface would say nothing at all.
+    fn renderer_retry(&mut self, pw: u32, ph: u32, scale: u32) {
+        self.renderer_fails += 1;
+        if self.renderer_fails == 1 {
+            hypr::notify_user(
+                "Golem shell: no usable GPU — the dock is unavailable, retrying in the background",
+            );
+        }
+        if self.renderer_retry_pending {
+            return;
+        }
+        // 2s, 4s, 8s … capped: a transient cause clears quickly, a permanent
+        // one must not spin.
+        let secs = (1u64 << self.renderer_fails.min(5)).min(32);
+        let armed = self.loop_handle.insert_source(
+            Timer::from_duration(Duration::from_secs(secs)),
+            move |_, _, app: &mut App| {
+                app.renderer_retry_pending = false;
+                if app.renderer.is_some() {
+                    return TimeoutAction::Drop;
+                }
+                match Renderer::new(&app.conn, app.layer.wl_surface(), pw, ph, scale) {
+                    Ok(mut renderer) => {
+                        if let Some(icons) = app.pending_icons.take() {
+                            renderer.set_icons(&icons);
+                        }
+                        app.renderer = Some(renderer);
+                        app.upload_pkg_icons();
+                        info!("renderer recovered after {} failures", app.renderer_fails);
+                        hypr::notify_user("Golem shell: display recovered");
+                        app.draw();
+                    }
+                    Err(e) => {
+                        warn!("renderer retry failed: {e:#}");
+                        app.renderer_retry(pw, ph, scale);
+                    }
+                }
+                TimeoutAction::Drop
+            },
+        );
+        match armed {
+            Ok(_) => self.renderer_retry_pending = true,
+            Err(e) => warn!("cannot arm renderer retry: {e}"),
         }
     }
 
@@ -3541,8 +3599,15 @@ impl LayerShellHandler for App {
                     self.upload_pkg_icons();
                 }
                 Err(e) => {
+                    // NEVER exit here (F8). Exiting made systemd restart us,
+                    // fail the same way, exhaust the restart limit within
+                    // seconds and leave the session with no dock, no bar and
+                    // nothing said — the shell simply gone. Stay up, tell the
+                    // user through the compositor, and keep retrying: the
+                    // cause is often transient (a driver still settling at
+                    // boot, a GPU busy on VT switch).
                     error!("renderer init failed: {e:#}");
-                    self.exit = true;
+                    self.renderer_retry(pw, ph, scale);
                     return;
                 }
             },

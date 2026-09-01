@@ -223,32 +223,81 @@ impl Renderer {
         height: u32,
         scale: u32,
     ) -> anyhow::Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
-
         let display = NonNull::new(conn.backend().display_ptr().cast())
             .ok_or_else(|| anyhow!("null wl_display"))?;
         let window = NonNull::new(wl_surface.id().as_ptr().cast())
             .ok_or_else(|| anyhow!("null wl_surface"))?;
-        // SAFETY: both handles point at live Wayland objects owned by App,
-        // which outlives the renderer and drops it first.
-        let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(display)),
-                raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(window)),
-            })
-        }
-        .context("wgpu surface creation failed")?;
 
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| anyhow!("no suitable GPU adapter (is vulkan-loader on LD_LIBRARY_PATH?)"))?;
-        tracing::info!("using adapter: {:?}", adapter.get_info());
+        // A LADDER, not a single attempt (F8): the machine that cannot
+        // present through its Vulkan path must still get a shell. Venus
+        // (Vulkan passthrough in the VM) gave us a surface with NO adapter,
+        // and one failed attempt used to be fatal. Each rung is tried in
+        // turn and the reason for the previous one is logged.
+        const ATTEMPTS: [(wgpu::Backends, bool, &str); 3] = [
+            // What we want: a real GPU on Vulkan (or GL).
+            (
+                wgpu::Backends::from_bits_truncate(
+                    wgpu::Backends::VULKAN.bits() | wgpu::Backends::GL.bits(),
+                ),
+                false,
+                "gpu",
+            ),
+            // Anything at all, including lavapipe/llvmpipe on the CPU. Slow
+            // (the F12 throttle exists for exactly this) but it is a desktop.
+            (
+                wgpu::Backends::from_bits_truncate(
+                    wgpu::Backends::VULKAN.bits() | wgpu::Backends::GL.bits(),
+                ),
+                true,
+                "software fallback",
+            ),
+            // Some stacks present fine on GL while their Vulkan surface path
+            // is broken; asking for GL alone changes which one is picked.
+            (wgpu::Backends::GL, false, "gl only"),
+        ];
+
+        let mut chosen: Option<(wgpu::Surface<'static>, wgpu::Adapter)> = None;
+        // The instance must outlive the surface it created; hold the winning
+        // one until the device is built below.
+        let mut _live_instance: Option<wgpu::Instance> = None;
+        for (backends, force_fallback_adapter, label) in ATTEMPTS {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends,
+                ..Default::default()
+            });
+            // SAFETY: both handles point at live Wayland objects owned by
+            // App, which outlives the renderer and drops it first.
+            let surface = match unsafe {
+                instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+                        display,
+                    )),
+                    raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(window)),
+                })
+            } {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("renderer: no surface via {label}: {e}");
+                    continue;
+                }
+            };
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter,
+            })) {
+                Some(adapter) => {
+                    tracing::info!("renderer: adapter via {label}: {:?}", adapter.get_info());
+                    chosen = Some((surface, adapter));
+                    _live_instance = Some(instance);
+                    break;
+                }
+                None => tracing::warn!("renderer: no adapter via {label}"),
+            }
+        }
+        let (surface, adapter) = chosen.ok_or_else(|| {
+            anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
+        })?;
         let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
 
         let (device, queue) = pollster::block_on(adapter.request_device(

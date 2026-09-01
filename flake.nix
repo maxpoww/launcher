@@ -228,11 +228,23 @@
                 Description = "waverunner dock launcher daemon";
                 After    = [ "graphical-session.target" ];
                 PartOf   = [ "graphical-session.target" ];
+                # NEVER give up on the shell (F8). systemd's default limit is
+                # 5 starts in 10s, so with RestartSec=1s a daemon that failed
+                # on something environmental — a GPU not ready yet, a driver
+                # still settling — burned through its budget in about five
+                # seconds and was left permanently failed: no dock, no bar,
+                # no explanation, and no way back without a terminal. A shell
+                # that keeps trying is strictly better than one that dies,
+                # and the daemon now also survives renderer failure on its
+                # own rather than exiting.
+                StartLimitIntervalSec = 0;
               };
               Service = {
                 ExecStart = "${cfg.package}/bin/waverunner";
                 Restart   = "on-failure";
-                RestartSec = "1s";
+                # Slower than 1s: a retry storm helps nothing, and the cause
+                # usually needs a moment to clear.
+                RestartSec = "2s";
               } // lib.optionalAttrs (cfg.packageIndex != null) {
                 Environment = [
                   "WAVERUNNER_PKG_INDEX=${cfg.packageIndex}/share/waverunner/nixpkgs-index.tsv"
