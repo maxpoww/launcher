@@ -5,9 +5,26 @@
 //! step the same animator at 60 Hz and 144 Hz and assert both land on the
 //! same result.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use waverunner_core::config::{CurveConfig, CurveKind};
+
+/// The reduce-motion accessibility intent (`[accessibility]` in
+/// config.toml), set once at startup. A process-wide flag rather than a
+/// parameter because every primitive below honours it and threading it
+/// through each of the dozens of call sites would be pure churn.
+static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
+
+/// Set the reduce-motion flag (startup only).
+pub fn set_reduce_motion(on: bool) {
+    REDUCE_MOTION.store(on, Ordering::Relaxed);
+}
+
+/// Whether every animation should snap straight to its end state.
+pub fn reduce_motion() -> bool {
+    REDUCE_MOTION.load(Ordering::Relaxed)
+}
 
 /// Linear interpolation between `a` and `b` by `t` (unclamped).
 pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -19,7 +36,11 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// target once within `snap`. Returns the new value and whether it is
 /// still moving — the shared ease behind every "glide to rest" in the
 /// daemon (page slides, the make-room reflows, the dock parting).
+/// Under reduce-motion it lands on the target immediately.
 pub fn ease_toward(current: f32, target: f32, dt: f32, rate: f32, snap: f32) -> (f32, bool) {
+    if reduce_motion() {
+        return (target, false);
+    }
     let delta = target - current;
     if delta.abs() > snap {
         (current + delta * (1.0 - (-dt * rate).exp()), true)
@@ -53,7 +74,14 @@ impl Follower {
     }
 
     /// Chase `target` for `dt` seconds (substepped for stability).
+    /// Under reduce-motion the body rests on the target at once — flat
+    /// water, no swell.
     pub fn step(&mut self, target: f32, dt: f32) {
+        if reduce_motion() {
+            self.pos = target;
+            self.vel = 0.0;
+            return;
+        }
         let mut remaining = dt.min(0.25);
         while remaining > 0.0 {
             let h = remaining.min(MAX_SUBSTEP);
@@ -111,6 +139,11 @@ impl Spring {
     }
 
     fn step(&mut self, dt: f32) -> f32 {
+        if reduce_motion() {
+            self.position = 1.0;
+            self.velocity = 0.0;
+            return 1.0;
+        }
         let mut remaining = dt.min(0.25); // clamp pathological pauses
         while remaining > 0.0 {
             let h = remaining.min(MAX_SUBSTEP);
@@ -138,6 +171,10 @@ pub struct Timed {
 
 impl Timed {
     fn step(&mut self, dt: f32) -> f32 {
+        if reduce_motion() {
+            self.elapsed = self.duration;
+            return 1.0;
+        }
         self.elapsed += Duration::from_secs_f32(dt.max(0.0));
         let t = (self.elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0);
         ease(self.kind, t)
@@ -220,8 +257,47 @@ impl Animator {
 mod tests {
     use super::*;
 
+    /// Serialises the tests that touch the process-wide reduce-motion flag
+    /// against the one test with mid-flight assertions, so parallel test
+    /// threads can't observe each other's flag state.
+    static FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn hold_flag() -> std::sync::MutexGuard<'static, ()> {
+        FLAG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn reduce_motion_snaps_every_primitive() {
+        let _g = hold_flag();
+        set_reduce_motion(true);
+        // The shared glide lands on its target at once, reporting settled.
+        assert_eq!(ease_toward(0.0, 10.0, 1.0 / 144.0, 12.0, 0.5), (10.0, false));
+        // Both animator kinds reach settled progress on the first step.
+        for cfg in [
+            CurveConfig::default(), // spring
+            CurveConfig {
+                kind: CurveKind::EaseOutCubic,
+                duration_ms: 200,
+                ..CurveConfig::default()
+            },
+        ] {
+            let mut a = Animator::new(&cfg);
+            assert!((a.step(1.0 / 144.0) - 1.0).abs() < f32::EPSILON);
+            assert!(a.is_settled());
+        }
+        // The AGUA water rests flat: a kicked follower is back on rest
+        // after one step, with no residual velocity to swell later.
+        let mut f = Follower::new(120.0, 14.0);
+        f.kick(5.0);
+        f.step(1.0, 1.0 / 144.0);
+        assert!(!f.is_active());
+        set_reduce_motion(false);
+    }
+
     #[test]
     fn ease_toward_steps_and_snaps() {
+        let _g = hold_flag();
         let (v, moving) = ease_toward(0.0, 10.0, 1.0 / 60.0, 12.0, 0.5);
         assert!(moving && v > 0.0 && v < 10.0);
         // Within snap distance: lands exactly, reports settled.

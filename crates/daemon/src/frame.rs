@@ -132,6 +132,12 @@ impl App {
     /// Current upward offset of the launch bounce, expiring it when
     /// done: two hops decaying in height.
     pub(crate) fn bounce_offset(&mut self) -> Option<(usize, f32)> {
+        // Reduce-motion: launch feedback is ornament, the launch itself is
+        // the signal — skip the hops.
+        if crate::animation::reduce_motion() {
+            self.bounce = None;
+            return None;
+        }
         let (index, start) = self.bounce?;
         let t = start.elapsed().as_secs_f32() / BOUNCE_DURATION.as_secs_f32();
         if t >= 1.0 {
@@ -638,7 +644,13 @@ impl App {
         // Box open/close transition (duration from config, eased below).
         if self.group_anim != self.group_anim_target {
             let secs = (self.config.animation.group_expand_ms as f32 / 1000.0).max(0.001);
-            let step = dt / secs;
+            // Reduce-motion: the box opens/closes in one frame (a full-range
+            // step keeps the collapse-finish bookkeeping below intact).
+            let step = if crate::animation::reduce_motion() {
+                1.0
+            } else {
+                dt / secs
+            };
             if self.group_anim_target > self.group_anim {
                 self.group_anim = (self.group_anim + step).min(self.group_anim_target);
             } else {
@@ -1107,6 +1119,13 @@ impl App {
         // transparent strip, drawn only to the bar height.
         let (color, bottom, matched) = match self.options_bar_matched {
             Some(c) => (c, bar_h + crate::OPTIONS_OVERHANG as f32, true),
+            // Reduce-transparency: the see-through strip becomes the same
+            // opaque slab the open boxes use (sampled backdrop + wash), so
+            // the bar's ink always sits on solid ground. Hard-edged like a
+            // matched bar — an opaque fill wants a crisp bottom cut.
+            None if self.config.accessibility.reduce_transparency => {
+                (self.options_box_surface().0, bar_h, true)
+            }
             None => ([0.0, 0.0, 0.0, 0.10], bar_h, false),
         };
         // Bleed the top/left/right edges a couple px past the surface so the

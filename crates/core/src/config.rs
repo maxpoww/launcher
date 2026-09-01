@@ -45,6 +45,27 @@ pub struct Config {
     pub launch: LaunchConfig,
     /// The "OPTIONS" topbar — a reserved strip at the top of the screen.
     pub options: OptionsConfig,
+    /// Accessibility intents (reduce motion / reduce transparency).
+    pub accessibility: AccessibilityConfig,
+}
+
+/// Accessibility intents. One system-wide setting writes these alongside
+/// its compositor and app counterparts (see the Golem repo,
+/// `accessibility-research.md` §4: one intent, four consumers) — the
+/// daemon only reads and honours its own share.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccessibilityConfig {
+    /// Snap every shell animation straight to its end state: opens, closes,
+    /// slides, springs and the AGUA water all settle instantly. Progress
+    /// indicators (install rings, the battery alarm) still display — they
+    /// are information, not ornament.
+    pub reduce_motion: bool,
+    /// Draw the shell's glass surfaces opaque: the card/dock background,
+    /// the open box panels and the OPTIONS bar drop their translucency so
+    /// text always sits on solid ground. (The compositor's own blur and
+    /// window opacity are its consumers of the same intent, not ours.)
+    pub reduce_transparency: bool,
 }
 
 /// Application launch behavior.
@@ -380,6 +401,19 @@ impl ThemeConfig {
     pub fn highlight_rgba(&self) -> [f32; 4] {
         parse_hex_rgba(&self.highlight).unwrap_or([0.02, 0.027, 0.035, 0.125])
     }
+
+    /// Reduce-transparency support: force the card background to full
+    /// alpha, so every surface built from it (the card, the dock, the box
+    /// panels, the dock label pills) draws solid. Hover/emphasis tints are
+    /// left alone — they read *on* the now-opaque ground.
+    pub fn force_opaque_background(&mut self) {
+        let hex = self.background.trim_start_matches('#');
+        if hex.len() == 8 {
+            if let Some(rgb) = hex.get(..6) {
+                self.background = format!("#{rgb}ff");
+            }
+        }
+    }
 }
 
 
@@ -427,6 +461,30 @@ mod tests {
     #[test]
     fn unknown_keys_are_rejected() {
         assert!(toml::from_str::<Config>("[window]\nwdith = 800\n").is_err());
+    }
+
+    #[test]
+    fn accessibility_defaults_off_and_parses() {
+        let c = Config::default();
+        assert!(!c.accessibility.reduce_motion);
+        assert!(!c.accessibility.reduce_transparency);
+        let c: Config =
+            toml::from_str("[accessibility]\nreduce_motion = true\nreduce_transparency = true\n")
+                .unwrap();
+        assert!(c.accessibility.reduce_motion);
+        assert!(c.accessibility.reduce_transparency);
+    }
+
+    #[test]
+    fn force_opaque_background_strips_alpha_only() {
+        let mut t = ThemeConfig::default();
+        t.force_opaque_background();
+        assert_eq!(t.background, "#050709ff");
+        assert_eq!(t.background_rgba()[3], 1.0);
+        // A 6-digit colour is already opaque and stays untouched.
+        t.background = "#112233".to_owned();
+        t.force_opaque_background();
+        assert_eq!(t.background, "#112233");
     }
 
     #[test]

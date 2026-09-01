@@ -137,11 +137,23 @@ fn main() -> anyhow::Result<()> {
         return nix::build_index(std::path::Path::new(json), std::path::Path::new(out));
     }
 
-    let config = Config::load().context("loading config.toml")?;
+    let mut config = Config::load().context("loading config.toml")?;
     info!(
         "config loaded: {}x{} popup",
         config.window.width, config.window.height
     );
+    // Accessibility intents, honoured from here on out: reduce-motion is a
+    // process-wide flag every animation primitive checks; reduce-transparency
+    // rewrites the theme background once so the card, dock and box panels
+    // all draw solid (the OPTIONS surfaces read the flag directly).
+    animation::set_reduce_motion(config.accessibility.reduce_motion);
+    if config.accessibility.reduce_transparency {
+        config.theme.force_opaque_background();
+        info!("reduce-transparency: glass surfaces drawn opaque");
+    }
+    if config.accessibility.reduce_motion {
+        info!("reduce-motion: animations snap to their end state");
+    }
 
     let conn = Connection::connect_to_env()
         .context("connecting to Wayland (is this a Wayland session?)")?;

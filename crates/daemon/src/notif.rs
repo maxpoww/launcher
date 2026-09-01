@@ -1267,7 +1267,7 @@ impl App {
                     expanded_fill[0],
                     expanded_fill[1],
                     expanded_fill[2],
-                    crate::options::BOX_ALPHA,
+                    self.box_panel_alpha(),
                 ],
                 e,
             ),
@@ -1318,7 +1318,7 @@ impl App {
             stripe[2] * sa + expanded_fill[2] * (1.0 - sa),
             // Matches the panel: an opaque stripe over a translucent panel
             // blocks the compositor's blur on every other card.
-            crate::options::BOX_ALPHA,
+            self.box_panel_alpha(),
         ];
 
         let content = self.notif_content_rect(rect);

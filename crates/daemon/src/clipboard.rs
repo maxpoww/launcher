@@ -1563,7 +1563,7 @@ impl App {
             // translucent box fill the compositor frosts.
             color: lerp4(
                 pill_base,
-                [fill[0], fill[1], fill[2], crate::options::BOX_ALPHA],
+                [fill[0], fill[1], fill[2], self.box_panel_alpha()],
                 solid,
             ),
             glass: 0.0,
@@ -1652,7 +1652,7 @@ impl App {
             stripe[2] * sa + fill[2] * (1.0 - sa),
             // Matches the panel: an opaque stripe over a translucent panel
             // blocks the compositor's blur on every other row.
-            crate::options::BOX_ALPHA,
+            self.box_panel_alpha(),
         ];
 
         // The content card grows out of the clicked row; the list is clipped to

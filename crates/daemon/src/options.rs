@@ -278,6 +278,18 @@ const BOX_SLAB: [f32; 3] = [0.10, 0.10, 0.12];
 /// translucent panel hides the blur under every other row, which is exactly
 /// how it looked — one band frosted, the next flat.
 pub(crate) const BOX_ALPHA: f32 = 0.80;
+
+impl crate::App {
+    /// The open boxes' panel/zebra alpha: [`BOX_ALPHA`] glass normally,
+    /// fully opaque under the reduce-transparency intent.
+    pub(crate) fn box_panel_alpha(&self) -> f32 {
+        if self.config.accessibility.reduce_transparency {
+            1.0
+        } else {
+            BOX_ALPHA
+        }
+    }
+}
 /// An open box's fill: the backdrop it floats on with the pill's wash
 /// composited over it, so the box reads as **the pill grown** and sits close
 /// to the surrounding colour (Max, 2026-08-31: "we want a similar color to

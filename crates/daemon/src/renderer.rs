@@ -982,8 +982,12 @@ impl Renderer {
         write_icon_chain(&self.queue, texture, layer, pixels);
     }
 
-    /// Spawn a ripple at the given surface position.
+    /// Spawn a ripple at the given surface position. Under reduce-motion
+    /// no ripple spawns — the click's effect is the feedback.
     pub fn record_click(&mut self, x: f32, y: f32) {
+        if crate::animation::reduce_motion() {
+            return;
+        }
         self.ripples.push(([x, y], self.anim_time));
     }
 
@@ -992,8 +996,12 @@ impl Renderer {
         !self.ripples.is_empty()
     }
 
-    /// Spawn a box open/close wave centred on the icon at (x, y).
+    /// Spawn a box open/close wave centred on the icon at (x, y). Skipped
+    /// under reduce-motion, like the click ripple.
     pub fn record_box_wave(&mut self, x: f32, y: f32) {
+        if crate::animation::reduce_motion() {
+            return;
+        }
         self.box_waves.push(([x, y], self.anim_time));
     }
 
