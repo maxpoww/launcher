@@ -1259,7 +1259,18 @@ impl App {
         scene.rects.push(RectInst {
             rect,
             radius,
-            color: lerp4(pill_base, expanded_fill, e),
+            // The PANEL is the only thing that goes translucent (frosted
+            // glass); the bubble it grows from keeps its own wash.
+            color: lerp4(
+                pill_base,
+                [
+                    expanded_fill[0],
+                    expanded_fill[1],
+                    expanded_fill[2],
+                    crate::options::BOX_ALPHA,
+                ],
+                e,
+            ),
             glass: 0.0,
         });
 
@@ -1304,7 +1315,9 @@ impl App {
             stripe[0] * sa + expanded_fill[0] * (1.0 - sa),
             stripe[1] * sa + expanded_fill[1] * (1.0 - sa),
             stripe[2] * sa + expanded_fill[2] * (1.0 - sa),
-            1.0,
+            // Matches the panel: an opaque stripe over a translucent panel
+            // blocks the compositor's blur on every other card.
+            crate::options::BOX_ALPHA,
         ];
 
         let content = self.notif_content_rect(rect);
@@ -1774,10 +1787,8 @@ impl App {
                 header_right = time_x - TEXT_GAP;
             }
         }
-        // Hovered lines go BOLD as well as full-strength.
-        let line_of = if hovered { mk_line_bold } else { mk_line };
         let sum_max = (header_right - text_x).max(0.0);
-        scene.labels.push(line_of(
+        scene.labels.push(mk_line(
             info.summary.clone(),
             text_x,
             header_ty,
@@ -3174,15 +3185,6 @@ fn mk_line(text: String, x: f32, y: f32, max_w: f32, color: [f32; 4], clip: Rect
     }
 }
 
-/// [`mk_line`], BOLD — the hovered card's lines, on top of the ink
-/// strengthening. Weight is the one emphasis channel that survives where
-/// lightness has run out of contrast to spend.
-fn mk_line_bold(text: String, x: f32, y: f32, max_w: f32, color: [f32; 4], clip: Rect) -> Label {
-    Label {
-        family: Some(crate::content::FONT_BOLD),
-        ..mk_line(text, x, y, max_w, color, clip)
-    }
-}
 
 #[cfg(test)]
 mod tests {

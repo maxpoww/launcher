@@ -1556,7 +1556,14 @@ impl App {
         scene.rects.push(RectInst {
             rect,
             radius,
-            color: lerp4(pill_base, fill, solid),
+            // The PANEL is the only thing that goes translucent (frosted
+            // glass); the pill it grows from keeps its own wash, and the
+            // detail card / dict panel drawn later stay opaque.
+            color: lerp4(
+                pill_base,
+                [fill[0], fill[1], fill[2], crate::options::BOX_ALPHA],
+                solid,
+            ),
             glass: 0.0,
         });
 
@@ -1640,7 +1647,9 @@ impl App {
             stripe[0] * sa + fill[0] * (1.0 - sa),
             stripe[1] * sa + fill[1] * (1.0 - sa),
             stripe[2] * sa + fill[2] * (1.0 - sa),
-            1.0,
+            // Matches the panel: an opaque stripe over a translucent panel
+            // blocks the compositor's blur on every other row.
+            crate::options::BOX_ALPHA,
         ];
 
         // The content card grows out of the clicked row; the list is clipped to
@@ -1831,10 +1840,7 @@ impl App {
                 centered: false,
                 dim: false,
                 cache: false,
-                // Hovered rows carry the weight change on their FIRST line
-                // only — bolding a whole wrapped clip turns the row into a
-                // slab, which read as too aggressive.
-                family: (hovered && i == 0).then_some(crate::content::FONT_BOLD),
+                family: None,
                 color: Some(col),
                 clip: Some(row_clip),
             });

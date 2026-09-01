@@ -270,10 +270,14 @@ const DESKTOP_ONLY: Presence = Presence {
 /// The theme's own box colour — the neutral OPTIONS slab, used when nothing
 /// has been sampled yet.
 const BOX_SLAB: [f32; 3] = [0.10, 0.10, 0.12];
-/// How opaque an open box's fill is. Below 1.0 so the compositor's blur
-/// reads through it (frosted glass); high enough that the fill's own tint
-/// still governs the ink choice.
-const BOX_ALPHA: f32 = 0.80;
+/// How opaque an open box's PANEL (and its zebra bands) are. Below 1.0 so
+/// the compositor's blur reads through them as frosted glass; high enough
+/// that the fill's own tint still governs the ink choice.
+///
+/// The zebra must carry the same value: a stripe drawn opaque over a
+/// translucent panel hides the blur under every other row, which is exactly
+/// how it looked — one band frosted, the next flat.
+pub(crate) const BOX_ALPHA: f32 = 0.80;
 /// An open box's fill: the backdrop it floats on with the pill's wash
 /// composited over it, so the box reads as **the pill grown** and sits close
 /// to the surrounding colour (Max, 2026-08-31: "we want a similar color to
@@ -766,18 +770,13 @@ impl App {
             // Not sampled yet (the first frames after opening): plain slab.
             None => [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0],
         };
-        // Frosted glass: the box is drawn slightly translucent so the
-        // COMPOSITOR's blur (hyprland.lua's layer rule on the
-        // waverunner-options namespace) shows through it. Only the
-        // compositor can blur the desktop behind a layer surface — the
-        // daemon's own scene texture contains just the bar's pixels.
-        //
-        // Kept high on purpose: the tint has to stay dominant, because the
-        // ink is chosen from this fill while what shows through it is
-        // whatever window happens to be under the box. Below ~0.7 a dark
-        // window under a light wallpaper starts dragging the effective
-        // background out from under the ink.
-        fill[3] = BOX_ALPHA;
+        // NOTE: opaque. Translucency belongs to the box PANEL and its zebra
+        // only (each box applies [`BOX_ALPHA`] there); this fill is also the
+        // clip detail card, the dictionary panel and the notification icon
+        // discs, and making it translucent wholesale turned those glassy too
+        // (Max, 2026-09-01: "the clipboard big pill became transparent... i
+        // only want the boxes to be blured").
+        fill[3] = 1.0;
         // Ink measured against the box's OWN fill. Since that fill is now the
         // backdrop plus a weak wash, this lands on the same answer the bar
         // reaches for the same backdrop — the two agree by measurement rather
