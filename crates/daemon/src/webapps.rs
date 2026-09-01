@@ -138,11 +138,26 @@ pub fn exec_app_host(exec: &str) -> Option<&str> {
 /// webapp".
 fn app_exec_with(url_token: &str) -> String {
     format!(
-        "{} --app={} {FLAG} --user-data-dir={} --remote-debugging-port={CDP_PORT}",
+        "{} --app={} {FLAG} --user-data-dir={} --remote-debugging-port={CDP_PORT}{}",
         browser(),
         url_token,
         profile_dir().display(),
+        extension_flag(std::env::var("WAVERUNNER_WEBAPP_EXTENSION").ok()),
     )
+}
+
+/// ` --load-extension=<dir>` for the shared webapp profile when the
+/// distribution ships an unpacked extension (WAVERUNNER_WEBAPP_EXTENSION,
+/// set by the home-manager module — Golem points it at its vendored
+/// notification-fix, which un-breaks FB/Messenger notifications on Wayland).
+/// Chromium honours the flag; branded Chrome removed it in 137 (verified
+/// ignored on 152), so on Chrome the extension still needs a one-time manual
+/// "Load unpacked" — the flag is harmless there. Env unset/empty = no flag.
+fn extension_flag(ext: Option<String>) -> String {
+    match ext {
+        Some(dir) if !dir.is_empty() => format!(" --load-extension={dir}"),
+        _ => String::new(),
+    }
 }
 
 /// Open an arbitrary link as a webapp (app-mode, shared profile) — the clipboard
@@ -482,5 +497,15 @@ mod tests {
         assert!(exec.contains("--user-data-dir="));
         assert_eq!(e.wm_class(), "chrome-www.netflix.com__-Default");
         assert!(e.desktop_contents().contains("Icon=netflix"));
+    }
+
+    #[test]
+    fn extension_flag_only_when_set() {
+        assert_eq!(extension_flag(None), "");
+        assert_eq!(extension_flag(Some(String::new())), "");
+        assert_eq!(
+            extension_flag(Some("/nix/store/abc-notification-fix".into())),
+            " --load-extension=/nix/store/abc-notification-fix"
+        );
     }
 }
