@@ -340,9 +340,9 @@ pub(crate) fn push_hover_frame(scene: &mut Scene, r: Rect, ink: [f32; 4], alpha:
     line(r.x + r.w - W, r.y, W, r.h); // right
 }
 
-/// How present the hovered row's frame is. Subtle on purpose — it marks the
-/// row without drawing a box around it.
-pub(crate) const HOVER_FRAME_ALPHA: f32 = 0.32;
+/// How present the hovered row's frame is. Restrained, but it has to read at
+/// a glance: a hairline only marks the row if you can actually see it.
+pub(crate) const HOVER_FRAME_ALPHA: f32 = 0.52;
 
 /// The hovered line's ink: the SAME colour at full strength — the hover
 /// always moves the text AWAY from its background, never toward it.
