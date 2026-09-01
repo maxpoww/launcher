@@ -78,11 +78,11 @@ const BOX_RADIUS: f32 = 10.0;
 /// Adaptive zebra striping — lighten a dark box, darken a light one.
 const STRIPE_LIGHTEN: f32 = 0.31;
 const STRIPE_DARKEN: f32 = 0.48;
-/// Resting (muted) list-ink opacity; the hovered row pops to full contrast.
-/// Raised 2026-08-31 with the notif box's twins (Max: "poor contrast"): a box
-/// now sits at its backdrop's luminance rather than being a near-black slab,
-/// so the old alphas washed the rows out. Hover still pops to full.
-const LIST_DIM: f32 = 0.82;
+/// Resting list-ink opacity; the hovered row spends the headroom these leave
+/// (see `options::hover_ink_for`). The twins of the notif box's — and see
+/// that file for why the two regimes sit so far apart: a dark box has
+/// contrast to spare, a backdrop-coloured light box does not.
+const LIST_DIM: f32 = 0.67;
 const LIST_DIM_LIGHT: f32 = 0.88;
 const DELETE_SZ: f32 = 18.0;
 /// fa-trash-o (outline can with vertical lines) — the per-item delete controls

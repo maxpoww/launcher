@@ -130,17 +130,17 @@ const BOX_RADIUS: f32 = 10.0;
 /// black one at equal alpha (same reasoning as the pill washes).
 const STRIPE_LIGHTEN: f32 = 0.31;
 const STRIPE_DARKEN: f32 = 0.48;
-/// sits muted as soon as it opens; the hovered line pops back to full contrast.
-/// Lower = more muted rest / stronger hover pop. `LIST_DIM` is tuned for dark
-/// boxes (light ink); light boxes (dark ink) use the stronger `LIST_DIM_LIGHT`
-/// so dark-on-light text stays legible at the same perceived muting.
+/// Resting text opacity of the open box's lines. The hovered line spends the
+/// headroom these leave (see `options::hover_ink_for`).
 ///
-/// Raised 2026-08-31 (Max: "the notification content and the clipboard have
-/// poor contrast"): these were tuned when a box was a near-black slab, where
-/// light ink at 0.55 still read easily. A box now sits at its BACKDROP's
-/// luminance — often mid-tone — and the same alphas washed the text out. The
-/// spotlight still works: the hovered line goes to full alpha.
-const LIST_DIM: f32 = 0.82;
+/// They differ a lot, and the reason is the CONTRAST CEILING of each regime,
+/// measured 2026-08-31: light ink on a dark box reaches ~7:1 easily, so it
+/// can rest well under full (0.67 still measures 6:1) and leave a wide gap
+/// for hover; dark ink on a backdrop-coloured light box tops out around
+/// 5.5:1, so it has to rest near full (0.88 ≈ 3.6:1) and the hover step is
+/// necessarily smaller. Muting the light-box text as far as the dark-box
+/// text is what made the content unreadable earlier in the day.
+const LIST_DIM: f32 = 0.67;
 const LIST_DIM_LIGHT: f32 = 0.88;
 
 /// How recently a matching message must have been surfaced for a new arrival to

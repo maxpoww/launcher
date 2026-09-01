@@ -328,7 +328,7 @@ pub(crate) fn hover_ink_for(ink: [f32; 4]) -> [f32; 4] {
     // reached 0.14. Toward black this is a uniform scale, so the warm cast
     // survives; toward white it naturally washes out, as a highlight should.
     const PUSH_DARK: f32 = 0.70;
-    const PUSH_LIGHT: f32 = 0.60;
+    const PUSH_LIGHT: f32 = 0.85;
     let (target, t) = if luminance(ink) > 0.179 {
         ([1.0, 1.0, 1.0], PUSH_LIGHT)
     } else {
