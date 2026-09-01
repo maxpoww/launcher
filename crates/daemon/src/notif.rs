@@ -130,12 +130,6 @@ const BOX_RADIUS: f32 = 10.0;
 /// black one at equal alpha (same reasoning as the pill washes).
 const STRIPE_LIGHTEN: f32 = 0.31;
 const STRIPE_DARKEN: f32 = 0.48;
-/// Hover highlight strength, applied in the direction OPPOSITE the zebra (see
-/// where it's mixed): it must be unmistakable without dragging the row toward
-/// the ink's own value.
-const HOVER_ROW_LIGHTEN: f32 = 0.30;
-const HOVER_ROW_DARKEN: f32 = 0.42;
-/// Resting text opacity of the open box's lines (band + list). The whole list
 /// sits muted as soon as it opens; the hovered line pops back to full contrast.
 /// Lower = more muted rest / stronger hover pop. `LIST_DIM` is tuned for dark
 /// boxes (light ink); light boxes (dark ink) use the stronger `LIST_DIM_LIGHT`
@@ -147,7 +141,7 @@ const HOVER_ROW_DARKEN: f32 = 0.42;
 /// luminance — often mid-tone — and the same alphas washed the text out. The
 /// spotlight still works: the hovered line goes to full alpha.
 const LIST_DIM: f32 = 0.85;
-const LIST_DIM_LIGHT: f32 = 0.95;
+const LIST_DIM_LIGHT: f32 = 1.0;
 
 /// How recently a matching message must have been surfaced for a new arrival to
 /// count as its *echo* (same chat mirrored by the webapp + KDE Connect) and skip
@@ -1273,11 +1267,11 @@ impl App {
         // fill: steady when the box mimics the (already-legible) bar colour,
         // else brightening as the fallback panel darkens.
         let ink = lerp4(text_color, expanded_ink, e);
-        // Spotlight ink: the open box rests muted; the hovered card pops to
-        // FULL ALPHA rather than switching to a pure black/white, so the ink
-        // keeps its warm tone throughout.
+        // Spotlight ink: the list rests at its DARKEST/strongest, and the
+        // hovered card's text goes LIGHTER (Max, 2026-08-31) — one clear
+        // direction, no row tinting.
         let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
-        let hover_ink = [ink[0], ink[1], ink[2], 1.0];
+        let hover_ink = crate::options::hover_ink_for(ink);
         // Dark ink on a light box needs more presence than light ink on a dark one
         // to read at the same muting (a black wash is perceptually weaker than a
         // white one at equal alpha) — so lift the resting dim on light boxes and
@@ -1305,25 +1299,6 @@ impl App {
         } else {
             wash(false, STRIPE_DARKEN)
         };
-        // Hover highlight for the pointed-at card. It moves the OPPOSITE way
-        // to the zebra — a light box's hovered card gets lighter, a dark
-        // box's darker — so it deepens the contrast with the ink instead of
-        // muddying it, and never reads as just another stripe. The hint has
-        // to live in the background now: resting text sits near full alpha
-        // for legibility, so the old "pop the ink" spotlight was invisible
-        // (Max, 2026-08-31: "i have no hover hint now").
-        let hover_bg = if flum <= 0.179 {
-            wash(false, HOVER_ROW_DARKEN)
-        } else {
-            wash(true, HOVER_ROW_LIGHTEN)
-        };
-        let ha = hover_bg[3];
-        let hover_opaque = [
-            hover_bg[0] * ha + expanded_fill[0] * (1.0 - ha),
-            hover_bg[1] * ha + expanded_fill[1] * (1.0 - ha),
-            hover_bg[2] * ha + expanded_fill[2] * (1.0 - ha),
-            1.0,
-        ];
         let sa = stripe[3];
         let stripe_opaque = [
             stripe[0] * sa + expanded_fill[0] * (1.0 - sa),
@@ -1383,7 +1358,7 @@ impl App {
                         let crect = Rect::new(rect.x, y, rect.w, h);
                         self.push_notif_card(
                             scene, idx, crect, content, radius, e, ink, dim_ink, hover_ink,
-                            stripe_opaque, hover_opaque, expanded_fill,
+                            stripe_opaque, expanded_fill,
                         );
                     }
                     y += h;
@@ -1395,7 +1370,7 @@ impl App {
             for (idx, crect) in self.notif_cards(rect) {
                 self.push_notif_card(
                     scene, idx, crect, content, radius, e, ink, dim_ink, hover_ink, stripe_opaque,
-                    hover_opaque, expanded_fill,
+                    expanded_fill,
                 );
             }
         }
@@ -1675,7 +1650,6 @@ impl App {
         dim_ink: [f32; 4],
         hover_ink: [f32; 4],
         stripe_opaque: [f32; 4],
-        hover_opaque: [f32; 4],
         fill: [f32; 4],
     ) {
         let Some(info) = self.notif.rows.get(idx) else {
@@ -1711,20 +1685,8 @@ impl App {
         }
 
         let hovered = self.notif.hover_card == Some(idx);
-        // Hover highlight, over the zebra: the visible hint (the ink barely
-        // changes now that resting text is near full alpha).
-        if hovered {
-            let top = rect.y.max(content.y);
-            let bot = (rect.y + rect.h).min(content.y + content.h);
-            if bot > top {
-                scene.rects.push(RectInst {
-                    rect: Rect::new(rect.x, top, rect.w, bot - top),
-                    radius: 0.0,
-                    color: hover_opaque,
-                    glass: 0.0,
-                });
-            }
-        }
+        // Hover tints no background — it lightens the card's TEXT instead
+        // (see hover_ink), so the hint is a step in one direction.
         let card_ink = if hovered { hover_ink } else { dim_ink };
         let prim = [card_ink[0], card_ink[1], card_ink[2], card_ink[3] * alpha];
         let dim = [

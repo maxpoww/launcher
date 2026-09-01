@@ -305,6 +305,26 @@ fn luminance(c: [f32; 4]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
+/// The hovered line's ink: LIGHTER than the resting text (Max's call,
+/// 2026-08-31). On a light box that flips the dark resting ink to the warm
+/// off-white — an unmistakable change with no row tinting; on a dark box the
+/// already-light ink brightens further. The resting text is meanwhile drawn
+/// as dark/strong as it goes, so the hint is a real step in one direction
+/// rather than a background wash.
+pub(crate) fn hover_ink_for(ink: [f32; 4]) -> [f32; 4] {
+    if luminance(ink) > 0.179 {
+        // Already light: brighten, keeping the warm cast.
+        [
+            (ink[0] * 1.28).min(1.0),
+            (ink[1] * 1.28).min(1.0),
+            (ink[2] * 1.28).min(1.0),
+            ink[3],
+        ]
+    } else {
+        [INK_LIGHT[0], INK_LIGHT[1], INK_LIGHT[2], ink[3]]
+    }
+}
+
 /// The ink that reads on `bg`: dark on a bright surface, light on a dark one.
 /// 0.179 is the WCAG flip point where black and white contrast equally.
 ///

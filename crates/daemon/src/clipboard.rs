@@ -83,12 +83,7 @@ const STRIPE_DARKEN: f32 = 0.48;
 /// now sits at its backdrop's luminance rather than being a near-black slab,
 /// so the old alphas washed the rows out. Hover still pops to full.
 const LIST_DIM: f32 = 0.85;
-const LIST_DIM_LIGHT: f32 = 0.95;
-/// Hover highlight strength, applied OPPOSITE the zebra's direction (see
-/// where it's mixed) — the twins of the notification box's.
-const HOVER_ROW_LIGHTEN: f32 = 0.30;
-const HOVER_ROW_DARKEN: f32 = 0.42;
-/// Per-row delete (×) hot-square, top-right.
+const LIST_DIM_LIGHT: f32 = 1.0;
 const DELETE_SZ: f32 = 18.0;
 /// fa-trash-o (outline can with vertical lines) — the per-item delete controls
 /// (row + detail).
@@ -1567,9 +1562,9 @@ impl App {
 
         let ink = lerp4(text_color, box_ink, solid);
         let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
-        // The hovered row pops by going to FULL ALPHA, not by switching to a
-        // pure black/white — the ink keeps its warm tone throughout.
-        let hover_ink = [ink[0], ink[1], ink[2], 1.0];
+        // The list rests at its darkest/strongest; the hovered row's text goes
+        // LIGHTER (Max, 2026-08-31) — one clear direction, no row tinting.
+        let hover_ink = crate::options::hover_ink_for(ink);
         let list_dim = if dark_ink { LIST_DIM_LIGHT } else { LIST_DIM };
         let dim_ink = [ink[0], ink[1], ink[2], ink[3] * list_dim];
 
@@ -1647,22 +1642,6 @@ impl App {
             stripe[2] * sa + fill[2] * (1.0 - sa),
             1.0,
         ];
-        // Hover highlight, moving OPPOSITE the zebra so it deepens the row's
-        // contrast with the ink and never reads as another stripe. This is
-        // the hover hint now: resting text sits near full alpha, so the old
-        // ink pop is invisible (Max: "i have no hover hint now").
-        let hover_bg = if flum <= 0.179 {
-            wash(false, HOVER_ROW_DARKEN)
-        } else {
-            wash(true, HOVER_ROW_LIGHTEN)
-        };
-        let ha = hover_bg[3];
-        let hover_opaque = [
-            hover_bg[0] * ha + fill[0] * (1.0 - ha),
-            hover_bg[1] * ha + fill[1] * (1.0 - ha),
-            hover_bg[2] * ha + fill[2] * (1.0 - ha),
-            1.0,
-        ];
 
         // The content card grows out of the clicked row; the list is clipped to
         // the strip ABOVE the card (a hard partition, no cross-fade ghosting), so
@@ -1694,7 +1673,6 @@ impl App {
                     dim_ink,
                     hover_ink,
                     stripe_opaque,
-                    hover_opaque,
                 );
             }
         }
@@ -1725,7 +1703,6 @@ impl App {
         dim_ink: [f32; 4],
         hover_ink: [f32; 4],
         stripe_opaque: [f32; 4],
-        hover_opaque: [f32; 4],
     ) {
         let Some(entry) = self.clip.history.get(idx) else {
             return;
@@ -1737,21 +1714,13 @@ impl App {
         if bot <= top {
             return;
         }
-        // Zebra on odd rows (newest = 0 stays plain), then the hover
-        // highlight over it — the visible hint, since the ink barely moves.
+        // Zebra on odd rows (newest = 0 stays plain). Hover tints no
+        // background — it lightens the row's TEXT instead (see hover_ink).
         if idx % 2 == 1 {
             scene.rects.push(RectInst {
                 rect: Rect::new(rr.x, top, rr.w, bot - top),
                 radius: 0.0,
                 color: stripe_opaque,
-                glass: 0.0,
-            });
-        }
-        if hovered {
-            scene.rects.push(RectInst {
-                rect: Rect::new(rr.x, top, rr.w, bot - top),
-                radius: 0.0,
-                color: hover_opaque,
                 glass: 0.0,
             });
         }
