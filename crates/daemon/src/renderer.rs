@@ -12,6 +12,7 @@ use std::ptr::NonNull;
 use anyhow::{anyhow, Context};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache as TextCache, Family, FontSystem, Metrics, Resolution,
+    Weight,
     Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use raw_window_handle::{
@@ -903,11 +904,11 @@ impl Renderer {
         }
         let mut buffer =
             TextBuffer::new(&mut self.font_system, Metrics::new(font_px, font_px * 1.3));
-        let fam = family.map_or(Family::SansSerif, Family::Name);
+        let (fam, weight) = resolve_family(family);
         buffer.set_text(
             &mut self.font_system,
             text,
-            Attrs::new().family(fam),
+            Attrs::new().family(fam).weight(weight),
             Shaping::Advanced,
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
@@ -1146,11 +1147,11 @@ impl Renderer {
                 Some(label.max_w * scale),
                 Some(label.line_px * scale),
             );
-            let family = label.family.map_or(Family::SansSerif, Family::Name);
+            let (family, weight) = resolve_family(label.family);
             buffer.set_text(
                 font_system,
                 &label.text,
-                Attrs::new().family(family),
+                Attrs::new().family(family).weight(weight),
                 Shaping::Advanced,
             );
             buffer.shape_until_scroll(font_system, false);
@@ -1160,7 +1161,7 @@ impl Renderer {
         let mut fresh_of: Vec<Option<usize>> = Vec::with_capacity(all_labels.len());
         for (label, _) in &all_labels {
             if label.cache {
-                let key = format!("{}\u{1}{}", label.text, label.font_px);
+                let key = label_key(label);
                 if !self.label_cache.contains_key(&key) {
                     let buffer = shape(&mut self.font_system, label);
                     self.label_cache.insert(key, buffer);
@@ -1184,7 +1185,7 @@ impl Renderer {
             let buffer = match fresh_of[i] {
                 Some(fi) => &fresh[fi],
                 None => {
-                    let key = format!("{}\u{1}{}", label.text, label.font_px);
+                    let key = label_key(label);
                     match self.label_cache.get(&key) {
                         Some(buffer) => buffer,
                         None => continue,
@@ -1541,4 +1542,30 @@ fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
         tint: i.tint,
         ring: i.ring,
     }
+}
+
+/// Resolve a `Label::family` into a glyphon family + weight.
+///
+/// [`crate::content::FONT_BOLD`] is a sentinel, not a real family name: it
+/// means "the default sans, bold" (see its docs for why weight rides this
+/// field). Everything else is a literal family name.
+fn resolve_family(family: Option<&str>) -> (Family<'_>, Weight) {
+    match family {
+        Some(f) if f == crate::content::FONT_BOLD => (Family::SansSerif, Weight::BOLD),
+        Some(name) => (Family::Name(name), Weight::NORMAL),
+        None => (Family::SansSerif, Weight::NORMAL),
+    }
+}
+
+/// Cache key for a shaped label. Includes the FAMILY as well as the text and
+/// size: the same string shaped sans vs Nerd vs bold is three different
+/// buffers, and keying on text alone silently served whichever was shaped
+/// first (bold hover made that visible).
+fn label_key(label: &crate::content::Label) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{}",
+        label.text,
+        label.font_px,
+        label.family.unwrap_or("")
+    )
 }

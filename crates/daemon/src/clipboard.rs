@@ -1723,32 +1723,6 @@ impl App {
                 glass: 0.0,
             });
         }
-        // The hovered row marks itself with a slim ACCENT BAR at its left
-        // edge, on top of the ink strengthening — the notif box's twin. Past
-        // ~4:1 the eye barely registers further darkening, so on a light box
-        // lightness alone couldn't carry the hint; a hue the box never
-        // otherwise shows does.
-        if hovered {
-            let bh = bot - top - 2.0 * crate::options::HOVER_BAR_INSET;
-            if bh > 0.0 {
-                scene.rects.push(RectInst {
-                    rect: Rect::new(
-                        rr.x + crate::options::HOVER_BAR_INSET,
-                        top + crate::options::HOVER_BAR_INSET,
-                        crate::options::HOVER_BAR_W,
-                        bh,
-                    ),
-                    radius: crate::options::HOVER_BAR_W / 2.0,
-                    color: [
-                        crate::options::ACCENT[0],
-                        crate::options::ACCENT[1],
-                        crate::options::ACCENT[2],
-                        e,
-                    ],
-                    glass: 0.0,
-                });
-            }
-        }
 
         let col = if hovered {
             [hover_ink[0], hover_ink[1], hover_ink[2], e]
@@ -1857,7 +1831,10 @@ impl App {
                 centered: false,
                 dim: false,
                 cache: false,
-                family: None,
+                // Hovered rows go BOLD as well as full-strength: weight is
+                // the one emphasis channel still free once lightness has
+                // spent its contrast.
+                family: hovered.then_some(crate::content::FONT_BOLD),
                 color: Some(col),
                 clip: Some(row_clip),
             });

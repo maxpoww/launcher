@@ -1685,34 +1685,6 @@ impl App {
         }
 
         let hovered = self.notif.hover_card == Some(idx);
-        // The hovered card marks itself with a slim ACCENT BAR at its left
-        // edge, on top of the ink strengthening. Lightness alone couldn't
-        // carry the hint on a light box: past ~4:1 the eye barely registers
-        // further darkening, so "even darker text" reads as no change at all
-        // (Max, 2026-09-01). A hue the box never otherwise shows does.
-        if hovered {
-            let top = rect.y.max(content.y);
-            let bot = (rect.y + rect.h).min(content.y + content.h);
-            let h = bot - top - 2.0 * crate::options::HOVER_BAR_INSET;
-            if h > 0.0 {
-                scene.rects.push(RectInst {
-                    rect: Rect::new(
-                        rect.x + crate::options::HOVER_BAR_INSET,
-                        top + crate::options::HOVER_BAR_INSET,
-                        crate::options::HOVER_BAR_W,
-                        h,
-                    ),
-                    radius: crate::options::HOVER_BAR_W / 2.0,
-                    color: [
-                        crate::options::ACCENT[0],
-                        crate::options::ACCENT[1],
-                        crate::options::ACCENT[2],
-                        alpha,
-                    ],
-                    glass: 0.0,
-                });
-            }
-        }
         let card_ink = if hovered { hover_ink } else { dim_ink };
         let prim = [card_ink[0], card_ink[1], card_ink[2], card_ink[3] * alpha];
         let dim = [
@@ -1802,8 +1774,10 @@ impl App {
                 header_right = time_x - TEXT_GAP;
             }
         }
+        // Hovered lines go BOLD as well as full-strength.
+        let line_of = if hovered { mk_line_bold } else { mk_line };
         let sum_max = (header_right - text_x).max(0.0);
-        scene.labels.push(mk_line(
+        scene.labels.push(line_of(
             info.summary.clone(),
             text_x,
             header_ty,
@@ -1823,7 +1797,7 @@ impl App {
             let ly = body_top + li as f32 * LINE_PX;
             scene
                 .labels
-                .push(mk_line(line.clone(), text_x, ly, body_max, prim, content));
+                .push(line_of(line.clone(), text_x, ly, body_max, prim, content));
         }
     }
 
@@ -3194,6 +3168,16 @@ fn mk_line(text: String, x: f32, y: f32, max_w: f32, color: [f32; 4], clip: Rect
         family: None,
         color: Some(color),
         clip: Some(clip),
+    }
+}
+
+/// [`mk_line`], BOLD — the hovered card's lines, on top of the ink
+/// strengthening. Weight is the one emphasis channel that survives where
+/// lightness has run out of contrast to spend.
+fn mk_line_bold(text: String, x: f32, y: f32, max_w: f32, color: [f32; 4], clip: Rect) -> Label {
+    Label {
+        family: Some(crate::content::FONT_BOLD),
+        ..mk_line(text, x, y, max_w, color, clip)
     }
 }
 

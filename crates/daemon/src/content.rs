@@ -77,6 +77,15 @@ pub struct ShadowInst {
     pub edges: [f32; 4],
 }
 
+/// Sentinel `Label::family` meaning "the default sans, BOLD".
+///
+/// Weight rides the family field rather than a new one: `Label` is built at
+/// ~45 sites, and threading a `bold` flag through all of them to serve two
+/// hover states would be noise. The renderer resolves this name specially
+/// (there is no font actually called it — the `\u{1}` prefix guarantees no
+/// real family can collide).
+pub const FONT_BOLD: &str = "\u{1}bold";
+
 /// One text label.
 #[derive(Debug, Clone)]
 pub struct Label {
