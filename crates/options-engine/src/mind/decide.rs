@@ -96,9 +96,10 @@ pub fn decide_with(ctx: &ContextState, temporal: &Temporal, tuning: &Tuning) -> 
     // Calibrate to *effective* skill (dynamic difficulty: friction lowers it),
     // then situate to the activity, then clear away the irrelevant.
     let skill = effective_skill(ctx, tuning.skill);
+    let media_fg = media_is_foreground(ctx, activity);
     for a in &mut items {
         a.relevance = calibrate(a.kind, a.relevance, skill);
-        a.relevance = contextual_relevance(a.id, a.relevance, activity);
+        a.relevance = contextual_relevance(a.id, a.relevance, activity, media_fg);
     }
     items.retain(|a| a.relevance >= tuning.min_relevance);
 
@@ -203,8 +204,9 @@ fn effective_skill(ctx: &ContextState, base: f32) -> f32 {
 /// are damped when media is background — i.e. the activity is something more
 /// purposeful (Coding, Communication, Browsing, Reading, Terminal). When media
 /// IS the activity (watching), they keep full weight.
-fn contextual_relevance(id: &str, base: f32, activity: Activity) -> f32 {
+fn contextual_relevance(id: &str, base: f32, activity: Activity, media_fg: bool) -> f32 {
     let media_is_background = id.starts_with("media.")
+        && !media_fg
         && !matches!(
             activity,
             Activity::Media | Activity::Idle | Activity::Unknown
@@ -215,6 +217,37 @@ fn contextual_relevance(id: &str, base: f32, activity: Activity) -> f32 {
         base
     }
 }
+
+/// Whether media is the FOREGROUND thing — full-weight controls. True for the
+/// Media activity, and for a **browser video tab**: a browser is focused AND
+/// the active MPRIS player is that browser (Chrome/Firefox expose MPRIS when a
+/// tab plays video). Music playing in another window while you browse is NOT
+/// foreground (its player isn't the browser), so it stays damped.
+fn media_is_foreground(ctx: &ContextState, activity: Activity) -> bool {
+    if activity == Activity::Media {
+        return true;
+    }
+    if activity == Activity::Browsing {
+        if let Some(m) = ctx.media.as_ref().filter(|m| m.is_playing) {
+            let p = m.player_name.to_lowercase();
+            return BROWSER_PLAYERS.iter().any(|b| p.contains(b));
+        }
+    }
+    false
+}
+
+/// MPRIS player-name fragments that identify a browser (a video tab).
+const BROWSER_PLAYERS: &[&str] = &[
+    "firefox",
+    "mozilla",
+    "chrom",
+    "chrome",
+    "brave",
+    "vivaldi",
+    "edge",
+    "librewolf",
+    "zen",
+];
 
 /// Skill scaling: safety and direct controls are untouchable; only scaffolding
 /// and ambient info fade for experts.
@@ -1892,6 +1925,56 @@ mod tests {
         );
         assert!(roomy.items.iter().any(|a| a.id.starts_with("media.")));
         assert!(roomy.items.iter().any(|a| a.id.starts_with("git.")));
+    }
+
+    #[test]
+    fn browser_video_tab_gives_foreground_media_but_background_music_stays_damped() {
+        // A video playing IN the focused browser → full-weight media controls.
+        let mut ctx = live_ctx();
+        ctx.window.class = "firefox".into();
+        ctx.window.pid = 1;
+        ctx.media = Some(MediaState {
+            player_name: "Firefox".into(),
+            title: "clip".into(),
+            artist: String::new(),
+            is_playing: true,
+            position_secs: 10,
+            length_secs: 100,
+        });
+        let vid = find(
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                },
+            ),
+            "media.playpause",
+        )
+        .unwrap()
+        .relevance;
+
+        // Same browsing context, but the player is Spotify (music in another
+        // window) → damped as background.
+        if let Some(m) = ctx.media.as_mut() {
+            m.player_name = "Spotify".into();
+        }
+        let bg = find(
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                },
+            ),
+            "media.playpause",
+        )
+        .unwrap()
+        .relevance;
+        assert!(
+            vid > bg,
+            "browser video is foreground; background music is damped"
+        );
     }
 
     #[test]
