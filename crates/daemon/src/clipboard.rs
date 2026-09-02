@@ -4015,6 +4015,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn box_scaling_is_lockstep_and_reduces_at_unity() {
+        // clip_text_col_w scales linearly (so the wrap column matches the box).
+        let full = clip_text_col_w(false, 1.0);
+        let half = clip_text_col_w(false, 0.5);
+        assert!((half - full * 0.5).abs() < 0.01, "col width scales linearly");
+        // The desync-free invariant: wrap_text is linear in font_px, so wrapping
+        // at (width·s, font·s) yields the SAME number of lines as at (width, font)
+        // for any s>0. Verify across a long entry and several scales.
+        let mut e = base_entry();
+        e.text = "a fairly long clipboard entry with enough words that it must \
+                  wrap onto multiple lines in the history box for the test to bite"
+            .into();
+        let baseline = clip_row_lines(&e, clip_text_col_w(false, 1.0), 1.0).len();
+        for s in [0.82_f32, 0.889, 0.95] {
+            let lines = clip_row_lines(&e, clip_text_col_w(false, s), s).len();
+            assert_eq!(lines, baseline, "line count invariant at scale {s}");
+        }
+        // Row height scales the same factor its content does (no drift).
+        let h1 = row_height_of(&e, 1.0);
+        let hs = row_height_of(&e, 0.5);
+        assert!((hs - h1 * 0.5).abs() < 0.01, "row height scales with the box");
+        // Unity is a strict no-op vs the pre-scale formula.
+        let has_tile = false;
+        let expect_h1 = clip_row_lines(&e, clip_text_col_w(has_tile, 1.0), 1.0).len() as f32
+            * LINE_PX
+            + 2.0 * ROW_PAD_Y;
+        assert!((h1 - expect_h1).abs() < 0.01, "scale 1.0 == original formula");
+    }
+
+    #[test]
     fn text_classifies_with_preview() {
         let e = classify_text("  hello  world  \nsecond line", "text/plain".into()).unwrap();
         assert_eq!(e.kind, ClipKind::Text);
