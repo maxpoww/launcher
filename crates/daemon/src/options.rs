@@ -156,7 +156,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "selection.search" | "shell.search_error" | "browser.find" => GLYPH_SEARCH,
         "system.high_cpu" => GLYPH_MONITOR,
         "coding.terminal_here" => GLYPH_TERMINAL,
-        "files.open_here" => GLYPH_OPEN_FILE,
+        "files.open_here" | "editor.open_folder" => GLYPH_OPEN_FILE,
         _ => GLYPH_OPTION,
     }
 }

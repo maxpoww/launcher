@@ -64,6 +64,7 @@ const PROVIDERS: &[Provider] = &[
     focus_churn_provider,
     shell_error_provider,
     diagnostics_provider,
+    editor_provider,
     selection_provider,
     mic_provider,
     camera_provider,
@@ -155,7 +156,12 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
     // focused inside a repo directory.
     if matches!(
         id,
-        "git.commit" | "git.push" | "git.pull" | "git.open_remote" | "coding.terminal_here"
+        "git.commit"
+            | "git.push"
+            | "git.pull"
+            | "git.open_remote"
+            | "coding.terminal_here"
+            | "editor.open_folder"
     ) {
         return activity == Activity::Coding;
     }
@@ -731,6 +737,31 @@ fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
         reason: "editor diagnostics present",
         source: Layer::AppBridge,
         action: AffordanceAction::None,
+    }]
+}
+
+/// **editor module** — the file you're editing (fed by the editor bridge):
+/// offer to open its folder in the file manager. Its own control so it works
+/// even in a repo where the git controls already show.
+fn editor_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let Some(dir) = ctx
+        .app_internal
+        .editor_file
+        .as_deref()
+        .and_then(|f| f.parent())
+        .and_then(|d| d.to_str())
+    else {
+        return vec![];
+    };
+    vec![Affordance {
+        id: "editor.open_folder",
+        kind: AffordanceKind::Control,
+        title: "Open folder".into(),
+        detail: dir.rsplit('/').next().unwrap_or(dir).to_string(),
+        relevance: 0.43,
+        reason: "open the edited file's folder",
+        source: Layer::AppBridge,
+        action: AffordanceAction::OpenUrl(dir.to_string()),
     }]
 }
 
@@ -1616,6 +1647,29 @@ mod tests {
         .unwrap()
         .relevance;
         assert!(full > playpause, "foreground media keeps full weight");
+    }
+
+    #[test]
+    fn editor_file_offers_open_folder() {
+        let mut ctx = live_ctx();
+        ctx.window.pid = 1; // a focused window (editor_file makes it Coding)
+        ctx.app_internal.editor_file = Some("/home/max/proj/src/main.rs".into());
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let o = find(&opts, "editor.open_folder").expect("open-folder from editor file");
+        assert_eq!(
+            o.action,
+            AffordanceAction::OpenUrl("/home/max/proj/src".into())
+        );
+        assert_eq!(o.detail, "src");
+        // No editor file → nothing.
+        ctx.app_internal.editor_file = None;
+        assert!(find(&decide(&ctx, &Tuning::default()), "editor.open_folder").is_none());
     }
 
     #[test]
