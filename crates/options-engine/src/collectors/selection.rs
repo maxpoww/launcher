@@ -119,12 +119,21 @@ fn classify(content: &str) -> TextSelection {
     }
     let char_count = content.chars().count();
     let snippet: String = content.chars().take(SNIPPET_CAP).collect();
+    // Classify from the bounded snippet, not the whole clipboard: a multi-MB
+    // paste must not trigger a dozen full-content substring scans on every
+    // clipboard change. The first SNIPPET_CAP chars are representative for the
+    // heuristics (a path is < SNIPPET_CAP chars anyway; code/URL intent shows
+    // early). `looks_like_path` short-circuits on length first, so it also stays
+    // O(1) on huge input.
+    let is_code = looks_like_code(&snippet);
+    let contains_url = contains_url(&snippet);
+    let is_path = looks_like_path(&snippet);
     TextSelection {
         highlighted_text: Some(snippet),
         char_count,
-        is_code: looks_like_code(content),
-        contains_url: contains_url(content),
-        is_path: looks_like_path(content),
+        is_code,
+        contains_url,
+        is_path,
     }
 }
 
@@ -134,7 +143,8 @@ fn classify(content: &str) -> TextSelection {
 /// needs no `~`/`$HOME` expansion (which shell-quoting would defeat).
 fn looks_like_path(t: &str) -> bool {
     let t = t.trim();
-    !t.contains('\n') && t.len() < 512 && t.starts_with('/') && !contains_url(t)
+    // Length guard first so huge input exits before any scan.
+    t.len() < 512 && t.starts_with('/') && !t.contains('\n') && !contains_url(t)
 }
 
 fn contains_url(t: &str) -> bool {
@@ -203,6 +213,32 @@ mod tests {
         let s = classify(&big);
         assert_eq!(s.char_count, 2000);
         assert_eq!(s.highlighted_text.unwrap().chars().count(), SNIPPET_CAP);
+    }
+
+    #[test]
+    fn huge_clipboard_is_classified_from_the_bounded_snippet() {
+        // A URL that only appears *after* the snippet window is not scanned:
+        // classification is bounded to the first SNIPPET_CAP chars regardless of
+        // how large the clipboard is (a multi-MB paste stays cheap).
+        let mut big = "a ".repeat(SNIPPET_CAP); // >> SNIPPET_CAP chars, no url early
+        big.push_str("https://buried.example.com/");
+        let s = classify(&big);
+        assert_eq!(s.char_count, big.chars().count());
+        assert_eq!(s.highlighted_text.unwrap().chars().count(), SNIPPET_CAP);
+        assert!(!s.contains_url, "url past the snippet window isn't scanned");
+        // A very long path-like blob exits the path check on length alone.
+        assert!(!classify(&format!("/{}", "d/".repeat(SNIPPET_CAP))).is_path);
+    }
+
+    #[test]
+    fn lossy_utf8_replacement_chars_classify_without_panic() {
+        // watch_clipboard feeds from_utf8_lossy output; a snippet full of U+FFFD
+        // must classify to a harmless plain selection, never panic.
+        let lossy = "\u{FFFD}\u{FFFD} some text \u{FFFD}";
+        let s = classify(lossy);
+        assert!(s.char_count > 0);
+        assert!(!s.is_code && !s.contains_url && !s.is_path);
+        assert!(s.highlighted_text.is_some());
     }
 
     #[test]
