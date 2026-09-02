@@ -18,6 +18,13 @@ const GLYPH_PREV: &str = "\u{f048}"; // step-backward
 const GLYPH_NEXT: &str = "\u{f051}"; // step-forward
 const GLYPH_VOL: &str = "\u{f028}"; // volume-up
 
+/// An in-progress drag on the media box's seek or volume bar.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MediaDrag {
+    pub(crate) seek: bool, // true = seek bar, false = volume bar
+    pub(crate) frac: f32,  // current dragged fraction 0..=1
+}
+
 const BOX_W: f32 = 360.0;
 const BOX_H: f32 = 128.0;
 const PAD: f32 = 16.0;
@@ -152,13 +159,15 @@ impl crate::App {
             });
         }
 
-        // Seek bar: track + filled progress.
+        // Seek bar: track + filled progress (the live drag fraction while
+        // dragging, else the sensed position).
         let seek = self.seek_track(box_r);
-        let frac = if m.length_secs > 0 {
+        let seek_drag = self.media_drag.filter(|d| d.seek).map(|d| d.frac);
+        let frac = seek_drag.unwrap_or(if m.length_secs > 0 {
             (m.position_secs as f32 / m.length_secs as f32).clamp(0.0, 1.0)
         } else {
             0.0
-        };
+        });
         push_bar(scene, seek, frac, track_c, accent);
         // Time labels (mm:ss / mm:ss) below the seek bar.
         if m.length_secs > 0 {
@@ -184,11 +193,16 @@ impl crate::App {
         // Volume bar with a speaker glyph on its left.
         let vol = self.vol_track(box_r);
         let vfrac = self
-            .brain
-            .as_ref()
-            .map(|c| (c.audio.default_sink_volume as f32 / 100.0).clamp(0.0, 1.5))
-            .unwrap_or(0.0)
-            .min(1.0);
+            .media_drag
+            .filter(|d| !d.seek)
+            .map(|d| d.frac)
+            .unwrap_or_else(|| {
+                self.brain
+                    .as_ref()
+                    .map(|c| (c.audio.default_sink_volume as f32 / 100.0).clamp(0.0, 1.5))
+                    .unwrap_or(0.0)
+                    .min(1.0)
+            });
         scene.labels.push(Label {
             text: GLYPH_VOL.to_owned(),
             pos: (vol.x - 20.0, vol.y - 6.0),
@@ -230,29 +244,78 @@ impl crate::App {
             self.media_spawn(&["playerctl", "next"]);
             return true;
         }
-        // Seek bar (a band around the thin track for easy hitting).
+        // The seek and volume bars are handled by the drag path (press → drag →
+        // release-commit), so a plain click there is already consumed. Any other
+        // click inside the panel is swallowed so it doesn't fall through.
+        true
+    }
+
+    /// Begin a drag if the press at `(px, py)` landed on the seek or volume
+    /// bar. Returns whether a drag started (so the press is consumed).
+    pub(crate) fn media_drag_start(&mut self, px: f32, py: f32) -> bool {
+        if !self.media_box_open {
+            return false;
+        }
+        let box_r = self.media_box_geom();
         let seek = self.seek_track(box_r);
-        if hit_band(seek, px, py) {
-            if let Some(len) = self.media_now().map(|m| m.length_secs).filter(|l| *l > 0) {
-                let frac = ((px - seek.x) / seek.w).clamp(0.0, 1.0);
-                let secs = (frac * len as f32).round() as u64;
-                self.media_spawn(&["playerctl", "position", &secs.to_string()]);
-            }
+        let vol = self.vol_track(box_r);
+        let bar = if hit_band(seek, px, py) {
+            Some((true, seek))
+        } else if hit_band(vol, px, py) {
+            Some((false, vol))
+        } else {
+            None
+        };
+        if let Some((is_seek, track)) = bar {
+            let frac = ((px - track.x) / track.w).clamp(0.0, 1.0);
+            self.media_drag = Some(MediaDrag {
+                seek: is_seek,
+                frac,
+            });
+            self.draw_options();
             return true;
         }
-        // Volume bar.
-        let vol = self.vol_track(box_r);
-        if hit_band(vol, px, py) {
-            let frac = ((px - vol.x) / vol.w).clamp(0.0, 1.0);
+        false
+    }
+
+    /// Update the in-progress drag's fraction from the pointer x. Returns
+    /// whether a drag is active (so the motion is consumed).
+    pub(crate) fn media_drag_update(&mut self, px: f32) -> bool {
+        let Some(mut d) = self.media_drag else {
+            return false;
+        };
+        let box_r = self.media_box_geom();
+        let track = if d.seek {
+            self.seek_track(box_r)
+        } else {
+            self.vol_track(box_r)
+        };
+        d.frac = ((px - track.x) / track.w).clamp(0.0, 1.0);
+        self.media_drag = Some(d);
+        self.draw_options();
+        true
+    }
+
+    /// Commit the drag on release: seek to the fraction of the track length, or
+    /// set the sink volume. Returns whether a drag was committed.
+    pub(crate) fn media_drag_commit(&mut self) -> bool {
+        let Some(d) = self.media_drag.take() else {
+            return false;
+        };
+        if d.seek {
+            if let Some(len) = self.media_now().map(|m| m.length_secs).filter(|l| *l > 0) {
+                let secs = (d.frac * len as f32).round() as u64;
+                self.media_spawn(&["playerctl", "position", &secs.to_string()]);
+            }
+        } else {
             self.media_spawn(&[
                 "wpctl",
                 "set-volume",
                 "@DEFAULT_AUDIO_SINK@",
-                &format!("{frac:.2}"),
+                &format!("{:.2}", d.frac),
             ]);
-            return true;
         }
-        // A click on the panel but not a control: swallow (keep the box open).
+        self.draw_options();
         true
     }
 

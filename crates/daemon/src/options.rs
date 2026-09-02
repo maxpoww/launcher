@@ -1429,6 +1429,10 @@ impl App {
                 ..
             } => {
                 self.options_ptr = Some((surface_x as f32, surface_y as f32));
+                // A live drag on a media-box slider tracks the pointer.
+                if self.media_drag_update(surface_x as f32) {
+                    return;
+                }
                 self.options_on_motion(surface_y as f32);
             }
             wl_pointer::Event::Leave { .. } => {
@@ -1450,11 +1454,25 @@ impl App {
                     }
                 }
             }
+            // Left press: start a media-slider drag if it landed on a bar.
+            wl_pointer::Event::Button { button, state, .. }
+                if button == BTN_LEFT
+                    && state == WEnum::Value(wl_pointer::ButtonState::Pressed)
+                    && !self.options_hidden =>
+            {
+                if let Some((px, py)) = self.options_ptr {
+                    self.media_drag_start(px, py);
+                }
+            }
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_LEFT
                     && state == WEnum::Value(wl_pointer::ButtonState::Released)
                     && !self.options_hidden =>
             {
+                // A slider drag commits on release and swallows the click.
+                if self.media_drag_commit() {
+                    return;
+                }
                 self.options_click();
             }
             wl_pointer::Event::Button { button, state, .. }

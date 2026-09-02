@@ -483,6 +483,7 @@ fn main() -> anyhow::Result<()> {
         options: Default::default(),
         options_sig: Vec::new(),
         media_box_open: false,
+        media_drag: None,
         overview_active: false,
         battery_alarm: battery::BatteryAlarm::default(),
         battery_beat_epoch: None,
@@ -1200,6 +1201,10 @@ pub struct App {
     /// clicked): a full panel — track, prev/play-pause/next, seek + volume bars
     /// — grown into the topbar's reserved dropdown region. See `mediabox.rs`.
     media_box_open: bool,
+    /// An in-progress drag on the media box's seek or volume bar: the bar and
+    /// the current fraction, shown live and committed (playerctl/wpctl) on
+    /// release. `None` when not dragging.
+    media_drag: Option<crate::mediabox::MediaDrag>,
     /// The compositor overview (waveview) is open: every waverunner surface
     /// stays concealed and reveals are ignored until it closes.
     overview_active: bool,
