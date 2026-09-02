@@ -39,6 +39,9 @@ pub struct TextSelection {
     /// The clipboard holds what looks like a single local filesystem path
     /// (an absolute `/…` or `~/…` line) — intent to open that file/folder.
     pub is_path: bool,
+    /// The clipboard holds what looks like a bare git commit hash (7–40 hex
+    /// chars, nothing else) — in a repo, intent to inspect that commit.
+    pub is_git_sha: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

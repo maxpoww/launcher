@@ -128,13 +128,21 @@ fn classify(content: &str) -> TextSelection {
     let is_code = looks_like_code(&snippet);
     let contains_url = contains_url(&snippet);
     let is_path = looks_like_path(&snippet);
+    let is_git_sha = looks_like_git_sha(snippet.trim());
     TextSelection {
         highlighted_text: Some(snippet),
         char_count,
         is_code,
         contains_url,
         is_path,
+        is_git_sha,
     }
+}
+
+/// Heuristic: a bare git commit hash — 7 to 40 hexadecimal characters and
+/// nothing else. (7 is git's default short-hash length; 40 is a full SHA-1.)
+fn looks_like_git_sha(t: &str) -> bool {
+    (7..=40).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Heuristic: a single-line absolute path (`/…`). Kept pure — no filesystem
@@ -239,6 +247,17 @@ mod tests {
         assert!(s.char_count > 0);
         assert!(!s.is_code && !s.contains_url && !s.is_path);
         assert!(s.highlighted_text.is_some());
+    }
+
+    #[test]
+    fn detects_bare_git_shas() {
+        assert!(classify("a1b2c3d").is_git_sha); // 7-char short hash
+        assert!(classify("  9f8e7d6c5b4a3021  ").is_git_sha); // trimmed
+        assert!(classify(&"a".repeat(40)).is_git_sha); // full SHA-1
+        assert!(!classify(&"a".repeat(41)).is_git_sha); // too long
+        assert!(!classify("a1b2c3").is_git_sha); // too short (<7)
+        assert!(!classify("g1b2c3d").is_git_sha); // non-hex
+        assert!(!classify("a1b2c3d e").is_git_sha); // has a space → not bare
     }
 
     #[test]

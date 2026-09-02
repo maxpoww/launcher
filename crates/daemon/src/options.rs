@@ -156,7 +156,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "git.push" => GLYPH_PUSH,
         "git.pull" => GLYPH_PULL,
         "git.open_remote" => GLYPH_REMOTE,
-        "git.diff" => GLYPH_DIFF,
+        "git.diff" | "git.show_commit" => GLYPH_DIFF,
         "selection.url" => GLYPH_COPY_LINK,
         "selection.open_path" => GLYPH_OPEN_FILE,
         "selection.email" => GLYPH_EMAIL,

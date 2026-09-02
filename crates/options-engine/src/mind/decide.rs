@@ -70,6 +70,7 @@ const PROVIDERS: &[Provider] = &[
     install_missing_provider,
     editor_provider,
     selection_provider,
+    git_sha_provider,
     mic_provider,
     camera_provider,
     fullscreen_provider,
@@ -170,6 +171,7 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
             | "coding.terminal_here"
             | "editor.open_folder"
             | "editor.run"
+            | "git.show_commit"
     ) {
         return activity == Activity::Coding;
     }
@@ -1355,6 +1357,47 @@ fn notifications_provider(ctx: &ContextState) -> Vec<Affordance> {
 }
 
 /// A copied URL or code snippet is strong intent — offer to act on it.
+/// A copied git commit hash while working in a repo → inspect it. Its own
+/// provider (not folded into `selection_provider`) because it needs the git
+/// context too. `git show` in a terminal pager; the sha and repo root are
+/// shell-quoted (the sha is clipboard text) so there's no injection surface.
+fn git_sha_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if !ctx.selection.is_git_sha {
+        return vec![];
+    }
+    let Some(sha) = ctx
+        .selection
+        .highlighted_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return vec![];
+    };
+    let Some(root) = ctx.git.repo_root.as_deref().and_then(|p| p.to_str()) else {
+        return vec![];
+    };
+    vec![Affordance {
+        id: "git.show_commit",
+        kind: AffordanceKind::Control,
+        title: "Show commit".into(),
+        detail: sha.chars().take(10).collect(),
+        relevance: 0.57,
+        reason: "a git commit hash is on the clipboard, in a repo",
+        source: Layer::Selection,
+        action: spawn(&[
+            "foot",
+            "sh",
+            "-c",
+            &format!(
+                "git -C {} show {} | less -R",
+                shell_arg(root),
+                shell_arg(sha)
+            ),
+        ]),
+    }]
+}
+
 fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
     let s = &ctx.selection;
     if s.char_count == 0 {
@@ -1799,6 +1842,7 @@ mod tests {
             is_code: false,
             contains_url: true,
             is_path: false,
+            is_git_sha: false,
         };
         let opts = decide(&ctx, &Tuning::default());
         assert!(opts.items.iter().any(|a| a.id == "selection.url"));
@@ -2189,6 +2233,7 @@ mod tests {
             is_code: false,
             contains_url: true,
             is_path: false,
+            is_git_sha: false,
         };
         let opts = decide(&ctx, &Tuning::default());
         let url = find(&opts, "selection.url").expect("url control");
@@ -2270,6 +2315,7 @@ mod tests {
             is_code: false,
             contains_url: false,
             is_path: false,
+            is_git_sha: false,
         };
         let opts = decide(&ctx, &Tuning::default());
         let s = find(&opts, "selection.search").expect("search control");
@@ -2534,6 +2580,53 @@ mod tests {
     }
 
     #[test]
+    fn copied_sha_in_a_repo_offers_show_commit() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "code".into(); // Coding
+        ctx.window.pid = 1;
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/proj".into()),
+            branch: Some("main".into()),
+            ..Default::default()
+        };
+        ctx.selection = crate::state::TextSelection {
+            highlighted_text: Some("a1b2c3d4e5".into()),
+            char_count: 10,
+            is_git_sha: true,
+            ..Default::default()
+        };
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let c = find(&opts, "git.show_commit").expect("show-commit control");
+        assert!(matches!(&c.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "foot" && argv.last().unwrap().contains("git -C '/home/max/proj' show 'a1b2c3d4e5'")));
+        // No repo → nothing to show against.
+        ctx.git = GitContext::default();
+        assert!(find(
+            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            "git.show_commit"
+        )
+        .is_none());
+        // Not while browsing (a stale clipboard SHA shouldn't fire it).
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/proj".into()),
+            branch: Some("main".into()),
+            ..Default::default()
+        };
+        ctx.window.class = "firefox".into();
+        assert!(find(
+            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            "git.show_commit"
+        )
+        .is_none());
+    }
+
+    #[test]
     fn copied_email_offers_compose() {
         let mut ctx = live_ctx();
         ctx.selection = TextSelection {
@@ -2542,6 +2635,7 @@ mod tests {
             is_code: false,
             contains_url: false,
             is_path: false,
+            is_git_sha: false,
         };
         let opts = decide(&ctx, &Tuning::default());
         let o = find(&opts, "selection.email").expect("email control");
@@ -2565,6 +2659,7 @@ mod tests {
             is_code: false,
             contains_url: false,
             is_path: true,
+            is_git_sha: false,
         };
         let opts = decide(&ctx, &Tuning::default());
         let o = find(&opts, "selection.open_path").expect("open-file control");
