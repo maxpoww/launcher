@@ -62,6 +62,7 @@ impl Collector for SystemCollector {
                     battery_pct,
                     is_charging,
                     has_backlight: has_backlight(),
+                    is_camera_active: camera_in_use(),
                 };
                 if tx
                     .send(Update::Delta(
@@ -144,6 +145,43 @@ fn has_backlight() -> bool {
     std::fs::read_dir("/sys/class/backlight")
         .map(|mut d| d.next().is_some())
         .unwrap_or(false)
+}
+
+/// Whether any process has a `/dev/video*` device open — a live camera, almost
+/// always a video call. Scans the readable `/proc/<pid>/fd/*` symlinks (own
+/// processes; camera apps run as the user, so their fds are visible). Bounded
+/// so a huge process table can't make it expensive.
+fn camera_in_use() -> bool {
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    let mut scanned = 0u32;
+    for p in procs.flatten() {
+        // Only numeric pid dirs.
+        if !p
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(p.path().join("fd")) else {
+            continue; // not ours / gone
+        };
+        for fd in fds.flatten() {
+            if let Ok(target) = std::fs::read_link(fd.path()) {
+                if target.to_string_lossy().starts_with("/dev/video") {
+                    return true;
+                }
+            }
+            scanned += 1;
+            if scanned > 20_000 {
+                return false; // hard cap — never spin forever
+            }
+        }
+    }
+    false
 }
 
 /// First real battery's `(capacity%, charging)` from `/sys/class/power_supply`,

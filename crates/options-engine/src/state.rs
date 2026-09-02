@@ -115,6 +115,9 @@ pub struct SystemMetrics {
     /// is non-empty) — a laptop panel, not a desktop monitor. Lets the mind
     /// offer brightness controls only where they'd actually do something.
     pub has_backlight: bool,
+    /// Whether a camera (`/dev/video*`) is currently open by some process — a
+    /// live webcam, usually a video call. Privacy awareness, like `is_mic_active`.
+    pub is_camera_active: bool,
 }
 
 /// NixOS deploy state: is the system we're *running* the system we last *built*?

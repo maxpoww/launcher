@@ -101,7 +101,26 @@ const GLYPH_OPEN_FILE: &str = "\u{f07c}"; // fa-folder-open (open copied path)
 const GLYPH_EMAIL: &str = "\u{f0e0}"; // fa-envelope (compose email)
 const GLYPH_MONITOR: &str = "\u{f0e4}"; // fa-tachometer (system monitor)
 const GLYPH_TERMINAL: &str = "\u{f120}"; // fa-terminal (open terminal here)
+const GLYPH_CAMERA: &str = "\u{f030}"; // fa-camera (camera live)
+const GLYPH_MIC: &str = "\u{f130}"; // fa-microphone (mic live)
+const GLYPH_SCREENCAST: &str = "\u{f108}"; // fa-desktop (screen sharing)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
+/// Amber wash for a privacy/safety WARNING pill, so it reads as "heads up",
+/// not a button.
+const WARN_COLOR: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
+
+/// Whether an affordance is surfaced as an OPTION pill: any actionable control,
+/// plus the privacy/safety WARNINGS worth a persistent glance (a live camera,
+/// mic, or screen share). Battery/deploy warnings are excluded — they have
+/// their own dedicated surfaces (battery.rs, and the deploy nudge).
+pub(crate) fn is_surfaced_affordance(a: &options_engine::Affordance) -> bool {
+    a.action.is_actionable()
+        || (a.kind == options_engine::AffordanceKind::Warning
+            && matches!(
+                a.id,
+                "camera.live" | "audio.mic_live" | "compositor.screencasting"
+            ))
+}
 
 /// The Nerd-Font glyph for a dynamic OPTION control, by affordance id. The
 /// play/pause toggle reads its title so it shows the action it WILL perform.
@@ -124,6 +143,9 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "media.seek_back" => GLYPH_SEEK_BACK,
         "audio.mic_mute" => GLYPH_MIC_SLASH,
         "audio.call_dnd" => GLYPH_BELL_SLASH,
+        "camera.live" => GLYPH_CAMERA,
+        "audio.mic_live" => GLYPH_MIC,
+        "compositor.screencasting" => GLYPH_SCREENCAST,
         "git.commit" => GLYPH_COMMIT,
         "git.push" => GLYPH_PUSH,
         "git.pull" => GLYPH_PULL,
@@ -309,7 +331,7 @@ pub(crate) enum PillId {
     Pseudo,
     Fullscreen,
     /// A dynamic OPTION control from the Mind (media/git/call/…), identified by
-    /// its index into [`crate::App::actionable_options`]. Clicking it runs that
+    /// its index into [`crate::App::surfaced_options`]. Clicking it runs that
     /// affordance's action.
     Option(u8),
 }
@@ -721,25 +743,30 @@ impl App {
         // transport/volume/brightness, git commit/push, mute mic, open link).
         // Small glyph circles in the free band just right of the clipboard
         // cluster, in the mind's ranked order. Each carries its index into
-        // `actionable_options()`, which the click handler dispatches.
+        // `surfaced_options()`, which the click handler dispatches.
         {
             // Clear the clipboard pill + the copy-link's slide-out slot.
             let cluster_start = EDGE_PAD + 2.0 * ph + crate::clipboard::LINK_GAP + OPTION_GAP;
-            let glyphs: Vec<(u8, &'static str)> = self
-                .actionable_options()
+            // (index, glyph, warning?) — a privacy/safety warning pill washes
+            // amber and is a passive indicator, not a button.
+            let glyphs: Vec<(u8, &'static str, bool)> = self
+                .surfaced_options()
                 .iter()
                 .take(OPTION_PILL_CAP)
                 .enumerate()
-                .map(|(i, a)| (i as u8, glyph_for_option(a.id, &a.title)))
+                .map(|(i, a)| {
+                    let warn = a.kind == options_engine::AffordanceKind::Warning;
+                    (i as u8, glyph_for_option(a.id, &a.title), warn)
+                })
                 .collect();
             let mut ox = cluster_start;
-            for (i, glyph) in glyphs {
+            for (i, glyph, warn) in glyphs {
                 pills.push(Pill {
                     id: PillId::Option(i),
                     rect: Rect::new(ox, y, ph, ph),
                     text: glyph.to_owned(),
                     family: Some(NERD),
-                    glyph_color: None,
+                    glyph_color: warn.then_some(WARN_COLOR),
                 });
                 ox += ph + CTRL_GAP;
             }
@@ -1740,7 +1767,7 @@ impl App {
         // Take an owned copy so the immutable borrow of the option set ends
         // before we run the (mutable-self) action.
         let picked = self
-            .actionable_options()
+            .surfaced_options()
             .get(idx)
             .map(|a| (a.id.to_string(), a.action.clone()));
         if let Some((id, action)) = picked {
@@ -1755,7 +1782,7 @@ impl App {
     /// verb). Returns whether an actionable offer with that id was found.
     pub(crate) fn trigger_option_by_id(&mut self, id: &str) -> bool {
         let action = self
-            .actionable_options()
+            .surfaced_options()
             .iter()
             .find(|a| a.id == id)
             .map(|a| a.action.clone());

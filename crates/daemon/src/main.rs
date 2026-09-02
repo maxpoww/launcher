@@ -1893,7 +1893,7 @@ impl App {
         let sig: Vec<(String, String)> = options
             .items
             .iter()
-            .filter(|a| a.action.is_actionable())
+            .filter(|a| crate::options::is_surfaced_affordance(a))
             .map(|a| (a.id.to_string(), a.title.clone()))
             .collect();
         let changed = sig != self.options_sig;
@@ -1924,13 +1924,14 @@ impl App {
         }
     }
 
-    /// The actionable OPTION offers (Controls / actionable Actions) the topbar
-    /// should surface as pills, in the Mind's ranked order.
-    pub(crate) fn actionable_options(&self) -> Vec<&options_engine::Affordance> {
+    /// The OPTION offers the topbar surfaces as pills (actionable controls +
+    /// privacy/safety warnings), in the Mind's ranked order. The pill index and
+    /// the click dispatch both key off this same list.
+    pub(crate) fn surfaced_options(&self) -> Vec<&options_engine::Affordance> {
         self.options
             .items
             .iter()
-            .filter(|a| a.action.is_actionable())
+            .filter(|a| crate::options::is_surfaced_affordance(a))
             .collect()
     }
 

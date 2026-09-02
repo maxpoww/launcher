@@ -65,6 +65,7 @@ const PROVIDERS: &[Provider] = &[
     diagnostics_provider,
     selection_provider,
     mic_provider,
+    camera_provider,
     notifications_provider,
 ];
 
@@ -704,6 +705,25 @@ fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
 
 /// A live microphone — awareness that you're being heard (and the seat of the
 /// Communication activity).
+/// A live camera — privacy awareness that you're on webcam (a video call).
+/// A Warning like the live mic; there's no safe universal "camera off", so it
+/// informs rather than acts.
+fn camera_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if !ctx.metrics.is_camera_active {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "camera.live",
+        kind: AffordanceKind::Warning,
+        title: "Camera is on".into(),
+        detail: "You're on camera".into(),
+        relevance: 0.82,
+        reason: "a /dev/video device is open",
+        source: Layer::Hardware,
+        action: AffordanceAction::None,
+    }]
+}
+
 fn mic_provider(ctx: &ContextState) -> Vec<Affordance> {
     if !ctx.audio.is_mic_active {
         return vec![];
@@ -1666,6 +1686,25 @@ mod tests {
         );
         assert!(roomy.items.iter().any(|a| a.id.starts_with("media.")));
         assert!(roomy.items.iter().any(|a| a.id.starts_with("git.")));
+    }
+
+    #[test]
+    fn live_camera_is_a_privacy_warning() {
+        let mut ctx = live_ctx();
+        ctx.metrics.is_camera_active = true;
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let cam = find(&opts, "camera.live").expect("camera warning when a video device is open");
+        assert_eq!(cam.kind, AffordanceKind::Warning);
+        assert!(!cam.action.is_actionable());
+        // Off → nothing.
+        ctx.metrics.is_camera_active = false;
+        assert!(find(&decide(&ctx, &Tuning::default()), "camera.live").is_none());
     }
 
     #[test]
