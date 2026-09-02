@@ -355,6 +355,13 @@ fn cpu_provider(ctx: &ContextState) -> Vec<Affordance> {
 }
 
 /// Build a fire-and-forget [`AffordanceAction::Spawn`] from a static argv.
+/// Single-quote a value for embedding inside an inner `sh -c` string (the few
+/// controls that need a pipeline). Engine-owned paths only, but quoted anyway
+/// so a space or metacharacter in a repo path can never break the command.
+fn shell_arg(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn spawn(argv: &[&str]) -> AffordanceAction {
     AffordanceAction::Spawn {
         argv: argv.iter().map(|s| s.to_string()).collect(),
@@ -578,6 +585,23 @@ fn git_provider(ctx: &ContextState) -> Vec<Affordance> {
                 reason: "push the branch to its remote",
                 source: Layer::Hardware,
                 action: spawn(&["git", "-C", root, "push"]),
+            });
+            out.push(Affordance {
+                id: "git.diff",
+                kind: AffordanceKind::Control,
+                title: "Show diff".into(),
+                detail: format!("on {branch}"),
+                relevance: 0.55,
+                reason: "review the uncommitted changes",
+                source: Layer::Hardware,
+                // A terminal pager over the diff; `-C <root>` and the fixed
+                // pipeline are engine-constructed (no user text) → shell-safe.
+                action: spawn(&[
+                    "foot",
+                    "sh",
+                    "-c",
+                    &format!("git -C {} diff | less -R", shell_arg(root)),
+                ]),
             });
         }
     }
