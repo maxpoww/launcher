@@ -99,6 +99,7 @@ const GLYPH_SEARCH: &str = "\u{f002}"; // fa-search (search the web)
 const GLYPH_OPEN_FILE: &str = "\u{f07c}"; // fa-folder-open (open copied path)
 const GLYPH_EMAIL: &str = "\u{f0e0}"; // fa-envelope (compose email)
 const GLYPH_MONITOR: &str = "\u{f0e4}"; // fa-tachometer (system monitor)
+const GLYPH_TERMINAL: &str = "\u{f120}"; // fa-terminal (open terminal here)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
 
 /// The Nerd-Font glyph for a dynamic OPTION control, by affordance id. The
@@ -129,6 +130,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "selection.email" => GLYPH_EMAIL,
         "selection.search" | "shell.search_error" => GLYPH_SEARCH,
         "system.high_cpu" => GLYPH_MONITOR,
+        "coding.terminal_here" => GLYPH_TERMINAL,
         _ => GLYPH_OPTION,
     }
 }

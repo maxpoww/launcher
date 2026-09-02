@@ -59,6 +59,7 @@ const PROVIDERS: &[Provider] = &[
     media_provider,
     media_controls_provider,
     git_provider,
+    coding_tools_provider,
     focus_churn_provider,
     shell_error_provider,
     diagnostics_provider,
@@ -147,7 +148,10 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
     // git commit/push are Coding controls — surface them only while actually
     // working in the repo, not when a browser or media app merely happens to be
     // focused inside a repo directory.
-    if matches!(id, "git.commit" | "git.push" | "git.pull") {
+    if matches!(
+        id,
+        "git.commit" | "git.push" | "git.pull" | "coding.terminal_here"
+    ) {
         return activity == Activity::Coding;
     }
     match activity {
@@ -549,6 +553,25 @@ fn git_provider(ctx: &ContextState) -> Vec<Affordance> {
         });
     }
     out
+}
+
+/// **coding-tools module** — a terminal opened right in the repo you're working
+/// in. Most useful from a GUI editor (no shell to hand); reuses the sensed
+/// `git.repo_root`. Gated to Coding via `fits_activity`.
+fn coding_tools_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let Some(root) = ctx.git.repo_root.as_deref().and_then(|p| p.to_str()) else {
+        return vec![];
+    };
+    vec![Affordance {
+        id: "coding.terminal_here",
+        kind: AffordanceKind::Control,
+        title: "Terminal here".into(),
+        detail: root.rsplit('/').next().unwrap_or(root).to_string(),
+        relevance: 0.45,
+        reason: "open a terminal in the repo",
+        source: Layer::Hardware,
+        action: spawn(&["foot", "--working-directory", root]),
+    }]
 }
 
 /// Behavioural: rapid window churn suggests searching/losing the thread — a
@@ -1397,6 +1420,41 @@ mod tests {
         // Whitespace-only selection offers nothing.
         ctx.selection.highlighted_text = Some("   ".into());
         assert!(find(&decide(&ctx, &Tuning::default()), "selection.search").is_none());
+    }
+
+    #[test]
+    fn coding_offers_a_terminal_here() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "code".into(); // an editor → Coding
+        ctx.window.pid = 1;
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/proj".into()),
+            branch: Some("main".into()),
+            is_dirty: false,
+        };
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let t = find(&opts, "coding.terminal_here").expect("terminal-here control");
+        assert!(matches!(&t.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "foot" && argv.contains(&"/home/max/proj".to_string())));
+        // Not while merely browsing in the repo dir.
+        ctx.window.class = "firefox".into();
+        assert!(find(
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
+            "coding.terminal_here"
+        )
+        .is_none());
     }
 
     #[test]
