@@ -56,6 +56,7 @@ const PROVIDERS: &[Provider] = &[
     deploy_provider,
     battery_provider,
     cpu_provider,
+    memory_provider,
     media_provider,
     media_controls_provider,
     git_provider,
@@ -405,6 +406,26 @@ fn cpu_provider(ctx: &ContextState) -> Vec<Affordance> {
         detail: format!("{:.0}% — open monitor", ctx.metrics.cpu_usage_pct),
         relevance: 0.4,
         reason: "cpu >=85%",
+        source: Layer::Hardware,
+        action: spawn(&["foot", "btop"]),
+    }]
+}
+
+/// Sustained memory pressure is worth the same "show me what's using it" offer
+/// as high CPU. Gated above the CPU pill's threshold so at most one monitor
+/// control shows: when both are high the CPU one already covers it, so this
+/// only fires when memory is the distinct problem.
+fn memory_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if ctx.metrics.ram_usage_pct < 90.0 || ctx.metrics.cpu_usage_pct >= 85.0 {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "system.high_mem",
+        kind: AffordanceKind::Control,
+        title: "High memory".into(),
+        detail: format!("{:.0}% — open monitor", ctx.metrics.ram_usage_pct),
+        relevance: 0.42,
+        reason: "ram >=90%",
         source: Layer::Hardware,
         action: spawn(&["foot", "btop"]),
     }]
@@ -2490,5 +2511,29 @@ mod tests {
         // Below the threshold it does not surface.
         ctx.metrics.cpu_usage_pct = 40.0;
         assert!(find(&decide(&ctx, &Tuning::default()), "system.high_cpu").is_none());
+    }
+
+    #[test]
+    fn high_memory_offers_a_monitor_but_defers_to_cpu() {
+        let mut ctx = live_ctx();
+        let roomy = Tuning {
+            max_items: 12,
+            ..Default::default()
+        };
+        // High RAM, calm CPU → the memory monitor control shows.
+        ctx.metrics.ram_usage_pct = 93.0;
+        let mem_opts = decide(&ctx, &roomy);
+        let m = find(&mem_opts, "system.high_mem").expect("high-mem control");
+        assert_eq!(m.kind, AffordanceKind::Control);
+        assert!(m.action.is_actionable());
+        // When CPU is ALSO high, the CPU pill covers it — no duplicate monitor.
+        ctx.metrics.cpu_usage_pct = 95.0;
+        let opts = decide(&ctx, &roomy);
+        assert!(find(&opts, "system.high_cpu").is_some());
+        assert!(find(&opts, "system.high_mem").is_none());
+        // Calm memory → nothing.
+        ctx.metrics.cpu_usage_pct = 10.0;
+        ctx.metrics.ram_usage_pct = 55.0;
+        assert!(find(&decide(&ctx, &roomy), "system.high_mem").is_none());
     }
 }
