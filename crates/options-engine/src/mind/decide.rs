@@ -71,6 +71,7 @@ const PROVIDERS: &[Provider] = &[
     camera_provider,
     fullscreen_provider,
     browser_provider,
+    reading_provider,
     notifications_provider,
 ];
 
@@ -889,6 +890,62 @@ fn browser_provider(ctx: &ContextState) -> Vec<Affordance> {
         source: Layer::Compositor,
         action: AffordanceAction::Daemon("find_in_page".into()),
     }]
+}
+
+/// Window classes we treat as document/PDF readers (substring, lower-cased).
+const READERS: &[&str] = &[
+    "papers",
+    "evince",
+    "zathura",
+    "okular",
+    "mupdf",
+    "xpdf",
+    "org.gnome.documents",
+    "foliate",
+    "sioyek",
+];
+
+/// **reading module** — a PDF / document reader is focused: offer Find (Ctrl+F,
+/// via the compositor keystroke) and, on a laptop, reading brightness. Keeps
+/// the eyes comfortable and lets you jump to a term without leaving the mouse.
+fn reading_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let class = ctx.window.class.to_lowercase();
+    if ctx.window.pid == 0 || !READERS.iter().any(|r| class.contains(r)) {
+        return vec![];
+    }
+    let mut out = vec![Affordance {
+        id: "reading.find",
+        kind: AffordanceKind::Control,
+        title: "Find".into(),
+        detail: String::new(),
+        relevance: 0.5,
+        reason: "find in the document",
+        source: Layer::Compositor,
+        action: AffordanceAction::Daemon("find_in_page".into()),
+    }];
+    if ctx.metrics.has_backlight {
+        out.push(Affordance {
+            id: "reading.bright_down",
+            kind: AffordanceKind::Control,
+            title: "Brightness −".into(),
+            detail: String::new(),
+            relevance: 0.46,
+            reason: "dim for comfortable reading",
+            source: Layer::Hardware,
+            action: spawn(&["brightnessctl", "set", "10%-"]),
+        });
+        out.push(Affordance {
+            id: "reading.bright_up",
+            kind: AffordanceKind::Control,
+            title: "Brightness +".into(),
+            detail: String::new(),
+            relevance: 0.45,
+            reason: "brighten for reading",
+            source: Layer::Hardware,
+            action: spawn(&["brightnessctl", "set", "10%+"]),
+        });
+    }
+    out
 }
 
 /// A fullscreen window is immersion — a video, a game, a presentation. Offer
@@ -2034,6 +2091,40 @@ mod tests {
             vid > bg,
             "browser video is foreground; background music is damped"
         );
+    }
+
+    #[test]
+    fn pdf_reader_offers_find_and_brightness() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "org.gnome.Papers".into();
+        ctx.window.pid = 1;
+        ctx.metrics.has_backlight = true;
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            find(&opts, "reading.find").unwrap().action,
+            AffordanceAction::Daemon("find_in_page".into())
+        );
+        assert!(find(&opts, "reading.bright_up").is_some());
+        // No backlight → find only, no brightness.
+        ctx.metrics.has_backlight = false;
+        let no_bl = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert!(find(&no_bl, "reading.find").is_some());
+        assert!(find(&no_bl, "reading.bright_up").is_none());
+        // A non-reader window offers nothing.
+        ctx.window.class = "foot".into();
+        assert!(find(&decide(&ctx, &Tuning::default()), "reading.find").is_none());
     }
 
     #[test]
