@@ -1896,6 +1896,9 @@ impl App {
         self.options_hide_deadline = None;
         self.sync_options_input();
         self.refresh_options_content();
+        // Overview open over a fullscreen client must remap the bar (it shows on
+        // the overview strip); closing back to bare fullscreen unmaps it again.
+        self.reconcile_options_fullscreen();
         self.draw_options();
         self.sync_input_region();
         if !active {

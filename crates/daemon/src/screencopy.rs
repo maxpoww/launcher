@@ -73,26 +73,20 @@ impl App {
     /// - smart-gaps: match a maximized window flush under the bar;
     /// - otherwise: the transparent bar.
     pub(crate) fn reeval_options_bar(&mut self) {
+        // Paused entirely during fullscreen — no poll, no capture, so the
+        // continuous screencopy stops blocking the fullscreen client's
+        // direct-scanout. The bar draws only a transparent frame meanwhile.
+        // Resumed on fullscreen exit.
+        if self.options_paused() {
+            self.abort_capture();
+            self.options_match = None;
+            return;
+        }
         // Keep the safety-net poll alive whenever matching is possible, so a
         // missed event can never leave the bar stuck (blue wallpaper or a
         // stale colour). Idempotent — the pending guard collapses repeats.
         self.schedule_options_poll();
         if self.options_layer.is_none() || self.screencopy.is_none() {
-            return;
-        }
-        if self.options_fullscreen {
-            if let Ok(mon) = hypr::focused_monitor() {
-                if let Some(output) = self.output_by_name(&mon.name) {
-                    // Sample the fullscreen content a few px below the bar —
-                    // past the bar's own drawn extent (bar_h + overhang) so a
-                    // revealed opaque bar never samples itself.
-                    let sample_y = ((self.config.options.height as f64 + 4.0) * mon.scale.max(0.1))
-                        .round() as u32;
-                    self.begin_options_match(output, sample_y);
-                    return;
-                }
-            }
-            self.clear_options_match();
             return;
         }
         match hypr::top_fill(self.config.options.height as f64) {
@@ -170,7 +164,7 @@ impl App {
         }
     }
 
-    fn abort_capture(&mut self) {
+    pub(crate) fn abort_capture(&mut self) {
         if let Some(cap) = self.capture.take() {
             cap.frame.destroy();
             if let Some(buf) = cap.buffer {
@@ -511,6 +505,12 @@ impl App {
     /// capture or empty read can't stop it. The pending guard keeps the
     /// event-driven and timer-driven callers from stacking duplicate timers.
     pub(crate) fn schedule_options_poll(&mut self) {
+        // Paused during fullscreen: no colour-match captures at all (the
+        // continuous screencopy is what blocks the fullscreen client's
+        // direct-scanout). The fullscreen-exit path reschedules the poll.
+        if self.options_paused() {
+            return;
+        }
         if self.options_poll_pending || !self.config.options.enabled || self.screencopy.is_none() {
             return;
         }

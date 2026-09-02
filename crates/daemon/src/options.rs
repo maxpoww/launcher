@@ -1290,20 +1290,61 @@ impl App {
     /// bar while fullscreen (it reveals on a deliberate top-edge hold), show it
     /// again otherwise.
     fn set_options_fullscreen(&mut self, fs: bool) {
-        if fs == self.options_fullscreen {
-            return;
+        let changed = fs != self.options_fullscreen;
+        if changed {
+            self.options_fullscreen = fs;
+            self.options_reveal_deadline = None;
+            self.options_hide_deadline = None;
+            // While the overview is open the bar always shows (it has its own
+            // reserved strip there) — fullscreen conceal resumes after.
+            self.options_hidden = fs && !self.overview_active;
+            if fs {
+                self.options_hover = None;
+            }
+            self.sync_options_input();
         }
-        self.options_fullscreen = fs;
-        self.options_reveal_deadline = None;
-        self.options_hide_deadline = None;
-        // While the overview is open the bar always shows (it has its own
-        // reserved strip there) — fullscreen conceal resumes after.
-        self.options_hidden = fs && !self.overview_active;
-        if fs {
-            self.options_hover = None;
+        // Reconcile the screencopy colour-match against fullscreen (pause while
+        // a fullscreen client is up, resume on exit). Idempotent, so it also
+        // self-heals if a transition is missed.
+        self.reconcile_options_fullscreen();
+        if changed {
+            self.draw_options();
         }
-        self.sync_options_input();
-        self.draw_options();
+    }
+
+    /// Reconcile the topbar layer's mapping and the screencopy colour-match
+    /// against the current fullscreen state. While a fullscreen client is active
+    /// (and the overview isn't up), the bar is fully UNMAPPED — a null buffer,
+    /// not just an empty frame — and the 700 ms colour-match capture is PAUSED,
+    /// so the compositor can hand the fullscreen client direct-scanout /
+    /// solitary and stop compositing our overlay entirely. Measured on the 2013
+    /// Air: this is the difference between ~26 % waverunner CPU (blocking
+    /// scanout, +18 °C, dropped frames) and ~0 % during fullscreen video. On
+    /// exit it remaps and resumes.
+    pub(crate) fn reconcile_options_fullscreen(&mut self) {
+        if self.options_paused() {
+            // A fullscreen client is up: PAUSE the screencopy colour-match
+            // entirely (abort any in-flight capture, drop the target). This is
+            // the continuous GPU readback Hyprland flags as "screen
+            // record/screenshot" blocking direct-scanout — the biggest per-frame
+            // cost waverunner adds during fullscreen video. The topbar itself
+            // stays mapped but draws only a transparent frame (see draw_options),
+            // so it costs a trivial single-rect render, not the capture.
+            self.abort_capture();
+            self.options_match = None;
+            self.options_bar_matched = None;
+        } else {
+            // Back from fullscreen: resume the colour-match cadence.
+            self.schedule_options_poll();
+            self.reeval_options_bar();
+        }
+    }
+
+    /// Whether the topbar's screencopy colour-match should be paused: a
+    /// fullscreen client is focused and the overview (which shows the bar on its
+    /// own strip) isn't up.
+    pub(crate) fn options_paused(&self) -> bool {
+        self.options_fullscreen && !self.overview_active
     }
 
     /// Arm the dwell timer that reveals a concealed bar. Idempotent while pending.
