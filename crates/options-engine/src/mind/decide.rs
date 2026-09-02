@@ -2038,6 +2038,113 @@ mod tests {
     }
 
     #[test]
+    fn git_diff_and_open_remote_and_dirty_warning() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "code".into(); // editor → Coding
+        ctx.window.pid = 1;
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/proj".into()),
+            branch: Some("main".into()),
+            is_dirty: true,
+            remote_url: Some("https://github.com/max/proj".into()),
+        };
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        // Dirty tree is a warning; branch is ambient info.
+        let dirty = find(&opts, "git.dirty").expect("dirty warning");
+        assert_eq!(dirty.kind, AffordanceKind::Warning);
+        assert!(find(&opts, "git.branch").is_some());
+        // Diff opens a pager pipeline in a terminal, repo path shell-quoted.
+        let diff = find(&opts, "git.diff").expect("diff control");
+        assert!(matches!(&diff.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "foot" && argv.last().unwrap().contains("git -C '/home/max/proj' diff")));
+        // Open-remote is the browsable URL; detail strips the scheme.
+        let remote = find(&opts, "git.open_remote").expect("open-remote control");
+        assert_eq!(
+            remote.action,
+            AffordanceAction::OpenUrl("https://github.com/max/proj".into())
+        );
+        assert_eq!(remote.detail, "github.com/max/proj");
+        // Clean tree → no dirty warning, no diff, but pull still offered.
+        ctx.git.is_dirty = false;
+        let clean = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert!(find(&clean, "git.dirty").is_none());
+        assert!(find(&clean, "git.diff").is_none());
+        assert!(find(&clean, "git.pull").is_some());
+    }
+
+    #[test]
+    fn git_offers_clear_outside_repo_when_detached_and_without_upstream() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "code".into(); // Coding, so gated controls could show
+        ctx.window.pid = 1;
+        let roomy = Tuning {
+            max_items: 12,
+            ..Default::default()
+        };
+
+        // No repo at all (left the repo / not a git dir) → zero git offers.
+        ctx.git = GitContext::default();
+        let none = decide(&ctx, &roomy);
+        assert!(!none.items.iter().any(|a| a.id.starts_with("git.")));
+
+        // Detached HEAD: a repo_root but no branch name. The module keys off the
+        // branch, so it stays silent rather than acting on an ambiguous head.
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/proj".into()),
+            branch: None,
+            is_dirty: true,
+            remote_url: None,
+        };
+        let detached = decide(&ctx, &roomy);
+        assert!(!detached.items.iter().any(|a| a.id.starts_with("git.")));
+
+        // On a branch but no remote (no upstream configured): commit/push/pull
+        // still offered (push failure is a runtime concern), but there is no
+        // Open-remote without a URL.
+        ctx.git.branch = Some("main".into());
+        let no_upstream = decide(&ctx, &roomy);
+        assert!(find(&no_upstream, "git.commit").is_some());
+        assert!(find(&no_upstream, "git.push").is_some());
+        assert!(find(&no_upstream, "git.pull").is_some());
+        assert!(find(&no_upstream, "git.open_remote").is_none());
+    }
+
+    #[test]
+    fn high_focus_churn_hints_window_switching() {
+        let mut ctx = live_ctx();
+        // Below the threshold → quiet.
+        ctx.behavior.focus_switch_velocity = 0.3;
+        assert!(find(
+            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            "behavior.focus_churn"
+        )
+        .is_none());
+        // Sustained rapid switching → a gentle scaffolding cue (Info).
+        ctx.behavior.focus_switch_velocity = 1.4;
+        let churn = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let c = find(&churn, "behavior.focus_churn").expect("focus-churn cue");
+        assert_eq!(c.kind, AffordanceKind::Action);
+    }
+
+    #[test]
     fn live_mic_offers_a_mute_control() {
         let mut ctx = live_ctx();
         ctx.audio.is_mic_active = true;
