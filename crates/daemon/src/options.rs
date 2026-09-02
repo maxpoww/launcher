@@ -123,6 +123,25 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
 /// cluster that stays clear of the centred window pill.
 const OPTION_PILL_CAP: usize = 5;
 
+/// The `/bin/sh -c` command line for a spawn-style [`options_engine::
+/// AffordanceAction`], or `None` when the action isn't a spawn (or is empty).
+/// Each argv element is shell-quoted, so a path or URL carrying spaces or shell
+/// metacharacters is passed literally — no injection surface even though the
+/// action ultimately runs through a shell. Pure, so the quoting is unit-tested.
+fn action_command_line(action: &options_engine::AffordanceAction) -> Option<String> {
+    use options_engine::AffordanceAction as A;
+    match action {
+        A::Spawn { argv } if !argv.is_empty() => Some(
+            argv.iter()
+                .map(|a| crate::launch::shell_quote(a))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        A::OpenUrl(url) => Some(format!("xdg-open {}", crate::launch::shell_quote(url))),
+        _ => None,
+    }
+}
+
 // Pill backgrounds (resting + hover) are adaptive washes — see
 // `options_rest_wash` / `options_hover_wash`.
 
@@ -1743,23 +1762,13 @@ impl App {
         use options_engine::AffordanceAction as A;
         match action {
             A::None => {}
-            A::Spawn { argv } => {
-                if argv.is_empty() {
-                    return;
-                }
-                let line = argv
-                    .iter()
-                    .map(|a| crate::launch::shell_quote(a))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if let Err(e) = crate::launch::launch(&line, false, &self.config.launch.terminal) {
-                    warn!("options: spawn failed ({}): {e:#}", argv.join(" "));
-                }
-            }
-            A::OpenUrl(url) => {
-                let line = format!("xdg-open {}", crate::launch::shell_quote(url));
-                if let Err(e) = crate::launch::launch(&line, false, &self.config.launch.terminal) {
-                    warn!("options: xdg-open failed: {e:#}");
+            A::Spawn { .. } | A::OpenUrl(_) => {
+                if let Some(line) = action_command_line(action) {
+                    if let Err(e) =
+                        crate::launch::launch(&line, false, &self.config.launch.terminal)
+                    {
+                        warn!("options: action spawn failed ({line}): {e:#}");
+                    }
                 }
             }
             A::HyprDispatch(cmd) => crate::hypr::dispatch(cmd),
@@ -1816,6 +1825,52 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use options_engine::AffordanceAction;
+
+    #[test]
+    fn option_glyphs_map_by_id_and_playpause_by_title() {
+        assert_eq!(glyph_for_option("media.playpause", "Pause"), GLYPH_PAUSE);
+        assert_eq!(glyph_for_option("media.playpause", "Play"), GLYPH_PLAY);
+        assert_eq!(glyph_for_option("media.vol_up", ""), GLYPH_VOL_UP);
+        assert_eq!(glyph_for_option("git.commit", ""), GLYPH_COMMIT);
+        assert_eq!(glyph_for_option("git.push", ""), GLYPH_PUSH);
+        assert_eq!(glyph_for_option("audio.mic_mute", ""), GLYPH_MIC_SLASH);
+        assert_eq!(glyph_for_option("selection.url", ""), GLYPH_COPY_LINK);
+        // An unknown id still gets a (generic) glyph, never a crash.
+        assert_eq!(glyph_for_option("something.new", ""), GLYPH_OPTION);
+    }
+
+    #[test]
+    fn action_command_line_shell_quotes_argv() {
+        // A repo path with a space is passed literally, not word-split.
+        let a = AffordanceAction::Spawn {
+            argv: vec![
+                "git".into(),
+                "-C".into(),
+                "/home/max/my repo".into(),
+                "commit".into(),
+                "-am".into(),
+                "Update (via OPTIONS)".into(),
+            ],
+        };
+        // shell_quote wraps every element, so a space in the path is safe.
+        assert_eq!(
+            action_command_line(&a).unwrap(),
+            "'git' '-C' '/home/max/my repo' 'commit' '-am' 'Update (via OPTIONS)'"
+        );
+        // A URL with shell metacharacters cannot break out of its argument.
+        let u = AffordanceAction::OpenUrl("https://x.test/a?b=1&c=$(rm -rf ~)".into());
+        assert_eq!(
+            action_command_line(&u).unwrap(),
+            "xdg-open 'https://x.test/a?b=1&c=$(rm -rf ~)'"
+        );
+        // None / empty spawn produce no command line.
+        assert_eq!(action_command_line(&AffordanceAction::None), None);
+        assert_eq!(
+            action_command_line(&AffordanceAction::Spawn { argv: vec![] }),
+            None
+        );
+    }
 
     /// The bar's resting wash for a dark (unmatched) bar — what the box
     /// composites over its backdrop.
