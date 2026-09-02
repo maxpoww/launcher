@@ -412,6 +412,16 @@ fn media_controls_provider(ctx: &ContextState) -> Vec<Affordance> {
             action: spawn(&["wpctl", "set-volume", "-l", "1.5", SINK, "5%+"]),
         },
         Affordance {
+            id: "media.mute",
+            kind: AffordanceKind::Control,
+            title: "Mute".into(),
+            detail: String::new(),
+            relevance: 0.605,
+            reason: "mute/unmute the audio",
+            source: Layer::Hardware,
+            action: spawn(&["wpctl", "set-mute", SINK, "toggle"]),
+        },
+        Affordance {
             id: "media.seek_back",
             kind: AffordanceKind::Control,
             title: "Back 10s".into(),

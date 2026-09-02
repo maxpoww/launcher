@@ -85,6 +85,7 @@ const GLYPH_PLAY: &str = "\u{f04b}"; // fa-play
 const GLYPH_PAUSE: &str = "\u{f04c}"; // fa-pause
 const GLYPH_VOL_DOWN: &str = "\u{f027}"; // fa-volume-down
 const GLYPH_VOL_UP: &str = "\u{f028}"; // fa-volume-up
+const GLYPH_VOL_MUTE: &str = "\u{f026}"; // fa-volume-off (mute)
 const GLYPH_BRIGHT_UP: &str = "\u{f185}"; // fa-sun-o
 const GLYPH_BRIGHT_DOWN: &str = "\u{f042}"; // fa-adjust (dim)
 const GLYPH_NEXT: &str = "\u{f051}"; // fa-step-forward
@@ -135,6 +136,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         }
         "media.vol_down" => GLYPH_VOL_DOWN,
         "media.vol_up" => GLYPH_VOL_UP,
+        "media.mute" => GLYPH_VOL_MUTE,
         "media.bright_up" => GLYPH_BRIGHT_UP,
         "media.bright_down" => GLYPH_BRIGHT_DOWN,
         "media.next" => GLYPH_NEXT,
