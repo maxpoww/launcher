@@ -416,7 +416,6 @@ impl ThemeConfig {
     }
 }
 
-
 /// Parse `#rrggbb` or `#rrggbbaa` into RGBA floats.
 fn parse_hex_rgba(s: &str) -> Option<[f32; 4]> {
     let hex = s.strip_prefix('#')?;

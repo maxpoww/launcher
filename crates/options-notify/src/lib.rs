@@ -91,7 +91,10 @@ impl NotificationService {
     /// dismissed).
     pub async fn invoke_action(&self, id: u32, action_key: &str) -> zbus::Result<()> {
         let iface = self.iface().await?;
-        iface.signal_emitter().action_invoked(id, action_key).await?;
+        iface
+            .signal_emitter()
+            .action_invoked(id, action_key)
+            .await?;
         self.close(&iface, id, CLOSE_DISMISSED).await
     }
 
@@ -118,7 +121,10 @@ impl NotificationService {
     ) -> zbus::Result<()> {
         let removed = iface.get_mut().await.remove(id);
         if removed {
-            iface.signal_emitter().notification_closed(id, reason).await?;
+            iface
+                .signal_emitter()
+                .notification_closed(id, reason)
+                .await?;
         }
         Ok(())
     }

@@ -54,8 +54,7 @@ impl Collector for GitCollector {
                 let pid = ctx.borrow_and_update().window.pid;
                 let pid_changed = Some(pid) != last_pid;
                 // Only poll dirty state while we're actually in a repo.
-                let refresh_due =
-                    last_git.repo_root.is_some() && last_refresh.elapsed() >= REFRESH;
+                let refresh_due = last_git.repo_root.is_some() && last_refresh.elapsed() >= REFRESH;
                 if pid_changed || refresh_due {
                     last_pid = Some(pid);
                     last_refresh = Instant::now();
@@ -160,7 +159,10 @@ mod tests {
 
     #[test]
     fn parses_symbolic_head_to_branch() {
-        assert_eq!(parse_head("ref: refs/heads/main\n").as_deref(), Some("main"));
+        assert_eq!(
+            parse_head("ref: refs/heads/main\n").as_deref(),
+            Some("main")
+        );
     }
 
     #[test]

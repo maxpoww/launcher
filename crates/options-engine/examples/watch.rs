@@ -72,7 +72,11 @@ async fn main() {
         if ai.shell_last_cmd.is_some() || ai.editor_file.is_some() || ai.browser_url.is_some() {
             println!(
                 "      ⌁ shell={:?}({:?}) editor={:?}/{:?} url={:?}",
-                ai.shell_last_cmd, ai.shell_exit_code, ai.editor_file, ai.editor_language, ai.browser_url
+                ai.shell_last_cmd,
+                ai.shell_exit_code,
+                ai.editor_file,
+                ai.editor_language,
+                ai.browser_url
             );
         }
     }

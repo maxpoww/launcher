@@ -266,7 +266,10 @@ impl App {
             if let Some(addr) = self.pending_refocus.take() {
                 match self.close_site.take() {
                     Some((ws, last)) if Some(ws) != self.restore_workspace => {
-                        debug!("settled ({:?}); staying on travelled ws {ws}", self.ui.target());
+                        debug!(
+                            "settled ({:?}); staying on travelled ws {ws}",
+                            self.ui.target()
+                        );
                         hypr::focus_workspace(ws);
                         if let Some(last) = last {
                             hypr::focus_window(&last);

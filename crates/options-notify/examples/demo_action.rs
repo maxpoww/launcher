@@ -36,7 +36,9 @@ async fn main() -> zbus::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     svc.invoke_action(id, "default").await?;
-    println!("invoke_action(id={id}, \"default\") done — ActionInvoked + NotificationClosed emitted");
+    println!(
+        "invoke_action(id={id}, \"default\") done — ActionInvoked + NotificationClosed emitted"
+    );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     Ok(())

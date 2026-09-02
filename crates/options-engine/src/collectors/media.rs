@@ -72,7 +72,10 @@ impl Collector for MediaCollector {
                             if last.as_ref() != Some(&state) {
                                 last = Some(state.clone());
                                 if tx
-                                    .send(Update::Delta(Layer::Hardware, ContextDelta::Media(state)))
+                                    .send(Update::Delta(
+                                        Layer::Hardware,
+                                        ContextDelta::Media(state),
+                                    ))
                                     .await
                                     .is_err()
                                 {
@@ -148,7 +151,10 @@ async fn read_player(conn: &Connection, bus_name: &str) -> Option<MediaState> {
         .and_then(|v| HashMap::try_from(v).ok())
         .unwrap_or_default();
 
-    let title = metadata.get("xesam:title").and_then(as_string).unwrap_or_default();
+    let title = metadata
+        .get("xesam:title")
+        .and_then(as_string)
+        .unwrap_or_default();
     let artist = metadata
         .get("xesam:artist")
         .and_then(as_string_list)

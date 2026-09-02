@@ -140,16 +140,18 @@ async fn handle_conn(stream: UnixStream, msg_tx: mpsc::Sender<BridgeMsg>) {
     let mut lines = BufReader::new(stream).lines();
     loop {
         match lines.next_line().await {
-            Ok(Some(line)) if !line.trim().is_empty() => match serde_json::from_str::<BridgeMsg>(&line) {
-                Ok(msg) => {
-                    if msg_tx.send(msg).await.is_err() {
-                        break;
+            Ok(Some(line)) if !line.trim().is_empty() => {
+                match serde_json::from_str::<BridgeMsg>(&line) {
+                    Ok(msg) => {
+                        if msg_tx.send(msg).await.is_err() {
+                            break;
+                        }
                     }
+                    Err(e) => tracing::debug!("bridge: ignoring bad message: {e}"),
                 }
-                Err(e) => tracing::debug!("bridge: ignoring bad message: {e}"),
-            },
-            Ok(Some(_)) => {}    // blank line
-            Ok(None) => break,   // client closed
+            }
+            Ok(Some(_)) => {}  // blank line
+            Ok(None) => break, // client closed
             Err(e) => {
                 tracing::debug!("bridge: read error: {e}");
                 break;
@@ -218,9 +220,10 @@ mod tests {
 
     #[test]
     fn parses_each_kind_ignoring_version_and_extras() {
-        let shell: BridgeMsg =
-            serde_json::from_str(r#"{"v":1,"kind":"shell","last_cmd":"ls","exit_code":0,"cwd":"/x"}"#)
-                .unwrap();
+        let shell: BridgeMsg = serde_json::from_str(
+            r#"{"v":1,"kind":"shell","last_cmd":"ls","exit_code":0,"cwd":"/x"}"#,
+        )
+        .unwrap();
         assert_eq!(
             shell,
             BridgeMsg::Shell {
@@ -228,10 +231,17 @@ mod tests {
                 exit_code: Some(0)
             }
         );
-        let editor: BridgeMsg =
-            serde_json::from_str(r#"{"kind":"editor","file":"/a.rs","language":"rust","diagnostics":3}"#)
-                .unwrap();
-        assert!(matches!(editor, BridgeMsg::Editor { diagnostics: Some(3), .. }));
+        let editor: BridgeMsg = serde_json::from_str(
+            r#"{"kind":"editor","file":"/a.rs","language":"rust","diagnostics":3}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            editor,
+            BridgeMsg::Editor {
+                diagnostics: Some(3),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -282,7 +292,10 @@ mod tests {
             .expect("channel closed");
         match update {
             Update::Delta(Layer::AppBridge, ContextDelta::AppInternal(ctx)) => {
-                assert_eq!(ctx.editor_file.as_deref(), Some(std::path::Path::new("/x.rs")));
+                assert_eq!(
+                    ctx.editor_file.as_deref(),
+                    Some(std::path::Path::new("/x.rs"))
+                );
                 assert_eq!(ctx.editor_language.as_deref(), Some("rust"));
                 assert_eq!(ctx.editor_diagnostics_count, 4);
             }

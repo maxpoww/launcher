@@ -164,6 +164,8 @@ impl UiState {
             | Command::DebugClipDetail
             | Command::DebugNotif
             | Command::DebugDict
+            | Command::DebugOptions
+            | Command::OptionsTrigger(_)
             | Command::OverviewOn
             | Command::OverviewOff
             | Command::ResizeDragOn

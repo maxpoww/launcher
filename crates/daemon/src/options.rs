@@ -19,7 +19,7 @@
 use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
-use tracing::warn;
+use tracing::{info, warn};
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_pointer;
@@ -78,6 +78,50 @@ pub(crate) const GLYPH_BELL_SLASH: &str = "\u{f1f6}"; // fa-bell-slash (mute pil
 pub(crate) const GLYPH_CLIPBOARD: &str = "\u{f0ea}"; // fa-clipboard (clipboard OPTION)
 pub(crate) const GLYPH_COPY: &str = "\u{f0c5}"; // fa-copy (detail-view copy)
 pub(crate) const GLYPH_COPY_LINK: &str = "\u{f0c1}"; // fa-link (copy the page URL)
+
+// Dynamic OPTION-pill glyphs (the Mind's context-aware controls). Keyed by
+// affordance id in `glyph_for_option`.
+const GLYPH_PLAY: &str = "\u{f04b}"; // fa-play
+const GLYPH_PAUSE: &str = "\u{f04c}"; // fa-pause
+const GLYPH_VOL_DOWN: &str = "\u{f027}"; // fa-volume-down
+const GLYPH_VOL_UP: &str = "\u{f028}"; // fa-volume-up
+const GLYPH_BRIGHT_UP: &str = "\u{f185}"; // fa-sun-o
+const GLYPH_BRIGHT_DOWN: &str = "\u{f042}"; // fa-adjust (dim)
+const GLYPH_NEXT: &str = "\u{f051}"; // fa-step-forward
+const GLYPH_PREV: &str = "\u{f048}"; // fa-step-backward
+const GLYPH_MIC_SLASH: &str = "\u{f131}"; // fa-microphone-slash (mute mic)
+const GLYPH_COMMIT: &str = "\u{f00c}"; // fa-check (commit)
+const GLYPH_PUSH: &str = "\u{f093}"; // fa-upload (push)
+const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
+
+/// The Nerd-Font glyph for a dynamic OPTION control, by affordance id. The
+/// play/pause toggle reads its title so it shows the action it WILL perform.
+fn glyph_for_option(id: &str, title: &str) -> &'static str {
+    match id {
+        "media.playpause" => {
+            if title == "Pause" {
+                GLYPH_PAUSE
+            } else {
+                GLYPH_PLAY
+            }
+        }
+        "media.vol_down" => GLYPH_VOL_DOWN,
+        "media.vol_up" => GLYPH_VOL_UP,
+        "media.bright_up" => GLYPH_BRIGHT_UP,
+        "media.bright_down" => GLYPH_BRIGHT_DOWN,
+        "media.next" => GLYPH_NEXT,
+        "media.prev" => GLYPH_PREV,
+        "audio.mic_mute" => GLYPH_MIC_SLASH,
+        "git.commit" => GLYPH_COMMIT,
+        "git.push" => GLYPH_PUSH,
+        "selection.url" => GLYPH_COPY_LINK,
+        _ => GLYPH_OPTION,
+    }
+}
+
+/// How many dynamic OPTION pills the topbar shows at once — a de-cluttered
+/// cluster that stays clear of the centred window pill.
+const OPTION_PILL_CAP: usize = 5;
 
 // Pill backgrounds (resting + hover) are adaptive washes — see
 // `options_rest_wash` / `options_hover_wash`.
@@ -182,6 +226,9 @@ fn draw_z(id: PillId) -> u8 {
         PillId::ClipboardBox => 8,
         PillId::ClipCopyLink => 8,
         PillId::Clipboard => 9,
+        // Dynamic OPTION controls sit in the free left-centre band, overlapping
+        // nothing — drawn first (lowest z).
+        PillId::Option(_) => 0,
     }
 }
 
@@ -223,6 +270,10 @@ pub(crate) enum PillId {
     Close,
     Pseudo,
     Fullscreen,
+    /// A dynamic OPTION control from the Mind (media/git/call/…), identified by
+    /// its index into [`crate::App::actionable_options`]. Clicking it runs that
+    /// affordance's action.
+    Option(u8),
 }
 
 struct Pill {
@@ -409,6 +460,8 @@ fn presence(id: PillId) -> Presence {
         PillId::Pseudo | PillId::Fullscreen => DESKTOP_ONLY,
         // The clipboard serves the window you're working in, not the map.
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => DESKTOP_ONLY,
+        // Context controls act on the focused app — meaningless over the map.
+        PillId::Option(_) => DESKTOP_ONLY,
     }
 }
 
@@ -624,6 +677,34 @@ impl App {
                 family: Some(NERD),
                 glyph_color: None,
             });
+        }
+
+        // Dynamic OPTION pills: the Mind's context-aware controls (media
+        // transport/volume/brightness, git commit/push, mute mic, open link).
+        // Small glyph circles in the free band just right of the clipboard
+        // cluster, in the mind's ranked order. Each carries its index into
+        // `actionable_options()`, which the click handler dispatches.
+        {
+            // Clear the clipboard pill + the copy-link's slide-out slot.
+            let cluster_start = EDGE_PAD + 2.0 * ph + crate::clipboard::LINK_GAP + OPTION_GAP;
+            let glyphs: Vec<(u8, &'static str)> = self
+                .actionable_options()
+                .iter()
+                .take(OPTION_PILL_CAP)
+                .enumerate()
+                .map(|(i, a)| (i as u8, glyph_for_option(a.id, &a.title)))
+                .collect();
+            let mut ox = cluster_start;
+            for (i, glyph) in glyphs {
+                pills.push(Pill {
+                    id: PillId::Option(i),
+                    rect: Rect::new(ox, y, ph, ph),
+                    text: glyph.to_owned(),
+                    family: Some(NERD),
+                    glyph_color: None,
+                });
+                ox += ph + CTRL_GAP;
+            }
         }
 
         // The window name pill is centred *alone* (so it doesn't shift when the
@@ -1085,14 +1166,14 @@ impl App {
             return; // drag already over (or no window): readout cleared
         };
         self.resize_watch_running = true;
-        let armed = self
-            .loop_handle
-            .insert_source(Timer::from_duration(delay), |_, _, app: &mut App| {
-                match app.tick_resize_watch() {
+        let armed =
+            self.loop_handle
+                .insert_source(Timer::from_duration(delay), |_, _, app: &mut App| match app
+                    .tick_resize_watch()
+                {
                     Some(d) => TimeoutAction::ToDuration(d),
                     None => TimeoutAction::Drop,
-                }
-            });
+                });
         if let Err(e) = armed {
             self.resize_watch_running = false;
             warn!("resize-watch timer failed ({e}); no live size readout");
@@ -1312,8 +1393,10 @@ impl App {
                 value,
                 ..
             } if !self.options_hidden
-                && (matches!(self.options_hover, Some(PillId::Clipboard | PillId::ClipboardBox))
-                    || self.clip.expanded) =>
+                && (matches!(
+                    self.options_hover,
+                    Some(PillId::Clipboard | PillId::ClipboardBox)
+                ) || self.clip.expanded) =>
             {
                 self.clip_axis(value as f32);
             }
@@ -1477,8 +1560,7 @@ impl App {
                 continue;
             }
             let target = if reveal { 1.0 } else { 0.0 };
-            let (nt, moving) =
-                ease_toward(self.options_ctrl.t[i], target, dt, CTRL_RATE, CTRL_EPS);
+            let (nt, moving) = ease_toward(self.options_ctrl.t[i], target, dt, CTRL_RATE, CTRL_EPS);
             self.options_ctrl.t[i] = nt;
             active |= moving;
         }
@@ -1607,7 +1689,80 @@ impl App {
             Some(PillId::Clipboard | PillId::ClipboardBox) => self.clip_paste(),
             // Copy the focused browser's current page URL to the clipboard.
             Some(PillId::ClipCopyLink) => self.copy_active_link(),
+            // A dynamic OPTION control from the Mind — run its action.
+            Some(PillId::Option(i)) => self.trigger_option(i as usize),
             _ => {}
+        }
+    }
+
+    /// Run the action of the `idx`-th actionable OPTION offer (the Mind's
+    /// ranked controls). Called from a pill click and from the `options-trigger`
+    /// IPC verb (scripting / verification).
+    pub(crate) fn trigger_option(&mut self, idx: usize) {
+        // Take an owned copy so the immutable borrow of the option set ends
+        // before we run the (mutable-self) action.
+        let picked = self
+            .actionable_options()
+            .get(idx)
+            .map(|a| (a.id.to_string(), a.action.clone()));
+        if let Some((id, action)) = picked {
+            info!("options: trigger '{id}'");
+            self.run_affordance_action(&action);
+        } else {
+            warn!("options: trigger index {idx} out of range");
+        }
+    }
+
+    /// Run an OPTION offer by its affordance id (the `options-trigger <id>` IPC
+    /// verb). Returns whether an actionable offer with that id was found.
+    pub(crate) fn trigger_option_by_id(&mut self, id: &str) -> bool {
+        let action = self
+            .actionable_options()
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.action.clone());
+        match action {
+            Some(action) => {
+                info!("options: trigger '{id}' (by id)");
+                self.run_affordance_action(&action);
+                true
+            }
+            None => {
+                warn!("options: no actionable offer with id '{id}'");
+                false
+            }
+        }
+    }
+
+    /// Execute an [`options_engine::AffordanceAction`]. The engine describes the
+    /// action declaratively; this is where it becomes a real effect. Spawns are
+    /// fully detached (double-fork via [`crate::launch`]); the argv is
+    /// shell-quoted per element, so a path or URL with spaces/metacharacters is
+    /// safe (the argv itself comes from the engine, never raw user text).
+    fn run_affordance_action(&self, action: &options_engine::AffordanceAction) {
+        use options_engine::AffordanceAction as A;
+        match action {
+            A::None => {}
+            A::Spawn { argv } => {
+                if argv.is_empty() {
+                    return;
+                }
+                let line = argv
+                    .iter()
+                    .map(|a| crate::launch::shell_quote(a))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Err(e) = crate::launch::launch(&line, false, &self.config.launch.terminal) {
+                    warn!("options: spawn failed ({}): {e:#}", argv.join(" "));
+                }
+            }
+            A::OpenUrl(url) => {
+                let line = format!("xdg-open {}", crate::launch::shell_quote(url));
+                if let Err(e) = crate::launch::launch(&line, false, &self.config.launch.terminal) {
+                    warn!("options: xdg-open failed: {e:#}");
+                }
+            }
+            A::HyprDispatch(cmd) => crate::hypr::dispatch(cmd),
         }
     }
 

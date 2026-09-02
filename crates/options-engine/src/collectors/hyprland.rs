@@ -100,7 +100,10 @@ async fn query(cmd: &str) -> anyhow::Result<String> {
 }
 
 /// Connect the event socket, seed initial state, then stream until it closes.
-async fn stream_events(tx: &mpsc::Sender<Update>, tracker: &mut FocusTracker) -> anyhow::Result<()> {
+async fn stream_events(
+    tx: &mpsc::Sender<Update>,
+    tracker: &mut FocusTracker,
+) -> anyhow::Result<()> {
     let path = instance_dir()?.join(".socket2.sock");
     let stream = UnixStream::connect(&path)
         .await
@@ -122,7 +125,10 @@ async fn stream_events(tx: &mpsc::Sender<Update>, tracker: &mut FocusTracker) ->
             }
             Some(Event::ActiveLayout(l)) => {
                 let _ = tx
-                    .send(Update::Delta(Layer::Compositor, ContextDelta::ActiveLayout(l)))
+                    .send(Update::Delta(
+                        Layer::Compositor,
+                        ContextDelta::ActiveLayout(l),
+                    ))
                     .await;
             }
             Some(Event::Screencast(on)) => {
@@ -162,7 +168,10 @@ async fn refresh_window(tx: &mpsc::Sender<Update>, tracker: &mut FocusTracker) {
             .await;
     }
     let _ = tx
-        .send(Update::Delta(Layer::Compositor, ContextDelta::Window(window)))
+        .send(Update::Delta(
+            Layer::Compositor,
+            ContextDelta::Window(window),
+        ))
         .await;
 }
 
@@ -226,7 +235,11 @@ fn parse_event(line: &str) -> Option<Event> {
         "submap" => Some(Event::Submap(data.trim().to_owned())),
         // `activelayout>>KEEBNAME,Layout Description` — keep the layout part.
         "activelayout" => Some(Event::ActiveLayout(
-            data.split_once(',').map(|(_, l)| l).unwrap_or(data).trim().to_owned(),
+            data.split_once(',')
+                .map(|(_, l)| l)
+                .unwrap_or(data)
+                .trim()
+                .to_owned(),
         )),
         // `screencast>>STATE,OWNER` — STATE is 0/1.
         "screencast" => Some(Event::Screencast(data.split(',').next() == Some("1"))),
@@ -288,7 +301,10 @@ mod tests {
 
     #[test]
     fn parses_submap_including_empty_default() {
-        assert_eq!(parse_event("submap>>resize"), Some(Event::Submap("resize".into())));
+        assert_eq!(
+            parse_event("submap>>resize"),
+            Some(Event::Submap("resize".into()))
+        );
         assert_eq!(parse_event("submap>>"), Some(Event::Submap(String::new())));
     }
 
@@ -302,8 +318,14 @@ mod tests {
 
     #[test]
     fn parses_screencast_state() {
-        assert_eq!(parse_event("screencast>>1,0"), Some(Event::Screencast(true)));
-        assert_eq!(parse_event("screencast>>0,0"), Some(Event::Screencast(false)));
+        assert_eq!(
+            parse_event("screencast>>1,0"),
+            Some(Event::Screencast(true))
+        );
+        assert_eq!(
+            parse_event("screencast>>0,0"),
+            Some(Event::Screencast(false))
+        );
     }
 
     #[test]
@@ -359,7 +381,7 @@ mod tests {
         assert!(!t.note_focus("0xA")); // same window, no switch
         assert!(t.note_focus("0xB"));
         assert!(t.note_focus("")); // focus lost — a change, but not counted
-        // Two real windows entered within the window ⇒ 2 / 5s.
+                                   // Two real windows entered within the window ⇒ 2 / 5s.
         assert!((t.velocity() - 2.0 / 5.0).abs() < 1e-6);
     }
 }

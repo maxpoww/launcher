@@ -237,10 +237,12 @@ fn main() -> anyhow::Result<()> {
     let (nix_tx, nix_rx) = channel::channel::<nix::Event>();
     let nix = nix::spawn(nix_tx, config.theme.icon_theme.clone());
 
-    // The Brain (options-engine) streams whole context snapshots from its
-    // own tokio thread; the first consumer is the OPTIONS window pill.
+    // The Brain (options-engine) streams whole context snapshots from its own
+    // tokio thread (the window pill, battery), and the Mind streams the ranked
+    // OptionSet (the dynamic OPTION pills — context-aware controls).
     let (brain_tx, brain_rx) = channel::channel::<options_engine::ContextState>();
-    brain::start(brain_tx);
+    let (options_tx, options_rx) = channel::channel::<options_engine::OptionSet>();
+    brain::start(brain_tx, options_tx);
 
     // File thumbnails arrive from their own worker as they render.
     let (thumb_tx, thumb_rx) = channel::channel::<thumbs::Event>();
@@ -477,6 +479,8 @@ fn main() -> anyhow::Result<()> {
         pending_icons: None,
         apps_fingerprint: None,
         brain: None,
+        options: Default::default(),
+        options_sig: Vec::new(),
         overview_active: false,
         battery_alarm: battery::BatteryAlarm::default(),
         battery_beat_epoch: None,
@@ -535,6 +539,15 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("registering brain channel: {e}"))?;
+
+    event_loop
+        .handle()
+        .insert_source(options_rx, |event, _, app| {
+            if let channel::Event::Msg(options) = event {
+                app.on_options(options);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering options channel: {e}"))?;
 
     event_loop
         .handle()
@@ -720,7 +733,8 @@ fn main() -> anyhow::Result<()> {
     } else if applier::needs_apply() {
         app.reconciled = true;
         info!("package list not yet proven applied; reconciling");
-        app.nix.request(nix::Request::EnsureApplied { force: false });
+        app.nix
+            .request(nix::Request::EnsureApplied { force: false });
     }
     // Surface the Recycle Bin on the dock the first time (a one-shot pin; the
     // user can move or unpin it freely afterwards — we never re-pin it).
@@ -1173,6 +1187,13 @@ pub struct App {
     /// Surfaces read it instead of sensing for themselves whenever its
     /// health says the relevant layer is alive (see `brain.rs`).
     brain: Option<options_engine::ContextState>,
+    /// The Mind's latest ranked options — the source of the dynamic OPTION
+    /// pills (context-aware controls) on the topbar. Empty until first light.
+    options: options_engine::OptionSet,
+    /// Signature (id+title of the actionable offers) of the last options set we
+    /// laid out, so a Mind republish that doesn't change the visible controls
+    /// doesn't churn the pill layout.
+    options_sig: Vec<(String, String)>,
     /// The compositor overview (waveview) is open: every waverunner surface
     /// stays concealed and reveals are ignored until it closes.
     overview_active: bool,
@@ -1542,9 +1563,9 @@ impl App {
                 return;
             }
             Command::OverviewResize(size) => {
-                let live = size.split_once('x').and_then(|(w, h)| {
-                    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
-                });
+                let live = size
+                    .split_once('x')
+                    .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)));
                 if live != self.options_resize_live {
                     self.options_resize_live = live;
                     self.measure_options_text();
@@ -1573,6 +1594,35 @@ impl App {
                 self.open_dict();
                 // A word in both dictionaries, to exercise the bilingual answer.
                 self.clip.dict_query = "pie".to_owned();
+                return;
+            }
+            Command::DebugOptions => {
+                // Dump the Mind's live decision for inspection/verification.
+                let o = &self.options;
+                info!(
+                    "debug-options: activity={:?}, {} offer(s) (gen {})",
+                    o.activity,
+                    o.items.len(),
+                    o.generation
+                );
+                for a in &o.items {
+                    info!(
+                        "  [{:.2}] {:?} {} — {} (action: {})",
+                        a.relevance,
+                        a.kind,
+                        a.id,
+                        a.title,
+                        if a.action.is_actionable() {
+                            "yes"
+                        } else {
+                            "—"
+                        }
+                    );
+                }
+                return;
+            }
+            Command::OptionsTrigger(id) => {
+                self.trigger_option_by_id(&id);
                 return;
             }
             _ => {}
@@ -1821,9 +1871,7 @@ impl App {
             .is_none_or(|prev| prev.window != ctx.window);
         // One line when the compositor layer first comes alive — the moment
         // the pill's data source switches from polling to the Brain.
-        if brain::hypr_alive(&ctx)
-            && !self.brain.as_ref().is_some_and(brain::hypr_alive)
-        {
+        if brain::hypr_alive(&ctx) && !self.brain.as_ref().is_some_and(brain::hypr_alive) {
             info!(
                 "brain: compositor layer alive — window pill is engine-driven \
                  (window '{}' [{}])",
@@ -1835,6 +1883,46 @@ impl App {
         if window_changed {
             self.refresh_options_content();
         }
+    }
+
+    /// The Mind published a fresh option set. Store it and, when the visible
+    /// controls actually changed (not just some sensed field the pills don't
+    /// show), relayout the OPTION pills. The Mind republishes on every context
+    /// change, so the signature guard keeps this from churning the bar.
+    fn on_options(&mut self, options: options_engine::OptionSet) {
+        let sig: Vec<(String, String)> = options
+            .items
+            .iter()
+            .filter(|a| a.action.is_actionable())
+            .map(|a| (a.id.to_string(), a.title.clone()))
+            .collect();
+        let changed = sig != self.options_sig;
+        self.options = options;
+        if changed {
+            if !self.options_sig.is_empty() || !sig.is_empty() {
+                info!(
+                    "options: {} control(s) [{}]",
+                    sig.len(),
+                    sig.iter()
+                        .map(|(id, _)| *&id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            self.options_sig = sig;
+            self.refresh_options_content();
+            self.schedule_frame();
+        }
+    }
+
+    /// The actionable OPTION offers (Controls / actionable Actions) the topbar
+    /// should surface as pills, in the Mind's ranked order.
+    pub(crate) fn actionable_options(&self) -> Vec<&options_engine::Affordance> {
+        self.options
+            .items
+            .iter()
+            .filter(|a| a.action.is_actionable())
+            .collect()
     }
 
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {

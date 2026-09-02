@@ -1153,7 +1153,8 @@ impl App {
                     "reconcile: installed packages with no live app: {}; forcing one apply",
                     drifted.join(", ")
                 );
-                self.nix.request(nix::Request::EnsureApplied { force: true });
+                self.nix
+                    .request(nix::Request::EnsureApplied { force: true });
             }
         }
 
@@ -1265,10 +1266,7 @@ impl App {
             let started = Instant::now()
                 .checked_sub(Duration::from_secs_f64(elapsed))
                 .unwrap_or_else(Instant::now);
-            info!(
-                "restoring pending install {} (failed={})",
-                t.attr, t.failed
-            );
+            info!("restoring pending install {} (failed={})", t.attr, t.failed);
             self.managed.stage(&t.attr, t.desktop_ids.clone());
             if !t.failed {
                 self.busy_ids.insert(t.attr.clone());

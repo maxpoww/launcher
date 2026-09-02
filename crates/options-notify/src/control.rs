@@ -37,7 +37,9 @@ impl OptionsControl {
     }
 
     /// Map the current store into the render-facing wire type.
-    pub(crate) fn snapshot(rx: &watch::Receiver<Vec<NotificationEvent>>) -> Vec<ActiveNotification> {
+    pub(crate) fn snapshot(
+        rx: &watch::Receiver<Vec<NotificationEvent>>,
+    ) -> Vec<ActiveNotification> {
         rx.borrow().iter().map(ActiveNotification::from).collect()
     }
 }
@@ -80,4 +82,3 @@ impl OptionsControl {
         notifications: Vec<ActiveNotification>,
     ) -> zbus::Result<()>;
 }
-

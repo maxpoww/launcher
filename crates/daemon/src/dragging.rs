@@ -561,15 +561,17 @@ impl App {
         // append slot — the SH edge-drop bug was exactly this zone
         // resolving to "outside" (the drop no-op'd and snapped back).
         let Some((d, fx, _fy)) = self.apps_display_cell(layout, pos) else {
-            let beside = pos.1 >= vp.y
-                && pos.1 <= vp.y + vp.h
-                && edge_page_dir(vp.x, vp.w, pos.0) != 0;
+            let beside =
+                pos.1 >= vp.y && pos.1 <= vp.y + vp.h && edge_page_dir(vp.x, vp.w, pos.0) != 0;
             let want = beside.then(|| {
                 let cap = self.apps_cap.max(1);
-                let page_start = self
-                    .scroll.per[content::SECTION_APPS]
+                let page_start = self.scroll.per[content::SECTION_APPS]
                     .page(vp.w.max(1.0))
-                    .min(layout.sections[content::SECTION_APPS].n_pages.saturating_sub(1))
+                    .min(
+                        layout.sections[content::SECTION_APPS]
+                            .n_pages
+                            .saturating_sub(1),
+                    )
                     * cap;
                 let append = self
                     .apps_slots
@@ -702,9 +704,7 @@ impl App {
         // a release there lands on the live page (the pointer was parked
         // there flipping pages — treating it as "outside" silently no-op'd
         // the whole drag-to-new-page gesture; SH edge-drop bug).
-        let beside = pos.1 >= vp.y
-            && pos.1 <= vp.y + vp.h
-            && edge_page_dir(vp.x, vp.w, pos.0) != 0;
+        let beside = pos.1 >= vp.y && pos.1 <= vp.y + vp.h && edge_page_dir(vp.x, vp.w, pos.0) != 0;
         if !vp.contains(pos) && !beside {
             // Dropped outside the grid (a dock app snaps back and stays
             // pinned; a grid member dragged out just returns): no-op.

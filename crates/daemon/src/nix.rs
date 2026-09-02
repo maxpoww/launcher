@@ -369,7 +369,8 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
     }
     // A cache that failed to load (missing, unreadable, or an old
     // format) must dump regardless of its file age.
-    if !from_prebuilt && (pkgs.is_empty() || cache_age(&cache).is_none_or(|age| age > REFRESH_AFTER))
+    if !from_prebuilt
+        && (pkgs.is_empty() || cache_age(&cache).is_none_or(|age| age > REFRESH_AFTER))
     {
         match dump_index() {
             Ok(fresh) => {
@@ -976,7 +977,14 @@ fn nix_locate(regex: &str) -> anyhow::Result<std::process::Output> {
     match cmd.args(["--regex", regex]).output() {
         Ok(out) => Ok(out),
         Err(_) => Ok(Command::new("nix")
-            .args(["shell", "nixpkgs#nix-index", "-c", "nix-locate", "--regex", regex])
+            .args([
+                "shell",
+                "nixpkgs#nix-index",
+                "-c",
+                "nix-locate",
+                "--regex",
+                regex,
+            ])
             .output()?),
     }
 }

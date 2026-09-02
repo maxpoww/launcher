@@ -38,17 +38,49 @@ pub enum Activity {
 
 /// Window classes we treat as code editors (substring match, lower-cased).
 const EDITORS: &[&str] = &[
-    "code", "vscodium", "nvim", "vim", "neovide", "emacs", "zed", "sublime_text", "helix", "kate",
-    "jetbrains", "idea", "pycharm", "goland", "clion", "webstorm", "rustrover",
+    "code",
+    "vscodium",
+    "nvim",
+    "vim",
+    "neovide",
+    "emacs",
+    "zed",
+    "sublime_text",
+    "helix",
+    "kate",
+    "jetbrains",
+    "idea",
+    "pycharm",
+    "goland",
+    "clion",
+    "webstorm",
+    "rustrover",
 ];
 /// Terminal emulators.
 const TERMINALS: &[&str] = &[
-    "foot", "alacritty", "kitty", "wezterm", "gnome-terminal", "konsole", "xterm", "urxvt",
-    "terminator", "st", "tilix", "ghostty",
+    "foot",
+    "alacritty",
+    "kitty",
+    "wezterm",
+    "gnome-terminal",
+    "konsole",
+    "xterm",
+    "urxvt",
+    "terminator",
+    "st",
+    "tilix",
+    "ghostty",
 ];
 /// Web browsers.
 const BROWSERS: &[&str] = &[
-    "firefox", "chromium", "chrome", "google-chrome", "brave", "librewolf", "vivaldi", "edge",
+    "firefox",
+    "chromium",
+    "chrome",
+    "google-chrome",
+    "brave",
+    "librewolf",
+    "vivaldi",
+    "edge",
     "zen",
 ];
 

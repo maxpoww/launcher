@@ -113,7 +113,16 @@ impl Notifications {
         } else {
             self.alloc_id()
         };
-        let event = build_event(id, replaces_id, app_name, app_icon, summary, body, &actions, &hints);
+        let event = build_event(
+            id,
+            replaces_id,
+            app_name,
+            app_icon,
+            summary,
+            body,
+            &actions,
+            &hints,
+        );
         // Capture the fields the expiry timer needs before the event moves into
         // the store. `timestamp` is refreshed on every post/replace, so it doubles
         // as the arm token that ties this timer to this exact notification.
@@ -258,7 +267,7 @@ fn build_event(
     body: String,
     actions: &[String],
     hints: &HashMap<String, OwnedValue>,
-    ) -> NotificationEvent {
+) -> NotificationEvent {
     let actions = parse_actions(actions);
     // Resolve the notification's own image, richest source first. The `*-data`
     // hints carry raw pixels; the `*-path` hints and (for Chrome-style web
@@ -552,7 +561,10 @@ mod tests {
         // -1 (server default): critical is sticky, others get a default, low the
         // shortest.
         assert_eq!(effective_expire(-1, UrgencyLevel::Critical), None);
-        assert_eq!(effective_expire(-1, UrgencyLevel::Normal), Some(DEFAULT_EXPIRE_MS));
+        assert_eq!(
+            effective_expire(-1, UrgencyLevel::Normal),
+            Some(DEFAULT_EXPIRE_MS)
+        );
         assert_eq!(effective_expire(-1, UrgencyLevel::Low), Some(LOW_EXPIRE_MS));
         assert!(
             effective_expire(-1, UrgencyLevel::Low).unwrap()

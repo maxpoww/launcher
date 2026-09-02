@@ -272,7 +272,10 @@ mod tests {
         let _g = hold_flag();
         set_reduce_motion(true);
         // The shared glide lands on its target at once, reporting settled.
-        assert_eq!(ease_toward(0.0, 10.0, 1.0 / 144.0, 12.0, 0.5), (10.0, false));
+        assert_eq!(
+            ease_toward(0.0, 10.0, 1.0 / 144.0, 12.0, 0.5),
+            (10.0, false)
+        );
         // Both animator kinds reach settled progress on the first step.
         for cfg in [
             CurveConfig::default(), // spring

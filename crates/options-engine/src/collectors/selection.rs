@@ -135,7 +135,18 @@ fn contains_url(t: &str) -> bool {
 /// deliberately simple — the mind only needs a hint, not a parser).
 fn looks_like_code(t: &str) -> bool {
     const MARKERS: &[&str] = &[
-        "{", "}", ";", "()", "=>", "::", "</", "def ", "fn ", "function ", "import ", "#include",
+        "{",
+        "}",
+        ";",
+        "()",
+        "=>",
+        "::",
+        "</",
+        "def ",
+        "fn ",
+        "function ",
+        "import ",
+        "#include",
         "    ",
     ];
     // A bare URL shouldn't read as code even though it has "://" etc.

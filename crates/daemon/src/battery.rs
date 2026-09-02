@@ -99,17 +99,19 @@ impl App {
             self.battery_aware_until = Some(Instant::now() + Duration::from_secs(AWARE_SECS));
             self.draw_options();
             let timer = Timer::from_duration(Duration::from_secs(AWARE_SECS));
-            let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
-                app.battery_aware_until = None;
-                // Still critical and unplugged after the pause? Sleep deep.
-                if app.battery_alarm == BatteryAlarm::Critical {
-                    warn!("battery: hibernating to preserve the session");
-                    sleep_machine("hibernate");
-                } else {
-                    app.draw_options();
-                }
-                TimeoutAction::Drop
-            });
+            let _ = self
+                .loop_handle
+                .insert_source(timer, |_, _, app: &mut App| {
+                    app.battery_aware_until = None;
+                    // Still critical and unplugged after the pause? Sleep deep.
+                    if app.battery_alarm == BatteryAlarm::Critical {
+                        warn!("battery: hibernating to preserve the session");
+                        sleep_machine("hibernate");
+                    } else {
+                        app.draw_options();
+                    }
+                    TimeoutAction::Drop
+                });
         } else if self.battery_suspend_armed {
             // First crossing while awake: suspend.
             self.battery_suspend_armed = false;
@@ -167,14 +169,16 @@ impl App {
         }
         self.battery_beat_pending = true;
         let timer = Timer::from_duration(Duration::from_millis(33));
-        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
-            app.battery_beat_pending = false;
-            if app.battery_alarm >= BatteryAlarm::Beating {
-                app.draw_options();
-                app.schedule_battery_beat();
-            }
-            TimeoutAction::Drop
-        });
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.battery_beat_pending = false;
+                if app.battery_alarm >= BatteryAlarm::Beating {
+                    app.draw_options();
+                    app.schedule_battery_beat();
+                }
+                TimeoutAction::Drop
+            });
     }
 }
 
@@ -184,13 +188,21 @@ impl App {
 fn notify(body: &str) {
     let r = std::process::Command::new("busctl")
         .args([
-            "--user", "call",
-            "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
-            "org.freedesktop.Notifications", "Notify",
+            "--user",
+            "call",
+            "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
             "susssasa{sv}i",
-            "waverunner", "0", "battery-caution",
-            crate::i18n::tr("Battery low"), body,
-            "0", "0", "10000",
+            "waverunner",
+            "0",
+            "battery-caution",
+            crate::i18n::tr("Battery low"),
+            body,
+            "0",
+            "0",
+            "10000",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

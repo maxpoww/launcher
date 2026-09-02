@@ -7,7 +7,9 @@
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().with_env_filter("options_notify=debug").init();
+    tracing_subscriber::fmt()
+        .with_env_filter("options_notify=debug")
+        .init();
     let svc = match options_notify::NotificationService::start().await {
         Ok(s) => s,
         Err(e) => {
@@ -33,7 +35,8 @@ async fn main() {
                 n.body,
                 n.urgency,
                 n.actions.len(),
-                n.image_dims.map_or("no".into(), |(w, h)| format!("{w}x{h}")),
+                n.image_dims
+                    .map_or("no".into(), |(w, h)| format!("{w}x{h}")),
             );
         }
     }

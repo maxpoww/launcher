@@ -36,8 +36,8 @@ use tracing::{debug, warn};
 use crate::animation::{ease_toward, lerp};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
-    hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD,
-    GLYPH_COPY, LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
+    hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY,
+    LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
 
@@ -318,7 +318,9 @@ fn detect_url(text: &str) -> Option<&str> {
     if t.split_whitespace().count() != 1 {
         return None;
     }
-    let rest = t.strip_prefix("https://").or_else(|| t.strip_prefix("http://"))?;
+    let rest = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))?;
     // A real host has a dot before any path/query, and the scheme isn't the
     // whole string.
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -483,7 +485,10 @@ fn capture(last_hash: &mut Option<u64>) -> Option<ClipEntry> {
     }
     let mut entry = if let Some(mime) = image_mime(&types) {
         classify_image(&mime)?
-    } else if types.iter().any(|t| t == "text/uri-list" || t == GNOME_COPIED) {
+    } else if types
+        .iter()
+        .any(|t| t == "text/uri-list" || t == GNOME_COPIED)
+    {
         let (cut, uri_list) = read_file_clip(&types);
         classify_files(&uri_list, cut)?
     } else if types.iter().any(|t| t.starts_with("text/")) {
@@ -537,7 +542,12 @@ fn capture_window_snapshot(hash: u64) -> Option<PathBuf> {
         }
     }
     let geom = format!("{x},{y} {w}x{h}");
-    match Command::new("grim").arg("-g").arg(&geom).arg(&path).status() {
+    match Command::new("grim")
+        .arg("-g")
+        .arg(&geom)
+        .arg(&path)
+        .status()
+    {
         Ok(s) if s.success() => Some(path),
         Ok(s) => {
             warn!("clip preview: grim exited {s}");
@@ -556,8 +566,15 @@ fn capture_window_snapshot(hash: u64) -> Option<PathBuf> {
 /// browser title suffix (see [`BROWSER_SUFFIXES`]).
 fn is_browser_source(class: &str, title: &str) -> bool {
     const BROWSER_CLASSES: &[&str] = &[
-        "firefox", "chrome", "chromium", "brave", "edge", "vivaldi", "opera",
-        "librewolf", "zen",
+        "firefox",
+        "chrome",
+        "chromium",
+        "brave",
+        "edge",
+        "vivaldi",
+        "opera",
+        "librewolf",
+        "zen",
     ];
     let c = class.to_lowercase();
     if BROWSER_CLASSES.iter().any(|b| c.contains(b)) {
@@ -777,7 +794,10 @@ fn file_offers(uri_list: &str, cut: bool) -> Vec<(String, Vec<u8>)> {
     vec![
         (GNOME_COPIED.to_owned(), gnome.into_bytes()),
         ("text/uri-list".to_owned(), urilist.into_bytes()),
-        ("text/plain;charset=utf-8".to_owned(), paths.clone().into_bytes()),
+        (
+            "text/plain;charset=utf-8".to_owned(),
+            paths.clone().into_bytes(),
+        ),
         ("text/plain".to_owned(), paths.clone().into_bytes()),
         ("UTF8_STRING".to_owned(), paths.into_bytes()),
     ]
@@ -935,7 +955,10 @@ fn one_line(text: &str) -> String {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    cap(&line.split_whitespace().collect::<Vec<_>>().join(" "), PREVIEW_CAP)
+    cap(
+        &line.split_whitespace().collect::<Vec<_>>().join(" "),
+        PREVIEW_CAP,
+    )
 }
 
 fn cap(s: &str, n: usize) -> String {
@@ -1322,7 +1345,13 @@ impl App {
             return;
         };
         entry.paste_count += 1;
-        entry.pastes.insert(0, PasteRecord { target, when_ms: now_ms() });
+        entry.pastes.insert(
+            0,
+            PasteRecord {
+                target,
+                when_ms: now_ms(),
+            },
+        );
         entry.pastes.truncate(PASTE_LOG_CAP);
         self.save_clip_history();
         if self.clip.expanded && self.clip.detail_id.is_some() {
@@ -1672,7 +1701,12 @@ impl App {
         } else {
             (content.y, content.y + content.h)
         };
-        let list_clip = Rect::new(content.x, list_top, content.w, (card_top - list_top).max(0.0));
+        let list_clip = Rect::new(
+            content.x,
+            list_top,
+            content.w,
+            (card_top - list_top).max(0.0),
+        );
         if list_clip.h > 0.5 {
             for (idx, rr) in self.clip_rows(rect) {
                 self.push_clip_row(
@@ -1778,7 +1812,11 @@ impl App {
             let on_x = self.clip.hit == ClipHit::Delete(idx);
             // No red on the target — brighten to the hover ink instead. The list
             // can is also a touch larger than the detail/footer ones.
-            let xc = if on_x { hover_ink } else { [ink[0], ink[1], ink[2], ink[3]] };
+            let xc = if on_x {
+                hover_ink
+            } else {
+                [ink[0], ink[1], ink[2], ink[3]]
+            };
             scene.labels.push(Label {
                 text: GLYPH_TRASH.to_owned(),
                 pos: (dr.x + dr.w / 2.0, dr.y + (dr.h - LINE_PX) / 2.0),
@@ -1972,7 +2010,12 @@ impl App {
         // ---- "‹ Back" button (same seat / visuals as the detail view) ----
         let back = self.clip_dict_back_rect(rect);
         let hv = self.clip.hit == ClipHit::Back;
-        let bcol = [ink[0], ink[1], ink[2], ink[3] * if hv { 1.0 } else { 0.72 } * a];
+        let bcol = [
+            ink[0],
+            ink[1],
+            ink[2],
+            ink[3] * if hv { 1.0 } else { 0.72 } * a,
+        ];
         let cy = back.y + (back.h - LINE_PX) / 2.0;
         let gclip = Rect::new(back.x - 4.0, back.y - 4.0, back.w + 8.0, back.h + 8.0);
         scene.labels.push(Label {
@@ -2085,7 +2128,9 @@ impl App {
             if !line.text.is_empty() && y + line.advance > res.y && y < res.y + res.h {
                 let c = match line.kind {
                     DictLineKind::Lang => [ink[0], ink[1], ink[2], ink[3] * 0.85 * a],
-                    DictLineKind::Etym => [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * 0.8 * a],
+                    DictLineKind::Etym => {
+                        [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * 0.8 * a]
+                    }
                     DictLineKind::Body => [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * a],
                 };
                 scene.labels.push(Label {
@@ -2182,7 +2227,7 @@ impl App {
         };
         if self.clip.expanded {
             self.clip.hold_deadline = None; // a scroll keeps it open
-            // In the dictionary panel, the wheel scrolls the answer.
+                                            // In the dictionary panel, the wheel scrolls the answer.
             if self.clip.dict_open {
                 let span = self.clip_dict_scroll_span();
                 self.clip.dict_scroll_target =
@@ -2373,7 +2418,12 @@ impl App {
     /// view's back button (top-left, aligned with the pill row).
     fn clip_dict_back_rect(&self, rect: Rect) -> Rect {
         let d = self.clip_band_h();
-        Rect::new(rect.x + DETAIL_PILL_X, rect.y + DETAIL_PILL_Y, DETAIL_BACK_W, d)
+        Rect::new(
+            rect.x + DETAIL_PILL_X,
+            rect.y + DETAIL_PILL_Y,
+            DETAIL_BACK_W,
+            d,
+        )
     }
 
     /// The dictionary panel's geometry: `(search field, answer area)`. Shared by
@@ -2447,7 +2497,11 @@ impl App {
     fn clip_dict_scroll_span(&self) -> f32 {
         let rect = self.clip_rect();
         let (_, res) = self.clip_dict_layout(rect);
-        let total: f32 = self.dict_answer_lines(res.w).iter().map(|l| l.advance).sum();
+        let total: f32 = self
+            .dict_answer_lines(res.w)
+            .iter()
+            .map(|l| l.advance)
+            .sum();
         (total - res.h).max(0.0)
     }
 
@@ -2612,7 +2666,10 @@ impl App {
         let d = self.clip_band_h();
         let y = rect.y + DETAIL_PILL_Y;
         // Left: the text back button.
-        let mut out = vec![(ClipHit::Back, Rect::new(rect.x + DETAIL_PILL_X, y, DETAIL_BACK_W, d))];
+        let mut out = vec![(
+            ClipHit::Back,
+            Rect::new(rect.x + DETAIL_PILL_X, y, DETAIL_BACK_W, d),
+        )];
         // Right cluster, in left→right order.
         let mut cluster = vec![ClipHit::DetailCopy];
         if self.clip_detail_entry().is_some_and(|e| e.is_link()) {
@@ -2625,7 +2682,10 @@ impl App {
         let n = cluster.len();
         for (i, hit) in cluster.into_iter().enumerate() {
             let j = (n - 1 - i) as f32; // 0 = rightmost
-            out.push((hit, Rect::new(rx - (j + 1.0) * d - j * DETAIL_PILL_GAP, y, d, d)));
+            out.push((
+                hit,
+                Rect::new(rx - (j + 1.0) * d - j * DETAIL_PILL_GAP, y, d, d),
+            ));
         }
         out
     }
@@ -2950,7 +3010,8 @@ impl App {
                     let a = if hv { 1.0 } else { 0.72 };
                     let col = [ink0[0], ink0[1], ink0[2], ink0[3] * a * pa];
                     let cy = prect.y + (prect.h - LINE_PX) / 2.0;
-                    let gclip = Rect::new(prect.x - 4.0, prect.y - 4.0, prect.w + 8.0, prect.h + 8.0);
+                    let gclip =
+                        Rect::new(prect.x - 4.0, prect.y - 4.0, prect.w + 8.0, prect.h + 8.0);
                     scene.labels.push(Label {
                         text: GLYPH_BACK.to_owned(),
                         pos: (prect.x, cy),
@@ -3084,8 +3145,8 @@ impl App {
                     .filter(|e| e.is_link())
                     .map(|e| e.text.trim().to_owned());
                 if let Some(url) = url {
-                    let as_webapp = crate::webapps::url_host(&url)
-                        .is_some_and(|h| self.link_has_webapp(h));
+                    let as_webapp =
+                        crate::webapps::url_host(&url).is_some_and(|h| self.link_has_webapp(h));
                     let exec = if as_webapp {
                         crate::webapps::app_open_exec(&url)
                     } else {
@@ -3454,12 +3515,12 @@ impl App {
     pub(crate) fn copy_active_link(&mut self) {
         let (class, title) = crate::hypr::active_window_where().unwrap_or_default();
         if crate::webapps::is_app_window(&class) {
-            std::thread::spawn(move || {
-                match crate::webapps::active_app_url(&class, &title) {
+            std::thread::spawn(
+                move || match crate::webapps::active_app_url(&class, &title) {
                     Some(url) => wl_copy("text/plain;charset=utf-8", url.as_bytes()),
                     None => warn!("copy-link: no URL for webapp {class} (debug port up?)"),
-                }
-            });
+                },
+            );
             return;
         }
         crate::hypr::send_shortcut_active("CTRL", "l");
@@ -3471,12 +3532,14 @@ impl App {
     fn after_ms(&self, ms: u64, f: impl FnOnce(&mut App) + 'static) {
         let timer = Timer::from_duration(Duration::from_millis(ms));
         let mut f = Some(f);
-        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
-            if let Some(f) = f.take() {
-                f(app);
-            }
-            TimeoutAction::Drop
-        });
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                if let Some(f) = f.take() {
+                    f(app);
+                }
+                TimeoutAction::Drop
+            });
     }
 
     /// After the pointer leaves, hold briefly then collapse the preview.
@@ -3564,7 +3627,7 @@ impl App {
         }
         let p = self.clip.detail_p;
         self.clip.detail_t = p * p * (3.0 - 2.0 * p); // smoothstep
-        // The close morph is done: drop the entry reference.
+                                                      // The close morph is done: drop the entry reference.
         if !self.clip.detail_open && self.clip.detail_p <= 0.0 {
             self.clip.detail_id = None;
         }
@@ -3603,8 +3666,13 @@ impl App {
         // Ease the open-box height toward its content-fit target (smooth on a
         // content change); only while open, so there's no idle churn collapsed.
         let bm = if self.clip.expand_t > MORPH_EPS {
-            let (bh, moving) =
-                ease_toward(self.clip.box_h, self.clip_full_h(), dt, MORPH_RATE * 1.3, 0.5);
+            let (bh, moving) = ease_toward(
+                self.clip.box_h,
+                self.clip_full_h(),
+                dt,
+                MORPH_RATE * 1.3,
+                0.5,
+            );
             self.clip.box_h = bh;
             moving
         } else {
@@ -3731,7 +3799,10 @@ fn clip_tile(entry: &ClipEntry) -> ClipTile {
             let Some(path) = first_file_path(&entry.text) else {
                 return ClipTile::Glyph(GLYPH_FILES);
             };
-            if std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+            if std::fs::metadata(&path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
                 ClipTile::Glyph(GLYPH_FOLDER)
             } else if crate::thumbs::thumbable(&path) {
                 let key = hash_bytes(path.as_bytes());
@@ -3850,10 +3921,7 @@ fn fmt_datetime(ms: u64) -> String {
             .copied()
             .map(crate::i18n::tr)
             .unwrap_or("");
-        format!(
-            "{mon} {} · {:02}:{:02}",
-            tm.tm_mday, tm.tm_hour, tm.tm_min
-        )
+        format!("{mon} {} · {:02}:{:02}", tm.tm_mday, tm.tm_hour, tm.tm_min)
     }
 }
 
@@ -3956,13 +4024,13 @@ mod tests {
     #[test]
     fn strips_only_known_browser_suffixes() {
         assert_eq!(clean_link_title("Rickroll - YouTube"), "Rickroll - YouTube"); // "YouTube" not a browser
-        assert_eq!(
-            clean_link_title("My Page — Mozilla Firefox"),
-            "My Page"
-        );
+        assert_eq!(clean_link_title("My Page — Mozilla Firefox"), "My Page");
         assert_eq!(clean_link_title("Docs - Google Chrome"), "Docs");
         // A legitimate " - " in the title with an unknown tail is left intact.
-        assert_eq!(clean_link_title("Fixes - a retrospective"), "Fixes - a retrospective");
+        assert_eq!(
+            clean_link_title("Fixes - a retrospective"),
+            "Fixes - a retrospective"
+        );
     }
 
     #[test]
@@ -3991,8 +4059,7 @@ mod tests {
 
     #[test]
     fn parses_gnome_copied_verb_and_uris() {
-        let (cut, uris) =
-            parse_gnome_copied("cut\nfile:///home/max/a.txt\nfile:///home/max/b.txt");
+        let (cut, uris) = parse_gnome_copied("cut\nfile:///home/max/a.txt\nfile:///home/max/b.txt");
         assert!(cut);
         assert_eq!(uris, "file:///home/max/a.txt\nfile:///home/max/b.txt");
 
@@ -4013,7 +4080,11 @@ mod tests {
     fn file_offers_carry_verb_and_all_types() {
         let offers = file_offers("file:///home/max/a%20b.txt\nfile:///home/max/c.txt", true);
         let by = |m: &str| -> Vec<u8> {
-            offers.iter().find(|(k, _)| k == m).map(|(_, v)| v.clone()).unwrap()
+            offers
+                .iter()
+                .find(|(k, _)| k == m)
+                .map(|(_, v)| v.clone())
+                .unwrap()
         };
         // x-special/gnome-copied-files carries the cut verb + raw URIs.
         assert_eq!(

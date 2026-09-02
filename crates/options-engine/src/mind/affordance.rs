@@ -94,16 +94,7 @@ pub struct Affordance {
     /// What triggering it does. `None` for pure information; a real action for
     /// a [`AffordanceKind::Control`] (or an actionable `Action`). This is the
     /// field that turns a described offer into a working button.
-    #[serde(default = "AffordanceAction::none_default")]
     pub action: AffordanceAction,
-}
-
-impl AffordanceAction {
-    /// Serde default for [`Affordance::action`] so older serialized affordances
-    /// (or hand-written ones) deserialize to the inert `None`.
-    fn none_default() -> Self {
-        AffordanceAction::None
-    }
 }
 
 /// The mind's output: the ranked, suppressed, capped set of options for one

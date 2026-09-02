@@ -30,12 +30,26 @@
 //! [`Health`]: options_engine::Health
 
 use calloop::channel::Sender;
-use options_engine::{ContextState, Engine};
+use options_engine::{ContextState, Engine, Mind, OptionSet, Tuning};
 use tracing::{info, warn};
 
-/// Spawn the Brain thread: engine + subscription, snapshots forwarded into
-/// the event loop until the receiving end closes (UI gone).
-pub fn start(tx: Sender<ContextState>) {
+/// The daemon's decision tuning. A roomier `max_items` than the engine default
+/// (3): the topbar's OPTION cluster wants the whole context-relevant control
+/// set (e.g. a media cluster) available, and the surface budgets how many pills
+/// it actually shows — the mind still ranks and drops the irrelevant.
+fn daemon_tuning() -> Tuning {
+    Tuning {
+        min_relevance: 0.2,
+        max_items: 8,
+        skill: 0.5,
+    }
+}
+
+/// Spawn the Brain thread: the sensing engine AND the deciding [`Mind`]. Raw
+/// context snapshots go to `ctx_tx` (the window pill, battery); the Mind's
+/// ranked [`OptionSet`] goes to `opt_tx` (the dynamic OPTION pills). Both flow
+/// until their receiving end closes (UI gone).
+pub fn start(ctx_tx: Sender<ContextState>, opt_tx: Sender<OptionSet>) {
     let spawned = std::thread::Builder::new()
         .name("options-brain".into())
         .spawn(move || {
@@ -51,16 +65,34 @@ pub fn start(tx: Sender<ContextState>) {
             };
             rt.block_on(async move {
                 let engine = Engine::start();
-                let mut rx = engine.subscribe();
-                info!("brain: engine started, streaming context");
+                // The Mind must outlive the loop (its Drop aborts the decide
+                // task), so bind it here for the whole block.
+                let mind = Mind::new(&engine, daemon_tuning());
+                let mut ctx_rx = engine.subscribe();
+                let mut opt_rx = mind.subscribe();
+                info!("brain: engine + mind started, streaming context and options");
                 loop {
-                    if rx.changed().await.is_err() {
-                        warn!("brain: engine watch closed");
-                        return;
-                    }
-                    let snapshot = rx.borrow_and_update().clone();
-                    if tx.send(snapshot).is_err() {
-                        return; // event loop is gone
+                    tokio::select! {
+                        r = ctx_rx.changed() => {
+                            if r.is_err() {
+                                warn!("brain: engine watch closed");
+                                return;
+                            }
+                            let snapshot = ctx_rx.borrow_and_update().clone();
+                            if ctx_tx.send(snapshot).is_err() {
+                                return; // event loop is gone
+                            }
+                        }
+                        r = opt_rx.changed() => {
+                            if r.is_err() {
+                                warn!("brain: mind watch closed");
+                                return;
+                            }
+                            let options = opt_rx.borrow_and_update().clone();
+                            if opt_tx.send(options).is_err() {
+                                return; // event loop is gone
+                            }
+                        }
                     }
                 }
             });

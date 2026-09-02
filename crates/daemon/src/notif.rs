@@ -449,7 +449,6 @@ impl NotifState {
         self.expand_t > 0.01
     }
 
-
     /// Peek-morph progress (0 = bell at rest, 1 = fully-grown preview pill). The
     /// mute pill behind the bell is uncovered by exactly this fraction, so the
     /// draw/hit code gates on it.
@@ -976,8 +975,8 @@ impl App {
             if name.is_empty() || looks_like_host(name.trim_end_matches('/')) {
                 continue;
             }
-            if let Some(icon) =
-                self.entry_icon(|e| e.id.starts_with("webapp-") && e.name.eq_ignore_ascii_case(&name))
+            if let Some(icon) = self
+                .entry_icon(|e| e.id.starts_with("webapp-") && e.name.eq_ignore_ascii_case(&name))
             {
                 return Some(icon);
             }
@@ -1350,7 +1349,10 @@ impl App {
                 let a = [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * pa];
                 scene.labels.push(Label {
                     text: crate::i18n::tr("No notifications").to_owned(),
-                    pos: (content.x + content.w / 2.0, content.y + (content.h - LINE_PX) / 2.0),
+                    pos: (
+                        content.x + content.w / 2.0,
+                        content.y + (content.h - LINE_PX) / 2.0,
+                    ),
                     max_w: content.w,
                     font_px: FONT_PX,
                     line_px: LINE_PX,
@@ -1364,8 +1366,21 @@ impl App {
             }
         } else if pa > 0.01 && (e <= 0.01 || morphing) {
             self.push_notif_top_card(
-                scene, 0, rect, content, ph, e, pa, band_ty, tx, right, radius, ink, dim_ink,
-                hover_ink, stripe_opaque,
+                scene,
+                0,
+                rect,
+                content,
+                ph,
+                e,
+                pa,
+                band_ty,
+                tx,
+                right,
+                radius,
+                ink,
+                dim_ink,
+                hover_ink,
+                stripe_opaque,
             );
             // Cards below the morphing top, pushed down as it grows.
             if e > 0.01 {
@@ -1378,8 +1393,17 @@ impl App {
                     if y + h > content.y {
                         let crect = Rect::new(rect.x, y, rect.w, h);
                         self.push_notif_card(
-                            scene, idx, crect, content, radius, e, ink, dim_ink, hover_ink,
-                            stripe_opaque, expanded_fill,
+                            scene,
+                            idx,
+                            crect,
+                            content,
+                            radius,
+                            e,
+                            ink,
+                            dim_ink,
+                            hover_ink,
+                            stripe_opaque,
+                            expanded_fill,
                         );
                     }
                     y += h;
@@ -1390,7 +1414,16 @@ impl App {
             // same layout the hit-test uses, so they never disagree).
             for (idx, crect) in self.notif_cards(rect) {
                 self.push_notif_card(
-                    scene, idx, crect, content, radius, e, ink, dim_ink, hover_ink, stripe_opaque,
+                    scene,
+                    idx,
+                    crect,
+                    content,
+                    radius,
+                    e,
+                    ink,
+                    dim_ink,
+                    hover_ink,
+                    stripe_opaque,
                     expanded_fill,
                 );
             }
@@ -1520,7 +1553,11 @@ impl App {
         // many MORE notifications are hidden in the history (the one on the pill
         // isn't counted). Resets once you open the box (all read). Fades out as the
         // box opens.
-        let count = if idx == 0 { self.notif_hidden_count() } else { 0 };
+        let count = if idx == 0 {
+            self.notif_hidden_count()
+        } else {
+            0
+        };
         let badge_num = (count > 0).then(|| format!("+{count}"));
         let chip_h = LINE_PX;
         let chip_w = badge_num.as_ref().map_or(0.0, |n| {
@@ -1536,12 +1573,7 @@ impl App {
         if let Some(n) = badge_num {
             if e < 0.999 {
                 let a = 1.0 - e;
-                let cr = Rect::new(
-                    badge_x,
-                    header_y + (LINE_PX - chip_h) / 2.0,
-                    chip_w,
-                    chip_h,
-                );
+                let cr = Rect::new(badge_x, header_y + (LINE_PX - chip_h) / 2.0, chip_w, chip_h);
                 scene.rects.push(RectInst {
                     rect: cr,
                     radius: chip_h / 2.0,
@@ -1580,14 +1612,9 @@ impl App {
                 header_right
             };
             let time_x = (time_right - time_w).max(header_x);
-            scene.labels.push(mk_line(
-                time,
-                time_x,
-                header_y,
-                time_w + 2.0,
-                dim,
-                content,
-            ));
+            scene
+                .labels
+                .push(mk_line(time, time_x, header_y, time_w + 2.0, dim, content));
             sum_right = time_x - TEXT_GAP;
         } else if has_badge {
             sum_right = (badge_x - TEXT_GAP).max(header_x);
@@ -2052,7 +2079,11 @@ impl App {
     /// remain, so glancing at the pill (which reads only the newest) doesn't clear
     /// it if more are still hidden in the history.
     fn notif_unread(&self) -> usize {
-        self.notif.history.iter().filter(|h| self.notif_is_unread(h)).count()
+        self.notif
+            .history
+            .iter()
+            .filter(|h| self.notif_is_unread(h))
+            .count()
     }
 
     /// Unread notifications *hidden in the history* — everything except the newest
@@ -2207,9 +2238,7 @@ impl App {
         let _ = self
             .loop_handle
             .insert_source(timer, move |_, _, _app: &mut App| {
-                let focused = class
-                    .as_deref()
-                    .is_some_and(crate::hypr::focus_exact_class);
+                let focused = class.as_deref().is_some_and(crate::hypr::focus_exact_class);
                 if !focused {
                     let _ = crate::launch::launch(&exec, false, "");
                 }
@@ -2377,8 +2406,8 @@ impl App {
         self.notif.hold_deadline = None;
         self.notif.expanded = true;
         self.mark_notif_read(); // opening the box = reading them
-        // Seed the eased box height to the current content so the open morph plays
-        // from the pill up to the right size (not from a stale height).
+                                // Seed the eased box height to the current content so the open morph plays
+                                // from the pill up to the right size (not from a stale height).
         self.notif.box_h = self.notif_full_h(self.notif_band_h());
         self.notif.list_scroll = 0.0;
         self.notif.scroll_target = 0.0;
@@ -2417,8 +2446,7 @@ impl App {
         } else {
             // Pointer left the pill — the click-suppression lifts.
             self.notif.peek_suppressed = false;
-            if (self.notif.peek_reveal || self.notif.expanded)
-                && self.notif.hold_deadline.is_none()
+            if (self.notif.peek_reveal || self.notif.expanded) && self.notif.hold_deadline.is_none()
             {
                 self.schedule_notif_collapse(LEAVE_HOLD);
             }
@@ -3224,7 +3252,6 @@ fn mk_line(text: String, x: f32, y: f32, max_w: f32, color: [f32; 4], clip: Rect
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3289,7 +3316,10 @@ mod tests {
     /// `&amp;quot;`) fully unescape, and tofu emoji are dropped.
     #[test]
     fn strip_markup_double_decodes_and_drops_emoji() {
-        assert_eq!(strip_markup("Reacted 😂 to &amp;quot;hi&amp;quot;"), "Reacted to \"hi\"");
+        assert_eq!(
+            strip_markup("Reacted 😂 to &amp;quot;hi&amp;quot;"),
+            "Reacted to \"hi\""
+        );
         assert_eq!(strip_markup("✔ done 🔗"), "done");
     }
 

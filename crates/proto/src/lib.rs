@@ -53,6 +53,14 @@ pub enum Command {
     /// Debug/verification: force-open the clipboard box on the dictionary
     /// "define a word" panel, pre-filled with a sample query.
     DebugDict,
+    /// Debug/verification: log the Mind's current OptionSet (activity + the
+    /// ranked offers with their ids/actions) to the journal, so the OPTIONS
+    /// engine's live decisions can be inspected without a GUI click.
+    DebugOptions,
+    /// Trigger the dynamic OPTION offer with this affordance id (e.g.
+    /// `media.playpause`, `git.commit`) — the same action a click on its pill
+    /// runs. Exposed for scripting and for verifying the action end to end.
+    OptionsTrigger(String),
     /// The compositor overview opened: conceal every waverunner surface
     /// (topbar + dock) and ignore reveals until `OverviewOff`.
     OverviewOn,
@@ -99,6 +107,8 @@ impl fmt::Display for Command {
             Command::DebugClipDetail => f.write_str("debug-clip-detail"),
             Command::DebugNotif => f.write_str("debug-notif"),
             Command::DebugDict => f.write_str("debug-dict"),
+            Command::DebugOptions => f.write_str("debug-options"),
+            Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
             Command::ResizeDragOn => f.write_str("resize-drag-on"),
@@ -122,8 +132,18 @@ impl FromStr for Command {
         // spacing).
         let line = s.trim_end_matches(['\n', '\r']);
         for (verb, wrap) in [
-            ("overview-hover", Command::OverviewHover as fn(String) -> Command),
-            ("overview-resize", Command::OverviewResize as fn(String) -> Command),
+            (
+                "overview-hover",
+                Command::OverviewHover as fn(String) -> Command,
+            ),
+            (
+                "overview-resize",
+                Command::OverviewResize as fn(String) -> Command,
+            ),
+            (
+                "options-trigger",
+                Command::OptionsTrigger as fn(String) -> Command,
+            ),
         ] {
             if let Some(rest) = line.strip_prefix(verb) {
                 // `verb` alone (or `verb ` + text) — anything else is a
@@ -146,6 +166,7 @@ impl FromStr for Command {
             "debug-clip-detail" => Ok(Command::DebugClipDetail),
             "debug-notif" => Ok(Command::DebugNotif),
             "debug-dict" => Ok(Command::DebugDict),
+            "debug-options" => Ok(Command::DebugOptions),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
@@ -229,11 +250,24 @@ mod tests {
             Command::DebugClipDetail,
             Command::DebugNotif,
             Command::DebugDict,
+            Command::DebugOptions,
             Command::OverviewOn,
             Command::OverviewOff,
         ] {
             assert_eq!(cmd.to_string().parse::<Command>().unwrap(), cmd);
         }
+    }
+
+    #[test]
+    fn options_trigger_roundtrips_with_payload() {
+        let cmd = Command::OptionsTrigger("media.playpause".into());
+        assert_eq!(cmd.to_string(), "options-trigger media.playpause");
+        assert_eq!(cmd.to_string().parse::<Command>().unwrap(), cmd);
+        // Bare verb → empty id.
+        assert_eq!(
+            "options-trigger".parse::<Command>().unwrap(),
+            Command::OptionsTrigger(String::new())
+        );
     }
 
     #[test]

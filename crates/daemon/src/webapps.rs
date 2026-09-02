@@ -67,12 +67,16 @@ fn profile_dir() -> PathBuf {
 /// attaches to it instead of spawning a rival process.
 pub fn clear_stale_profile_lock_for(exec: &str) {
     let profile = profile_dir();
-    let Some(profile_str) = profile.to_str() else { return };
+    let Some(profile_str) = profile.to_str() else {
+        return;
+    };
     if !exec.contains(profile_str) {
         return; // not a webapp launch
     }
     let lock = profile.join("SingletonLock");
-    let Ok(target) = std::fs::read_link(&lock) else { return }; // no lock → nothing to clear
+    let Ok(target) = std::fs::read_link(&lock) else {
+        return;
+    }; // no lock → nothing to clear
     let target = target.to_string_lossy();
     if lock_is_live(&target, &hostname()) {
         return;
@@ -121,7 +125,9 @@ fn class_host(class: &str) -> Option<&str> {
 
 /// The host of an http(s) URL.
 pub fn url_host(url: &str) -> Option<&str> {
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
     Some(rest.split(['/', '?', '#']).next().unwrap_or(""))
 }
 
@@ -176,7 +182,12 @@ pub fn app_open_exec(url: &str) -> String {
 pub fn active_app_url(class: &str, title: &str) -> Option<String> {
     let host = class_host(class)?;
     let out = Command::new("curl")
-        .args(["-s", "--max-time", "2", &format!("http://127.0.0.1:{CDP_PORT}/json/list")])
+        .args([
+            "-s",
+            "--max-time",
+            "2",
+            &format!("http://127.0.0.1:{CDP_PORT}/json/list"),
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -195,7 +206,12 @@ fn pick_page_url(targets: &[serde_json::Value], host: &str, title: &str) -> Opti
     let pages: Vec<&serde_json::Value> = targets
         .iter()
         .filter(|t| t["type"] == "page")
-        .filter(|t| t["url"].as_str().and_then(url_host).is_some_and(|h| h == host))
+        .filter(|t| {
+            t["url"]
+                .as_str()
+                .and_then(url_host)
+                .is_some_and(|h| h == host)
+        })
         .collect();
     let pick = pages
         .iter()
@@ -203,7 +219,6 @@ fn pick_page_url(targets: &[serde_json::Value], host: &str, title: &str) -> Opti
         .or_else(|| pages.first());
     pick?.get("url")?.as_str().map(str::to_owned)
 }
-
 
 /// One curated web-app from the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,8 +433,14 @@ mod tests {
         assert!(is_app_window("chrome-www.youtube.com__-Default"));
         assert!(!is_app_window("google-chrome"));
         assert!(!is_app_window("firefox"));
-        assert_eq!(class_host("chrome-www.youtube.com__-Default"), Some("www.youtube.com"));
-        assert_eq!(url_host("https://www.youtube.com/watch?v=x"), Some("www.youtube.com"));
+        assert_eq!(
+            class_host("chrome-www.youtube.com__-Default"),
+            Some("www.youtube.com")
+        );
+        assert_eq!(
+            url_host("https://www.youtube.com/watch?v=x"),
+            Some("www.youtube.com")
+        );
     }
 
     #[test]
@@ -491,8 +512,9 @@ mod tests {
         };
         assert_eq!(e.desktop_id(), "webapp-netflix");
         let exec = e.exec();
-        assert!(exec
-            .starts_with("google-chrome-stable --app=https://www.netflix.com --disable-client-side-decorations"));
+        assert!(exec.starts_with(
+            "google-chrome-stable --app=https://www.netflix.com --disable-client-side-decorations"
+        ));
         assert!(exec.contains(&format!("--remote-debugging-port={CDP_PORT}")));
         assert!(exec.contains("--user-data-dir="));
         assert_eq!(e.wm_class(), "chrome-www.netflix.com__-Default");

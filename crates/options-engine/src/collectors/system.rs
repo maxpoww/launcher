@@ -63,7 +63,10 @@ impl Collector for SystemCollector {
                     is_charging,
                 };
                 if tx
-                    .send(Update::Delta(Layer::Hardware, ContextDelta::Metrics(metrics)))
+                    .send(Update::Delta(
+                        Layer::Hardware,
+                        ContextDelta::Metrics(metrics),
+                    ))
                     .await
                     .is_err()
                 {

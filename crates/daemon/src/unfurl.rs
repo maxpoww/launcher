@@ -156,7 +156,14 @@ fn youtube_oembed(url: &str) -> Option<(String, String)> {
 /// failure (curl absent, network error, non-2xx). Extra args go before the URL.
 fn fetch(url: &str, extra: &[&str]) -> Option<String> {
     let out = Command::new("curl")
-        .args(["-sL", "--max-time", TIMEOUT_SECS, "-A", USER_AGENT, "--fail"])
+        .args([
+            "-sL",
+            "--max-time",
+            TIMEOUT_SECS,
+            "-A",
+            USER_AGENT,
+            "--fail",
+        ])
         .args(extra)
         .arg(url)
         .output()
@@ -179,14 +186,24 @@ fn download_image(id: u64, image_url: &str) -> Option<PathBuf> {
         }
     }
     let ok = Command::new("curl")
-        .args(["-sL", "--max-time", TIMEOUT_SECS, "-A", USER_AGENT, "--fail", "-o"])
+        .args([
+            "-sL",
+            "--max-time",
+            TIMEOUT_SECS,
+            "-A",
+            USER_AGENT,
+            "--fail",
+            "-o",
+        ])
         .arg(&path)
         .arg(image_url)
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     // Guard against an empty/tiny file (a stray error page saved as the image).
-    let big_enough = std::fs::metadata(&path).map(|m| m.len() > 256).unwrap_or(false);
+    let big_enough = std::fs::metadata(&path)
+        .map(|m| m.len() > 256)
+        .unwrap_or(false);
     if ok && big_enough {
         Some(path)
     } else {
@@ -308,13 +325,24 @@ fn absolutize(page: &str, img: &str) -> Option<String> {
 
 /// The host portion of an http(s) URL.
 fn url_host(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
-    Some(rest.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase())
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    Some(
+        rest.split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+    )
 }
 
 /// A safe image file extension guessed from the URL path (default `jpg`).
 fn image_ext(url: &str) -> &'static str {
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
     if path.ends_with(".png") {
         "png"
     } else if path.ends_with(".webp") {
@@ -368,7 +396,10 @@ mod tests {
 
     #[test]
     fn attr_needs_word_boundary_and_handles_quotes() {
-        assert_eq!(attr(r#"<meta name='og:image' content="x">"#, "name"), Some("og:image"));
+        assert_eq!(
+            attr(r#"<meta name='og:image' content="x">"#, "name"),
+            Some("og:image")
+        );
         // `itemname` must not satisfy a request for `name`.
         assert_eq!(attr(r#"<meta itemname="no">"#, "name"), None);
     }

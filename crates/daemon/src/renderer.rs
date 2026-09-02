@@ -12,8 +12,7 @@ use std::ptr::NonNull;
 use anyhow::{anyhow, Context};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache as TextCache, Family, FontSystem, Metrics, Resolution,
-    Weight,
-    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -49,7 +48,7 @@ struct RectInstance {
     rect_max: [f32; 2],
     color: [f32; 4],
     radius: f32,
-    glass: f32, // 0 = solid fill, 1 = liquid-glass material
+    glass: f32,  // 0 = solid fill, 1 = liquid-glass material
     border: f32, // 0 = filled; >0 = stroke width just inside the edge
     _pad: f32,
 }
