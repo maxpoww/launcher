@@ -1916,7 +1916,13 @@ impl App {
             return;
         }
         self.search.query = q.to_string();
-        self.handle_command(waverunner_proto::Command::Expand);
+        // Open the full card. `Expand` only grows Dock→Open (a no-op from the
+        // Hidden state the launcher sits in while another window is focused);
+        // `Toggle` opens straight from Hidden or Dock. Guard so an already-open
+        // launcher isn't toggled shut.
+        if self.ui.target() != crate::state::Target::Open {
+            self.handle_command(waverunner_proto::Command::Toggle);
+        }
         self.refilter();
     }
 
