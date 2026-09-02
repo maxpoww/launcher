@@ -1006,16 +1006,38 @@ fn fullscreen_provider(ctx: &ContextState) -> Vec<Affordance> {
     if !ctx.window.is_fullscreen {
         return vec![];
     }
-    vec![Affordance {
-        id: "window.fullscreen_dnd",
-        kind: AffordanceKind::Control,
-        title: "Do not disturb".into(),
-        detail: "Fullscreen".into(),
-        relevance: 0.5,
-        reason: "silence notifications while fullscreen",
-        source: Layer::Compositor,
-        action: AffordanceAction::Daemon("toggle_dnd".into()),
-    }]
+    vec![
+        Affordance {
+            id: "window.fullscreen_dnd",
+            kind: AffordanceKind::Control,
+            title: "Do not disturb".into(),
+            detail: "Fullscreen".into(),
+            relevance: 0.5,
+            reason: "silence notifications while fullscreen",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("toggle_dnd".into()),
+        },
+        // Screenshotting a game / video / slide is a common fullscreen reach.
+        // grim writes a timestamped PNG to ~/Pictures (created if needed); the
+        // whole command is engine-constructed, so the shell has no user text.
+        Affordance {
+            id: "window.screenshot",
+            kind: AffordanceKind::Control,
+            title: "Screenshot".into(),
+            detail: "→ Pictures".into(),
+            relevance: 0.47,
+            reason: "capture the fullscreen content",
+            source: Layer::Compositor,
+            action: AffordanceAction::Spawn {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "mkdir -p ~/Pictures && grim ~/Pictures/screenshot-$(date +%Y%m%d-%H%M%S).png"
+                        .into(),
+                ],
+            },
+        },
+    ]
 }
 
 /// A live camera — privacy awareness that you're on webcam (a video call).
@@ -2244,8 +2266,13 @@ mod tests {
         );
         let d = find(&opts, "window.fullscreen_dnd").expect("dnd while fullscreen");
         assert_eq!(d.action, AffordanceAction::Daemon("toggle_dnd".into()));
+        let s = find(&opts, "window.screenshot").expect("screenshot while fullscreen");
+        assert!(
+            matches!(&s.action, AffordanceAction::Spawn { argv } if argv.iter().any(|a| a.contains("grim")))
+        );
         ctx.window.is_fullscreen = false;
         assert!(find(&decide(&ctx, &Tuning::default()), "window.fullscreen_dnd").is_none());
+        assert!(find(&decide(&ctx, &Tuning::default()), "window.screenshot").is_none());
     }
 
     #[test]
