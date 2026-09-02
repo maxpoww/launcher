@@ -171,6 +171,7 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
             | "coding.terminal_here"
             | "editor.open_folder"
             | "editor.run"
+            | "editor.build"
             | "git.show_commit"
     ) {
         return activity == Activity::Coding;
@@ -1043,7 +1044,48 @@ fn editor_provider(ctx: &ContextState) -> Vec<Affordance> {
             },
         });
     }
+    // Compiled languages with a canonical build tool: a project build (run from
+    // the file's dir; the tool finds the project root upward). Complements
+    // editor.run, which only handles single-file scripts.
+    if let Some(builder) = ctx
+        .app_internal
+        .editor_language
+        .as_deref()
+        .and_then(builder_for_language)
+    {
+        out.push(Affordance {
+            id: "editor.build",
+            kind: AffordanceKind::Control,
+            title: "Build project".into(),
+            detail: builder.into(),
+            relevance: 0.5,
+            reason: "build the compiled project",
+            source: Layer::AppBridge,
+            action: AffordanceAction::Spawn {
+                argv: vec![
+                    "foot".into(),
+                    "--working-directory".into(),
+                    dir.to_string(),
+                    "sh".into(),
+                    "-c".into(),
+                    format!("{builder}; exec zsh"),
+                ],
+            },
+        });
+    }
     out
+}
+
+/// The project build command for a compiled language with a canonical build
+/// tool, or `None` (scripting languages run per-file; C/C++ builds are
+/// project-specific — make vs cmake — so are left out rather than guessed).
+fn builder_for_language(lang: &str) -> Option<&'static str> {
+    match lang.to_lowercase().as_str() {
+        "rust" => Some("cargo build"),
+        "go" => Some("go build ./..."),
+        "zig" => Some("zig build"),
+        _ => None,
+    }
 }
 
 /// The interpreter for a scripting language's filetype, or `None` for compiled
@@ -2438,6 +2480,35 @@ mod tests {
         .is_none());
         assert_eq!(runner_for_language("javascript"), Some("node"));
         assert_eq!(runner_for_language("c"), None);
+    }
+
+    #[test]
+    fn editor_offers_build_for_compiled_languages() {
+        let mut ctx = live_ctx();
+        ctx.window.pid = 1;
+        ctx.window.class = "code".into(); // Coding
+        ctx.app_internal.editor_file = Some("/home/max/proj/src/main.rs".into());
+        ctx.app_internal.editor_language = Some("rust".into());
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let b = find(&opts, "editor.build").expect("build for a rust project");
+        assert!(matches!(&b.action, AffordanceAction::Spawn { argv }
+            if argv.contains(&"/home/max/proj/src".to_string())
+               && argv.last().unwrap().contains("cargo build")));
+        // A scripting language builds nothing (it runs per-file instead).
+        ctx.app_internal.editor_language = Some("python".into());
+        assert!(find(
+            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            "editor.build"
+        )
+        .is_none());
+        assert_eq!(builder_for_language("go"), Some("go build ./..."));
+        assert_eq!(builder_for_language("ruby"), None);
     }
 
     #[test]

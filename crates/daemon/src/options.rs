@@ -169,6 +169,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "coding.terminal_here" => GLYPH_TERMINAL,
         "shell.rerun" => GLYPH_RERUN,
         "editor.run" | "slides.present" => GLYPH_PLAY,
+        "editor.build" => GLYPH_TERMINAL,
         "files.open_here" | "editor.open_folder" => GLYPH_OPEN_FILE,
         _ => GLYPH_OPTION,
     }
