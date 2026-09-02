@@ -1107,6 +1107,8 @@ mod tests {
             title: "t".into(),
             artist: "a".into(),
             is_playing: true,
+            position_secs: 0,
+            length_secs: 0,
         });
         // A roomy cap so the ambient now_playing Info isn't crowded out of the
         // capped set by the media *controls* cluster (this test is about the
@@ -1143,6 +1145,8 @@ mod tests {
             title: "t".into(),
             artist: "a".into(),
             is_playing: true,
+            position_secs: 0,
+            length_secs: 0,
         });
         ctx.git = GitContext {
             branch: Some("main".into()),
@@ -1419,6 +1423,8 @@ mod tests {
             title: "t".into(),
             artist: "a".into(),
             is_playing: true,
+            position_secs: 0,
+            length_secs: 0,
         });
         let rel = |skill| {
             decide(
@@ -1454,6 +1460,8 @@ mod tests {
             title: "clip".into(),
             artist: String::new(),
             is_playing: true,
+            position_secs: 0,
+            length_secs: 0,
         });
         ctx.metrics.has_backlight = true; // a laptop panel → brightness offered
         let roomy = Tuning {
@@ -1589,6 +1597,8 @@ mod tests {
             title: "clip".into(),
             artist: String::new(),
             is_playing: true,
+            position_secs: 0,
+            length_secs: 0,
         });
         let opts = decide(
             &ctx,
@@ -1650,6 +1660,8 @@ mod tests {
             title: "t".into(),
             artist: "a".into(),
             is_playing: true,
+            position_secs: 0,
+            length_secs: 0,
         });
         let opts = decide(
             &ctx,
@@ -1847,6 +1859,8 @@ mod tests {
             title: "t".into(),
             artist: String::new(),
             is_playing: true,
+            position_secs: 0,
+            length_secs: 0,
         });
         // Cap of 4: only the four highest-relevance controls survive.
         let opts = decide(

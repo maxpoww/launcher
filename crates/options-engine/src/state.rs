@@ -81,6 +81,12 @@ pub struct MediaState {
     pub title: String,
     pub artist: String,
     pub is_playing: bool,
+    /// Playback position in seconds (MPRIS `Position`), 0 if unknown.
+    #[serde(default)]
+    pub position_secs: u64,
+    /// Track length in seconds (MPRIS `mpris:length`), 0 if unknown/stream.
+    #[serde(default)]
+    pub length_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -169,17 +169,39 @@ async fn read_player(conn: &Connection, bus_name: &str) -> Option<MediaState> {
         .and_then(|root| root.get("Identity").and_then(as_string))
         .unwrap_or_else(|| bus_name.trim_start_matches(MPRIS_PREFIX).to_owned());
 
+    let us_to_secs = |us: i64| (us.max(0) as u64) / 1_000_000;
+    let position_secs = player
+        .get("Position")
+        .and_then(as_i64)
+        .map(us_to_secs)
+        .unwrap_or(0);
+    let length_secs = metadata
+        .get("mpris:length")
+        .and_then(as_i64)
+        .map(us_to_secs)
+        .unwrap_or(0);
+
     Some(MediaState {
         player_name,
         title,
         artist,
         is_playing: status == "Playing",
+        position_secs,
+        length_secs,
     })
 }
 
 /// Best-effort `OwnedValue` → `String`.
 fn as_string(v: &OwnedValue) -> Option<String> {
     String::try_from(v.try_clone().ok()?).ok()
+}
+
+/// Best-effort `OwnedValue` → `i64` (MPRIS Position/length are i64 or u64 µs).
+fn as_i64(v: &OwnedValue) -> Option<i64> {
+    let c = v.try_clone().ok()?;
+    i64::try_from(c.try_clone().ok()?)
+        .ok()
+        .or_else(|| u64::try_from(c).ok().map(|u| u as i64))
 }
 
 /// Best-effort `OwnedValue` → `Vec<String>` (MPRIS `xesam:artist` is an array).
@@ -197,6 +219,8 @@ mod tests {
             title: "t".into(),
             artist: "a".into(),
             is_playing: playing,
+            position_secs: 0,
+            length_secs: 0,
         }
     }
 
