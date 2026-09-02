@@ -2548,6 +2548,52 @@ mod tests {
     }
 
     #[test]
+    fn dense_coding_cluster_ranks_git_and_build_over_lesser_editor_actions() {
+        // Editing a rust file in a dirty repo surfaces the whole coding cluster
+        // (git commit/push/pull/diff + editor build/format/open-folder +
+        // terminal-here). At the real 5-pill cap the high-value actions must win
+        // and the lesser ones (open-folder, format) drop — the de-clutter.
+        let mut ctx = live_ctx();
+        ctx.window.class = "code".into();
+        ctx.window.pid = 1;
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/proj".into()),
+            branch: Some("main".into()),
+            is_dirty: true,
+            remote_url: None,
+        };
+        ctx.app_internal.editor_file = Some("/home/max/proj/src/main.rs".into());
+        ctx.app_internal.editor_language = Some("rust".into());
+        let capped = decide(
+            &ctx,
+            &Tuning {
+                max_items: 5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(capped.items.len(), 5, "capped to 5");
+        // Strictly descending relevance (the de-clutter is a clean ranking).
+        for w in capped.items.windows(2) {
+            assert!(w[0].relevance >= w[1].relevance);
+        }
+        // The single highest-value action (commit the dirty tree) makes the cut.
+        assert!(find(&capped, "git.commit").is_some());
+        // The lowest-value editor action (open the folder, 0.43) is crowded out.
+        assert!(find(&capped, "editor.open_folder").is_none());
+        // With room, every coding offer reappears (the blend is preserved).
+        let roomy = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        for id in ["editor.build", "editor.format", "editor.open_folder"] {
+            assert!(find(&roomy, id).is_some(), "{id} present when uncapped");
+        }
+    }
+
+    #[test]
     fn editor_offers_format_for_known_languages() {
         let mut ctx = live_ctx();
         ctx.window.pid = 1;
