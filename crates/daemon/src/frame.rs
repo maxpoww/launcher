@@ -1150,6 +1150,10 @@ impl App {
         };
         // The context-aware pill modules ride on top of the base fill.
         self.push_options_pills(&mut scene);
+        // The media transport box grows into the reserved dropdown area.
+        if self.media_box_open {
+            self.push_media_box(&mut scene);
+        }
         // Adaptive: black text on a bright matched bar, white on a dark one.
         let text_rgba = self.options_text_color();
         let squircle = self.config.theme.icon_squircle;

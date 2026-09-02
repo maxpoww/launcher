@@ -41,6 +41,7 @@ mod notifications;
 // The notification OPTION UI (bell → peek → history dropdown) on the topbar.
 mod notif;
 // Off-thread resolver: a notification's app icon → premultiplied mip chain.
+mod mediabox;
 mod notif_icons;
 mod options;
 mod order;
@@ -481,6 +482,7 @@ fn main() -> anyhow::Result<()> {
         brain: None,
         options: Default::default(),
         options_sig: Vec::new(),
+        media_box_open: false,
         overview_active: false,
         battery_alarm: battery::BatteryAlarm::default(),
         battery_beat_epoch: None,
@@ -1194,6 +1196,10 @@ pub struct App {
     /// laid out, so a Mind republish that doesn't change the visible controls
     /// doesn't churn the pill layout.
     options_sig: Vec<(String, String)>,
+    /// The media transport box (a media player is active and its box pill was
+    /// clicked): a full panel — track, prev/play-pause/next, seek + volume bars
+    /// — grown into the topbar's reserved dropdown region. See `mediabox.rs`.
+    media_box_open: bool,
     /// The compositor overview (waveview) is open: every waverunner surface
     /// stays concealed and reveals are ignored until it closes.
     overview_active: bool,
@@ -1879,9 +1885,26 @@ impl App {
             );
         }
         self.check_battery(&ctx);
+        // Did a player appear / disappear (the media pill's presence)?
+        let media_presence_changed =
+            self.brain.as_ref().map(|p| p.media.is_some()) != Some(ctx.media.is_some());
         self.brain = Some(ctx);
         if window_changed {
             self.refresh_options_content();
+        }
+        // The media pill appears/disappears with the player.
+        if media_presence_changed {
+            if self.media_box_open && self.media_now().is_none() {
+                // The player went away while its box was open — close it.
+                self.media_box_open = false;
+                self.sync_options_input();
+            }
+            self.draw_options();
+        }
+        // Keep the OPEN media box live (seek position, title, play/pause) — a
+        // media delta arrives ~once a second while playing.
+        if self.media_box_open {
+            self.draw_options();
         }
     }
 

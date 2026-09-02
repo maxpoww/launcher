@@ -107,6 +107,7 @@ const GLYPH_CAMERA: &str = "\u{f030}"; // fa-camera (camera live)
 const GLYPH_MIC: &str = "\u{f130}"; // fa-microphone (mic live)
 const GLYPH_SCREENCAST: &str = "\u{f108}"; // fa-desktop (screen sharing)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
+const GLYPH_MUSIC: &str = "\u{f001}"; // fa-music (open the media box)
 /// Amber wash for a privacy/safety WARNING pill, so it reads as "heads up",
 /// not a button.
 const WARN_COLOR: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
@@ -294,6 +295,7 @@ fn draw_z(id: PillId) -> u8 {
         // Dynamic OPTION controls sit in the free left-centre band, overlapping
         // nothing — drawn first (lowest z).
         PillId::Option(_) => 0,
+        PillId::MediaOpen => 0,
     }
 }
 
@@ -339,6 +341,9 @@ pub(crate) enum PillId {
     /// its index into [`crate::App::surfaced_options`]. Clicking it runs that
     /// affordance's action.
     Option(u8),
+    /// The media-box opener: a music glyph shown when a player is active; a
+    /// click grows the transport box (see [`crate::mediabox`]).
+    MediaOpen,
 }
 
 struct Pill {
@@ -527,6 +532,7 @@ fn presence(id: PillId) -> Presence {
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => DESKTOP_ONLY,
         // Context controls act on the focused app — meaningless over the map.
         PillId::Option(_) => DESKTOP_ONLY,
+        PillId::MediaOpen => DESKTOP_ONLY,
     }
 }
 
@@ -774,6 +780,17 @@ impl App {
                     glyph_color: warn.then_some(WARN_COLOR),
                 });
                 ox += ph + CTRL_GAP;
+            }
+            // The media-box opener: a music glyph when a player is active, right
+            // of the control cluster. A click grows the transport box.
+            if self.media_now().is_some() {
+                pills.push(Pill {
+                    id: PillId::MediaOpen,
+                    rect: Rect::new(ox, y, ph, ph),
+                    text: GLYPH_MUSIC.to_owned(),
+                    family: Some(NERD),
+                    glyph_color: None,
+                });
             }
         }
 
@@ -1354,9 +1371,9 @@ impl App {
         };
         let h = if self.options_hidden {
             REVEAL_PX.ceil() as i32
-        } else if self.notif.expanded || self.clip.expanded {
-            // Extend the pointer-sensitive region down over whichever history
-            // box is open so scroll/hover there reach us instead of passing
+        } else if self.notif.expanded || self.clip.expanded || self.media_box_open {
+            // Extend the pointer-sensitive region down over whichever box is
+            // open so scroll/hover/clicks there reach us instead of passing
             // through. Use the *fully-expanded* bottom (not the live animating
             // height) so the region is stable the instant a box opens.
             let mut bottom = self.config.options.height as f32;
@@ -1365,6 +1382,9 @@ impl App {
             }
             if self.clip.expanded {
                 bottom = bottom.max(self.clip_input_bottom());
+            }
+            if self.media_box_open {
+                bottom = bottom.max(self.media_input_bottom());
             }
             bottom.ceil() as i32
         } else {
@@ -1736,7 +1756,28 @@ impl App {
             self.clip_box_click();
             return;
         }
+        // The open media transport box handles its own hits (transport / seek /
+        // volume) at the pointer position.
+        if self.media_box_open {
+            if let Some((px, py)) = self.options_ptr {
+                if self.media_box_click(px, py) {
+                    self.draw_options();
+                    return;
+                }
+                // A click outside the box closes it.
+                self.media_box_open = false;
+                self.sync_options_input();
+                self.draw_options();
+                // Fall through so the click can still hit a pill.
+            }
+        }
         match self.options_hover {
+            // The media glyph pill toggles the transport box.
+            Some(PillId::MediaOpen) => {
+                self.media_box_open = !self.media_box_open;
+                self.sync_options_input();
+                self.draw_options();
+            }
             // While the overview owns the screen the X closes the OVERVIEW,
             // not the window under it — the bar is the overview's only
             // on-screen exit affordance (Esc/Super+R being the others).
