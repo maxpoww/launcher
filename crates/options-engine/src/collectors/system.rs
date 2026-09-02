@@ -61,6 +61,7 @@ impl Collector for SystemCollector {
                     ram_usage_pct,
                     battery_pct,
                     is_charging,
+                    has_backlight: has_backlight(),
                 };
                 if tx
                     .send(Update::Delta(
@@ -134,6 +135,15 @@ fn ram_used_pct(meminfo: &str) -> Option<f32> {
     }
     let used = total.saturating_sub(avail.min(total)) as f32;
     Some((used / total as f32 * 100.0).clamp(0.0, 100.0))
+}
+
+/// Whether the machine has a controllable backlight — any entry under
+/// `/sys/class/backlight` (a laptop panel). Desktops with external monitors
+/// have none, so brightness controls would be dead there.
+fn has_backlight() -> bool {
+    std::fs::read_dir("/sys/class/backlight")
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false)
 }
 
 /// First real battery's `(capacity%, charging)` from `/sys/class/power_supply`,

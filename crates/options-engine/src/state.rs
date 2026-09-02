@@ -104,6 +104,10 @@ pub struct SystemMetrics {
     pub ram_usage_pct: f32,
     pub battery_pct: Option<u8>,
     pub is_charging: bool,
+    /// Whether this machine has a controllable backlight (`/sys/class/backlight`
+    /// is non-empty) — a laptop panel, not a desktop monitor. Lets the mind
+    /// offer brightness controls only where they'd actually do something.
+    pub has_backlight: bool,
 }
 
 /// NixOS deploy state: is the system we're *running* the system we last *built*?

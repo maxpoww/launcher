@@ -339,7 +339,7 @@ fn media_controls_provider(ctx: &ContextState) -> Vec<Affordance> {
     } else {
         ("Play", "resume the paused media")
     };
-    vec![
+    let mut out = vec![
         Affordance {
             id: "media.playpause",
             kind: AffordanceKind::Control,
@@ -371,26 +371,6 @@ fn media_controls_provider(ctx: &ContextState) -> Vec<Affordance> {
             action: spawn(&["wpctl", "set-volume", "-l", "1.5", SINK, "5%+"]),
         },
         Affordance {
-            id: "media.bright_down",
-            kind: AffordanceKind::Control,
-            title: "Brightness −".into(),
-            detail: String::new(),
-            relevance: 0.56,
-            reason: "dim the screen",
-            source: Layer::Hardware,
-            action: spawn(&["brightnessctl", "set", "10%-"]),
-        },
-        Affordance {
-            id: "media.bright_up",
-            kind: AffordanceKind::Control,
-            title: "Brightness +".into(),
-            detail: String::new(),
-            relevance: 0.55,
-            reason: "brighten the screen",
-            source: Layer::Hardware,
-            action: spawn(&["brightnessctl", "set", "10%+"]),
-        },
-        Affordance {
             id: "media.next",
             kind: AffordanceKind::Control,
             title: "Next".into(),
@@ -410,7 +390,34 @@ fn media_controls_provider(ctx: &ContextState) -> Vec<Affordance> {
             source: Layer::Hardware,
             action: spawn(&["playerctl", "previous"]),
         },
-    ]
+    ];
+    // Brightness is a screen control, not a media one — offer it (for
+    // watching video) only where a backlight actually exists (a laptop
+    // panel), so a desktop/VM never shows dead brightness pills. It outranks
+    // track-skip so it leads the cluster when present.
+    if ctx.metrics.has_backlight {
+        out.push(Affordance {
+            id: "media.bright_down",
+            kind: AffordanceKind::Control,
+            title: "Brightness −".into(),
+            detail: String::new(),
+            relevance: 0.56,
+            reason: "dim the screen",
+            source: Layer::Hardware,
+            action: spawn(&["brightnessctl", "set", "10%-"]),
+        });
+        out.push(Affordance {
+            id: "media.bright_up",
+            kind: AffordanceKind::Control,
+            title: "Brightness +".into(),
+            detail: String::new(),
+            relevance: 0.55,
+            reason: "brighten the screen",
+            source: Layer::Hardware,
+            action: spawn(&["brightnessctl", "set", "10%+"]),
+        });
+    }
+    out
 }
 
 /// What you're listening to, while it's playing.
@@ -1073,6 +1080,7 @@ mod tests {
             artist: String::new(),
             is_playing: true,
         });
+        ctx.metrics.has_backlight = true; // a laptop panel → brightness offered
         let roomy = Tuning {
             max_items: 12,
             skill: 1.0, // an expert — controls must NOT fade
@@ -1085,11 +1093,19 @@ mod tests {
         assert!(pp.action.is_actionable());
         assert!(matches!(&pp.action, AffordanceAction::Spawn { argv }
             if argv == &["playerctl", "play-pause"]));
-        // Volume + brightness controls present.
+        // Volume + (with a backlight) brightness controls present.
         assert!(find(&opts, "media.vol_up").is_some());
         assert!(find(&opts, "media.bright_down").is_some());
         // A Control is not faded even for a max-skill expert.
         assert!(pp.relevance >= 0.6);
+
+        // Without a backlight (a desktop / VM) brightness is not offered, but
+        // the media transport still is.
+        ctx.metrics.has_backlight = false;
+        let no_bl = decide(&ctx, &roomy);
+        assert!(find(&no_bl, "media.bright_down").is_none());
+        assert!(find(&no_bl, "media.playpause").is_some());
+        assert!(find(&no_bl, "media.vol_up").is_some());
 
         // Paused → the toggle offers Play instead.
         if let Some(m) = ctx.media.as_mut() {
