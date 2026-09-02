@@ -135,6 +135,9 @@ pub struct SystemMetrics {
     /// the default `false` means "assume fine" and nothing surfaces until the
     /// sensor has positively observed a disconnected machine.
     pub is_network_down: bool,
+    /// Whether a screen recording is in progress (a `wf-recorder` process
+    /// exists). Drives the record ↔ stop-recording control pair.
+    pub is_recording: bool,
 }
 
 /// NixOS deploy state: is the system we're *running* the system we last *built*?

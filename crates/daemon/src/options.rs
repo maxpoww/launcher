@@ -106,6 +106,8 @@ const GLYPH_TERMINAL: &str = "\u{f120}"; // fa-terminal (open terminal here)
 const GLYPH_RERUN: &str = "\u{f021}"; // fa-refresh (re-run last command)
 const GLYPH_FORMAT: &str = "\u{f0d0}"; // fa-magic (format the file)
 const GLYPH_WIFI: &str = "\u{f1eb}"; // fa-wifi (network state / settings)
+const GLYPH_RECORD: &str = "\u{f111}"; // fa-circle (start recording)
+const GLYPH_STOP: &str = "\u{f04d}"; // fa-stop (stop recording)
 const GLYPH_CAMERA: &str = "\u{f030}"; // fa-camera (camera live)
 const GLYPH_MIC: &str = "\u{f130}"; // fa-microphone (mic live)
 const GLYPH_SCREENCAST: &str = "\u{f108}"; // fa-desktop (screen sharing)
@@ -174,6 +176,8 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "editor.build" => GLYPH_TERMINAL,
         "editor.format" => GLYPH_FORMAT,
         "network.down" | "network.settings" => GLYPH_WIFI,
+        "window.record" => GLYPH_RECORD,
+        "window.record_stop" => GLYPH_STOP,
         "files.open_here" | "editor.open_folder" => GLYPH_OPEN_FILE,
         _ => GLYPH_OPTION,
     }

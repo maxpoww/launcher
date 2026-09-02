@@ -75,6 +75,7 @@ const PROVIDERS: &[Provider] = &[
     mic_provider,
     camera_provider,
     fullscreen_provider,
+    recording_provider,
     browser_provider,
     reading_provider,
     presentation_provider,
@@ -1351,7 +1352,7 @@ fn fullscreen_provider(ctx: &ContextState) -> Vec<Affordance> {
     if !ctx.window.is_fullscreen {
         return vec![];
     }
-    vec![
+    let mut out = vec![
         Affordance {
             id: "window.fullscreen_dnd",
             kind: AffordanceKind::Control,
@@ -1382,7 +1383,51 @@ fn fullscreen_provider(ctx: &ContextState) -> Vec<Affordance> {
                 ],
             },
         },
-    ]
+    ];
+    // Record the fullscreen moment (gameplay, a demo, a talk). Only offered
+    // while NOT already recording — the stop control (recording_provider,
+    // always-on) owns the other half of the pair. Timestamped MP4 into
+    // ~/Videos; the whole command is engine-constructed.
+    if !ctx.metrics.is_recording {
+        out.push(Affordance {
+            id: "window.record",
+            kind: AffordanceKind::Control,
+            title: "Record screen".into(),
+            detail: "→ Videos".into(),
+            relevance: 0.44,
+            reason: "record the fullscreen content",
+            source: Layer::Compositor,
+            action: AffordanceAction::Spawn {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "mkdir -p ~/Videos && exec wf-recorder -f ~/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4"
+                        .into(),
+                ],
+            },
+        });
+    }
+    out
+}
+
+/// A screen recording is running: the stop control. Its OWN provider, not part
+/// of the fullscreen module — a recording started fullscreen must stay
+/// stoppable after leaving fullscreen. SIGINT lets wf-recorder finalize the
+/// file cleanly (a SIGKILL would truncate the MP4).
+fn recording_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if !ctx.metrics.is_recording {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "window.record_stop",
+        kind: AffordanceKind::Control,
+        title: "Stop recording".into(),
+        detail: "Save → Videos".into(),
+        relevance: 0.74,
+        reason: "a screen recording is in progress",
+        source: Layer::Hardware,
+        action: spawn(&["pkill", "-INT", "-x", "wf-recorder"]),
+    }]
 }
 
 /// A live camera — privacy awareness that you're on webcam (a video call).
@@ -3234,6 +3279,36 @@ mod tests {
         // Below the threshold it does not surface.
         ctx.metrics.cpu_usage_pct = 40.0;
         assert!(find(&decide(&ctx, &Tuning::default()), "system.high_cpu").is_none());
+    }
+
+    #[test]
+    fn fullscreen_offers_record_and_recording_offers_stop() {
+        let roomy = Tuning {
+            max_items: 12,
+            ..Default::default()
+        };
+        let mut ctx = live_ctx();
+        ctx.window.class = "game".into();
+        ctx.window.pid = 1;
+        ctx.window.is_fullscreen = true;
+        // Fullscreen, not recording → Record (wf-recorder into ~/Videos).
+        let idle = decide(&ctx, &roomy);
+        let rec = find(&idle, "window.record").expect("record control fullscreen");
+        assert!(matches!(&rec.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "sh" && argv.last().unwrap().contains("wf-recorder")));
+        assert!(find(&idle, "window.record_stop").is_none());
+        // Recording → Stop (SIGINT so the file finalizes), Record gone.
+        ctx.metrics.is_recording = true;
+        let recording = decide(&ctx, &roomy);
+        assert!(find(&recording, "window.record").is_none());
+        let stop = find(&recording, "window.record_stop").expect("stop control");
+        assert!(matches!(&stop.action, AffordanceAction::Spawn { argv }
+            if argv == &["pkill", "-INT", "-x", "wf-recorder"]));
+        // Stop stays reachable after LEAVING fullscreen (its own provider).
+        ctx.window.is_fullscreen = false;
+        let windowed = decide(&ctx, &roomy);
+        assert!(find(&windowed, "window.record_stop").is_some());
+        assert!(find(&windowed, "window.record").is_none());
     }
 
     #[test]

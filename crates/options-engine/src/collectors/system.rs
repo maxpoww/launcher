@@ -64,6 +64,7 @@ impl Collector for SystemCollector {
                     has_backlight: has_backlight(),
                     is_camera_active: camera_in_use(),
                     is_network_down: network_down(),
+                    is_recording: recorder_running(),
                 };
                 if tx
                     .send(Update::Delta(
@@ -167,6 +168,26 @@ fn network_down() -> bool {
     }
     // Only "down" if there was at least one real interface and none were up.
     saw_candidate
+}
+
+/// Whether a `wf-recorder` process is running — a screen recording in
+/// progress. One readdir over `/proc/<pid>/comm`; same zero-dependency
+/// pattern as `camera_in_use`.
+fn recorder_running() -> bool {
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for p in procs.flatten() {
+        if !p.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(comm) = std::fs::read_to_string(p.path().join("comm")) {
+            if comm.trim() == "wf-recorder" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn has_backlight() -> bool {
