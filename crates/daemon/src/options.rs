@@ -103,6 +103,7 @@ const GLYPH_OPEN_FILE: &str = "\u{f07c}"; // fa-folder-open (open copied path)
 const GLYPH_EMAIL: &str = "\u{f0e0}"; // fa-envelope (compose email)
 const GLYPH_MONITOR: &str = "\u{f0e4}"; // fa-tachometer (system monitor)
 const GLYPH_TERMINAL: &str = "\u{f120}"; // fa-terminal (open terminal here)
+const GLYPH_RERUN: &str = "\u{f021}"; // fa-refresh (re-run last command)
 const GLYPH_CAMERA: &str = "\u{f030}"; // fa-camera (camera live)
 const GLYPH_MIC: &str = "\u{f130}"; // fa-microphone (mic live)
 const GLYPH_SCREENCAST: &str = "\u{f108}"; // fa-desktop (screen sharing)
@@ -161,6 +162,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "selection.search" | "shell.search_error" | "browser.find" => GLYPH_SEARCH,
         "system.high_cpu" => GLYPH_MONITOR,
         "coding.terminal_here" => GLYPH_TERMINAL,
+        "shell.rerun" => GLYPH_RERUN,
         "files.open_here" | "editor.open_folder" => GLYPH_OPEN_FILE,
         _ => GLYPH_OPTION,
     }

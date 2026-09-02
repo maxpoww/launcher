@@ -60,6 +60,7 @@ const PROVIDERS: &[Provider] = &[
     media_controls_provider,
     git_provider,
     coding_tools_provider,
+    rerun_provider,
     files_here_provider,
     focus_churn_provider,
     shell_error_provider,
@@ -166,8 +167,8 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
     ) {
         return activity == Activity::Coding;
     }
-    // "Open files here" fits terminal work (and coding).
-    if id == "files.open_here" {
+    // "Open files here" / "Re-run last" fit terminal work (and coding).
+    if matches!(id, "files.open_here" | "shell.rerun") {
         return matches!(activity, Activity::Terminal | Activity::Coding);
     }
     match activity {
@@ -689,6 +690,42 @@ fn coding_tools_provider(ctx: &ContextState) -> Vec<Affordance> {
         reason: "open a terminal in the repo",
         source: Layer::Hardware,
         action: spawn(&["foot", "--working-directory", root]),
+    }]
+}
+
+/// **dev-run module** — re-run the last shell command in a fresh terminal at
+/// its folder (both from the shell bridge). Useful after editing: click to
+/// re-run the last build/test without hunting for the terminal. The command is
+/// the user's own; it rides one argv slot into `zsh -ic`, shell-quoted for the
+/// outer shell, so it runs verbatim with no extra injection surface.
+fn rerun_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let ai = &ctx.app_internal;
+    let (Some(cmd), Some(cwd)) = (
+        ai.shell_last_cmd
+            .as_deref()
+            .filter(|c| !c.trim().is_empty()),
+        ai.shell_cwd.as_deref().and_then(|p| p.to_str()),
+    ) else {
+        return vec![];
+    };
+    vec![Affordance {
+        id: "shell.rerun",
+        kind: AffordanceKind::Control,
+        title: "Re-run last".into(),
+        detail: cmd.chars().take(40).collect(),
+        relevance: 0.47,
+        reason: "re-run the last command in a fresh terminal",
+        source: Layer::AppBridge,
+        action: AffordanceAction::Spawn {
+            argv: vec![
+                "foot".into(),
+                "--working-directory".into(),
+                cwd.to_string(),
+                "zsh".into(),
+                "-ic".into(),
+                format!("{cmd}; exec zsh"),
+            ],
+        },
     }]
 }
 
@@ -1749,6 +1786,28 @@ mod tests {
         // No editor file → nothing.
         ctx.app_internal.editor_file = None;
         assert!(find(&decide(&ctx, &Tuning::default()), "editor.open_folder").is_none());
+    }
+
+    #[test]
+    fn shell_bridge_offers_rerun_last() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "foot".into();
+        ctx.window.pid = 1;
+        ctx.app_internal.shell_last_cmd = Some("cargo build".into());
+        ctx.app_internal.shell_cwd = Some("/home/max/proj".into());
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let r = find(&opts, "shell.rerun").expect("rerun control in a terminal");
+        assert!(matches!(&r.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "foot" && argv.iter().any(|a| a.contains("cargo build"))));
+        // No cwd (or no cmd) → nothing.
+        ctx.app_internal.shell_cwd = None;
+        assert!(find(&decide(&ctx, &Tuning::default()), "shell.rerun").is_none());
     }
 
     #[test]
