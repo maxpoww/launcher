@@ -115,7 +115,39 @@ use crate::content::Hit;
 use crate::renderer::Renderer;
 use crate::state::{Target, UiState};
 
+/// Constrain glibc's `malloc` so freed memory is returned to the OS instead of
+/// accumulating in per-thread arenas. Called first thing in `main`, before any
+/// worker thread exists (arena limits only bind arenas created afterwards).
+/// A no-op on non-glibc targets.
+#[cfg(target_env = "gnu")]
+fn tune_allocator() {
+    // SAFETY: `mallopt` is a plain libc configuration call with no
+    // preconditions; invoked single-threaded before any allocation-heavy work.
+    unsafe {
+        // At most 2 arenas. The default (8×ncpu) scatters allocations across
+        // many 64 MB arenas that never shrink; two keeps a little concurrency
+        // while collapsing the fragmentation.
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+        // Trim the top of the heap back to the OS once more than 256 KB is
+        // free there, rather than letting it grow unbounded under churn.
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 256 * 1024);
+    }
+}
+
+/// Non-glibc: nothing to tune.
+#[cfg(not(target_env = "gnu"))]
+fn tune_allocator() {}
+
 fn main() -> anyhow::Result<()> {
+    // Cap glibc's malloc arenas before any thread spawns. The daemon runs
+    // ~38 threads (render, nix index, icon rasterizers, brain, clipboard,
+    // notifications, …); glibc's default of up to 8×ncpu per-thread arenas —
+    // each able to grow to 64 MB and never trimmed back — fragmented anon RSS
+    // to ~357 MB across 36 arena regions (measured on real hardware,
+    // 2026-09-02). Two arenas plus an eager trim threshold keep freed pages
+    // returning to the OS: the single biggest RAM lever for the 4 GB target.
+    tune_allocator();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -424,6 +456,7 @@ fn main() -> anyhow::Result<()> {
         pkg_hit_placeholders: Vec::new(),
         pkg_layer_base: 0,
         pkg_state: PkgIndexState::Loading,
+        pkg_load_kicked: false,
         busy_ids: HashSet::new(),
         failed_ids: HashMap::new(),
         launching: HashSet::new(),
@@ -996,6 +1029,10 @@ pub struct App {
     pkg_layer_base: u32,
     /// Whether the package index is usable yet (drives the Install hint).
     pkg_state: PkgIndexState,
+    /// Whether we've asked the nix thread to load the index yet. The index is
+    /// lazy: the ~8.6 MB parse happens on the first Install-section view, not
+    /// at startup, so sessions that never search nixpkgs never pay for it.
+    pkg_load_kicked: bool,
     /// Entry ids (package attrs / desktop ids) with a profile mutation
     /// in flight; their cells render dimmed and ignore input.
     busy_ids: HashSet<String>,
