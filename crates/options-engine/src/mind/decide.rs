@@ -67,6 +67,7 @@ const PROVIDERS: &[Provider] = &[
     selection_provider,
     mic_provider,
     camera_provider,
+    fullscreen_provider,
     notifications_provider,
 ];
 
@@ -734,6 +735,25 @@ fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
 
 /// A live microphone — awareness that you're being heard (and the seat of the
 /// Communication activity).
+/// A fullscreen window is immersion — a video, a game, a presentation. Offer
+/// Do-Not-Disturb so a notification doesn't pop over it. (The mic-live call
+/// path offers DND too; this is the fullscreen path.)
+fn fullscreen_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if !ctx.window.is_fullscreen {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "window.fullscreen_dnd",
+        kind: AffordanceKind::Control,
+        title: "Do not disturb".into(),
+        detail: "Fullscreen".into(),
+        relevance: 0.5,
+        reason: "silence notifications while fullscreen",
+        source: Layer::Compositor,
+        action: AffordanceAction::Daemon("toggle_dnd".into()),
+    }]
+}
+
 /// A live camera — privacy awareness that you're on webcam (a video call).
 /// A Warning like the live mic; there's no safe universal "camera off", so it
 /// informs rather than acts.
@@ -1749,6 +1769,24 @@ mod tests {
         );
         assert!(roomy.items.iter().any(|a| a.id.starts_with("media.")));
         assert!(roomy.items.iter().any(|a| a.id.starts_with("git.")));
+    }
+
+    #[test]
+    fn fullscreen_offers_dnd() {
+        let mut ctx = live_ctx();
+        ctx.window.is_fullscreen = true;
+        ctx.window.pid = 1;
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let d = find(&opts, "window.fullscreen_dnd").expect("dnd while fullscreen");
+        assert_eq!(d.action, AffordanceAction::Daemon("toggle_dnd".into()));
+        ctx.window.is_fullscreen = false;
+        assert!(find(&decide(&ctx, &Tuning::default()), "window.fullscreen_dnd").is_none());
     }
 
     #[test]

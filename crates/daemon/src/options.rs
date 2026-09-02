@@ -142,7 +142,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "media.seek_fwd" => GLYPH_SEEK_FWD,
         "media.seek_back" => GLYPH_SEEK_BACK,
         "audio.mic_mute" => GLYPH_MIC_SLASH,
-        "audio.call_dnd" => GLYPH_BELL_SLASH,
+        "audio.call_dnd" | "window.fullscreen_dnd" => GLYPH_BELL_SLASH,
         "camera.live" => GLYPH_CAMERA,
         "audio.mic_live" => GLYPH_MIC,
         "compositor.screencasting" => GLYPH_SCREENCAST,
