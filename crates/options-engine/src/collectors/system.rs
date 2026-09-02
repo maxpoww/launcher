@@ -63,6 +63,7 @@ impl Collector for SystemCollector {
                     is_charging,
                     has_backlight: has_backlight(),
                     is_camera_active: camera_in_use(),
+                    is_network_down: network_down(),
                 };
                 if tx
                     .send(Update::Delta(
@@ -141,6 +142,33 @@ fn ram_used_pct(meminfo: &str) -> Option<f32> {
 /// Whether the machine has a controllable backlight — any entry under
 /// `/sys/class/backlight` (a laptop panel). Desktops with external monitors
 /// have none, so brightness controls would be dead there.
+/// Confirmed offline: `/sys/class/net` is readable and NO interface other than
+/// loopback reports operstate `up`. Errs toward "not down" — an unreadable
+/// sysfs (containers, odd kernels) must never raise a false disconnection
+/// warning. Pure sysfs, same zero-dependency design as the rest of this
+/// collector.
+fn network_down() -> bool {
+    let Ok(ifs) = std::fs::read_dir("/sys/class/net") else {
+        return false;
+    };
+    let mut saw_candidate = false;
+    for e in ifs.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name == "lo" {
+            continue;
+        }
+        saw_candidate = true;
+        if let Ok(state) = std::fs::read_to_string(e.path().join("operstate")) {
+            if state.trim() == "up" {
+                return false; // something is connected
+            }
+        }
+    }
+    // Only "down" if there was at least one real interface and none were up.
+    saw_candidate
+}
+
 fn has_backlight() -> bool {
     std::fs::read_dir("/sys/class/backlight")
         .map(|mut d| d.next().is_some())

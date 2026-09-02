@@ -57,6 +57,7 @@ const PROVIDERS: &[Provider] = &[
     battery_provider,
     cpu_provider,
     memory_provider,
+    network_provider,
     media_provider,
     media_controls_provider,
     git_provider,
@@ -415,6 +416,38 @@ fn cpu_provider(ctx: &ContextState) -> Vec<Affordance> {
         source: Layer::Hardware,
         action: spawn(&["foot", "btop"]),
     }]
+}
+
+/// Confirmed offline (no interface up): a warning plus the direct remedy — open
+/// the network manager TUI. High value for a distro: a stranger's wifi drops
+/// and the shell itself offers the way back online.
+fn network_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if !ctx.metrics.is_network_down {
+        return vec![];
+    }
+    vec![
+        Affordance {
+            id: "network.down",
+            kind: AffordanceKind::Warning,
+            title: "No network".into(),
+            detail: "All interfaces down".into(),
+            relevance: 0.78,
+            reason: "no non-loopback interface is up",
+            source: Layer::Hardware,
+            action: AffordanceAction::None,
+        },
+        Affordance {
+            id: "network.settings",
+            kind: AffordanceKind::Control,
+            title: "Network settings".into(),
+            detail: "Reconnect".into(),
+            relevance: 0.76,
+            reason: "open the connection manager to get back online",
+            source: Layer::Hardware,
+            // nmtui ships with NetworkManager itself (always present on Golem).
+            action: spawn(&["foot", "nmtui"]),
+        },
+    ]
 }
 
 /// Sustained memory pressure is worth the same "show me what's using it" offer
@@ -1251,16 +1284,41 @@ fn reading_provider(ctx: &ContextState) -> Vec<Affordance> {
     if ctx.window.pid == 0 || !READERS.iter().any(|r| class.contains(r)) {
         return vec![];
     }
-    let mut out = vec![Affordance {
-        id: "reading.find",
-        kind: AffordanceKind::Control,
-        title: "Find".into(),
-        detail: String::new(),
-        relevance: 0.5,
-        reason: "find in the document",
-        source: Layer::Compositor,
-        action: AffordanceAction::Daemon("find_in_page".into()),
-    }];
+    let mut out = vec![
+        Affordance {
+            id: "reading.find",
+            kind: AffordanceKind::Control,
+            title: "Find".into(),
+            detail: String::new(),
+            relevance: 0.5,
+            reason: "find in the document",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("find_in_page".into()),
+        },
+        // Page navigation — PageDown/PageUp keystrokes (XKB "Next"/"Prior"),
+        // universal across PDF/document viewers. The mouse-first reading
+        // reach-for: turn pages without finding the keyboard.
+        Affordance {
+            id: "reading.page_next",
+            kind: AffordanceKind::Control,
+            title: "Next page".into(),
+            detail: String::new(),
+            relevance: 0.49,
+            reason: "page forward in the document",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("page_next".into()),
+        },
+        Affordance {
+            id: "reading.page_prev",
+            kind: AffordanceKind::Control,
+            title: "Previous page".into(),
+            detail: String::new(),
+            relevance: 0.48,
+            reason: "page back in the document",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("page_prev".into()),
+        },
+    ];
     if ctx.metrics.has_backlight {
         out.push(Affordance {
             id: "reading.bright_down",
@@ -3020,6 +3078,15 @@ mod tests {
             AffordanceAction::Daemon("find_in_page".into())
         );
         assert!(find(&opts, "reading.bright_up").is_some());
+        // Page navigation is always offered for a reader (keystroke path).
+        assert_eq!(
+            find(&opts, "reading.page_next").unwrap().action,
+            AffordanceAction::Daemon("page_next".into())
+        );
+        assert_eq!(
+            find(&opts, "reading.page_prev").unwrap().action,
+            AffordanceAction::Daemon("page_prev".into())
+        );
         // No backlight → find only, no brightness.
         ctx.metrics.has_backlight = false;
         let no_bl = decide(
@@ -3167,6 +3234,32 @@ mod tests {
         // Below the threshold it does not surface.
         ctx.metrics.cpu_usage_pct = 40.0;
         assert!(find(&decide(&ctx, &Tuning::default()), "system.high_cpu").is_none());
+    }
+
+    #[test]
+    fn network_down_warns_and_offers_settings() {
+        let mut ctx = live_ctx();
+        ctx.metrics.is_network_down = true;
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 8,
+                ..Default::default()
+            },
+        );
+        let warn = find(&opts, "network.down").expect("no-network warning");
+        assert_eq!(warn.kind, AffordanceKind::Warning);
+        let fix = find(&opts, "network.settings").expect("settings control");
+        assert_eq!(fix.kind, AffordanceKind::Control);
+        assert!(matches!(&fix.action, AffordanceAction::Spawn { argv }
+            if argv == &["foot", "nmtui"]));
+        // The warning leads its remedy.
+        assert!(warn.relevance > fix.relevance);
+        // Back online → both clear.
+        ctx.metrics.is_network_down = false;
+        let up = decide(&ctx, &Tuning::default());
+        assert!(find(&up, "network.down").is_none());
+        assert!(find(&up, "network.settings").is_none());
     }
 
     #[test]

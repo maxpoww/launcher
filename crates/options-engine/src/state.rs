@@ -130,6 +130,11 @@ pub struct SystemMetrics {
     /// Whether a camera (`/dev/video*`) is currently open by some process — a
     /// live webcam, usually a video call. Privacy awareness, like `is_mic_active`.
     pub is_camera_active: bool,
+    /// Whether NO network interface (other than loopback) is up — confirmed
+    /// offline, from `/sys/class/net/*/operstate`. Inverted (down, not up) so
+    /// the default `false` means "assume fine" and nothing surfaces until the
+    /// sensor has positively observed a disconnected machine.
+    pub is_network_down: bool,
 }
 
 /// NixOS deploy state: is the system we're *running* the system we last *built*?
