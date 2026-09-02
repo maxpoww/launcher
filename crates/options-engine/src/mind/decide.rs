@@ -1118,13 +1118,26 @@ const PRESENTERS: &[&str] = &[
     "onlyoffice",
 ];
 
-/// **presentation module** — a fullscreen office/slides app is a slideshow:
-/// offer Next / Previous slide (arrow keys via the compositor). Gated on
-/// fullscreen so it doesn't fire while merely editing the deck.
+/// **presentation module** — an office/slides app. Editing the deck (windowed):
+/// offer "Present" (F5, start the slideshow). Presenting (fullscreen): offer
+/// Next / Previous slide (arrow keys). All via the compositor keystroke.
 fn presentation_provider(ctx: &ContextState) -> Vec<Affordance> {
     let class = ctx.window.class.to_lowercase();
-    if !ctx.window.is_fullscreen || !PRESENTERS.iter().any(|p| class.contains(p)) {
+    if !PRESENTERS.iter().any(|p| class.contains(p)) {
         return vec![];
+    }
+    // Not yet presenting: one tap starts the slideshow from the first slide.
+    if !ctx.window.is_fullscreen {
+        return vec![Affordance {
+            id: "slides.present",
+            kind: AffordanceKind::Control,
+            title: "Present".into(),
+            detail: "Start the slideshow".into(),
+            relevance: 0.5,
+            reason: "a presentation app is focused but not presenting",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("present".into()),
+        }];
     }
     vec![
         Affordance {
@@ -2694,9 +2707,23 @@ mod tests {
             AffordanceAction::Daemon("slide_next".into())
         );
         assert!(find(&opts, "slides.prev").is_some());
-        // Not while merely editing the deck (windowed).
+        // No "Present" while already presenting (fullscreen).
+        assert!(find(&opts, "slides.present").is_none());
+        // Editing the deck (windowed): no slide nav, but a one-tap "Present".
         ctx.window.is_fullscreen = false;
-        assert!(find(&decide(&ctx, &Tuning::default()), "slides.next").is_none());
+        let editing = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert!(find(&editing, "slides.next").is_none());
+        let present = find(&editing, "slides.present").expect("present control while editing");
+        assert_eq!(present.action, AffordanceAction::Daemon("present".into()));
+        // Not for a non-presentation window.
+        ctx.window.class = "firefox".into();
+        assert!(find(&decide(&ctx, &Tuning::default()), "slides.present").is_none());
     }
 
     #[test]

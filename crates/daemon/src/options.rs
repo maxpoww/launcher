@@ -168,7 +168,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "downloads.extract" => GLYPH_OPEN_FILE,
         "coding.terminal_here" => GLYPH_TERMINAL,
         "shell.rerun" => GLYPH_RERUN,
-        "editor.run" => GLYPH_PLAY,
+        "editor.run" | "slides.present" => GLYPH_PLAY,
         "files.open_here" | "editor.open_folder" => GLYPH_OPEN_FILE,
         _ => GLYPH_OPTION,
     }
@@ -2001,6 +2001,7 @@ impl App {
                 "reopen_tab" => crate::hypr::send_shortcut_active("CTRL SHIFT", "t"),
                 "slide_next" => crate::hypr::send_shortcut_active("", "Right"),
                 "slide_prev" => crate::hypr::send_shortcut_active("", "Left"),
+                "present" => crate::hypr::send_shortcut_active("", "F5"),
                 // "pkgsearch:<name>" — open the launcher's Install search
                 // pre-filled with a package name (a command-not-found remedy).
                 t if t.starts_with("pkgsearch:") => self.pkg_search_for(&t["pkgsearch:".len()..]),
