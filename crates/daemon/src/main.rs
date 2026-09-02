@@ -1466,9 +1466,9 @@ const DOCK_TOOLTIP_DELAY: Duration = Duration::from_millis(600);
 
 impl App {
     /// Uniform size multiplier for the topbar OPTIONS surfaces (pills, and the
-    /// notification / clipboard boxes) on small screens. Full size on panels
-    /// >= OPTIONS_FULL_H logical px, easing down to OPTIONS_MIN_SCALE on short
-    /// ones so the boxes don't dominate a 1366x768 laptop (2026-09-02). Applied
+    /// notification / clipboard boxes) on small screens. Full size on panels at
+    /// or above `OPTIONS_FULL_H` logical px, easing down to `OPTIONS_MIN_SCALE`
+    /// on short ones so the boxes don't dominate a 1366x768 laptop. Applied
     /// uniformly (every dimension AND font) so text measurement and drawing
     /// stay consistent and the surface just shrinks proportionally.
     pub fn options_scale(&self) -> f32 {
