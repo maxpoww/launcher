@@ -165,6 +165,7 @@ impl UiState {
             | Command::DebugNotif
             | Command::DebugDict
             | Command::DebugOptions
+            | Command::DebugMediaBox
             | Command::OptionsTrigger(_)
             | Command::OverviewOn
             | Command::OverviewOff

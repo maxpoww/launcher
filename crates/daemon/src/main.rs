@@ -1631,6 +1631,17 @@ impl App {
                 self.trigger_option_by_id(&id);
                 return;
             }
+            Command::DebugMediaBox => {
+                if self.media_now().is_some() {
+                    self.media_box_open = true;
+                    self.sync_options_input();
+                    self.draw_options();
+                    info!("debug-media-box: opened the media transport box");
+                } else {
+                    warn!("debug-media-box: no active media player");
+                }
+                return;
+            }
             _ => {}
         }
         // Summoning or expanding is the moment freshness matters:

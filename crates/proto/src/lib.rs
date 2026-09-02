@@ -57,6 +57,9 @@ pub enum Command {
     /// ranked offers with their ids/actions) to the journal, so the OPTIONS
     /// engine's live decisions can be inspected without a GUI click.
     DebugOptions,
+    /// Debug/verification: force-open the media transport box (when a player is
+    /// active), so it can be screenshotted without a pointer click.
+    DebugMediaBox,
     /// Trigger the dynamic OPTION offer with this affordance id (e.g.
     /// `media.playpause`, `git.commit`) — the same action a click on its pill
     /// runs. Exposed for scripting and for verifying the action end to end.
@@ -108,6 +111,7 @@ impl fmt::Display for Command {
             Command::DebugNotif => f.write_str("debug-notif"),
             Command::DebugDict => f.write_str("debug-dict"),
             Command::DebugOptions => f.write_str("debug-options"),
+            Command::DebugMediaBox => f.write_str("debug-media-box"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
@@ -167,6 +171,7 @@ impl FromStr for Command {
             "debug-notif" => Ok(Command::DebugNotif),
             "debug-dict" => Ok(Command::DebugDict),
             "debug-options" => Ok(Command::DebugOptions),
+            "debug-media-box" => Ok(Command::DebugMediaBox),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
