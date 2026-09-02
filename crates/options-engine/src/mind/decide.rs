@@ -2922,6 +2922,54 @@ mod tests {
     }
 
     #[test]
+    fn privacy_warnings_are_never_crowded_out_by_controls() {
+        // A dense context: a live camera + mic + screencast (privacy WARNINGS)
+        // alongside a pile of routine CONTROLS (coding in a dirty repo with media
+        // playing and a clipboard SHA). Even at the real topbar cap, every
+        // privacy warning must survive — safety signals outrank every control.
+        let mut ctx = live_ctx();
+        ctx.metrics.is_camera_active = true;
+        ctx.audio.is_mic_active = true;
+        ctx.is_screencasting = true;
+        ctx.window.class = "code".into();
+        ctx.window.pid = 1;
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/proj".into()),
+            branch: Some("main".into()),
+            is_dirty: true,
+            remote_url: Some("https://github.com/max/proj".into()),
+        };
+        ctx.media = Some(MediaState {
+            player_name: "vlc".into(),
+            title: "t".into(),
+            artist: String::new(),
+            is_playing: true,
+            position_secs: 1,
+            length_secs: 100,
+        });
+        ctx.selection = crate::state::TextSelection {
+            highlighted_text: Some("a1b2c3d4".into()),
+            char_count: 8,
+            is_git_sha: true,
+            ..Default::default()
+        };
+        // The real topbar cap.
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 5,
+                ..Default::default()
+            },
+        );
+        // A live mic makes the activity Communication, which clears media — but
+        // the three privacy warnings must all be present regardless of the crowd.
+        for id in ["camera.live", "audio.mic_live", "compositor.screencasting"] {
+            let a = find(&opts, id).unwrap_or_else(|| panic!("privacy warning {id} survives the cap"));
+            assert_eq!(a.kind, AffordanceKind::Warning, "{id}");
+        }
+    }
+
+    #[test]
     fn high_cpu_offers_a_monitor_control() {
         let mut ctx = live_ctx();
         ctx.metrics.cpu_usage_pct = 92.0;
