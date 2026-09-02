@@ -88,6 +88,30 @@ fn matches_any(class_lower: &str, set: &[&str]) -> bool {
     set.iter().any(|k| class_lower.contains(k))
 }
 
+/// Whether a browser window title reads like a documentation / reference page —
+/// the reading-mode heuristic used in place of a browser bridge. Kept to strong
+/// markers so a random page rarely trips it (a false positive only adds the mild
+/// reading offers — find + brightness — which are harmless on any page).
+fn title_looks_like_docs(title: &str) -> bool {
+    let t = title.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "documentation",
+        "readthedocs",
+        "read the docs",
+        "mdn",
+        "stack overflow",
+        "wikipedia",
+        "reference manual",
+        "man page",
+        "api reference",
+        "developer guide",
+        "user guide",
+        " docs",
+        " — docs",
+    ];
+    MARKERS.iter().any(|m| t.contains(m))
+}
+
 /// Classify the current activity from a context snapshot. Ordered by priority:
 /// the first situation that fits wins.
 pub fn infer_activity(ctx: &ContextState) -> Activity {
@@ -105,6 +129,14 @@ pub fn infer_activity(ctx: &ContextState) -> Activity {
         return Activity::Reading;
     }
     if matches_any(&class, BROWSERS) || ctx.app_internal.browser_url.is_some() {
+        // Reading docs is a more specific browser state. Absent a browser bridge
+        // (blocked: an extension needs a store upload, and enabling the main
+        // browser's remote-debugging port is a security exposure), infer it from
+        // the window title the compositor already gives us — documentation sites
+        // put recognisable markers there.
+        if title_looks_like_docs(&ctx.window.title) {
+            return Activity::Reading;
+        }
         return Activity::Browsing;
     }
     // An editor is coding; a terminal is coding only if it's in a repo.
@@ -186,6 +218,39 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(infer_activity(&ctx), Activity::Reading);
+    }
+
+    #[test]
+    fn browser_doc_title_infers_reading_without_a_bridge() {
+        // A documentation title flips Browsing → Reading purely from the
+        // window title (no browser bridge), so a docs tab gets the reading
+        // offers (find, brightness).
+        let mut ctx = focused("firefox");
+        for docish in [
+            "array — Python documentation",
+            "Array - JavaScript | MDN",
+            "regex - How to ... - Stack Overflow",
+            "requests: HTTP for Humans — Docs",
+            "Rust By Example - User Guide",
+        ] {
+            ctx.window.title = docish.into();
+            assert_eq!(infer_activity(&ctx), Activity::Reading, "{docish:?}");
+        }
+        // An ordinary page stays Browsing.
+        ctx.window.title = "Cat videos - YouTube".into();
+        assert_eq!(infer_activity(&ctx), Activity::Browsing);
+        // The title heuristic only applies to browsers, not other apps.
+        let mut term = focused("foot");
+        term.window.title = "man page".into();
+        assert_eq!(infer_activity(&term), Activity::Terminal);
+    }
+
+    #[test]
+    fn doc_title_marker_matching() {
+        assert!(title_looks_like_docs("NumPy Documentation"));
+        assert!(title_looks_like_docs("something - MDN"));
+        assert!(!title_looks_like_docs("My Cool Blog Post"));
+        assert!(!title_looks_like_docs(""));
     }
 
     #[test]
