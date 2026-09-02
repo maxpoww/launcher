@@ -1302,6 +1302,41 @@ mod tests {
     }
 
     #[test]
+    fn busy_context_blends_and_caps_by_relevance() {
+        // Coding in a dirty repo WITH media playing: both modules' controls are
+        // eligible. The mind ranks by relevance and caps — the surface then
+        // sees a blended, de-cluttered set, never everything at once.
+        let mut ctx = live_ctx();
+        ctx.window.class = "foot".into();
+        ctx.window.pid = 1;
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/p".into()),
+            branch: Some("main".into()),
+            is_dirty: true,
+        };
+        ctx.media = Some(MediaState {
+            player_name: "vlc".into(),
+            title: "t".into(),
+            artist: String::new(),
+            is_playing: true,
+        });
+        // Cap of 4: only the four highest-relevance controls survive.
+        let opts = decide(&ctx, &Tuning { max_items: 4, ..Default::default() });
+        assert_eq!(opts.items.len(), 4);
+        // Descending, and all above the min-relevance floor.
+        for w in opts.items.windows(2) {
+            assert!(w[0].relevance >= w[1].relevance);
+        }
+        assert!(opts.items.iter().all(|a| a.relevance >= 0.2));
+        // The top control is the highest-scoring one present (media play/pause
+        // at 0.66 beats git.commit at 0.64).
+        assert_eq!(opts.items[0].id, "media.playpause");
+        // Both modules are represented in the blended top set.
+        assert!(opts.items.iter().any(|a| a.id.starts_with("media.")));
+        assert!(opts.items.iter().any(|a| a.id.starts_with("git.")));
+    }
+
+    #[test]
     fn high_cpu_offers_a_monitor_control() {
         let mut ctx = live_ctx();
         ctx.metrics.cpu_usage_pct = 92.0;
