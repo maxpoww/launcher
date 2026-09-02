@@ -164,7 +164,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "browser.reopen_tab" => GLYPH_RERUN,
         "system.high_cpu" | "system.high_mem" => GLYPH_MONITOR,
         "system.battery_dim" => GLYPH_BRIGHT_DOWN,
-        "downloads.open" => GLYPH_PULL,
+        "downloads.open" | "shell.install_missing" => GLYPH_PULL,
         "downloads.extract" => GLYPH_OPEN_FILE,
         "coding.terminal_here" => GLYPH_TERMINAL,
         "shell.rerun" => GLYPH_RERUN,
@@ -1899,9 +1899,25 @@ impl App {
                 "reopen_tab" => crate::hypr::send_shortcut_active("CTRL SHIFT", "t"),
                 "slide_next" => crate::hypr::send_shortcut_active("", "Right"),
                 "slide_prev" => crate::hypr::send_shortcut_active("", "Left"),
+                // "pkgsearch:<name>" — open the launcher's Install search
+                // pre-filled with a package name (a command-not-found remedy).
+                t if t.starts_with("pkgsearch:") => self.pkg_search_for(&t["pkgsearch:".len()..]),
                 other => warn!("options: unknown daemon action '{other}'"),
             },
         }
+    }
+
+    /// Open the launcher's Install search pre-filled with `query` — the
+    /// command-not-found → install remedy. Opening (Target::Open) also kicks the
+    /// lazy package index load, so results populate as soon as it is ready.
+    fn pkg_search_for(&mut self, query: &str) {
+        let q = query.trim();
+        if q.is_empty() {
+            return;
+        }
+        self.search.query = q.to_string();
+        self.handle_command(waverunner_proto::Command::Expand);
+        self.refilter();
     }
 
     /// Right-click: over an open clipboard row, open its metadata detail view.

@@ -67,6 +67,7 @@ const PROVIDERS: &[Provider] = &[
     focus_churn_provider,
     shell_error_provider,
     diagnostics_provider,
+    install_missing_provider,
     editor_provider,
     selection_provider,
     mic_provider,
@@ -172,8 +173,9 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
     ) {
         return activity == Activity::Coding;
     }
-    // "Open files here" / "Re-run last" fit terminal work (and coding).
-    if matches!(id, "files.open_here" | "shell.rerun") {
+    // "Open files here" / "Re-run last" / "Install <missing>" fit terminal work
+    // (and coding) — a stale shell exit shouldn't fire them while browsing.
+    if matches!(id, "files.open_here" | "shell.rerun" | "shell.install_missing") {
         return matches!(activity, Activity::Terminal | Activity::Coding);
     }
     match activity {
@@ -912,6 +914,50 @@ fn shell_error_provider(ctx: &ContextState) -> Vec<Affordance> {
     }
 }
 
+/// The command name from a shell line: its first whitespace token, skipping a
+/// leading `sudo` and `VAR=val` assignments. `None` when there's nothing usable.
+fn first_command_token(line: &str) -> Option<&str> {
+    for tok in line.split_whitespace() {
+        if tok == "sudo" || (tok.contains('=') && !tok.starts_with('=')) {
+            continue; // env-assignment or a sudo prefix, not the command
+        }
+        // Only a bare program name is installable — skip paths and pipelines.
+        if tok.contains('/') || tok.starts_with('-') {
+            return None;
+        }
+        return Some(tok);
+    }
+    None
+}
+
+/// A `command not found` (exit 127) on NixOS is a golden moment: the tool you
+/// wanted has a package. Offer to search nixpkgs for it — one tap opens the
+/// launcher's Install search pre-filled with the missing command. Distinct from
+/// "Search the error" (a web lookup); this leads straight to installing it.
+fn install_missing_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if ctx.app_internal.shell_exit_code != Some(127) {
+        return vec![];
+    }
+    let Some(cmd) = ctx
+        .app_internal
+        .shell_last_cmd
+        .as_deref()
+        .and_then(first_command_token)
+    else {
+        return vec![];
+    };
+    vec![Affordance {
+        id: "shell.install_missing",
+        kind: AffordanceKind::Control,
+        title: format!("Install {cmd}?"),
+        detail: "not found — search nixpkgs".into(),
+        relevance: 0.6,
+        reason: "command-not-found (exit 127) with a bare program name",
+        source: Layer::AppBridge,
+        action: AffordanceAction::Daemon(format!("pkgsearch:{cmd}")),
+    }]
+}
+
 /// Diagnostics in the focused editor buffer — surface the count while you work.
 fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
     let n = ctx.app_internal.editor_diagnostics_count;
@@ -1551,6 +1597,61 @@ mod tests {
         );
         assert!(find(&desktop, "system.battery_critical").is_some());
         assert!(find(&desktop, "system.battery_dim").is_none());
+    }
+
+    #[test]
+    fn command_not_found_offers_install_from_nixpkgs() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "foot".into();
+        ctx.window.pid = 1; // a terminal → Terminal activity
+        ctx.app_internal = AppInternalContext {
+            shell_last_cmd: Some("htop -d 5".into()),
+            shell_exit_code: Some(127),
+            ..Default::default()
+        };
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let i = find(&opts, "shell.install_missing").expect("install-missing control");
+        assert_eq!(i.title, "Install htop?");
+        assert_eq!(i.action, AffordanceAction::Daemon("pkgsearch:htop".into()));
+        // A normal failure (not 127) does not offer install.
+        ctx.app_internal.shell_exit_code = Some(1);
+        assert!(find(
+            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            "shell.install_missing"
+        )
+        .is_none());
+        // 127 but the token is a path (./x) → not installable, no offer.
+        ctx.app_internal.shell_exit_code = Some(127);
+        ctx.app_internal.shell_last_cmd = Some("./build.sh".into());
+        assert!(find(
+            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            "shell.install_missing"
+        )
+        .is_none());
+        // Not while browsing (a stale exit code shouldn't fire it).
+        ctx.app_internal.shell_last_cmd = Some("htop".into());
+        ctx.window.class = "firefox".into();
+        assert!(find(
+            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            "shell.install_missing"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn first_command_token_skips_sudo_and_assignments() {
+        assert_eq!(first_command_token("htop"), Some("htop"));
+        assert_eq!(first_command_token("sudo nixos-rebuild"), Some("nixos-rebuild"));
+        assert_eq!(first_command_token("FOO=1 BAR=2 ripgrep x"), Some("ripgrep"));
+        assert_eq!(first_command_token("./local"), None);
+        assert_eq!(first_command_token("/usr/bin/x"), None);
+        assert_eq!(first_command_token(""), None);
     }
 
     #[test]
