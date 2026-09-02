@@ -327,6 +327,30 @@ fn helper_active() -> bool {
         .unwrap_or(true)
 }
 
+/// Whether the privileged apply mechanism is installed AT ALL — i.e. the
+/// systemd `.path` unit that watches the list exists. On the live ISO (and
+/// any machine with no flake checkout, `golem.flakeDir = null`) the unit is
+/// absent BY DESIGN, so writing the list triggers nothing: without this
+/// check every install would block the mutation thread for the full
+/// [`START_TIMEOUT`] (120 s of nudging) before reporting a false "Failed" —
+/// the "won't install anything" symptom on the live medium. Detecting the
+/// missing unit lets an install fail FAST and honestly instead of hanging.
+///
+/// `systemctl` missing/erroring returns `true` (assume present): a test box
+/// or a non-systemd environment then degrades to the old timeout behavior
+/// rather than refusing every install outright.
+fn apply_mechanism_present() -> bool {
+    match std::process::Command::new("systemctl")
+        .args(["cat", "waverunner-apply.path"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) => s.success(),
+        Err(_) => true,
+    }
+}
+
 /// Block until the apply helper reports a terminal status for a run that
 /// covers a list write made at `since`. Returns the rebuild's success.
 ///
@@ -338,6 +362,17 @@ fn helper_active() -> bool {
 /// at all fails the [`START_TIMEOUT`] "trigger not wired" escape; a run
 /// past [`BUILD_TIMEOUT`] is a hard timeout.
 fn wait_for_apply(since: f64) -> bool {
+    // No apply unit on this machine (live ISO / no flake checkout): the list
+    // write triggered nothing and never will. Fail immediately rather than
+    // nudge and poll for the full START_TIMEOUT — an instant, honest "Failed"
+    // beats a two-minute hang that ends in the same place.
+    if !apply_mechanism_present() {
+        warn!(
+            "waverunner-apply is not installed on this system (live medium / no flake checkout?); \
+             package changes cannot be applied here"
+        );
+        return false;
+    }
     let start = Instant::now();
     let mut saw_ours = false;
     let mut nudges = 0u32;
