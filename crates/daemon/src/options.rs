@@ -1863,6 +1863,20 @@ impl App {
                     Shape::Default
                 }
             }
+            // A dynamic OPTION pill is clickable only if it's an actionable
+            // control — a privacy/safety WARNING pill is a passive indicator,
+            // so it keeps the default cursor.
+            Some(PillId::Option(i)) => {
+                if self
+                    .surfaced_options()
+                    .get(i as usize)
+                    .is_some_and(|a| a.action.is_actionable())
+                {
+                    Shape::Pointer
+                } else {
+                    Shape::Default
+                }
+            }
             // The small clipboard pill is clickable (paste) → pointer.
             Some(PillId::Clock) | None => Shape::Default,
             Some(_) => Shape::Pointer, // control circle / small clipboard pill
