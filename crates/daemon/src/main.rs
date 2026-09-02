@@ -1904,14 +1904,17 @@ impl App {
                     "options: {} control(s) [{}]",
                     sig.len(),
                     sig.iter()
-                        .map(|(id, _)| *&id.as_str())
+                        .map(|(id, _)| id.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
             }
             self.options_sig = sig;
-            self.refresh_options_content();
-            self.schedule_frame();
+            // The OPTION pills are computed fresh in `options_pills()`; redraw
+            // the topbar directly (the window-title guard in
+            // `refresh_options_content` would skip a redraw when only the
+            // controls changed).
+            self.draw_options();
         }
     }
 
