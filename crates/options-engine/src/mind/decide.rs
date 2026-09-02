@@ -732,6 +732,19 @@ fn mic_provider(ctx: &ContextState) -> Vec<Affordance> {
             source: Layer::Hardware,
             action: spawn(&["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"]),
         },
+        // In a call you don't want a notification popping over your screen
+        // share — offer Do Not Disturb (mute the shell's notifications). An
+        // internal daemon action.
+        Affordance {
+            id: "audio.call_dnd",
+            kind: AffordanceKind::Control,
+            title: "Do not disturb".into(),
+            detail: String::new(),
+            relevance: 0.6,
+            reason: "silence notifications during a call",
+            source: Layer::Hardware,
+            action: AffordanceAction::Daemon("toggle_dnd".into()),
+        },
     ]
 }
 
@@ -1388,6 +1401,10 @@ mod tests {
             if argv.contains(&"set-mute".to_string())));
         // The warning is still there too.
         assert!(find(&opts, "audio.mic_live").is_some());
+        // And a call offers Do-Not-Disturb (an internal daemon action).
+        let dnd = find(&opts, "audio.call_dnd").expect("dnd control in a call");
+        assert_eq!(dnd.action, AffordanceAction::Daemon("toggle_dnd".into()));
+        assert!(dnd.action.is_actionable());
     }
 
     #[test]

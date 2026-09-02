@@ -59,6 +59,10 @@ pub enum AffordanceAction {
     HyprDispatch(String),
     /// Open a URL with the user's default handler (`xdg-open`).
     OpenUrl(String),
+    /// An internal daemon action, identified by a stable tag the surface maps to
+    /// one of its own capabilities (`"toggle_dnd"` → mute notifications). Lets
+    /// an offer drive the shell itself, not just spawn a process.
+    Daemon(String),
 }
 
 impl AffordanceAction {

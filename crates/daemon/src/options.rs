@@ -123,6 +123,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "media.seek_fwd" => GLYPH_SEEK_FWD,
         "media.seek_back" => GLYPH_SEEK_BACK,
         "audio.mic_mute" => GLYPH_MIC_SLASH,
+        "audio.call_dnd" => GLYPH_BELL_SLASH,
         "git.commit" => GLYPH_COMMIT,
         "git.push" => GLYPH_PUSH,
         "git.pull" => GLYPH_PULL,
@@ -1776,7 +1777,7 @@ impl App {
     /// fully detached (double-fork via [`crate::launch`]); the argv is
     /// shell-quoted per element, so a path or URL with spaces/metacharacters is
     /// safe (the argv itself comes from the engine, never raw user text).
-    fn run_affordance_action(&self, action: &options_engine::AffordanceAction) {
+    fn run_affordance_action(&mut self, action: &options_engine::AffordanceAction) {
         use options_engine::AffordanceAction as A;
         match action {
             A::None => {}
@@ -1790,6 +1791,11 @@ impl App {
                 }
             }
             A::HyprDispatch(cmd) => crate::hypr::dispatch(cmd),
+            // Internal daemon actions, mapped by tag to a shell capability.
+            A::Daemon(tag) => match tag.as_str() {
+                "toggle_dnd" => self.toggle_notif_mute(),
+                other => warn!("options: unknown daemon action '{other}'"),
+            },
         }
     }
 
