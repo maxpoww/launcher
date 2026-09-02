@@ -96,11 +96,69 @@ async fn git_for_pid(pid: u32) -> Option<GitContext> {
     let (repo_root, git_dir) = repo_for_process_tree(pid)?;
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let is_dirty = repo_is_dirty(&repo_root).await;
+    let remote_url = std::fs::read_to_string(git_dir.join("config"))
+        .ok()
+        .and_then(|c| origin_url(&c))
+        .and_then(|u| remote_to_web_url(&u));
     Some(GitContext {
         branch: parse_head(&head),
         is_dirty,
         repo_root: Some(repo_root),
+        remote_url,
     })
+}
+
+/// The `url = …` of the `[remote "origin"]` section of a git config, if any.
+fn origin_url(config: &str) -> Option<String> {
+    let mut in_origin = false;
+    for line in config.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_origin = t == "[remote \"origin\"]";
+        } else if in_origin {
+            if let Some(rest) = t.strip_prefix("url") {
+                if let Some((_, v)) = rest.split_once('=') {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Normalize a git remote URL (ssh or https) to a browsable https web URL, or
+/// `None` for schemes we don't recognize (local paths, etc.).
+///   git@github.com:u/r.git      → https://github.com/u/r
+///   ssh://git@gitlab.com/u/r.git → https://gitlab.com/u/r
+///   https://github.com/u/r.git   → https://github.com/u/r
+fn remote_to_web_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let strip_git = |s: &str| {
+        s.strip_suffix(".git")
+            .unwrap_or(s)
+            .trim_end_matches('/')
+            .to_string()
+    };
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        // Drop any userinfo (user@host) and keep host/path.
+        let rest = rest.rsplit('@').next().unwrap_or(rest);
+        return Some(format!("https://{}", strip_git(rest)));
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.rsplit('@').next().unwrap_or(rest);
+        return Some(format!("https://{}", strip_git(rest)));
+    }
+    // scp-like: git@host:owner/repo(.git)
+    if let Some((host_part, path)) = url.split_once(':') {
+        if !host_part.contains('/') && host_part.contains('@') {
+            let host = host_part.rsplit('@').next().unwrap_or(host_part);
+            return Some(format!("https://{host}/{}", strip_git(path)));
+        }
+    }
+    None
 }
 
 /// The cwd of `pid` (the symlink target of `/proc/<pid>/cwd`), if readable.
@@ -204,6 +262,30 @@ fn parse_head(head: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_remote_urls_to_web() {
+        assert_eq!(
+            remote_to_web_url("git@github.com:max/golem.git").as_deref(),
+            Some("https://github.com/max/golem")
+        );
+        assert_eq!(
+            remote_to_web_url("https://gitlab.com/u/r.git").as_deref(),
+            Some("https://gitlab.com/u/r")
+        );
+        assert_eq!(
+            remote_to_web_url("ssh://git@github.com/u/r.git").as_deref(),
+            Some("https://github.com/u/r")
+        );
+        assert_eq!(remote_to_web_url("/srv/git/repo.git"), None);
+    }
+
+    #[test]
+    fn parses_origin_url_from_config() {
+        let cfg = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:a/b.git\n\tfetch = x\n";
+        assert_eq!(origin_url(cfg).as_deref(), Some("git@github.com:a/b.git"));
+        assert_eq!(origin_url("[core]\n\tbare = false\n"), None);
+    }
 
     #[test]
     fn parses_symbolic_head_to_branch() {

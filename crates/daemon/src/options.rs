@@ -95,6 +95,7 @@ const GLYPH_MIC_SLASH: &str = "\u{f131}"; // fa-microphone-slash (mute mic)
 const GLYPH_COMMIT: &str = "\u{f00c}"; // fa-check (commit)
 const GLYPH_PUSH: &str = "\u{f093}"; // fa-upload (push)
 const GLYPH_PULL: &str = "\u{f019}"; // fa-download (pull)
+const GLYPH_REMOTE: &str = "\u{f09b}"; // fa-github (open remote)
 const GLYPH_SEARCH: &str = "\u{f002}"; // fa-search (search the web)
 const GLYPH_OPEN_FILE: &str = "\u{f07c}"; // fa-folder-open (open copied path)
 const GLYPH_EMAIL: &str = "\u{f0e0}"; // fa-envelope (compose email)
@@ -125,6 +126,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "git.commit" => GLYPH_COMMIT,
         "git.push" => GLYPH_PUSH,
         "git.pull" => GLYPH_PULL,
+        "git.open_remote" => GLYPH_REMOTE,
         "selection.url" => GLYPH_COPY_LINK,
         "selection.open_path" => GLYPH_OPEN_FILE,
         "selection.email" => GLYPH_EMAIL,

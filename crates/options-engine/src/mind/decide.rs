@@ -150,7 +150,7 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
     // focused inside a repo directory.
     if matches!(
         id,
-        "git.commit" | "git.push" | "git.pull" | "coding.terminal_here"
+        "git.commit" | "git.push" | "git.pull" | "git.open_remote" | "coding.terminal_here"
     ) {
         return activity == Activity::Coding;
     }
@@ -550,6 +550,23 @@ fn git_provider(ctx: &ContextState) -> Vec<Affordance> {
             reason: "fast-forward to the remote",
             source: Layer::Hardware,
             action: spawn(&["git", "-C", root, "pull", "--ff-only"]),
+        });
+    }
+    // Open the repo's remote (GitHub/GitLab/…) in the browser.
+    if let Some(web) = &ctx.git.remote_url {
+        out.push(Affordance {
+            id: "git.open_remote",
+            kind: AffordanceKind::Control,
+            title: "Open remote".into(),
+            detail: web
+                .strip_prefix("https://")
+                .unwrap_or(web)
+                .trim_start_matches("www.")
+                .to_string(),
+            relevance: 0.5,
+            reason: "repo has a browsable remote",
+            source: Layer::Hardware,
+            action: AffordanceAction::OpenUrl(web.clone()),
         });
     }
     out
@@ -1296,6 +1313,7 @@ mod tests {
             repo_root: Some("/home/max/proj".into()),
             branch: Some("main".into()),
             is_dirty: true,
+            remote_url: None,
         };
         // A terminal in a repo → Coding: commit & push surface as controls.
         ctx.window.class = "foot".into();
@@ -1431,6 +1449,7 @@ mod tests {
             repo_root: Some("/home/max/proj".into()),
             branch: Some("main".into()),
             is_dirty: false,
+            remote_url: None,
         };
         let opts = decide(
             &ctx,
@@ -1521,6 +1540,7 @@ mod tests {
             repo_root: Some("/home/max/p".into()),
             branch: Some("main".into()),
             is_dirty: true,
+            remote_url: None,
         };
         ctx.media = Some(MediaState {
             player_name: "vlc".into(),

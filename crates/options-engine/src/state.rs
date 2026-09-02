@@ -57,6 +57,10 @@ pub struct GitContext {
     pub repo_root: Option<PathBuf>,
     pub branch: Option<String>,
     pub is_dirty: bool,
+    /// The `origin` remote as a browsable **https web URL** (github/gitlab/…),
+    /// normalized from an ssh or https git URL, or `None` when there's no
+    /// origin. Lets the mind offer "Open on GitHub/GitLab".
+    pub remote_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
