@@ -60,6 +60,7 @@ const PROVIDERS: &[Provider] = &[
     media_controls_provider,
     git_provider,
     coding_tools_provider,
+    files_here_provider,
     focus_churn_provider,
     shell_error_provider,
     diagnostics_provider,
@@ -155,6 +156,10 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
         "git.commit" | "git.push" | "git.pull" | "git.open_remote" | "coding.terminal_here"
     ) {
         return activity == Activity::Coding;
+    }
+    // "Open files here" fits terminal work (and coding).
+    if id == "files.open_here" {
+        return matches!(activity, Activity::Terminal | Activity::Coding);
     }
     match activity {
         // In a call, now-playing media and its controls are a distraction —
@@ -609,6 +614,30 @@ fn coding_tools_provider(ctx: &ContextState) -> Vec<Affordance> {
         reason: "open a terminal in the repo",
         source: Layer::Hardware,
         action: spawn(&["foot", "--working-directory", root]),
+    }]
+}
+
+/// **files module** — open the shell's current folder in the file manager. Fed
+/// by the shell bridge's cwd; xdg-open on a directory launches the default file
+/// manager there. Gated to terminal/coding activity in `fits_activity`.
+fn files_here_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let Some(cwd) = ctx
+        .app_internal
+        .shell_cwd
+        .as_deref()
+        .and_then(|p| p.to_str())
+    else {
+        return vec![];
+    };
+    vec![Affordance {
+        id: "files.open_here",
+        kind: AffordanceKind::Control,
+        title: "Open files here".into(),
+        detail: cwd.rsplit('/').next().unwrap_or(cwd).to_string(),
+        relevance: 0.46,
+        reason: "open the shell's folder in the file manager",
+        source: Layer::AppBridge,
+        action: AffordanceAction::OpenUrl(cwd.to_string()),
     }]
 }
 
@@ -1546,6 +1575,40 @@ mod tests {
         .unwrap()
         .relevance;
         assert!(full > playpause, "foreground media keeps full weight");
+    }
+
+    #[test]
+    fn shell_cwd_offers_open_files_here() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "foot".into();
+        ctx.window.pid = 1; // a terminal → Terminal activity
+        ctx.app_internal.shell_cwd = Some("/home/max/photos".into());
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let f = find(&opts, "files.open_here").expect("open-files control in a terminal");
+        assert_eq!(
+            f.action,
+            AffordanceAction::OpenUrl("/home/max/photos".into())
+        );
+        assert_eq!(f.detail, "photos");
+        // Not while browsing.
+        ctx.window.class = "firefox".into();
+        assert!(find(
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
+            "files.open_here"
+        )
+        .is_none());
     }
 
     #[test]

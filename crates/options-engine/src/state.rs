@@ -45,6 +45,9 @@ pub struct TextSelection {
 pub struct AppInternalContext {
     pub shell_last_cmd: Option<String>,
     pub shell_exit_code: Option<i32>,
+    /// The focused shell's working directory (from the shell bridge) — lets
+    /// OPTIONS offer "open the current folder in Files".
+    pub shell_cwd: Option<PathBuf>,
     pub editor_file: Option<PathBuf>,
     pub editor_language: Option<String>,
     pub editor_diagnostics_count: u32,

@@ -170,6 +170,8 @@ enum BridgeMsg {
         last_cmd: Option<String>,
         #[serde(default)]
         exit_code: Option<i32>,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     Editor {
         #[serde(default)]
@@ -194,9 +196,11 @@ fn apply(state: &mut AppInternalContext, msg: BridgeMsg) {
         BridgeMsg::Shell {
             last_cmd,
             exit_code,
+            cwd,
         } => {
             state.shell_last_cmd = last_cmd;
             state.shell_exit_code = exit_code;
+            state.shell_cwd = cwd;
         }
         BridgeMsg::Editor {
             file,
@@ -228,7 +232,8 @@ mod tests {
             shell,
             BridgeMsg::Shell {
                 last_cmd: Some("ls".into()),
-                exit_code: Some(0)
+                exit_code: Some(0),
+                cwd: Some("/x".into()),
             }
         );
         let editor: BridgeMsg = serde_json::from_str(
@@ -260,6 +265,7 @@ mod tests {
             BridgeMsg::Shell {
                 last_cmd: Some("cargo build".into()),
                 exit_code: Some(1),
+                cwd: None,
             },
         );
         // Editor fields survive the shell update.
