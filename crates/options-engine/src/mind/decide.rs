@@ -172,6 +172,7 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
             | "editor.open_folder"
             | "editor.run"
             | "editor.build"
+            | "editor.format"
             | "git.show_commit"
     ) {
         return activity == Activity::Coding;
@@ -1073,6 +1074,29 @@ fn editor_provider(ctx: &ContextState) -> Vec<Affordance> {
             },
         });
     }
+    // Format the current file in place with the language's canonical formatter.
+    if let (Some(file), Some(fmt)) = (
+        ctx.app_internal
+            .editor_file
+            .as_deref()
+            .and_then(|f| f.to_str()),
+        ctx.app_internal
+            .editor_language
+            .as_deref()
+            .and_then(formatter_for_language),
+    ) {
+        out.push(Affordance {
+            id: "editor.format",
+            kind: AffordanceKind::Control,
+            title: "Format file".into(),
+            detail: fmt.split_whitespace().next().unwrap_or(fmt).into(),
+            relevance: 0.46,
+            reason: "reformat the edited file",
+            source: Layer::AppBridge,
+            // `<fmt> '<file>'` — file path shell-quoted (editor-bridge sourced).
+            action: spawn(&["sh", "-c", &format!("{fmt} {}", shell_arg(file))]),
+        });
+    }
     out
 }
 
@@ -1084,6 +1108,18 @@ fn builder_for_language(lang: &str) -> Option<&'static str> {
         "rust" => Some("cargo build"),
         "go" => Some("go build ./..."),
         "zig" => Some("zig build"),
+        _ => None,
+    }
+}
+
+/// The in-place formatter binary for a language (invoked as `<fmt> <file>`), or
+/// `None`. Idempotent tools that rewrite the file in place with no other args.
+fn formatter_for_language(lang: &str) -> Option<&'static str> {
+    match lang.to_lowercase().as_str() {
+        "rust" => Some("rustfmt"),
+        "go" => Some("gofmt -w"),
+        "python" => Some("black -q"),
+        "zig" => Some("zig fmt"),
         _ => None,
     }
 }
@@ -2509,6 +2545,34 @@ mod tests {
         .is_none());
         assert_eq!(builder_for_language("go"), Some("go build ./..."));
         assert_eq!(builder_for_language("ruby"), None);
+    }
+
+    #[test]
+    fn editor_offers_format_for_known_languages() {
+        let mut ctx = live_ctx();
+        ctx.window.pid = 1;
+        ctx.window.class = "code".into(); // Coding
+        ctx.app_internal.editor_file = Some("/home/max/proj/src/main.rs".into());
+        ctx.app_internal.editor_language = Some("rust".into());
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let f = find(&opts, "editor.format").expect("format for a rust file");
+        assert!(matches!(&f.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "sh"
+               && argv.last().unwrap().contains("rustfmt '/home/max/proj/src/main.rs'")));
+        // An unknown language has no formatter.
+        ctx.app_internal.editor_language = Some("cobol".into());
+        assert!(find(
+            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            "editor.format"
+        )
+        .is_none());
+        assert_eq!(formatter_for_language("go"), Some("gofmt -w"));
     }
 
     #[test]
