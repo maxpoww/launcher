@@ -44,8 +44,9 @@ impl crate::App {
 
     /// The media box panel rect, just below the bar in the dropdown region.
     pub(crate) fn media_box_geom(&self) -> Rect {
+        let s = self.options_scale();
         let y = self.config.options.height as f32 + PILL_MARGIN_Y;
-        Rect::new(EDGE_PAD, y, BOX_W, BOX_H)
+        Rect::new(EDGE_PAD, y, BOX_W * s, BOX_H * s)
     }
 
     /// Fully-expanded bottom of the media box, for the input region.
@@ -54,32 +55,19 @@ impl crate::App {
         g.y + g.h
     }
 
-    /// The seek track rect (inside the box).
+    /// The seek track rect (inside the box), at the live box scale.
     fn seek_track(&self, box_r: Rect) -> Rect {
-        Rect::new(
-            box_r.x + PAD,
-            box_r.y + PAD + 18.0 + BTN_D + 14.0,
-            box_r.w - 2.0 * PAD,
-            BAR_H,
-        )
+        seek_track_at(box_r, self.options_scale())
     }
 
-    /// The volume track rect (inside the box), below the seek track.
+    /// The volume track rect (inside the box), at the live box scale.
     fn vol_track(&self, box_r: Rect) -> Rect {
-        let s = self.seek_track(box_r);
-        Rect::new(s.x + 20.0, s.y + 22.0, s.w - 20.0, BAR_H)
+        vol_track_at(box_r, self.options_scale())
     }
 
-    /// The three transport button rects: (prev, play/pause, next).
+    /// The three transport button rects, at the live box scale.
     fn transport_btns(&self, box_r: Rect) -> [Rect; 3] {
-        let total = 3.0 * BTN_D + 2.0 * BTN_GAP;
-        let x0 = box_r.x + (box_r.w - total) / 2.0;
-        let y = box_r.y + PAD + 16.0;
-        [
-            Rect::new(x0, y, BTN_D, BTN_D),
-            Rect::new(x0 + BTN_D + BTN_GAP, y, BTN_D, BTN_D),
-            Rect::new(x0 + 2.0 * (BTN_D + BTN_GAP), y, BTN_D, BTN_D),
-        ]
+        transport_btns_at(box_r, self.options_scale())
     }
 
     /// Draw the media box into the scene (panel + track + transport + bars).
@@ -88,6 +76,7 @@ impl crate::App {
             return;
         };
         let box_r = self.media_box_geom();
+        let s = self.options_scale();
         let (fill3, ink) = self.options_box_surface();
         let bright = self.options_bar_is_bright();
         let alpha = self.box_panel_alpha();
@@ -96,10 +85,11 @@ impl crate::App {
         let track_c = [ink[0], ink[1], ink[2], ink[3] * 0.18];
 
         // Panel.
-        crate::options::push_neumorph(scene, box_r, 14.0, bright, alpha);
+        let panel_r = 14.0 * s;
+        crate::options::push_neumorph(scene, box_r, panel_r, bright, alpha);
         scene.rects.push(RectInst {
             rect: box_r,
-            radius: 14.0,
+            radius: panel_r,
             color: [fill3[0], fill3[1], fill3[2], alpha],
             glass: 0.0,
             border: 0.0,
@@ -113,10 +103,10 @@ impl crate::App {
         };
         scene.labels.push(Label {
             text: title,
-            pos: (box_r.x + PAD, box_r.y + 8.0),
-            max_w: box_r.w - 2.0 * PAD,
-            font_px: 14.0,
-            line_px: 18.0,
+            pos: (box_r.x + PAD * s, box_r.y + 8.0 * s),
+            max_w: box_r.w - 2.0 * PAD * s,
+            font_px: 14.0 * s,
+            line_px: 18.0 * s,
             centered: false,
             dim: false,
             cache: true,
@@ -146,10 +136,10 @@ impl crate::App {
             });
             scene.labels.push(Label {
                 text: g.to_owned(),
-                pos: (r.x + r.w / 2.0, r.y + (r.h - 16.0) / 2.0),
+                pos: (r.x + r.w / 2.0, r.y + (r.h - 16.0 * s) / 2.0),
                 max_w: r.w,
-                font_px: 15.0,
-                line_px: 16.0,
+                font_px: 15.0 * s,
+                line_px: 16.0 * s,
                 centered: true,
                 dim: false,
                 cache: true,
@@ -177,10 +167,10 @@ impl crate::App {
                     fmt_time(m.position_secs),
                     fmt_time(m.length_secs)
                 ),
-                pos: (seek.x, seek.y + 8.0),
+                pos: (seek.x, seek.y + 8.0 * s),
                 max_w: seek.w,
-                font_px: 11.0,
-                line_px: 14.0,
+                font_px: 11.0 * s,
+                line_px: 14.0 * s,
                 centered: false,
                 dim: true,
                 cache: false,
@@ -205,10 +195,10 @@ impl crate::App {
             });
         scene.labels.push(Label {
             text: GLYPH_VOL.to_owned(),
-            pos: (vol.x - 20.0, vol.y - 6.0),
-            max_w: 18.0,
-            font_px: 13.0,
-            line_px: 14.0,
+            pos: (vol.x - 20.0 * s, vol.y - 6.0 * s),
+            max_w: 18.0 * s,
+            font_px: 13.0 * s,
+            line_px: 14.0 * s,
             centered: false,
             dim: true,
             cache: true,
@@ -333,6 +323,36 @@ impl crate::App {
     }
 }
 
+/// The seek track rect inside `box_r`, with every offset scaled by `s` — the
+/// same factor `media_box_geom` applies to the panel, so the layout is uniform.
+fn seek_track_at(box_r: Rect, s: f32) -> Rect {
+    Rect::new(
+        box_r.x + PAD * s,
+        box_r.y + (PAD + 18.0 + BTN_D + 14.0) * s,
+        box_r.w - 2.0 * PAD * s,
+        BAR_H * s,
+    )
+}
+
+/// The volume track rect inside `box_r`, below the seek track.
+fn vol_track_at(box_r: Rect, s: f32) -> Rect {
+    let t = seek_track_at(box_r, s);
+    Rect::new(t.x + 20.0 * s, t.y + 22.0 * s, t.w - 20.0 * s, BAR_H * s)
+}
+
+/// The three transport button rects inside `box_r`: (prev, play/pause, next).
+fn transport_btns_at(box_r: Rect, s: f32) -> [Rect; 3] {
+    let (btn_d, btn_gap) = (BTN_D * s, BTN_GAP * s);
+    let total = 3.0 * btn_d + 2.0 * btn_gap;
+    let x0 = box_r.x + (box_r.w - total) / 2.0;
+    let y = box_r.y + (PAD + 16.0) * s;
+    [
+        Rect::new(x0, y, btn_d, btn_d),
+        Rect::new(x0 + btn_d + btn_gap, y, btn_d, btn_d),
+        Rect::new(x0 + 2.0 * (btn_d + btn_gap), y, btn_d, btn_d),
+    ]
+}
+
 /// Draw a track bar with a filled portion `frac` (0..=1).
 fn push_bar(scene: &mut Scene, track: Rect, frac: f32, track_c: [f32; 4], fill_c: [f32; 4]) {
     scene.rects.push(RectInst {
@@ -368,8 +388,59 @@ fn fmt_time(secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_time, hit_band};
+    use super::{
+        fmt_time, hit_band, seek_track_at, transport_btns_at, vol_track_at, BAR_H, BOX_H, BOX_W,
+        BTN_D, BTN_GAP, PAD,
+    };
     use crate::content::Rect;
+
+    /// The panel as `media_box_geom` builds it: edge-anchored origin, scaled size.
+    fn box_at(s: f32) -> Rect {
+        Rect::new(24.0, 40.0, BOX_W * s, BOX_H * s)
+    }
+
+    #[test]
+    fn box_scaling_is_lockstep_and_reduces_at_unity() {
+        // Unity is a strict no-op vs the pre-scale constants.
+        let b = box_at(1.0);
+        let seek = seek_track_at(b, 1.0);
+        assert!((seek.x - (b.x + PAD)).abs() < 0.01);
+        assert!((seek.y - (b.y + PAD + 18.0 + BTN_D + 14.0)).abs() < 0.01);
+        assert!((seek.w - (b.w - 2.0 * PAD)).abs() < 0.01);
+        assert!((seek.h - BAR_H).abs() < 0.01);
+        let btns = transport_btns_at(b, 1.0);
+        assert!((btns[1].x - btns[0].x - (BTN_D + BTN_GAP)).abs() < 0.01);
+        assert!((btns[0].w - BTN_D).abs() < 0.01);
+
+        // Every interior offset scales by exactly the box factor (no drift), and
+        // nothing interactive escapes the shrunken panel.
+        for s in [0.82_f32, 0.889, 0.95] {
+            let bs = box_at(s);
+            for (full, small) in [
+                (seek, seek_track_at(bs, s)),
+                (vol_track_at(b, 1.0), vol_track_at(bs, s)),
+                (btns[0], transport_btns_at(bs, s)[0]),
+                (btns[2], transport_btns_at(bs, s)[2]),
+            ] {
+                assert!(
+                    ((small.x - bs.x) - (full.x - b.x) * s).abs() < 0.01
+                        && ((small.y - bs.y) - (full.y - b.y) * s).abs() < 0.01,
+                    "offset scales at {s}"
+                );
+                assert!(
+                    (small.w - full.w * s).abs() < 0.01 && (small.h - full.h * s).abs() < 0.01,
+                    "size scales at {s}"
+                );
+                assert!(
+                    small.x >= bs.x
+                        && small.y >= bs.y
+                        && small.x + small.w <= bs.x + bs.w + 0.01
+                        && small.y + small.h <= bs.y + bs.h + 0.01,
+                    "stays inside the panel at {s}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn fmt_time_pads_seconds_and_carries_minutes() {
