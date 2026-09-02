@@ -89,9 +89,13 @@ const GLYPH_BRIGHT_UP: &str = "\u{f185}"; // fa-sun-o
 const GLYPH_BRIGHT_DOWN: &str = "\u{f042}"; // fa-adjust (dim)
 const GLYPH_NEXT: &str = "\u{f051}"; // fa-step-forward
 const GLYPH_PREV: &str = "\u{f048}"; // fa-step-backward
+const GLYPH_SEEK_FWD: &str = "\u{f04e}"; // fa-forward (seek +10s)
+const GLYPH_SEEK_BACK: &str = "\u{f04a}"; // fa-backward (seek -10s)
 const GLYPH_MIC_SLASH: &str = "\u{f131}"; // fa-microphone-slash (mute mic)
 const GLYPH_COMMIT: &str = "\u{f00c}"; // fa-check (commit)
 const GLYPH_PUSH: &str = "\u{f093}"; // fa-upload (push)
+const GLYPH_SEARCH: &str = "\u{f002}"; // fa-search (search the web)
+const GLYPH_MONITOR: &str = "\u{f0e4}"; // fa-tachometer (system monitor)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
 
 /// The Nerd-Font glyph for a dynamic OPTION control, by affordance id. The
@@ -111,10 +115,14 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "media.bright_down" => GLYPH_BRIGHT_DOWN,
         "media.next" => GLYPH_NEXT,
         "media.prev" => GLYPH_PREV,
+        "media.seek_fwd" => GLYPH_SEEK_FWD,
+        "media.seek_back" => GLYPH_SEEK_BACK,
         "audio.mic_mute" => GLYPH_MIC_SLASH,
         "git.commit" => GLYPH_COMMIT,
         "git.push" => GLYPH_PUSH,
         "selection.url" => GLYPH_COPY_LINK,
+        "selection.search" => GLYPH_SEARCH,
+        "system.high_cpu" => GLYPH_MONITOR,
         _ => GLYPH_OPTION,
     }
 }

@@ -301,15 +301,18 @@ fn cpu_provider(ctx: &ContextState) -> Vec<Affordance> {
     if ctx.metrics.cpu_usage_pct < 85.0 {
         return vec![];
     }
+    // Sustained high CPU: surface a control to SEE what's using it (open a
+    // system monitor in a terminal). A Control — a direct "show me", equally
+    // useful to novice and expert. `foot btop` (both ship on Golem).
     vec![Affordance {
         id: "system.high_cpu",
-        kind: AffordanceKind::Info,
-        title: "High CPU load".into(),
-        detail: format!("{:.0}% in use", ctx.metrics.cpu_usage_pct),
+        kind: AffordanceKind::Control,
+        title: "High CPU".into(),
+        detail: format!("{:.0}% — open monitor", ctx.metrics.cpu_usage_pct),
         relevance: 0.4,
         reason: "cpu >=85%",
         source: Layer::Hardware,
-        action: AffordanceAction::None,
+        action: spawn(&["foot", "btop"]),
     }]
 }
 
@@ -369,6 +372,26 @@ fn media_controls_provider(ctx: &ContextState) -> Vec<Affordance> {
             reason: "raise the volume",
             source: Layer::Hardware,
             action: spawn(&["wpctl", "set-volume", "-l", "1.5", SINK, "5%+"]),
+        },
+        Affordance {
+            id: "media.seek_back",
+            kind: AffordanceKind::Control,
+            title: "Back 10s".into(),
+            detail: String::new(),
+            relevance: 0.60,
+            reason: "seek backward 10 seconds",
+            source: Layer::Hardware,
+            action: spawn(&["playerctl", "position", "10-"]),
+        },
+        Affordance {
+            id: "media.seek_fwd",
+            kind: AffordanceKind::Control,
+            title: "Forward 10s".into(),
+            detail: String::new(),
+            relevance: 0.59,
+            reason: "seek forward 10 seconds",
+            source: Layer::Hardware,
+            action: spawn(&["playerctl", "position", "10+"]),
         },
         Affordance {
             id: "media.next",
@@ -670,8 +693,8 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
         return vec![];
     }
     if s.contains_url {
-        // **browser/selection module** — a copied URL is intent to open it.
-        // A real Control now: xdg-open the link with the default handler.
+        // **selection module** — a copied URL is intent to open it.
+        // A real Control: xdg-open the link with the default handler.
         let url = s.highlighted_text.clone().unwrap_or_default();
         vec![Affordance {
             id: "selection.url",
@@ -683,20 +706,46 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
             source: Layer::Selection,
             action: AffordanceAction::OpenUrl(url),
         }]
-    } else if s.is_code {
+    } else if let Some(text) = s
+        .highlighted_text
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+    {
+        // Any other copied text (prose or code) is a strong search intent — a
+        // pasted error message, a term, a snippet. Offer to search the web for
+        // it (xdg-open a query URL). The query is percent-encoded so spaces and
+        // metacharacters travel intact. Covers "text/document editing" and
+        // "web browsing" from the catalog with a single universal control.
+        let query = url_encode_query(text.trim());
         vec![Affordance {
-            id: "selection.code",
-            kind: AffordanceKind::Action,
-            title: "Copied code".into(),
-            detail: format!("{} characters", s.char_count),
-            relevance: 0.4,
-            reason: "clipboard looks like code",
+            id: "selection.search",
+            kind: AffordanceKind::Control,
+            title: "Search the web".into(),
+            detail: text.chars().take(48).collect(),
+            relevance: 0.42,
+            reason: "clipboard holds searchable text",
             source: Layer::Selection,
-            action: AffordanceAction::None,
+            action: AffordanceAction::OpenUrl(format!("https://duckduckgo.com/?q={query}")),
         }]
     } else {
         vec![]
     }
+}
+
+/// Percent-encode `s` for use in a URL query value (RFC 3986 unreserved kept,
+/// everything else `%XX`). Small and dependency-free — the only transform the
+/// search control needs.
+fn url_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1193,5 +1242,81 @@ mod tests {
             url.action,
             AffordanceAction::OpenUrl("https://example.com".into())
         );
+    }
+
+    #[test]
+    fn media_offers_seek_controls() {
+        let mut ctx = live_ctx();
+        ctx.media = Some(MediaState {
+            player_name: "vlc".into(),
+            title: "clip".into(),
+            artist: String::new(),
+            is_playing: true,
+        });
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let back = find(&opts, "media.seek_back").expect("seek-back control");
+        assert!(matches!(&back.action, AffordanceAction::Spawn { argv }
+            if argv == &["playerctl", "position", "10-"]));
+        let fwd = find(&opts, "media.seek_fwd").expect("seek-fwd control");
+        assert!(matches!(&fwd.action, AffordanceAction::Spawn { argv }
+            if argv == &["playerctl", "position", "10+"]));
+        // Seek outranks track-skip so it leads the cluster (video-first).
+        let next = find(&opts, "media.next").unwrap();
+        assert!(back.relevance > next.relevance);
+    }
+
+    #[test]
+    fn copied_text_offers_a_web_search_url_encoded() {
+        let mut ctx = live_ctx();
+        ctx.selection = TextSelection {
+            highlighted_text: Some("rust borrow checker error E0502".into()),
+            char_count: 31,
+            is_code: false,
+            contains_url: false,
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        let s = find(&opts, "selection.search").expect("search control");
+        assert_eq!(s.kind, AffordanceKind::Control);
+        assert_eq!(
+            s.action,
+            AffordanceAction::OpenUrl(
+                "https://duckduckgo.com/?q=rust%20borrow%20checker%20error%20E0502".into()
+            )
+        );
+        // Whitespace-only selection offers nothing.
+        ctx.selection.highlighted_text = Some("   ".into());
+        assert!(find(&decide(&ctx, &Tuning::default()), "selection.search").is_none());
+    }
+
+    #[test]
+    fn url_encoding_escapes_reserved_and_keeps_unreserved() {
+        assert_eq!(url_encode_query("a b&c"), "a%20b%26c");
+        assert_eq!(url_encode_query("A-z_0.9~"), "A-z_0.9~");
+        assert_eq!(url_encode_query("$(x)"), "%24%28x%29");
+    }
+
+    #[test]
+    fn high_cpu_offers_a_monitor_control() {
+        let mut ctx = live_ctx();
+        ctx.metrics.cpu_usage_pct = 92.0;
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let c = find(&opts, "system.high_cpu").expect("high-cpu control");
+        assert_eq!(c.kind, AffordanceKind::Control);
+        assert!(c.action.is_actionable());
+        // Below the threshold it does not surface.
+        ctx.metrics.cpu_usage_pct = 40.0;
+        assert!(find(&decide(&ctx, &Tuning::default()), "system.high_cpu").is_none());
     }
 }
