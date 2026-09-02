@@ -58,6 +58,7 @@ mod collectors;
 mod engine;
 mod message;
 mod mind;
+mod self_capture;
 mod state;
 
 pub use collector::{Collector, CollectorFuture};
@@ -67,6 +68,7 @@ pub use mind::{
     decide, decide_with, infer_activity, Activity, Affordance, AffordanceAction, AffordanceKind,
     Mind, OptionSet, Temporal, Tuning,
 };
+pub use self_capture::{begin_self_capture, end_self_capture};
 pub use state::{
     ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, DeployHealth,
     GitContext, Health, Layer, LayerHealth, MediaState, NotificationContext, SystemMetrics,

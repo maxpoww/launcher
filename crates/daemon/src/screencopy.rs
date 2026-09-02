@@ -170,6 +170,7 @@ impl App {
             if let Some(buf) = cap.buffer {
                 buf.destroy();
             }
+            options_engine::end_self_capture();
         }
     }
 
@@ -193,6 +194,12 @@ impl App {
         let output = target.output.clone();
         let sample_y = target.sample_y;
         let frost = target.frost;
+        // Declare the capture as ours BEFORE asking for it: Hyprland announces
+        // every screencopy session on its event socket, and the OPTIONS Mind
+        // would otherwise surface "Screen is being shared" for the bar's own
+        // colour-match — twice a second, forever (see
+        // `options_engine::begin_self_capture`).
+        options_engine::begin_self_capture();
         let frame = mgr.capture_output(0, &output, &self.qh, ());
         self.capture = Some(Capture {
             frame,
@@ -282,6 +289,7 @@ impl App {
         if let Some(buf) = cap.buffer {
             buf.destroy();
         }
+        options_engine::end_self_capture();
         // Update the colour if we got one; the poll runs on its own timer
         // (see `schedule_options_poll`), so re-evaluation keeps going regardless.
         // A frost capture feeds the box's pill colour; a normal one the bar.

@@ -132,6 +132,13 @@ async fn stream_events(
                     .await;
             }
             Some(Event::Screencast(on)) => {
+                // Our own topbar colour-match samples the screen over
+                // screencopy every ~700 ms, and Hyprland announces that exactly
+                // like a real share — so without this the privacy warning
+                // blinks on and off forever. See [`crate::self_capture`].
+                if crate::self_capture::self_capture_active() {
+                    continue;
+                }
                 let _ = tx
                     .send(Update::Delta(
                         Layer::Compositor,
