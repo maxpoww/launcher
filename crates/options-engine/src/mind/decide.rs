@@ -147,7 +147,7 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
     // git commit/push are Coding controls — surface them only while actually
     // working in the repo, not when a browser or media app merely happens to be
     // focused inside a repo directory.
-    if matches!(id, "git.commit" | "git.push") {
+    if matches!(id, "git.commit" | "git.push" | "git.pull") {
         return activity == Activity::Coding;
     }
     match activity {
@@ -532,6 +532,21 @@ fn git_provider(ctx: &ContextState) -> Vec<Affordance> {
                 action: spawn(&["git", "-C", root, "push"]),
             });
         }
+    }
+    // Pull is useful whether or not the tree is dirty (grab upstream before
+    // you start). --ff-only never creates a merge and aborts cleanly on
+    // divergence or a dirty conflict, so it is safe to offer unconditionally.
+    if let Some(root) = ctx.git.repo_root.as_deref().and_then(|p| p.to_str()) {
+        out.push(Affordance {
+            id: "git.pull",
+            kind: AffordanceKind::Control,
+            title: "Pull".into(),
+            detail: format!("on {branch}"),
+            relevance: 0.58,
+            reason: "fast-forward to the remote",
+            source: Layer::Hardware,
+            action: spawn(&["git", "-C", root, "pull", "--ff-only"]),
+        });
     }
     out
 }
@@ -1236,8 +1251,12 @@ mod tests {
             if argv[0] == "git" && argv.contains(&"/home/max/proj".to_string())
                && argv.contains(&"commit".to_string())));
         assert!(find(&opts, "git.push").is_some());
+        // Pull is offered while coding too (dirty or not), --ff-only.
+        let pull = find(&opts, "git.pull").expect("pull control while coding");
+        assert!(matches!(&pull.action, AffordanceAction::Spawn { argv }
+            if argv.contains(&"pull".to_string()) && argv.contains(&"--ff-only".to_string())));
 
-        // A browser focused in the same repo dir → Browsing, NOT coding: the
+        // A browser focused in the same repo dir → Browsing, NOT coding: all
         // git controls clear away (only the branch/dirty info would remain).
         ctx.window.class = "firefox".into();
         let opts = decide(
@@ -1249,6 +1268,7 @@ mod tests {
         );
         assert!(find(&opts, "git.commit").is_none());
         assert!(find(&opts, "git.push").is_none());
+        assert!(find(&opts, "git.pull").is_none());
     }
 
     #[test]
