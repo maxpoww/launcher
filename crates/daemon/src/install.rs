@@ -527,11 +527,15 @@ impl App {
     /// matches as transient entries, returning their indices for the
     /// Install section.
     pub(crate) fn pkg_results(&mut self) -> Vec<usize> {
-        // Lazily load the index the first time the Install section is shown.
-        // Until this fires the nix thread is parked holding no index memory;
-        // one Rank kicks the ~8.6 MB parse (and icon sweep), after which
-        // `IndexReady` flips the state to `Ready` and normal ranking takes over.
-        if self.pkg_state == PkgIndexState::Loading && !self.pkg_load_kicked {
+        // Lazily load the index the first time the launcher card is actually
+        // opened (not during the hidden-state refilters that run at startup and
+        // on every rescan). Until this fires the nix thread is parked holding no
+        // index memory; one Rank kicks the ~8.6 MB parse (and icon sweep), after
+        // which `IndexReady` flips the state to `Ready` and ranking takes over.
+        if self.pkg_state == PkgIndexState::Loading
+            && !self.pkg_load_kicked
+            && self.ui.target() == Target::Open
+        {
             self.pkg_load_kicked = true;
             self.nix.request(nix::Request::Rank {
                 query: self.search.query.clone(),
