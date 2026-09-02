@@ -36,30 +36,134 @@ use crate::notifications::{
     action_pairs, ActiveNotification, NotifCommand, NotifEvent, NotifHandle,
 };
 use crate::options::{
-    hover_grow, push_neumorph, wash, PillId, BOND_GAP, EDGE_PAD, FONT_PX, GLYPH_BELL,
-    GLYPH_BELL_SLASH, LINE_PX, NERD, OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X,
+    hover_grow, push_neumorph, wash, PillId, BOND_GAP, EDGE_PAD, GLYPH_BELL, GLYPH_BELL_SLASH,
+    NERD, OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
 
-/// Comfortable inner padding of a history card (matches the browser mockup —
-/// no compact mode). Horizontal on both sides; vertical top and bottom.
-const CARD_PAD_X: f32 = 14.0;
-const CARD_PAD_Y: f32 = 11.0;
-/// Right inset for the trailing time / dismiss can — tighter than `CARD_PAD_X`
-/// so they hug the card's top-right corner (matches the clipboard list).
-const TRAIL_PAD_X: f32 = 6.0;
-/// The app-identity tile at the card's top-left — a real avatar (circular) /
-/// app icon, or the initial-letter monogram fallback.
-const ICON_SZ: f32 = 40.0;
-const ICON_GAP: f32 = 11.0;
 /// Body wraps to at most this many lines; the overflow is clipped (an
 /// interactive "show more" is a later pass).
 const MAX_BODY_LINES: usize = 4;
-/// Gap between the header line and the wrapped body.
-const BODY_GAP: f32 = 3.0;
-/// Per-card control (×) hot-square and the gap to the header text.
-const CTRL_SZ: f32 = 18.0;
-const CTRL_GAP_N: f32 = 6.0;
+
+/// Every dimension of the OPEN BOX (and its cards), at the live small-screen
+/// scale — the box shrinks UNIFORMLY: chrome, pads, icon tile AND font, so a
+/// 1366x768 panel gets a proportionally smaller shade rather than a squeezed
+/// frame around full-size text. Built once per measure/draw pass from
+/// [`App::options_scale`]; scale 1.0 reduces to the original constants.
+///
+/// Measure and draw both read these fields, so they cannot drift apart. The
+/// wrap stays desync-free for the same reason the clipboard box does:
+/// `wrap_text` is LINEAR in font size, so scaling the text column and the font
+/// by one factor yields identical line breaks (see `body_w`).
+///
+/// The topbar PILLS are deliberately NOT scaled here (their reserved zone is
+/// fixed at startup); pill code names `crate::options::FONT_PX` explicitly.
+#[derive(Clone, Copy)]
+pub(crate) struct BoxMetrics {
+    /// The factor itself, for the odd inline offset that has no named constant.
+    s: f32,
+    /// Body/summary text size and the line box it sits in.
+    font_px: f32,
+    line_px: f32,
+    /// Comfortable inner padding of a history card (matches the browser mockup
+    /// — no compact mode). Horizontal on both sides; vertical top and bottom.
+    card_pad_x: f32,
+    card_pad_y: f32,
+    /// Right inset for the trailing time / dismiss can — tighter than
+    /// `card_pad_x` so they hug the card's top-right corner (like the
+    /// clipboard list).
+    trail_pad_x: f32,
+    /// The app-identity tile at the card's top-left — a real avatar
+    /// (circular) / app icon, or the initial-letter monogram fallback.
+    icon_sz: f32,
+    icon_gap: f32,
+    /// Gap between the header line and the wrapped body.
+    body_gap: f32,
+    /// Per-card control (×) hot-square and the gap to the header text.
+    ctrl_sz: f32,
+    ctrl_gap_n: f32,
+    /// Width of the extended preview pill (and thus the history rectangle).
+    /// Kept narrow so the open box reads as a portrait phone-style shade
+    /// (clearly taller than wide) rather than a squat panel.
+    extended_w: f32,
+    /// Height of the fully-expanded history rectangle (fits within the
+    /// surface's reserved dropdown area, [`crate::OPTIONS_DROPDOWN_H`]).
+    expanded_h: f32,
+    /// Height of the open box with no notifications — just tall enough for the
+    /// centred "No notifications" message.
+    empty_h: f32,
+    /// Gap between summary and the trailing time / between summary and body.
+    text_gap: f32,
+    /// Bottom padding below the last card before scrolling stops.
+    list_pad: f32,
+    /// The box's corner radius once fully open. The collapsed element is a full
+    /// stadium/circle (`ph/2`); it eases to this gentler radius as it expands so
+    /// the edge-to-edge zebra stripes can round to the box outline without
+    /// ballooning into pills.
+    box_radius: f32,
+}
+
+/// A text size — glyph size and the line box it sits in. Carried explicitly so
+/// a label can take the BOX's scaled size, the PILL's own (unscaled) size, or a
+/// lerp of the two while the top card morphs between the preview line and a card.
+#[derive(Clone, Copy)]
+pub(crate) struct TextPx {
+    font: f32,
+    line: f32,
+}
+
+impl TextPx {
+    /// The topbar pill's text size — never scaled (the pills' reserved zone is
+    /// fixed at startup).
+    fn pill() -> Self {
+        Self {
+            font: crate::options::FONT_PX,
+            line: crate::options::LINE_PX,
+        }
+    }
+
+    /// Between the pill's size (`t` = 0) and the box's (`t` = 1), for the
+    /// top card's morph out of the preview band.
+    fn lerp(pill: Self, box_px: Self, t: f32) -> Self {
+        Self {
+            font: lerp(pill.font, box_px.font, t),
+            line: lerp(pill.line, box_px.line, t),
+        }
+    }
+}
+
+impl BoxMetrics {
+    /// This box's text size (see [`TextPx`]).
+    fn text(&self) -> TextPx {
+        TextPx {
+            font: self.font_px,
+            line: self.line_px,
+        }
+    }
+
+    /// The design dimensions multiplied through by `s` (1.0 = the originals).
+    fn at(s: f32) -> Self {
+        Self {
+            s,
+            font_px: crate::options::FONT_PX * s,
+            line_px: crate::options::LINE_PX * s,
+            card_pad_x: 14.0 * s,
+            card_pad_y: 11.0 * s,
+            trail_pad_x: 6.0 * s,
+            icon_sz: 40.0 * s,
+            icon_gap: 11.0 * s,
+            body_gap: 3.0 * s,
+            ctrl_sz: 18.0 * s,
+            ctrl_gap_n: 6.0 * s,
+            extended_w: 380.0 * s,
+            expanded_h: 505.0 * s,
+            empty_h: 120.0 * s,
+            text_gap: 8.0 * s,
+            list_pad: 6.0 * s,
+            box_radius: 10.0 * s,
+        }
+    }
+}
 /// fa-trash-o (outline can with vertical lines) — the per-card delete control.
 const GLYPH_TRASH: &str = "\u{f014}";
 
@@ -104,25 +208,6 @@ const SCROLL_SPEED: f32 = 3.0;
 /// than stepping a whole card at a time.
 const SCROLL_RATE: f32 = 20.0;
 
-/// Target width of the extended preview pill (and thus the history rectangle).
-/// Kept narrow so the open box reads as a portrait phone-style notification
-/// shade (clearly taller than wide) rather than a squat panel.
-const EXTENDED_W: f32 = 380.0;
-/// Target height of the fully-expanded history rectangle (fits within the
-/// surface's reserved dropdown area, [`crate::OPTIONS_DROPDOWN_H`]).
-const EXPANDED_H: f32 = 505.0;
-/// Height of the open box when there are no notifications — a small panel just
-/// tall enough to hold the centred "No notifications" message.
-const EMPTY_H: f32 = 120.0;
-/// Gap between the summary and the trailing time / between summary and body.
-const TEXT_GAP: f32 = 8.0;
-/// Bottom padding below the last card before scrolling stops.
-const LIST_PAD: f32 = 6.0;
-/// The box's corner radius once fully open. The collapsed element is a full
-/// stadium/circle (`ph/2`); it eases to this gentler radius as it expands so the
-/// edge-to-edge zebra stripes can round to the box outline without ballooning
-/// into pills.
-const BOX_RADIUS: f32 = 10.0;
 /// Zebra striping for the history list — alternate rows get a wash so adjacent
 /// lines read as distinct (old-Finder style). Direction is **adaptive**: a dark
 /// box lightens its stripes, a light box darkens them, keyed off the box's own
@@ -498,8 +583,8 @@ fn fmt_relative(ms: u64) -> String {
 
 /// Approx label width for a relative-time string (chars × ~half em), the same
 /// cheap estimate the clipboard list uses so no renderer is needed at draw time.
-fn rel_time_w(time: &str) -> f32 {
-    time.chars().count() as f32 * FONT_PX * 0.55
+fn rel_time_w(time: &str, m: BoxMetrics) -> f32 {
+    time.chars().count() as f32 * m.font_px * 0.55
 }
 
 fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
@@ -512,6 +597,12 @@ fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 }
 
 impl App {
+    /// The open box's dimensions at the live scale — one source of truth for
+    /// both the measure and the draw pass (see [`BoxMetrics`]).
+    fn nm(&self) -> BoxMetrics {
+        BoxMetrics::at(self.options_scale())
+    }
+
     /// Fold a worker update into notification state (called from the loop).
     pub(crate) fn on_notif_event(&mut self, ev: NotifEvent) {
         let mut arrived = false;
@@ -811,20 +902,22 @@ impl App {
             })
             .collect();
         // The body wraps to the card's text column: full width minus both pads
-        // and the identity tile + its gap. The box footprint shrinks on small
-        // screens (options_scale) so it doesn't dominate a 1366x768 panel; the
-        // internal pads/icon/font stay full size so text stays legible, and
-        // this same scaled width feeds notif_geom, so measure and draw agree.
-        let box_w = EXTENDED_W * self.options_scale();
-        let body_w = (box_w - 2.0 * CARD_PAD_X - ICON_SZ - ICON_GAP).max(1.0);
+        // and the identity tile + its gap. On a small screen the whole box
+        // shrinks UNIFORMLY (chrome, pads, tile and font alike — see
+        // [`BoxMetrics`]), and because wrap_text is linear in font size, a
+        // column and a font scaled by the same factor break into the same
+        // lines. This width feeds notif_geom too, so measure and draw agree.
+        let nm = self.nm();
+        let box_w = nm.extended_w;
+        let body_w = (box_w - 2.0 * nm.card_pad_x - nm.icon_sz - nm.icon_gap).max(1.0);
         let mut rows = Vec::with_capacity(items.len());
         if let Some(r) = self.options_renderer.as_mut() {
             for (app, summary, body, timestamp_ms, icon_key) in items {
-                let summary_w = r.measure_text(&summary, FONT_PX, None);
-                let mut m = |s: &str| r.measure_text(s, FONT_PX, None);
+                let summary_w = r.measure_text(&summary, nm.font_px, None);
+                let mut m = |s: &str| r.measure_text(s, nm.font_px, None);
                 let body_lines = wrap_text(&mut m, &body, body_w);
                 let initial = card_initial(&app, &summary);
-                let height = card_height(&body_lines);
+                let height = card_height(&body_lines, nm);
                 let preview = newest_line(&body);
                 rows.push(RowInfo {
                     summary,
@@ -849,7 +942,7 @@ impl App {
                     icon_key,
                     body_lines: Vec::new(),
                     summary_w: 0.0,
-                    height: card_height(&[]),
+                    height: card_height(&[], nm),
                 });
             }
         }
@@ -1082,7 +1175,7 @@ impl App {
         let right = right - (ph + BOND_GAP) * self.notif.peek_t;
         // Scaled to match measure_notif's box_w so the drawn box and the wrapped
         // text column always agree (options_scale shrinks the box on small screens).
-        let mut w = lerp(ph, EXTENDED_W * self.options_scale(), self.notif.peek_t).max(ph);
+        let mut w = lerp(ph, self.nm().extended_w, self.notif.peek_t).max(ph);
         if right - w < EDGE_PAD {
             w = (right - EDGE_PAD).max(ph);
         }
@@ -1123,11 +1216,11 @@ impl App {
     /// capped at the dropdown max) so a short list gives a short box; a compact
     /// fixed panel when there are no notifications (the centred empty state).
     fn notif_full_h(&self, ph: f32) -> f32 {
-        let s = self.options_scale();
+        let nm = self.nm();
         if self.notif.rows.is_empty() {
-            return EMPTY_H * s;
+            return nm.empty_h;
         }
-        (self.cards_total_h() + LIST_PAD + self.notif_footer_h()).clamp(ph, EXPANDED_H * s)
+        (self.cards_total_h() + nm.list_pad + self.notif_footer_h()).clamp(ph, nm.expanded_h)
     }
 
     /// Diameter of the footer ✕ pill — noticeably larger than a bar pill so it
@@ -1207,7 +1300,7 @@ impl App {
         }
         for (idx, crect) in self.notif_cards(rect) {
             if crect.contains(p) {
-                if card_close_rect(crect).contains(p) {
+                if card_close_rect(crect, self.nm()).contains(p) {
                     return NotifHit::Close(idx);
                 }
                 return NotifHit::Card(idx);
@@ -1245,11 +1338,12 @@ impl App {
     /// and the history list (fading in). One rounded rect — the pill becomes the box.
     pub(crate) fn push_notif_pill(&self, scene: &mut Scene, rect: Rect) {
         let ph = self.notif_band_h();
+        let nm = self.nm();
         let bright = self.options_bar_is_bright();
         let e = self.notif.expand_t;
         // Full stadium/circle while collapsed, easing to the gentler box radius as
         // it opens so the full-width stripes can round to the corners cleanly.
-        let radius = lerp(ph / 2.0, BOX_RADIUS, e);
+        let radius = lerp(ph / 2.0, nm.box_radius, e);
 
         push_neumorph(scene, rect, radius, bright, 1.0);
         // The box fill never reacts to hover — hover is per-row (the pointed
@@ -1296,7 +1390,10 @@ impl App {
         // keep the tuned dark-box value.
         let list_dim = if dark_ink { LIST_DIM_LIGHT } else { LIST_DIM };
         let dim_ink = [ink[0], ink[1], ink[2], ink[3] * list_dim];
-        let band_ty = rect.y + (ph - LINE_PX) / 2.0;
+        // The collapsed PREVIEW band is pill furniture, not box content: it sits
+        // in the unscaled bar band beside the bell and clock, so it keeps the
+        // pill's own text size (only the open box's content scales).
+        let band_ty = rect.y + (ph - crate::options::LINE_PX) / 2.0;
         // The bell is now a separate fixed element (see `push_notif_mute`); this
         // sliding element is pure preview/box that slides out from behind it.
 
@@ -1332,7 +1429,7 @@ impl App {
             .notif
             .rows
             .first()
-            .map_or_else(|| card_height(&[]), |r| r.height);
+            .map_or_else(|| card_height(&[], nm), |r| r.height);
         let morph_h = lerp(ph, full_h, e);
 
         // The open transition plays the height-morph: the newest card grows from
@@ -1351,11 +1448,11 @@ impl App {
                     text: crate::i18n::tr("No notifications").to_owned(),
                     pos: (
                         content.x + content.w / 2.0,
-                        content.y + (content.h - LINE_PX) / 2.0,
+                        content.y + (content.h - nm.line_px) / 2.0,
                     ),
                     max_w: content.w,
-                    font_px: FONT_PX,
-                    line_px: LINE_PX,
+                    font_px: nm.font_px,
+                    line_px: nm.line_px,
                     centered: true,
                     dim: false,
                     cache: true,
@@ -1458,6 +1555,11 @@ impl App {
         hover_ink: [f32; 4],
         stripe_opaque: [f32; 4],
     ) {
+        let nm = self.nm();
+        // This card MORPHS out of the preview band, so its text size morphs with
+        // it: the pill's own size while collapsed, the box's scaled size once
+        // open (at e = 1 it is exactly what `measure_notif` wrapped against).
+        let tpx = TextPx::lerp(TextPx::pill(), nm.text(), e);
         let placeholder = RowInfo {
             summary: crate::i18n::tr("No notifications").to_owned(),
             preview: String::new(),
@@ -1466,7 +1568,7 @@ impl App {
             icon_key: None,
             body_lines: Vec::new(),
             summary_w: 0.0,
-            height: card_height(&[]),
+            height: card_height(&[], nm),
         };
         let info = self.notif.rows.get(idx).unwrap_or(&placeholder);
         let full_h = info.height;
@@ -1519,11 +1621,16 @@ impl App {
         }
 
         // Identity tile fades in as the card forms.
-        let icon = Rect::new(rect.x + CARD_PAD_X, rect.y + CARD_PAD_Y, ICON_SZ, ICON_SZ);
+        let icon = Rect::new(
+            rect.x + nm.card_pad_x,
+            rect.y + nm.card_pad_y,
+            nm.icon_sz,
+            nm.icon_sz,
+        );
         if e > 0.01 {
             scene.rects.push(RectInst {
                 rect: icon,
-                radius: ICON_SZ / 2.0, // circle, matching the round avatars
+                radius: nm.icon_sz / 2.0, // circle, matching the round avatars
                 color: [ink[0], ink[1], ink[2], 0.10 * e],
                 glass: 0.0,
                 border: 0.0,
@@ -1535,17 +1642,18 @@ impl App {
                     None,
                     [prim[0], prim[1], prim[2], prim[3] * e],
                     content,
+                    tpx,
                 ));
             }
         }
 
         // Header (summary + time) — solid, sliding from the one-liner position to
         // the card header position as the card grows.
-        let text_x = icon.x + ICON_SZ + ICON_GAP;
+        let text_x = icon.x + nm.icon_sz + nm.icon_gap;
         let header_x = lerp(tx, text_x, e);
-        let header_y = lerp(band_ty, rect.y + CARD_PAD_Y, e);
+        let header_y = lerp(band_ty, rect.y + nm.card_pad_y, e);
         let full_rect = Rect::new(rect.x, rect.y, rect.w, full_h);
-        let card_header_right = card_close_rect(full_rect).x - CTRL_GAP_N;
+        let card_header_right = card_close_rect(full_rect, nm).x - nm.ctrl_gap_n;
         let header_right = lerp(right, card_header_right, e);
 
         // Hidden-count badge — a filled green chip with the count inside, on the
@@ -1559,9 +1667,12 @@ impl App {
             0
         };
         let badge_num = (count > 0).then(|| format!("+{count}"));
-        let chip_h = LINE_PX;
+        // The chip lives on the PREVIEW line and fades out as the box opens, so
+        // it is sized to the pill band it nests in, not to the box.
+        let pill_px = TextPx::pill();
+        let chip_h = pill_px.line;
         let chip_w = badge_num.as_ref().map_or(0.0, |n| {
-            (n.chars().count() as f32 * FONT_PX * 0.6 + 12.0).max(chip_h)
+            (n.chars().count() as f32 * pill_px.font * 0.6 + 12.0).max(chip_h)
         });
         let has_badge = badge_num.is_some();
         // Badge nests in the pill's rounded right cap: inset from the true right
@@ -1573,7 +1684,12 @@ impl App {
         if let Some(n) = badge_num {
             if e < 0.999 {
                 let a = 1.0 - e;
-                let cr = Rect::new(badge_x, header_y + (LINE_PX - chip_h) / 2.0, chip_w, chip_h);
+                let cr = Rect::new(
+                    badge_x,
+                    header_y + (pill_px.line - chip_h) / 2.0,
+                    chip_w,
+                    chip_h,
+                );
                 scene.rects.push(RectInst {
                     rect: cr,
                     radius: chip_h / 2.0,
@@ -1585,10 +1701,10 @@ impl App {
                 });
                 scene.labels.push(Label {
                     text: n,
-                    pos: (cr.x + cr.w / 2.0, cr.y + (cr.h - LINE_PX) / 2.0),
+                    pos: (cr.x + cr.w / 2.0, cr.y + (cr.h - pill_px.line) / 2.0),
                     max_w: cr.w + 4.0,
-                    font_px: FONT_PX,
-                    line_px: LINE_PX,
+                    font_px: pill_px.font,
+                    line_px: pill_px.line,
                     centered: true,
                     dim: false,
                     cache: true,
@@ -1605,19 +1721,25 @@ impl App {
         let mut sum_right = header_right;
         let time = fmt_relative(info.timestamp_ms);
         if !time.is_empty() {
-            let time_w = rel_time_w(&time);
+            let time_w = rel_time_w(&time, nm);
             let time_right = if has_badge {
-                lerp(badge_x - TEXT_GAP, header_right, e)
+                lerp(badge_x - nm.text_gap, header_right, e)
             } else {
                 header_right
             };
             let time_x = (time_right - time_w).max(header_x);
-            scene
-                .labels
-                .push(mk_line(time, time_x, header_y, time_w + 2.0, dim, content));
-            sum_right = time_x - TEXT_GAP;
+            scene.labels.push(mk_line(
+                time,
+                time_x,
+                header_y,
+                time_w + 2.0,
+                dim,
+                content,
+                tpx,
+            ));
+            sum_right = time_x - nm.text_gap;
         } else if has_badge {
-            sum_right = (badge_x - TEXT_GAP).max(header_x);
+            sum_right = (badge_x - nm.text_gap).max(header_x);
         }
         let sum_max = (sum_right - header_x).max(0.0);
         scene.labels.push(mk_line(
@@ -1627,13 +1749,14 @@ impl App {
             sum_max,
             prim,
             content,
+            tpx,
         ));
 
         // Inline body preview (the one-liner tail) fades OUT as the block body
         // below fades IN. Shows the NEWEST message of the stack (`preview`), so the
         // pill reflects the latest and updates as new ones land — not the first.
         if !info.preview.is_empty() {
-            let bx = header_x + info.summary_w.min(sum_max) + TEXT_GAP;
+            let bx = header_x + info.summary_w.min(sum_max) + nm.text_gap;
             if e < 0.999 && bx < sum_right {
                 let inline = [dim[0], dim[1], dim[2], dim[3] * (1.0 - e)];
                 scene.labels.push(mk_line(
@@ -1643,6 +1766,7 @@ impl App {
                     sum_right - bx,
                     inline,
                     content,
+                    tpx,
                 ));
             }
         }
@@ -1656,8 +1780,8 @@ impl App {
                 card_rect.w,
                 morph_h.min(content.h),
             );
-            let body_top = rect.y + CARD_PAD_Y + LINE_PX + BODY_GAP;
-            let body_max = (rect.x + rect.w - CARD_PAD_X - text_x).max(0.0);
+            let body_top = rect.y + nm.card_pad_y + nm.line_px + nm.body_gap;
+            let body_max = (rect.x + rect.w - nm.card_pad_x - text_x).max(0.0);
             // The body IS the notification — it carries the message, so it
             // gets the same weight as the summary rather than a fraction of
             // it. Every discount here compounds onto the list dim, and on a
@@ -1665,24 +1789,35 @@ impl App {
             // hierarchy comes from position and the hover highlight instead.
             let bink = [base_ink[0], base_ink[1], base_ink[2], base_ink[3] * e];
             for (li, line) in info.body_lines.iter().enumerate() {
-                let ly = body_top + li as f32 * LINE_PX;
-                scene
-                    .labels
-                    .push(mk_line(line.clone(), text_x, ly, body_max, bink, clip));
+                let ly = body_top + li as f32 * nm.line_px;
+                scene.labels.push(mk_line(
+                    line.clone(),
+                    text_x,
+                    ly,
+                    body_max,
+                    bink,
+                    clip,
+                    nm.text(),
+                ));
             }
         }
 
         // × dismiss once the box is open.
         if hovered {
-            let close = card_close_rect(full_rect);
+            let close = card_close_rect(full_rect, nm);
             let xc = if self.notif.hit == NotifHit::Close(idx) {
                 CRIMSON
             } else {
                 dim_ink
             };
-            scene
-                .labels
-                .push(centered_glyph(GLYPH_TRASH, close, Some(NERD), xc, content));
+            scene.labels.push(centered_glyph(
+                GLYPH_TRASH,
+                close,
+                Some(NERD),
+                xc,
+                content,
+                nm.text(),
+            ));
         }
     }
 
@@ -1707,6 +1842,7 @@ impl App {
         let Some(info) = self.notif.rows.get(idx) else {
             return;
         };
+        let nm = self.nm();
         // Zebra: alternate cards get the opaque stripe, clipped to the content
         // region; only the corner meeting the box top rounds (a square overlay
         // trims the rest so interior boundaries stay straight).
@@ -1763,7 +1899,12 @@ impl App {
 
         // Identity tile: a real app icon once the resolver has one for this row,
         // else the monogram fallback (a soft rounded square + the initial).
-        let icon = Rect::new(rect.x + CARD_PAD_X, rect.y + CARD_PAD_Y, ICON_SZ, ICON_SZ);
+        let icon = Rect::new(
+            rect.x + nm.card_pad_x,
+            rect.y + nm.card_pad_y,
+            nm.icon_sz,
+            nm.icon_sz,
+        );
         // Opaque disc behind every icon so a transparent icon (a themed glyph, a
         // round avatar's corners, or the monogram fallback) shows this consistent
         // tone rather than letting the zebra stripe bleed through it. Composited on
@@ -1775,7 +1916,7 @@ impl App {
             content,
             RectInst {
                 rect: icon,
-                radius: ICON_SZ / 2.0, // circle, matching the round avatars
+                radius: nm.icon_sz / 2.0, // circle, matching the round avatars
                 color: [
                     ink[0] * 0.10 + fill[0] * 0.90,
                     ink[1] * 0.10 + fill[1] * 0.90,
@@ -1796,32 +1937,37 @@ impl App {
             // ride a grid pinned to the box interior (they scroll with the list).
             push_notif_icon(scene, content, icon, layer);
         } else if !info.initial.is_empty() {
-            scene
-                .labels
-                .push(centered_glyph(&info.initial, icon, None, prim, content));
+            scene.labels.push(centered_glyph(
+                &info.initial,
+                icon,
+                None,
+                prim,
+                content,
+                nm.text(),
+            ));
         }
 
         // Header: summary (primary) + a single trailing control at the right.
         // Like the clipboard list, the relative time shows by default and swaps
         // to the dismiss can on hover (only ever one of the two, never both).
-        let text_x = icon.x + ICON_SZ + ICON_GAP;
+        let text_x = icon.x + nm.icon_sz + nm.icon_gap;
         // The trailing time / dismiss can sits in the card's top-right corner, on
         // the summary's header line.
-        let header_ty = rect.y + CARD_PAD_Y;
-        let close = card_close_rect(rect);
-        let mut header_right = rect.x + rect.w - TRAIL_PAD_X;
+        let header_ty = rect.y + nm.card_pad_y;
+        let close = card_close_rect(rect, nm);
+        let mut header_right = rect.x + rect.w - nm.trail_pad_x;
         if hovered {
             // Dismiss can — no red, brighten to the hover ink on the target.
             // Drawn directly (not via `centered_glyph`) so it matches the clip
-            // list: the larger `FONT_PX * 1.3` glyph, centred in the row.
+            // list: the larger 1.3× glyph, centred in the row.
             let on_x = self.notif.hit == NotifHit::Close(idx);
             let xc = if on_x { hover_ink } else { dim_ink };
             scene.labels.push(Label {
                 text: GLYPH_TRASH.to_owned(),
                 pos: (close.x + close.w / 2.0, header_ty),
                 max_w: close.w + 8.0,
-                font_px: FONT_PX * 1.3,
-                line_px: LINE_PX,
+                font_px: nm.font_px * 1.3,
+                line_px: nm.line_px,
                 centered: true,
                 dim: false,
                 cache: true,
@@ -1829,17 +1975,23 @@ impl App {
                 color: Some([xc[0], xc[1], xc[2], xc[3] * alpha]),
                 clip: Some(content),
             });
-            header_right = close.x - CTRL_GAP_N;
+            header_right = close.x - nm.ctrl_gap_n;
         } else {
             // Compact relative time ("15m"/"2h"/"1d"), computed live, centred.
             let time = fmt_relative(info.timestamp_ms);
             if !time.is_empty() {
-                let time_w = rel_time_w(&time);
+                let time_w = rel_time_w(&time, nm);
                 let time_x = (header_right - time_w).max(text_x);
-                scene
-                    .labels
-                    .push(mk_line(time, time_x, header_ty, time_w + 2.0, dim, content));
-                header_right = time_x - TEXT_GAP;
+                scene.labels.push(mk_line(
+                    time,
+                    time_x,
+                    header_ty,
+                    time_w + 2.0,
+                    dim,
+                    content,
+                    nm.text(),
+                ));
+                header_right = time_x - nm.text_gap;
             }
         }
         let sum_max = (header_right - text_x).max(0.0);
@@ -1850,6 +2002,7 @@ impl App {
             sum_max,
             prim,
             content,
+            nm.text(),
         ));
 
         // Wrapped body beneath the header — at PRIMARY weight, not `dim`.
@@ -1857,16 +2010,22 @@ impl App {
         // left it around 0.57 alpha, which on a backdrop-coloured box is the
         // "content is weak" Max kept seeing. `dim` stays for the timestamp,
         // which really is secondary.
-        let body_top = rect.y + CARD_PAD_Y + LINE_PX + BODY_GAP;
-        let body_max = (rect.x + rect.w - CARD_PAD_X - text_x).max(0.0);
+        let body_top = rect.y + nm.card_pad_y + nm.line_px + nm.body_gap;
+        let body_max = (rect.x + rect.w - nm.card_pad_x - text_x).max(0.0);
         for (li, line) in info.body_lines.iter().enumerate() {
-            let ly = body_top + li as f32 * LINE_PX;
+            let ly = body_top + li as f32 * nm.line_px;
             // Body stays regular even when hovered: bolding a whole wrapped
             // message turns the card into a slab. The summary carries the
             // weight change on its own.
-            scene
-                .labels
-                .push(mk_line(line.clone(), text_x, ly, body_max, prim, content));
+            scene.labels.push(mk_line(
+                line.clone(),
+                text_x,
+                ly,
+                body_max,
+                prim,
+                content,
+                nm.text(),
+            ));
         }
     }
 
@@ -2023,12 +2182,14 @@ impl App {
         // bell keeps its exact original metrics).
         // Battery Critical (or the post-wake awareness pause) replaces the
         // bell with the warning triangle — the awareness symbol.
+        // Bar-pill furniture: the bell keeps the pills' own (unscaled) text size.
+        let p = TextPx::pill();
         let (glyph, gpx, glh) = if self.battery_warning() {
-            (GLYPH_BATTERY_WARN, FONT_PX, LINE_PX)
+            (GLYPH_BATTERY_WARN, p.font, p.line)
         } else if self.notif.muted {
-            (GLYPH_BELL_SLASH, FONT_PX * 1.4, LINE_PX * 1.4)
+            (GLYPH_BELL_SLASH, p.font * 1.4, p.line * 1.4)
         } else {
-            (GLYPH_BELL, FONT_PX, LINE_PX)
+            (GLYPH_BELL, p.font, p.line)
         };
         let cx = rect.x + rect.w / 2.0;
         let ty = rect.y + (rect.h - glh) / 2.0;
@@ -2358,8 +2519,9 @@ impl App {
     /// `[0, this]` — the box anchors the newest at the top on open, then scrolls
     /// smoothly and freely (a partial top card is expected while scrolling).
     fn notif_scroll_span(&self) -> f32 {
-        let visible = (EXPANDED_H - self.notif_footer_h()).max(0.0);
-        (self.cards_total_h() + LIST_PAD - visible).max(0.0)
+        let nm = self.nm();
+        let visible = (nm.expanded_h - self.notif_footer_h()).max(0.0);
+        (self.cards_total_h() + nm.list_pad - visible).max(0.0)
     }
 
     /// A wheel event over the notification OPTION (raw axis value). Accumulates
@@ -2585,12 +2747,12 @@ impl App {
 }
 
 /// A card's × dismiss hot-square (top-right).
-fn card_close_rect(card: Rect) -> Rect {
+fn card_close_rect(card: Rect, m: BoxMetrics) -> Rect {
     Rect::new(
-        card.x + card.w - TRAIL_PAD_X - CTRL_SZ,
-        card.y + CARD_PAD_Y - 1.0,
-        CTRL_SZ,
-        CTRL_SZ,
+        card.x + card.w - m.trail_pad_x - m.ctrl_sz,
+        card.y + m.card_pad_y - 1.0 * m.s,
+        m.ctrl_sz,
+        m.ctrl_sz,
     )
 }
 
@@ -2601,13 +2763,14 @@ fn centered_glyph(
     family: Option<&'static str>,
     color: [f32; 4],
     clip: Rect,
+    t: TextPx,
 ) -> Label {
     Label {
         text: text.to_string(),
-        pos: (r.x + r.w / 2.0, r.y + (r.h - LINE_PX) / 2.0),
+        pos: (r.x + r.w / 2.0, r.y + (r.h - t.line) / 2.0),
         max_w: r.w + 4.0,
-        font_px: FONT_PX,
-        line_px: LINE_PX,
+        font_px: t.font,
+        line_px: t.line,
         centered: true,
         dim: false,
         cache: false,
@@ -2736,14 +2899,14 @@ fn card_initial(app: &str, summary: &str) -> String {
 /// Full card height for a wrapped body: comfortable padding top+bottom, one
 /// header line, then the body block (with its gap) — but never shorter than the
 /// identity tile.
-fn card_height(body_lines: &[String]) -> f32 {
+fn card_height(body_lines: &[String], m: BoxMetrics) -> f32 {
     let body_h = if body_lines.is_empty() {
         0.0
     } else {
-        BODY_GAP + body_lines.len() as f32 * LINE_PX
+        m.body_gap + body_lines.len() as f32 * m.line_px
     };
-    let text_h = LINE_PX + body_h;
-    2.0 * CARD_PAD_Y + text_h.max(ICON_SZ)
+    let text_h = m.line_px + body_h;
+    2.0 * m.card_pad_y + text_h.max(m.icon_sz)
 }
 
 /// The newest message of a (possibly multi-message) body — its last non-empty
@@ -3236,13 +3399,21 @@ fn is_persistable(n: &ActiveNotification) -> bool {
 }
 
 /// A left-anchored, clipped single-line label (the notif element's text rows).
-fn mk_line(text: String, x: f32, y: f32, max_w: f32, color: [f32; 4], clip: Rect) -> Label {
+fn mk_line(
+    text: String,
+    x: f32,
+    y: f32,
+    max_w: f32,
+    color: [f32; 4],
+    clip: Rect,
+    t: TextPx,
+) -> Label {
     Label {
         text,
         pos: (x, y),
         max_w,
-        font_px: FONT_PX,
-        line_px: LINE_PX,
+        font_px: t.font,
+        line_px: t.line,
         centered: false,
         dim: false,
         cache: false,
@@ -3474,10 +3645,74 @@ mod tests {
     /// Card height grows with the wrapped body and never shrinks below the tile.
     #[test]
     fn card_height_grows_with_body() {
-        let none = card_height(&[]);
-        let two = card_height(&["a".to_string(), "b".to_string()]);
+        let m = BoxMetrics::at(1.0);
+        let none = card_height(&[], m);
+        let two = card_height(&["a".to_string(), "b".to_string()], m);
         assert!(two > none);
-        assert!(none >= ICON_SZ + 2.0 * CARD_PAD_Y - 0.01);
+        assert!(none >= m.icon_sz + 2.0 * m.card_pad_y - 0.01);
+    }
+
+    /// The uniform-scale invariant for the open box (Max's call, 2026-09-02:
+    /// "uniform everywhere" — the notif box scales like the clipboard and media
+    /// boxes, fonts included). Two halves:
+    ///
+    /// 1. Every dimension — chrome AND text — scales by exactly one factor, so
+    ///    measure and draw cannot drift apart; scale 1.0 is the original design.
+    /// 2. Card height scales with it, which is what keeps the list geometry
+    ///    (offsets, scroll span, hit-testing) consistent at any size.
+    #[test]
+    fn box_scaling_is_uniform_and_reduces_at_unity() {
+        let full = BoxMetrics::at(1.0);
+        // Unity == the original constants (no full-size regression).
+        assert!((full.font_px - crate::options::FONT_PX).abs() < 0.001);
+        assert!((full.line_px - crate::options::LINE_PX).abs() < 0.001);
+        assert!((full.card_pad_x - 14.0).abs() < 0.001);
+        assert!((full.icon_sz - 40.0).abs() < 0.001);
+        assert!((full.extended_w - 380.0).abs() < 0.001);
+
+        let body = ["a".to_string(), "b".to_string(), "c".to_string()];
+        for s in [0.82_f32, 0.889, 0.95] {
+            let m = BoxMetrics::at(s);
+            // Chrome and FONT scale together — the whole point of the pass.
+            for (f, b) in [
+                (m.font_px, full.font_px),
+                (m.line_px, full.line_px),
+                (m.card_pad_x, full.card_pad_x),
+                (m.card_pad_y, full.card_pad_y),
+                (m.trail_pad_x, full.trail_pad_x),
+                (m.icon_sz, full.icon_sz),
+                (m.icon_gap, full.icon_gap),
+                (m.body_gap, full.body_gap),
+                (m.ctrl_sz, full.ctrl_sz),
+                (m.ctrl_gap_n, full.ctrl_gap_n),
+                (m.extended_w, full.extended_w),
+                (m.expanded_h, full.expanded_h),
+                (m.empty_h, full.empty_h),
+                (m.text_gap, full.text_gap),
+                (m.list_pad, full.list_pad),
+                (m.box_radius, full.box_radius),
+            ] {
+                assert!((f - b * s).abs() < 0.001, "dimension scales at {s}");
+            }
+            // Card height (the list's unit of geometry) scales with the box.
+            assert!(
+                (card_height(&body, m) - card_height(&body, full) * s).abs() < 0.01,
+                "card height scales at {s}"
+            );
+            // The text column the body wraps into shrinks by the same factor as
+            // the font, which is why the line breaks are scale-invariant
+            // (wrap_text is linear in font size — same argument as the
+            // clipboard box's lockstep test).
+            let col = |k: BoxMetrics| k.extended_w - 2.0 * k.card_pad_x - k.icon_sz - k.icon_gap;
+            assert!((col(m) - col(full) * s).abs() < 0.01, "text column at {s}");
+            // The close control stays pinned inside the card at any scale.
+            let card = Rect::new(0.0, 0.0, m.extended_w, card_height(&body, m));
+            let close = card_close_rect(card, m);
+            assert!(
+                close.x >= card.x && close.x + close.w <= card.x + card.w + 0.01,
+                "close control inside the card at {s}"
+            );
+        }
     }
 
     /// The persistence path maps each `ActiveNotification` to a `StoredNotification`
