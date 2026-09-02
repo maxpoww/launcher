@@ -245,6 +245,9 @@ pub struct ContextState {
     pub hypr_submap: String,
     pub active_layout: String,
     pub is_screencasting: bool,
+    /// The most recently added file in the Downloads folder (within a short
+    /// window) — intent to open it. `None` when nothing arrived recently.
+    pub recent_download: Option<PathBuf>,
 
     // --- provenance (added by the engine, not in the raw spec) ---
     /// Per-layer liveness + freshness.

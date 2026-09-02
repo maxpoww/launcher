@@ -44,6 +44,8 @@ pub enum ContextDelta {
     Deploy(DeployHealth),
     /// The live (unread) notification summary from the OPTIONS notification daemon.
     Notifications(NotificationContext),
+    /// The most recently added Downloads file (or cleared when it ages out).
+    RecentDownload(Option<std::path::PathBuf>),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

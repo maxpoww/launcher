@@ -62,6 +62,7 @@ const PROVIDERS: &[Provider] = &[
     coding_tools_provider,
     rerun_provider,
     files_here_provider,
+    downloads_provider,
     focus_churn_provider,
     shell_error_provider,
     diagnostics_provider,
@@ -753,6 +754,27 @@ fn files_here_provider(ctx: &ContextState) -> Vec<Affordance> {
         reason: "open the shell's folder in the file manager",
         source: Layer::AppBridge,
         action: AffordanceAction::OpenUrl(cwd.to_string()),
+    }]
+}
+
+/// A file just landed in Downloads — offer to open it with its default app.
+/// Transient (the collector clears it after a short window), so this is the
+/// "you just downloaded X" moment, not a permanent pin. xdg-open picks the
+/// right handler by type (PDF viewer, archive manager, image viewer, …).
+fn downloads_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let Some(path) = ctx.recent_download.as_deref().and_then(|p| p.to_str()) else {
+        return vec![];
+    };
+    let name = path.rsplit('/').next().unwrap_or(path);
+    vec![Affordance {
+        id: "downloads.open",
+        kind: AffordanceKind::Control,
+        title: "Open download".into(),
+        detail: name.to_string(),
+        relevance: 0.62,
+        reason: "a file just finished downloading",
+        source: Layer::Hardware,
+        action: AffordanceAction::OpenUrl(path.to_string()),
     }]
 }
 
@@ -2045,6 +2067,39 @@ mod tests {
                 }
             ),
             "files.open_here"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn recent_download_offers_open() {
+        let mut ctx = live_ctx();
+        ctx.recent_download = Some("/home/max/Downloads/report.pdf".into());
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let d = find(&opts, "downloads.open").expect("open-download control");
+        assert_eq!(d.kind, AffordanceKind::Control);
+        assert_eq!(d.detail, "report.pdf");
+        assert_eq!(
+            d.action,
+            AffordanceAction::OpenUrl("/home/max/Downloads/report.pdf".into())
+        );
+        // Cleared → gone, even with the source live.
+        ctx.recent_download = None;
+        assert!(find(
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
+            "downloads.open"
         )
         .is_none());
     }

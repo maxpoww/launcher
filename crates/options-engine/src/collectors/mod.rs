@@ -9,6 +9,7 @@
 pub mod audio;
 pub mod bridge;
 pub mod deploy;
+pub mod downloads;
 pub mod git;
 pub mod hyprland;
 pub mod media;
