@@ -64,8 +64,8 @@ pub use collector::{Collector, CollectorFuture};
 pub use engine::Engine;
 pub use message::{ContextDelta, Update};
 pub use mind::{
-    decide, decide_with, infer_activity, Activity, Affordance, AffordanceKind, Mind, OptionSet,
-    Temporal, Tuning,
+    decide, decide_with, infer_activity, Activity, Affordance, AffordanceAction, AffordanceKind,
+    Mind, OptionSet, Temporal, Tuning,
 };
 pub use state::{
     ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, DeployHealth,

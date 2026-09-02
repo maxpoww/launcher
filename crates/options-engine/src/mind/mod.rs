@@ -29,7 +29,7 @@ mod decide;
 mod session;
 
 pub use activity::{infer_activity, Activity};
-pub use affordance::{Affordance, AffordanceKind, OptionSet};
+pub use affordance::{Affordance, AffordanceAction, AffordanceKind, OptionSet};
 pub use decide::{decide, decide_with, Tuning};
 pub use session::Temporal;
 

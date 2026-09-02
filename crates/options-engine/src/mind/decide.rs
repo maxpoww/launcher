@@ -17,7 +17,7 @@
 use crate::state::{ContextState, Layer};
 
 use super::activity::{infer_activity, Activity};
-use super::affordance::{Affordance, AffordanceKind, OptionSet};
+use super::affordance::{Affordance, AffordanceAction, AffordanceKind, OptionSet};
 use super::session::Temporal;
 
 /// A coding stretch past this long earns a gentle "take a break" nudge.
@@ -57,6 +57,7 @@ const PROVIDERS: &[Provider] = &[
     battery_provider,
     cpu_provider,
     media_provider,
+    media_controls_provider,
     git_provider,
     focus_churn_provider,
     shell_error_provider,
@@ -122,6 +123,7 @@ fn temporal_affordances(activity: Activity, temporal: &Temporal) -> Vec<Affordan
             relevance: 0.4,
             reason: "coding over an hour",
             source: Layer::Compositor,
+            action: AffordanceAction::None,
         });
     }
     if temporal.failure_streak >= 3 {
@@ -133,6 +135,7 @@ fn temporal_affordances(activity: Activity, temporal: &Temporal) -> Vec<Affordan
             relevance: 0.7,
             reason: "repeated shell failures",
             source: Layer::AppBridge,
+            action: AffordanceAction::None,
         });
     }
     out
@@ -141,9 +144,16 @@ fn temporal_affordances(activity: Activity, temporal: &Temporal) -> Vec<Affordan
 /// Activity-aware suppression: some affordances are noise in some situations.
 /// Safety (warnings) always fits; this only clears ambient distractions.
 fn fits_activity(id: &str, activity: Activity) -> bool {
+    // git commit/push are Coding controls — surface them only while actually
+    // working in the repo, not when a browser or media app merely happens to be
+    // focused inside a repo directory.
+    if matches!(id, "git.commit" | "git.push") {
+        return activity == Activity::Coding;
+    }
     match activity {
-        // In a call, now-playing media is a distraction — clear it away.
-        Activity::Communication => id != "media.now_playing",
+        // In a call, now-playing media and its controls are a distraction —
+        // clear them away (the mic-mute control stays; it belongs to the call).
+        Activity::Communication => id != "media.now_playing" && !id.starts_with("media."),
         _ => true,
     }
 }
@@ -168,11 +178,18 @@ fn effective_skill(ctx: &ContextState, base: f32) -> f32 {
     (base - friction).clamp(0.0, 1.0)
 }
 
-/// Skill scaling: safety is untouchable; scaffolding fades for experts.
+/// Skill scaling: safety and direct controls are untouchable; only scaffolding
+/// and ambient info fade for experts.
 fn calibrate(kind: AffordanceKind, relevance: f32, skill: f32) -> f32 {
     let factor = match kind {
+        // Safety is always relevant when true.
         AffordanceKind::Warning => 1.0,
+        // A direct control (play/pause, mute, commit) is the button you reached
+        // for — an expert wants it as much as a novice. Never faded.
+        AffordanceKind::Control => 1.0,
+        // Scaffolding/help fades most for experts.
         AffordanceKind::Action => 1.0 - 0.6 * skill,
+        // Ambient info fades gently.
         AffordanceKind::Info => 1.0 - 0.3 * skill,
     };
     (relevance * factor).clamp(0.0, 1.0)
@@ -206,6 +223,7 @@ fn screencast_provider(ctx: &ContextState) -> Vec<Affordance> {
         relevance: 0.9,
         reason: "screencast active",
         source: Layer::Compositor,
+        action: AffordanceAction::None,
     }]
 }
 
@@ -225,6 +243,7 @@ fn deploy_provider(ctx: &ContextState) -> Vec<Affordance> {
             relevance: 0.85,
             reason: "current system != latest built generation",
             source: Layer::System,
+            action: AffordanceAction::None,
         }];
     }
     if d.stale_generation {
@@ -236,6 +255,7 @@ fn deploy_provider(ctx: &ContextState) -> Vec<Affordance> {
             relevance: 0.8,
             reason: "booted system != latest built generation",
             source: Layer::System,
+            action: AffordanceAction::None,
         }];
     }
     vec![]
@@ -258,6 +278,7 @@ fn battery_provider(ctx: &ContextState) -> Vec<Affordance> {
             relevance: 0.97,
             reason: "battery <=15% on power",
             source: Layer::Hardware,
+            action: AffordanceAction::None,
         }]
     } else if pct <= 30 {
         vec![Affordance {
@@ -268,6 +289,7 @@ fn battery_provider(ctx: &ContextState) -> Vec<Affordance> {
             relevance: 0.5,
             reason: "battery <=30% on power",
             source: Layer::Hardware,
+            action: AffordanceAction::None,
         }]
     } else {
         vec![]
@@ -287,7 +309,108 @@ fn cpu_provider(ctx: &ContextState) -> Vec<Affordance> {
         relevance: 0.4,
         reason: "cpu >=85%",
         source: Layer::Hardware,
+        action: AffordanceAction::None,
     }]
+}
+
+/// Build a fire-and-forget [`AffordanceAction::Spawn`] from a static argv.
+fn spawn(argv: &[&str]) -> AffordanceAction {
+    AffordanceAction::Spawn {
+        argv: argv.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// The default audio sink / source handles for `wpctl`.
+const SINK: &str = "@DEFAULT_AUDIO_SINK@";
+
+/// **media-controls module** — the "watching a video / listening" controls:
+/// play/pause, volume, brightness, track skip. Surfaces whenever an MPRIS
+/// player is present (playing or paused, so Pause↔Play both work). Every offer
+/// is a [`AffordanceKind::Control`] (never faded by skill) whose action is a
+/// one-shot CLI already on a Golem system (playerctl / wpctl / brightnessctl).
+/// Relevance is set in the natural reading order so the cluster reads
+/// left-to-right sensibly after the mind's descending sort.
+fn media_controls_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let Some(m) = &ctx.media else {
+        return vec![];
+    };
+    let (toggle_title, toggle_reason) = if m.is_playing {
+        ("Pause", "pause the playing media")
+    } else {
+        ("Play", "resume the paused media")
+    };
+    vec![
+        Affordance {
+            id: "media.playpause",
+            kind: AffordanceKind::Control,
+            title: toggle_title.into(),
+            detail: String::new(),
+            relevance: 0.66,
+            reason: toggle_reason,
+            source: Layer::Hardware,
+            action: spawn(&["playerctl", "play-pause"]),
+        },
+        Affordance {
+            id: "media.vol_down",
+            kind: AffordanceKind::Control,
+            title: "Volume −".into(),
+            detail: String::new(),
+            relevance: 0.62,
+            reason: "lower the volume",
+            source: Layer::Hardware,
+            action: spawn(&["wpctl", "set-volume", SINK, "5%-"]),
+        },
+        Affordance {
+            id: "media.vol_up",
+            kind: AffordanceKind::Control,
+            title: "Volume +".into(),
+            detail: String::new(),
+            relevance: 0.61,
+            reason: "raise the volume",
+            source: Layer::Hardware,
+            action: spawn(&["wpctl", "set-volume", "-l", "1.5", SINK, "5%+"]),
+        },
+        Affordance {
+            id: "media.bright_down",
+            kind: AffordanceKind::Control,
+            title: "Brightness −".into(),
+            detail: String::new(),
+            relevance: 0.56,
+            reason: "dim the screen",
+            source: Layer::Hardware,
+            action: spawn(&["brightnessctl", "set", "10%-"]),
+        },
+        Affordance {
+            id: "media.bright_up",
+            kind: AffordanceKind::Control,
+            title: "Brightness +".into(),
+            detail: String::new(),
+            relevance: 0.55,
+            reason: "brighten the screen",
+            source: Layer::Hardware,
+            action: spawn(&["brightnessctl", "set", "10%+"]),
+        },
+        Affordance {
+            id: "media.next",
+            kind: AffordanceKind::Control,
+            title: "Next".into(),
+            detail: String::new(),
+            relevance: 0.50,
+            reason: "skip to the next track",
+            source: Layer::Hardware,
+            action: spawn(&["playerctl", "next"]),
+        },
+        Affordance {
+            id: "media.prev",
+            kind: AffordanceKind::Control,
+            title: "Previous".into(),
+            detail: String::new(),
+            relevance: 0.49,
+            reason: "back to the previous track",
+            source: Layer::Hardware,
+            action: spawn(&["playerctl", "previous"]),
+        },
+    ]
 }
 
 /// What you're listening to, while it's playing.
@@ -303,12 +426,18 @@ fn media_provider(ctx: &ContextState) -> Vec<Affordance> {
     vec![Affordance {
         id: "media.now_playing",
         kind: AffordanceKind::Info,
-        title: if m.is_playing { "Now playing" } else { "Paused" }.into(),
+        title: if m.is_playing {
+            "Now playing"
+        } else {
+            "Paused"
+        }
+        .into(),
         detail,
         // A playing track is more present than a paused one.
         relevance: if m.is_playing { 0.45 } else { 0.25 },
         reason: "mpris player present",
         source: Layer::Hardware,
+        action: AffordanceAction::None,
     }]
 }
 
@@ -332,6 +461,7 @@ fn git_provider(ctx: &ContextState) -> Vec<Affordance> {
         relevance: 0.35,
         reason: "focused window in a git repo",
         source: Layer::Hardware,
+        action: AffordanceAction::None,
     }];
     if ctx.git.is_dirty {
         out.push(Affordance {
@@ -342,7 +472,36 @@ fn git_provider(ctx: &ContextState) -> Vec<Affordance> {
             relevance: 0.6,
             reason: "working tree dirty",
             source: Layer::Hardware,
+            action: AffordanceAction::None,
         });
+        // **git-actions module** — the coding controls. `-C <root>` runs git in
+        // the repo without a shell, so no quoting/injection surface (the root
+        // comes from /proc, never user text). Commit stages tracked changes
+        // (`-am`); Push publishes. Gated to the Coding activity in
+        // `fits_activity` so they only appear while you're actually working in
+        // the repo, not when a browser happens to be focused in a repo dir.
+        if let Some(root) = ctx.git.repo_root.as_deref().and_then(|p| p.to_str()) {
+            out.push(Affordance {
+                id: "git.commit",
+                kind: AffordanceKind::Control,
+                title: "Commit all".into(),
+                detail: format!("on {branch}"),
+                relevance: 0.64,
+                reason: "commit the tracked changes",
+                source: Layer::Hardware,
+                action: spawn(&["git", "-C", root, "commit", "-am", "Update (via OPTIONS)"]),
+            });
+            out.push(Affordance {
+                id: "git.push",
+                kind: AffordanceKind::Control,
+                title: "Push".into(),
+                detail: format!("on {branch}"),
+                relevance: 0.6,
+                reason: "push the branch to its remote",
+                source: Layer::Hardware,
+                action: spawn(&["git", "-C", root, "push"]),
+            });
+        }
     }
     out
 }
@@ -363,6 +522,7 @@ fn focus_churn_provider(ctx: &ContextState) -> Vec<Affordance> {
         relevance: (vel * 0.4).clamp(0.0, 0.7),
         reason: "high focus-switch velocity",
         source: Layer::Compositor,
+        action: AffordanceAction::None,
     }]
 }
 
@@ -386,6 +546,7 @@ fn shell_error_provider(ctx: &ContextState) -> Vec<Affordance> {
                 relevance: 0.55,
                 reason: "nonzero shell exit code",
                 source: Layer::AppBridge,
+                action: AffordanceAction::None,
             }]
         }
         _ => vec![],
@@ -414,6 +575,7 @@ fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
         relevance: (0.35 + 0.05 * n.min(5) as f32).clamp(0.0, 0.6),
         reason: "editor diagnostics present",
         source: Layer::AppBridge,
+        action: AffordanceAction::None,
     }]
 }
 
@@ -423,15 +585,31 @@ fn mic_provider(ctx: &ContextState) -> Vec<Affordance> {
     if !ctx.audio.is_mic_active {
         return vec![];
     }
-    vec![Affordance {
-        id: "audio.mic_live",
-        kind: AffordanceKind::Warning,
-        title: "Microphone is live".into(),
-        detail: "You're being recorded or heard".into(),
-        relevance: 0.8,
-        reason: "active capture stream",
-        source: Layer::Hardware,
-    }]
+    vec![
+        Affordance {
+            id: "audio.mic_live",
+            kind: AffordanceKind::Warning,
+            title: "Microphone is live".into(),
+            detail: "You're being recorded or heard".into(),
+            relevance: 0.8,
+            reason: "active capture stream",
+            source: Layer::Hardware,
+            action: AffordanceAction::None,
+        },
+        // **call-controls module** — the moment the mic goes live (a call), the
+        // one control everyone reaches for: mute. A direct Control, so it never
+        // fades; toggles the default source via wpctl.
+        Affordance {
+            id: "audio.mic_mute",
+            kind: AffordanceKind::Control,
+            title: "Mute mic".into(),
+            detail: String::new(),
+            relevance: 0.82,
+            reason: "toggle the microphone mute",
+            source: Layer::Hardware,
+            action: spawn(&["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"]),
+        },
+    ]
 }
 
 /// Unread notifications the daemon is holding. A critical one is a genuine
@@ -459,6 +637,7 @@ fn notifications_provider(ctx: &ContextState) -> Vec<Affordance> {
             relevance: 0.8,
             reason: "an active notification is critical urgency",
             source: Layer::Notifications,
+            action: AffordanceAction::None,
         }];
     }
     vec![Affordance {
@@ -473,6 +652,7 @@ fn notifications_provider(ctx: &ContextState) -> Vec<Affordance> {
         relevance: (0.3 + 0.05 * n.active_count.min(4) as f32).clamp(0.0, 0.5),
         reason: "unread notifications present",
         source: Layer::Notifications,
+        action: AffordanceAction::None,
     }]
 }
 
@@ -483,14 +663,18 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
         return vec![];
     }
     if s.contains_url {
+        // **browser/selection module** — a copied URL is intent to open it.
+        // A real Control now: xdg-open the link with the default handler.
+        let url = s.highlighted_text.clone().unwrap_or_default();
         vec![Affordance {
             id: "selection.url",
-            kind: AffordanceKind::Action,
+            kind: AffordanceKind::Control,
             title: "Open copied link".into(),
-            detail: s.highlighted_text.clone().unwrap_or_default(),
+            detail: url.clone(),
             relevance: 0.5,
             reason: "clipboard holds a url",
             source: Layer::Selection,
+            action: AffordanceAction::OpenUrl(url),
         }]
     } else if s.is_code {
         vec![Affordance {
@@ -501,6 +685,7 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
             relevance: 0.4,
             reason: "clipboard looks like code",
             source: Layer::Selection,
+            action: AffordanceAction::None,
         }]
     } else {
         vec![]
@@ -552,14 +737,21 @@ mod tests {
             artist: "a".into(),
             is_playing: true,
         });
+        // A roomy cap so the ambient now_playing Info isn't crowded out of the
+        // capped set by the media *controls* cluster (this test is about the
+        // freshness gate, not the cap).
+        let roomy = Tuning {
+            max_items: 12,
+            ..Default::default()
+        };
         // With hardware alive it shows…
-        assert!(decide(&ctx, &Tuning::default())
+        assert!(decide(&ctx, &roomy)
             .items
             .iter()
             .any(|a| a.id == "media.now_playing"));
         // …but if the hardware layer is dead, it must not.
         ctx.health.hardware.alive = false;
-        assert!(decide(&ctx, &Tuning::default())
+        assert!(decide(&ctx, &roomy)
             .items
             .iter()
             .all(|a| a.id != "media.now_playing"));
@@ -693,11 +885,17 @@ mod tests {
             latest_summary: "Hello".into(),
         };
         let novice = |skill| {
-            decide(&ctx, &Tuning { skill, ..Default::default() })
-                .items
-                .iter()
-                .find(|a| a.id == "notifications.unread")
-                .map(|a| a.relevance)
+            decide(
+                &ctx,
+                &Tuning {
+                    skill,
+                    ..Default::default()
+                },
+            )
+            .items
+            .iter()
+            .find(|a| a.id == "notifications.unread")
+            .map(|a| a.relevance)
         };
         let expert_rel = novice(1.0).expect("unread should surface");
         let novice_rel = novice(0.0).expect("unread should surface");
@@ -784,7 +982,10 @@ mod tests {
         assert_eq!(calibrate(AffordanceKind::Warning, 0.9, 1.0), 0.9);
         assert_eq!(calibrate(AffordanceKind::Warning, 0.9, 0.0), 0.9);
         // An Action fades for the expert, full for the novice.
-        assert!(calibrate(AffordanceKind::Action, 0.4, 1.0) < calibrate(AffordanceKind::Action, 0.4, 0.0));
+        assert!(
+            calibrate(AffordanceKind::Action, 0.4, 1.0)
+                < calibrate(AffordanceKind::Action, 0.4, 0.0)
+        );
         // Below threshold for an expert, above for a novice (suppression).
         assert!(calibrate(AffordanceKind::Action, 0.4, 1.0) < 0.2);
         assert!(calibrate(AffordanceKind::Action, 0.4, 0.0) >= 0.2);
@@ -822,7 +1023,10 @@ mod tests {
         );
         assert!(opts.items.iter().any(|a| a.id == "behavior.focus_churn"));
         // …and safety is present no matter what.
-        assert!(opts.items.iter().any(|a| a.id == "compositor.screencasting"));
+        assert!(opts
+            .items
+            .iter()
+            .any(|a| a.id == "compositor.screencasting"));
     }
 
     #[test]
@@ -835,13 +1039,143 @@ mod tests {
             is_playing: true,
         });
         let rel = |skill| {
-            decide(&ctx, &Tuning { skill, ..Default::default() })
-                .items
-                .iter()
-                .find(|a| a.id == "media.now_playing")
-                .map(|a| a.relevance)
-                .unwrap()
+            decide(
+                &ctx,
+                &Tuning {
+                    skill,
+                    // Roomy cap so the ambient Info isn't crowded out of the
+                    // capped set by the media controls cluster.
+                    max_items: 12,
+                    ..Default::default()
+                },
+            )
+            .items
+            .iter()
+            .find(|a| a.id == "media.now_playing")
+            .map(|a| a.relevance)
+            .unwrap()
         };
         assert!(rel(1.0) < rel(0.0));
+    }
+
+    // --- action modules -----------------------------------------------------
+
+    fn find<'a>(opts: &'a OptionSet, id: &str) -> Option<&'a Affordance> {
+        opts.items.iter().find(|a| a.id == id)
+    }
+
+    #[test]
+    fn media_controls_are_actionable_and_never_fade() {
+        let mut ctx = live_ctx();
+        ctx.media = Some(MediaState {
+            player_name: "mpv".into(),
+            title: "clip".into(),
+            artist: String::new(),
+            is_playing: true,
+        });
+        let roomy = Tuning {
+            max_items: 12,
+            skill: 1.0, // an expert — controls must NOT fade
+            ..Default::default()
+        };
+        let opts = decide(&ctx, &roomy);
+        let pp = find(&opts, "media.playpause").expect("play/pause control");
+        assert_eq!(pp.kind, AffordanceKind::Control);
+        assert_eq!(pp.title, "Pause"); // playing → offers Pause
+        assert!(pp.action.is_actionable());
+        assert!(matches!(&pp.action, AffordanceAction::Spawn { argv }
+            if argv == &["playerctl", "play-pause"]));
+        // Volume + brightness controls present.
+        assert!(find(&opts, "media.vol_up").is_some());
+        assert!(find(&opts, "media.bright_down").is_some());
+        // A Control is not faded even for a max-skill expert.
+        assert!(pp.relevance >= 0.6);
+
+        // Paused → the toggle offers Play instead.
+        if let Some(m) = ctx.media.as_mut() {
+            m.is_playing = false;
+        }
+        assert_eq!(
+            find(&decide(&ctx, &roomy), "media.playpause")
+                .unwrap()
+                .title,
+            "Play"
+        );
+    }
+
+    #[test]
+    fn git_commit_and_push_only_while_coding() {
+        let mut ctx = live_ctx();
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/proj".into()),
+            branch: Some("main".into()),
+            is_dirty: true,
+        };
+        // A terminal in a repo → Coding: commit & push surface as controls.
+        ctx.window.class = "foot".into();
+        ctx.window.pid = 1;
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let commit = find(&opts, "git.commit").expect("commit control while coding");
+        assert_eq!(commit.kind, AffordanceKind::Control);
+        assert!(matches!(&commit.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "git" && argv.contains(&"/home/max/proj".to_string())
+               && argv.contains(&"commit".to_string())));
+        assert!(find(&opts, "git.push").is_some());
+
+        // A browser focused in the same repo dir → Browsing, NOT coding: the
+        // git controls clear away (only the branch/dirty info would remain).
+        ctx.window.class = "firefox".into();
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert!(find(&opts, "git.commit").is_none());
+        assert!(find(&opts, "git.push").is_none());
+    }
+
+    #[test]
+    fn live_mic_offers_a_mute_control() {
+        let mut ctx = live_ctx();
+        ctx.audio.is_mic_active = true;
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let mute = find(&opts, "audio.mic_mute").expect("mute control when mic live");
+        assert_eq!(mute.kind, AffordanceKind::Control);
+        assert!(matches!(&mute.action, AffordanceAction::Spawn { argv }
+            if argv.contains(&"set-mute".to_string())));
+        // The warning is still there too.
+        assert!(find(&opts, "audio.mic_live").is_some());
+    }
+
+    #[test]
+    fn copied_url_action_opens_it() {
+        let mut ctx = live_ctx();
+        ctx.selection = TextSelection {
+            highlighted_text: Some("https://example.com".into()),
+            char_count: 19,
+            is_code: false,
+            contains_url: true,
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        let url = find(&opts, "selection.url").expect("url control");
+        assert_eq!(url.kind, AffordanceKind::Control);
+        assert_eq!(
+            url.action,
+            AffordanceAction::OpenUrl("https://example.com".into())
+        );
     }
 }
