@@ -165,6 +165,7 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
             | "git.open_remote"
             | "coding.terminal_here"
             | "editor.open_folder"
+            | "editor.run"
     ) {
         return activity == Activity::Coding;
     }
@@ -858,7 +859,7 @@ fn editor_provider(ctx: &ContextState) -> Vec<Affordance> {
     else {
         return vec![];
     };
-    vec![Affordance {
+    let mut out = vec![Affordance {
         id: "editor.open_folder",
         kind: AffordanceKind::Control,
         title: "Open folder".into(),
@@ -867,7 +868,57 @@ fn editor_provider(ctx: &ContextState) -> Vec<Affordance> {
         reason: "open the edited file's folder",
         source: Layer::AppBridge,
         action: AffordanceAction::OpenUrl(dir.to_string()),
-    }]
+    }];
+    // Language-appropriate "Run this file" for scripting languages: run the
+    // interpreter on the edited file in a fresh terminal (the file path is
+    // quoted for the inner shell; both come from the editor bridge, not raw
+    // user text). Compiled languages are project-not-file builds — skipped.
+    if let (Some(file), Some(runner)) = (
+        ctx.app_internal
+            .editor_file
+            .as_deref()
+            .and_then(|f| f.to_str()),
+        ctx.app_internal
+            .editor_language
+            .as_deref()
+            .and_then(runner_for_language),
+    ) {
+        out.push(Affordance {
+            id: "editor.run",
+            kind: AffordanceKind::Control,
+            title: "Run this file".into(),
+            detail: runner.into(),
+            relevance: 0.5,
+            reason: "run the edited script",
+            source: Layer::AppBridge,
+            action: AffordanceAction::Spawn {
+                argv: vec![
+                    "foot".into(),
+                    "--working-directory".into(),
+                    dir.to_string(),
+                    "sh".into(),
+                    "-c".into(),
+                    format!("{runner} {}; exec zsh", shell_arg(file)),
+                ],
+            },
+        });
+    }
+    out
+}
+
+/// The interpreter for a scripting language's filetype, or `None` for compiled
+/// / unknown languages (a per-project build, not a single-file run).
+fn runner_for_language(lang: &str) -> Option<&'static str> {
+    match lang.to_lowercase().as_str() {
+        "python" => Some("python3"),
+        "ruby" => Some("ruby"),
+        "javascript" => Some("node"),
+        "sh" | "bash" => Some("bash"),
+        "lua" => Some("lua"),
+        "perl" => Some("perl"),
+        "php" => Some("php"),
+        _ => None,
+    }
 }
 
 /// A live microphone — awareness that you're being heard (and the seat of the
@@ -1843,6 +1894,39 @@ mod tests {
         // No editor file → nothing.
         ctx.app_internal.editor_file = None;
         assert!(find(&decide(&ctx, &Tuning::default()), "editor.open_folder").is_none());
+    }
+
+    #[test]
+    fn editor_offers_run_for_scripting_languages() {
+        let mut ctx = live_ctx();
+        ctx.window.pid = 1;
+        ctx.app_internal.editor_file = Some("/home/max/proj/app.py".into());
+        ctx.app_internal.editor_language = Some("python".into());
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let r = find(&opts, "editor.run").expect("run for a python file");
+        assert!(matches!(&r.action, AffordanceAction::Spawn { argv }
+            if argv.iter().any(|a| a.contains("python3") && a.contains("app.py"))));
+        // A compiled language has no single-file runner.
+        ctx.app_internal.editor_language = Some("rust".into());
+        assert!(find(
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
+            "editor.run"
+        )
+        .is_none());
+        assert_eq!(runner_for_language("javascript"), Some("node"));
+        assert_eq!(runner_for_language("c"), None);
     }
 
     #[test]
