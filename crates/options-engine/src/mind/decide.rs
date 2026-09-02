@@ -805,7 +805,7 @@ fn downloads_provider(ctx: &ContextState) -> Vec<Affordance> {
         return vec![];
     };
     let name = path.rsplit('/').next().unwrap_or(path);
-    vec![Affordance {
+    let mut out = vec![Affordance {
         id: "downloads.open",
         kind: AffordanceKind::Control,
         title: "Open download".into(),
@@ -814,7 +814,37 @@ fn downloads_provider(ctx: &ContextState) -> Vec<Affordance> {
         reason: "a file just finished downloading",
         source: Layer::Hardware,
         action: AffordanceAction::OpenUrl(path.to_string()),
-    }]
+    }];
+    // An archive is more likely wanted extracted than merely opened to browse
+    // its contents, so offer a direct one-tap "Extract here" alongside (it
+    // unpacks next to the file via the archive manager). Ranked just above
+    // plain open for archives.
+    if is_archive(name) {
+        out.push(Affordance {
+            id: "downloads.extract",
+            kind: AffordanceKind::Control,
+            title: "Extract here".into(),
+            detail: name.to_string(),
+            relevance: 0.64,
+            reason: "the download is an archive",
+            source: Layer::Hardware,
+            action: spawn(&["file-roller", "--extract-here", path]),
+        });
+    }
+    out
+}
+
+/// Whether a filename looks like a compressed archive the archive manager can
+/// unpack. Matches the common single- and compound-suffix families by their
+/// trailing tokens, case-insensitively.
+fn is_archive(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    const EXACT: &[&str] = &[
+        ".zip", ".tar", ".tgz", ".txz", ".tbz", ".tbz2", ".gz", ".xz", ".bz2", ".zst", ".7z",
+        ".rar", ".lz", ".lzma", ".cab",
+    ];
+    const COMPOUND: &[&str] = &[".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tar.lz"];
+    COMPOUND.iter().any(|s| lower.ends_with(s)) || EXACT.iter().any(|s| lower.ends_with(s))
 }
 
 /// Behavioural: rapid window churn suggests searching/losing the thread — a
@@ -2169,6 +2199,20 @@ mod tests {
             d.action,
             AffordanceAction::OpenUrl("/home/max/Downloads/report.pdf".into())
         );
+        // A plain PDF is not an archive → no extract offer.
+        assert!(find(&opts, "downloads.extract").is_none());
+        // A .tar.gz download → an "Extract here" companion appears.
+        ctx.recent_download = Some("/home/max/Downloads/src.tar.gz".into());
+        let arc = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let x = find(&arc, "downloads.extract").expect("extract control for an archive");
+        assert!(matches!(&x.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "file-roller" && argv.iter().any(|a| a.ends_with("src.tar.gz"))));
         // Cleared → gone, even with the source live.
         ctx.recent_download = None;
         assert!(find(

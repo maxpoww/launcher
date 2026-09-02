@@ -164,6 +164,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "system.high_cpu" | "system.high_mem" => GLYPH_MONITOR,
         "system.battery_dim" => GLYPH_BRIGHT_DOWN,
         "downloads.open" => GLYPH_PULL,
+        "downloads.extract" => GLYPH_OPEN_FILE,
         "coding.terminal_here" => GLYPH_TERMINAL,
         "shell.rerun" => GLYPH_RERUN,
         "editor.run" => GLYPH_PLAY,
