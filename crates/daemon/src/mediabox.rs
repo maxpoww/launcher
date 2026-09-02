@@ -365,3 +365,34 @@ fn hit_band(track: Rect, px: f32, py: f32) -> bool {
 fn fmt_time(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{fmt_time, hit_band};
+    use crate::content::Rect;
+
+    #[test]
+    fn fmt_time_pads_seconds_and_carries_minutes() {
+        assert_eq!(fmt_time(0), "0:00");
+        assert_eq!(fmt_time(5), "0:05");
+        assert_eq!(fmt_time(65), "1:05");
+        assert_eq!(fmt_time(123), "2:03");
+        // Long track: minutes are not wrapped to hours (a plain m:ss clock).
+        assert_eq!(fmt_time(3661), "61:01");
+    }
+
+    #[test]
+    fn hit_band_is_generous_vertically_but_bounded_horizontally() {
+        let track = Rect::new(100.0, 200.0, 80.0, 6.0);
+        // On the bar.
+        assert!(hit_band(track, 140.0, 203.0));
+        // Within the 10px vertical slop above/below.
+        assert!(hit_band(track, 140.0, 192.0));
+        assert!(hit_band(track, 140.0, 214.0));
+        // Past the vertical slop → miss.
+        assert!(!hit_band(track, 140.0, 180.0));
+        // Left/right of the track → miss (no horizontal slop).
+        assert!(!hit_band(track, 90.0, 203.0));
+        assert!(!hit_band(track, 200.0, 203.0));
+    }
+}

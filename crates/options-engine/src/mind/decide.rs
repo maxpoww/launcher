@@ -2216,6 +2216,39 @@ mod tests {
     }
 
     #[test]
+    fn no_mpris_clears_every_media_offer() {
+        let mut ctx = live_ctx();
+        // A player is present → media controls exist.
+        ctx.media = Some(MediaState {
+            player_name: "vlc".into(),
+            title: "clip".into(),
+            artist: String::new(),
+            is_playing: true,
+            position_secs: 10,
+            length_secs: 200,
+        });
+        let with = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert!(with.items.iter().any(|a| a.id.starts_with("media.")));
+        // The player vanishes (no MPRIS at all) → every media.* offer clears,
+        // no stale controls linger.
+        ctx.media = None;
+        let without = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert!(!without.items.iter().any(|a| a.id.starts_with("media.")));
+    }
+
+    #[test]
     fn copied_text_offers_a_web_search_url_encoded() {
         let mut ctx = live_ctx();
         ctx.selection = TextSelection {
