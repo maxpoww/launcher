@@ -527,6 +527,16 @@ impl App {
     /// matches as transient entries, returning their indices for the
     /// Install section.
     pub(crate) fn pkg_results(&mut self) -> Vec<usize> {
+        // Lazily load the index the first time the Install section is shown.
+        // Until this fires the nix thread is parked holding no index memory;
+        // one Rank kicks the ~8.6 MB parse (and icon sweep), after which
+        // `IndexReady` flips the state to `Ready` and normal ranking takes over.
+        if self.pkg_state == PkgIndexState::Loading && !self.pkg_load_kicked {
+            self.pkg_load_kicked = true;
+            self.nix.request(nix::Request::Rank {
+                query: self.search.query.clone(),
+            });
+        }
         if self.pkg_state != PkgIndexState::Ready {
             return Vec::new();
         }

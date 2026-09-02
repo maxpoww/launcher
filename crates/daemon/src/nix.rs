@@ -327,6 +327,15 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
 /// Body of the index thread: cache load, background refresh, then rank
 /// service until the daemon goes away.
 fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_theme: String) {
+    // Park until the first rank request — nothing about the package index is
+    // loaded until the user actually opens package search. The parsed index is
+    // ~8.6 MB resident (23,673 entries) plus the icon-availability sweep; a
+    // session that never searches nixpkgs pays none of it. The daemon kicks
+    // this by sending one Rank the first time the Install section is shown.
+    let first_query = match ranks.recv() {
+        Ok(q) => q,
+        Err(_) => return, // daemon gone before any search
+    };
     let cache = cache_path();
     // A distribution-prebuilt index (WAVERUNNER_PKG_INDEX, set by the
     // flake) is authoritative: it was built from the exact nixpkgs the
@@ -419,7 +428,7 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
         })
         .filter(|(_, placeholder)| !placeholder)
         .unwrap_or_else(|| (crate::apps::placeholder_icon("package"), true));
-    let mut pending: Option<String> = None;
+    let mut pending: Option<String> = Some(first_query);
     loop {
         let mut query = match pending.take() {
             Some(query) => query,
