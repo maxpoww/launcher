@@ -68,6 +68,7 @@ const PROVIDERS: &[Provider] = &[
     mic_provider,
     camera_provider,
     fullscreen_provider,
+    browser_provider,
     notifications_provider,
 ];
 
@@ -735,6 +736,26 @@ fn diagnostics_provider(ctx: &ContextState) -> Vec<Affordance> {
 
 /// A live microphone — awareness that you're being heard (and the seat of the
 /// Communication activity).
+/// **browser module** — a browser is focused: offer "Find in page" (Ctrl+F).
+/// The action is a compositor keystroke (no bridge, no extra dependency); the
+/// same mechanism the clipboard paste uses. Ctrl+F is universal across
+/// browsers, so this works from the window class alone.
+fn browser_provider(ctx: &ContextState) -> Vec<Affordance> {
+    if infer_activity(ctx) != Activity::Browsing {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "browser.find",
+        kind: AffordanceKind::Control,
+        title: "Find in page".into(),
+        detail: String::new(),
+        relevance: 0.44,
+        reason: "find on the current page",
+        source: Layer::Compositor,
+        action: AffordanceAction::Daemon("find_in_page".into()),
+    }]
+}
+
 /// A fullscreen window is immersion — a video, a game, a presentation. Offer
 /// Do-Not-Disturb so a notification doesn't pop over it. (The mic-live call
 /// path offers DND too; this is the fullscreen path.)
@@ -1769,6 +1790,25 @@ mod tests {
         );
         assert!(roomy.items.iter().any(|a| a.id.starts_with("media.")));
         assert!(roomy.items.iter().any(|a| a.id.starts_with("git.")));
+    }
+
+    #[test]
+    fn browser_offers_find_in_page() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "firefox".into();
+        ctx.window.pid = 1; // a browser → Browsing
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let f = find(&opts, "browser.find").expect("find control while browsing");
+        assert_eq!(f.action, AffordanceAction::Daemon("find_in_page".into()));
+        // Not while coding.
+        ctx.window.class = "foot".into();
+        assert!(find(&decide(&ctx, &Tuning::default()), "browser.find").is_none());
     }
 
     #[test]

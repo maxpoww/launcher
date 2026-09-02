@@ -153,7 +153,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "selection.url" => GLYPH_COPY_LINK,
         "selection.open_path" => GLYPH_OPEN_FILE,
         "selection.email" => GLYPH_EMAIL,
-        "selection.search" | "shell.search_error" => GLYPH_SEARCH,
+        "selection.search" | "shell.search_error" | "browser.find" => GLYPH_SEARCH,
         "system.high_cpu" => GLYPH_MONITOR,
         "coding.terminal_here" => GLYPH_TERMINAL,
         "files.open_here" => GLYPH_OPEN_FILE,
@@ -1822,6 +1822,9 @@ impl App {
             // Internal daemon actions, mapped by tag to a shell capability.
             A::Daemon(tag) => match tag.as_str() {
                 "toggle_dnd" => self.toggle_notif_mute(),
+                // A compositor keystroke to the focused window (no extra dep,
+                // same path as the clipboard paste).
+                "find_in_page" => crate::hypr::send_shortcut_active("CTRL", "f"),
                 other => warn!("options: unknown daemon action '{other}'"),
             },
         }
