@@ -754,6 +754,23 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
             source: Layer::Selection,
             action: AffordanceAction::OpenUrl(path),
         }]
+    } else if let Some(addr) = s
+        .highlighted_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| looks_like_email(t))
+    {
+        // A copied email address is intent to write to it.
+        vec![Affordance {
+            id: "selection.email",
+            kind: AffordanceKind::Control,
+            title: "Compose email".into(),
+            detail: addr.to_string(),
+            relevance: 0.5,
+            reason: "clipboard holds an email address",
+            source: Layer::Selection,
+            action: AffordanceAction::OpenUrl(format!("mailto:{addr}")),
+        }]
     } else if let Some(text) = s
         .highlighted_text
         .as_deref()
@@ -777,6 +794,28 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
         }]
     } else {
         vec![]
+    }
+}
+
+/// Heuristic: the whole trimmed selection is a single email address
+/// (`local@domain.tld`), no whitespace. Deliberately strict so a sentence that
+/// merely mentions an address doesn't trigger it.
+fn looks_like_email(t: &str) -> bool {
+    let t = t.trim();
+    if t.contains(char::is_whitespace) || t.len() > 254 {
+        return false;
+    }
+    match t.split_once('@') {
+        Some((local, domain)) => {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+                && domain
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        }
+        None => false,
     }
 }
 
@@ -1358,6 +1397,29 @@ mod tests {
         // Whitespace-only selection offers nothing.
         ctx.selection.highlighted_text = Some("   ".into());
         assert!(find(&decide(&ctx, &Tuning::default()), "selection.search").is_none());
+    }
+
+    #[test]
+    fn copied_email_offers_compose() {
+        let mut ctx = live_ctx();
+        ctx.selection = TextSelection {
+            highlighted_text: Some("max@golem.example".into()),
+            char_count: 17,
+            is_code: false,
+            contains_url: false,
+            is_path: false,
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        let o = find(&opts, "selection.email").expect("email control");
+        assert_eq!(
+            o.action,
+            AffordanceAction::OpenUrl("mailto:max@golem.example".into())
+        );
+        // A sentence merely mentioning an address does not trigger it.
+        assert!(looks_like_email("a@b.co"));
+        assert!(!looks_like_email("email me at a@b.co please"));
+        assert!(!looks_like_email("not-an-email"));
+        assert!(!looks_like_email("a@nodot"));
     }
 
     #[test]

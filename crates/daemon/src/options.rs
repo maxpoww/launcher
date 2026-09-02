@@ -97,6 +97,7 @@ const GLYPH_PUSH: &str = "\u{f093}"; // fa-upload (push)
 const GLYPH_PULL: &str = "\u{f019}"; // fa-download (pull)
 const GLYPH_SEARCH: &str = "\u{f002}"; // fa-search (search the web)
 const GLYPH_OPEN_FILE: &str = "\u{f07c}"; // fa-folder-open (open copied path)
+const GLYPH_EMAIL: &str = "\u{f0e0}"; // fa-envelope (compose email)
 const GLYPH_MONITOR: &str = "\u{f0e4}"; // fa-tachometer (system monitor)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
 
@@ -125,6 +126,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "git.pull" => GLYPH_PULL,
         "selection.url" => GLYPH_COPY_LINK,
         "selection.open_path" => GLYPH_OPEN_FILE,
+        "selection.email" => GLYPH_EMAIL,
         "selection.search" | "shell.search_error" => GLYPH_SEARCH,
         "system.high_cpu" => GLYPH_MONITOR,
         _ => GLYPH_OPTION,
