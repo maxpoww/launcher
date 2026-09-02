@@ -36,6 +36,9 @@ pub struct TextSelection {
     pub char_count: usize,
     pub is_code: bool,
     pub contains_url: bool,
+    /// The clipboard holds what looks like a single local filesystem path
+    /// (an absolute `/…` or `~/…` line) — intent to open that file/folder.
+    pub is_path: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

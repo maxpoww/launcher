@@ -95,6 +95,7 @@ const GLYPH_MIC_SLASH: &str = "\u{f131}"; // fa-microphone-slash (mute mic)
 const GLYPH_COMMIT: &str = "\u{f00c}"; // fa-check (commit)
 const GLYPH_PUSH: &str = "\u{f093}"; // fa-upload (push)
 const GLYPH_SEARCH: &str = "\u{f002}"; // fa-search (search the web)
+const GLYPH_OPEN_FILE: &str = "\u{f07c}"; // fa-folder-open (open copied path)
 const GLYPH_MONITOR: &str = "\u{f0e4}"; // fa-tachometer (system monitor)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
 
@@ -121,6 +122,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "git.commit" => GLYPH_COMMIT,
         "git.push" => GLYPH_PUSH,
         "selection.url" => GLYPH_COPY_LINK,
+        "selection.open_path" => GLYPH_OPEN_FILE,
         "selection.search" => GLYPH_SEARCH,
         "system.high_cpu" => GLYPH_MONITOR,
         _ => GLYPH_OPTION,

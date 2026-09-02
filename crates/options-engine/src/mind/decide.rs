@@ -706,6 +706,21 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
             source: Layer::Selection,
             action: AffordanceAction::OpenUrl(url),
         }]
+    } else if s.is_path {
+        // A copied absolute path is intent to open that file/folder in its
+        // default app (xdg-open handles a plain path).
+        let path = s.highlighted_text.clone().unwrap_or_default();
+        let path = path.trim().to_string();
+        vec![Affordance {
+            id: "selection.open_path",
+            kind: AffordanceKind::Control,
+            title: "Open file".into(),
+            detail: path.rsplit('/').next().unwrap_or(&path).to_string(),
+            relevance: 0.5,
+            reason: "clipboard holds a file path",
+            source: Layer::Selection,
+            action: AffordanceAction::OpenUrl(path),
+        }]
     } else if let Some(text) = s
         .highlighted_text
         .as_deref()
@@ -966,6 +981,7 @@ mod tests {
             char_count: 19,
             is_code: false,
             contains_url: true,
+            is_path: false,
         };
         let opts = decide(&ctx, &Tuning::default());
         assert!(opts.items.iter().any(|a| a.id == "selection.url"));
@@ -1234,6 +1250,7 @@ mod tests {
             char_count: 19,
             is_code: false,
             contains_url: true,
+            is_path: false,
         };
         let opts = decide(&ctx, &Tuning::default());
         let url = find(&opts, "selection.url").expect("url control");
@@ -1279,6 +1296,7 @@ mod tests {
             char_count: 31,
             is_code: false,
             contains_url: false,
+            is_path: false,
         };
         let opts = decide(&ctx, &Tuning::default());
         let s = find(&opts, "selection.search").expect("search control");
@@ -1292,6 +1310,28 @@ mod tests {
         // Whitespace-only selection offers nothing.
         ctx.selection.highlighted_text = Some("   ".into());
         assert!(find(&decide(&ctx, &Tuning::default()), "selection.search").is_none());
+    }
+
+    #[test]
+    fn copied_path_offers_open_file() {
+        let mut ctx = live_ctx();
+        ctx.selection = TextSelection {
+            highlighted_text: Some("/home/max/notes/todo.md".into()),
+            char_count: 23,
+            is_code: false,
+            contains_url: false,
+            is_path: true,
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        let o = find(&opts, "selection.open_path").expect("open-file control");
+        assert_eq!(o.kind, AffordanceKind::Control);
+        assert_eq!(o.detail, "todo.md"); // basename shown
+        assert_eq!(
+            o.action,
+            AffordanceAction::OpenUrl("/home/max/notes/todo.md".into())
+        );
+        // A path takes precedence over the generic web-search fallback.
+        assert!(find(&opts, "selection.search").is_none());
     }
 
     #[test]

@@ -124,7 +124,17 @@ fn classify(content: &str) -> TextSelection {
         char_count,
         is_code: looks_like_code(content),
         contains_url: contains_url(content),
+        is_path: looks_like_path(content),
     }
+}
+
+/// Heuristic: a single-line absolute path (`/…`). Kept pure — no filesystem
+/// check (xdg-open simply no-ops on a path that isn't there), so the classifier
+/// stays deterministic and testable. Only absolute paths, so the open action
+/// needs no `~`/`$HOME` expansion (which shell-quoting would defeat).
+fn looks_like_path(t: &str) -> bool {
+    let t = t.trim();
+    !t.contains('\n') && t.len() < 512 && t.starts_with('/') && !contains_url(t)
 }
 
 fn contains_url(t: &str) -> bool {
@@ -193,6 +203,15 @@ mod tests {
         let s = classify(&big);
         assert_eq!(s.char_count, 2000);
         assert_eq!(s.highlighted_text.unwrap().chars().count(), SNIPPET_CAP);
+    }
+
+    #[test]
+    fn detects_absolute_paths() {
+        assert!(classify("/home/max/notes/todo.md").is_path);
+        assert!(classify("  /etc/hosts \n").is_path);
+        assert!(!classify("just prose").is_path);
+        assert!(!classify("https://example.com/x").is_path); // a url, not a path
+        assert!(!classify("relative/path").is_path); // must be absolute
     }
 
     #[test]
