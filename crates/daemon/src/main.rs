@@ -1396,6 +1396,21 @@ const BOUNCE_HEIGHT: f32 = 18.0;
 const DOCK_TOOLTIP_DELAY: Duration = Duration::from_millis(600);
 
 impl App {
+    /// Uniform size multiplier for the topbar OPTIONS surfaces (pills, and the
+    /// notification / clipboard boxes) on small screens. Full size on panels
+    /// >= OPTIONS_FULL_H logical px, easing down to OPTIONS_MIN_SCALE on short
+    /// ones so the boxes don't dominate a 1366x768 laptop (2026-09-02). Applied
+    /// uniformly (every dimension AND font) so text measurement and drawing
+    /// stay consistent and the surface just shrinks proportionally.
+    pub fn options_scale(&self) -> f32 {
+        const OPTIONS_FULL_H: f32 = 900.0;
+        const OPTIONS_MIN_SCALE: f32 = 0.82;
+        match self.output_logical_height() {
+            Some(h) if h < OPTIONS_FULL_H => (h / OPTIONS_FULL_H).max(OPTIONS_MIN_SCALE),
+            _ => 1.0,
+        }
+    }
+
     /// Logical height of the output the shell lives on, if known.
     fn output_logical_height(&self) -> Option<f32> {
         self.output_state

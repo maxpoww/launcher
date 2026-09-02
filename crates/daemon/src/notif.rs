@@ -812,8 +812,12 @@ impl App {
             })
             .collect();
         // The body wraps to the card's text column: full width minus both pads
-        // and the identity tile + its gap.
-        let body_w = (EXTENDED_W - 2.0 * CARD_PAD_X - ICON_SZ - ICON_GAP).max(1.0);
+        // and the identity tile + its gap. The box footprint shrinks on small
+        // screens (options_scale) so it doesn't dominate a 1366x768 panel; the
+        // internal pads/icon/font stay full size so text stays legible, and
+        // this same scaled width feeds notif_geom, so measure and draw agree.
+        let box_w = EXTENDED_W * self.options_scale();
+        let body_w = (box_w - 2.0 * CARD_PAD_X - ICON_SZ - ICON_GAP).max(1.0);
         let mut rows = Vec::with_capacity(items.len());
         if let Some(r) = self.options_renderer.as_mut() {
             for (app, summary, body, timestamp_ms, icon_key) in items {
@@ -1077,7 +1081,9 @@ impl App {
         // *behind* it at rest and slides out to the left as `peek_t` rises,
         // clearing the bell (plus a bond gap) so the two read as separate pills.
         let right = right - (ph + BOND_GAP) * self.notif.peek_t;
-        let mut w = lerp(ph, EXTENDED_W, self.notif.peek_t).max(ph);
+        // Scaled to match measure_notif's box_w so the drawn box and the wrapped
+        // text column always agree (options_scale shrinks the box on small screens).
+        let mut w = lerp(ph, EXTENDED_W * self.options_scale(), self.notif.peek_t).max(ph);
         if right - w < EDGE_PAD {
             w = (right - EDGE_PAD).max(ph);
         }
@@ -1118,10 +1124,11 @@ impl App {
     /// capped at the dropdown max) so a short list gives a short box; a compact
     /// fixed panel when there are no notifications (the centred empty state).
     fn notif_full_h(&self, ph: f32) -> f32 {
+        let s = self.options_scale();
         if self.notif.rows.is_empty() {
-            return EMPTY_H;
+            return EMPTY_H * s;
         }
-        (self.cards_total_h() + LIST_PAD + self.notif_footer_h()).clamp(ph, EXPANDED_H)
+        (self.cards_total_h() + LIST_PAD + self.notif_footer_h()).clamp(ph, EXPANDED_H * s)
     }
 
     /// Diameter of the footer ✕ pill — noticeably larger than a bar pill so it
