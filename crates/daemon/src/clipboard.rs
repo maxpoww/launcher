@@ -1148,7 +1148,9 @@ impl ClipState {
             );
         }
         let next_id = history.iter().map(|e| e.id).max().unwrap_or(0) + 1;
-        let row_heights = history.iter().map(row_height_of).collect();
+        // Provisional (scale 1.0 — no App yet); `open_clip_box` re-measures at
+        // the live options_scale before the box ever lays out.
+        let row_heights = history.iter().map(|e| row_height_of(e, 1.0)).collect();
         Self {
             handle,
             dict_open: false,
@@ -1220,11 +1222,14 @@ fn remove_clip_side_files(entry: &ClipEntry) {
 /// instead of showing as one clipped line. Blank lines are dropped here (they're
 /// honoured only in the metadata view and when the clip is copied). Files / images
 /// show their single preview line.
-fn clip_row_lines(entry: &ClipEntry, max_w: f32) -> Vec<String> {
+fn clip_row_lines(entry: &ClipEntry, max_w: f32, scale: f32) -> Vec<String> {
     if entry.kind != ClipKind::Text {
         return vec![entry.preview.clone()];
     }
-    let mut lines: Vec<String> = wrap_text(&entry.text, max_w, FONT_PX)
+    // `wrap_text` is linear in font_px, so scaling max_w and the font by the
+    // same factor yields IDENTICAL line breaks — the invariant that keeps the
+    // scaled measure and draw in lockstep.
+    let mut lines: Vec<String> = wrap_text(&entry.text, max_w, FONT_PX * scale)
         .into_iter()
         .filter(|l| !l.trim().is_empty())
         .collect();
@@ -1243,19 +1248,22 @@ fn clip_row_lines(entry: &ClipEntry, max_w: f32) -> Vec<String> {
 /// Width available for a row's wrapped text: the expanded box width less the
 /// horizontal padding, the leading tile (if any) and the trailing time column.
 /// Shared by the height measure and the draw so their line-wrapping matches.
-fn clip_text_col_w(has_tile: bool) -> f32 {
-    let lead = ROW_PAD_X + if has_tile { TILE_SZ + TEXT_GAP } else { 0.0 };
-    (PEEK_W - lead - ROW_PAD_X - TIME_COL_W).max(40.0)
+fn clip_text_col_w(has_tile: bool, scale: f32) -> f32 {
+    let lead = (ROW_PAD_X + if has_tile { TILE_SZ + TEXT_GAP } else { 0.0 }) * scale;
+    (PEEK_W * scale - lead - (ROW_PAD_X + TIME_COL_W) * scale).max(40.0 * scale)
 }
 
 /// The laid-out height of a clip's row: grows with its wrapped line count (up to
 /// [`MAX_ROW_LINES`]), and is at least the tile height for image / files / link
 /// rows. Short clips stay compact rather than padding out to a fixed height.
-fn row_height_of(entry: &ClipEntry) -> f32 {
+/// `scale` is the small-screen box scale ([`crate::App::options_scale`]) — the
+/// measure and the draw MUST receive the same value (see `measure_clip_rows`).
+fn row_height_of(entry: &ClipEntry, scale: f32) -> f32 {
     let has_tile = !matches!(clip_tile(entry), ClipTile::None);
-    let text_h = clip_row_lines(entry, clip_text_col_w(has_tile)).len() as f32 * LINE_PX;
-    let tile_h = if has_tile { TILE_SZ } else { 0.0 };
-    text_h.max(tile_h) + 2.0 * ROW_PAD_Y
+    let lines = clip_row_lines(entry, clip_text_col_w(has_tile, scale), scale).len();
+    let text_h = lines as f32 * LINE_PX * scale;
+    let tile_h = if has_tile { TILE_SZ * scale } else { 0.0 };
+    text_h.max(tile_h) + 2.0 * ROW_PAD_Y * scale
 }
 
 impl App {
@@ -1417,7 +1425,7 @@ impl App {
     /// the preview width — the left-side mirror of the bell, opening rightward.
     pub(crate) fn clip_geom(&self, left0: f32, y: f32, ph: f32) -> Rect {
         let left = left0 + (ph + BOND_GAP) * self.clip.peek_t;
-        let w = lerp(ph, PEEK_W, self.clip.peek_t).max(ph);
+        let w = lerp(ph, PEEK_W * self.options_scale(), self.clip.peek_t).max(ph);
         // Grows down into the history drawer with `expand_t`. Use the eased
         // `box_h` (seeded on open) so a content change morphs smoothly.
         let full = if self.clip.box_h > 0.0 {
@@ -1448,18 +1456,27 @@ impl App {
 
     /// Recompute the per-row heights after any history change (the variable-
     /// height list must lay out identically in the draw and the hit-test).
+    /// Measured at the live [`options_scale`](crate::App::options_scale) — the
+    /// single source the row draw uses too, so they can never desync.
     fn measure_clip_rows(&mut self) {
-        self.clip.row_heights = self.clip.history.iter().map(row_height_of).collect();
+        let s = self.options_scale();
+        self.clip.row_heights = self
+            .clip
+            .history
+            .iter()
+            .map(|e| row_height_of(e, s))
+            .collect();
     }
 
     /// Fully-expanded box height: fit to content (rows + pad + footer, capped),
     /// or a small panel for the empty state.
     fn clip_full_h(&self) -> f32 {
+        let s = self.options_scale();
         if self.clip.history.is_empty() {
-            return EMPTY_H;
+            return EMPTY_H * s;
         }
-        let content = self.clip_rows_total_h() + LIST_PAD + self.clip_footer_h();
-        content.clamp(self.clip_band_h(), EXPANDED_H)
+        let content = self.clip_rows_total_h() + LIST_PAD * s + self.clip_footer_h();
+        content.clamp(self.clip_band_h(), EXPANDED_H * s)
     }
 
     /// Diameter of the footer ✕ pill (larger than a bar pill — the box's primary
@@ -1753,6 +1770,10 @@ impl App {
         let Some(entry) = self.clip.history.get(idx) else {
             return;
         };
+        // Small-screen box scale. Every row-content dimension below (font,
+        // line height, tile, pads, wrap width) multiplies by this SAME value
+        // the measure used (`measure_clip_rows`), so layout and heights agree.
+        let s = self.options_scale();
         let hovered = self.clip.hover_row == Some(idx);
         // Clip the row to the content region so it can't spill over the footer.
         let top = rr.y.max(content.y);
@@ -1788,7 +1809,7 @@ impl App {
             [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * e]
         };
         // Trailing time / delete can sit in the row's top-right corner.
-        let ty = rr.y + ROW_PAD_Y;
+        let ty = rr.y + ROW_PAD_Y * s;
         // Clip to the (possibly narrowed) content width so labels are masked at
         // the detail-wipe boundary rather than bleeding under the panel.
         let row_clip = Rect::new(content.x, top, content.w, bot - top);
@@ -1833,13 +1854,13 @@ impl App {
             dr.x - TEXT_GAP
         } else {
             let time = fmt_relative(entry.timestamp_ms);
-            let tw = time.chars().count() as f32 * FONT_PX * 0.55;
+            let tw = time.chars().count() as f32 * FONT_PX * s * 0.55;
             scene.labels.push(Label {
                 text: time,
                 pos: (right - tw, ty),
                 max_w: tw + 6.0,
-                font_px: FONT_PX,
-                line_px: LINE_PX,
+                font_px: FONT_PX * s,
+                line_px: LINE_PX * s,
                 centered: false,
                 dim: false,
                 cache: false,
@@ -1847,21 +1868,22 @@ impl App {
                 color: Some([col[0], col[1], col[2], col[3] * 0.85]),
                 clip: Some(row_clip),
             });
-            right - tw - TEXT_GAP
+            right - tw - TEXT_GAP * s
         };
 
         // Left icon tile for image & files clips; text is inset past it.
         // Text-only clips start at the padding.
-        let mut tx = rr.x + ROW_PAD_X;
+        let tile_sz = TILE_SZ * s;
+        let mut tx = rr.x + ROW_PAD_X * s;
         match tile {
             ClipTile::None => {}
             ClipTile::Glyph(glyph) => {
-                let t = Rect::new(tx, rr.y + (rr.h - TILE_SZ) / 2.0, TILE_SZ, TILE_SZ);
+                let t = Rect::new(tx, rr.y + (rr.h - tile_sz) / 2.0, tile_sz, tile_sz);
                 self.push_clip_tile_glyph(scene, t, glyph, ink, e, row_clip);
-                tx += TILE_SZ + TEXT_GAP;
+                tx += tile_sz + TEXT_GAP * s;
             }
             ClipTile::Thumb { key, glyph, .. } => {
-                let t = Rect::new(tx, rr.y + (rr.h - TILE_SZ) / 2.0, TILE_SZ, TILE_SZ);
+                let t = Rect::new(tx, rr.y + (rr.h - tile_sz) / 2.0, tile_sz, tile_sz);
                 if let Some(layer) = self.clip_thumb_layer(key) {
                     clip_grid(scene, content).icons.push(IconInst {
                         rect: t,
@@ -1873,7 +1895,7 @@ impl App {
                     // Not resolved yet — a soft placeholder with the kind glyph.
                     self.push_clip_tile_glyph(scene, t, glyph, ink, e, row_clip);
                 }
-                tx += TILE_SZ + TEXT_GAP;
+                tx += tile_sz + TEXT_GAP * s;
             }
         }
 
@@ -1881,15 +1903,16 @@ impl App {
         // Wrap to the shared column width (so line breaks match `row_height_of`),
         // but mask each label to the actual gap before the trailing time.
         let max_w = (text_right - tx).max(0.0);
-        let lines = clip_row_lines(entry, clip_text_col_w(!matches!(tile, ClipTile::None)));
-        let text_top = rr.y + (rr.h - lines.len() as f32 * LINE_PX) / 2.0;
+        let lines = clip_row_lines(entry, clip_text_col_w(!matches!(tile, ClipTile::None), s), s);
+        let line_px = LINE_PX * s;
+        let text_top = rr.y + (rr.h - lines.len() as f32 * line_px) / 2.0;
         for (i, line) in lines.into_iter().enumerate() {
             scene.labels.push(Label {
                 text: line,
-                pos: (tx, text_top + i as f32 * LINE_PX),
+                pos: (tx, text_top + i as f32 * line_px),
                 max_w,
-                font_px: FONT_PX,
-                line_px: LINE_PX,
+                font_px: FONT_PX * s,
+                line_px,
                 centered: false,
                 dim: false,
                 cache: false,
@@ -2294,7 +2317,15 @@ impl App {
         self.clip.hold_deadline = None;
         self.clip.peek_reveal = true; // keep the preview fully out under the box
         self.clip.expanded = true;
+        // Fresh heights at the live scale (the constructor measured at 1.0).
+        self.measure_clip_rows();
         self.clip.box_h = self.clip_full_h();
+        tracing::debug!(
+            "clip box open: rows={} box_h={:.0} scale={:.3}",
+            self.clip.history.len(),
+            self.clip.box_h,
+            self.options_scale()
+        );
         // Every open is a fresh box: list at the top, no detail view carried over
         // from a previous session. Done here (box still hidden) rather than on
         // close, so a collapse-while-in-detail can shrink away smoothly instead
