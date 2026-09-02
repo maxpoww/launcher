@@ -250,6 +250,39 @@ mod tests {
     }
 
     #[test]
+    fn malformed_and_unknown_bridge_input_is_rejected_never_panics() {
+        // The exact call handle_conn makes on every line. Each of these must
+        // return Err (logged + ignored), never panic the collector/daemon.
+        for bad in [
+            "",                                  // empty line
+            "   ",                               // whitespace
+            "not json at all",                   // garbage
+            "{",                                 // truncated
+            r#"{"kind":"telepathy"}"#,           // unknown kind
+            r#"{"last_cmd":"ls"}"#,              // missing the tag
+            r#"{"kind":"shell","exit_code":"nope"}"#, // wrong field type
+            r#"[1,2,3]"#,                        // wrong shape
+            "\u{FFFD}\u{FFFD}",                   // lossy garbage
+        ] {
+            assert!(
+                serde_json::from_str::<BridgeMsg>(bad).is_err(),
+                "should reject: {bad:?}"
+            );
+        }
+        // A valid message that omits every optional field still parses (the
+        // clients send partial subsets), yielding all-None.
+        let shell: BridgeMsg = serde_json::from_str(r#"{"kind":"shell"}"#).unwrap();
+        assert_eq!(
+            shell,
+            BridgeMsg::Shell {
+                last_cmd: None,
+                exit_code: None,
+                cwd: None,
+            }
+        );
+    }
+
+    #[test]
     fn each_kind_replaces_only_its_own_fields() {
         let mut s = AppInternalContext::default();
         apply(
