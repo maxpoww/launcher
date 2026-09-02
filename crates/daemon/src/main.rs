@@ -1396,9 +1396,46 @@ const BOUNCE_HEIGHT: f32 = 18.0;
 const DOCK_TOOLTIP_DELAY: Duration = Duration::from_millis(600);
 
 impl App {
-    /// Current icon scale multiplier (driven by `icon_size`).
+    /// Logical height of the output the shell lives on, if known.
+    fn output_logical_height(&self) -> Option<f32> {
+        self.output_state
+            .outputs()
+            .next()
+            .and_then(|o| self.output_state.info(&o))
+            .and_then(|i| i.logical_size)
+            .map(|(_, h)| h as f32)
+    }
+
+    /// Current icon scale multiplier (driven by `icon_size`), fitted to the
+    /// screen. ICON_SCALES are absolute multipliers of base sizes tuned for a
+    /// large panel; on a short screen the upper levels overflow the display
+    /// (1366x768 Acer, 2026-09-02). Rather than clamp each level to the ceiling
+    /// — which collapses the top steps onto one value ("2, 3, 4 all the same")
+    /// — distribute the four steps evenly from the smallest design scale up to
+    /// the largest that still fits. On a large screen the cap == the design max,
+    /// reproducing the original ladder exactly; on a small one every step stays
+    /// distinct AND fits. Every extent and surface size derives from this one
+    /// value, so the fit belongs here.
     pub fn icon_scale(&self) -> f32 {
-        content::ICON_SCALES[self.icon_size]
+        let levels = &content::ICON_SCALES;
+        let requested = levels[self.icon_size];
+        let base_full = (self.config.window.height + self.config.window.bottom_margin) as f32;
+        let Some(h) = self.output_logical_height() else {
+            return requested;
+        };
+        if base_full <= 0.0 {
+            return requested;
+        }
+        let largest = levels[levels.len() - 1];
+        let smallest = levels[0];
+        // Largest scale whose fully-open card fits OPEN_FIT of the screen,
+        // never above the design max, never below a legible floor.
+        let cap = (h * content::OPEN_FIT / base_full)
+            .min(largest)
+            .max(content::OPEN_FIT_FLOOR);
+        let lo = smallest.min(cap);
+        let t = self.icon_size as f32 / (levels.len() - 1) as f32;
+        lo + (cap - lo) * t
     }
 
     /// Logical surface dimensions for the current icon_size.

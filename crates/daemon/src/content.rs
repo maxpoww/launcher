@@ -435,6 +435,15 @@ pub struct Layout {
 /// The four icon-size levels, indexed by `App::icon_size` (default 1).
 pub const ICON_SCALES: [f32; 4] = [0.70, 1.00, 1.30, 1.65];
 
+/// Responsive fit: the largest fraction of the screen height the fully-open
+/// card may occupy, and the floor the fit-cap may never push the scale below
+/// (so text stays legible on a small panel). ICON_SCALES are absolute
+/// multipliers of base sizes tuned for a large panel; without this cap the
+/// upper levels make the open card taller than a short screen and clip its
+/// top row off-display (seen on a 1366x768 laptop, 2026-09-02).
+pub const OPEN_FIT: f32 = 0.94;
+pub const OPEN_FIT_FLOOR: f32 = 0.6;
+
 #[allow(clippy::too_many_arguments)]
 pub fn layout(
     config: &Config,
@@ -449,6 +458,10 @@ pub fn layout(
     // AGUA deformation, (card silhouette, content ride) — 1.0 = rest.
     stretch: (f32, f32),
 ) -> Layout {
+    // NOTE: icon_scale is already capped to fit the screen at its source,
+    // App::icon_scale() (main.rs) — every extent and surface size derives from
+    // that one value, so the cap lives there, not here. (2026-09-02)
+
     // Scaled size metrics — all icon/slot dimensions respond to icon_scale.
     let dock_slot = DOCK_SLOT * icon_scale;
     let dock_pad_x = DOCK_PAD_X * icon_scale;
