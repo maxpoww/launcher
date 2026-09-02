@@ -87,16 +87,14 @@ fn newest_recent(dir: &std::path::Path) -> Option<PathBuf> {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') {
+        if !eligible_name(&name) {
             continue;
         }
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if PARTIAL.iter().any(|p| ext.eq_ignore_ascii_case(p)) {
-                continue;
-            }
-        }
         let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() {
+        if !meta.is_file() || meta.len() == 0 {
+            // Skip empty files — a browser often creates a 0-byte target
+            // before it starts filling (an in-progress download with no
+            // sidecar), and a bare `touch` placeholder isn't worth offering.
             continue;
         }
         let Ok(mtime) = meta.modified() else { continue };
@@ -108,4 +106,38 @@ fn newest_recent(dir: &std::path::Path) -> Option<PathBuf> {
         }
     }
     best.map(|(_, p)| p)
+}
+
+/// Whether a Downloads entry's *name* is worth considering: not hidden, and not
+/// a partial-download sidecar. The mtime-recency, regular-file and non-empty
+/// checks live in [`newest_recent`] (they need `stat`); this is the pure,
+/// unit-testable string half.
+fn eligible_name(name: &str) -> bool {
+    if name.starts_with('.') {
+        return false;
+    }
+    match name.rsplit_once('.') {
+        Some((_, ext)) => !PARTIAL.iter().any(|p| ext.eq_ignore_ascii_case(p)),
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eligible_name;
+
+    #[test]
+    fn eligible_name_skips_hidden_and_partial_sidecars() {
+        assert!(eligible_name("report.pdf"));
+        assert!(eligible_name("archive.tar.gz"));
+        assert!(eligible_name("noext"));
+        // Partial-download sidecars, any case.
+        assert!(!eligible_name("movie.mp4.part"));
+        assert!(!eligible_name("iso.CRDOWNLOAD"));
+        assert!(!eligible_name("x.tmp"));
+        assert!(!eligible_name("y.download"));
+        // Hidden files.
+        assert!(!eligible_name(".bashrc"));
+        assert!(!eligible_name(".partial-thing"));
+    }
 }
