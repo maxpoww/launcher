@@ -89,10 +89,11 @@ pub fn decide_with(ctx: &ContextState, temporal: &Temporal, tuning: &Tuning) -> 
     items.retain(|a| fits_activity(a.id, activity));
 
     // Calibrate to *effective* skill (dynamic difficulty: friction lowers it),
-    // then clear away the irrelevant.
+    // then situate to the activity, then clear away the irrelevant.
     let skill = effective_skill(ctx, tuning.skill);
     for a in &mut items {
         a.relevance = calibrate(a.kind, a.relevance, skill);
+        a.relevance = contextual_relevance(a.id, a.relevance, activity);
     }
     items.retain(|a| a.relevance >= tuning.min_relevance);
 
@@ -180,6 +181,25 @@ fn effective_skill(ctx: &ContextState, base: f32) -> f32 {
     let hesitating = if ctx.behavior.is_hesitating { 0.3 } else { 0.0 };
     let friction = (churn + shell_err + diagnostics + hesitating).clamp(0.0, 1.0);
     (base - friction).clamp(0.0, 1.0)
+}
+
+/// Situate an affordance's relevance to the current activity. The Mind ranks a
+/// blended set (media + git + …), and a track playing quietly *behind* your
+/// work shouldn't outrank the controls for the work itself. So media controls
+/// are damped when media is background — i.e. the activity is something more
+/// purposeful (Coding, Communication, Browsing, Reading, Terminal). When media
+/// IS the activity (watching), they keep full weight.
+fn contextual_relevance(id: &str, base: f32, activity: Activity) -> f32 {
+    let media_is_background = id.starts_with("media.")
+        && !matches!(
+            activity,
+            Activity::Media | Activity::Idle | Activity::Unknown
+        );
+    if media_is_background {
+        base * 0.65
+    } else {
+        base
+    }
 }
 
 /// Skill scaling: safety and direct controls are untouchable; only scaffolding
@@ -1441,6 +1461,57 @@ mod tests {
     }
 
     #[test]
+    fn background_music_ranks_below_work_controls() {
+        // Coding in a dirty repo WITH music playing: the git controls for what
+        // you're doing lead; the background media controls are damped below them.
+        let mut ctx = live_ctx();
+        ctx.window.class = "foot".into();
+        ctx.window.pid = 1;
+        ctx.git = GitContext {
+            repo_root: Some("/home/max/p".into()),
+            branch: Some("main".into()),
+            is_dirty: true,
+            remote_url: None,
+        };
+        ctx.media = Some(MediaState {
+            player_name: "spotify".into(),
+            title: "t".into(),
+            artist: "a".into(),
+            is_playing: true,
+        });
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        let commit = find(&opts, "git.commit").unwrap().relevance;
+        let playpause = find(&opts, "media.playpause").unwrap().relevance;
+        assert!(commit > playpause, "work controls lead background media");
+
+        // But when media IS the activity (watching), it keeps full weight.
+        let mut watching = live_ctx();
+        watching.media = ctx.media.clone();
+        watching.window.class = "somerandomapp".into();
+        watching.window.pid = 1; // media playing + nothing purposeful → Media
+        assert_eq!(infer_activity(&watching), Activity::Media);
+        let full = find(
+            &decide(
+                &watching,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                },
+            ),
+            "media.playpause",
+        )
+        .unwrap()
+        .relevance;
+        assert!(full > playpause, "foreground media keeps full weight");
+    }
+
+    #[test]
     fn coding_offers_a_terminal_here() {
         let mut ctx = live_ctx();
         ctx.window.class = "code".into(); // an editor → Coding
@@ -1562,12 +1633,22 @@ mod tests {
             assert!(w[0].relevance >= w[1].relevance);
         }
         assert!(opts.items.iter().all(|a| a.relevance >= 0.2));
-        // The top control is the highest-scoring one present (media play/pause
-        // at 0.66 beats git.commit at 0.64).
-        assert_eq!(opts.items[0].id, "media.playpause");
-        // Both modules are represented in the blended top set.
-        assert!(opts.items.iter().any(|a| a.id.starts_with("media.")));
+        // While Coding, the work controls lead and fill the small cap: git.commit
+        // tops the set and background media is damped below (and here crowded
+        // out of the top 4 entirely — exactly the de-clutter we want).
+        assert_eq!(opts.items[0].id, "git.commit");
         assert!(opts.items.iter().any(|a| a.id.starts_with("git.")));
+        // With more room, media reappears (below the git controls) — the blend
+        // is preserved, just correctly ordered.
+        let roomy = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert!(roomy.items.iter().any(|a| a.id.starts_with("media.")));
+        assert!(roomy.items.iter().any(|a| a.id.starts_with("git.")));
     }
 
     #[test]
