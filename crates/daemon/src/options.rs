@@ -142,8 +142,8 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "media.mute" => GLYPH_VOL_MUTE,
         "media.bright_up" | "reading.bright_up" => GLYPH_BRIGHT_UP,
         "media.bright_down" | "reading.bright_down" => GLYPH_BRIGHT_DOWN,
-        "media.next" => GLYPH_NEXT,
-        "media.prev" => GLYPH_PREV,
+        "media.next" | "slides.next" => GLYPH_NEXT,
+        "media.prev" | "slides.prev" => GLYPH_PREV,
         "media.seek_fwd" => GLYPH_SEEK_FWD,
         "media.seek_back" => GLYPH_SEEK_BACK,
         "audio.mic_mute" => GLYPH_MIC_SLASH,
@@ -1892,6 +1892,8 @@ impl App {
                 // A compositor keystroke to the focused window (no extra dep,
                 // same path as the clipboard paste).
                 "find_in_page" => crate::hypr::send_shortcut_active("CTRL", "f"),
+                "slide_next" => crate::hypr::send_shortcut_active("", "Right"),
+                "slide_prev" => crate::hypr::send_shortcut_active("", "Left"),
                 other => warn!("options: unknown daemon action '{other}'"),
             },
         }

@@ -72,6 +72,7 @@ const PROVIDERS: &[Provider] = &[
     fullscreen_provider,
     browser_provider,
     reading_provider,
+    presentation_provider,
     notifications_provider,
 ];
 
@@ -955,6 +956,47 @@ const READERS: &[&str] = &[
     "foliate",
     "sioyek",
 ];
+
+/// Office/presentation window classes (substring, lower-cased).
+const PRESENTERS: &[&str] = &[
+    "impress",
+    "libreoffice",
+    "soffice",
+    "powerpoint",
+    "onlyoffice",
+];
+
+/// **presentation module** — a fullscreen office/slides app is a slideshow:
+/// offer Next / Previous slide (arrow keys via the compositor). Gated on
+/// fullscreen so it doesn't fire while merely editing the deck.
+fn presentation_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let class = ctx.window.class.to_lowercase();
+    if !ctx.window.is_fullscreen || !PRESENTERS.iter().any(|p| class.contains(p)) {
+        return vec![];
+    }
+    vec![
+        Affordance {
+            id: "slides.next",
+            kind: AffordanceKind::Control,
+            title: "Next slide".into(),
+            detail: String::new(),
+            relevance: 0.62,
+            reason: "advance the slideshow",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("slide_next".into()),
+        },
+        Affordance {
+            id: "slides.prev",
+            kind: AffordanceKind::Control,
+            title: "Previous slide".into(),
+            detail: String::new(),
+            relevance: 0.6,
+            reason: "back a slide",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("slide_prev".into()),
+        },
+    ]
+}
 
 /// **reading module** — a PDF / document reader is focused: offer Find (Ctrl+F,
 /// via the compositor keystroke) and, on a laptop, reading brightness. Keeps
@@ -2197,6 +2239,29 @@ mod tests {
             vid > bg,
             "browser video is foreground; background music is damped"
         );
+    }
+
+    #[test]
+    fn fullscreen_slides_offer_slide_nav() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "libreoffice-impress".into();
+        ctx.window.pid = 1;
+        ctx.window.is_fullscreen = true;
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 12,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            find(&opts, "slides.next").unwrap().action,
+            AffordanceAction::Daemon("slide_next".into())
+        );
+        assert!(find(&opts, "slides.prev").is_some());
+        // Not while merely editing the deck (windowed).
+        ctx.window.is_fullscreen = false;
+        assert!(find(&decide(&ctx, &Tuning::default()), "slides.next").is_none());
     }
 
     #[test]
