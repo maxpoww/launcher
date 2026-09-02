@@ -562,22 +562,40 @@ fn focus_churn_provider(ctx: &ContextState) -> Vec<Affordance> {
 fn shell_error_provider(ctx: &ContextState) -> Vec<Affordance> {
     match ctx.app_internal.shell_exit_code {
         Some(code) if code != 0 => {
-            let detail = ctx
-                .app_internal
-                .shell_last_cmd
-                .as_deref()
+            let cmd = ctx.app_internal.shell_last_cmd.as_deref();
+            let detail = cmd
                 .map(|c| format!("{c} → exit {code}"))
                 .unwrap_or_else(|| format!("exit {code}"));
-            vec![Affordance {
-                id: "shell.last_failed",
-                kind: AffordanceKind::Action,
-                title: "Last command failed".into(),
-                detail,
-                relevance: 0.55,
-                reason: "nonzero shell exit code",
-                source: Layer::AppBridge,
-                action: AffordanceAction::None,
-            }]
+            // A failed command: offer to look it up. "Turn frustration into
+            // revelation" — a web search for the command that just failed. A
+            // Control (the direct thing you'd reach for), fed by the shell
+            // bridge. Without a captured command there's nothing to search, so
+            // it stays a plain info line.
+            match cmd.filter(|c| !c.trim().is_empty()) {
+                Some(c) => vec![Affordance {
+                    id: "shell.search_error",
+                    kind: AffordanceKind::Control,
+                    title: "Search the error".into(),
+                    detail,
+                    relevance: 0.55,
+                    reason: "nonzero shell exit code with a known command",
+                    source: Layer::AppBridge,
+                    action: AffordanceAction::OpenUrl(format!(
+                        "https://duckduckgo.com/?q={}",
+                        url_encode_query(c.trim())
+                    )),
+                }],
+                None => vec![Affordance {
+                    id: "shell.last_failed",
+                    kind: AffordanceKind::Info,
+                    title: "Last command failed".into(),
+                    detail,
+                    relevance: 0.4,
+                    reason: "nonzero shell exit code",
+                    source: Layer::AppBridge,
+                    action: AffordanceAction::None,
+                }],
+            }
         }
         _ => vec![],
     }
@@ -869,19 +887,29 @@ mod tests {
             ..Default::default()
         };
         let opts = decide(&ctx, &Tuning::default());
+        // With a captured command, the failure becomes an actionable
+        // "Search the error" Control (web search for the command).
         let a = opts
             .items
             .iter()
-            .find(|a| a.id == "shell.last_failed")
+            .find(|a| a.id == "shell.search_error")
             .expect("failure should surface");
-        assert_eq!(a.kind, AffordanceKind::Action);
+        assert_eq!(a.kind, AffordanceKind::Control);
         assert!(a.detail.contains("cargo build"));
+        assert_eq!(
+            a.action,
+            AffordanceAction::OpenUrl("https://duckduckgo.com/?q=cargo%20build".into())
+        );
+        // Without a captured command (no bridge) it's a plain info line.
+        ctx.app_internal.shell_last_cmd = None;
+        let info = decide(&ctx, &Tuning::default());
+        assert!(info.items.iter().any(|a| a.id == "shell.last_failed"));
         // A zero exit surfaces nothing.
         ctx.app_internal.shell_exit_code = Some(0);
         assert!(decide(&ctx, &Tuning::default())
             .items
             .iter()
-            .all(|a| a.id != "shell.last_failed"));
+            .all(|a| !a.id.starts_with("shell.")));
     }
 
     #[test]

@@ -123,7 +123,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "git.push" => GLYPH_PUSH,
         "selection.url" => GLYPH_COPY_LINK,
         "selection.open_path" => GLYPH_OPEN_FILE,
-        "selection.search" => GLYPH_SEARCH,
+        "selection.search" | "shell.search_error" => GLYPH_SEARCH,
         "system.high_cpu" => GLYPH_MONITOR,
         _ => GLYPH_OPTION,
     }
