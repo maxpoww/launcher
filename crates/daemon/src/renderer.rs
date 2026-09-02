@@ -241,6 +241,16 @@ impl Renderer {
                 false,
                 "gpu",
             ),
+            // Some stacks present fine on GL while their Vulkan surface path
+            // is broken; asking for GL alone changes which one is picked.
+            // MUST come before the software fallback: on pre-Skylake Intel
+            // (Haswell — "Vulkan support is incomplete") the only Vulkan
+            // adapter mesa offers is llvmpipe, so the attempt above yields a
+            // CPU rasterizer while a perfectly good REAL GPU sits on the GL
+            // path (crocus). Found live on a 2013 MacBook Air: the whole
+            // shell was software-rendered (menubox = 80% CPU) until GL was
+            // tried before accepting CPU (2026-09-02).
+            (wgpu::Backends::GL, false, "gl only"),
             // Anything at all, including lavapipe/llvmpipe on the CPU. Slow
             // (the F12 throttle exists for exactly this) but it is a desktop.
             (
@@ -250,9 +260,6 @@ impl Renderer {
                 true,
                 "software fallback",
             ),
-            // Some stacks present fine on GL while their Vulkan surface path
-            // is broken; asking for GL alone changes which one is picked.
-            (wgpu::Backends::GL, false, "gl only"),
         ];
 
         let mut chosen: Option<(wgpu::Surface<'static>, wgpu::Adapter)> = None;
@@ -286,6 +293,20 @@ impl Renderer {
                 force_fallback_adapter,
             })) {
                 Some(adapter) => {
+                    // A CPU rasterizer only counts on the explicit software
+                    // attempt — a non-fallback attempt returning one (mesa's
+                    // llvmpipe posing as the Vulkan adapter on old Intel)
+                    // must keep looking so a real GPU on another backend
+                    // gets its turn.
+                    if !force_fallback_adapter
+                        && adapter.get_info().device_type == wgpu::DeviceType::Cpu
+                    {
+                        tracing::warn!(
+                            "renderer: {label} offered a CPU adapter ({}); trying next backend",
+                            adapter.get_info().name
+                        );
+                        continue;
+                    }
                     tracing::info!("renderer: adapter via {label}: {:?}", adapter.get_info());
                     chosen = Some((surface, adapter));
                     _live_instance = Some(instance);

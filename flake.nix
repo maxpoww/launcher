@@ -23,7 +23,14 @@
         nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
       # Runtime libs wgpu dlopens; must be on LD_LIBRARY_PATH at process start.
-      runtimeLibs = pkgs: with pkgs; [ wayland vulkan-loader libxkbcommon ];
+      # libglvnd is LOAD-BEARING: without libEGL.so.1 wgpu's GL backend cannot
+      # initialize at all, and on GPUs whose Vulkan is incomplete (pre-Skylake
+      # Intel — mesa offers only llvmpipe there) the shell silently fell back
+      # to CPU rendering. Found live on a 2013 MacBook Air (menubox = 80% CPU,
+      # whole shell sluggish); with GL reachable the very first adapter probe
+      # picks the real iGPU (2026-09-02). The wrapper also needs the system's
+      # driver dir at runtime — see the wrapProgram below.
+      runtimeLibs = pkgs: with pkgs; [ wayland vulkan-loader libxkbcommon libglvnd ];
 
       # External tools the daemon shells out to. Everything degrades gracefully
       # when absent, but "gracefully" can mean a whole OPTION silently doing
@@ -97,6 +104,8 @@
           postInstall = ''
             wrapProgram $out/bin/waverunner \
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (runtimeLibs pkgs)} \
+              --suffix LD_LIBRARY_PATH : /run/opengl-driver/lib \
+              --set-default __EGL_VENDOR_LIBRARY_DIRS /run/opengl-driver/share/glvnd/egl_vendor.d \
               --prefix PATH : ${pkgs.lib.makeBinPath (runtimeTools pkgs)} \
               --set-default WAVERUNNER_DICT ${dictionaries}/share/waverunner/dictionary.json \
               --set-default WAVERUNNER_DICT_ES ${dictionaries}/share/waverunner/dictionary-es.json
