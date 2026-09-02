@@ -346,7 +346,7 @@ fn battery_provider(ctx: &ContextState) -> Vec<Affordance> {
         return vec![];
     }
     if pct <= 15 {
-        vec![Affordance {
+        let mut out = vec![Affordance {
             id: "system.battery_critical",
             kind: AffordanceKind::Warning,
             title: format!("Battery low — {pct}%"),
@@ -355,7 +355,25 @@ fn battery_provider(ctx: &ContextState) -> Vec<Affordance> {
             reason: "battery <=15% on power",
             source: Layer::Hardware,
             action: AffordanceAction::None,
-        }]
+        }];
+        // The panel backlight is usually the single biggest draw, so on a
+        // laptop turn the warning into something actionable: one tap dims the
+        // screen to a still-usable 40% to stretch the remaining runtime. Gated
+        // on a real backlight (never on a desktop/VM). Ranks just under the
+        // warning so it reads as its remedy.
+        if ctx.metrics.has_backlight {
+            out.push(Affordance {
+                id: "system.battery_dim",
+                kind: AffordanceKind::Control,
+                title: "Dim screen".into(),
+                detail: "Save power".into(),
+                relevance: 0.95,
+                reason: "cut the biggest draw to extend runtime",
+                source: Layer::Hardware,
+                action: spawn(&["brightnessctl", "set", "40%"]),
+            });
+        }
+        out
     } else if pct <= 30 {
         vec![Affordance {
             id: "system.battery_low",
@@ -1426,6 +1444,47 @@ mod tests {
         assert!(opts.items.iter().all(|a| a.kind == AffordanceKind::Warning));
         // Sorted descending.
         assert!(opts.items[0].relevance >= opts.items[1].relevance);
+    }
+
+    #[test]
+    fn critical_battery_offers_dim_only_on_a_laptop() {
+        let mut ctx = live_ctx();
+        // Critical battery on a machine with a backlight (a laptop panel).
+        ctx.metrics = SystemMetrics {
+            battery_pct: Some(8),
+            is_charging: false,
+            has_backlight: true,
+            ..Default::default()
+        };
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 8,
+                ..Default::default()
+            },
+        );
+        assert!(find(&opts, "system.battery_critical").is_some());
+        let dim = find(&opts, "system.battery_dim").expect("dim control on a laptop");
+        assert_eq!(dim.kind, AffordanceKind::Control);
+        assert!(matches!(&dim.action, AffordanceAction::Spawn { argv }
+            if argv[0] == "brightnessctl" && argv.contains(&"40%".to_string())));
+        // Charging → no battery offers at all.
+        ctx.metrics.is_charging = true;
+        let charged = decide(&ctx, &Tuning::default());
+        assert!(find(&charged, "system.battery_dim").is_none());
+        assert!(find(&charged, "system.battery_critical").is_none());
+        // A desktop (no backlight) gets the warning but no dim control.
+        ctx.metrics.is_charging = false;
+        ctx.metrics.has_backlight = false;
+        let desktop = decide(
+            &ctx,
+            &Tuning {
+                max_items: 8,
+                ..Default::default()
+            },
+        );
+        assert!(find(&desktop, "system.battery_critical").is_some());
+        assert!(find(&desktop, "system.battery_dim").is_none());
     }
 
     #[test]
