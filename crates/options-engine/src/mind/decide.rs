@@ -1321,7 +1321,13 @@ mod tests {
             is_playing: true,
         });
         // Cap of 4: only the four highest-relevance controls survive.
-        let opts = decide(&ctx, &Tuning { max_items: 4, ..Default::default() });
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 4,
+                ..Default::default()
+            },
+        );
         assert_eq!(opts.items.len(), 4);
         // Descending, and all above the min-relevance floor.
         for w in opts.items.windows(2) {

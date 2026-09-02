@@ -1915,6 +1915,12 @@ impl App {
             // `refresh_options_content` would skip a redraw when only the
             // controls changed).
             self.draw_options();
+            // Re-hit-test the pointer against the NEW pill layout: an OPTION
+            // pill is keyed by its index into the (just-changed) option set, so
+            // without this a click without moving the mouse could fire the
+            // wrong control. `options_update_hover` re-syncs from the stored
+            // pointer position (and redraws the hover highlight if it moved).
+            self.options_update_hover();
         }
     }
 

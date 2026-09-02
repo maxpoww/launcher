@@ -1447,7 +1447,7 @@ impl App {
         self.options_apply_cursor();
     }
 
-    fn options_update_hover(&mut self) {
+    pub(crate) fn options_update_hover(&mut self) {
         let bar_h = self.config.options.height as f32;
         let hover = self.options_ptr.and_then(|p| {
             self.options_pills()
