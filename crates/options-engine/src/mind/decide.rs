@@ -1023,16 +1023,31 @@ fn browser_provider(ctx: &ContextState) -> Vec<Affordance> {
     if infer_activity(ctx) != Activity::Browsing {
         return vec![];
     }
-    vec![Affordance {
-        id: "browser.find",
-        kind: AffordanceKind::Control,
-        title: "Find in page".into(),
-        detail: String::new(),
-        relevance: 0.44,
-        reason: "find on the current page",
-        source: Layer::Compositor,
-        action: AffordanceAction::Daemon("find_in_page".into()),
-    }]
+    vec![
+        Affordance {
+            id: "browser.find",
+            kind: AffordanceKind::Control,
+            title: "Find in page".into(),
+            detail: String::new(),
+            relevance: 0.44,
+            reason: "find on the current page",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("find_in_page".into()),
+        },
+        // Reopen-closed-tab (Ctrl+Shift+T) is universal across every browser and
+        // the classic "oops" recovery. A compositor keystroke, same path as
+        // Find; ranked just under it (Find is the more frequent reach).
+        Affordance {
+            id: "browser.reopen_tab",
+            kind: AffordanceKind::Control,
+            title: "Reopen closed tab".into(),
+            detail: String::new(),
+            relevance: 0.43,
+            reason: "restore the last-closed tab",
+            source: Layer::Compositor,
+            action: AffordanceAction::Daemon("reopen_tab".into()),
+        },
+    ]
 }
 
 /// Window classes we treat as document/PDF readers (substring, lower-cased).
@@ -2491,9 +2506,14 @@ mod tests {
         );
         let f = find(&opts, "browser.find").expect("find control while browsing");
         assert_eq!(f.action, AffordanceAction::Daemon("find_in_page".into()));
+        let r = find(&opts, "browser.reopen_tab").expect("reopen-tab control while browsing");
+        assert_eq!(r.action, AffordanceAction::Daemon("reopen_tab".into()));
+        assert!(f.relevance > r.relevance, "find leads reopen");
         // Not while coding.
         ctx.window.class = "foot".into();
-        assert!(find(&decide(&ctx, &Tuning::default()), "browser.find").is_none());
+        let coding = decide(&ctx, &Tuning::default());
+        assert!(find(&coding, "browser.find").is_none());
+        assert!(find(&coding, "browser.reopen_tab").is_none());
     }
 
     #[test]

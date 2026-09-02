@@ -161,6 +161,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "selection.open_path" => GLYPH_OPEN_FILE,
         "selection.email" => GLYPH_EMAIL,
         "selection.search" | "shell.search_error" | "browser.find" | "reading.find" => GLYPH_SEARCH,
+        "browser.reopen_tab" => GLYPH_RERUN,
         "system.high_cpu" | "system.high_mem" => GLYPH_MONITOR,
         "system.battery_dim" => GLYPH_BRIGHT_DOWN,
         "downloads.open" => GLYPH_PULL,
@@ -1895,6 +1896,7 @@ impl App {
                 // A compositor keystroke to the focused window (no extra dep,
                 // same path as the clipboard paste).
                 "find_in_page" => crate::hypr::send_shortcut_active("CTRL", "f"),
+                "reopen_tab" => crate::hypr::send_shortcut_active("CTRL SHIFT", "t"),
                 "slide_next" => crate::hypr::send_shortcut_active("", "Right"),
                 "slide_prev" => crate::hypr::send_shortcut_active("", "Left"),
                 other => warn!("options: unknown daemon action '{other}'"),
