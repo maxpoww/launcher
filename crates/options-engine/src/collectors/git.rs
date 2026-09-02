@@ -85,11 +85,15 @@ impl Collector for GitCollector {
     }
 }
 
-/// Git context for the process `pid`'s working directory, or `None` when it
+/// Git context for the focused window's working directory, or `None` when it
 /// isn't inside a repository (or `/proc` isn't readable for it).
+///
+/// The window process's OWN cwd is tried first, then its descendants' — a
+/// terminal (foot, and many others) resets its own cwd to `/` while the shell
+/// child actually works in the repo, so without this walk "a terminal inside a
+/// repository" (the Coding activity's own definition) would never be sensed.
 async fn git_for_pid(pid: u32) -> Option<GitContext> {
-    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
-    let (repo_root, git_dir) = find_git_dir(&cwd)?;
+    let (repo_root, git_dir) = repo_for_process_tree(pid)?;
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let is_dirty = repo_is_dirty(&repo_root).await;
     Some(GitContext {
@@ -97,6 +101,50 @@ async fn git_for_pid(pid: u32) -> Option<GitContext> {
         is_dirty,
         repo_root: Some(repo_root),
     })
+}
+
+/// The cwd of `pid` (the symlink target of `/proc/<pid>/cwd`), if readable.
+fn cwd_of(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+/// Direct child pids of `pid`, from `/proc/<pid>/task/<pid>/children`.
+fn children_of(pid: u32) -> Vec<u32> {
+    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .ok()
+        .map(|s| {
+            s.split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Find the enclosing repo among `pid`'s own cwd and its descendants' cwds, by
+/// a bounded breadth-first walk of the process tree (window process first, then
+/// its shells). Bounded in both depth and total visits so it stays cheap.
+fn repo_for_process_tree(pid: u32) -> Option<(PathBuf, PathBuf)> {
+    use std::collections::VecDeque;
+    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
+    queue.push_back((pid, 0));
+    let mut visited = 0u32;
+    while let Some((p, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > 64 {
+            break; // a runaway tree — stop rather than stat forever
+        }
+        if let Some(cwd) = cwd_of(p) {
+            if let Some(found) = find_git_dir(&cwd) {
+                return Some(found);
+            }
+        }
+        if depth < 4 {
+            for child in children_of(p) {
+                queue.push_back((child, depth + 1));
+            }
+        }
+    }
+    None
 }
 
 /// Whether the working tree at `root` has changes — via `git status --porcelain`
