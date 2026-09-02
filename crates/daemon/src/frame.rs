@@ -1150,6 +1150,8 @@ impl App {
         };
         // The context-aware pill modules ride on top of the base fill.
         self.push_options_pills(&mut scene);
+        // A hover tooltip for the icon-only OPTION pills (discoverability).
+        self.push_options_tooltip(&mut scene);
         // The media transport box grows into the reserved dropdown area.
         if self.media_box_open {
             self.push_media_box(&mut scene);

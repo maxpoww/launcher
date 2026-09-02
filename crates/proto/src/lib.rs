@@ -60,6 +60,10 @@ pub enum Command {
     /// Debug/verification: force-open the media transport box (when a player is
     /// active), so it can be screenshotted without a pointer click.
     DebugMediaBox,
+    /// Debug/verification: force the hover state onto the first dynamic OPTION
+    /// pill and redraw, so its discoverability tooltip can be screenshotted
+    /// without a pointer (there's no headless cursor warp on this compositor).
+    DebugHoverOption,
     /// Trigger the dynamic OPTION offer with this affordance id (e.g.
     /// `media.playpause`, `git.commit`) — the same action a click on its pill
     /// runs. Exposed for scripting and for verifying the action end to end.
@@ -112,6 +116,7 @@ impl fmt::Display for Command {
             Command::DebugDict => f.write_str("debug-dict"),
             Command::DebugOptions => f.write_str("debug-options"),
             Command::DebugMediaBox => f.write_str("debug-media-box"),
+            Command::DebugHoverOption => f.write_str("debug-hover-option"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
@@ -172,6 +177,7 @@ impl FromStr for Command {
             "debug-dict" => Ok(Command::DebugDict),
             "debug-options" => Ok(Command::DebugOptions),
             "debug-media-box" => Ok(Command::DebugMediaBox),
+            "debug-hover-option" => Ok(Command::DebugHoverOption),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),

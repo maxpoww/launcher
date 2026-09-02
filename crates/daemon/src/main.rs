@@ -1684,6 +1684,16 @@ impl App {
                 }
                 return;
             }
+            Command::DebugHoverOption => {
+                if self.surfaced_options().is_empty() {
+                    warn!("debug-hover-option: no OPTION pills surfaced");
+                } else {
+                    self.options_hover = Some(options::PillId::Option(0));
+                    self.draw_options();
+                    info!("debug-hover-option: hovering OPTION pill 0 (tooltip visible)");
+                }
+                return;
+            }
             _ => {}
         }
         // Summoning or expanding is the moment freshness matters:

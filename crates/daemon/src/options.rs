@@ -1015,6 +1015,67 @@ impl App {
     /// Control buttons carry the reveal animation: a horizontal slide from
     /// behind their parent pill (offset from `slide`) plus an opacity from
     /// `alpha`; window/clock are always at rest, full opacity.
+    /// Discoverability: while a context OPTION pill (an icon-only glyph) is
+    /// hovered, show its offer title in a small label just below the bar. Only
+    /// the dynamic OPTION pills get this — the fixed pills (clock, bell,
+    /// clipboard) reveal their own labels. Suppressed while the media box is
+    /// open (the pointer is working that surface, not reading tooltips).
+    pub(crate) fn push_options_tooltip(&self, scene: &mut Scene) {
+        if self.media_box_open {
+            return;
+        }
+        let Some(PillId::Option(i)) = self.options_hover else {
+            return;
+        };
+        let Some(label) = self
+            .surfaced_options()
+            .get(i as usize)
+            .map(|a| a.title.clone())
+            .filter(|s| !s.trim().is_empty())
+        else {
+            return;
+        };
+        let pills = self.options_pills();
+        let Some(pr) = pills
+            .iter()
+            .find(|p| p.id == PillId::Option(i))
+            .map(|p| p.rect)
+        else {
+            return;
+        };
+        let bar_h = self.config.options.height as f32;
+        let full_w = self.options_size.0 as f32;
+        // The Label shapes exactly at render time; only the background needs a
+        // size, so a per-char estimate is fine here.
+        let pad_x = 11.0;
+        let text_w = label.chars().count() as f32 * (FONT_PX * 0.62);
+        let box_w = (text_w + 2.0 * pad_x).min((full_w - 8.0).max(24.0));
+        let box_h = LINE_PX + 9.0;
+        let bx = (pr.x + (pr.w - box_w) / 2.0).clamp(4.0, (full_w - box_w - 4.0).max(4.0));
+        let by = bar_h + 6.0;
+        let (fill, ink) = self.options_box_surface();
+        scene.rects.push(RectInst {
+            rect: Rect::new(bx, by, box_w, box_h),
+            radius: box_h / 2.0,
+            color: fill,
+            glass: 0.0,
+            border: 0.0,
+        });
+        scene.labels.push(Label {
+            text: label,
+            pos: (bx + box_w / 2.0, by + (box_h - LINE_PX) / 2.0),
+            max_w: box_w - 2.0 * pad_x,
+            font_px: FONT_PX,
+            line_px: LINE_PX,
+            centered: true,
+            dim: false,
+            cache: true,
+            family: None,
+            color: Some(ink),
+            clip: None,
+        });
+    }
+
     pub(crate) fn push_options_pills(&self, scene: &mut Scene) {
         let hover_wash = self.options_hover_wash();
         let rest_wash = self.options_rest_wash();
