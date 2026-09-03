@@ -356,6 +356,7 @@ fn main() -> anyhow::Result<()> {
         options_layer,
         options_renderer: None,
         options_size: (0, 0),
+        options_zone: None,
         options_bar_matched: None,
         options_pill_color: None,
         options_match: None,
@@ -804,6 +805,11 @@ pub struct App {
     options_layer: Option<LayerSurface>,
     options_renderer: Option<Renderer>,
     options_size: (u32, u32),
+    /// The last exclusive-zone height committed for the topbar (`None` until
+    /// [`Self::sync_options_zone`] first runs). The zone is set once at surface
+    /// creation from the configured height; this tracks the re-reservation at
+    /// the live small-screen scale so output events only commit on change.
+    options_zone: Option<i32>,
     /// Smart-gaps colour-match: when a maximized window is flush under the
     /// bar, the bar is painted this sampled colour (opaque); `None` = the
     /// default transparent strip. See [`screencopy`].
@@ -1472,12 +1478,48 @@ impl App {
     /// uniformly (every dimension AND font) so text measurement and drawing
     /// stay consistent and the surface just shrinks proportionally.
     pub fn options_scale(&self) -> f32 {
-        const OPTIONS_FULL_H: f32 = 900.0;
-        const OPTIONS_MIN_SCALE: f32 = 0.82;
-        match self.output_logical_height() {
-            Some(h) if h < OPTIONS_FULL_H => (h / OPTIONS_FULL_H).max(OPTIONS_MIN_SCALE),
-            _ => 1.0,
+        options::pill_scale_for(self.output_logical_height())
+    }
+
+    /// The topbar's LIVE bar height: the configured height at the small-screen
+    /// scale. Every piece of bar geometry (pill band, hit tests, box anchors,
+    /// the input region, the reserved exclusive zone, the colour-match rows)
+    /// reads this one value, so the drawn bar, its input and its reservation
+    /// can never disagree. Before the output size is known it equals the
+    /// configured height (scale 1.0), matching the zone set at surface
+    /// creation; [`Self::sync_options_zone`] re-reserves once outputs arrive.
+    pub(crate) fn options_bar_h(&self) -> f32 {
+        self.config.options.height as f32 * self.options_scale()
+    }
+
+    /// Re-apply the topbar's reserved (exclusive) zone at the live scale.
+    ///
+    /// The surface is created before outputs are enumerated, so the initial
+    /// zone uses the configured full-size height; once the output's logical
+    /// size is known (or changes — hotplug, resolution switch) the bar height
+    /// shrinks by [`Self::options_scale`] and the reservation must follow, or
+    /// a small screen keeps a full-size dead band above a smaller drawn bar.
+    /// Idempotent: commits only when the rounded zone actually changes.
+    pub(crate) fn sync_options_zone(&mut self) {
+        if self.options_layer.is_none() {
+            return;
         }
+        let zone = self.options_bar_h().round() as i32;
+        if self.options_zone == Some(zone) {
+            return;
+        }
+        if let Some(layer) = self.options_layer.as_ref() {
+            layer.set_exclusive_zone(zone);
+            layer.commit();
+        }
+        self.options_zone = Some(zone);
+        // The scale moved: pill text metrics and the notif rows were measured
+        // at the old scale — re-measure and redraw at the new one. (All are
+        // no-ops before the renderer exists; the first configure re-runs them.)
+        self.measure_options_text();
+        self.measure_notif();
+        self.sync_options_input();
+        self.draw_options();
     }
 
     /// Logical height of the output the shell lives on, if known.
@@ -4414,6 +4456,10 @@ impl OutputHandler for App {
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
+        // The topbar's reserved zone was set before outputs were enumerated;
+        // now (and on any later change) the output's logical size is known, so
+        // re-reserve at the live small-screen scale.
+        self.sync_options_zone();
     }
 
     fn update_output(
@@ -4422,6 +4468,7 @@ impl OutputHandler for App {
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
+        self.sync_options_zone();
     }
 
     fn output_destroyed(
@@ -4430,6 +4477,7 @@ impl OutputHandler for App {
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
+        self.sync_options_zone();
     }
 }
 

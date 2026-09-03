@@ -45,7 +45,7 @@ impl crate::App {
     /// The media box panel rect, just below the bar in the dropdown region.
     pub(crate) fn media_box_geom(&self) -> Rect {
         let s = self.options_scale();
-        let y = self.config.options.height as f32 + PILL_MARGIN_Y;
+        let y = self.options_bar_h() + PILL_MARGIN_Y;
         Rect::new(EDGE_PAD, y, BOX_W * s, BOX_H * s)
     }
 

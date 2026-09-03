@@ -1082,9 +1082,12 @@ impl App {
                 }
             }
         }
-        // Now the size + renderer exist: measure the pill text (incl. the notif
-        // rows, in case notifications hydrated before this first configure), set
-        // the input region, and draw.
+        // Now the size + renderer exist: re-reserve the exclusive zone at the
+        // live scale (covers an output whose size arrived before this
+        // configure), measure the pill text (incl. the notif rows, in case
+        // notifications hydrated before this first configure), set the input
+        // region, and draw.
+        self.sync_options_zone();
         self.measure_options_text();
         self.measure_notif();
         // Any icons resolved before this renderer existed haven't been uploaded
@@ -1116,7 +1119,7 @@ impl App {
             return;
         }
         let w = w as f32;
-        let bar_h = self.config.options.height as f32;
+        let bar_h = self.options_bar_h();
         // Matched: opaque window colour, extended down over the window's top
         // border (the overhang) to hide the seam. Otherwise the faint
         // transparent strip, drawn only to the bar height.

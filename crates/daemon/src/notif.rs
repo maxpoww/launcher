@@ -56,8 +56,9 @@ const MAX_BODY_LINES: usize = 4;
 /// `wrap_text` is LINEAR in font size, so scaling the text column and the font
 /// by one factor yields identical line breaks (see `body_w`).
 ///
-/// The topbar PILLS are deliberately NOT scaled here (their reserved zone is
-/// fixed at startup); pill code names `crate::options::FONT_PX` explicitly.
+/// The topbar PILLS scale with the bar itself (its reserved zone is re-set at
+/// the live scale once the output size is known); their text size is
+/// [`TextPx::pill`], fed the same factor.
 #[derive(Clone, Copy)]
 pub(crate) struct BoxMetrics {
     /// The factor itself, for the odd inline offset that has no named constant.
@@ -113,12 +114,14 @@ pub(crate) struct TextPx {
 }
 
 impl TextPx {
-    /// The topbar pill's text size — never scaled (the pills' reserved zone is
-    /// fixed at startup).
-    fn pill() -> Self {
+    /// The topbar pill's text size at the live bar scale (`s` =
+    /// [`crate::App::options_scale`]): the pills now shrink with their bar —
+    /// the reserved zone is re-set once the output size is known — so their
+    /// text scales in lockstep with the band it sits in.
+    fn pill(s: f32) -> Self {
         Self {
-            font: crate::options::FONT_PX,
-            line: crate::options::LINE_PX,
+            font: crate::options::FONT_PX * s,
+            line: crate::options::LINE_PX * s,
         }
     }
 
@@ -1163,7 +1166,7 @@ impl App {
 
     /// The bar-pill height (the collapsed element's diameter / the preview band).
     fn notif_band_h(&self) -> f32 {
-        (self.config.options.height as f32 - 2.0 * PILL_MARGIN_Y).max(1.0)
+        (self.options_bar_h() - 2.0 * PILL_MARGIN_Y).max(1.0)
     }
 
     /// Geometry of the whole morphing element given its pinned right edge, top,
@@ -1559,7 +1562,7 @@ impl App {
         // This card MORPHS out of the preview band, so its text size morphs with
         // it: the pill's own size while collapsed, the box's scaled size once
         // open (at e = 1 it is exactly what `measure_notif` wrapped against).
-        let tpx = TextPx::lerp(TextPx::pill(), nm.text(), e);
+        let tpx = TextPx::lerp(TextPx::pill(nm.s), nm.text(), e);
         let placeholder = RowInfo {
             summary: crate::i18n::tr("No notifications").to_owned(),
             preview: String::new(),
@@ -1669,7 +1672,7 @@ impl App {
         let badge_num = (count > 0).then(|| format!("+{count}"));
         // The chip lives on the PREVIEW line and fades out as the box opens, so
         // it is sized to the pill band it nests in, not to the box.
-        let pill_px = TextPx::pill();
+        let pill_px = TextPx::pill(self.options_scale());
         let chip_h = pill_px.line;
         let chip_w = badge_num.as_ref().map_or(0.0, |n| {
             (n.chars().count() as f32 * pill_px.font * 0.6 + 12.0).max(chip_h)
@@ -2182,8 +2185,8 @@ impl App {
         // bell keeps its exact original metrics).
         // Battery Critical (or the post-wake awareness pause) replaces the
         // bell with the warning triangle — the awareness symbol.
-        // Bar-pill furniture: the bell keeps the pills' own (unscaled) text size.
-        let p = TextPx::pill();
+        // Bar-pill furniture: the bell takes the pills' own (bar-scaled) size.
+        let p = TextPx::pill(self.options_scale());
         let (glyph, gpx, glh) = if self.battery_warning() {
             (GLYPH_BATTERY_WARN, p.font, p.line)
         } else if self.notif.muted {

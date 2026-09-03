@@ -1439,7 +1439,7 @@ impl App {
 
     /// Band height of the resting pill (bar minus its top/bottom margins).
     fn clip_band_h(&self) -> f32 {
-        (self.config.options.height as f32 - 2.0 * PILL_MARGIN_Y).max(1.0)
+        (self.options_bar_h() - 2.0 * PILL_MARGIN_Y).max(1.0)
     }
 
     /// The element's current rect (used by hit-testing / scroll / input region),
@@ -1629,15 +1629,18 @@ impl App {
         let pa = ((peek - 0.35) / 0.5).clamp(0.0, 1.0) * (1.0 - solid);
         if pa > 0.01 {
             if let Some(latest) = self.clip.history.first() {
+                // The preview line nests in the pill band, so it takes the
+                // pills' bar-scaled text size.
+                let s = self.options_scale();
                 let tx = rect.x + PILL_PAD_X;
-                let gty = rect.y + (ph - LINE_PX) / 2.0;
+                let gty = rect.y + (ph - LINE_PX * s) / 2.0;
                 let max_w = (rect.x + rect.w - PILL_PAD_X - tx).max(0.0);
                 scene.labels.push(Label {
                     text: latest.preview.clone(),
                     pos: (tx, gty),
                     max_w,
-                    font_px: FONT_PX,
-                    line_px: LINE_PX,
+                    font_px: FONT_PX * s,
+                    line_px: LINE_PX * s,
                     centered: false,
                     dim: false,
                     cache: false,
@@ -1654,16 +1657,19 @@ impl App {
         }
         let content = self.clip_content_rect(rect);
         if self.clip.history.is_empty() {
+            // The empty panel scales like the rest of the box (`EMPTY_H * s`),
+            // so its message takes the box's scaled text size too.
+            let s = self.options_scale();
             let a = [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * solid];
             scene.labels.push(Label {
                 text: crate::i18n::tr("Nothing copied yet").to_owned(),
                 pos: (
                     content.x + content.w / 2.0,
-                    content.y + (content.h - LINE_PX) / 2.0,
+                    content.y + (content.h - LINE_PX * s) / 2.0,
                 ),
                 max_w: content.w,
-                font_px: FONT_PX,
-                line_px: LINE_PX,
+                font_px: FONT_PX * s,
+                line_px: LINE_PX * s,
                 centered: true,
                 dim: false,
                 cache: true,
@@ -3414,14 +3420,15 @@ impl App {
         });
 
         let ink = self.options_text_color();
+        let s = self.options_scale();
         let cx = rect.x + rect.w / 2.0;
-        let ty = rect.y + (rect.h - LINE_PX) / 2.0;
+        let ty = rect.y + (rect.h - LINE_PX * s) / 2.0;
         scene.labels.push(Label {
             text: GLYPH_CLIPBOARD.to_owned(),
             pos: (cx, ty),
             max_w: rect.w + 4.0,
-            font_px: FONT_PX,
-            line_px: LINE_PX,
+            font_px: FONT_PX * s,
+            line_px: LINE_PX * s,
             centered: true,
             dim: false,
             cache: true,
@@ -3519,12 +3526,13 @@ impl App {
             border: 0.0,
         });
         let ink = self.options_text_color();
+        let s = self.options_scale();
         scene.labels.push(Label {
             text: glyph.to_owned(),
-            pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - LINE_PX) / 2.0),
+            pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - LINE_PX * s) / 2.0),
             max_w: rect.w + 4.0,
-            font_px: FONT_PX,
-            line_px: LINE_PX,
+            font_px: FONT_PX * s,
+            line_px: LINE_PX * s,
             centered: true,
             dim: false,
             cache: true,

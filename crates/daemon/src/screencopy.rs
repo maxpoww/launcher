@@ -89,7 +89,7 @@ impl App {
         if self.options_layer.is_none() || self.screencopy.is_none() {
             return;
         }
-        match hypr::top_fill(self.config.options.height as f64) {
+        match hypr::top_fill(self.options_bar_h() as f64) {
             Some(tf) => match self.output_by_name(&tf.monitor) {
                 Some(output) => self.begin_options_match(output, tf.sample_y),
                 None => {
@@ -116,7 +116,7 @@ impl App {
                 // A row inside the bar itself (mid-height) — always the
                 // blurred wallpaper, since the reserved zone keeps windows
                 // out from under the bar.
-                let sample_y = ((self.config.options.height as f64 * 0.5) * mon.scale.max(0.1))
+                let sample_y = ((self.options_bar_h() as f64 * 0.5) * mon.scale.max(0.1))
                     .round()
                     .max(1.0) as u32;
                 if had_match {

@@ -47,6 +47,20 @@ const TEXT_FONT: Option<&str> = None;
 pub(crate) const FONT_PX: f32 = 17.0;
 pub(crate) const LINE_PX: f32 = 20.0;
 
+/// Pure small-screen scale mapping for the topbar (pills, bar height, boxes):
+/// full size on panels at or above `OPTIONS_FULL_H` logical px, easing down
+/// linearly to `OPTIONS_MIN_SCALE` on short ones. `None` (output size not yet
+/// known) means full size. [`crate::App::options_scale`] is this, fed the live
+/// output height — kept pure here so the mapping is unit-testable.
+pub(crate) fn pill_scale_for(logical_h: Option<f32>) -> f32 {
+    const OPTIONS_FULL_H: f32 = 900.0;
+    const OPTIONS_MIN_SCALE: f32 = 0.82;
+    match logical_h {
+        Some(h) if h < OPTIONS_FULL_H => (h / OPTIONS_FULL_H).max(OPTIONS_MIN_SCALE),
+        _ => 1.0,
+    }
+}
+
 /// Margin above/below the pills — leaves room for the neumorphic rim so the
 /// pills themselves stay compact rather than filling the whole bar.
 pub(crate) const PILL_MARGIN_Y: f32 = 2.5;
@@ -679,7 +693,7 @@ impl App {
     /// Compute the current pills (interactive modules) for the bar state.
     fn options_pills(&self) -> Vec<Pill> {
         let w = self.options_size.0 as f32;
-        let bar_h = self.config.options.height as f32;
+        let bar_h = self.options_bar_h();
         if w == 0.0 {
             return Vec::new();
         }
@@ -869,7 +883,7 @@ impl App {
         if self.options_clock.is_empty() {
             return w - EDGE_PAD;
         }
-        let bar_h = self.config.options.height as f32;
+        let bar_h = self.options_bar_h();
         let ph = (bar_h - 2.0 * PILL_MARGIN_Y).max(1.0);
         let content_w = lerp(
             self.options_clock_w,
@@ -903,14 +917,17 @@ impl App {
         let clock = self.options_clock.clone();
         let date = self.options_date.clone();
         let title = self.options_window_text();
+        // Pill text scales with the bar (see `options_bar_h`): measure at the
+        // same scaled size the draw uses, so pill widths always fit their text.
+        let font_px = FONT_PX * self.options_scale();
         let Some(r) = self.options_renderer.as_mut() else {
             return;
         };
-        let cw = r.measure_text(&clock, FONT_PX, TEXT_FONT);
-        let dw = r.measure_text(&date, FONT_PX, TEXT_FONT);
+        let cw = r.measure_text(&clock, font_px, TEXT_FONT);
+        let dw = r.measure_text(&date, font_px, TEXT_FONT);
         let tw = title
             .as_deref()
-            .map_or(0.0, |t| r.measure_text(t, FONT_PX, TEXT_FONT));
+            .map_or(0.0, |t| r.measure_text(t, font_px, TEXT_FONT));
         self.options_clock_w = cw;
         self.options_date_w = dw;
         self.options_title_w = tw;
@@ -1052,14 +1069,17 @@ impl App {
         else {
             return;
         };
-        let bar_h = self.config.options.height as f32;
+        let bar_h = self.options_bar_h();
         let full_w = self.options_size.0 as f32;
+        // Rides the pill scale so the tooltip matches the pills it names.
+        let s = self.options_scale();
+        let (font_px, line_px) = (FONT_PX * s, LINE_PX * s);
         // The Label shapes exactly at render time; only the background needs a
         // size, so a per-char estimate is fine here.
         let pad_x = 11.0;
-        let text_w = label.chars().count() as f32 * (FONT_PX * 0.62);
+        let text_w = label.chars().count() as f32 * (font_px * 0.62);
         let box_w = (text_w + 2.0 * pad_x).min((full_w - 8.0).max(24.0));
-        let box_h = LINE_PX + 9.0;
+        let box_h = line_px + 9.0;
         let bx = (pr.x + (pr.w - box_w) / 2.0).clamp(4.0, (full_w - box_w - 4.0).max(4.0));
         let by = bar_h + 6.0;
         let (fill, ink) = self.options_box_surface();
@@ -1072,10 +1092,10 @@ impl App {
         });
         scene.labels.push(Label {
             text: label,
-            pos: (bx + box_w / 2.0, by + (box_h - LINE_PX) / 2.0),
+            pos: (bx + box_w / 2.0, by + (box_h - line_px) / 2.0),
             max_w: box_w - 2.0 * pad_x,
-            font_px: FONT_PX,
-            line_px: LINE_PX,
+            font_px,
+            line_px,
             centered: true,
             dim: false,
             cache: true,
@@ -1090,8 +1110,12 @@ impl App {
         let rest_wash = self.options_rest_wash();
         let bright = self.options_bar_is_bright();
         let text_color = self.options_text_color();
-        let bar_h = self.config.options.height as f32;
+        let bar_h = self.options_bar_h();
         let full_w = self.options_size.0 as f32;
+        // Pill text at the bar's live scale — the same size `measure_options_text`
+        // measured against, so text always fits the pill that was sized for it.
+        let s = self.options_scale();
+        let (font_px, line_px) = (FONT_PX * s, LINE_PX * s);
 
         let pills = self.options_pills();
         // Resting rect of a pill by id, for computing where each control is
@@ -1185,13 +1209,13 @@ impl App {
             let g = pill.glyph_color.unwrap_or(text_color);
             let family = pill.family;
             let cx = rect.x + rect.w / 2.0;
-            let ty = rect.y + (rect.h - LINE_PX) / 2.0;
+            let ty = rect.y + (rect.h - line_px) / 2.0;
             let mk = |text: String, alpha: f32, max_w: f32, clip: Option<Rect>| Label {
                 text,
                 pos: (cx, ty),
                 max_w,
-                font_px: FONT_PX,
-                line_px: LINE_PX,
+                font_px,
+                line_px,
                 centered: true,
                 dim: false,
                 cache: true,
@@ -1495,7 +1519,7 @@ impl App {
             // open so scroll/hover/clicks there reach us instead of passing
             // through. Use the *fully-expanded* bottom (not the live animating
             // height) so the region is stable the instant a box opens.
-            let mut bottom = self.config.options.height as f32;
+            let mut bottom = self.options_bar_h();
             if self.notif.expanded {
                 bottom = bottom.max(self.notif_input_bottom());
             }
@@ -1507,7 +1531,7 @@ impl App {
             }
             bottom.ceil() as i32
         } else {
-            self.config.options.height as i32
+            self.options_bar_h().ceil() as i32
         };
         surface::set_input_rects(&self.compositor, layer, &[(0, 0, w as i32, h)]);
     }
@@ -1648,7 +1672,7 @@ impl App {
     }
 
     pub(crate) fn options_update_hover(&mut self) {
-        let bar_h = self.config.options.height as f32;
+        let bar_h = self.options_bar_h();
         let hover = self.options_ptr.and_then(|p| {
             self.options_pills()
                 .iter()
@@ -1707,7 +1731,7 @@ impl App {
         let Some((x, y)) = self.options_ptr else {
             return false;
         };
-        if y < 0.0 || y > self.config.options.height as f32 {
+        if y < 0.0 || y > self.options_bar_h() {
             return false;
         }
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
@@ -2150,6 +2174,46 @@ mod tests {
             action_command_line(&AffordanceAction::Spawn { argv: vec![] }),
             None
         );
+    }
+
+    #[test]
+    fn pill_scale_full_size_on_tall_screens_and_before_outputs() {
+        // At or above the full-size threshold: exactly 1.0 (large screens
+        // provably unchanged).
+        assert_eq!(pill_scale_for(Some(900.0)), 1.0);
+        assert_eq!(pill_scale_for(Some(1440.0)), 1.0);
+        // Output size not yet known (startup, pre-enumeration): full size —
+        // matching the exclusive zone set at surface creation.
+        assert_eq!(pill_scale_for(None), 1.0);
+    }
+
+    #[test]
+    fn pill_scale_shrinks_small_screens_to_a_floor() {
+        // The 1280x800 VM screen: 800/900.
+        let s = pill_scale_for(Some(800.0));
+        assert!((s - 800.0 / 900.0).abs() < 1e-6);
+        // The 1366x768 Acer: 768/900, still above the floor.
+        let acer = pill_scale_for(Some(768.0));
+        assert!((acer - 768.0 / 900.0).abs() < 1e-6);
+        // Shorter panels clamp at the legibility floor, monotonically.
+        assert_eq!(pill_scale_for(Some(700.0)), 0.82);
+        assert_eq!(pill_scale_for(Some(1.0)), 0.82);
+        assert!(acer < s && s < 1.0);
+    }
+
+    #[test]
+    fn scaled_bar_keeps_pill_band_positive_and_proportional() {
+        // The pill band (bar minus its margins) at the default 28px bar must
+        // stay positive at every reachable scale, and the band shrinks by
+        // strictly less than the bar (fixed margins) — so pills stay legible.
+        for h in [700.0_f32, 768.0, 800.0, 900.0] {
+            let s = pill_scale_for(Some(h));
+            let bar = 28.0 * s;
+            let band = bar - 2.0 * PILL_MARGIN_Y;
+            assert!(band > 0.0, "band collapsed at h={h}");
+            // Scaled text still fits the band it is centred in.
+            assert!(FONT_PX * s < band + 2.0 * PILL_MARGIN_Y);
+        }
     }
 
     /// The bar's resting wash for a dark (unmatched) bar — what the box
