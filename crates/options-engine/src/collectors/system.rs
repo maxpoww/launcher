@@ -67,6 +67,7 @@ impl Collector for SystemCollector {
                     is_recording: recorder_running(),
                     disk_usage_pct: home_disk_usage_pct(),
                     trash_has_items: trash_has_items(),
+                    trash_bytes: trash_bytes(),
                 };
                 if tx
                     .send(Update::Delta(
@@ -227,10 +228,9 @@ fn disk_used_pct(blocks: u64, bfree: u64, bavail: u64) -> Option<f32> {
     Some(used as f32 / denom as f32 * 100.0)
 }
 
-/// Whether the XDG trash has anything in it (`Trash/files` non-empty).
-/// Missing/unreadable dirs read as empty — never offer to empty nothing.
-fn trash_has_items() -> bool {
-    let data = std::env::var("XDG_DATA_HOME")
+/// The XDG `Trash/files` directory, from `$XDG_DATA_HOME` or `~/.local/share`.
+fn trash_files_dir() -> Option<std::path::PathBuf> {
+    std::env::var("XDG_DATA_HOME")
         .ok()
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
@@ -238,13 +238,50 @@ fn trash_has_items() -> bool {
             std::env::var("HOME")
                 .ok()
                 .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        });
-    let Some(dir) = data.map(|d| d.join("Trash/files")) else {
+        })
+        .map(|d| d.join("Trash/files"))
+}
+
+/// Whether the XDG trash has anything in it (`Trash/files` non-empty).
+/// Missing/unreadable dirs read as empty — never offer to empty nothing.
+fn trash_has_items() -> bool {
+    let Some(dir) = trash_files_dir() else {
         return false;
     };
     std::fs::read_dir(dir)
         .map(|mut d| d.next().is_some())
         .unwrap_or(false)
+}
+
+/// Approximate bytes in the trash: a bounded sweep (at most ~2000 entries,
+/// depth-first) summing file sizes, so the offer can say what emptying
+/// reclaims. Deliberately approximate — a huge trash stops counting at the
+/// bound (still a large, honest number) rather than stalling the poll.
+fn trash_bytes() -> u64 {
+    let Some(root) = trash_files_dir() else {
+        return 0;
+    };
+    let mut total = 0u64;
+    let mut budget = 2000usize;
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            if budget == 0 {
+                return total;
+            }
+            budget -= 1;
+            let Ok(md) = e.metadata() else { continue };
+            if md.is_dir() {
+                stack.push(e.path());
+            } else {
+                total = total.saturating_add(md.len());
+            }
+        }
+    }
+    total
 }
 
 /// Whether any process has a `/dev/video*` device open — a live camera, almost

@@ -150,6 +150,9 @@ pub struct SystemMetrics {
     /// Whether the XDG trash holds anything to empty (`Trash/files`
     /// non-empty) — the cheapest disk-space remedy the shell can offer.
     pub trash_has_items: bool,
+    /// Approximate bytes sitting in the trash (bounded sweep) — lets the
+    /// empty-trash offer say what it actually reclaims.
+    pub trash_bytes: u64,
 }
 
 /// NixOS deploy state: is the system we're *running* the system we last *built*?

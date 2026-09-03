@@ -563,11 +563,17 @@ fn disk_provider(ctx: &ContextState) -> Vec<Affordance> {
         action: AffordanceAction::None,
     }];
     if ctx.metrics.trash_has_items {
+        // Say what emptying reclaims when the size is known; a trash full
+        // of zero-byte entries falls back to the disk figure.
+        let detail = match ctx.metrics.trash_bytes {
+            0 => format!("Disk {pct:.0}% full"),
+            b => format!("Reclaim {}", fmt_bytes(b)),
+        };
         out.push(Affordance {
             id: "system.empty_trash",
             kind: AffordanceKind::Control,
             title: "Empty trash".into(),
-            detail: format!("Disk {pct:.0}% full"),
+            detail,
             relevance: 0.6,
             reason: "reclaimable space is sitting in the trash",
             source: Layer::Hardware,
@@ -575,6 +581,21 @@ fn disk_provider(ctx: &ContextState) -> Vec<Affordance> {
         });
     }
     out
+}
+
+/// Human-readable byte size for offer details (1 decimal above KB).
+fn fmt_bytes(b: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = b as f64;
+    if b >= KB * KB * KB {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    } else if b >= KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{b:.0} B")
+    }
 }
 
 /// Build a fire-and-forget [`AffordanceAction::Spawn`] from a static argv.
@@ -3912,5 +3933,20 @@ mod tests {
         let t = find(&opts, "system.empty_trash").expect("empty-trash control");
         assert_eq!(t.kind, AffordanceKind::Control);
         assert_eq!(t.action, AffordanceAction::Daemon("empty_trash".into()));
+        // Zero known bytes → the disk figure; a known size → the reclaim.
+        assert!(t.detail.contains("94"), "fallback detail: {}", t.detail);
+        ctx.metrics.trash_bytes = 1_300_000_000;
+        let opts = decide(&ctx, &roomy);
+        let t = find(&opts, "system.empty_trash").expect("control with size");
+        assert_eq!(t.detail, "Reclaim 1.2 GB");
+    }
+
+    #[test]
+    fn byte_sizes_read_like_a_human_wrote_them() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(999), "999 B");
+        assert_eq!(fmt_bytes(1536), "1.5 KB");
+        assert_eq!(fmt_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(fmt_bytes(1_300_000_000), "1.2 GB");
     }
 }
