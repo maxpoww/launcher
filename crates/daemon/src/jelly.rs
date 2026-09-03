@@ -182,3 +182,113 @@ impl JellyMembrane {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RECT: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 200.0,
+        h: 100.0,
+    };
+
+    /// Drain everything, then run the membrane at display cadence for
+    /// `secs` seconds.
+    fn run(m: &mut JellyMembrane, secs: f32) {
+        m.drain(1.0); // all delays are < 1 s
+        let mut t = 0.0;
+        while t < secs {
+            m.step(1.0 / 60.0);
+            t += 1.0 / 60.0;
+        }
+    }
+
+    #[test]
+    fn poke_targets_the_crossed_edge() {
+        // Crossing near the right edge must displace the right spring most.
+        let mut m = JellyMembrane::new();
+        m.poke(RECT, (198.0, 50.0), Some((205.0, 50.0)), true);
+        m.drain(1.0);
+        m.step(0.05);
+        let (l, r, _t, _b) = m.offsets();
+        assert!(r.abs() > 0.0, "right spring got the main kick");
+        assert!(
+            r.abs() > l.abs(),
+            "main kick outweighs cross-coupling (r={r}, l={l})"
+        );
+    }
+
+    #[test]
+    fn membrane_always_comes_to_rest() {
+        // The frame loop's liveness depends on this: is_active() drives
+        // redraws, so a spring that never settles pins the daemon at
+        // 60 fps forever. Worst-case poke (max speed factor) must settle.
+        let mut m = JellyMembrane::new();
+        m.poke(RECT, (198.0, 50.0), Some((0.0, 50.0)), true); // huge speed, clamped
+        run(&mut m, 5.0);
+        assert!(!m.is_active(), "membrane still ringing after 5 s");
+        assert!(!m.has_pending());
+        let (l, r, t, b) = m.offsets();
+        for (name, v) in [("l", l), ("r", r), ("t", t), ("b", b)] {
+            assert!(v.abs() < 0.01, "{name} edge rests off-zero: {v}");
+        }
+    }
+
+    #[test]
+    fn impulses_fire_exactly_once_across_fragmented_drains() {
+        let mut m = JellyMembrane::new();
+        m.poke(RECT, (198.0, 50.0), Some((190.0, 50.0)), true);
+        assert!(m.has_pending(), "poke queues delayed impulses");
+        // Fragmented dt smaller than any delay: nothing may be lost.
+        for _ in 0..40 {
+            m.drain(0.001);
+        }
+        assert!(!m.has_pending(), "all impulses fired after 40 ms of drains");
+        // A further drain on the empty queue is a no-op (no double kicks:
+        // capture the state and confirm draining again changes nothing).
+        let before = m.offsets();
+        m.drain(1.0);
+        assert_eq!(before, m.offsets());
+    }
+
+    #[test]
+    fn kick_magnitude_is_bounded_for_wild_pointer_jumps() {
+        // A pointer warp (thousands of px between events) must not launch
+        // the membrane into orbit: the speed factor clamps at 2.0. Compare
+        // peak displacement against a moderate crossing.
+        let peak = |speed_from: f32| {
+            let mut m = JellyMembrane::new();
+            m.poke(RECT, (198.0, 50.0), Some((speed_from, 50.0)), true);
+            m.drain(1.0);
+            let mut worst = 0.0f32;
+            for _ in 0..300 {
+                m.step(1.0 / 60.0);
+                let (_, r, _, _) = m.offsets();
+                worst = worst.max(r.abs());
+            }
+            worst
+        };
+        let warp = peak(90_000.0);
+        let moderate = peak(178.0); // 20 px between events → factor 2.0 exactly
+        assert!(
+            warp <= moderate * 1.01,
+            "warp {warp} vs moderate {moderate}"
+        );
+    }
+
+    #[test]
+    fn snap_rests_edges_but_preserves_pending() {
+        // The frame loop only snaps when has_pending() is false — snap
+        // deliberately does NOT clear the queue, so a mid-flight wobble
+        // can't be half-swallowed. This test pins that contract; if snap
+        // ever starts draining the queue, frame.rs's guard becomes dead
+        // code and this fails.
+        let mut m = JellyMembrane::new();
+        m.poke(RECT, (198.0, 50.0), Some((190.0, 50.0)), true);
+        m.snap();
+        assert_eq!(m.offsets(), (0.0, 0.0, 0.0, 0.0), "edges snapped to rest");
+        assert!(m.has_pending(), "pending impulses survive a snap");
+    }
+}
