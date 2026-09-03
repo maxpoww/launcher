@@ -817,4 +817,19 @@ mod tests {
         );
         assert!(!occupied(&[hidden, unmapped], 1));
     }
+
+    #[test]
+    fn browser_class_match_is_case_insensitive_and_substring() {
+        // Real Hyprland class strings vary in case and carry suffixes.
+        assert!(is_browser_class("firefox"));
+        assert!(is_browser_class("Firefox"));
+        assert!(is_browser_class("org.mozilla.firefox"));
+        assert!(is_browser_class("Google-chrome"));
+        assert!(is_browser_class("Brave-browser"));
+        assert!(is_browser_class("zen-alpha"));
+        // Not browsers — the copy-link / find offers must not fire here.
+        assert!(!is_browser_class("foot"));
+        assert!(!is_browser_class("org.gnome.Nautilus"));
+        assert!(!is_browser_class(""));
+    }
 }
