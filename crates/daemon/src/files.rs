@@ -346,3 +346,25 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_assets_map_by_extension_case_insensitively() {
+        assert_eq!(file_asset_name("song.MP3"), "asset-audio");
+        assert_eq!(file_asset_name("clip.mkv"), "asset-video");
+        assert_eq!(file_asset_name("shot.PNG"), "asset-image");
+        assert_eq!(file_asset_name("paper.pdf"), "asset-pdf");
+        assert_eq!(file_asset_name("backup.tar"), "asset-archive");
+        assert_eq!(file_asset_name("sheet.xlsx"), "asset-doc");
+        assert_eq!(file_asset_name("main.rs"), "asset-code");
+        // Unknown or missing extensions fall back to the generic file.
+        assert_eq!(file_asset_name("mystery.xyz"), "asset-file");
+        assert_eq!(file_asset_name("README"), "asset-file");
+        // Dotfiles: "everything after the last dot" — `.bashrc`'s "ext" is
+        // bashrc, which is unknown → generic (not a crash, not code).
+        assert_eq!(file_asset_name(".bashrc"), "asset-file");
+    }
+}
