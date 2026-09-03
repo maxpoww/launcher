@@ -276,6 +276,63 @@ fn normalize_id(s: &str) -> String {
         .collect()
 }
 
+/// Minimum normalized length before a *fuzzy* (substring/prefix) relation is
+/// trusted. Equality always relates. Without this guard a short attr latched
+/// onto any unrelated app that happened to contain it: nixpkgs really ships
+/// `R`, `go` and `mc`, and "go" ~ "google-chrome" by substring — resolving
+/// (and later UNINSTALL-mapping) the wrong app.
+const FUZZY_MIN: usize = 3;
+
+/// Fuzzy relation between a package attr and a desktop id: normalized
+/// equality, or a substring either way when the shorter side is distinctive
+/// enough ([`FUZZY_MIN`]). Pure — this is the seam both resolve paths share.
+fn ids_relate(attr: &str, id: &str) -> bool {
+    let key = normalize_id(attr);
+    let n = normalize_id(id);
+    if key.is_empty() || n.is_empty() {
+        return false;
+    }
+    if key == n {
+        return true;
+    }
+    key.len().min(n.len()) >= FUZZY_MIN && (n.contains(&key) || key.contains(&n))
+}
+
+/// The startup-reconcile relation: the attr as a *prefix* of the app id
+/// (`chromium` → `chromium-browser`); equality always; prefix only when the
+/// key is distinctive ([`FUZZY_MIN`] — else `go` claims `google-chrome`).
+fn attr_prefixes_id(attr: &str, id: &str) -> bool {
+    let key = normalize_id(attr);
+    let n = normalize_id(id);
+    if key.is_empty() {
+        return false;
+    }
+    key == n || (key.len() >= FUZZY_MIN && n.starts_with(&key))
+}
+
+/// Resolve one finished install to its scanned app: a shipped desktop id
+/// present in the scan wins; else a newly-appeared app related to the attr.
+/// An id already claimed by another install is never reused. Pure — the
+/// tile and managed (dock-drop) paths both resolve through here.
+fn resolve_hit(
+    attr: &str,
+    desktop_ids: &[String],
+    current: &HashSet<String>,
+    newly: &[String],
+    claimed: &HashSet<String>,
+) -> Option<String> {
+    desktop_ids
+        .iter()
+        .find(|d| current.contains(d.as_str()) && !claimed.contains(d.as_str()))
+        .cloned()
+        .or_else(|| {
+            newly
+                .iter()
+                .find(|id| !claimed.contains(id.as_str()) && ids_relate(attr, id))
+                .cloned()
+        })
+}
+
 impl App {
     /// A message from the nix threads: the index became searchable, a
     /// rank answer arrived, or a profile mutation finished.
@@ -928,24 +985,7 @@ impl App {
         let mut resolved: Vec<(String, String, Option<String>, bool)> = Vec::new();
         let mut claimed: HashSet<String> = HashSet::new();
         for (attr, desktop_ids, anchor) in &pending {
-            let hit = desktop_ids
-                .iter()
-                .find(|d| current.contains(d.as_str()) && !claimed.contains(d.as_str()))
-                .cloned()
-                .or_else(|| {
-                    // A freshly-appeared app whose name relates to the attr.
-                    let key = normalize_id(attr);
-                    newly
-                        .iter()
-                        .find(|id| {
-                            !claimed.contains(id.as_str()) && {
-                                let n = normalize_id(id);
-                                n.contains(&key) || key.contains(&n)
-                            }
-                        })
-                        .cloned()
-                });
-            if let Some(app_id) = hit {
+            if let Some(app_id) = resolve_hit(attr, desktop_ids, &current, &newly, &claimed) {
                 claimed.insert(app_id.clone());
                 resolved.push((attr.clone(), app_id, anchor.clone(), true));
             }
@@ -1051,22 +1091,7 @@ impl App {
                 continue; // still installing — wait for its own rescan
             }
             let desktop_ids = self.managed.desktop_ids_for(&attr);
-            let hit = desktop_ids
-                .iter()
-                .find(|d| current.contains(d.as_str()) && !claimed.contains(d.as_str()))
-                .cloned()
-                .or_else(|| {
-                    let key = normalize_id(&attr);
-                    newly
-                        .iter()
-                        .find(|id| {
-                            !claimed.contains(id.as_str()) && {
-                                let n = normalize_id(id);
-                                n.contains(&key) || key.contains(&n)
-                            }
-                        })
-                        .cloned()
-                });
+            let hit = resolve_hit(&attr, &desktop_ids, &current, &newly, &claimed);
             let (app_id, gui) = match hit {
                 Some(app_id) => (app_id, true),
                 None if self.cli_ids.contains(&attr) => (attr.clone(), false),
@@ -1104,15 +1129,9 @@ impl App {
             {
                 continue;
             }
-            let key = normalize_id(&attr);
             let hit = current
                 .iter()
-                .find(|id| {
-                    !claimed.contains(id.as_str()) && {
-                        let n = normalize_id(id);
-                        n == key || n.starts_with(&key)
-                    }
-                })
+                .find(|id| !claimed.contains(id.as_str()) && attr_prefixes_id(&attr, id))
                 .cloned();
             match hit {
                 Some(app_id) => {
@@ -1323,5 +1342,128 @@ impl App {
             rearmed = true;
         }
         rearmed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+    fn vecs(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn normalize_strips_punctuation_and_case() {
+        assert_eq!(normalize_id("Chromium-Browser"), "chromiumbrowser");
+        assert_eq!(normalize_id("org.gnome.Nautilus"), "orggnomenautilus");
+        assert_eq!(normalize_id("__--__"), "");
+    }
+
+    #[test]
+    fn wrapped_packages_relate_both_directions() {
+        // The canonical wrapped case, both containment directions.
+        assert!(ids_relate("chromium", "chromium-browser"));
+        assert!(ids_relate("neovim-unwrapped", "neovim"));
+        // Reverse-DNS ids relate through the substring too.
+        assert!(ids_relate("nautilus", "org.gnome.Nautilus"));
+    }
+
+    #[test]
+    fn short_attrs_never_latch_fuzzily() {
+        // nixpkgs really ships `R`, `go` and `mc`. Before the FUZZY_MIN
+        // guard, "go" ~ "google-chrome" by substring — a finished go install
+        // would resolve to (and uninstall-map onto!) Chrome.
+        assert!(!ids_relate("go", "google-chrome"));
+        assert!(!ids_relate("R", "rhythmbox"));
+        assert!(!ids_relate("mc", "mcomix"));
+        // Equality still relates however short.
+        assert!(ids_relate("R", "r"));
+        assert!(ids_relate("mc", "mc"));
+        // Degenerates relate to nothing (an empty key must not match-all).
+        assert!(!ids_relate("--", "anything"));
+        assert!(!ids_relate("gimp", "…"));
+    }
+
+    #[test]
+    fn reconcile_prefix_is_guarded_the_same_way() {
+        assert!(attr_prefixes_id("chromium", "chromium-browser"));
+        assert!(attr_prefixes_id("gimp", "gimp"));
+        // Prefix only, unlike the fuzzy relation.
+        assert!(!attr_prefixes_id("browser", "chromium-browser"));
+        // Short keys: equality only.
+        assert!(attr_prefixes_id("go", "go"));
+        assert!(!attr_prefixes_id("go", "google-chrome"));
+        assert!(!attr_prefixes_id("__", "anything"));
+    }
+
+    #[test]
+    fn shipped_desktop_id_wins_over_fuzzy() {
+        let current = set(&["org.inkscape.Inkscape", "inkscape-helper"]);
+        let newly = vecs(&["inkscape-helper"]);
+        let hit = resolve_hit(
+            "inkscape",
+            &vecs(&["org.inkscape.Inkscape"]),
+            &current,
+            &newly,
+            &HashSet::new(),
+        );
+        assert_eq!(hit.as_deref(), Some("org.inkscape.Inkscape"));
+    }
+
+    #[test]
+    fn claimed_ids_are_never_reused() {
+        let current = set(&["chromium-browser"]);
+        let newly = vecs(&["chromium-browser"]);
+        let claimed = set(&["chromium-browser"]);
+        // Both the desktop-id route and the fuzzy route must skip a claimed id.
+        assert_eq!(
+            resolve_hit(
+                "chromium",
+                &vecs(&["chromium-browser"]),
+                &current,
+                &newly,
+                &claimed
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn fuzzy_only_matches_newly_appeared_apps() {
+        // An app that was already installed (in `current` but not `newly`)
+        // is not a fuzzy candidate — only the desktop-id route may take it.
+        let current = set(&["gimp"]);
+        let hit = resolve_hit("gimp", &[], &current, &[], &HashSet::new());
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn ring_progress_is_bounded_and_monotonic() {
+        let mut last = -1.0f32;
+        for s in 0..600 {
+            let p = install_ring_progress(Duration::from_secs(s));
+            assert!((0.0..1.0).contains(&p), "p={p} at {s}s escapes [0,1)");
+            assert!(p >= last, "ring went backwards at {s}s");
+            last = p;
+        }
+        // The pre-completion ring never claims done.
+        assert!(install_ring_progress(Duration::from_secs(3600)) < 0.98);
+    }
+
+    #[test]
+    fn shine_waits_for_the_ring_fill_then_sweeps_once() {
+        assert_eq!(install_shine(None), -1.0);
+        let done = Instant::now();
+        // Immediately after completion the ring is still filling — no shine.
+        assert_eq!(install_shine(Some(done)), -1.0);
+        // Well past fill+sweep the shine clamps at 1.0 (played out).
+        let old = done
+            .checked_sub(INSTALL_HOLD + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(install_shine(Some(old)), 1.0);
     }
 }
