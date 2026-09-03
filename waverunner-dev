@@ -1,8 +1,21 @@
 #!/bin/sh
-# Dev launcher wrapper — sets LD_LIBRARY_PATH from the flake's buildInputs so
-# the daemon can find libwayland, libxkbcommon, and vulkan-loader without
-# requiring nix develop. Paths are pinned by flake.lock.
-export LD_LIBRARY_PATH=/nix/store/clvzgv5kqq953s4azqhkg3ddgpvgl9wc-wayland-1.25.0/lib:/nix/store/3kncz3fkk7sv9xc61x096jnbxvxfnx1k-libxkbcommon-1.13.1/lib:/nix/store/y5a34h6vgvsc1pmfmvcqfcvxy2grg3hx-vulkan-loader-1.4.341.0/lib
+# Dev launcher wrapper — makes LD_LIBRARY_PATH available so the daemon can find
+# libwayland, libxkbcommon, vulkan-loader (and libglvnd) without a full
+# `nix develop` shell.
+#
+# The paths are RESOLVED FROM THE FLAKE at launch, never hardcoded: a previous
+# version froze the store paths from flake.lock, and a nixpkgs bump + GC then
+# reclaimed them, so the daemon lost its GPU surface and the dock/OPTIONS shell
+# vanished after a rebuild (2026-09-03). Deriving them each start is self-healing
+# — the flake (flake.lock) is the single source of truth and GC can never
+# desync us from it.
+LDP="$(nix develop /home/max/launcher --command sh -c 'printf %s "$LD_LIBRARY_PATH"' 2>/dev/null)"
+if [ -n "$LDP" ]; then
+  export LD_LIBRARY_PATH="$LDP${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+  echo "waverunner-dev: WARNING: could not resolve LD_LIBRARY_PATH from the flake;" \
+       "the daemon may fail to create a GPU surface." >&2
+fi
 
 # Point the clipboard dictionary panel at the flake-built, declaratively-pinned
 # data (English Webster + Spanish RAE). Built + cached by Nix; if the build is
