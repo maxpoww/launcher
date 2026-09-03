@@ -1124,8 +1124,21 @@ impl App {
             .surfaced_options()
             .get(i as usize)
             // Engine titles are user-visible text: translate at display
-            // (English literal = key), like every daemon-side string.
-            .map(|a| crate::i18n::tr_dyn(&a.title).to_owned())
+            // (English literal = key), like every daemon-side string. The
+            // detail rides along when present — it's the only place an
+            // offer's specifics ("Reclaim 1.2 GB", the branch, the copied
+            // word) ever reach the screen. Details are data (paths, sizes),
+            // so they pass through untranslated, capped so a full URL can't
+            // balloon the tooltip.
+            .map(|a| {
+                let title = crate::i18n::tr_dyn(&a.title).to_owned();
+                let detail = a.detail.trim();
+                if detail.is_empty() || detail == title {
+                    title
+                } else {
+                    format!("{title} — {}", truncate(detail, 40))
+                }
+            })
             .filter(|s| !s.trim().is_empty())
         else {
             return;
