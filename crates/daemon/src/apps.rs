@@ -422,8 +422,19 @@ fn icon_assets() -> Vec<AppEntry> {
 /// the banner names the command to type. Skips any package a real
 /// `.desktop` already covers (`apps` = the scanned entries).
 fn managed_cli_tiles(apps: &[AppEntry]) -> Vec<AppEntry> {
+    cli_tiles_from(crate::managed::snapshot(), apps)
+}
+
+/// Pure core of [`managed_cli_tiles`] (snapshot passed in, so it's
+/// testable): decide which managed packages earn a synthetic CLI tile and
+/// build them. Split out because the shipped bug lived in the FILTER —
+/// which packages get a fabricated tile — not in the scan plumbing.
+fn cli_tiles_from(
+    snapshot: Vec<(String, Vec<String>, Option<bool>)>,
+    apps: &[AppEntry],
+) -> Vec<AppEntry> {
     let app_ids: HashSet<&str> = apps.iter().map(|e| e.id.as_str()).collect();
-    crate::managed::snapshot()
+    snapshot
         .into_iter()
         // A known GUI app (`gui == Some(true)`) never gets a synthetic
         // terminal tile — not even in the window right after install,
@@ -1418,5 +1429,68 @@ mod tests {
         assert_eq!(parse_resolutions(&written, "g"), None);
 
         std::fs::remove_dir_all(&disk.dir).unwrap();
+    }
+
+    fn scanned(id: &str) -> AppEntry {
+        AppEntry {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            description: None,
+            exec: "true".to_owned(),
+            icon: None,
+            startup_wm_class: None,
+            needs_terminal: false,
+            path: None,
+        }
+    }
+
+    #[test]
+    fn cli_tiles_never_fabricate_a_tile_for_a_gui_app() {
+        // The shipped bug: a GUI package (gui==Some(true)) got a synthetic
+        // terminal tile pinned in place of the real app — a green box that
+        // opened a shell, unhealed until relogin. It must NEVER get a tile,
+        // even before its .desktop reaches the scan (apps empty here).
+        let snap = vec![("gimp".to_owned(), vec!["gimp".to_owned()], Some(true))];
+        assert!(cli_tiles_from(snap, &[]).is_empty());
+    }
+
+    #[test]
+    fn cli_tiles_cover_real_cli_tools_and_legacy_entries() {
+        let snap = vec![
+            ("ripgrep".to_owned(), vec![], Some(false)), // a genuine CLI tool
+            ("htop".to_owned(), vec![], None),           // legacy (gui unknown)
+        ];
+        let tiles = cli_tiles_from(snap, &[]);
+        let ids: Vec<&str> = tiles.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["ripgrep", "htop"]);
+        // The fabricated tile is a terminal launcher, not a GUI app.
+        assert!(tiles.iter().all(|t| t.needs_terminal));
+    }
+
+    #[test]
+    fn cli_tiles_yield_to_a_scanned_desktop_that_already_covers_them() {
+        // A CLI-flagged package whose desktop id IS present in the scan
+        // gets no duplicate tile — the real .desktop already represents it.
+        let snap = vec![("mpv".to_owned(), vec!["mpv".to_owned()], Some(false))];
+        assert!(cli_tiles_from(snap.clone(), &[scanned("mpv")]).is_empty());
+        // But when the scan lacks it, the tile appears.
+        assert_eq!(cli_tiles_from(snap, &[scanned("firefox")]).len(), 1);
+    }
+
+    #[test]
+    fn icon_mip_chain_math_is_exact() {
+        // ICON_MIPS = full chain down to 1×1 inclusive (256 → 9 levels).
+        assert_eq!(ICON_MIPS, 9);
+        // The byte total is the geometric sum 4·(256²+128²+…+1²), which the
+        // texture upload reserves — an off-by-one here mis-sizes the buffer.
+        let expected: usize = (0..9)
+            .map(|l| {
+                let s = 256usize >> l;
+                s * s * 4
+            })
+            .sum();
+        assert_eq!(ICON_CHAIN_BYTES, expected);
+        assert_eq!(icon_chain_bytes(1), 4); // a 1×1 chain is one texel
+        assert_eq!(icon_chain_bytes(2), 4 * 4 + 4); // 2×2 + 1×1
     }
 }
