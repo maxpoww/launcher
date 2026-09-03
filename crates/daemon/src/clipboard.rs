@@ -2324,18 +2324,16 @@ impl App {
         if self.clip.history.is_empty() {
             return;
         }
+        // Timed (logged below): the whole body runs synchronously on the event
+        // loop before the first open frame, so any cost here is felt as
+        // open-lag (Max, issues.md: "the opening of the box is laggy").
+        let t0 = Instant::now();
         self.clip.hold_deadline = None;
         self.clip.peek_reveal = true; // keep the preview fully out under the box
         self.clip.expanded = true;
         // Fresh heights at the live scale (the constructor measured at 1.0).
         self.measure_clip_rows();
         self.clip.box_h = self.clip_full_h();
-        tracing::debug!(
-            "clip box open: rows={} box_h={:.0} scale={:.3}",
-            self.clip.history.len(),
-            self.clip.box_h,
-            self.options_scale()
-        );
         // Every open is a fresh box: list at the top, no detail view carried over
         // from a previous session. Done here (box still hidden) rather than on
         // close, so a collapse-while-in-detail can shrink away smoothly instead
@@ -2364,6 +2362,13 @@ impl App {
         self.reeval_options_bar();
         self.request_clip_thumbs();
         self.schedule_clip_frame();
+        tracing::debug!(
+            "clip box open: rows={} box_h={:.0} scale={:.3} in {:?}",
+            self.clip.history.len(),
+            self.clip.box_h,
+            self.options_scale(),
+            t0.elapsed()
+        );
     }
 
     /// Collapse the open history drawer back to the pill.
@@ -3656,10 +3661,18 @@ impl App {
     /// from `peek_t` at draw time.
     fn tick_clip(&mut self) {
         let now = Instant::now();
-        let dt = self
+        let raw_dt = self
             .clip
             .last
-            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32());
+        // Frame-gap tripwire (issues.md "the opening of the box is laggy"):
+        // the chain schedules every 8 ms, so a gap past ~50 ms means the event
+        // loop stalled mid-animation — exactly what reads as a hitch. Debug
+        // level: free in normal runs, visible under RUST_LOG when hunting.
+        if raw_dt > 0.05 {
+            tracing::debug!("clip anim frame gap: {:.0}ms", raw_dt * 1000.0);
+        }
+        let dt = raw_dt.min(0.05);
         self.clip.last = Some(now);
         let target = if self.clip.peek_reveal { 1.0 } else { 0.0 };
         let (pt, moving) = ease_toward(self.clip.peek_t, target, dt, MORPH_RATE, MORPH_EPS);

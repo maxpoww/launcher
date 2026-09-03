@@ -2679,10 +2679,15 @@ impl App {
     /// derive from these at draw time.
     fn tick_notif(&mut self) {
         let now = Instant::now();
-        let dt = self
+        let raw_dt = self
             .notif
             .last
-            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32());
+        // Frame-gap tripwire — see `tick_clip`'s twin (issues.md open-lag).
+        if raw_dt > 0.05 {
+            tracing::debug!("notif anim frame gap: {:.0}ms", raw_dt * 1000.0);
+        }
+        let dt = raw_dt.min(0.05);
         self.notif.last = Some(now);
 
         let peek_target = if self.notif.peek_reveal || self.notif.expanded {
