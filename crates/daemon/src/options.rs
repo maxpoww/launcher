@@ -717,6 +717,27 @@ pub(crate) fn daemon_tag_known(tag: &str) -> bool {
         || tag.starts_with("pkgsearch:")
 }
 
+/// Estimated shaped width of `text` at `font_px`, char-class aware and
+/// deliberately generous: the tooltip label wraps (invisibly) past its box,
+/// so an UNDERestimate silently truncates the text while an overestimate
+/// only widens the pill a little. Classes are em-fractions for a humanist
+/// sans; +8% margin on top.
+fn est_text_w(text: &str, font_px: f32) -> f32 {
+    let units: f32 = text
+        .chars()
+        .map(|c| match c {
+            'i' | 'l' | 'j' | '!' | '|' | '\'' | '.' | ',' | ':' | ';' => 0.30,
+            ' ' | '(' | ')' | '[' | ']' | '-' | 'f' | 't' | 'r' => 0.40,
+            'm' | 'w' => 0.85,
+            'M' | 'W' => 0.95,
+            'A'..='Z' | '0'..='9' => 0.70,
+            'a'..='z' => 0.55,
+            _ => 1.0, // wide/unknown scripts: assume a full em
+        })
+        .sum();
+    units * font_px * 1.08
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
@@ -1123,9 +1144,13 @@ impl App {
         let s = self.options_scale();
         let (font_px, line_px) = (FONT_PX * s, LINE_PX * s);
         // The Label shapes exactly at render time; only the background needs a
-        // size, so a per-char estimate is fine here.
+        // size, so an estimate is fine here — but it must be an OVERestimate:
+        // the label shapes into a one-line box of max_w, and anything wider
+        // WRAPS to an invisible second line (found live: an all-caps
+        // translated title rendered as its first word). Char-class aware, so
+        // caps-heavy strings don't blow past a flat per-char average.
         let pad_x = 11.0;
-        let text_w = label.chars().count() as f32 * (font_px * 0.62);
+        let text_w = est_text_w(&label, font_px);
         let box_w = (text_w + 2.0 * pad_x).min((full_w - 8.0).max(24.0));
         let box_h = line_px + 9.0;
         let bx = (pr.x + (pr.w - box_w) / 2.0).clamp(4.0, (full_w - box_w - 4.0).max(4.0));
@@ -1141,7 +1166,10 @@ impl App {
         scene.labels.push(Label {
             text: label,
             pos: (bx + box_w / 2.0, by + (box_h - line_px) / 2.0),
-            max_w: box_w - 2.0 * pad_x,
+            // Full box width (pads included) as the wrap limit: if the
+            // estimate is ever slightly tight, the line eats into the pill's
+            // rounded ends instead of wrapping out of existence.
+            max_w: box_w,
             font_px,
             line_px,
             centered: true,
@@ -2356,6 +2384,24 @@ mod tests {
                 "no scenario made the engine emit {expected:?} (emitted: {emitted:?})"
             );
         }
+    }
+
+    #[test]
+    fn tooltip_estimate_is_generous_and_class_aware() {
+        // Caps-heavy strings must estimate wider than same-length lowercase
+        // (the live bug: a flat 0.62/char average under-sized "PROBE-…" and
+        // the label wrapped out of existence).
+        let caps = est_text_w("PROBE-TRADUCIDO", 17.0);
+        let lower = est_text_w("probe-traducido", 17.0);
+        assert!(caps > lower);
+        // The old flat estimate for this string was 15 × 17 × 0.62 ≈ 158 —
+        // provably too small; the class-aware one clears it with margin.
+        assert!(caps > 170.0, "caps estimate {caps} still too tight");
+        // Monotonic in content; empty is zero.
+        assert_eq!(est_text_w("", 17.0), 0.0);
+        assert!(est_text_w("Open copied files", 17.0) > est_text_w("Open", 17.0));
+        // Unknown scripts assume a full em — never narrower than Latin.
+        assert!(est_text_w("日本語", 17.0) >= 3.0 * 17.0);
     }
 
     #[test]
