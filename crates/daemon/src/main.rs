@@ -1526,7 +1526,20 @@ impl App {
             layer.set_exclusive_zone(zone);
             layer.commit();
         }
+        let was_synced = self.options_zone.is_some();
         self.options_zone = Some(zone);
+        // A LIVE scale change (hotplug, resolution switch — not the initial
+        // sync) invalidates the eased geometry of any open box: box_h and the
+        // wrapped rows were seeded at the old scale, and a mis-scaled panel is
+        // worse than a closed one. Collapse them — the next open re-seeds at
+        // the live scale (every open path measures fresh).
+        if was_synced {
+            if self.clip.expanded {
+                self.close_clip_box();
+            }
+            self.force_collapse_notif();
+            self.media_box_open = false;
+        }
         // The scale moved: pill text metrics and the notif rows were measured
         // at the old scale — re-measure and redraw at the new one. (All are
         // no-ops before the renderer exists; the first configure re-runs them.)

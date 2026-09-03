@@ -2517,6 +2517,20 @@ impl App {
         self.schedule_notif_frame();
     }
 
+    /// Hard-collapse the notification element (box + peek, no hold): used when
+    /// a live scale change invalidates an open box's seeded geometry (see
+    /// `sync_options_zone`). A no-op when already at rest.
+    pub(crate) fn force_collapse_notif(&mut self) {
+        if !self.notif.expanded && !self.notif.peek_reveal {
+            return;
+        }
+        self.notif.expanded = false;
+        self.notif.peek_reveal = false;
+        self.notif.hold_deadline = None;
+        self.notif.last = None;
+        self.schedule_notif_frame();
+    }
+
     /// Maximum scroll (px): the newest at the top down to the last card's bottom
     /// resting at the content bottom. `list_scroll`/`scroll_target` are clamped to
     /// `[0, this]` — the box anchors the newest at the top on open, then scrolls
