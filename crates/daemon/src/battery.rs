@@ -66,6 +66,62 @@ pub(crate) enum BatteryAlarm {
     Critical,
 }
 
+/// The alarm rung for one battery reading. Pure: `charging` clears everything
+/// (whatever the gauge claims), a missing battery is calm, thresholds are the
+/// `<=` ladder above.
+pub(crate) fn alarm_for(pct: Option<u8>, charging: bool) -> BatteryAlarm {
+    let Some(pct) = pct else {
+        return BatteryAlarm::None;
+    };
+    match pct {
+        _ if charging => BatteryAlarm::None,
+        p if p <= SUSPEND_PCT => BatteryAlarm::Critical,
+        p if p <= BEAT_PCT => BatteryAlarm::Beating,
+        p if p <= LOW_PCT => BatteryAlarm::Low,
+        _ => BatteryAlarm::None,
+    }
+}
+
+/// What the sleep rungs do for one snapshot — the decision 92e97e6's two
+/// guards protect, extracted pure so every rung and guard is testable (the
+/// shipped showstopper class: this is the code path that once put a machine
+/// down seconds after boot, and the VM gate can never exercise it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SleepDecision {
+    /// No automatic sleep this snapshot.
+    Stay,
+    /// First crossing while awake (armed): suspend now.
+    Suspend,
+    /// Woke still critical + unplugged: awareness pause, then hibernate.
+    HibernateAfterAware,
+}
+
+/// Decide the sleep rung. Both guards precede everything, including the
+/// post-wake hibernate: a freshly-booted machine (BOOT_GRACE) or an unproven
+/// reading (CRITICAL_STREAK) never sleeps automatically. `armed` is the
+/// one-shot latch so a suspend fires once per critical episode.
+pub(crate) fn sleep_decision(
+    alarm: BatteryAlarm,
+    woke: bool,
+    armed: bool,
+    since_start: Duration,
+    critical_streak: u8,
+) -> SleepDecision {
+    if alarm < BatteryAlarm::Critical {
+        return SleepDecision::Stay;
+    }
+    if since_start < BOOT_GRACE || critical_streak < CRITICAL_STREAK {
+        return SleepDecision::Stay;
+    }
+    if woke {
+        return SleepDecision::HibernateAfterAware;
+    }
+    if armed {
+        return SleepDecision::Suspend;
+    }
+    SleepDecision::Stay
+}
+
 impl App {
     /// React to a Brain snapshot's battery state. Called from `on_brain`.
     pub(crate) fn check_battery(&mut self, ctx: &ContextState) {
@@ -75,19 +131,8 @@ impl App {
             .is_some_and(|t| t.elapsed() > WAKE_GAP);
         self.battery_last_snapshot = Some(Instant::now());
 
-        let Some(pct) = ctx.metrics.battery_pct else {
-            self.set_battery_alarm(BatteryAlarm::None);
-            return;
-        };
-        let charging = ctx.metrics.is_charging;
-
-        let alarm = match pct {
-            _ if charging => BatteryAlarm::None,
-            p if p <= SUSPEND_PCT => BatteryAlarm::Critical,
-            p if p <= BEAT_PCT => BatteryAlarm::Beating,
-            p if p <= LOW_PCT => BatteryAlarm::Low,
-            _ => BatteryAlarm::None,
-        };
+        let alarm = alarm_for(ctx.metrics.battery_pct, ctx.metrics.is_charging);
+        let pct = ctx.metrics.battery_pct.unwrap_or(0);
         let prev = self.battery_alarm;
         self.set_battery_alarm(alarm);
         // Streak of consecutive Critical readings — the sleep rungs' evidence.
@@ -109,41 +154,42 @@ impl App {
         // Re-arm whenever we're out of the critical band.
         if alarm < BatteryAlarm::Critical {
             self.battery_suspend_armed = true;
-            return;
         }
-        // The sleep rungs need BOTH: a machine that isn't freshly booted, and
-        // a critical reading that has held for several snapshots. The warnings
-        // above already fired either way.
-        if self.battery_started.elapsed() < BOOT_GRACE
-            || self.battery_critical_streak < CRITICAL_STREAK
-        {
-            return;
-        }
-        // Critical. Woken from sleep still critical+unplugged → awareness
-        // symbol for a beat, then hibernate (every wake, per the spec).
-        if woke {
-            warn!("battery: woke at {pct}% unplugged — hibernating in {AWARE_SECS}s");
-            self.battery_aware_until = Some(Instant::now() + Duration::from_secs(AWARE_SECS));
-            self.draw_options();
-            let timer = Timer::from_duration(Duration::from_secs(AWARE_SECS));
-            let _ = self
-                .loop_handle
-                .insert_source(timer, |_, _, app: &mut App| {
-                    app.battery_aware_until = None;
-                    // Still critical and unplugged after the pause? Sleep deep.
-                    if app.battery_alarm == BatteryAlarm::Critical {
-                        warn!("battery: hibernating to preserve the session");
-                        sleep_machine("hibernate");
-                    } else {
-                        app.draw_options();
-                    }
-                    TimeoutAction::Drop
-                });
-        } else if self.battery_suspend_armed {
-            // First crossing while awake: suspend.
-            self.battery_suspend_armed = false;
-            warn!("battery: {pct}% and discharging — suspending to save the session");
-            sleep_machine("suspend");
+        match sleep_decision(
+            alarm,
+            woke,
+            self.battery_suspend_armed,
+            self.battery_started.elapsed(),
+            self.battery_critical_streak,
+        ) {
+            SleepDecision::Stay => {}
+            // Critical, woken from sleep still critical+unplugged → awareness
+            // symbol for a beat, then hibernate (every wake, per the spec).
+            SleepDecision::HibernateAfterAware => {
+                warn!("battery: woke at {pct}% unplugged — hibernating in {AWARE_SECS}s");
+                self.battery_aware_until = Some(Instant::now() + Duration::from_secs(AWARE_SECS));
+                self.draw_options();
+                let timer = Timer::from_duration(Duration::from_secs(AWARE_SECS));
+                let _ = self
+                    .loop_handle
+                    .insert_source(timer, |_, _, app: &mut App| {
+                        app.battery_aware_until = None;
+                        // Still critical and unplugged after the pause? Sleep deep.
+                        if app.battery_alarm == BatteryAlarm::Critical {
+                            warn!("battery: hibernating to preserve the session");
+                            sleep_machine("hibernate");
+                        } else {
+                            app.draw_options();
+                        }
+                        TimeoutAction::Drop
+                    });
+            }
+            SleepDecision::Suspend => {
+                // First crossing while awake: suspend, once per episode.
+                self.battery_suspend_armed = false;
+                warn!("battery: {pct}% and discharging — suspending to save the session");
+                sleep_machine("suspend");
+            }
         }
     }
 
@@ -249,5 +295,120 @@ fn sleep_machine(mode: &str) {
             sleep_machine("suspend");
         }
         Err(e) => warn!("battery: {mode} failed to spawn: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ladder's rungs at their exact boundaries, and the two absolute
+    /// clears: charging (whatever the gauge claims — old Acers report
+    /// "discharging 0%" on AC, so plugging in must beat any percentage), and
+    /// a machine with no battery at all (the VM, desktops).
+    #[test]
+    fn alarm_ladder_boundaries_and_clears() {
+        assert_eq!(alarm_for(None, false), BatteryAlarm::None);
+        assert_eq!(alarm_for(Some(100), false), BatteryAlarm::None);
+        assert_eq!(alarm_for(Some(11), false), BatteryAlarm::None);
+        assert_eq!(alarm_for(Some(10), false), BatteryAlarm::Low);
+        assert_eq!(alarm_for(Some(8), false), BatteryAlarm::Low);
+        assert_eq!(alarm_for(Some(7), false), BatteryAlarm::Beating);
+        assert_eq!(alarm_for(Some(6), false), BatteryAlarm::Beating);
+        assert_eq!(alarm_for(Some(5), false), BatteryAlarm::Critical);
+        assert_eq!(alarm_for(Some(0), false), BatteryAlarm::Critical);
+        // Charging clears EVERY rung, including the lying-gauge 0%.
+        for pct in [0, 3, 5, 7, 10] {
+            assert_eq!(alarm_for(Some(pct), true), BatteryAlarm::None, "{pct}%");
+        }
+    }
+
+    /// The shipped-showstopper guard (92e97e6): within BOOT_GRACE nothing
+    /// sleeps automatically — not the awake suspend, not the post-wake
+    /// hibernate — no matter how critical the reading claims to be.
+    #[test]
+    fn boot_grace_blocks_every_sleep_rung() {
+        let just_booted = Duration::from_secs(3); // the first brain snapshot
+        for woke in [false, true] {
+            assert_eq!(
+                sleep_decision(BatteryAlarm::Critical, woke, true, just_booted, 200),
+                SleepDecision::Stay,
+                "woke={woke}"
+            );
+        }
+        // One tick before the boundary still holds; at the boundary it acts.
+        assert_eq!(
+            sleep_decision(
+                BatteryAlarm::Critical,
+                false,
+                true,
+                BOOT_GRACE - Duration::from_millis(1),
+                CRITICAL_STREAK
+            ),
+            SleepDecision::Stay
+        );
+        assert_eq!(
+            sleep_decision(
+                BatteryAlarm::Critical,
+                false,
+                true,
+                BOOT_GRACE,
+                CRITICAL_STREAK
+            ),
+            SleepDecision::Suspend
+        );
+    }
+
+    /// One flaky ACPI read must never put the machine down: the streak has to
+    /// reach CRITICAL_STREAK consecutive snapshots first (a reset streak — a
+    /// single good reading in between — starts the count over upstream).
+    #[test]
+    fn critical_streak_blocks_until_proven() {
+        let up = BOOT_GRACE * 2;
+        for streak in 0..CRITICAL_STREAK {
+            for woke in [false, true] {
+                assert_eq!(
+                    sleep_decision(BatteryAlarm::Critical, woke, true, up, streak),
+                    SleepDecision::Stay,
+                    "streak={streak} woke={woke}"
+                );
+            }
+        }
+        assert_eq!(
+            sleep_decision(BatteryAlarm::Critical, false, true, up, CRITICAL_STREAK),
+            SleepDecision::Suspend
+        );
+    }
+
+    /// Past both guards: waking still-critical hibernates (armed or not —
+    /// every wake, per the spec); awake it suspends exactly once per episode
+    /// (the armed latch), then stays.
+    #[test]
+    fn sleep_rungs_past_the_guards() {
+        let up = BOOT_GRACE * 2;
+        for armed in [true, false] {
+            assert_eq!(
+                sleep_decision(BatteryAlarm::Critical, true, armed, up, CRITICAL_STREAK),
+                SleepDecision::HibernateAfterAware,
+                "armed={armed}"
+            );
+        }
+        assert_eq!(
+            sleep_decision(BatteryAlarm::Critical, false, true, up, CRITICAL_STREAK),
+            SleepDecision::Suspend
+        );
+        // The latch spent: no second suspend from continued critical reads.
+        assert_eq!(
+            sleep_decision(BatteryAlarm::Critical, false, false, up, CRITICAL_STREAK),
+            SleepDecision::Stay
+        );
+        // And below Critical nothing ever sleeps, guards or no guards.
+        for alarm in [BatteryAlarm::None, BatteryAlarm::Low, BatteryAlarm::Beating] {
+            assert_eq!(
+                sleep_decision(alarm, true, true, up, 200),
+                SleepDecision::Stay,
+                "{alarm:?}"
+            );
+        }
     }
 }
