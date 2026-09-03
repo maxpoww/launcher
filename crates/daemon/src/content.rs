@@ -388,6 +388,16 @@ pub struct SectionLayout {
     pub scroll: f32,
     /// Total number of grid cells (the *visible*, filtered entries).
     pub cells: usize,
+    /// Cells per page for slot STORAGE (page-major slot math, `apps_cap`,
+    /// `PagedList::normalize`) — derived from the screen alone (`fits`),
+    /// never from how much content there happens to be. `rows` may shrink
+    /// to the content span for display; capacity must not follow it: a
+    /// transiently small span (daemon start, mid-index) fed a collapsed
+    /// `rows` into `normalize`, which split the persisted pages at that
+    /// tiny capacity and SAVED the shred (2026-09-03, "one line through
+    /// lots of pages"). Under-full pages never re-merge, so a capacity
+    /// collapse is permanent — this field is why it can't happen again.
+    pub cap: usize,
 }
 
 /// Geometry shared by scene assembly and hit-testing.
@@ -560,7 +570,27 @@ pub fn layout(
         + N_SECTIONS as f32 * SECTION_TITLE_H
         + (N_SECTIONS - 1) as f32 * SECTION_GAP;
     let avail = grid_bottom - grid_top - fixed;
-    let apps_rows = ((avail / grid_cell_h) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
+    let fits = ((avail / grid_cell_h) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
+    // …but never TALLER than the apps actually need. Sizing Apps to whatever
+    // fits meant a machine with fewer apps than the screen could hold got the
+    // slack as dead space INSIDE the Apps viewport — a visible void between
+    // the last icon row and the "Install" title (Max on the 2013 Air, 1440x900
+    // with 3 rows of apps in a 5-row viewport, 2026-09-03). Rows the content
+    // does not reach are not breathing room, they are a hole in the middle of
+    // the card; the leftover belongs at the bottom, above Search.
+    //
+    // The shrink is DISPLAY-ONLY: page capacity stays at `fits` rows (see
+    // `SectionLayout::cap`), so a small span never re-pages the stored
+    // order. The two agree wherever both apply: the shrink only engages
+    // when the whole span fits one page (needed ≤ fits ⇒ span ≤ rows·cols),
+    // where the page-major cell math is capacity-independent.
+    //
+    // Floor at OPEN_BOX_COLS while a group box is open: the magnified box is
+    // sized against this viewport, so a short grid would shrink the box too.
+    let needed = n_visible[SECTION_APPS].div_ceil(cols.max(1)).max(1);
+    let row_floor = if box_open { OPEN_BOX_COLS } else { 1 };
+    let apps_rows = fits.min(needed.max(row_floor)).max(1);
+    let apps_cap_rows = fits;
 
     let mut y = grid_top;
     let sections = std::array::from_fn(|s| {
@@ -604,6 +634,12 @@ pub fn layout(
             n_pages,
             scroll,
             cells: n_visible[s],
+            cap: cols
+                * if s == SECTION_APPS {
+                    apps_cap_rows
+                } else {
+                    rows
+                },
         }
     });
 

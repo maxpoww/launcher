@@ -2475,7 +2475,11 @@ impl App {
                 if self.renderer.is_some() {
                     let settled = self.layout_at(self.ui.extent_of(Target::Open));
                     let sec = &settled.sections[content::SECTION_APPS];
-                    self.apps_cap = (sec.cols * sec.rows).max(1);
+                    // `cap`, not cols*rows: rows shrink to the content span
+                    // for display, and normalizing by a shrunk (or cold-
+                    // start empty) span shredded the stored pages — see
+                    // `SectionLayout::cap`.
+                    self.apps_cap = sec.cap.max(1);
                     self.order
                         .normalize(self.apps_cap, |id| by_id.contains_key(id));
                 }
