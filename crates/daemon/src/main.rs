@@ -1763,11 +1763,18 @@ impl App {
                 );
                 for a in &o.items {
                     info!(
-                        "  [{:.2}] {:?} {} — {} (action: {})",
+                        "  [{:.2}] {:?} {} — {}{} (action: {})",
                         a.relevance,
                         a.kind,
                         a.id,
                         a.title,
+                        // The detail now renders (tooltips), so the dump
+                        // shows it too — it's part of the live decision.
+                        if a.detail.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", a.detail)
+                        },
                         if a.action.is_actionable() {
                             "yes"
                         } else {
