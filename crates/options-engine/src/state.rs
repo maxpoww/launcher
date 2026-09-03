@@ -144,6 +144,12 @@ pub struct SystemMetrics {
     /// Whether a screen recording is in progress (a `wf-recorder` process
     /// exists). Drives the record ↔ stop-recording control pair.
     pub is_recording: bool,
+    /// Home filesystem usage percent (statvfs on `$HOME`, df's arithmetic);
+    /// `None` when unreadable. Drives the disk-almost-full warning.
+    pub disk_usage_pct: Option<f32>,
+    /// Whether the XDG trash holds anything to empty (`Trash/files`
+    /// non-empty) — the cheapest disk-space remedy the shell can offer.
+    pub trash_has_items: bool,
 }
 
 /// NixOS deploy state: is the system we're *running* the system we last *built*?

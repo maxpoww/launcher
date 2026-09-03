@@ -57,6 +57,7 @@ const PROVIDERS: &[Provider] = &[
     battery_provider,
     cpu_provider,
     memory_provider,
+    disk_provider,
     network_provider,
     media_provider,
     media_controls_provider,
@@ -537,6 +538,43 @@ fn memory_provider(ctx: &ContextState) -> Vec<Affordance> {
         source: Layer::Hardware,
         action: spawn(&["foot", "btop"]),
     }]
+}
+
+/// A nearly-full home filesystem is the "everything mysteriously fails"
+/// precursor (downloads die, saves fail, nix builds abort) — warn before it
+/// bites, and when the trash actually holds something, offer the one
+/// remedy the shell can perform itself: emptying it (the daemon's own
+/// FreeDesktop trash, via the `empty_trash` daemon tag).
+fn disk_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let Some(pct) = ctx.metrics.disk_usage_pct else {
+        return vec![];
+    };
+    if pct < 90.0 {
+        return vec![];
+    }
+    let mut out = vec![Affordance {
+        id: "system.disk_full",
+        kind: AffordanceKind::Warning,
+        title: "Disk almost full".into(),
+        detail: format!("{pct:.0}% used"),
+        relevance: 0.7,
+        reason: "home filesystem >=90%",
+        source: Layer::Hardware,
+        action: AffordanceAction::None,
+    }];
+    if ctx.metrics.trash_has_items {
+        out.push(Affordance {
+            id: "system.empty_trash",
+            kind: AffordanceKind::Control,
+            title: "Empty trash".into(),
+            detail: format!("Disk {pct:.0}% full"),
+            relevance: 0.6,
+            reason: "reclaimable space is sitting in the trash",
+            source: Layer::Hardware,
+            action: AffordanceAction::Daemon("empty_trash".into()),
+        });
+    }
+    out
 }
 
 /// Build a fire-and-forget [`AffordanceAction::Spawn`] from a static argv.
@@ -3843,5 +3881,36 @@ mod tests {
         ctx.metrics.cpu_usage_pct = 10.0;
         ctx.metrics.ram_usage_pct = 55.0;
         assert!(find(&decide(&ctx, &roomy), "system.high_mem").is_none());
+    }
+
+    #[test]
+    fn full_disk_warns_and_offers_the_trash_remedy_only_when_it_helps() {
+        let mut ctx = live_ctx();
+        let roomy = Tuning {
+            max_items: 12,
+            ..Default::default()
+        };
+        // No reading (sensor unreadable) → silence, not a phantom warning.
+        ctx.metrics.disk_usage_pct = None;
+        assert!(find(&decide(&ctx, &roomy), "system.disk_full").is_none());
+        // Healthy disk → silence.
+        ctx.metrics.disk_usage_pct = Some(72.0);
+        assert!(find(&decide(&ctx, &roomy), "system.disk_full").is_none());
+        // Nearly full but the trash is empty: warn, but never offer to
+        // empty nothing.
+        ctx.metrics.disk_usage_pct = Some(94.0);
+        ctx.metrics.trash_has_items = false;
+        let opts = decide(&ctx, &roomy);
+        let w = find(&opts, "system.disk_full").expect("disk warning");
+        assert_eq!(w.kind, AffordanceKind::Warning);
+        assert!(!w.action.is_actionable());
+        assert!(w.detail.contains("94"));
+        assert!(find(&opts, "system.empty_trash").is_none());
+        // Trash holds something → the remedy control appears with its tag.
+        ctx.metrics.trash_has_items = true;
+        let opts = decide(&ctx, &roomy);
+        let t = find(&opts, "system.empty_trash").expect("empty-trash control");
+        assert_eq!(t.kind, AffordanceKind::Control);
+        assert_eq!(t.action, AffordanceAction::Daemon("empty_trash".into()));
     }
 }

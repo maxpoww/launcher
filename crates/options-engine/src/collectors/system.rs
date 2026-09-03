@@ -65,6 +65,8 @@ impl Collector for SystemCollector {
                     is_camera_active: camera_in_use(),
                     is_network_down: network_down(),
                     is_recording: recorder_running(),
+                    disk_usage_pct: home_disk_usage_pct(),
+                    trash_has_items: trash_has_items(),
                 };
                 if tx
                     .send(Update::Delta(
@@ -201,6 +203,50 @@ fn has_backlight() -> bool {
         .unwrap_or(false)
 }
 
+/// Used percent of the filesystem holding `$HOME` (statvfs; `None` when
+/// unreadable). df's arithmetic — used vs used+available from the
+/// unprivileged view — so the number matches what `df -h ~` shows.
+fn home_disk_usage_pct() -> Option<f32> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let c = std::ffi::CString::new(home).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    disk_used_pct(st.f_blocks as u64, st.f_bfree as u64, st.f_bavail as u64)
+}
+
+/// df's percentage: `used / (used + available-to-unprivileged)`. Pure so the
+/// arithmetic (root reserve, degenerate zero-block fs) is testable.
+fn disk_used_pct(blocks: u64, bfree: u64, bavail: u64) -> Option<f32> {
+    let used = blocks.checked_sub(bfree)?;
+    let denom = used + bavail;
+    if denom == 0 {
+        return None;
+    }
+    Some(used as f32 / denom as f32 * 100.0)
+}
+
+/// Whether the XDG trash has anything in it (`Trash/files` non-empty).
+/// Missing/unreadable dirs read as empty — never offer to empty nothing.
+fn trash_has_items() -> bool {
+    let data = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        });
+    let Some(dir) = data.map(|d| d.join("Trash/files")) else {
+        return false;
+    };
+    std::fs::read_dir(dir)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false)
+}
+
 /// Whether any process has a `/dev/video*` device open — a live camera, almost
 /// always a video call. Scans the readable `/proc/<pid>/fd/*` symlinks (own
 /// processes; camera apps run as the user, so their fds are visible). Bounded
@@ -319,5 +365,20 @@ mod tests {
         assert!(!charging_from_status("Full"));
         assert!(!charging_from_status("Discharging"));
         assert!(!charging_from_status("Unknown"));
+    }
+
+    #[test]
+    fn disk_pct_matches_df_and_survives_degenerates() {
+        // df's arithmetic: 80 used of 80+20 available → 80%. The root
+        // reserve (bfree > bavail) inflates the pct exactly like df does.
+        assert_eq!(disk_used_pct(100, 20, 20), Some(80.0));
+        let reserved = disk_used_pct(100, 25, 20).unwrap(); // 5% root reserve
+        assert!((reserved - 75.0 / 95.0 * 100.0).abs() < 0.01);
+        // Degenerates: an empty fs, and bfree > blocks (torn read) → None,
+        // never a panic or a phantom 100%.
+        assert_eq!(disk_used_pct(0, 0, 0), None);
+        assert_eq!(disk_used_pct(10, 20, 0), None);
+        // Completely full reads 100.
+        assert_eq!(disk_used_pct(100, 0, 0), Some(100.0));
     }
 }

@@ -139,6 +139,8 @@ const GLYPH_UNDO: &str = "\u{f0e2}"; // fa-undo (creative undo)
 const GLYPH_DEFINE: &str = "\u{f02d}"; // fa-book (define a copied word)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
 const GLYPH_MUSIC: &str = "\u{f001}"; // fa-music (open the media box)
+const GLYPH_TRASH: &str = "\u{f014}"; // fa-trash-o (empty the trash)
+const GLYPH_DISK: &str = "\u{f0a0}"; // fa-hdd-o (disk almost full)
 /// Amber wash for a privacy/safety WARNING pill, so it reads as "heads up",
 /// not a button.
 const WARN_COLOR: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
@@ -152,7 +154,11 @@ pub(crate) fn is_surfaced_affordance(a: &options_engine::Affordance) -> bool {
         || (a.kind == options_engine::AffordanceKind::Warning
             && matches!(
                 a.id,
-                "camera.live" | "audio.mic_live" | "compositor.screencasting" | "network.down"
+                "camera.live"
+                    | "audio.mic_live"
+                    | "compositor.screencasting"
+                    | "network.down"
+                    | "system.disk_full"
             ))
 }
 
@@ -205,6 +211,8 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "editor.build" => GLYPH_TERMINAL,
         "editor.format" => GLYPH_FORMAT,
         "network.down" | "network.settings" => GLYPH_WIFI,
+        "system.disk_full" => GLYPH_DISK,
+        "system.empty_trash" => GLYPH_TRASH,
         "window.record" => GLYPH_RECORD,
         "window.record_stop" => GLYPH_STOP,
         "files.open_here" | "editor.open_folder" | "selection.multi_path" => GLYPH_OPEN_FILE,
@@ -704,6 +712,7 @@ pub(crate) fn daemon_tag_known(tag: &str) -> bool {
             | "page_next"
             | "page_prev"
             | "undo"
+            | "empty_trash"
     ) || tag.starts_with("define:")
         || tag.starts_with("pkgsearch:")
 }
@@ -2087,6 +2096,15 @@ impl App {
                 // Undo in the focused creative app — Ctrl+Z is the one chord
                 // that is universal across the image/video editors.
                 "undo" => crate::hypr::send_shortcut_active("CTRL", "z"),
+                // Empty the FreeDesktop trash (the disk-almost-full remedy),
+                // then refilter so an open Recycle Bin view empties too.
+                "empty_trash" => {
+                    match crate::trash::Trash::home().empty() {
+                        Ok(()) => info!("options: emptied the trash"),
+                        Err(e) => warn!("options: emptying the trash failed: {e}"),
+                    }
+                    self.refilter();
+                }
                 // "define:<word>" — open the clipboard box's dictionary panel
                 // pre-filled with a copied word (the selection module's
                 // "Define word" pill).
@@ -2297,6 +2315,11 @@ mod tests {
             ..Default::default()
         };
         scenarios.push(word);
+        // A nearly-full home disk with trash to reclaim → empty_trash.
+        let mut full_disk = live("foot");
+        full_disk.metrics.disk_usage_pct = Some(95.0);
+        full_disk.metrics.trash_has_items = true;
+        scenarios.push(full_disk);
 
         let mut emitted: std::collections::BTreeSet<String> = Default::default();
         for ctx in &scenarios {
@@ -2326,6 +2349,7 @@ mod tests {
             "undo",
             "pkgsearch:cowsay",
             "define:serendipity",
+            "empty_trash",
         ] {
             assert!(
                 emitted.contains(expected),
