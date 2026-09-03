@@ -39,6 +39,19 @@ const BEAT_PERIOD: Duration = Duration::from_millis(2000);
 const AWARE_SECS: u64 = 5;
 /// A snapshot gap this large means the machine was asleep.
 const WAKE_GAP: Duration = Duration::from_secs(60);
+/// No AUTOMATIC sleep within this long of the daemon starting. Shipped without
+/// it, the very first snapshot on a drained (or lying — old Acers chronically
+/// report "discharging 0%" on AC) battery suspended the machine seconds after
+/// the cursor appeared, on every boot, wake after wake: to the person standing
+/// there the ISO simply "doesn't boot" (2026-09-03, the Air AND the Acer, the
+/// same night). A machine that just booted has a person at it trying to use
+/// it; "protecting the session" by killing a seconds-old session protects
+/// nothing. All the *warnings* (red bell, beat, notification) still fire
+/// instantly — only the ladder's sleep rungs wait.
+pub(crate) const BOOT_GRACE: Duration = Duration::from_secs(180);
+/// Consecutive Critical snapshots (~3 s apart) required before any auto-sleep:
+/// one flaky ACPI read must never put the machine down.
+pub(crate) const CRITICAL_STREAK: u8 = 3;
 
 /// The battery alarm ladder (order matters: `>=` comparisons).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -77,6 +90,12 @@ impl App {
         };
         let prev = self.battery_alarm;
         self.set_battery_alarm(alarm);
+        // Streak of consecutive Critical readings — the sleep rungs' evidence.
+        self.battery_critical_streak = if alarm == BatteryAlarm::Critical {
+            self.battery_critical_streak.saturating_add(1)
+        } else {
+            0
+        };
 
         // One notification on entering the ladder (not on every state walk).
         if prev == BatteryAlarm::None && alarm >= BatteryAlarm::Low {
@@ -90,6 +109,14 @@ impl App {
         // Re-arm whenever we're out of the critical band.
         if alarm < BatteryAlarm::Critical {
             self.battery_suspend_armed = true;
+            return;
+        }
+        // The sleep rungs need BOTH: a machine that isn't freshly booted, and
+        // a critical reading that has held for several snapshots. The warnings
+        // above already fired either way.
+        if self.battery_started.elapsed() < BOOT_GRACE
+            || self.battery_critical_streak < CRITICAL_STREAK
+        {
             return;
         }
         // Critical. Woken from sleep still critical+unplugged → awareness

@@ -525,6 +525,8 @@ fn main() -> anyhow::Result<()> {
         battery_suspend_armed: true,
         battery_aware_until: None,
         battery_last_snapshot: None,
+        battery_started: Instant::now(),
+        battery_critical_streak: 0,
         restore_workspace: None,
         close_site: None,
         hover: None,
@@ -1260,6 +1262,11 @@ pub struct App {
     battery_suspend_armed: bool,
     battery_aware_until: Option<Instant>,
     battery_last_snapshot: Option<Instant>,
+    /// When the daemon started — the auto-sleep boot grace runs from here.
+    battery_started: Instant,
+    /// Consecutive snapshots at Critical — one flaky ACPI read must not
+    /// sleep the machine (see `battery::CRITICAL_STREAK`).
+    battery_critical_streak: u8,
     /// Workspace the user was on when the keyboard grab began, paired with
     /// [`Self::restore_window`] — so a close can tell "still where they
     /// opened us" from "travelled while we were open" (rofi behavior).
