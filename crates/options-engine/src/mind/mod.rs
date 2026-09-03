@@ -70,11 +70,29 @@ impl Mind {
                     let temporal = session.observe(&ctx, now);
                     settle.apply(decide_with(&ctx, &temporal, &tuning), now)
                 };
+                // If an offer is still waiting out its settle dwell, arm a
+                // wake for the moment it earns its pill: the loop is otherwise
+                // purely change-driven, and a context that goes quiet right
+                // after an offer arrives would leave it hidden until some
+                // unrelated event re-ran the decision.
+                let deadline = settle.next_deadline(Instant::now());
                 if tx.send(options).is_err() {
                     break; // no subscribers and receiver dropped
                 }
-                if ctx_rx.changed().await.is_err() {
-                    break; // engine gone
+                match deadline {
+                    Some(d) => tokio::select! {
+                        changed = ctx_rx.changed() => {
+                            if changed.is_err() {
+                                break; // engine gone
+                            }
+                        }
+                        () = tokio::time::sleep_until(d.into()) => {}
+                    },
+                    None => {
+                        if ctx_rx.changed().await.is_err() {
+                            break; // engine gone
+                        }
+                    }
                 }
             }
         });

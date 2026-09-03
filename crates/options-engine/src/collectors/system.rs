@@ -178,7 +178,12 @@ fn recorder_running() -> bool {
         return false;
     };
     for p in procs.flatten() {
-        if !p.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+        if !p
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
             continue;
         }
         if let Ok(comm) = std::fs::read_to_string(p.path().join("comm")) {

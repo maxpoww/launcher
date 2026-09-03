@@ -3391,6 +3391,83 @@ mod tests {
         }
     }
 
+    /// A bare affordance for exercising [`cap_bystander_modules`] directly.
+    fn bare(id: &'static str, kind: AffordanceKind, relevance: f32) -> Affordance {
+        Affordance {
+            id,
+            kind,
+            title: id.into(),
+            detail: String::new(),
+            relevance,
+            reason: "test",
+            source: Layer::Compositor,
+            action: AffordanceAction::None,
+        }
+    }
+
+    /// The bystander cap against a mixed warning/control set, at every
+    /// activity: the module that IS the moment keeps its whole cluster, every
+    /// other module keeps its best two controls, and warnings/info are never
+    /// counted against anyone.
+    #[test]
+    fn bystander_cap_mixed_sets_at_every_activity() {
+        // Ranked highest-first, as `decide_with` sorts before capping.
+        let mixed = || {
+            vec![
+                bare("compositor.camera", AffordanceKind::Warning, 0.95),
+                bare("git.commit", AffordanceKind::Control, 0.9),
+                bare("git.push", AffordanceKind::Control, 0.8),
+                bare("git.pull", AffordanceKind::Control, 0.7),
+                bare("git.diff", AffordanceKind::Control, 0.6),
+                bare("media.playpause", AffordanceKind::Control, 0.5),
+                bare("session.long_coding", AffordanceKind::Info, 0.4),
+            ]
+        };
+        let cases: &[(Activity, bool, usize, usize)] = &[
+            // (activity, media_fg, git controls kept, media controls kept)
+            (Activity::Coding, false, 4, 1), // git is the moment; media a bystander
+            (Activity::Terminal, false, 2, 1),
+            (Activity::Browsing, false, 2, 1),
+            (Activity::Reading, false, 2, 1),
+            (Activity::Communication, false, 2, 1),
+            (Activity::Media, false, 2, 1), // media primary keeps its (one) control
+            // Foreground media takes the bar even while the activity is Coding.
+            (Activity::Coding, true, 2, 1),
+        ];
+        for &(activity, media_fg, git_kept, media_kept) in cases {
+            let mut items = mixed();
+            cap_bystander_modules(&mut items, activity, media_fg);
+            let count = |m: &str| {
+                items
+                    .iter()
+                    .filter(|a| a.id.starts_with(m) && a.kind == AffordanceKind::Control)
+                    .count()
+            };
+            assert_eq!(count("git."), git_kept, "{activity:?} media_fg={media_fg}");
+            assert_eq!(count("media."), media_kept, "{activity:?}");
+            // The warning and the info ride along untouched, uncounted.
+            assert!(items.iter().any(|a| a.id == "compositor.camera"));
+            assert!(items.iter().any(|a| a.id == "session.long_coding"));
+            // A capped module keeps its BEST controls: ranked order in, the
+            // survivors are the head of the module's ranking.
+            if git_kept == 2 {
+                let gits: Vec<_> = items
+                    .iter()
+                    .filter(|a| a.id.starts_with("git."))
+                    .map(|a| a.id)
+                    .collect();
+                assert_eq!(gits, ["git.commit", "git.push"], "{activity:?}");
+            }
+        }
+        // Idle/Unknown: nothing is primary, so nothing is a bystander — the
+        // cap must not drop a single item.
+        for activity in [Activity::Idle, Activity::Unknown] {
+            let mut items = mixed();
+            cap_bystander_modules(&mut items, activity, false);
+            assert_eq!(items.len(), mixed().len(), "{activity:?} caps nothing");
+        }
+    }
+
     #[test]
     fn high_cpu_offers_a_monitor_control() {
         let mut ctx = live_ctx();

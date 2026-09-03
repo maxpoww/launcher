@@ -98,7 +98,11 @@ fn newest_recent(dir: &std::path::Path) -> Option<PathBuf> {
             continue;
         }
         let Ok(mtime) = meta.modified() else { continue };
-        if now.duration_since(mtime).map(|d| d > RECENT).unwrap_or(true) {
+        if now
+            .duration_since(mtime)
+            .map(|d| d > RECENT)
+            .unwrap_or(true)
+        {
             continue; // too old (or clock skew)
         }
         if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {

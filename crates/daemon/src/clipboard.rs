@@ -1909,7 +1909,11 @@ impl App {
         // Wrap to the shared column width (so line breaks match `row_height_of`),
         // but mask each label to the actual gap before the trailing time.
         let max_w = (text_right - tx).max(0.0);
-        let lines = clip_row_lines(entry, clip_text_col_w(!matches!(tile, ClipTile::None), s), s);
+        let lines = clip_row_lines(
+            entry,
+            clip_text_col_w(!matches!(tile, ClipTile::None), s),
+            s,
+        );
         let line_px = LINE_PX * s;
         let text_top = rr.y + (rr.h - lines.len() as f32 * line_px) / 2.0;
         for (i, line) in lines.into_iter().enumerate() {
@@ -4027,7 +4031,10 @@ mod tests {
         // clip_text_col_w scales linearly (so the wrap column matches the box).
         let full = clip_text_col_w(false, 1.0);
         let half = clip_text_col_w(false, 0.5);
-        assert!((half - full * 0.5).abs() < 0.01, "col width scales linearly");
+        assert!(
+            (half - full * 0.5).abs() < 0.01,
+            "col width scales linearly"
+        );
         // The desync-free invariant: wrap_text is linear in font_px, so wrapping
         // at (width·s, font·s) yields the SAME number of lines as at (width, font)
         // for any s>0. Verify across a long entry and several scales.
@@ -4043,13 +4050,19 @@ mod tests {
         // Row height scales the same factor its content does (no drift).
         let h1 = row_height_of(&e, 1.0);
         let hs = row_height_of(&e, 0.5);
-        assert!((hs - h1 * 0.5).abs() < 0.01, "row height scales with the box");
+        assert!(
+            (hs - h1 * 0.5).abs() < 0.01,
+            "row height scales with the box"
+        );
         // Unity is a strict no-op vs the pre-scale formula.
         let has_tile = false;
         let expect_h1 = clip_row_lines(&e, clip_text_col_w(has_tile, 1.0), 1.0).len() as f32
             * LINE_PX
             + 2.0 * ROW_PAD_Y;
-        assert!((h1 - expect_h1).abs() < 0.01, "scale 1.0 == original formula");
+        assert!(
+            (h1 - expect_h1).abs() < 0.01,
+            "scale 1.0 == original formula"
+        );
     }
 
     #[test]

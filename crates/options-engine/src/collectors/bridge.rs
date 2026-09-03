@@ -254,15 +254,15 @@ mod tests {
         // The exact call handle_conn makes on every line. Each of these must
         // return Err (logged + ignored), never panic the collector/daemon.
         for bad in [
-            "",                                  // empty line
-            "   ",                               // whitespace
-            "not json at all",                   // garbage
-            "{",                                 // truncated
-            r#"{"kind":"telepathy"}"#,           // unknown kind
-            r#"{"last_cmd":"ls"}"#,              // missing the tag
+            "",                                       // empty line
+            "   ",                                    // whitespace
+            "not json at all",                        // garbage
+            "{",                                      // truncated
+            r#"{"kind":"telepathy"}"#,                // unknown kind
+            r#"{"last_cmd":"ls"}"#,                   // missing the tag
             r#"{"kind":"shell","exit_code":"nope"}"#, // wrong field type
-            r#"[1,2,3]"#,                        // wrong shape
-            "\u{FFFD}\u{FFFD}",                   // lossy garbage
+            r#"[1,2,3]"#,                             // wrong shape
+            "\u{FFFD}\u{FFFD}",                       // lossy garbage
         ] {
             assert!(
                 serde_json::from_str::<BridgeMsg>(bad).is_err(),

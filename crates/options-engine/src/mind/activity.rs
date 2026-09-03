@@ -121,11 +121,22 @@ fn title_looks_like_docs(title: &str) -> bool {
 /// user did not ask for, while the cost of a false Terminal is one extra
 /// keystroke to run git yourself.
 fn looks_like_dev_work(last_cmd: &str) -> bool {
-    // The command word, after any leading env assignments (FOO=1 cargo …) and
-    // a `sudo`/`doas` prefix; a path (…/bin/cargo) reduces to its file name.
+    // The command word, after any leading env assignments (FOO=1 cargo …),
+    // wrapper prefixes (`sudo`/`doas`/`env`/`nice`/`time`/`command`/`exec`)
+    // AND those wrappers' own flags with their bare-number values
+    // (`nice -n 10 make`, `env -i cargo`) — a flag or a number is never the
+    // command. A path (…/bin/cargo) reduces to its file name.
     let word = last_cmd
         .split_whitespace()
-        .find(|w| !w.contains('=') && !matches!(*w, "sudo" | "doas" | "env" | "nice" | "time"))
+        .find(|w| {
+            !w.contains('=')
+                && !w.starts_with('-')
+                && !w.chars().all(|c| c.is_ascii_digit())
+                && !matches!(
+                    *w,
+                    "sudo" | "doas" | "env" | "nice" | "time" | "command" | "exec"
+                )
+        })
         .unwrap_or("")
         .rsplit('/')
         .next()
@@ -329,6 +340,40 @@ mod tests {
         ctx.app_internal.shell_last_cmd = None;
         ctx.app_internal.editor_file = Some("/home/max/x.rs".into());
         assert_eq!(infer_activity(&ctx), Activity::Coding);
+    }
+
+    /// The dev-work matcher's edge cases: paths, env prefixes, wrapper chains
+    /// (with their flags), and the exact-word rule that keeps lookalikes out.
+    #[test]
+    fn dev_work_matcher_edge_cases() {
+        // A path reduces to its file name.
+        assert!(looks_like_dev_work("/usr/bin/git status"));
+        assert!(looks_like_dev_work(
+            "/run/current-system/sw/bin/cargo build"
+        ));
+        // Env assignments and wrapper prefixes are skipped — including chains,
+        // and including the wrappers' own flags (a flag is never the command).
+        assert!(looks_like_dev_work("FOO=1 BAR=2 cargo build"));
+        assert!(looks_like_dev_work("sudo env RUST_LOG=debug nix build"));
+        assert!(looks_like_dev_work("nice -n 10 make -j8"));
+        assert!(looks_like_dev_work("time -v cargo test"));
+        assert!(looks_like_dev_work("command git push"));
+        assert!(looks_like_dev_work("exec nvim ."));
+        // Exact word match: no substring creep in either direction.
+        assert!(!looks_like_dev_work("gitk"));
+        assert!(
+            !looks_like_dev_work("./git-hooks.sh"),
+            "a path that merely contains a tool name is not the tool"
+        );
+        // A non-dev command stays non-dev under any wrapper.
+        assert!(!looks_like_dev_work("sudo btop"));
+        assert!(!looks_like_dev_work("nice -n 5 htop"));
+        // Degenerate inputs match nothing and never panic.
+        assert!(!looks_like_dev_work(""));
+        assert!(!looks_like_dev_work("   "));
+        assert!(!looks_like_dev_work("sudo"));
+        assert!(!looks_like_dev_work("FOO=1"));
+        assert!(!looks_like_dev_work("--help"));
     }
 
     #[test]
