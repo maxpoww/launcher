@@ -1010,3 +1010,42 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_bands_page_and_overshoot_still_counts() {
+        // Surface spanning 100..500 (w=400): band = 56 px each side.
+        assert_eq!(edge_page_dir(100.0, 400.0, 120.0), -1); // in left band
+        assert_eq!(edge_page_dir(100.0, 400.0, 300.0), 0); // centre
+        assert_eq!(edge_page_dir(100.0, 400.0, 480.0), 1); // in right band
+                                                           // Mid-drag overshoot past the surface still pages (forgiving bands).
+        assert_eq!(edge_page_dir(100.0, 400.0, -50.0), -1);
+        assert_eq!(edge_page_dir(100.0, 400.0, 900.0), 1);
+    }
+
+    #[test]
+    fn edge_dwell_arms_fires_on_cooldown_and_disarms() {
+        let mut timer = None;
+        // Entering the band arms but does NOT page immediately — a drag
+        // passing through the band must not flip pages on the way.
+        assert!(!edge_page_due(&mut timer, 1));
+        assert!(timer.is_some());
+        // Held but before the cooldown: no fire.
+        assert!(!edge_page_due(&mut timer, 1));
+        // Simulate the dwell elapsing.
+        timer = Some(Instant::now() - DRAG_PAGE_COOLDOWN);
+        assert!(edge_page_due(&mut timer, 1), "fires after a full dwell");
+        // ...and immediately re-arms for the next interval.
+        assert!(!edge_page_due(&mut timer, 1));
+        // Leaving the band disarms: the next entry starts a fresh dwell.
+        assert!(!edge_page_due(&mut timer, 0));
+        assert!(timer.is_none());
+        timer = Some(Instant::now() - DRAG_PAGE_COOLDOWN);
+        // Direction changes don't leak the old dwell either — the timer is
+        // per-hold, not per-direction, so a flip fires on the elapsed clock.
+        assert!(edge_page_due(&mut timer, -1));
+    }
+}
