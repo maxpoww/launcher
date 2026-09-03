@@ -191,6 +191,39 @@ impl FromStr for Command {
     }
 }
 
+/// Every verb, for the CLI's usage text — one entry per [`Command`] variant,
+/// payload verbs shown with their argument. The client renders its usage from
+/// this table, so it can never again fall out of date the way the hand-written
+/// string did (found live 2026-09-02: it stopped at `debug-dict`, hiding
+/// `debug-options`/`options-trigger`/… from anyone at the prompt). The proto
+/// tests walk this table against the parser AND walk every variant against
+/// this table, so a new `Command` that misses it fails the build's tests.
+pub const USAGE_VERBS: &[&str] = &[
+    "toggle",
+    "show",
+    "hide",
+    "expand",
+    "collapse",
+    "debug-clip",
+    "debug-clip-detail",
+    "debug-notif",
+    "debug-dict",
+    "debug-options",
+    "debug-media-box",
+    "debug-hover-option",
+    "options-trigger <id>",
+    "overview-on",
+    "overview-off",
+    "resize-drag-on",
+    "resize-drag-off",
+    "interacted",
+    "focus-next",
+    "focus-other",
+    "pseudo-toggle",
+    "overview-hover [title]",
+    "overview-resize [WxH]",
+];
+
 /// A response sent from the daemon back to the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
@@ -249,9 +282,39 @@ fn uid_fallback() -> u32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn command_roundtrip() {
-        for cmd in [
+    /// One instance of EVERY command variant. The inner match is the
+    /// exhaustiveness tripwire: adding a `Command` variant breaks this
+    /// function's compile until it is added here (and thus to the round-trip
+    /// and usage-coverage tests below).
+    fn all_commands() -> Vec<Command> {
+        fn _exhaustive(c: &Command) {
+            match c {
+                Command::Toggle
+                | Command::Show
+                | Command::Hide
+                | Command::Expand
+                | Command::Collapse
+                | Command::DebugClip
+                | Command::DebugClipDetail
+                | Command::DebugNotif
+                | Command::DebugDict
+                | Command::DebugOptions
+                | Command::DebugMediaBox
+                | Command::DebugHoverOption
+                | Command::OptionsTrigger(_)
+                | Command::OverviewOn
+                | Command::OverviewOff
+                | Command::ResizeDragOn
+                | Command::ResizeDragOff
+                | Command::Interacted
+                | Command::FocusNext
+                | Command::FocusOther
+                | Command::PseudoToggle
+                | Command::OverviewHover(_)
+                | Command::OverviewResize(_) => (),
+            }
+        }
+        vec![
             Command::Toggle,
             Command::Show,
             Command::Hide,
@@ -262,10 +325,56 @@ mod tests {
             Command::DebugNotif,
             Command::DebugDict,
             Command::DebugOptions,
+            Command::DebugMediaBox,
+            Command::DebugHoverOption,
+            Command::OptionsTrigger("media.playpause".into()),
             Command::OverviewOn,
             Command::OverviewOff,
-        ] {
-            assert_eq!(cmd.to_string().parse::<Command>().unwrap(), cmd);
+            Command::ResizeDragOn,
+            Command::ResizeDragOff,
+            Command::Interacted,
+            Command::FocusNext,
+            Command::FocusOther,
+            Command::PseudoToggle,
+            Command::OverviewHover("A Window Title".into()),
+            Command::OverviewResize("1240x1000".into()),
+        ]
+    }
+
+    /// Display ↔ FromStr round-trips over every variant, payloads included.
+    #[test]
+    fn command_roundtrip() {
+        for cmd in all_commands() {
+            assert_eq!(cmd.to_string().parse::<Command>().unwrap(), cmd, "{cmd}");
+        }
+    }
+
+    /// The usage table and the parser cover each other exactly: every table
+    /// entry parses (payload verbs with a dummy payload), and every variant's
+    /// verb appears in the table — so the CLI's help can never go stale again.
+    #[test]
+    fn usage_table_and_parser_cover_each_other() {
+        for entry in USAGE_VERBS {
+            let verb = entry.split_whitespace().next().unwrap();
+            let line = if entry.contains(' ') {
+                format!("{verb} x")
+            } else {
+                verb.to_owned()
+            };
+            assert!(
+                line.parse::<Command>().is_ok(),
+                "usage entry {entry:?} does not parse"
+            );
+        }
+        for cmd in all_commands() {
+            let s = cmd.to_string();
+            let verb = s.split_whitespace().next().unwrap();
+            assert!(
+                USAGE_VERBS
+                    .iter()
+                    .any(|e| e.split_whitespace().next() == Some(verb)),
+                "verb {verb:?} missing from USAGE_VERBS"
+            );
         }
     }
 

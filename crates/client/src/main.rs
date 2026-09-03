@@ -12,8 +12,15 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use waverunner_proto::{Command, Response};
 
-const USAGE: &str =
-    "usage: waverunner-ctl [--time] <toggle|show|hide|expand|collapse|debug-clip|debug-clip-detail|debug-notif|debug-dict>";
+/// Usage text generated from the proto's own verb table
+/// ([`waverunner_proto::USAGE_VERBS`]) — the hand-written string it replaces
+/// had silently stopped at `debug-dict` while the protocol kept growing.
+fn usage() -> String {
+    format!(
+        "usage: waverunner-ctl [--time] <command>\ncommands:\n  {}",
+        waverunner_proto::USAGE_VERBS.join("\n  ")
+    )
+}
 
 fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -22,10 +29,13 @@ fn main() -> anyhow::Result<()> {
         .position(|a| a == "--time")
         .map(|i| args.remove(i))
         .is_some();
-    let [cmd] = args.as_slice() else {
-        bail!("{USAGE}");
-    };
-    let cmd: Command = cmd.parse().context(USAGE)?;
+    if args.is_empty() {
+        bail!("{}", usage());
+    }
+    // Payload verbs arrive as separate argv elements from a shell
+    // (`waverunner-ctl options-trigger media.playpause`); the wire format is
+    // one space-joined line either way, so join rather than demand quoting.
+    let cmd: Command = args.join(" ").parse().with_context(usage)?;
 
     let path = waverunner_proto::socket_path();
     // The daemon handles the command — including rendering and committing
