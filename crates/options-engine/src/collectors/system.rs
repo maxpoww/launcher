@@ -67,7 +67,18 @@ impl Collector for SystemCollector {
                     is_recording: recorder_running(),
                     disk_usage_pct: home_disk_usage_pct(),
                     trash_has_items: trash_has_items(),
-                    trash_bytes: trash_bytes(),
+                    trash_bytes: 0, // filled below only when it matters
+                };
+                // The bounded trash sweep (up to ~2000 stats) is only worth
+                // its cost when the disk provider would actually use it —
+                // at/near the almost-full threshold. A healthy disk polls
+                // only the O(1) sensors every 3 s.
+                let metrics = SystemMetrics {
+                    trash_bytes: match metrics.disk_usage_pct {
+                        Some(pct) if pct >= 89.0 && metrics.trash_has_items => trash_bytes(),
+                        _ => 0,
+                    },
+                    ..metrics
                 };
                 if tx
                     .send(Update::Delta(
