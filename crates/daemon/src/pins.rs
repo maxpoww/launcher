@@ -90,3 +90,67 @@ fn strings_from_array(arr: &[serde_json::Value]) -> Vec<String> {
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db(pins: &[&str]) -> PinDb {
+        PinDb {
+            pins: pins.iter().map(|s| s.to_string()).collect(),
+            path: std::env::temp_dir().join("waverunner-test-pins.json"),
+        }
+    }
+
+    #[test]
+    fn parses_current_and_legacy_shapes() {
+        // Current object form.
+        assert_eq!(
+            parse_file(r#"{ "pins": ["a", "b"] }"#),
+            Some(vec!["a".into(), "b".into()])
+        );
+        // Legacy bare array.
+        assert_eq!(parse_file(r#"["a"]"#), Some(vec!["a".into()]));
+        // Older object with an excluded list: pins kept, excluded ignored.
+        assert_eq!(
+            parse_file(r#"{ "pins": ["a"], "excluded": ["x"] }"#),
+            Some(vec!["a".into()])
+        );
+        // An object without pins is an empty dock, not an error.
+        assert_eq!(parse_file(r#"{ "excluded": ["x"] }"#), Some(vec![]));
+    }
+
+    #[test]
+    fn corrupted_files_never_panic_and_never_invent_pins() {
+        assert_eq!(parse_file("not json"), None);
+        assert_eq!(parse_file(r#""just a string""#), None);
+        assert_eq!(parse_file("42"), None);
+        // Non-string entries are dropped, the rest survive.
+        assert_eq!(
+            parse_file(r#"["a", 7, null, "b"]"#),
+            Some(vec!["a".into(), "b".into()])
+        );
+    }
+
+    #[test]
+    fn pin_at_moves_and_clamps() {
+        let mut d = db(&["a", "b", "c"]);
+        // Re-pinning an existing app MOVES it (no duplicate).
+        d.pin_at("a", 2);
+        assert_eq!(d.pins(), ["b", "c", "a"]);
+        // A slot past the end clamps to the end instead of panicking.
+        d.pin_at("new", 99);
+        assert_eq!(d.pins(), ["b", "c", "a", "new"]);
+    }
+
+    #[test]
+    fn unpin_removes_and_missing_is_a_noop() {
+        let mut d = db(&["a", "b"]);
+        d.unpin("a");
+        assert_eq!(d.pins(), ["b"]);
+        d.unpin("ghost");
+        assert_eq!(d.pins(), ["b"]);
+        assert!(!d.is_pinned("a"));
+        assert!(d.is_pinned("b"));
+    }
+}

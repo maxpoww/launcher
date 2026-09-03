@@ -36,3 +36,23 @@ impl UsageDb {
         self.counts.get(app_id).copied().unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_accumulate_and_unknown_is_zero() {
+        let mut db = UsageDb {
+            counts: HashMap::new(),
+            path: std::env::temp_dir().join("waverunner-test-usage.json"),
+        };
+        assert_eq!(db.count("firefox"), 0);
+        db.increment("firefox");
+        db.increment("firefox");
+        db.increment("foot");
+        assert_eq!(db.count("firefox"), 2);
+        assert_eq!(db.count("foot"), 1);
+        assert_eq!(db.count("never-launched"), 0);
+    }
+}
