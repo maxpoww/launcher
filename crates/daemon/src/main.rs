@@ -1632,6 +1632,26 @@ impl App {
         (dock, full)
     }
 
+    /// Re-derive the surface size and animation extents from the CURRENT
+    /// icon_scale. Needed in two situations: an icon_size change (user
+    /// resize), and the output's logical size becoming known/changing. The
+    /// second was missing: the slide's open extent was baked at startup from
+    /// the pre-output scale, so on a small panel the card opened too TALL —
+    /// dock row riding the stale card top, grid at the scaled content top,
+    /// and a void between them on EVERY boot, self-healing only when a manual
+    /// resize happened to run this refresh (the Acer, 2026-09-03: "a gap on
+    /// top of the app grid ... goes away after resizing").
+    fn refresh_scaled_geometry(&mut self) {
+        let (dock_extent, full_extent) = self.scaled_extents();
+        if (self.ui.extent_of(Target::Open) - full_extent).abs() < 0.5 {
+            return; // scale unchanged — don't churn the surface
+        }
+        self.ui.set_extents(dock_extent, full_extent);
+        let (w, h) = self.scaled_surface_size();
+        self.layer.set_size(w, h);
+        self.layer.wl_surface().commit();
+    }
+
     /// Resize the Wayland surface and update animation extents after an icon_size change.
     fn apply_icon_size_change(&mut self) {
         let (dock_extent, full_extent) = self.scaled_extents();
@@ -4519,8 +4539,11 @@ impl OutputHandler for App {
     ) {
         // The topbar's reserved zone was set before outputs were enumerated;
         // now (and on any later change) the output's logical size is known, so
-        // re-reserve at the live small-screen scale.
+        // re-reserve at the live small-screen scale. The launcher card has the
+        // same startup blindness — its open extent was baked pre-output — so
+        // its geometry re-derives here too (see refresh_scaled_geometry).
         self.sync_options_zone();
+        self.refresh_scaled_geometry();
     }
 
     fn update_output(
@@ -4530,6 +4553,7 @@ impl OutputHandler for App {
         _output: wl_output::WlOutput,
     ) {
         self.sync_options_zone();
+        self.refresh_scaled_geometry();
     }
 
     fn output_destroyed(
@@ -4539,6 +4563,7 @@ impl OutputHandler for App {
         _output: wl_output::WlOutput,
     ) {
         self.sync_options_zone();
+        self.refresh_scaled_geometry();
     }
 }
 
