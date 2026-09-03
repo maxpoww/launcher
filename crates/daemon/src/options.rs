@@ -1093,7 +1093,9 @@ impl App {
         let Some(label) = self
             .surfaced_options()
             .get(i as usize)
-            .map(|a| a.title.clone())
+            // Engine titles are user-visible text: translate at display
+            // (English literal = key), like every daemon-side string.
+            .map(|a| crate::i18n::tr_dyn(&a.title).to_owned())
             .filter(|s| !s.trim().is_empty())
         else {
             return;

@@ -46,6 +46,18 @@ pub fn tr(en: &'static str) -> &'static str {
     }
 }
 
+/// [`tr`] for strings that aren't literals in this crate — offer titles
+/// arrive from the options engine as `String`s, and they are user-visible
+/// (the pill tooltips), so they must hit the same table. The English text
+/// is the key exactly as with [`tr`]; a translation (being `'static`)
+/// happily outlives any input lifetime.
+pub fn tr_dyn(en: &str) -> &str {
+    match TABLE.get().and_then(|t| t.get(en)) {
+        Some(s) => s.as_str(),
+        None => en,
+    }
+}
+
 fn load_table() -> HashMap<String, String> {
     // Explicit file override wins (the dictionary's `$WAVERUNNER_DICT` shape).
     if let Ok(path) = std::env::var("WAVERUNNER_I18N") {
@@ -116,6 +128,13 @@ mod tests {
     fn tr_without_init_returns_the_literal() {
         // Tests never call init(); every string must survive untranslated.
         assert_eq!(tr("No results"), "No results");
+    }
+
+    #[test]
+    fn tr_dyn_passes_dynamic_strings_through_untranslated() {
+        // Engine-built titles (Strings, not literals) survive the same way.
+        let title = String::from("Open copied files");
+        assert_eq!(tr_dyn(&title), "Open copied files");
     }
 
     #[test]
