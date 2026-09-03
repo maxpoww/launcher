@@ -274,9 +274,9 @@ pub(crate) const BOX_CORNER_RADIUS: f32 = 24.0;
 /// there are no seams). Alphas stay under the compositor's `ignore_alpha`
 /// blur threshold so the shadow never triggers layer blur.
 pub(crate) const DOCK_SHADOW_BLUR: f32 = 16.0;
-pub(crate) const DOCK_SHADOW_ALPHA_TOP: f32 = 0.16;
-pub(crate) const DOCK_SHADOW_ALPHA_BOTTOM: f32 = 0.62;
-pub(crate) const DOCK_SHADOW_ALPHA_SIDE: f32 = 0.16;
+pub(crate) const DOCK_SHADOW_ALPHA_TOP: f32 = 0.10;
+pub(crate) const DOCK_SHADOW_ALPHA_BOTTOM: f32 = 0.40;
+pub(crate) const DOCK_SHADOW_ALPHA_SIDE: f32 = 0.10;
 /// Dock icons: fastest and bounciest (ζ≈0.3), first to peak, a few
 /// visible sloshes.
 pub(crate) const AGUA_ICONS_K: f32 = 200.0;

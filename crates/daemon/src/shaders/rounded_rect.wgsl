@@ -155,7 +155,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Layer 6 — boundary rim glow: thin bright ring at the SDF card edge.
     // Scaled by `in.glass` so group boxes (0.5) get half the glow of the main card (1.0).
-    let boundary = exp(-d * d * 0.45) * 0.13 * in.glass;
+    let boundary = exp(-d * d * 0.45) * 0.04 * in.glass;
 
     // Layer 8 — iridescent tint on all edges, cursor-driven phase.
     // `in.glass` doubles as an iridescence scale: 1.0 = full (main card),
