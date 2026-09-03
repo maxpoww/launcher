@@ -78,6 +78,8 @@ const PROVIDERS: &[Provider] = &[
     recording_provider,
     browser_provider,
     reading_provider,
+    doc_editor_provider,
+    creative_provider,
     presentation_provider,
     notifications_provider,
 ];
@@ -1279,6 +1281,77 @@ fn browser_provider(ctx: &ContextState) -> Vec<Affordance> {
     ]
 }
 
+/// Word-processor / plain-document window classes (substring, lower-cased) —
+/// apps whose in-document Find is the universal Ctrl+F. Code editors are NOT
+/// here (they are the Coding activity, served by the editor module).
+const DOC_EDITORS: &[&str] = &[
+    "libreoffice",
+    "soffice",
+    "abiword",
+    "gedit",
+    "gnome-text-editor",
+    "kwrite",
+    "onlyoffice",
+    "wps",
+];
+
+/// **text module** (§1.3 document editing) — a focused word processor gets
+/// "Find" (Ctrl+F), the same universal chord and daemon tag as the browser's
+/// live-confirmed find. The richer §1.3 reach-fors (replace, formatting,
+/// word-count) need an app bridge and stay designed-only; Find is the one that
+/// is honest from the window class alone.
+fn doc_editor_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let class = ctx.window.class.to_lowercase();
+    if ctx.window.pid == 0 || !DOC_EDITORS.iter().any(|d| class.contains(d)) {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "text.find",
+        kind: AffordanceKind::Control,
+        title: "Find".into(),
+        detail: String::new(),
+        relevance: 0.46,
+        reason: "find in the document",
+        source: Layer::Compositor,
+        action: AffordanceAction::Daemon("find_in_page".into()),
+    }]
+}
+
+/// Image / video editor window classes (substring, lower-cased) — §1.8/§1.9.
+const CREATIVE_EDITORS: &[&str] = &[
+    "gimp",
+    "krita",
+    "inkscape",
+    "darktable",
+    "kdenlive",
+    "shotcut",
+    "blender",
+];
+
+/// **creative module** (§1.8 image / §1.9 video editing) — the one reach-for
+/// that is universal from the window class alone: Undo (Ctrl+Z), the
+/// mouse-first artist's most-reached key. Redo is deliberately NOT offered —
+/// its chord diverges per app (Ctrl+Y in GIMP, Ctrl+Shift+Z in Krita and
+/// Inkscape), and a control that does the wrong thing in half the apps is
+/// worse than no control. Everything richer (export, crop, brush size) is
+/// in-app state the compositor cannot sense — documented as bridge-gated.
+fn creative_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let class = ctx.window.class.to_lowercase();
+    if ctx.window.pid == 0 || !CREATIVE_EDITORS.iter().any(|c| class.contains(c)) {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "creative.undo",
+        kind: AffordanceKind::Control,
+        title: "Undo".into(),
+        detail: String::new(),
+        relevance: 0.46,
+        reason: "undo the last edit",
+        source: Layer::Compositor,
+        action: AffordanceAction::Daemon("undo".into()),
+    }]
+}
+
 /// Window classes we treat as document/PDF readers (substring, lower-cased).
 const READERS: &[&str] = &[
     "papers",
@@ -1710,7 +1783,7 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
         // metacharacters travel intact. Covers "text/document editing" and
         // "web browsing" from the catalog with a single universal control.
         let query = url_encode_query(text.trim());
-        vec![Affordance {
+        let search = Affordance {
             id: "selection.search",
             kind: AffordanceKind::Control,
             title: "Search the web".into(),
@@ -1719,10 +1792,46 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
             reason: "clipboard holds searchable text",
             source: Layer::Selection,
             action: AffordanceAction::OpenUrl(format!("https://duckduckgo.com/?q={query}")),
-        }]
+        };
+        // A copied SINGLE WORD is also a lookup intent — "what does this
+        // mean?" — served by the offline dictionary panel the clipboard box
+        // already carries (§1.3/§1.11 "define/lookup"). Ranked above the
+        // generic search: for one word, defining is the more likely reach.
+        // Skipped when the selection reads as a git sha (a hex "word" like
+        // `deadbeef` is a commit, and git.show_commit owns that intent).
+        let word = text.trim();
+        if looks_like_word(word) && !s.is_git_sha {
+            vec![
+                Affordance {
+                    id: "selection.define",
+                    kind: AffordanceKind::Control,
+                    title: "Define word".into(),
+                    detail: word.to_string(),
+                    relevance: 0.46,
+                    reason: "clipboard holds a single word",
+                    source: Layer::Selection,
+                    action: AffordanceAction::Daemon(format!("define:{word}")),
+                },
+                search,
+            ]
+        } else {
+            vec![search]
+        }
     } else {
         vec![]
     }
+}
+
+/// Whether the whole trimmed selection is one natural-language word: a single
+/// token of letters (plus the hyphen/apostrophe a headword may carry), sized
+/// like a word rather than an identifier dump. Deliberately strict — the cost
+/// of a false positive is a "Define word" pill for gibberish.
+fn looks_like_word(t: &str) -> bool {
+    let n = t.chars().count();
+    (2..=32).contains(&n)
+        && t.chars().next().is_some_and(char::is_alphabetic)
+        && t.chars()
+            .all(|c| c.is_alphabetic() || matches!(c, '-' | '\''))
 }
 
 /// Heuristic: the whole trimmed selection is a single email address
@@ -3389,6 +3498,108 @@ mod tests {
                 find(&opts, id).unwrap_or_else(|| panic!("privacy warning {id} survives the cap"));
             assert_eq!(a.kind, AffordanceKind::Warning, "{id}");
         }
+    }
+
+    /// §1.3 "define/lookup": a copied single word earns "Define word" (the
+    /// offline dictionary panel), ranked above the generic web search; a
+    /// sentence, an identifier, or a bare commit sha must not.
+    #[test]
+    fn copied_single_word_offers_define_above_search() {
+        let mut ctx = live_ctx();
+        ctx.window.class = "firefox".into();
+        ctx.window.pid = 1;
+        let select = |ctx: &mut ContextState, text: &str, sha: bool| {
+            ctx.selection = TextSelection {
+                highlighted_text: Some(text.into()),
+                char_count: text.chars().count(),
+                is_git_sha: sha,
+                ..Default::default()
+            };
+        };
+        select(&mut ctx, "serendipity", false);
+        let opts = decide(
+            &ctx,
+            &Tuning {
+                max_items: 8,
+                ..Default::default()
+            },
+        );
+        let def = find(&opts, "selection.define").expect("define for a single word");
+        assert_eq!(def.detail, "serendipity");
+        match &def.action {
+            AffordanceAction::Daemon(tag) => assert_eq!(tag, "define:serendipity"),
+            other => panic!("define should be a daemon action, got {other:?}"),
+        }
+        let search = find(&opts, "selection.search").expect("search rides along");
+        assert!(
+            def.relevance > search.relevance,
+            "for one word, defining outranks searching"
+        );
+        // A sentence is a search, not a headword.
+        select(&mut ctx, "how do I exit vim", false);
+        assert!(find(&decide(&ctx, &Tuning::default()), "selection.define").is_none());
+        // Hyphenated/apostrophe headwords still count.
+        select(&mut ctx, "self-taught", false);
+        assert!(find(&decide(&ctx, &Tuning::default()), "selection.define").is_some());
+        // A hex "word" flagged as a git sha belongs to git.show_commit.
+        select(&mut ctx, "deadbeef", true);
+        assert!(find(&decide(&ctx, &Tuning::default()), "selection.define").is_none());
+        // Degenerate: one char, or word-shaped junk with digits.
+        for junk in ["a", "x86asm64", "word9"] {
+            select(&mut ctx, junk, false);
+            assert!(
+                find(&decide(&ctx, &Tuning::default()), "selection.define").is_none(),
+                "{junk:?} is not a headword"
+            );
+        }
+    }
+
+    /// §1.3 document editing: a word processor gets the universal Ctrl+F Find
+    /// (same daemon tag as the browser's); unclassified apps get nothing.
+    #[test]
+    fn word_processor_offers_find() {
+        let mut ctx = live_ctx();
+        ctx.window.pid = 1;
+        for class in ["libreoffice-writer", "AbiWord", "org.gnome.gedit"] {
+            ctx.window.class = class.into();
+            let opts = decide(
+                &ctx,
+                &Tuning {
+                    max_items: 8,
+                    ..Default::default()
+                },
+            );
+            let f = find(&opts, "text.find").unwrap_or_else(|| panic!("find for {class}"));
+            assert_eq!(f.action, AffordanceAction::Daemon("find_in_page".into()));
+        }
+        ctx.window.class = "somerandomapp".into();
+        assert!(find(&decide(&ctx, &Tuning::default()), "text.find").is_none());
+    }
+
+    /// §1.8/§1.9: an image/video editor gets Undo (the one universal chord);
+    /// redo is deliberately absent (its chord diverges per app).
+    #[test]
+    fn creative_editor_offers_undo_only() {
+        let mut ctx = live_ctx();
+        ctx.window.pid = 1;
+        for class in ["Gimp-2.10", "krita", "org.inkscape.Inkscape", "kdenlive"] {
+            ctx.window.class = class.into();
+            let opts = decide(
+                &ctx,
+                &Tuning {
+                    max_items: 8,
+                    ..Default::default()
+                },
+            );
+            let undo = find(&opts, "creative.undo").unwrap_or_else(|| panic!("undo for {class}"));
+            assert_eq!(undo.action, AffordanceAction::Daemon("undo".into()));
+            assert!(
+                opts.items.iter().all(|a| a.id != "creative.redo"),
+                "redo must not be offered"
+            );
+        }
+        ctx.window.class = "firefox".into();
+        assert!(find(&decide(&ctx, &Tuning::default()), "creative.undo").is_none());
     }
 
     /// A bare affordance for exercising [`cap_bystander_modules`] directly.

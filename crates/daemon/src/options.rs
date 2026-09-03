@@ -125,6 +125,8 @@ const GLYPH_STOP: &str = "\u{f04d}"; // fa-stop (stop recording)
 const GLYPH_CAMERA: &str = "\u{f030}"; // fa-camera (camera live)
 const GLYPH_MIC: &str = "\u{f130}"; // fa-microphone (mic live)
 const GLYPH_SCREENCAST: &str = "\u{f108}"; // fa-desktop (screen sharing)
+const GLYPH_UNDO: &str = "\u{f0e2}"; // fa-undo (creative undo)
+const GLYPH_DEFINE: &str = "\u{f02d}"; // fa-book (define a copied word)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
 const GLYPH_MUSIC: &str = "\u{f001}"; // fa-music (open the media box)
 /// Amber wash for a privacy/safety WARNING pill, so it reads as "heads up",
@@ -178,7 +180,10 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "selection.url" => GLYPH_COPY_LINK,
         "selection.open_path" => GLYPH_OPEN_FILE,
         "selection.email" => GLYPH_EMAIL,
-        "selection.search" | "shell.search_error" | "browser.find" | "reading.find" => GLYPH_SEARCH,
+        "selection.search" | "shell.search_error" | "browser.find" | "reading.find"
+        | "text.find" => GLYPH_SEARCH,
+        "selection.define" => GLYPH_DEFINE,
+        "creative.undo" => GLYPH_UNDO,
         "browser.reopen_tab" => GLYPH_RERUN,
         "system.high_cpu" | "system.high_mem" => GLYPH_MONITOR,
         "system.battery_dim" => GLYPH_BRIGHT_DOWN,
@@ -2038,6 +2043,13 @@ impl App {
                 // XKB names: "Next" = PageDown, "Prior" = PageUp.
                 "page_next" => crate::hypr::send_shortcut_active("", "Next"),
                 "page_prev" => crate::hypr::send_shortcut_active("", "Prior"),
+                // Undo in the focused creative app — Ctrl+Z is the one chord
+                // that is universal across the image/video editors.
+                "undo" => crate::hypr::send_shortcut_active("CTRL", "z"),
+                // "define:<word>" — open the clipboard box's dictionary panel
+                // pre-filled with a copied word (the selection module's
+                // "Define word" pill).
+                t if t.starts_with("define:") => self.open_define(&t["define:".len()..]),
                 // "pkgsearch:<name>" — open the launcher's Install search
                 // pre-filled with a package name (a command-not-found remedy).
                 t if t.starts_with("pkgsearch:") => self.pkg_search_for(&t["pkgsearch:".len()..]),

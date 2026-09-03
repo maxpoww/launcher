@@ -2567,6 +2567,23 @@ impl App {
         self.schedule_clip_frame();
     }
 
+    /// Open the dictionary panel pre-filled with `word` — the selection
+    /// module's "Define word" pill. The same sequence as the debug verb:
+    /// expand the clipboard box, open the dict panel (which grabs the keyboard
+    /// so the query can be refined), then seed the query — after `open_dict`,
+    /// which clears it. The lookup itself lowercases and diacritic-folds, so
+    /// the word is seeded verbatim.
+    pub(crate) fn open_define(&mut self, word: &str) {
+        let word = word.trim();
+        if word.is_empty() {
+            return;
+        }
+        self.open_clip_box();
+        self.open_dict();
+        self.clip.dict_query = word.to_owned();
+        self.schedule_clip_frame();
+    }
+
     /// Close the dictionary panel and release the keyboard grab.
     pub(crate) fn close_dict(&mut self) {
         self.clip.dict_open = false;
