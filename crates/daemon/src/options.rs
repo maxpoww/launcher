@@ -686,6 +686,28 @@ pub(crate) fn push_neumorph(scene: &mut Scene, rect: Rect, radius: f32, bright: 
     });
 }
 
+/// Whether a `Daemon(tag)` action is one the dispatch in
+/// `run_affordance_action` actually handles. This is the daemon's half of the
+/// stringly-typed cross-crate tag contract (see the note on
+/// `run_affordance_action`): the engine-emission coverage test asserts every
+/// tag the engine can produce satisfies this, and the dispatch's fallback arm
+/// `debug_assert`s the inverse, so the two lists cannot drift silently.
+pub(crate) fn daemon_tag_known(tag: &str) -> bool {
+    matches!(
+        tag,
+        "toggle_dnd"
+            | "find_in_page"
+            | "reopen_tab"
+            | "slide_next"
+            | "slide_prev"
+            | "present"
+            | "page_next"
+            | "page_prev"
+            | "undo"
+    ) || tag.starts_with("define:")
+        || tag.starts_with("pkgsearch:")
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
@@ -2026,6 +2048,13 @@ impl App {
     /// fully detached (double-fork via [`crate::launch`]); the argv is
     /// shell-quoted per element, so a path or URL with spaces/metacharacters is
     /// safe (the argv itself comes from the engine, never raw user text).
+    ///
+    /// The `Daemon(tag)` vocabulary is stringly-typed across two crates: keep
+    /// the match arms in `run_affordance_action` and [`daemon_tag_known`] in
+    /// lockstep — the `engine_daemon_tags_are_all_dispatchable` test walks the
+    /// ENGINE's actual emissions against `daemon_tag_known`, so a tag added on
+    /// the engine side without a dispatch arm fails the daemon's tests instead
+    /// of shipping a dead pill.
     fn run_affordance_action(&mut self, action: &options_engine::AffordanceAction) {
         use options_engine::AffordanceAction as A;
         match action {
@@ -2063,7 +2092,13 @@ impl App {
                 // "pkgsearch:<name>" — open the launcher's Install search
                 // pre-filled with a package name (a command-not-found remedy).
                 t if t.starts_with("pkgsearch:") => self.pkg_search_for(&t["pkgsearch:".len()..]),
-                other => warn!("options: unknown daemon action '{other}'"),
+                other => {
+                    debug_assert!(
+                        !daemon_tag_known(other),
+                        "daemon_tag_known says '{other}' is handled but no match arm took it"
+                    );
+                    warn!("options: unknown daemon action '{other}'");
+                }
             },
         }
     }
@@ -2196,6 +2231,104 @@ mod tests {
             action_command_line(&AffordanceAction::Spawn { argv: vec![] }),
             None
         );
+    }
+
+    /// The cross-crate tag seam (hardening pass F): every `Daemon(tag)` the
+    /// ENGINE can actually emit must be one this daemon dispatches. The tags
+    /// are stringly-typed across two crates, so a typo (or a new engine tag
+    /// without a dispatch arm) would otherwise ship as a pill that logs a warn
+    /// and does nothing. Each scenario below drives the real `decide` over a
+    /// synthetic context built to fire one tag-emitting provider; the test
+    /// asserts BOTH directions: every emitted tag is known, and every expected
+    /// tag was actually emitted (so a dead scenario can't silently pass).
+    #[test]
+    fn engine_daemon_tags_are_all_dispatchable() {
+        use options_engine::{decide, ContextState, Tuning};
+
+        fn live(class: &str) -> ContextState {
+            let mut ctx = ContextState::default();
+            ctx.health.compositor.alive = true;
+            ctx.health.hardware.alive = true;
+            ctx.health.behavior.alive = true;
+            ctx.health.app_bridge.alive = true;
+            ctx.health.selection.alive = true;
+            ctx.health.system.alive = true;
+            ctx.health.notifications.alive = true;
+            ctx.window.class = class.into();
+            ctx.window.pid = 1;
+            ctx
+        }
+        let roomy = Tuning {
+            max_items: 16,
+            ..Default::default()
+        };
+
+        let mut scenarios: Vec<ContextState> = Vec::new();
+        // Browser → find_in_page + reopen_tab.
+        scenarios.push(live("firefox"));
+        // Reader → page_next/page_prev (and find_in_page again).
+        scenarios.push(live("zathura"));
+        // Word processor → find_in_page via text.find.
+        scenarios.push(live("abiword"));
+        // Creative editor → undo.
+        scenarios.push(live("gimp"));
+        // Slides app windowed → present; fullscreen → slide_next/slide_prev.
+        scenarios.push(live("libreoffice-impress"));
+        let mut presenting = live("libreoffice-impress");
+        presenting.window.is_fullscreen = true;
+        scenarios.push(presenting);
+        // Any fullscreen window → toggle_dnd.
+        let mut fullscreen = live("mpv");
+        fullscreen.window.is_fullscreen = true;
+        scenarios.push(fullscreen);
+        // Command-not-found in a terminal → pkgsearch:<name>.
+        let mut missing = live("foot");
+        missing.app_internal.shell_last_cmd = Some("cowsay hi".into());
+        missing.app_internal.shell_exit_code = Some(127);
+        scenarios.push(missing);
+        // A copied single word → define:<word>.
+        let mut word = live("firefox");
+        word.selection = options_engine::TextSelection {
+            highlighted_text: Some("serendipity".into()),
+            char_count: 11,
+            ..Default::default()
+        };
+        scenarios.push(word);
+
+        let mut emitted: std::collections::BTreeSet<String> = Default::default();
+        for ctx in &scenarios {
+            for a in decide(ctx, &roomy).items {
+                if let AffordanceAction::Daemon(tag) = &a.action {
+                    assert!(
+                        daemon_tag_known(tag),
+                        "engine emits Daemon tag {tag:?} (offer {}) that the daemon does not dispatch",
+                        a.id
+                    );
+                    emitted.insert(tag.clone());
+                }
+            }
+        }
+        // The scenarios must have exercised the WHOLE tag vocabulary — a
+        // scenario that stops firing (provider gating changed) fails here
+        // rather than hollowing the test out.
+        for expected in [
+            "toggle_dnd",
+            "find_in_page",
+            "reopen_tab",
+            "slide_next",
+            "slide_prev",
+            "present",
+            "page_next",
+            "page_prev",
+            "undo",
+            "pkgsearch:cowsay",
+            "define:serendipity",
+        ] {
+            assert!(
+                emitted.contains(expected),
+                "no scenario made the engine emit {expected:?} (emitted: {emitted:?})"
+            );
+        }
     }
 
     #[test]
