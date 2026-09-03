@@ -2451,4 +2451,49 @@ mod tests {
             assert_eq!(hit_test(&l, pos, false, &idslots(7)), None);
         }
     }
+
+    #[test]
+    fn scroll_to_reveal_lands_on_the_cell_s_page_and_clamps() {
+        // Enough entries to guarantee several pages (as scrolled_hit_test
+        // does with 18*3): read cells-per-page from the built section.
+        let cfg = config();
+        let sec = &open_layout(&cfg, 18 * 3, 0.0).sections[SECTION_APPS];
+        let per = sec.cols * sec.rows;
+        assert!(sec.n_pages >= 2, "test needs a multi-page section");
+        // Cell on page 0 → no scroll; a cell on page 1 → one viewport width.
+        assert_eq!(scroll_to_reveal(sec, 0), 0.0);
+        assert!((scroll_to_reveal(sec, per) - sec.viewport.w).abs() < 0.01);
+        // A cell index past the last page clamps to the last page, never
+        // scrolls into empty space beyond the content.
+        let last_page_scroll = (sec.n_pages - 1) as f32 * sec.viewport.w;
+        assert!((scroll_to_reveal(sec, per * 999) - last_page_scroll).abs() < 0.01);
+    }
+
+    #[test]
+    fn open_box_slots_are_a_bijection_each_side() {
+        // Every 3x3 slot maps to a distinct member 0..9, both sides — a
+        // click on any slot resolves to exactly one member, none aliased.
+        for left in [true, false] {
+            let members: std::collections::BTreeSet<usize> =
+                (0..9).map(|s| open_box_slot_member(left, s)).collect();
+            assert_eq!(members, (0..9).collect(), "slots bijection (left={left})");
+        }
+        // Out-of-range slots pass through as identity (defensive, no panic).
+        assert_eq!(open_box_slot_member(true, 42), 42);
+    }
+
+    #[test]
+    fn dock_box_rect_centers_over_the_icon_and_clamps_to_the_surface() {
+        // Icon mid-surface, so the centred box sits well inside the
+        // DRAG_MARGIN_X (=80) clamp band and centring is exact.
+        let icon = Rect::new(480.0, 500.0, 40.0, 40.0); // centre x = 500
+        let r = dock_box_rect(icon, 200.0, 1000.0);
+        assert!((r.x + r.w / 2.0 - 500.0).abs() < 0.01);
+        assert!(r.y + r.h < icon.y, "box floats above the dock icon");
+        // An icon near the right edge clamps the box fully on-surface.
+        let edge = Rect::new(980.0, 500.0, 40.0, 40.0);
+        let r = dock_box_rect(edge, 200.0, 1000.0);
+        assert!(r.x + r.w <= 1000.0 + 0.01, "clamped within the surface");
+        assert!(r.x >= 0.0);
+    }
 }
