@@ -25,7 +25,8 @@ pub enum Activity {
     Reading,
     /// A browser is the focus (general web).
     Browsing,
-    /// Writing code — an editor is focused, or a terminal inside a repository.
+    /// Writing code — an editor is focused, or a terminal where development
+    /// work is actually happening (not merely one sitting in a repo).
     Coding,
     /// A terminal is focused, not clearly a coding session.
     Terminal,
@@ -112,6 +113,69 @@ fn title_looks_like_docs(title: &str) -> bool {
     MARKERS.iter().any(|m| t.contains(m))
 }
 
+/// Whether the last command run in the focused shell is development work — the
+/// evidence that turns a terminal from [`Activity::Terminal`] into
+/// [`Activity::Coding`]. Deliberately a whitelist of tools you *build* with:
+/// anything unrecognised (a monitor, a pager, ssh, cd, ls) leaves the terminal
+/// alone, because the cost of a false Coding is a bar full of git controls the
+/// user did not ask for, while the cost of a false Terminal is one extra
+/// keystroke to run git yourself.
+fn looks_like_dev_work(last_cmd: &str) -> bool {
+    // The command word, after any leading env assignments (FOO=1 cargo …) and
+    // a `sudo`/`doas` prefix; a path (…/bin/cargo) reduces to its file name.
+    let word = last_cmd
+        .split_whitespace()
+        .find(|w| !w.contains('=') && !matches!(*w, "sudo" | "doas" | "env" | "nice" | "time"))
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    const DEV_TOOLS: &[&str] = &[
+        "git",
+        "cargo",
+        "rustc",
+        "make",
+        "cmake",
+        "meson",
+        "ninja",
+        "gcc",
+        "g++",
+        "clang",
+        "go",
+        "zig",
+        "npm",
+        "pnpm",
+        "yarn",
+        "node",
+        "deno",
+        "python",
+        "python3",
+        "pip",
+        "ruby",
+        "gem",
+        "mvn",
+        "gradle",
+        "dotnet",
+        "nix",
+        "nix-build",
+        "nix-shell",
+        "nixos-rebuild",
+        "docker",
+        "podman",
+        "pytest",
+        "tox",
+        "rustfmt",
+        "clippy-driver",
+        "vim",
+        "nvim",
+        "emacs",
+        "hx",
+        "kak",
+        "helix",
+    ];
+    DEV_TOOLS.contains(&word)
+}
+
 /// Classify the current activity from a context snapshot. Ordered by priority:
 /// the first situation that fits wins.
 pub fn infer_activity(ctx: &ContextState) -> Activity {
@@ -139,12 +203,28 @@ pub fn infer_activity(ctx: &ContextState) -> Activity {
         }
         return Activity::Browsing;
     }
-    // An editor is coding; a terminal is coding only if it's in a repo.
+    // An editor is coding outright; a terminal has to earn it (just below).
     if matches_any(&class, EDITORS) || ctx.app_internal.editor_file.is_some() {
         return Activity::Coding;
     }
     if matches_any(&class, TERMINALS) {
-        return if ctx.git.branch.is_some() {
+        // A terminal is Coding only when the user is DOING development in it —
+        // not merely because its working directory happens to be a repo. That
+        // rule filled the bar with git controls while Max sat watching btop
+        // inside ~/Golem (2026-09-02: "the options engine is shit, im on btop
+        // it show me 5 options for git hub"). A directory is not an intention.
+        //
+        // The evidence we accept is the last command the shell bridge saw: a
+        // dev tool means dev work. A monitor (btop/top/htop), a pager, ssh, or
+        // no command at all leaves it a plain Terminal, where the git module
+        // stays out of the way.
+        return if ctx.app_internal.editor_file.is_some()
+            || ctx
+                .app_internal
+                .shell_last_cmd
+                .as_deref()
+                .is_some_and(looks_like_dev_work)
+        {
             Activity::Coding
         } else {
             Activity::Terminal
@@ -198,14 +278,56 @@ mod tests {
         assert_eq!(infer_activity(&focused("neovide")), Activity::Coding);
     }
 
+    /// A repo working directory is NOT an intention: watching btop in a
+    /// terminal that happens to sit in a repo must stay Terminal, or the bar
+    /// fills with git controls nobody asked for (Max, 2026-09-02). It takes an
+    /// actual dev command — or an open editor file — to make it Coding.
     #[test]
-    fn terminal_in_repo_is_coding_else_terminal() {
+    fn terminal_needs_dev_work_not_just_a_repo_to_be_coding() {
         let mut ctx = focused("foot");
         assert_eq!(infer_activity(&ctx), Activity::Terminal);
         ctx.git = GitContext {
             branch: Some("main".into()),
             ..Default::default()
         };
+        assert_eq!(
+            infer_activity(&ctx),
+            Activity::Terminal,
+            "cwd in a repo alone is not coding"
+        );
+        for monitoring in [
+            "btop",
+            "htop",
+            "top -d 1",
+            "less NOTES.md",
+            "ssh box",
+            "ls -la",
+        ] {
+            ctx.app_internal.shell_last_cmd = Some(monitoring.into());
+            assert_eq!(
+                infer_activity(&ctx),
+                Activity::Terminal,
+                "'{monitoring}' is not development"
+            );
+        }
+        for dev in [
+            "git status",
+            "cargo test --workspace",
+            "sudo nixos-rebuild build-vm",
+            "RUST_LOG=debug cargo run",
+            "/run/current-system/sw/bin/nix build",
+            "nvim src/main.rs",
+        ] {
+            ctx.app_internal.shell_last_cmd = Some(dev.into());
+            assert_eq!(
+                infer_activity(&ctx),
+                Activity::Coding,
+                "'{dev}' is dev work"
+            );
+        }
+        // An open editor file counts even with no shell command seen.
+        ctx.app_internal.shell_last_cmd = None;
+        ctx.app_internal.editor_file = Some("/home/max/x.rs".into());
         assert_eq!(infer_activity(&ctx), Activity::Coding);
     }
 

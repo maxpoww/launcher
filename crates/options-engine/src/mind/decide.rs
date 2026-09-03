@@ -118,6 +118,7 @@ pub fn decide_with(ctx: &ContextState, temporal: &Temporal, tuning: &Tuning) -> 
             .partial_cmp(&a.relevance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    cap_bystander_modules(&mut items, activity, media_fg);
     items.truncate(tuning.max_items);
 
     OptionSet {
@@ -125,6 +126,64 @@ pub fn decide_with(ctx: &ContextState, temporal: &Temporal, tuning: &Tuning) -> 
         items,
         generation: ctx.generation,
     }
+}
+
+/// How many CONTROLS a module that ISN'T what you're doing may put on the bar.
+const BYSTANDER_MODULE_CAP: usize = 2;
+
+/// The modules that belong to what the user is doing right now. These keep
+/// their whole cluster — transport controls while a video plays, the git and
+/// build controls while coding — because that cluster IS the moment.
+fn primary_modules(activity: Activity, media_fg: bool) -> &'static [&'static str] {
+    if media_fg {
+        return &["media"];
+    }
+    match activity {
+        Activity::Coding => &["git", "editor", "coding"],
+        Activity::Terminal => &["shell", "files"],
+        Activity::Browsing | Activity::Reading => &["browser", "reading"],
+        Activity::Communication => &["audio", "call"],
+        Activity::Media => &["media"],
+        _ => &[],
+    }
+}
+
+/// Keep a module that is NOT the current activity from owning the bar: ranked
+/// highest-first, each bystander module keeps its best
+/// [`BYSTANDER_MODULE_CAP`] controls and the rest drop out so another module
+/// gets a turn.
+///
+/// The bar has seven slots and one module used to be able to take four of them
+/// — commit + push + pull + diff, git's whole menu, while the user was doing
+/// something else entirely (Max, 2026-09-02: "im on btop it show me 5 options
+/// for git hub"). OPTIONS suggests the right thing for the moment; it is not a
+/// toolbar. What you ARE doing keeps its cluster (see [`primary_modules`]) —
+/// six transport pills while you watch a video is the point, not clutter.
+///
+/// Warnings and Info are exempt: they are not a module competing for space,
+/// they are the system telling you something (a privacy warning must never be
+/// squeezed out by controls — see `privacy_warnings_are_never_crowded_out`).
+fn cap_bystander_modules(items: &mut Vec<Affordance>, activity: Activity, media_fg: bool) {
+    let primary = primary_modules(activity, media_fg);
+    // With no idea what the user is doing (Idle/Unknown) there is no bystander
+    // to demote — everything on offer is equally speculative, and dropping half
+    // of it at random would only make the bar less useful. Cap nothing.
+    if primary.is_empty() {
+        return;
+    }
+    let mut per_module: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    items.retain(|a| {
+        if !matches!(a.kind, AffordanceKind::Control | AffordanceKind::Action) {
+            return true;
+        }
+        let module = a.id.split('.').next().unwrap_or(a.id);
+        if primary.contains(&module) {
+            return true;
+        }
+        let n = per_module.entry(module).or_insert(0);
+        *n += 1;
+        *n <= BYSTANDER_MODULE_CAP
+    });
 }
 
 /// Affordances that only exist with temporal memory: how long you've been at
@@ -169,6 +228,7 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
         "git.commit"
             | "git.push"
             | "git.pull"
+            | "git.diff"
             | "git.open_remote"
             | "coding.terminal_here"
             | "editor.open_folder"
@@ -177,11 +237,17 @@ fn fits_activity(id: &str, activity: Activity) -> bool {
             | "editor.format"
             | "git.show_commit"
     ) {
+        // git.diff was missing from this list, so "Review changes" turned up
+        // beside the media controls while Max watched YouTube (caught live,
+        // 2026-09-02). Every git CONTROL belongs to Coding, without exception.
         return activity == Activity::Coding;
     }
     // "Open files here" / "Re-run last" / "Install <missing>" fit terminal work
     // (and coding) — a stale shell exit shouldn't fire them while browsing.
-    if matches!(id, "files.open_here" | "shell.rerun" | "shell.install_missing") {
+    if matches!(
+        id,
+        "files.open_here" | "shell.rerun" | "shell.install_missing"
+    ) {
         return matches!(activity, Activity::Terminal | Activity::Coding);
     }
     match activity {
@@ -706,7 +772,10 @@ fn git_provider(ctx: &ContextState) -> Vec<Affordance> {
             out.push(Affordance {
                 id: "git.diff",
                 kind: AffordanceKind::Control,
-                title: "Show diff".into(),
+                // "Show diff" is jargon — Max, seeing it on his own desktop:
+                // "a 'show diff' that i dont even know what it is". A pill has
+                // room for a plain verb, so it gets one.
+                title: "Review changes".into(),
                 detail: format!("on {branch}"),
                 relevance: 0.55,
                 reason: "review the uncommitted changes",
@@ -1859,7 +1928,13 @@ mod tests {
         // A normal failure (not 127) does not offer install.
         ctx.app_internal.shell_exit_code = Some(1);
         assert!(find(
-            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
             "shell.install_missing"
         )
         .is_none());
@@ -1867,7 +1942,13 @@ mod tests {
         ctx.app_internal.shell_exit_code = Some(127);
         ctx.app_internal.shell_last_cmd = Some("./build.sh".into());
         assert!(find(
-            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
             "shell.install_missing"
         )
         .is_none());
@@ -1875,7 +1956,13 @@ mod tests {
         ctx.app_internal.shell_last_cmd = Some("htop".into());
         ctx.window.class = "firefox".into();
         assert!(find(
-            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
             "shell.install_missing"
         )
         .is_none());
@@ -1884,8 +1971,14 @@ mod tests {
     #[test]
     fn first_command_token_skips_sudo_and_assignments() {
         assert_eq!(first_command_token("htop"), Some("htop"));
-        assert_eq!(first_command_token("sudo nixos-rebuild"), Some("nixos-rebuild"));
-        assert_eq!(first_command_token("FOO=1 BAR=2 ripgrep x"), Some("ripgrep"));
+        assert_eq!(
+            first_command_token("sudo nixos-rebuild"),
+            Some("nixos-rebuild")
+        );
+        assert_eq!(
+            first_command_token("FOO=1 BAR=2 ripgrep x"),
+            Some("ripgrep")
+        );
         assert_eq!(first_command_token("./local"), None);
         assert_eq!(first_command_token("/usr/bin/x"), None);
         assert_eq!(first_command_token(""), None);
@@ -2239,9 +2332,12 @@ mod tests {
             is_dirty: true,
             remote_url: None,
         };
-        // A terminal in a repo → Coding: commit & push surface as controls.
+        // A terminal where the user is actually running git → Coding: commit &
+        // push surface as controls. (The repo cwd alone is NOT enough — see
+        // `terminal_needs_dev_work_not_just_a_repo_to_be_coding`.)
         ctx.window.class = "foot".into();
         ctx.window.pid = 1;
+        ctx.app_internal.shell_last_cmd = Some("git status".into());
         let opts = decide(
             &ctx,
             &Tuning {
@@ -2365,7 +2461,13 @@ mod tests {
         // Below the threshold → quiet.
         ctx.behavior.focus_switch_velocity = 0.3;
         assert!(find(
-            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
             "behavior.focus_churn"
         )
         .is_none());
@@ -2519,6 +2621,7 @@ mod tests {
         let mut ctx = live_ctx();
         ctx.window.class = "foot".into();
         ctx.window.pid = 1;
+        ctx.app_internal.shell_last_cmd = Some("cargo test".into()); // actually working
         ctx.git = GitContext {
             repo_root: Some("/home/max/p".into()),
             branch: Some("main".into()),
@@ -2642,7 +2745,13 @@ mod tests {
         // A scripting language builds nothing (it runs per-file instead).
         ctx.app_internal.editor_language = Some("python".into());
         assert!(find(
-            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
             "editor.build"
         )
         .is_none());
@@ -2717,7 +2826,13 @@ mod tests {
         // An unknown language has no formatter.
         ctx.app_internal.editor_language = Some("cobol".into());
         assert!(find(
-            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
             "editor.format"
         )
         .is_none());
@@ -2892,7 +3007,13 @@ mod tests {
         // No repo → nothing to show against.
         ctx.git = GitContext::default();
         assert!(find(
-            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
             "git.show_commit"
         )
         .is_none());
@@ -2904,7 +3025,13 @@ mod tests {
         };
         ctx.window.class = "firefox".into();
         assert!(find(
-            &decide(&ctx, &Tuning { max_items: 12, ..Default::default() }),
+            &decide(
+                &ctx,
+                &Tuning {
+                    max_items: 12,
+                    ..Default::default()
+                }
+            ),
             "git.show_commit"
         )
         .is_none());
@@ -2972,6 +3099,7 @@ mod tests {
         let mut ctx = live_ctx();
         ctx.window.class = "foot".into();
         ctx.window.pid = 1;
+        ctx.app_internal.shell_last_cmd = Some("git commit".into()); // actually working
         ctx.git = GitContext {
             repo_root: Some("/home/max/p".into()),
             branch: Some("main".into()),
@@ -3257,7 +3385,8 @@ mod tests {
         // A live mic makes the activity Communication, which clears media — but
         // the three privacy warnings must all be present regardless of the crowd.
         for id in ["camera.live", "audio.mic_live", "compositor.screencasting"] {
-            let a = find(&opts, id).unwrap_or_else(|| panic!("privacy warning {id} survives the cap"));
+            let a =
+                find(&opts, id).unwrap_or_else(|| panic!("privacy warning {id} survives the cap"));
             assert_eq!(a.kind, AffordanceKind::Warning, "{id}");
         }
     }

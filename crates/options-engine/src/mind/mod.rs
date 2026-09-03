@@ -27,6 +27,7 @@ mod activity;
 mod affordance;
 mod decide;
 mod session;
+mod settle;
 
 pub use activity::{infer_activity, Activity};
 pub use affordance::{Affordance, AffordanceAction, AffordanceKind, OptionSet};
@@ -41,6 +42,7 @@ use tokio::task::JoinHandle;
 use crate::engine::Engine;
 
 use session::Session;
+use settle::Settle;
 
 /// A live decision loop: context in, ranked options out.
 pub struct Mind {
@@ -56,13 +58,17 @@ impl Mind {
         let (tx, rx) = watch::channel(OptionSet::default());
         let task = tokio::spawn(async move {
             let mut session = Session::new(Instant::now());
+            let mut settle = Settle::default();
             loop {
                 // Decide from the latest snapshot plus the session's temporal
                 // memory; scope the borrow so it's dropped before the await.
+                // What is decided and what is SHOWN are two questions: the
+                // decision is instantaneous, the bar is not (see `settle`).
                 let options = {
+                    let now = Instant::now();
                     let ctx = ctx_rx.borrow_and_update();
-                    let temporal = session.observe(&ctx, Instant::now());
-                    decide_with(&ctx, &temporal, &tuning)
+                    let temporal = session.observe(&ctx, now);
+                    settle.apply(decide_with(&ctx, &temporal, &tuning), now)
                 };
                 if tx.send(options).is_err() {
                     break; // no subscribers and receiver dropped
