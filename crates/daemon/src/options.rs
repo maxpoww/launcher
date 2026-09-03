@@ -61,6 +61,16 @@ pub(crate) fn pill_scale_for(logical_h: Option<f32>) -> f32 {
     }
 }
 
+/// Multi-output precedence for the shell's scale source: the logical height of
+/// the output the shell's own surface actually maps to (learned from
+/// `wl_surface` enter) wins; the first enumerated output is only the fallback
+/// before any enter arrives (or after a leave). On a laptop + external setup
+/// enumeration order says nothing about where the bar lives — the compositor's
+/// placement does.
+pub(crate) fn preferred_output_height(entered: Option<f32>, first: Option<f32>) -> Option<f32> {
+    entered.or(first)
+}
+
 /// Margin above/below the pills — leaves room for the neumorphic rim so the
 /// pills themselves stay compact rather than filling the whole bar.
 pub(crate) const PILL_MARGIN_Y: f32 = 2.5;
@@ -2211,6 +2221,29 @@ mod tests {
         assert_eq!(pill_scale_for(Some(700.0)), 0.82);
         assert_eq!(pill_scale_for(Some(1.0)), 0.82);
         assert!(acer < s && s < 1.0);
+    }
+
+    /// Multi-output: the shell's own output wins over enumeration order; the
+    /// first output is only the pre-enter (or post-leave) fallback.
+    #[test]
+    fn scale_prefers_the_output_the_shell_maps_to() {
+        // Bar on the laptop panel (800) while a 1440 external enumerated
+        // first: the laptop's height drives the scale.
+        assert_eq!(
+            preferred_output_height(Some(800.0), Some(1440.0)),
+            Some(800.0)
+        );
+        // And the mirror case: bar on the external, laptop enumerated first.
+        assert_eq!(
+            preferred_output_height(Some(1440.0), Some(800.0)),
+            Some(1440.0)
+        );
+        // No enter yet → fall back to the first output.
+        assert_eq!(preferred_output_height(None, Some(768.0)), Some(768.0));
+        // Nothing known at all → None, which pill_scale_for reads as full size
+        // (matching the creation-time exclusive zone).
+        assert_eq!(preferred_output_height(None, None), None);
+        assert_eq!(pill_scale_for(preferred_output_height(None, None)), 1.0);
     }
 
     #[test]

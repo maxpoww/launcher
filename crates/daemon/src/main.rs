@@ -357,6 +357,7 @@ fn main() -> anyhow::Result<()> {
         options_renderer: None,
         options_size: (0, 0),
         options_zone: None,
+        shell_output: None,
         options_bar_matched: None,
         options_pill_color: None,
         options_match: None,
@@ -812,6 +813,12 @@ pub struct App {
     /// creation from the configured height; this tracks the re-reservation at
     /// the live small-screen scale so output events only commit on change.
     options_zone: Option<i32>,
+    /// The output the shell's scale-owner surface (topbar, else dock) actually
+    /// maps to, learned from `wl_surface` enter — the authoritative source for
+    /// the small-screen scale on multi-output setups (enumeration order says
+    /// nothing about where the compositor put the bar). `None` before the
+    /// first enter and after a leave: fall back to the first output.
+    shell_output: Option<wl_output::WlOutput>,
     /// Smart-gaps colour-match: when a maximized window is flush under the
     /// bar, the bar is painted this sampled colour (opaque); `None` = the
     /// default transparent strip. See [`screencopy`].
@@ -1529,14 +1536,33 @@ impl App {
         self.draw_options();
     }
 
-    /// Logical height of the output the shell lives on, if known.
+    /// Logical height of the output the shell lives on, if known: the output
+    /// the shell's own surface maps to (from `wl_surface` enter) when we have
+    /// it, else the first enumerated output (see
+    /// [`options::preferred_output_height`] for the precedence contract).
     fn output_logical_height(&self) -> Option<f32> {
-        self.output_state
+        let height_of = |o: &wl_output::WlOutput| {
+            self.output_state
+                .info(o)
+                .and_then(|i| i.logical_size)
+                .map(|(_, h)| h as f32)
+        };
+        let entered = self.shell_output.as_ref().and_then(height_of);
+        let first = self
+            .output_state
             .outputs()
             .next()
-            .and_then(|o| self.output_state.info(&o))
-            .and_then(|i| i.logical_size)
-            .map(|(_, h)| h as f32)
+            .and_then(|o| height_of(&o));
+        options::preferred_output_height(entered, first)
+    }
+
+    /// The one surface whose output placement drives the shell's small-screen
+    /// scale: the topbar when it exists (its exclusive zone is what must match
+    /// the panel), else the dock (which still drives `icon_scale`).
+    fn scale_owner_surface(&self) -> &wl_surface::WlSurface {
+        self.options_layer
+            .as_ref()
+            .map_or_else(|| self.layer.wl_surface(), |l| l.wl_surface())
     }
 
     /// Current icon scale multiplier (driven by `icon_size`), fitted to the
@@ -3826,18 +3852,33 @@ impl CompositorHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        // The scale-owner surface (topbar, else dock) landed on an output:
+        // that output — not enumeration order — is where the shell lives, so
+        // it drives the small-screen scale. Re-sync the reserved zone in case
+        // this panel's size changes it (laptop vs external).
+        if self.scale_owner_surface() == surface && self.shell_output.as_ref() != Some(output) {
+            self.shell_output = Some(output.clone());
+            self.sync_options_zone();
+        }
     }
 
     fn surface_leave(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        // The owner surface left the output we were scaling for (unplug, or a
+        // move to another panel — the enter for the new one may follow): fall
+        // back to the first output until the next enter says otherwise.
+        if self.scale_owner_surface() == surface && self.shell_output.as_ref() == Some(output) {
+            self.shell_output = None;
+            self.sync_options_zone();
+        }
     }
 }
 
