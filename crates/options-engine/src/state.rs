@@ -42,6 +42,12 @@ pub struct TextSelection {
     /// The clipboard holds what looks like a bare git commit hash (7–40 hex
     /// chars, nothing else) — in a repo, intent to inspect that commit.
     pub is_git_sha: bool,
+    /// The clipboard holds SEVERAL absolute paths (or `file://` URIs), one
+    /// per line — the shape a file manager's multi-file Copy leaves behind.
+    /// Count is what was seen within the bounded snippet; the dir is the
+    /// files' deepest common parent folder (decoded, plain path).
+    pub multi_path_count: usize,
+    pub multi_path_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

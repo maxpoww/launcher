@@ -129,6 +129,11 @@ fn classify(content: &str) -> TextSelection {
     let contains_url = contains_url(&snippet);
     let is_path = looks_like_path(&snippet);
     let is_git_sha = looks_like_git_sha(snippet.trim());
+    let (multi_path_count, multi_path_dir) =
+        match classify_multi_paths(&snippet, char_count > SNIPPET_CAP) {
+            Some((n, dir)) => (n, Some(dir)),
+            None => (0, None),
+        };
     TextSelection {
         highlighted_text: Some(snippet),
         char_count,
@@ -136,7 +141,98 @@ fn classify(content: &str) -> TextSelection {
         contains_url,
         is_path,
         is_git_sha,
+        multi_path_count,
+        multi_path_dir,
     }
+}
+
+/// Detect a file-manager multi-file Copy: EVERY non-empty line of the snippet
+/// is an absolute path or a `file://` URI, and there are at least two. Mixed
+/// content (a path pasted inside prose) is not a multi-copy. Returns the count
+/// seen and the files' deepest common parent folder (decoded plain path).
+/// When the snippet was truncated the last line may be a cut-off path — it is
+/// dropped before judging, so a partial line can neither fail nor corrupt the
+/// classification.
+fn classify_multi_paths(snippet: &str, truncated: bool) -> Option<(usize, String)> {
+    let mut lines: Vec<&str> = snippet
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if truncated {
+        lines.pop();
+    }
+    if lines.len() < 2 {
+        return None;
+    }
+    let mut paths = Vec::with_capacity(lines.len());
+    for line in lines {
+        let p = if let Some(rest) = line.strip_prefix("file://") {
+            percent_decode(rest)
+        } else {
+            line.to_string()
+        };
+        if !p.starts_with('/') || p.len() >= 512 {
+            return None;
+        }
+        paths.push(p);
+    }
+    let mut dir = parent_of(&paths[0]).to_string();
+    for p in &paths[1..] {
+        dir = common_dir(&dir, parent_of(p));
+    }
+    Some((paths.len(), dir))
+}
+
+/// The parent folder of an absolute path (`/` for a root-level entry).
+fn parent_of(p: &str) -> &str {
+    match p.rfind('/') {
+        Some(0) | None => "/",
+        Some(i) => &p[..i],
+    }
+}
+
+/// Deepest common ancestor of two absolute directories, at component
+/// boundaries (so `/a/bc` and `/a/bd` share `/a`, not `/a/b`).
+fn common_dir(a: &str, b: &str) -> String {
+    let mut out = String::new();
+    for (ca, cb) in a.split('/').zip(b.split('/')) {
+        if ca != cb {
+            break;
+        }
+        if !ca.is_empty() {
+            out.push('/');
+            out.push_str(ca);
+        }
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    out
+}
+
+/// Minimal percent-decoding for `file://` URI paths (`%20` → space, etc.).
+/// Malformed escapes pass through literally; non-UTF8 decodes lossily — the
+/// worst case is a folder that xdg-open can't find, never a panic.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok());
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Heuristic: a bare git commit hash — 7 to 40 hexadecimal characters and
@@ -145,14 +241,19 @@ fn looks_like_git_sha(t: &str) -> bool {
     (7..=40).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Heuristic: a single-line absolute path (`/…`). Kept pure — no filesystem
-/// check (xdg-open simply no-ops on a path that isn't there), so the classifier
-/// stays deterministic and testable. Only absolute paths, so the open action
-/// needs no `~`/`$HOME` expansion (which shell-quoting would defeat).
+/// Heuristic: a single-line absolute path (`/…`) or `file:///` URI (what a
+/// file manager's single-file Copy puts on the clipboard). Kept pure — no
+/// filesystem check (xdg-open simply no-ops on a path that isn't there), so
+/// the classifier stays deterministic and testable. Only absolute paths, so
+/// the open action needs no `~`/`$HOME` expansion (which shell-quoting would
+/// defeat); xdg-open accepts the `file://` form as-is.
 fn looks_like_path(t: &str) -> bool {
     let t = t.trim();
     // Length guard first so huge input exits before any scan.
-    t.len() < 512 && t.starts_with('/') && !t.contains('\n') && !contains_url(t)
+    t.len() < 512
+        && (t.starts_with('/') || t.starts_with("file:///"))
+        && !t.contains('\n')
+        && !contains_url(t)
 }
 
 fn contains_url(t: &str) -> bool {
@@ -272,5 +373,72 @@ mod tests {
     #[test]
     fn bare_url_is_not_code() {
         assert!(!looks_like_code("https://example.com/a/b?c=d"));
+    }
+
+    #[test]
+    fn single_file_uri_is_a_path() {
+        // A file manager's single-file Copy puts a file:// URI on the
+        // clipboard — that is a path, not web-search fodder.
+        assert!(classify("file:///home/max/photo.png").is_path);
+        assert!(!classify("file:///a\nfile:///b").is_path); // multi-line → multi_path's
+    }
+
+    #[test]
+    fn multi_path_detects_a_file_manager_copy() {
+        let s = classify("/home/max/pics/a.png\n/home/max/pics/b.png\n");
+        assert_eq!(s.multi_path_count, 2);
+        assert_eq!(s.multi_path_dir.as_deref(), Some("/home/max/pics"));
+        assert!(!s.is_path, "multi-line is not a single path");
+    }
+
+    #[test]
+    fn multi_path_decodes_file_uris() {
+        let s = classify("file:///home/max/My%20Docs/a.odt\nfile:///home/max/My%20Docs/b.odt");
+        assert_eq!(s.multi_path_count, 2);
+        assert_eq!(s.multi_path_dir.as_deref(), Some("/home/max/My Docs"));
+    }
+
+    #[test]
+    fn multi_path_common_dir_is_component_bounded() {
+        // /a/bc and /a/bd share /a — never the string prefix /a/b.
+        let s = classify("/a/bc/x.txt\n/a/bd/y.txt");
+        assert_eq!(s.multi_path_dir.as_deref(), Some("/a"));
+        // Nothing in common beyond the root.
+        let s = classify("/etc/hosts\n/home/max/x");
+        assert_eq!(s.multi_path_dir.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn multi_path_rejects_mixed_content_and_singles() {
+        // A path quoted inside prose is not a multi-copy.
+        assert_eq!(classify("see the file\n/etc/hosts").multi_path_count, 0);
+        // A single path stays the single-path offer.
+        let s = classify("/etc/hosts");
+        assert_eq!(s.multi_path_count, 0);
+        assert!(s.is_path);
+        // Relative lines are not a copy set.
+        assert_eq!(classify("a/x\nb/y").multi_path_count, 0);
+    }
+
+    #[test]
+    fn multi_path_drops_the_truncated_tail_line() {
+        // Three paths per snippet window, the last cut mid-path by the cap:
+        // the partial line must neither fail the set nor corrupt the dir.
+        let mut content = String::new();
+        for i in 0..40 {
+            content.push_str(&format!("/home/max/pics/photo-{i:04}.png\n"));
+        }
+        assert!(content.chars().count() > SNIPPET_CAP);
+        let s = classify(&content);
+        assert!(s.multi_path_count >= 2);
+        assert_eq!(s.multi_path_dir.as_deref(), Some("/home/max/pics"));
+    }
+
+    #[test]
+    fn percent_decode_edges() {
+        assert_eq!(percent_decode("no-escapes"), "no-escapes");
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("%zz%2"), "%zz%2"); // malformed passes through
+        assert_eq!(percent_decode("%C3%A9"), "é"); // multi-byte UTF-8
     }
 }

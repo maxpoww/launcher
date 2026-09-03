@@ -1726,6 +1726,29 @@ fn selection_provider(ctx: &ContextState) -> Vec<Affordance> {
     if s.char_count == 0 {
         return vec![];
     }
+    if s.multi_path_count >= 2 {
+        // **selection module** — several copied file paths (a file manager's
+        // multi-file Copy, one path or file:// URI per line) is intent to do
+        // something with those files; the universal serve is opening their
+        // common folder in the file manager (catalog §6's documented PARTIAL).
+        let dir = s.multi_path_dir.clone().unwrap_or_else(|| "/".into());
+        let folder = dir
+            .rsplit('/')
+            .next()
+            .filter(|b| !b.is_empty())
+            .unwrap_or("/")
+            .to_string();
+        return vec![Affordance {
+            id: "selection.multi_path",
+            kind: AffordanceKind::Control,
+            title: "Open copied files".into(),
+            detail: format!("{} files in {folder}", s.multi_path_count),
+            relevance: 0.5,
+            reason: "clipboard holds several file paths",
+            source: Layer::Selection,
+            action: AffordanceAction::OpenUrl(dir),
+        }];
+    }
     if s.contains_url {
         // **selection module** — a copied URL is intent to open it.
         // A real Control: xdg-open the link with the default handler.
@@ -2226,6 +2249,8 @@ mod tests {
             contains_url: true,
             is_path: false,
             is_git_sha: false,
+            multi_path_count: 0,
+            multi_path_dir: None,
         };
         let opts = decide(&ctx, &Tuning::default());
         assert!(opts.items.iter().any(|a| a.id == "selection.url"));
@@ -2626,6 +2651,8 @@ mod tests {
             contains_url: true,
             is_path: false,
             is_git_sha: false,
+            multi_path_count: 0,
+            multi_path_dir: None,
         };
         let opts = decide(&ctx, &Tuning::default());
         let url = find(&opts, "selection.url").expect("url control");
@@ -2708,6 +2735,8 @@ mod tests {
             contains_url: false,
             is_path: false,
             is_git_sha: false,
+            multi_path_count: 0,
+            multi_path_dir: None,
         };
         let opts = decide(&ctx, &Tuning::default());
         let s = find(&opts, "selection.search").expect("search control");
@@ -3101,6 +3130,8 @@ mod tests {
             highlighted_text: Some("a1b2c3d4e5".into()),
             char_count: 10,
             is_git_sha: true,
+            multi_path_count: 0,
+            multi_path_dir: None,
             ..Default::default()
         };
         let opts = decide(
@@ -3156,6 +3187,8 @@ mod tests {
             contains_url: false,
             is_path: false,
             is_git_sha: false,
+            multi_path_count: 0,
+            multi_path_dir: None,
         };
         let opts = decide(&ctx, &Tuning::default());
         let o = find(&opts, "selection.email").expect("email control");
@@ -3180,6 +3213,8 @@ mod tests {
             contains_url: false,
             is_path: true,
             is_git_sha: false,
+            multi_path_count: 0,
+            multi_path_dir: None,
         };
         let opts = decide(&ctx, &Tuning::default());
         let o = find(&opts, "selection.open_path").expect("open-file control");
@@ -3191,6 +3226,34 @@ mod tests {
         );
         // A path takes precedence over the generic web-search fallback.
         assert!(find(&opts, "selection.search").is_none());
+    }
+
+    #[test]
+    fn copied_multi_paths_offer_their_folder() {
+        let mut ctx = live_ctx();
+        ctx.selection = TextSelection {
+            highlighted_text: Some("/home/max/pics/a.png\n/home/max/pics/b.png".into()),
+            char_count: 41,
+            is_code: false,
+            contains_url: false,
+            is_path: false,
+            is_git_sha: false,
+            multi_path_count: 2,
+            multi_path_dir: Some("/home/max/pics".into()),
+        };
+        let opts = decide(&ctx, &Tuning::default());
+        let o = find(&opts, "selection.multi_path").expect("multi-path control");
+        assert_eq!(o.kind, AffordanceKind::Control);
+        assert_eq!(o.detail, "2 files in pics");
+        assert_eq!(o.action, AffordanceAction::OpenUrl("/home/max/pics".into()));
+        // The copy set owns the intent — no generic search rides along.
+        assert!(find(&opts, "selection.search").is_none());
+        // Root-dir fallback renders honestly.
+        ctx.selection.multi_path_dir = Some("/".into());
+        let opts = decide(&ctx, &Tuning::default());
+        let o = find(&opts, "selection.multi_path").expect("control at root");
+        assert_eq!(o.detail, "2 files in /");
+        assert_eq!(o.action, AffordanceAction::OpenUrl("/".into()));
     }
 
     #[test]
@@ -3481,6 +3544,8 @@ mod tests {
             highlighted_text: Some("a1b2c3d4".into()),
             char_count: 8,
             is_git_sha: true,
+            multi_path_count: 0,
+            multi_path_dir: None,
             ..Default::default()
         };
         // The real topbar cap.
@@ -3513,6 +3578,8 @@ mod tests {
                 highlighted_text: Some(text.into()),
                 char_count: text.chars().count(),
                 is_git_sha: sha,
+                multi_path_count: 0,
+                multi_path_dir: None,
                 ..Default::default()
             };
         };

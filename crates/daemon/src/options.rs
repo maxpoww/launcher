@@ -207,7 +207,7 @@ fn glyph_for_option(id: &str, title: &str) -> &'static str {
         "network.down" | "network.settings" => GLYPH_WIFI,
         "window.record" => GLYPH_RECORD,
         "window.record_stop" => GLYPH_STOP,
-        "files.open_here" | "editor.open_folder" => GLYPH_OPEN_FILE,
+        "files.open_here" | "editor.open_folder" | "selection.multi_path" => GLYPH_OPEN_FILE,
         _ => GLYPH_OPTION,
     }
 }
@@ -2263,17 +2263,18 @@ mod tests {
             ..Default::default()
         };
 
-        let mut scenarios: Vec<ContextState> = Vec::new();
-        // Browser → find_in_page + reopen_tab.
-        scenarios.push(live("firefox"));
-        // Reader → page_next/page_prev (and find_in_page again).
-        scenarios.push(live("zathura"));
-        // Word processor → find_in_page via text.find.
-        scenarios.push(live("abiword"));
-        // Creative editor → undo.
-        scenarios.push(live("gimp"));
-        // Slides app windowed → present; fullscreen → slide_next/slide_prev.
-        scenarios.push(live("libreoffice-impress"));
+        let mut scenarios: Vec<ContextState> = vec![
+            // Browser → find_in_page + reopen_tab.
+            live("firefox"),
+            // Reader → page_next/page_prev (and find_in_page again).
+            live("zathura"),
+            // Word processor → find_in_page via text.find.
+            live("abiword"),
+            // Creative editor → undo.
+            live("gimp"),
+            // Slides app windowed → present; fullscreen → slide_next/slide_prev.
+            live("libreoffice-impress"),
+        ];
         let mut presenting = live("libreoffice-impress");
         presenting.window.is_fullscreen = true;
         scenarios.push(presenting);
