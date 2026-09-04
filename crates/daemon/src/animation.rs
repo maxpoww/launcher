@@ -31,6 +31,77 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+// --- One Material (OptionUXRules.md §3) --------------------------------------
+// The OPTIONS surface moves at ONE tempo: every morph is an exponential approach
+// sharing the time constant below, so a long travel and a short one have the
+// same acceleration profile and read as the same stuff. Modules import this
+// vocabulary; a module-local rate constant is a defect even while it still
+// happens to be equal, because it is equal only until someone tunes one of them.
+//
+// Shared is the TEMPO, not the choreography: stagger, hold, direction and order
+// stay each OPTION's own. One rate does not mean one moment.
+
+/// The surface's one morph rate, in exponential-approach units (the value
+/// closes ≈`RATE`× of the remaining distance per second, so the time constant
+/// is `1/RATE` seconds). Tuning this retimes the whole bar at once — which is
+/// the point.
+pub const MORPH_RATE: f32 = 13.0;
+
+/// Where a morph may call itself finished: half a logical pixel, i.e. under
+/// what the screen can show. Stated in real geometry so that every animation
+/// stops at the same *visible* distance rather than at the same number in
+/// whatever unit it happens to run on.
+pub const SETTLE_PX: f32 = 0.5;
+
+/// [`SETTLE_PX`] converted for a normalized 0→1 progress that drives `span_px`
+/// of geometry.
+///
+/// A progress value is not a distance, so its threshold has to be mapped back
+/// through the span it carries — otherwise the same-looking epsilon means a
+/// tenth of a pixel on a wide morph and a whole pixel on a narrow one, and two
+/// animations that read as equally done stop at different visible distances.
+/// Clamped so a span smaller than the threshold still terminates.
+pub fn settle_t(span_px: f32) -> f32 {
+    (SETTLE_PX / span_px.abs().max(SETTLE_PX)).min(0.5)
+}
+
+/// The tempo for content *tracking* — a list gliding to a scroll target rather
+/// than a shape morphing into another shape. Faster than [`MORPH_RATE`] because
+/// it is chasing a position the user is actively driving, where lag reads as
+/// weight rather than grace.
+///
+/// It is a second named tempo, not a local deviation: §3 allows the vocabulary
+/// to have more than one word in it, and forbids modules from inventing them.
+pub const SCROLL_RATE: f32 = 20.0;
+
+/// Where a fade may call itself finished: one step of 8-bit colour, i.e. under
+/// what the display can show.
+///
+/// The same idea as [`SETTLE_PX`] — settle at the limit of what is visible —
+/// measured in the unit the animation actually runs on. An opacity drives no
+/// geometry, so pixels are the wrong ruler for it; borrowing them would make a
+/// fade stop at a threshold that means nothing to it.
+pub const SETTLE_ALPHA: f32 = 1.0 / 255.0;
+
+/// How long an OPTION stays open after the pointer has left it.
+///
+/// Shared by every OPTION, and deliberately short. Dwelling on something is
+/// expressed by *keeping the pointer on it* — that vocabulary is already in the
+/// user's hand, so an OPTION that lingers on its own has decided for them that
+/// they were still interested. Leave, and it leaves.
+///
+/// This grace is not reading time: it exists so that crossing the gap between
+/// two parts of one OPTION (the bell and its mute pill, a pill and the box
+/// beneath it) does not register as leaving. It is sized for a hand in transit,
+/// which is why one value fits everywhere — hands cross gaps at the same speed
+/// on every part of the bar.
+///
+/// NOT to be confused with an auto-withdraw dwell — how long something that
+/// arrived *on its own* stays readable (a notification's flash, ranked by
+/// urgency). Nobody's pointer arrived there, so nobody's pointer can leave;
+/// that duration answers a different question and each OPTION owns it.
+pub const LEAVE_HOLD: Duration = Duration::from_millis(300);
+
 /// Frame-rate-independent exponential approach: step `current` toward
 /// `target` by the decay factor `1 − exp(−dt·rate)`, snapping onto the
 /// target once within `snap`. Returns the new value and whether it is
@@ -261,6 +332,86 @@ mod tests {
     /// against the one test with mid-flight assertions, so parallel test
     /// threads can't observe each other's flag state.
     static FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// How long a morph of `span` logical px takes to settle, in seconds —
+    /// the exponential approach's `ln(span/ε)/rate`, walked frame by frame so
+    /// it measures the real primitive rather than the formula.
+    fn settle_secs(span: f32) -> f32 {
+        let (mut v, mut t) = (0.0f32, 0.0f32);
+        let eps = settle_t(span);
+        loop {
+            let (nv, moving) = ease_toward(v, 1.0, 1.0 / 240.0, MORPH_RATE, eps);
+            v = nv;
+            t += 1.0 / 240.0;
+            if !moving || t > 5.0 {
+                return t;
+            }
+        }
+    }
+
+    #[test]
+    fn one_material_every_morph_stops_at_the_same_visible_distance() {
+        // §3: a progress value is not a distance, so its settle threshold is
+        // mapped back through the span it drives. A 12px nudge and a 400px
+        // sweep must both stop half a logical pixel short — not at the same
+        // number in whatever unit each happens to run on.
+        for span in [12.0, 27.0, 180.0, 380.0, 505.0] {
+            let remaining_px = settle_t(span) * span;
+            assert!(
+                (remaining_px - SETTLE_PX).abs() < 1e-3,
+                "a {span}px morph stopped {remaining_px}px short, not {SETTLE_PX}px"
+            );
+        }
+        // A span below the threshold still terminates rather than easing forever.
+        assert!(settle_t(0.0) > 0.0 && settle_t(0.0) <= 0.5);
+    }
+
+    #[test]
+    fn one_material_the_leave_hold_is_a_transit_grace_not_reading_time() {
+        // §3: leave, and it leaves. Dwelling is expressed by keeping the
+        // pointer on a thing; a hold long enough to *read* by has decided on
+        // the user's behalf that they were still interested. The clock used to
+        // sit at 1500ms and that is exactly what it felt like.
+        assert!(
+            LEAVE_HOLD >= Duration::from_millis(150),
+            "too brief to survive a hand crossing between two parts of one OPTION"
+        );
+        assert!(
+            LEAVE_HOLD <= Duration::from_millis(400),
+            "{LEAVE_HOLD:?} is reading time — the OPTION is deciding you are still looking"
+        );
+    }
+
+    #[test]
+    fn one_material_duration_grows_gently_with_distance() {
+        // Walks the real primitive, so it has to hold the flag: under
+        // reduce-motion `ease_toward` lands instantly and every span would
+        // "settle" in one step, quietly turning this into a test of nothing.
+        let _g = hold_flag();
+        set_reduce_motion(false);
+        // The shared RATE, not a shared stopwatch: a longer travel starts
+        // faster and takes a little longer. The spread across the bar's real
+        // spans stays inside a few hundred ms — one material at every scale,
+        // rather than a 12px nudge and a 505px drawer both taking exactly as
+        // long as each other (which is what a fixed duration would give).
+        let small = settle_secs(12.0);
+        let large = settle_secs(505.0);
+        assert!(small < large, "a longer travel must not finish sooner");
+        assert!(
+            large - small < 0.35,
+            "spread of {:.0}ms is a different material, not a longer one",
+            (large - small) * 1000.0
+        );
+        // And the whole bar lands in the range the design language asks for.
+        for span in [12.0, 27.0, 180.0, 380.0, 505.0] {
+            let s = settle_secs(span);
+            assert!(
+                (0.2..0.8).contains(&s),
+                "a {span}px morph settles in {:.0}ms",
+                s * 1000.0
+            );
+        }
+    }
     fn hold_flag() -> std::sync::MutexGuard<'static, ()> {
         FLAG_LOCK
             .lock()

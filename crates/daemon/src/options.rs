@@ -25,7 +25,7 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_pointer;
 use wayland_client::WEnum;
 
-use crate::animation::{ease_toward, lerp};
+use crate::animation::{self, ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene, ShadowInst};
 use crate::{hypr, surface, App, BTN_LEFT, BTN_RIGHT};
 
@@ -97,6 +97,7 @@ const TITLE_MAX: usize = 48;
 pub(crate) const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
 const GLYPH_SQUARE: &str = "\u{f096}"; // fa-square-o (pseudotile)
 const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
+const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
 pub(crate) const GLYPH_BELL: &str = "\u{f0f3}"; // fa-bell (notification OPTION)
 pub(crate) const GLYPH_BELL_SLASH: &str = "\u{f1f6}"; // fa-bell-slash (mute pill)
 pub(crate) const GLYPH_CLIPBOARD: &str = "\u{f0ea}"; // fa-clipboard (clipboard OPTION)
@@ -255,13 +256,16 @@ fn action_command_line(action: &options_engine::AffordanceAction) -> Option<Stri
 // outermost-first, each tucking back behind its parent while it fades. One
 // progress value per button drives both position and opacity, the same
 // metamorphosis feel as the copy-link pill and the bell peek. All dt-based.
+// The stagger is CHOREOGRAPHY, not tempo: One Material shares the rate, never
+// the moment (`OptionUXRules.md` §3).
 const CTRL_STAGGER: f32 = 0.06; // s between stagger stages
-/// Glide rate of a toggle's progress (exponential approach) — matches the
-/// bar's other metamorphoses (`MORPH_RATE`).
-const CTRL_RATE: f32 = 13.0;
-const CTRL_EPS: f32 = 0.002;
 /// How many toggles ride the reveal chain.
-const CTRL_N: usize = 2;
+const CTRL_N: usize = 3;
+/// How long to let a window settle into its tile before measuring it — the
+/// second beat of a fullscreen/float → pseudo transition. Comfortably past the
+/// compositor's move animation, since a size read mid-flight is worse than a
+/// slightly later one.
+const MODE_SETTLE: Duration = Duration::from_millis(500);
 
 /// Per-button progress for the reveal animation. Buttons are ordered
 /// [pseudo, fullscreen] (see [`ctrl_index`]); close is not animated — it is
@@ -292,13 +296,13 @@ const SIZE_POLL_FAST: Duration = Duration::from_millis(40);
 
 // --- Clock↔date metamorphosis ----------------------------------------------
 // Hovering the clock pill grows it horizontally and crossfades HH:MM into the
-// full date; it holds as the date for a few seconds after the pointer leaves,
-// then plays the same transition backwards. All dt-based.
-/// Glide rate of the metamorphosis progress (exponential approach).
-const META_RATE: f32 = 13.0;
-const META_EPS: f32 = 0.001;
-/// How long the pill stays on the date after the hover leaves.
-const META_HOLD: Duration = Duration::from_millis(1500);
+// full date; it lets go a beat after the pointer leaves the surface, then plays
+// the same transition backwards. All dt-based.
+//
+// That beat is the surface's shared `animation::LEAVE_HOLD`, not the clock's own
+// idea of one (`OptionUXRules.md` §3). It used to be 1500ms, which left the date
+// standing long after the hand that asked for it had gone: if you want to keep
+// reading it, keep the pointer on it.
 /// Crossfade split: the clock fades out by `t = OUT_END`, the date fades in
 /// from `t = IN_START` — a slight overlap in the middle keeps it smooth.
 const META_OUT_END: f32 = 0.55;
@@ -317,12 +321,278 @@ pub(crate) struct ClockMeta {
     hold_deadline: Option<std::time::Instant>,
 }
 
+// --- The Leader (OptionUXRules.md §1) ---------------------------------------
+// "Using an OPTION must never cost you the OPTION." A CLICK chooses the LEADER:
+// the pill you clicked is pinned to the place on the bar where you clicked it,
+// and its group is laid out from that anchor instead of from its resting one.
+// A pill that changes width therefore spends the change on its far side. Close
+// a tile holding [X] and the shorter title spends its whole width change on its
+// left edge — [X] stays put and you can click again without re-aiming. The
+// anchor holds until the pointer leaves the bar, then the group eases home; at
+// rest displacement is exactly 0, so the resting layout is the one that was
+// always there.
+//
+// The anchor is a PLACE ON THE BAR, never the pointer. An earlier cut of this
+// rule captured on hover and solved for "the leader lands under the cursor",
+// which meant the cluster travelled with the pointer: setting off from
+// [current task] toward [X] pushed [X] away at exactly the speed it was
+// chased, and it could never be reached. A leader you must be able to aim at
+// cannot be attached to your aim.
+
+/// The pill groups that lay out as a unit. Only the two that actually re-flow
+/// can be led: the window cluster (the title's width moves the controls) and
+/// the Mind's ranked control row (offers arrive and withdraw). The clock, the
+/// bell and the clipboard are edge-pinned and own their morphs, so leading them
+/// would fight animations that are already correct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PillGroup {
+    /// `[current task] [X] [pseudo] [fullscreen]` — centred, re-flows on title.
+    Window,
+    /// The Mind's context-aware controls + the media opener — left-anchored,
+    /// re-flows as offers are ranked in and out.
+    Mind,
+    Clipboard,
+    Notif,
+    Clock,
+}
+
+/// How many groups can be led — the width of [`LeadAnim::off`].
+const LEAD_N: usize = 2;
+
+/// Which pills move together. The one table that says what "its OPTION" means
+/// when the rule says the group lays out from the leader.
+pub(crate) fn group_of(id: PillId) -> PillGroup {
+    match id {
+        PillId::Window | PillId::Close | PillId::Pseudo | PillId::Float | PillId::Fullscreen => {
+            PillGroup::Window
+        }
+        PillId::Option(_) | PillId::MediaOpen => PillGroup::Mind,
+        PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
+        PillId::Notif | PillId::NotifMute => PillGroup::Notif,
+        PillId::Clock => PillGroup::Clock,
+        // A doorway belongs to whatever it stands in for; today only the window
+        // controls can go sticky. It never reflows anyway — a sticky pair is a
+        // fixed two-pill layout — so its group is only ever asked for in passing.
+        PillId::Doorway => PillGroup::Window,
+    }
+}
+
+/// Displacement slot for a leadable group, `None` for the ones the rule does
+/// not (yet) cover — the single gate deciding what can be led.
+pub(crate) fn group_slot(g: PillGroup) -> Option<usize> {
+    match g {
+        PillGroup::Window => Some(0),
+        PillGroup::Mind => Some(1),
+        PillGroup::Clipboard | PillGroup::Notif | PillGroup::Clock => None,
+    }
+}
+
+/// The pill a click has pinned.
+#[derive(Debug, Clone)]
+pub(crate) struct Leader {
+    /// The pill as it was captured. For a Mind control this is a *slot*, which
+    /// is why `action` exists.
+    id: PillId,
+    /// "The leader is an identity, not a slot": for a Mind control, the
+    /// affordance id it was captured on. If the ranking reorders, the leader
+    /// follows the ACTION to its new slot; if the action withdraws, the leader
+    /// is released — so a re-rank can never put a different action under a
+    /// stationary finger.
+    action: Option<&'static str>,
+    /// The bar x the leader's centre is pinned to: where the pill sat at the
+    /// moment it was clicked. Fixed for the life of the leader — the pointer
+    /// may travel anywhere on the bar without moving it.
+    anchor_cx: f32,
+}
+
+/// Per-group displacement from the resting layout, plus the ease home.
+///
+/// While a leader is held its group's displacement is *derived* every layout
+/// (see [`App::live_lead`]) rather than stored — that is what pins the leader
+/// through a layout change that happens between pointer events. Only the
+/// release needs state: the last derived value is frozen here and eased to 0.
+#[derive(Debug, Default)]
+pub(crate) struct LeadAnim {
+    /// Logical-px offset per leadable group; 0 = resting.
+    off: [f32; LEAD_N],
+    last: Option<std::time::Instant>,
+    frame_pending: bool,
+}
+
+/// Where the leader's group must sit for the leader to stay on its anchor: the
+/// pure core of the rule.
+///
+/// `nat` is the leader's rect in the *resting* layout — where it would be if
+/// the rule did not exist. The group is translated by the difference, so a
+/// leader whose pill did not move displaces nothing: at rest this is exactly 0
+/// and the drawn layout is the resting one.
+///
+/// The anchor is the leader's CENTRE, so a leader that resizes holds its place
+/// on the bar rather than one of its edges, spending the width change evenly
+/// instead of lunging. For the fixed-width buttons that do the reflowing work
+/// — `[X]`, the Mind's controls — centre and edges are the same promise: the
+/// pill is bit-still.
+///
+/// Nothing here reads the pointer, and that IS the guarantee: the leader is a
+/// fixed point you can travel to, not something that travels with you.
+fn lead_shift(nat: Rect, anchor_cx: f32) -> f32 {
+    anchor_cx - (nat.x + nat.w / 2.0)
+}
+
+/// "The leader yields to the edges": bound a group's shift so it cannot push
+/// into its neighbours. `span` is the group's resting extent, `barrier_l` /
+/// `barrier_r` the nearest neighbouring edges (`None` = the free bar edge, and
+/// `edge_l`/`edge_r` bound that). When the clamp bites the leader *does* move —
+/// correct geometry outranks the guarantee, and it breaks visibly.
+fn clamp_shift(
+    span: (f32, f32),
+    barrier_l: Option<f32>,
+    barrier_r: Option<f32>,
+    edge: (f32, f32),
+    gap: f32,
+    raw: f32,
+) -> f32 {
+    let (gl, gr) = span;
+    let lo = barrier_l.map_or(edge.0, |b| b + gap) - gl;
+    let hi = barrier_r.map_or(edge.1, |b| b - gap) - gr;
+    // A group already too wide for its slot inverts the range; pinning to `lo`
+    // keeps it deterministic (and leaves the overflow where it always was).
+    raw.clamp(lo, hi.max(lo))
+}
+
+// --- Sticky OPTIONS (OptionUXRules.md §4) ------------------------------------
+// "Undoing must cost what doing cost." §1 keeps an OPTION from MOVING when you
+// use it; this keeps one from DISAPPEARING when you use it. Clicking
+// [fullscreen] conceals the bar — so the control you need in four seconds, to
+// undo what you just did, was taken away by what you just did. Doing costs one
+// click; undoing costs a journey down, up, a dwell and a hunt.
+//
+// So when an action takes the bar away, the OPTION that did it stays, alone,
+// exactly where the hand left it — plus a DOORWAY: an empty pill standing in
+// the slot its successor will occupy. Hover the doorway (no click, no dwell)
+// and the whole bar returns, the real pill arriving in that same place.
+//
+// It is a grace, not a mode: nothing to dismiss, no timer. Move off the pair
+// and it goes, and the bar is back to its ordinary rules.
+
+/// The bar's own coming and going — One Material (`OptionUXRules.md` §3)
+/// applied to the surface itself, not just to the pills on it.
+///
+/// The bar used to appear and vanish instantly, which made it the one thing up
+/// here that did not obey the tempo: every OPTION glided, and the surface
+/// carrying them snapped. It fades on the shared rate now, whichever way it is
+/// summoned or dismissed — the top-edge dwell, a fullscreen taking the screen,
+/// the pointer leaving, or a doorway opening.
+#[derive(Debug)]
+pub(crate) struct ShowAnim {
+    /// 0 = gone, 1 = fully present. The drawn presence, not the intent —
+    /// `options_hidden` is the intent, and interaction follows that at once
+    /// rather than waiting for the fade.
+    pub(crate) t: f32,
+    last: Option<std::time::Instant>,
+    frame_pending: bool,
+}
+
+impl Default for ShowAnim {
+    /// The bar starts fully present: a session opens with it already there, not
+    /// fading in from nothing.
+    fn default() -> Self {
+        Self {
+            t: 1.0,
+            last: None,
+            frame_pending: false,
+        }
+    }
+}
+
+/// A control that took the bar away and stayed behind, with its way back.
+#[derive(Debug, Clone)]
+pub(crate) struct Sticky {
+    /// The OPTION that did it. Still live: clicking it again undoes the thing.
+    id: PillId,
+    /// Where it sat when the bar went — the place §1 had pinned it to. Kept as
+    /// an absolute rect, because the layout it belonged to no longer exists.
+    rect: Rect,
+    /// The doorway's rect: one slot along, on the side the rest of its group
+    /// lives, sized like its successor because it is standing in for it.
+    door: Rect,
+    /// The reveal chain exactly as it stood when the bar went away.
+    ///
+    /// The doorway's promise is "the OPTIONS as they were when you pressed
+    /// this" — so the bar it brings back must be the bar you left, not one
+    /// rebuilding itself from scratch. Frozen here rather than left running,
+    /// because a chain that keeps animating while concealed has already thrown
+    /// away the state it is supposed to return to.
+    ctrl: [f32; CTRL_N],
+    ctrl_reveal: bool,
+}
+
+/// How long after acting on the bar a concealment still counts as *caused by*
+/// that action. Past this the bar concealed for its own reasons (the pointer
+/// wandered off, the compositor changed something) and nothing sticks.
+const STICKY_BLAME: Duration = Duration::from_millis(1200);
+
+// --- Title metamorphosis ----------------------------------------------------
+// The Leader says the width change happens *away* from the leader; this is the
+// width change itself. The window pill used to jump between title widths — now
+// it eases, crossfading the outgoing name into the incoming one, exactly the
+// clock↔date pattern. Holding [X], the pill's right edge is pinned against it
+// and the whole ease plays out leftward.
+/// Crossfade split, mirroring the clock's: the old name is gone by
+/// `t = OUT_END`, the new one starts at `IN_START` — a slight overlap.
+const TITLE_OUT_END: f32 = 0.55;
+const TITLE_IN_START: f32 = 0.45;
+
+/// Whether the date may start collapsing back to the time — "The Still Bar"
+/// (`OptionUXRules.md` §2): the bar does not re-flow while you are on it.
+///
+/// The clock's width is not its own business: the notification cluster is
+/// pinned a gap to its left, so a collapse slides the bell ~180px sideways.
+/// That re-flow is nobody's request — it fires on a timer — so it is allowed
+/// only once the pointer has left the surface entirely (`ptr_here` covers an
+/// open box below the bar, which is pinned to the clock the same way). Leaving
+/// the *clock* is not enough; leaving the *bar* is.
+fn clock_may_collapse(showing_date: bool, collapse_pending: bool, ptr_here: bool) -> bool {
+    showing_date && !collapse_pending && !ptr_here
+}
+
+/// Progress + endpoints for the window pill's title metamorphosis.
+#[derive(Debug)]
+pub(crate) struct TitleMeta {
+    /// Content width the morph started from (the pill grows/shrinks from here
+    /// toward the live measured width).
+    from: f32,
+    /// The name being faded out.
+    outgoing: String,
+    /// The name last measured — the current one; a change starts a morph.
+    shown: String,
+    /// Progress 0 (`from`/`outgoing`) → 1 (measured width / `shown`).
+    t: f32,
+    last: Option<std::time::Instant>,
+    frame_pending: bool,
+}
+
+impl Default for TitleMeta {
+    fn default() -> Self {
+        // Settled: an empty bar starts at its true width, not mid-morph.
+        Self {
+            from: 0.0,
+            outgoing: String::new(),
+            shown: String::new(),
+            t: 1.0,
+            last: None,
+            frame_pending: false,
+        }
+    }
+}
+
 /// Animation slot for a mode-toggle pill (`None` for window/clock/close —
 /// close is a resting pill, always visible beside the window name).
 fn ctrl_index(id: PillId) -> Option<usize> {
     match id {
         PillId::Pseudo => Some(0),
-        PillId::Fullscreen => Some(1),
+        PillId::Float => Some(1),
+        PillId::Fullscreen => Some(2),
         _ => None,
     }
 }
@@ -332,20 +602,24 @@ fn ctrl_index(id: PillId) -> Option<usize> {
 /// independent resting pills — they never overlap the emerge chain.)
 fn draw_z(id: PillId) -> u8 {
     match id {
+        // A doorway is drawn under its sticky partner, like the control it is
+        // standing in for would be.
+        PillId::Doorway => 1,
         PillId::Fullscreen => 1,
-        PillId::Pseudo => 2,
-        PillId::Close => 3,
-        PillId::Window => 4,
-        PillId::Clock => 5,
+        PillId::Float => 2,
+        PillId::Pseudo => 3,
+        PillId::Close => 4,
+        PillId::Window => 5,
+        PillId::Clock => 6,
         // The preview/box (Notif) draws first; the fixed bell (NotifMute) draws
         // on top of it, capping its right end as it grows out from behind.
-        PillId::Notif => 6,
-        PillId::NotifMute => 7,
+        PillId::Notif => 7,
+        PillId::NotifMute => 8,
         // Mirror of the bell on the left edge: the box + copy-link pill draw
         // first (emerging from behind), then the small fixed glyph pill on top.
-        PillId::ClipboardBox => 8,
-        PillId::ClipCopyLink => 8,
-        PillId::Clipboard => 9,
+        PillId::ClipboardBox => 9,
+        PillId::ClipCopyLink => 9,
+        PillId::Clipboard => 10,
         // Dynamic OPTION controls sit in the free left-centre band, overlapping
         // nothing — drawn first (lowest z).
         PillId::Option(_) => 0,
@@ -390,7 +664,14 @@ pub(crate) enum PillId {
     Window,
     Close,
     Pseudo,
+    /// Out of the layout, free-floating — the fourth window mode.
+    Float,
     Fullscreen,
+    /// The doorway of a sticky OPTION (`OptionUXRules.md` §4): an empty pill
+    /// standing in the slot its successor will occupy. Not an action — hovering
+    /// it brings the whole bar back, and the real OPTION appears in this exact
+    /// place, so it reads as that pill arriving rather than as a swap.
+    Doorway,
     /// A dynamic OPTION control from the Mind (media/git/call/…), identified by
     /// its index into [`crate::App::surfaced_options`]. Clicking it runs that
     /// affordance's action.
@@ -581,12 +862,28 @@ fn presence(id: PillId) -> Presence {
         PillId::Notif | PillId::NotifMute => BOTH,
         // Window-mode controls act on the FOCUSED window — meaningless while
         // you're above the desktop choosing one.
-        PillId::Pseudo | PillId::Fullscreen => DESKTOP_ONLY,
+        PillId::Pseudo | PillId::Float | PillId::Fullscreen => DESKTOP_ONLY,
         // The clipboard serves the window you're working in, not the map.
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => DESKTOP_ONLY,
         // Context controls act on the focused app — meaningless over the map.
         PillId::Option(_) => DESKTOP_ONLY,
         PillId::MediaOpen => DESKTOP_ONLY,
+        // Only ever present while a sticky OPTION is standing, which cannot
+        // happen above the overview (it has its own strip and never conceals).
+        PillId::Doorway => DESKTOP_ONLY,
+    }
+}
+
+/// The glyph a fixed control pill wears. Only the window-mode controls can go
+/// sticky today (they are the ones whose action can take the bar away), so the
+/// rest fall back to the generic OPTION mark rather than inventing one.
+fn glyph_for_pill(id: PillId) -> &'static str {
+    match id {
+        PillId::Fullscreen => GLYPH_FULL,
+        PillId::Pseudo => GLYPH_SQUARE,
+        PillId::Float => GLYPH_FLOAT,
+        PillId::Close => GLYPH_CLOSE,
+        _ => GLYPH_OPTION,
     }
 }
 
@@ -757,12 +1054,39 @@ impl App {
         date_now()
     }
 
-    /// Compute the current pills (interactive modules) for the bar state.
-    fn options_pills(&self) -> Vec<Pill> {
+    /// The pills at their RESTING positions — the layout with no leader held,
+    /// i.e. exactly the layout that was always there. [`Self::options_pills`]
+    /// is this plus the Leader's displacement; everything downstream reads
+    /// that one.
+    fn options_pills_resting(&self) -> Vec<Pill> {
         let w = self.options_size.0 as f32;
         let bar_h = self.options_bar_h();
         if w == 0.0 {
             return Vec::new();
+        }
+        // A sticky OPTION IS the layout while it stands (`OptionUXRules.md`
+        // §4): the bar is concealed, and all that remains is the control that
+        // took it away plus its doorway. Returning them here rather than
+        // painting them specially means they get the surface's real drawing,
+        // hit-testing and hover for free — they are ordinary pills, there just
+        // aren't any others.
+        if let Some(st) = self.options_sticky.as_ref() {
+            return vec![
+                Pill {
+                    id: PillId::Doorway,
+                    rect: st.door,
+                    text: String::new(),
+                    family: Some(NERD),
+                    glyph_color: None,
+                },
+                Pill {
+                    id: st.id,
+                    rect: st.rect,
+                    text: glyph_for_pill(st.id).to_owned(),
+                    family: Some(NERD),
+                    glyph_color: None,
+                },
+            ];
         }
         // Pills fill almost the whole bar height, top to bottom.
         let ph = (bar_h - 2.0 * PILL_MARGIN_Y).max(1.0);
@@ -899,7 +1223,9 @@ impl App {
         if self.options_title.is_some() || self.overview_hover.is_some() {
             // Title, with the live resize readout appended while active.
             let shown = self.options_window_text().unwrap_or_default();
-            let ww = (self.options_title_w + 2.0 * PILL_PAD_X).max(ph);
+            // Morphing width, not the raw measurement: the pill eases between
+            // two titles instead of jumping (see [`TitleMeta`]).
+            let ww = (self.options_title_content_w() + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
             let wx = ((w - ww) / 2.0).max(EDGE_PAD);
             let circle = |pills: &mut Vec<Pill>, x: f32, id, glyph: &str, color| {
@@ -924,7 +1250,12 @@ impl App {
             // Window-mode toggles, right of the close (pseudo nearest,
             // fullscreen outermost).
             let mut cx = close_x + d + GROUP_GAP;
+            // The window modes, ordered by how far each takes the window from
+            // the layout: pseudo (still tiled, just smaller), float (out of the
+            // layout), fullscreen (over everything).
             circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
+            cx += d + CTRL_GAP;
+            circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
             cx += d + CTRL_GAP;
             circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
         }
@@ -940,6 +1271,123 @@ impl App {
             }
         });
         pills
+    }
+
+    /// The pills as DRAWN: the resting layout with the Leader's displacement
+    /// applied to its group (`OptionUXRules.md` §1). Draw, hit-test, hover and
+    /// click all read this, so a displaced `[X]` is still hit-tested as `[X]`.
+    /// With no leader held and nothing easing home this is bit-identical to
+    /// [`Self::options_pills_resting`] — at rest, nothing changed.
+    fn options_pills(&self) -> Vec<Pill> {
+        let mut pills = self.options_pills_resting();
+        let off = self.lead_offsets(&pills);
+        if off.iter().all(|o| *o == 0.0) {
+            return pills;
+        }
+        for p in pills.iter_mut() {
+            if let Some(s) = group_slot(group_of(p.id)) {
+                p.rect.x += off[s];
+            }
+        }
+        pills
+    }
+
+    /// Current displacement per leadable group: the stored (easing-home) value,
+    /// overridden for the held group by the live one. The held group's offset is
+    /// *derived*, not stored, which is what pins the leader through a layout
+    /// change that lands between two pointer events.
+    fn lead_offsets(&self, resting: &[Pill]) -> [f32; LEAD_N] {
+        let mut off = self.options_lead.off;
+        if let Some((slot, live)) = self.live_lead(resting) {
+            off[slot] = live;
+        }
+        off
+    }
+
+    /// Where the held group must sit for the leader to stay on its anchor,
+    /// bounded by its neighbours. `None` when nothing is held or the leader has
+    /// left the layout.
+    fn live_lead(&self, resting: &[Pill]) -> Option<(usize, f32)> {
+        let ld = self.options_leader.as_ref()?;
+        let id = self.leader_pill_id()?;
+        let slot = group_slot(group_of(id))?;
+        let nat = resting
+            .iter()
+            .find(|p| p.id == id && self.ctrl_pill_visible(p.id))?;
+        let raw = lead_shift(nat.rect, ld.anchor_cx);
+        let g = group_of(id);
+        let span = self.group_span(resting, g)?;
+        let (bl, br) = self.group_barriers(resting, g, span);
+        let bar_w = self.options_size.0 as f32;
+        Some((
+            slot,
+            clamp_shift(span, bl, br, (EDGE_PAD, bar_w - EDGE_PAD), OPTION_GAP, raw),
+        ))
+    }
+
+    /// The leader's pill id *now*. For a Mind control the leader is held by its
+    /// affordance id, so a re-rank moves the leader to the action's new slot
+    /// rather than handing a stationary finger a different action; a withdrawn
+    /// action yields `None` and the leader is released.
+    fn leader_pill_id(&self) -> Option<PillId> {
+        let ld = self.options_leader.as_ref()?;
+        match ld.action {
+            Some(act) => self
+                .surfaced_options()
+                .iter()
+                .take(OPTION_PILL_CAP)
+                .position(|a| a.id == act)
+                .map(|i| PillId::Option(i as u8)),
+            None => Some(ld.id),
+        }
+    }
+
+    /// A group's resting extent (leftmost left edge, rightmost right edge)
+    /// over the pills that are actually up — a tucked toggle must not
+    /// constrain a shift it isn't visible for.
+    fn group_span(&self, resting: &[Pill], g: PillGroup) -> Option<(f32, f32)> {
+        resting
+            .iter()
+            .filter(|p| group_of(p.id) == g && self.ctrl_pill_visible(p.id))
+            .fold(None, |acc: Option<(f32, f32)>, p| {
+                let (l, r) = (p.rect.x, p.rect.x + p.rect.w);
+                Some(acc.map_or((l, r), |(al, ar)| (al.min(l), ar.max(r))))
+            })
+    }
+
+    /// The nearest neighbouring edges on either side of a group — what "yields
+    /// to the edges" measures against.
+    fn group_barriers(
+        &self,
+        resting: &[Pill],
+        g: PillGroup,
+        span: (f32, f32),
+    ) -> (Option<f32>, Option<f32>) {
+        let (gl, gr) = span;
+        let others = resting
+            .iter()
+            .filter(|p| group_of(p.id) != g && self.ctrl_pill_visible(p.id));
+        let mut left: Option<f32> = None;
+        let mut right: Option<f32> = None;
+        for p in others {
+            let (l, r) = (p.rect.x, p.rect.x + p.rect.w);
+            if r <= gl {
+                left = Some(left.map_or(r, |b: f32| b.max(r)));
+            } else if l >= gr {
+                right = Some(right.map_or(l, |b: f32| b.min(l)));
+            }
+        }
+        (left, right)
+    }
+
+    /// The window pill's content width right now — the morphing value, easing
+    /// between the outgoing title's width and the measured current one.
+    pub(crate) fn options_title_content_w(&self) -> f32 {
+        lerp(
+            self.options_title_meta.from,
+            self.options_title_w,
+            self.options_title_meta.t,
+        )
     }
 
     /// The clock pill's current left edge (accounting for its date
@@ -997,7 +1445,16 @@ impl App {
             .map_or(0.0, |t| r.measure_text(t, font_px, TEXT_FONT));
         self.options_clock_w = cw;
         self.options_date_w = dw;
+        // The window pill EASES between title widths instead of jumping (the
+        // visible half of the Leader rule). Keyed on the text, not the width,
+        // so a scale change re-measures without pretending the title changed.
+        let shown = title.unwrap_or_default();
+        let displayed = self.options_title_content_w();
         self.options_title_w = tw;
+        if shown != self.options_title_meta.shown {
+            let outgoing = std::mem::replace(&mut self.options_title_meta.shown, shown);
+            self.begin_title_morph(displayed, outgoing);
+        }
     }
 
     /// Whether the matched bar is bright enough to want dark text/ink.
@@ -1245,8 +1702,12 @@ impl App {
             // from behind the parent's near edge (slide 0 = tucked, 1 = rest),
             // fading in; the glyph is clipped to the emerge side so it reads as
             // coming out from under the parent rather than through it.
+            // A sticky control is not riding the reveal chain — it is standing
+            // on its own on a concealed bar (`OptionUXRules.md` §4), so it
+            // draws at full presence instead of tucking back behind a parent
+            // that is no longer there.
             let (rect, a, clip, shadow_a) = match ctrl_index(pill.id) {
-                Some(i) => {
+                Some(i) if self.options_sticky.is_none() => {
                     let t = self.options_ctrl.t[i];
                     // Opacity rides the slide (the same mapping as the
                     // copy-link pill), so show and hide are one symmetric
@@ -1266,9 +1727,13 @@ impl App {
                             let cr = home(PillId::Close).map_or(pill.rect.x + d, |r| r.x + r.w);
                             (cr - d, cr)
                         }
-                        PillId::Fullscreen => {
+                        PillId::Float => {
                             let pr = home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x + r.w);
                             (pr - d, pr)
+                        }
+                        PillId::Fullscreen => {
+                            let fr = home(PillId::Float).map_or(pill.rect.x, |r| r.x + r.w);
+                            (fr - d, fr)
                         }
                         _ => (pill.rect.x, pill.rect.x),
                     };
@@ -1279,12 +1744,31 @@ impl App {
                     // doesn't leak over the parent (overlay shadows draw on top).
                     (rect, a, Some(clip), a * t)
                 }
-                None => (pill.rect, 1.0, None, 1.0),
+                _ => (pill.rect, 1.0, None, 1.0),
             };
             // Unified hover lift: a hovered pill grows a touch (drawn geometry
             // only) so hover reads as a tactile rise, not a shrink.
+            // The bar's own fade, applied per pill so the sticky pair can be
+            // exempt from it (`OptionUXRules.md` §3 for the tempo, §4 for who
+            // is allowed to stay).
+            let fade = self.options_pill_fade(pill.id, pill.rect);
+            if fade <= 0.001 {
+                continue;
+            }
+            let a = a * fade;
+            let shadow_a = shadow_a * fade;
             let hovered = self.options_hover == Some(pill.id);
-            let rect = if hovered { hover_grow(rect) } else { rect };
+            // The hover lift reads as a RISE only when a bar full of pills sets
+            // the baseline. A sticky pair has no baseline — two circles alone
+            // on a concealed bar — so the lifted one just makes its partner
+            // look shrunken, and the doorway stops reading as a full OPTION
+            // (`OptionUXRules.md` §4: it is an OPTION, identical to the others,
+            // only empty). There, hover speaks with colour alone.
+            let rect = if hovered && self.options_sticky.is_none() {
+                hover_grow(rect)
+            } else {
+                rect
+            };
             let radius = rect.h / 2.0; // stadium ⇒ circle when w == h
             push_neumorph(scene, rect, radius, bright, shadow_a);
             let base = if hovered { hover_wash } else { rest_wash };
@@ -1316,6 +1800,34 @@ impl App {
             // metamorphosis: the clock fades out early, the date fades in late
             // (a slight overlap), the date centred on the pill and scissor-
             // clipped to it so it reveals from the centre outward as it grows.
+            // The window pill crossfades the outgoing title into the incoming
+            // one while its width eases between them — the same split as the
+            // clock. Each label keeps its own natural width so neither wraps
+            // mid-morph; the scissor clip does the reveal. Under the Leader the
+            // pill's leader-facing edge is pinned, so this plays out entirely
+            // on its far side (`OptionUXRules.md` §1).
+            let tt = self.options_title_meta.t;
+            if pill.id == PillId::Window && tt < 0.999 {
+                let out = (1.0 - tt / TITLE_OUT_END).clamp(0.0, 1.0);
+                let inn = ((tt - TITLE_IN_START) / (1.0 - TITLE_IN_START)).clamp(0.0, 1.0);
+                if out > 0.001 {
+                    scene.labels.push(mk(
+                        self.options_title_meta.outgoing.clone(),
+                        out,
+                        self.options_title_meta.from + 2.0,
+                        Some(rect),
+                    ));
+                }
+                if inn > 0.001 {
+                    scene.labels.push(mk(
+                        pill.text.clone(),
+                        inn,
+                        self.options_title_w + 2.0,
+                        Some(rect),
+                    ));
+                }
+                continue;
+            }
             let t = self.options_clock_meta.t;
             if pill.id == PillId::Clock && t > 0.001 {
                 let out = (1.0 - t / META_OUT_END).clamp(0.0, 1.0);
@@ -1390,6 +1902,10 @@ impl App {
             },
         };
         if self.options_active_addr != addr {
+            // Focus moved, so a sticky OPTION's way back is stale: it offers to
+            // undo something you are no longer looking at, which is worse than
+            // offering nothing (`OptionUXRules.md` §4).
+            self.clear_sticky();
             // Focus moved — re-derive the copy-link affordance from the new app's
             // class (only browsers expose a copyable page URL).
             let is_browser = class.is_some_and(|c| hypr::is_browser_class(&c));
@@ -1480,9 +1996,17 @@ impl App {
             self.options_hide_deadline = None;
             // While the overview is open the bar always shows (it has its own
             // reserved strip there) — fullscreen conceal resumes after.
-            self.options_hidden = fs && !self.overview_active;
+            self.set_options_hidden(fs && !self.overview_active);
             if fs {
-                self.options_hover = None;
+                // The bar is being taken away. If the user's own click is what
+                // took it, leave that control standing (`OptionUXRules.md` §4)
+                // — otherwise the hover is dropped as before.
+                if !self.arm_sticky() {
+                    self.options_hover = None;
+                }
+            } else {
+                // Back from fullscreen: the bar itself is the way back now.
+                self.clear_sticky();
             }
             self.sync_options_input();
         }
@@ -1530,6 +2054,268 @@ impl App {
         self.options_fullscreen && !self.overview_active
     }
 
+    /// Leave the acted-on control standing on the concealed bar, with its
+    /// doorway — Sticky OPTIONS (`OptionUXRules.md` §4). Returns whether
+    /// anything stuck.
+    ///
+    /// The trigger is a condition, not a list: the bar is concealing, the user
+    /// acted on it a moment ago, and their pointer is still there. Any future
+    /// OPTION whose action hides the bar inherits this without knowing about it.
+    fn arm_sticky(&mut self) -> bool {
+        let Some((id, rect, when)) = self.options_acted else {
+            return false;
+        };
+        // Concealed for its own reasons, or the hand has already gone: there is
+        // no journey to save.
+        if when.elapsed() > STICKY_BLAME || !self.options_ptr_on_bar() {
+            return false;
+        }
+        // The doorway stands in its successor's slot, on the side the rest of
+        // the group lives — for [fullscreen] that is leftward, toward
+        // [pseudo], [X] and the title.
+        let step = rect.w + CTRL_GAP;
+        let leftward = self.group_lies_left_of(id, rect);
+        let door_x = if leftward {
+            rect.x - step
+        } else {
+            rect.x + step
+        };
+        self.options_sticky = Some(Sticky {
+            id,
+            rect,
+            door: Rect::new(door_x, rect.y, rect.w, rect.h),
+            ctrl: self.options_ctrl.t,
+            ctrl_reveal: self.options_ctrl.reveal,
+        });
+        // The pointer is on it — that was a precondition of getting here — so
+        // it is hovered, without waiting for the next motion to say so. The
+        // hand never left the control; the bar left from under the hand.
+        self.options_hover = Some(id);
+        self.options_acted = None;
+        true
+    }
+
+    /// Which side of a control the rest of its group sits on, from the resting
+    /// layout it just left. Ties (and a group of one) open toward the middle of
+    /// the bar, which is always where more room is.
+    fn group_lies_left_of(&self, id: PillId, rect: Rect) -> bool {
+        let g = group_of(id);
+        let mut left = 0;
+        let mut right = 0;
+        for p in self.options_pills_resting() {
+            if p.id == id || group_of(p.id) != g {
+                continue;
+            }
+            if p.rect.x < rect.x {
+                left += 1;
+            } else {
+                right += 1;
+            }
+        }
+        match left.cmp(&right) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => rect.x > self.options_size.0 as f32 / 2.0,
+        }
+    }
+
+    /// Drop the sticky pair once the pointer has been off it for the shared
+    /// leave-hold. Not a countdown on the feature — it answers to the pointer
+    /// (§4) and borrows §3's transit grace so that moving between the control
+    /// and its doorway, or over the gap between them, never counts as leaving.
+    fn schedule_sticky_drop(&mut self) {
+        let timer = Timer::from_duration(animation::LEAVE_HOLD);
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                // Still standing, and the hand has not come back to it.
+                if app.options_sticky.is_some() && app.options_hover.is_none() {
+                    app.clear_sticky();
+                }
+                TimeoutAction::Drop
+            });
+    }
+
+    /// Put the focused window into a mode, leaving whatever mode it was in.
+    ///
+    /// Handles the one transition the compositor cannot do in a single step:
+    /// entering pseudo from fullscreen or floating, where the Golem pseudo size
+    /// is a fraction of the window's TILE and the tile is not measurable until
+    /// the window is back in the layout. There the first pass returns it to the
+    /// layout and this schedules the second, once the move has settled.
+    pub(crate) fn set_window_mode(&mut self, target: hypr::WindowMode) {
+        if !hypr::set_window_mode(target) {
+            return;
+        }
+        // Long enough for the window to reach its tile: the compositor reports
+        // a mid-ANIMATION size until it lands (see `docs/hypr-api.md`), and a
+        // size read too early would pseudotile to a fraction of a rectangle the
+        // window was only passing through.
+        let timer = Timer::from_duration(MODE_SETTLE);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, _app| {
+            hypr::set_window_mode(target);
+            TimeoutAction::Drop
+        });
+    }
+
+    /// Show or conceal the bar. The one door every path goes through — the
+    /// top-edge dwell, a fullscreen taking the screen, the pointer leaving, a
+    /// doorway opening — so the surface has exactly one entrance and one exit,
+    /// both on the shared tempo (`OptionUXRules.md` §3).
+    ///
+    /// The flag is the intent and flips at once; `options_show` is the drawn
+    /// presence and catches up. Input follows the intent, so a bar on its way
+    /// out is not clickable and one on its way in already is.
+    pub(crate) fn set_options_hidden(&mut self, hidden: bool) {
+        if self.options_hidden == hidden {
+            return;
+        }
+        self.options_hidden = hidden;
+        if animation::reduce_motion() {
+            self.options_show.t = if hidden { 0.0 } else { 1.0 };
+            return;
+        }
+        self.schedule_options_show_frame();
+    }
+
+    fn schedule_options_show_frame(&mut self) {
+        if self.options_show.frame_pending {
+            return;
+        }
+        self.options_show.frame_pending = true;
+        if self.options_show.last.is_none() {
+            self.options_show.last = Some(Instant::now());
+        }
+        let timer = Timer::from_duration(Duration::from_millis(8));
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.options_show.frame_pending = false;
+                app.tick_options_show();
+                TimeoutAction::Drop
+            });
+    }
+
+    /// One frame of the bar's fade.
+    fn tick_options_show(&mut self) {
+        let now = Instant::now();
+        let dt = self
+            .options_show
+            .last
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+        self.options_show.last = Some(now);
+        let target = if self.options_hidden { 0.0 } else { 1.0 };
+        let (t, moving) = ease_toward(
+            self.options_show.t,
+            target,
+            dt,
+            animation::MORPH_RATE,
+            animation::SETTLE_ALPHA,
+        );
+        self.options_show.t = t;
+        self.draw_options();
+        if moving {
+            self.schedule_options_show_frame();
+        } else {
+            self.options_show.last = None;
+            // The bar is all the way back, so the pair it came back around has
+            // finished handing over: the doorway's slot is an ordinary OPTION
+            // again (`OptionUXRules.md` §4).
+            if t >= 1.0 && self.options_sticky.is_some() {
+                self.options_sticky = None;
+                self.options_update_hover();
+                self.draw_options();
+            }
+        }
+    }
+
+    /// How present a given pill should be drawn right now.
+    ///
+    /// The bar fades as one, except for the sticky pair: the whole point of
+    /// those two is that they do NOT go, so the rest fades around them — out
+    /// when the bar is taken away, and back in when a doorway brings it back
+    /// (`OptionUXRules.md` §4).
+    fn options_pill_fade(&self, id: PillId, rect: Rect) -> f32 {
+        if let Some(st) = self.options_sticky.as_ref() {
+            let in_doorway = rect.x < st.door.x + st.door.w && st.door.x < rect.x + rect.w;
+            if id == st.id || id == PillId::Doorway || in_doorway {
+                return 1.0;
+            }
+        }
+        self.options_show.t
+    }
+
+    /// Debug/verification only: conceal the bar and stand `[fullscreen]` plus
+    /// its doorway on it, as a real fullscreen click would. The §4 pair is
+    /// otherwise reachable only with a pointer on a real fullscreen window,
+    /// which no screenshot can arrange.
+    pub(crate) fn debug_stand_sticky(&mut self) {
+        let Some(full) = self
+            .options_pills_resting()
+            .into_iter()
+            .find(|p| p.id == PillId::Fullscreen)
+        else {
+            return;
+        };
+        self.options_acted = Some((full.id, full.rect, Instant::now()));
+        self.set_options_hidden(true);
+        self.options_ptr = Some((full.rect.x + full.rect.w / 2.0, full.rect.y));
+        self.arm_sticky();
+        self.options_update_hover();
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    /// Take the sticky pair down. The bar underneath is unchanged — it was
+    /// already concealed — so this simply stops drawing a way back that is no
+    /// longer wanted or no longer true.
+    fn clear_sticky(&mut self) {
+        if self.options_sticky.take().is_none() {
+            return;
+        }
+        self.options_acted = None;
+        self.sync_options_input();
+        // Hover is RE-DERIVED from where the pointer actually is, never
+        // dropped. The hand did not move — the world did — so whatever now
+        // sits under it is hovered, and a toggle can be repeated as many times
+        // as wanted without re-aiming between presses (`OptionUXRules.md` §1's
+        // repeatability, carried across the bar going away and coming back).
+        // If the pointer really has left, this resolves to nothing anyway.
+        //
+        // The Leader is deliberately NOT snapped: it was pinned to this control
+        // when it was clicked, and zeroing that displacement would re-flow the
+        // cluster under a stationary finger — the exact failure §1 exists to
+        // prevent, arriving at the worst possible moment.
+        self.options_update_hover();
+        self.draw_options();
+    }
+
+    /// The doorway was hovered: bring the whole bar back, here and now. No
+    /// dwell — the pointer is on it deliberately, and the bar was never really
+    /// left (`OptionUXRules.md` §4). The real OPTION lands in the doorway's
+    /// exact slot, so it reads as that pill arriving, not as a swap.
+    fn open_doorway(&mut self) {
+        let Some(st) = self.options_sticky.take() else {
+            return;
+        };
+        // "The OPTIONS as they were when you pressed the sticky one." The
+        // chain is restored to the exact progress it was frozen at, with its
+        // stagger clock cleared so no stage waits its turn again: the bar is
+        // simply back, mid-state and all. Nothing replays, nothing rebuilds.
+        self.options_ctrl.t = st.ctrl;
+        self.options_ctrl.reveal = st.ctrl_reveal;
+        self.options_ctrl.changed_at = None;
+        self.options_ctrl.last = None;
+        self.options_acted = None;
+        self.set_options_hidden(false);
+        self.options_reveal_deadline = None;
+        // The Leader is deliberately NOT snapped: the control was pinned when
+        // it was clicked (§1), and that anchor is part of "as they were".
+        self.sync_options_input();
+        self.options_update_hover();
+        self.draw_options();
+    }
+
     /// Arm the dwell timer that reveals a concealed bar. Idempotent while pending.
     fn arm_options_reveal(&mut self) {
         if self.options_reveal_deadline.is_some() {
@@ -1545,7 +2331,7 @@ impl App {
                     app.options_reveal_deadline = None;
                     let still_at_top = app.options_ptr.is_some_and(|(_, y)| y <= REVEAL_PX);
                     if app.options_hidden && still_at_top {
-                        app.options_hidden = false;
+                        app.set_options_hidden(false);
                         app.sync_options_input();
                         app.draw_options();
                     }
@@ -1566,8 +2352,10 @@ impl App {
                 if app.options_hide_deadline == Some(deadline) {
                     app.options_hide_deadline = None;
                     if app.options_fullscreen && !app.options_hidden && app.options_ptr.is_none() {
-                        app.options_hidden = true;
+                        app.set_options_hidden(true);
                         app.options_hover = None;
+                        // The bar is going away — nothing to ease home to.
+                        app.snap_lead();
                         app.sync_options_input();
                         app.draw_options();
                     }
@@ -1601,6 +2389,24 @@ impl App {
         let Some(layer) = self.options_layer.as_ref() else {
             return;
         };
+        // A sticky pair sits on an otherwise-concealed bar: the pointer has to
+        // reach the pair, and the top-edge reveal strip has to keep working
+        // underneath it, so both are input (`OptionUXRules.md` §4).
+        if self.options_hidden {
+            if let Some(st) = self.options_sticky.as_ref() {
+                let l = st.rect.x.min(st.door.x);
+                let r = (st.rect.x + st.rect.w).max(st.door.x + st.door.w);
+                let strip = (0, 0, w as i32, REVEAL_PX.ceil() as i32);
+                let pair = (
+                    l.floor() as i32,
+                    0,
+                    (r - l).ceil() as i32,
+                    (st.rect.y + st.rect.h).ceil() as i32,
+                );
+                surface::set_input_rects(&self.compositor, layer, &[strip, pair]);
+                return;
+            }
+        }
         let h = if self.options_hidden {
             REVEAL_PX.ceil() as i32
         } else if self.notif.expanded || self.clip.expanded || self.media_box_open {
@@ -1668,9 +2474,23 @@ impl App {
                 self.options_on_motion(surface_y as f32);
             }
             wl_pointer::Event::Leave { .. } => {
+                // Pointer off the bar: the Leader is released and its group
+                // eases home to its resting position (`OptionUXRules.md` §1).
+                // Nothing is permanently displaced.
+                self.release_leader();
                 self.options_ptr = None;
                 self.pointer_surface = PointerSurface::Dock;
                 self.options_reveal_deadline = None;
+                // A sticky pair lives on a CONCEALED bar, so the cleanup below
+                // (guarded on the bar being up) never runs for it. Walking away
+                // is one of its three endings (`OptionUXRules.md` §4), so it is
+                // handled here: hover goes, and the pair goes after the shared
+                // transit grace unless the hand comes back.
+                if self.options_sticky.is_some() {
+                    self.options_hover = None;
+                    self.schedule_sticky_drop();
+                    self.draw_options();
+                }
                 if !self.options_hidden {
                     self.options_hover = None;
                     self.update_ctrl_reveal(); // fade the buttons out
@@ -1690,8 +2510,12 @@ impl App {
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_LEFT
                     && state == WEnum::Value(wl_pointer::ButtonState::Pressed)
-                    && !self.options_hidden =>
+                    && self.options_interactive() =>
             {
+                // The Leader (`OptionUXRules.md` §1): the click pins the pill it
+                // lands on, so the re-flow the click causes happens around it.
+                // On PRESS — the anchor is the layout that was aimed at.
+                self.capture_leader();
                 if let Some((px, py)) = self.options_ptr {
                     self.media_drag_start(px, py);
                 }
@@ -1699,7 +2523,7 @@ impl App {
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_LEFT
                     && state == WEnum::Value(wl_pointer::ButtonState::Released)
-                    && !self.options_hidden =>
+                    && self.options_interactive() =>
             {
                 // A slider drag commits on release and swallows the click.
                 if self.media_drag_commit() {
@@ -1710,7 +2534,7 @@ impl App {
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_RIGHT
                     && state == WEnum::Value(wl_pointer::ButtonState::Released)
-                    && !self.options_hidden =>
+                    && self.options_interactive() =>
             {
                 self.options_right_click();
             }
@@ -1748,6 +2572,12 @@ impl App {
     /// otherwise hover the pills and cancel any pending conceal.
     fn options_on_motion(&mut self, y: f32) {
         if self.options_hidden {
+            // A sticky pair is live on the concealed bar: it hovers and clicks
+            // like any other pill (`OptionUXRules.md` §4). The top-edge dwell
+            // still runs underneath, so the ordinary way back keeps working.
+            if self.options_sticky.is_some() {
+                self.options_update_hover();
+            }
             if y <= REVEAL_PX {
                 self.arm_options_reveal();
             } else {
@@ -1762,8 +2592,11 @@ impl App {
 
     pub(crate) fn options_update_hover(&mut self) {
         let bar_h = self.options_bar_h();
+        // One layout, shared by the hit-test and the Leader capture — so the
+        // grab is measured against exactly the rects the pointer is over.
+        let pills = self.options_pills();
         let hover = self.options_ptr.and_then(|p| {
-            self.options_pills()
+            pills
                 .iter()
                 .find(|pill| {
                     // The notification element owns its whole (possibly tall,
@@ -1781,6 +2614,25 @@ impl App {
         });
         let changed = hover != self.options_hover;
         self.options_hover = hover;
+        // Sticky OPTIONS (`OptionUXRules.md` §4). Hovering the doorway brings
+        // the bar back at once; leaving the pair takes it down after the shared
+        // transit grace, so crossing the gap between the two is not leaving.
+        if self.options_sticky.is_some() {
+            if hover == Some(PillId::Doorway) {
+                self.open_doorway();
+                return;
+            }
+            if hover.is_none() {
+                self.schedule_sticky_drop();
+            }
+        }
+        // The Leader (`OptionUXRules.md` §1) is chosen by the click, not by the
+        // hover — travelling across the bar must not move anything. The anchor
+        // holds until the pointer leaves the bar strip, which includes going
+        // down into an open box.
+        if self.options_leader.is_some() && !self.options_ptr_on_bar() {
+            self.release_leader();
+        }
         self.update_ctrl_reveal();
         self.update_clock_meta();
         self.update_notif_reveal();
@@ -1796,6 +2648,12 @@ impl App {
 
     /// A control button is only hoverable/clickable once mostly revealed.
     fn ctrl_pill_visible(&self, id: PillId) -> bool {
+        // A sticky pair is the whole layout: both its pills are up by
+        // definition, whatever the reveal chain's progress happens to be
+        // (`OptionUXRules.md` §4).
+        if self.options_sticky.is_some() {
+            return true;
+        }
         // The mute pill hides behind the bell at rest; only accept hover/clicks
         // once it has actually been uncovered, so the resting bell slot always
         // hits the bell (which is listed first) rather than the pill under it.
@@ -1812,6 +2670,35 @@ impl App {
             Some(i) => self.options_ctrl.t[i] > 0.5,
             None => true, // window / clock / close always
         }
+    }
+
+    /// The bar's pill height — pills fill almost the whole bar, top to bottom.
+    /// The one place the formula lives; the layout and every morph span that
+    /// counts in pills read it from here.
+    pub(crate) fn options_pill_h(&self) -> f32 {
+        (self.options_bar_h() - 2.0 * PILL_MARGIN_Y).max(1.0)
+    }
+
+    /// How far a mode toggle slides as its progress runs 0→1: out from behind
+    /// its parent's near edge to its resting spot, i.e. one pill plus the gap
+    /// it emerges across. The span [`animation::settle_t`] measures against.
+    fn options_ctrl_travel(&self) -> f32 {
+        self.options_pill_h() + GROUP_GAP
+    }
+
+    /// Whether the surface takes clicks right now: the bar is up, or it is
+    /// concealed but a sticky OPTION is standing on it, which is the whole
+    /// point of it standing there (`OptionUXRules.md` §4).
+    fn options_interactive(&self) -> bool {
+        !self.options_hidden || self.options_sticky.is_some()
+    }
+
+    /// Whether the pointer is on the bar strip itself — not merely somewhere on
+    /// the OPTIONS surface, which extends down over an open box. This is what
+    /// "until the pointer leaves the bar" measures, gaps between pills included.
+    fn options_ptr_on_bar(&self) -> bool {
+        self.options_ptr
+            .is_some_and(|(_, y)| (0.0..=self.options_bar_h()).contains(&y))
     }
 
     /// Whether the pointer is within the window+controls cluster span (so a
@@ -1837,7 +2724,227 @@ impl App {
     /// the window pill or the (always-visible) close button is hovered and
     /// stay while the pointer is over the cluster; leaving fades them out. A
     /// fresh reveal restarts the slide.
+    /// Capture the Leader: the pill being clicked, pinned to the place on the
+    /// bar it occupies right now. Taken on PRESS, before the action runs, so
+    /// the anchor is the layout the user actually aimed at.
+    ///
+    /// The anchor is read from the DRAWN rect, so clicking a second pill while
+    /// its group is already displaced hands leadership over without a jump.
+    ///
+    /// A click between pills, or on a group the rule does not cover, leaves the
+    /// standing leader alone: you do not lose your grip by missing, and merely
+    /// travelling across the bar changes nothing at all.
+    fn capture_leader(&mut self) {
+        let drawn = self.options_pills();
+        let Some(id) = self
+            .options_hover
+            .filter(|id| group_slot(group_of(*id)).is_some())
+        else {
+            return;
+        };
+        let Some(rect) = drawn.iter().find(|p| p.id == id).map(|p| p.rect) else {
+            return;
+        };
+        // A Mind control is held by its ACTION, not its slot.
+        let action = match id {
+            PillId::Option(i) => match self
+                .surfaced_options()
+                .get(i as usize)
+                .filter(|_| (i as usize) < OPTION_PILL_CAP)
+            {
+                Some(a) => Some(a.id),
+                None => return,
+            },
+            _ => None,
+        };
+        self.options_leader = Some(Leader {
+            id,
+            action,
+            anchor_cx: rect.x + rect.w / 2.0,
+        });
+    }
+
+    /// Keep the stored displacement in step with the live one, and release the
+    /// leader when the pill it holds leaves the layout — a window closed, a
+    /// Mind offer withdrawn, a toggle tucked away. The stored value is the last
+    /// good one, so the group eases home from where it actually is rather than
+    /// snapping. Runs before anything consumes the layout.
+    pub(crate) fn sync_lead(&mut self) {
+        let held = if self.options_leader.is_some() {
+            let resting = self.options_pills_resting();
+            match self.live_lead(&resting) {
+                Some((slot, live)) => {
+                    self.options_lead.off[slot] = live;
+                    Some(slot)
+                }
+                // The leader is gone: keep whatever offset it had and go home.
+                None => {
+                    self.options_leader = None;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // Every group that is NOT the held one eases home — including the group
+        // the leader just left, when a click hands leadership from one OPTION
+        // to another.
+        if (0..LEAD_N).any(|s| held != Some(s) && self.options_lead.off[s] != 0.0) {
+            self.schedule_options_lead_frame();
+        }
+    }
+
+    /// Release the Leader and ease its group home to the resting layout.
+    /// Nothing is permanently displaced.
+    fn release_leader(&mut self) {
+        // Holding still is not an animation, but the ease home is — so
+        // reduce-motion snaps it, and a bar that is going away has nothing to
+        // ease home on.
+        if self.options_hidden || animation::reduce_motion() {
+            return self.snap_lead();
+        }
+        self.sync_lead(); // freeze the last live offset
+        self.options_leader = None;
+        // Idle at rest: a leave that never displaced anything costs no frames.
+        if self.options_lead.off.iter().any(|o| *o != 0.0) {
+            self.schedule_options_lead_frame();
+        }
+    }
+
+    /// Drop the Leader and any displacement outright — the bar is going away,
+    /// so there is nothing to ease home to.
+    pub(crate) fn snap_lead(&mut self) {
+        self.options_leader = None;
+        self.options_lead.off = [0.0; LEAD_N];
+    }
+
+    fn schedule_options_lead_frame(&mut self) {
+        if self.options_lead.frame_pending {
+            return;
+        }
+        self.options_lead.frame_pending = true;
+        if self.options_lead.last.is_none() {
+            self.options_lead.last = Some(Instant::now());
+        }
+        let timer = Timer::from_duration(Duration::from_millis(8));
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.options_lead.frame_pending = false;
+                app.tick_options_lead();
+                TimeoutAction::Drop
+            });
+    }
+
+    /// One frame of the ease home. The held group (if any) is skipped — its
+    /// offset is derived, not decayed.
+    fn tick_options_lead(&mut self) {
+        let now = Instant::now();
+        let dt = self
+            .options_lead
+            .last
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+        self.options_lead.last = Some(now);
+        let held = self
+            .leader_pill_id()
+            .and_then(|id| group_slot(group_of(id)));
+        let mut active = false;
+        for slot in 0..LEAD_N {
+            if held == Some(slot) {
+                continue;
+            }
+            // Already a real distance in logical px, so it settles straight on
+            // the shared threshold (`OptionUXRules.md` §3).
+            let (n, moving) = ease_toward(
+                self.options_lead.off[slot],
+                0.0,
+                dt,
+                animation::MORPH_RATE,
+                animation::SETTLE_PX,
+            );
+            self.options_lead.off[slot] = n;
+            active |= moving;
+        }
+        self.draw_options();
+        if active {
+            self.schedule_options_lead_frame();
+        } else {
+            self.options_lead.last = None;
+        }
+    }
+
+    /// Start a title metamorphosis: the pill eases from the width it is showing
+    /// now to the freshly measured one, crossfading the two names. Under the
+    /// Leader the pill's leader-facing edge is pinned, so the whole ease plays
+    /// out on its far side.
+    fn begin_title_morph(&mut self, from: f32, outgoing: String) {
+        // A live-resize readout retitles every 40ms — that is a counter, not a
+        // metamorphosis. Reduce-motion goes straight to the answer.
+        if animation::reduce_motion() || self.options_resize_live.is_some() {
+            self.options_title_meta.t = 1.0;
+            return;
+        }
+        self.options_title_meta.from = from;
+        self.options_title_meta.outgoing = outgoing;
+        self.options_title_meta.t = 0.0;
+        self.options_title_meta.last = None;
+        self.schedule_options_title_frame();
+    }
+
+    fn schedule_options_title_frame(&mut self) {
+        if self.options_title_meta.frame_pending {
+            return;
+        }
+        self.options_title_meta.frame_pending = true;
+        if self.options_title_meta.last.is_none() {
+            self.options_title_meta.last = Some(Instant::now());
+        }
+        let timer = Timer::from_duration(Duration::from_millis(8));
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.options_title_meta.frame_pending = false;
+                app.tick_options_title();
+                TimeoutAction::Drop
+            });
+    }
+
+    fn tick_options_title(&mut self) {
+        let now = Instant::now();
+        let dt = self
+            .options_title_meta
+            .last
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+        self.options_title_meta.last = Some(now);
+        // The progress carries the width change between the two titles, so the
+        // settle is measured against that span (`OptionUXRules.md` §3).
+        let (t, moving) = ease_toward(
+            self.options_title_meta.t,
+            1.0,
+            dt,
+            animation::MORPH_RATE,
+            animation::settle_t(self.options_title_w - self.options_title_meta.from),
+        );
+        self.options_title_meta.t = t;
+        self.draw_options();
+        if moving {
+            self.schedule_options_title_frame();
+        } else {
+            self.options_title_meta.last = None;
+            self.options_title_meta.outgoing.clear();
+        }
+    }
+
     fn update_ctrl_reveal(&mut self) {
+        // While a sticky OPTION stands, the chain is FROZEN at the state the
+        // bar went away in (`OptionUXRules.md` §4). Otherwise moving onto the
+        // doorway — which is outside the cluster span, the cluster being one
+        // pill wide now — would retract the whole chain, and the bar the
+        // doorway brings back would be a bar mid-rebuild instead of the one
+        // that was left.
+        if self.options_sticky.is_some() {
+            return;
+        }
         let want = if self.options_ctrl.reveal {
             self.options_ptr_in_cluster()
         } else {
@@ -1900,7 +3007,16 @@ impl App {
                 continue;
             }
             let target = if reveal { 1.0 } else { 0.0 };
-            let (nt, moving) = ease_toward(self.options_ctrl.t[i], target, dt, CTRL_RATE, CTRL_EPS);
+            // The progress carries a slide of one pill plus the gap it emerges
+            // across (`origin` → rest in `draw_options`), so that is the span
+            // its settle is measured in (`OptionUXRules.md` §3).
+            let (nt, moving) = ease_toward(
+                self.options_ctrl.t[i],
+                target,
+                dt,
+                animation::MORPH_RATE,
+                animation::settle_t(self.options_ctrl_travel()),
+            );
             self.options_ctrl.t[i] = nt;
             active |= moving;
         }
@@ -1913,8 +3029,18 @@ impl App {
     }
 
     /// Update whether the clock pill should show the date: revealed while it's
-    /// hovered; on leave it holds on the date for [`META_HOLD`] then collapses
-    /// back to the clock (same transition backwards).
+    /// hovered; once the pointer leaves the SURFACE it holds on the date for
+    /// [`animation::LEAVE_HOLD`] then collapses back to the clock (same transition
+    /// backwards).
+    ///
+    /// The collapse waits for the pointer to leave rather than firing when the
+    /// clock itself is left, because the clock's width is not its own business:
+    /// the notification cluster is pinned a gap to its left
+    /// ([`Self::options_pills_resting`]), so the date's ~180px shrink drags the
+    /// bell sideways. Firing that while the pointer is still here would move a
+    /// pill the user is travelling to click, on a timer, for a reason they did
+    /// not ask for — and a re-flow nobody requested waits until the visit is
+    /// over (`OptionUXRules.md` §2, "The Still Bar").
     fn update_clock_meta(&mut self) {
         if self.options_hover == Some(PillId::Clock) {
             // Hovering the clock: reveal, and cancel any pending collapse.
@@ -1924,25 +3050,33 @@ impl App {
                 self.options_clock_meta.last = None;
                 self.schedule_options_clock_frame();
             }
-        } else if self.options_clock_meta.reveal && self.options_clock_meta.hold_deadline.is_none()
-        {
-            // Left the clock while showing the date: hold, then collapse.
+        } else if clock_may_collapse(
+            self.options_clock_meta.reveal,
+            self.options_clock_meta.hold_deadline.is_some(),
+            self.options_ptr.is_some(),
+        ) {
+            // Left the surface while showing the date: hold, then collapse.
             self.schedule_clock_collapse();
         }
     }
 
-    /// After the hover leaves, keep the date up for [`META_HOLD`], then play
-    /// the metamorphosis backwards (unless the clock got hovered again).
+    /// After the pointer leaves, keep the date up for the shared
+    /// [`animation::LEAVE_HOLD`], then play
+    /// the metamorphosis backwards — unless the pointer came back inside the
+    /// hold, in which case the collapse is abandoned rather than played under
+    /// them (it is re-armed by the next leave). Shrinking the clock moves the
+    /// notification cluster, and that must not happen while anyone is aiming at
+    /// it; see [`Self::update_clock_meta`].
     fn schedule_clock_collapse(&mut self) {
-        let deadline = Instant::now() + META_HOLD;
+        let deadline = Instant::now() + animation::LEAVE_HOLD;
         self.options_clock_meta.hold_deadline = Some(deadline);
-        let timer = Timer::from_duration(META_HOLD);
+        let timer = Timer::from_duration(animation::LEAVE_HOLD);
         let _ = self
             .loop_handle
             .insert_source(timer, move |_, _, app: &mut App| {
                 if app.options_clock_meta.hold_deadline == Some(deadline) {
                     app.options_clock_meta.hold_deadline = None;
-                    if app.options_hover != Some(PillId::Clock) {
+                    if app.options_ptr.is_none() {
                         app.options_clock_meta.reveal = false;
                         app.options_clock_meta.last = None;
                         app.schedule_options_clock_frame();
@@ -1984,7 +3118,15 @@ impl App {
         } else {
             0.0
         };
-        let (nt, moving) = ease_toward(self.options_clock_meta.t, target, dt, META_RATE, META_EPS);
+        // The progress carries the whole clock→date width change, so the settle
+        // is measured against that span (`OptionUXRules.md` §3).
+        let (nt, moving) = ease_toward(
+            self.options_clock_meta.t,
+            target,
+            dt,
+            animation::MORPH_RATE,
+            animation::settle_t(self.options_date_w - self.options_clock_w),
+        );
         self.options_clock_meta.t = nt;
         self.draw_options();
         if moving {
@@ -2021,7 +3163,18 @@ impl App {
                 // Fall through so the click can still hit a pill.
             }
         }
+        // Remember what was acted on and where it was drawn, so that a
+        // concealment arriving right behind this click can be blamed on it and
+        // leave the control standing (`OptionUXRules.md` §4).
+        if let Some(id) = self.options_hover {
+            if let Some(r) = self.options_pills().iter().find(|p| p.id == id) {
+                self.options_acted = Some((id, r.rect, Instant::now()));
+            }
+        }
         match self.options_hover {
+            // An empty doorway is not an action — a click on it does what
+            // hovering it already did: bring the bar back (§4).
+            Some(PillId::Doorway) => self.open_doorway(),
             // The media glyph pill toggles the transport box.
             Some(PillId::MediaOpen) => {
                 self.media_box_open = !self.media_box_open;
@@ -2040,8 +3193,12 @@ impl App {
             // The current-task pill cycles focus through this workspace's
             // windows, most-used first (see `crate::focus_cycle`).
             Some(PillId::Window) => self.cycle_focus(true),
-            Some(PillId::Pseudo) => hypr::pseudo_active(),
-            Some(PillId::Fullscreen) => hypr::fullscreen_active(),
+            // The window-mode controls. One mode at a time: entering one leaves
+            // whatever was on, and pressing the mode you are already in returns
+            // the window to the layout (see [`hypr::set_window_mode`]).
+            Some(PillId::Pseudo) => self.set_window_mode(hypr::WindowMode::Pseudo),
+            Some(PillId::Float) => self.set_window_mode(hypr::WindowMode::Floating),
+            Some(PillId::Fullscreen) => self.set_window_mode(hypr::WindowMode::Fullscreen),
             Some(PillId::NotifMute) => self.toggle_notif_mute(),
             // Clicking the clipboard element pastes the current clip into the
             // focused window. Both ids resolve here because the box overlaps the
@@ -2415,6 +3572,253 @@ mod tests {
         assert!(est_text_w("Open copied files", 17.0) > est_text_w("Open", 17.0));
         // Unknown scripts assume a full em — never narrower than Latin.
         assert!(est_text_w("日本語", 17.0) >= 3.0 * 17.0);
+    }
+
+    // --- The Leader (OptionUXRules.md §1) -----------------------------------
+
+    /// The resting x of `[X]`, straight from the layout in
+    /// [`App::options_pills_resting`]: the name pill is centred alone and the
+    /// close rests a gap to its right, so the close rides on HALF the title
+    /// width — the whole reason this rule exists.
+    fn resting_close_x(bar_w: f32, title_w: f32, ph: f32) -> f32 {
+        let ww = (title_w + 2.0 * PILL_PAD_X).max(ph);
+        let wx = ((bar_w - ww) / 2.0).max(EDGE_PAD);
+        wx + ww + GROUP_GAP
+    }
+
+    #[test]
+    fn leader_holds_a_fixed_width_button_exactly_still() {
+        // The live case: click [X], the Firefox tile closes, the compositor
+        // focuses a `foot` with a much shorter name.
+        let (bar_w, ph) = (1920.0, 27.0);
+        let before = resting_close_x(bar_w, 380.0, ph);
+        let after = resting_close_x(bar_w, 60.0, ph);
+        // Without the rule the button runs away by half the title delta.
+        assert!(
+            (before - after - 160.0).abs() < 0.01,
+            "close moves {} px unaided",
+            before - after
+        );
+        // Anchored where the click found it; the layout then re-flows under it.
+        let anchor = before + ph / 2.0;
+        let drawn = after + lead_shift(Rect::new(after, 0.0, ph, ph), anchor);
+        assert!((drawn - before).abs() < 1e-4, "leader moved to {drawn}");
+    }
+
+    #[test]
+    fn travelling_to_a_neighbour_does_not_push_it_away() {
+        // The live bug that reshaped this rule (2026-09-04): with the leader
+        // pinned under the CURSOR, setting off from [current task] toward [X]
+        // dragged the whole cluster along — [X] retreated at exactly the speed
+        // it was chased and could never be reached. The anchor is a place on
+        // the bar, so a pointer that is merely travelling displaces nothing.
+        let (bar_w, ph) = (1920.0, 27.0);
+        let title_w = 380.0;
+        let ww = (title_w + 2.0 * PILL_PAD_X).max(ph);
+        let wx = ((bar_w - ww) / 2.0).max(EDGE_PAD);
+        let name = Rect::new(wx, 0.0, ww, ph);
+        // Click the middle of the name pill, then walk right toward [X].
+        let anchor = wx + ww / 2.0;
+        let close = resting_close_x(bar_w, title_w, ph);
+        let mut reached = false;
+        for step in 0..400 {
+            let ptr = anchor + step as f32;
+            // The layout has not changed, so nothing may move...
+            let shift = lead_shift(name, anchor);
+            assert_eq!(shift, 0.0, "the cluster moved while the pointer travelled");
+            // ...which means the walk actually arrives on [X].
+            if ptr >= close + shift && ptr <= close + shift + ph {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "the pointer never caught up with [X]");
+    }
+
+    #[test]
+    fn the_anchor_is_the_leaders_centre() {
+        // A leader that resizes holds its PLACE, not one of its edges: the
+        // width change is spent evenly on both sides instead of lunging one
+        // way. (For the fixed-width buttons that do the re-flowing work,
+        // centre and edges are the same promise.)
+        let anchor = 500.0;
+        for w in [27.0, 120.0, 400.0] {
+            let nat = Rect::new(300.0, 0.0, w, 27.0);
+            let drawn = nat.x + lead_shift(nat, anchor);
+            assert!(
+                (drawn + w / 2.0 - anchor).abs() < 1e-4,
+                "width {w} moved the leader off its anchor"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mind_control_holds_its_place_when_the_row_re_ranks() {
+        // The Mind's row is left-anchored: when an offer above withdraws,
+        // every control below it slides left by a slot. The leader is held by
+        // its ACTION, so the pill that was clicked keeps its place on the bar
+        // and the re-rank plays out around it.
+        let ph = 27.0;
+        let slot = |i: f32| Rect::new(200.0 + i * (ph + CTRL_GAP), 0.0, ph, ph);
+        // It moves a whole slot unaided — the misfire being prevented.
+        assert!((slot(2.0).x - slot(1.0).x - (ph + CTRL_GAP)).abs() < 1e-4);
+        // Clicked in the third slot; the first offer then withdraws and the
+        // action is re-ranked into the second.
+        let anchor = slot(2.0).x + ph / 2.0;
+        let drawn = slot(1.0).x + lead_shift(slot(1.0), anchor);
+        assert!(
+            (drawn - slot(2.0).x).abs() < 1e-4,
+            "control moved to {drawn}"
+        );
+    }
+
+    #[test]
+    fn leader_shift_is_zero_when_the_layout_does_not_move() {
+        // At rest, nothing changed: a leader whose pill has not moved displaces
+        // its group by exactly 0, so the drawn layout IS the resting layout.
+        for (x, w) in [(860.0, 27.0), (400.0, 300.0), (EDGE_PAD, 27.0)] {
+            assert_eq!(
+                lead_shift(Rect::new(x, 0.0, w, 27.0), x + w / 2.0),
+                0.0,
+                "a {w}px pill that did not move was nudged"
+            );
+        }
+    }
+
+    #[test]
+    fn the_leader_yields_to_the_edges() {
+        let span = (700.0, 900.0);
+        let edge = (EDGE_PAD, 1920.0 - EDGE_PAD);
+        // Free on both sides: the shift passes through untouched.
+        assert_eq!(
+            clamp_shift(span, None, None, edge, OPTION_GAP, -120.0),
+            -120.0
+        );
+        // A neighbour at 640 on the left: the group may only come back to
+        // 640 + OPTION_GAP, so a bigger leftward shift is cut short.
+        let s = clamp_shift(span, Some(640.0), None, edge, OPTION_GAP, -120.0);
+        assert!((s - (640.0 + OPTION_GAP - 700.0)).abs() < 1e-4);
+        assert!(s > -120.0, "clamp must reduce the shift, not grow it");
+        // A neighbour at 950 on the right bounds the other direction.
+        let r = clamp_shift(span, None, Some(950.0), edge, OPTION_GAP, 200.0);
+        assert!((r - (950.0 - OPTION_GAP - 900.0)).abs() < 1e-4);
+        // Squeezed from both sides (a group already too wide for its slot):
+        // deterministic, and never NaN.
+        let both = clamp_shift(span, Some(690.0), Some(710.0), edge, OPTION_GAP, 50.0);
+        assert!(both.is_finite());
+    }
+
+    #[test]
+    fn only_the_reflowing_groups_can_be_led() {
+        // The window cluster moves as one unit — that is what "its OPTION
+        // lays out from the leader" means.
+        for id in [
+            PillId::Window,
+            PillId::Close,
+            PillId::Pseudo,
+            PillId::Fullscreen,
+        ] {
+            assert_eq!(group_of(id), PillGroup::Window);
+        }
+        assert_eq!(group_of(PillId::Option(0)), PillGroup::Mind);
+        assert_eq!(group_of(PillId::MediaOpen), PillGroup::Mind);
+        assert_eq!(group_of(PillId::NotifMute), PillGroup::Notif);
+        assert_eq!(group_of(PillId::ClipCopyLink), PillGroup::Clipboard);
+        // Leadable = the two that re-flow, on distinct slots; the edge-pinned
+        // OPTIONS own their own morphs and are left alone.
+        assert_eq!(group_slot(PillGroup::Window), Some(0));
+        assert_eq!(group_slot(PillGroup::Mind), Some(1));
+        for g in [PillGroup::Clock, PillGroup::Notif, PillGroup::Clipboard] {
+            assert_eq!(group_slot(g), None);
+        }
+        assert!(group_slot(PillGroup::Window).unwrap() < LEAD_N);
+        assert!(group_slot(PillGroup::Mind).unwrap() < LEAD_N);
+    }
+
+    #[test]
+    fn held_still_the_repeat_click_lands_on_the_same_control() {
+        // The misfire this rule exists to stop: without it, a shrinking title
+        // walks [pseudo] into the space [X] vacated, so a second click
+        // pseudotiles instead of closing. Four closes in a row, no re-aim.
+        let (bar_w, ph) = (1920.0, 27.0);
+        let titles = [380.0, 240.0, 60.0, 150.0, 20.0];
+        // Anchored by the first click; the pointer then never moves again.
+        let first = resting_close_x(bar_w, titles[0], ph);
+        let anchor = first + ph / 2.0;
+        let ptr = first + 13.0;
+        for w in &titles[1..] {
+            let nat = Rect::new(resting_close_x(bar_w, *w, ph), 0.0, ph, ph);
+            let drawn = nat.x + lead_shift(nat, anchor);
+            assert!((drawn - first).abs() < 1e-4, "[X] drifted to {drawn}");
+            // The pointer is still inside [X], never past it into [pseudo]
+            // (which rests GROUP_GAP beyond the close's right edge).
+            assert!(ptr >= drawn && ptr <= drawn + ph, "pointer left [X]");
+            assert!(ptr < drawn + ph + GROUP_GAP, "pointer reached [pseudo]");
+        }
+    }
+
+    #[test]
+    fn the_date_never_collapses_while_the_pointer_is_still_here() {
+        // "The Still Bar" (`OptionUXRules.md` §2). The live friction
+        // (2026-09-04): look at the clock, then head for the
+        // bell to read the last notification. The bell is pinned a gap left of
+        // the clock, so the date's collapse — on a 3s timer, nothing the user
+        // asked for — drags the bell out from under a pointer that was aiming
+        // at it. Reaching for an OPTION cost the OPTION.
+        //
+        // So leaving the CLOCK is not the trigger; leaving the SURFACE is.
+        assert!(
+            !clock_may_collapse(true, false, true),
+            "collapsed under a pointer that was still on the bar"
+        );
+        // Pointer gone: this is the only case that may collapse.
+        assert!(clock_may_collapse(true, false, false));
+        // An open box below the bar counts as still here (it is pinned to the
+        // clock too, so a collapse would slide the box the user is reading).
+        assert!(!clock_may_collapse(true, false, true));
+        // Nothing to collapse, or a collapse already armed: no second timer.
+        assert!(!clock_may_collapse(false, false, false));
+        assert!(!clock_may_collapse(true, true, false));
+    }
+
+    // --- Sticky OPTIONS (OptionUXRules.md §4) -------------------------------
+
+    #[test]
+    fn the_doorway_stands_where_its_successor_will() {
+        // §4: "it becomes [pseudo]" has to be literal. The doorway takes the
+        // exact slot the next control along occupies in the real layout, so
+        // when the bar returns that pill arrives *in place* — a metamorphosis,
+        // not a pill swapped for a different pill somewhere else.
+        let (bar_w, ph) = (1920.0, 27.0);
+        let close = resting_close_x(bar_w, 380.0, ph);
+        // Resting: [X] [pseudo] [fullscreen], pseudo a GROUP_GAP past the
+        // close, fullscreen a CTRL_GAP past pseudo.
+        let pseudo = close + ph + GROUP_GAP;
+        let full = pseudo + ph + CTRL_GAP;
+        // The doorway sits one slot back from the sticky control.
+        let door = full - (ph + CTRL_GAP);
+        assert!(
+            (door - pseudo).abs() < 1e-4,
+            "doorway at {door} does not stand where [pseudo] does ({pseudo})"
+        );
+    }
+
+    #[test]
+    fn the_way_back_is_never_wider_than_the_thing_it_replaces() {
+        // §4's trade is one moment of chrome against a journey every time. Two
+        // pills is the price; anything more and the rule is buying the user's
+        // fullscreen back at too high a rate.
+        let ph = 27.0;
+        let sticky = Rect::new(900.0, 2.5, ph, ph);
+        let door = Rect::new(sticky.x - (ph + CTRL_GAP), sticky.y, ph, ph);
+        let span = (sticky.x + sticky.w) - door.x;
+        assert!(
+            span <= 2.0 * ph + CTRL_GAP + 1e-4,
+            "the sticky pair spans {span}px — more than the two pills it is"
+        );
+        // And it stays inside the bar's own strip: it is a survivor of the bar,
+        // not a new surface somewhere else on the screen.
+        assert!(door.y >= 0.0 && door.y + door.h <= ph + 2.0 * PILL_MARGIN_Y + 1e-4);
     }
 
     #[test]

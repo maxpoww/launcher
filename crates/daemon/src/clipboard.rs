@@ -33,7 +33,12 @@ use serde::{Deserialize, Serialize};
 use smithay_client_toolkit::seat::keyboard::Keysym;
 use tracing::{debug, warn};
 
-use crate::animation::{ease_toward, lerp};
+// The tempo comes from the surface, not from this module — One Material
+// (`OptionUXRules.md` §3). This import is the only place the clipboard's speed
+// is decided; there is deliberately no rate constant below.
+use crate::animation::{
+    ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SCROLL_RATE, SETTLE_PX,
+};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
     hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY,
@@ -44,8 +49,9 @@ use crate::App;
 /// Target width of the extended preview pill (mirrors the notification OPTION's
 /// preview so the two elements read as siblings). The open history box keeps it.
 const PEEK_W: f32 = 380.0;
-/// Glide rate of the peek morph (exponential approach), matched to the bell.
-const MORPH_RATE: f32 = 13.0;
+/// Below this a morph progress counts as "not showing at all" — a visibility
+/// test, not a settle threshold (the settle comes from
+/// [`animation::settle_t`], measured in real geometry).
 const MORPH_EPS: f32 = 0.001;
 
 // ---- history box (mirrors the notification history drawer) ----
@@ -145,8 +151,6 @@ const THUMB_CAP: usize = 32;
 const NOTCH: f32 = 15.0;
 /// Pixels of list scroll per axis unit.
 const SCROLL_SPEED: f32 = 3.0;
-/// Exponential approach rate of `list_scroll` toward its target.
-const SCROLL_RATE: f32 = 20.0;
 
 /// Smoothstep of the linear detail-open progress `p`, remapped to the sub-window
 /// `[a, b]` and clamped. Used to stagger the detail view's elements so they
@@ -181,7 +185,6 @@ pub(crate) enum ClipHit {
 }
 /// Grace before the preview collapses once the pointer leaves — enough to cross
 /// a small gap, snappy otherwise. Matches the bell's `LEAVE_HOLD`.
-const LEAVE_HOLD: Duration = Duration::from_millis(300);
 /// A fresh clip beats the small pill for this long — one slow heartbeat (swell +
 /// settle), the same single-period pulse as the bell's muted-arrival blink.
 const BEAT_DURATION: Duration = Duration::from_millis(500);
@@ -3674,16 +3677,31 @@ impl App {
         }
         let dt = raw_dt.min(0.05);
         self.clip.last = Some(now);
+        // Each progress settles against the span it actually carries — the peek
+        // widens to `PEEK_W`, the link pill slides one pill plus its bond gap,
+        // the drawer grows to `EXPANDED_H` (`OptionUXRules.md` §3).
         let target = if self.clip.peek_reveal { 1.0 } else { 0.0 };
-        let (pt, moving) = ease_toward(self.clip.peek_t, target, dt, MORPH_RATE, MORPH_EPS);
+        let (pt, moving) = ease_toward(self.clip.peek_t, target, dt, MORPH_RATE, settle_t(PEEK_W));
         self.clip.peek_t = pt;
         // Slide the copy-link pill toward its target (out when a browser is up).
         let ltarget = if self.clip.link_available { 1.0 } else { 0.0 };
-        let (lt, lmoving) = ease_toward(self.clip.link_t, ltarget, dt, MORPH_RATE, MORPH_EPS);
+        let (lt, lmoving) = ease_toward(
+            self.clip.link_t,
+            ltarget,
+            dt,
+            MORPH_RATE,
+            settle_t(self.options_pill_h() + LINK_GAP),
+        );
         self.clip.link_t = lt;
         // Grow / collapse the history drawer.
         let etarget = if self.clip.expanded { 1.0 } else { 0.0 };
-        let (et, em) = ease_toward(self.clip.expand_t, etarget, dt, MORPH_RATE, MORPH_EPS);
+        let (et, em) = ease_toward(
+            self.clip.expand_t,
+            etarget,
+            dt,
+            MORPH_RATE,
+            settle_t(EXPANDED_H),
+        );
         self.clip.expand_t = et;
         // Open/close the detail: advance a LINEAR progress at a constant rate,
         // then smoothstep it into `detail_t` so the row-grow eases in *and* out
@@ -3738,13 +3756,16 @@ impl App {
         let mm = mm1 || mm2;
         // Ease the open-box height toward its content-fit target (smooth on a
         // content change); only while open, so there's no idle churn collapsed.
+        // (This ran at `MORPH_RATE * 1.3` — the same inline deviation the bell's
+        // box carried. One Material: the tempo is the surface's, and a module
+        // does not multiply it at the call site.)
         let bm = if self.clip.expand_t > MORPH_EPS {
             let (bh, moving) = ease_toward(
                 self.clip.box_h,
                 self.clip_full_h(),
                 dt,
-                MORPH_RATE * 1.3,
-                0.5,
+                MORPH_RATE,
+                SETTLE_PX,
             );
             self.clip.box_h = bh;
             moving

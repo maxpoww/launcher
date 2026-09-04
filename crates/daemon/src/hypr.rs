@@ -78,62 +78,212 @@ const PSEUDO_H: f64 = 0.84;
 /// rule, which restores rounding + border under smart gaps.
 const PSEUDO_TAG: &str = "golem-pseudo";
 
-/// Toggle Golem pseudo on the focused window: tag it, pseudotile it, and
-/// size it to [`PSEUDO_W`]×[`PSEUDO_H`] of its tile — or undo all of that
-/// when it is already tagged.
+/// How a window is laid out. **Exactly one of these holds at a time** — the
+/// four are mutually exclusive, and picking one drops whatever was on.
 ///
-/// The policy lives HERE rather than in hyprland.lua because the state is
-/// only readable from this side: the Lua `window.tags` field reads as an
-/// empty table even for a tagged window (verified 2026-08-31), and pseudo
-/// state is exposed nowhere at all — so a config-side toggle could never
-/// tell "on" from "off" and always re-applied "on". The topbar pill and
-/// Super+P both route through this one function.
-pub fn toggle_golem_pseudo() {
-    let Ok(raw) = request("j/activewindow") else {
+/// The compositor does not see it that way: there, floating, pseudo and
+/// fullscreen are independent flags that can overlap (a floating window can be
+/// fullscreened; pseudo is a tiled sub-mode that quietly does nothing while
+/// fullscreen). That orthogonality is expressive and hard to hold in your head
+/// — you can be in states that have no name and no obvious way out. The bar
+/// presents the four modes a window can actually *be in*, and switching to one
+/// is a single act that leaves the previous one behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMode {
+    /// In the layout, filling its tile. The state everything falls back to.
+    Tiled,
+    /// Out of the layout, free-floating.
+    Floating,
+    /// In the layout, but drawn smaller than its tile (Golem policy:
+    /// [`PSEUDO_W`]×[`PSEUDO_H`] of it).
+    Pseudo,
+    /// Covering the output.
+    Fullscreen,
+}
+
+/// The last tile size seen for a window, by address.
+///
+/// Golem's pseudo size is a fraction of the window's TILE, and a window that is
+/// fullscreen or floating cannot report its tile — it reports the output or the
+/// float. Measuring it afterwards costs a second beat the user can see.
+///
+/// So it is remembered on the way past instead: every mode change reads the
+/// window, and any time one is found tiled its size is kept here. Going
+/// fullscreen and then straight to pseudo therefore needs no measuring, because
+/// the trip into fullscreen already went through this function.
+static LAST_TILE: std::sync::Mutex<Option<(String, f64, f64)>> = std::sync::Mutex::new(None);
+
+/// Remember a window's tile, so a later pseudo can be sized without measuring.
+fn note_tile(addr: &str, json: &serde_json::Value) {
+    let (Some(w), Some(h)) = (json["size"][0].as_f64(), json["size"][1].as_f64()) else {
         return;
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    if w < 1.0 || h < 1.0 {
         return;
+    }
+    if let Ok(mut slot) = LAST_TILE.lock() {
+        *slot = Some((addr.to_owned(), w, h));
+    }
+}
+
+/// The remembered tile for `addr`, if the last one seen was this window's.
+fn remembered_tile(addr: &str) -> Option<(f64, f64)> {
+    let slot = LAST_TILE.lock().ok()?;
+    match slot.as_ref() {
+        Some((a, w, h)) if a == addr => Some((*w, *h)),
+        _ => None,
+    }
+}
+
+/// Read a mode out of an `activewindow`/`clients` entry.
+///
+/// Precedence matters where the compositor's flags overlap: fullscreen wins
+/// because it is what you can see, then floating, then pseudo. A window with
+/// no flag set is tiled.
+///
+/// Pseudo is read from a TAG rather than from the window: the Lua
+/// `window.tags` field reads as an empty table even for a tagged window
+/// (verified 2026-08-31) and pseudo state is exposed nowhere at all, so this
+/// side is the only place that can tell "on" from "off". That is also why the
+/// whole mode policy lives here rather than in `hyprland.lua`.
+fn mode_of(json: &serde_json::Value) -> WindowMode {
+    if json["fullscreen"].as_i64().unwrap_or(0) != 0 {
+        WindowMode::Fullscreen
+    } else if json["floating"].as_bool().unwrap_or(false) {
+        WindowMode::Floating
+    } else if json["tags"]
+        .as_array()
+        .is_some_and(|t| t.iter().any(|v| v.as_str() == Some(PSEUDO_TAG)))
+    {
+        WindowMode::Pseudo
+    } else {
+        WindowMode::Tiled
+    }
+}
+
+/// Put the focused window into `target`, leaving whatever mode it was in.
+///
+/// Asking for the mode it is already in returns it to [`WindowMode::Tiled`], so
+/// every control on the bar stays a toggle: press to enter, press again to come
+/// back to the layout.
+///
+/// Everything that can be done at once is emitted as ONE eval chunk, so the
+/// window never passes through a visible intermediate state. The exception is
+/// entering pseudo from fullscreen or floating: the Golem pseudo size is a
+/// fraction of the window's TILE, and the tile size is not knowable until the
+/// window is back in the layout. That case returns `true` to ask for a second
+/// pass once it has settled — the honest two-beat, rather than pseudotiling to
+/// a fraction of the wrong rectangle.
+pub fn set_window_mode(target: WindowMode) -> bool {
+    let Ok(raw) = request("j/activewindow") else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
     };
     let Some(addr) = json["address"]
         .as_str()
         .filter(|a| !a.is_empty() && *a != "0x0")
     else {
-        return;
+        return false;
     };
-    if json["fullscreen"].as_i64().unwrap_or(0) != 0 {
-        debug!("pseudo: skipped, {addr} is fullscreen");
-        return;
+    let current = mode_of(&json);
+    // Seen in the layout: remember its tile, so a pseudo asked for later —
+    // from fullscreen, from floating — needs no second beat to measure one.
+    if current == WindowMode::Tiled {
+        note_tile(addr, &json);
     }
-    let tagged = json["tags"]
-        .as_array()
-        .is_some_and(|t| t.iter().any(|v| v.as_str() == Some(PSEUDO_TAG)));
-    // One eval chunk so the tag, the mode, and the size land together.
-    let lua = if tagged {
-        format!(
-            "hl.dispatch(hl.dsp.window.tag({{ tag = \"-{PSEUDO_TAG}\", window = \"address:{addr}\" }})) \
-             hl.dispatch(hl.dsp.window.pseudo({{ action = \"off\", window = \"address:{addr}\" }}))"
-        )
+    // Pressing the mode you are already in is how you get out of it.
+    let target = if current == target {
+        WindowMode::Tiled
     } else {
-        // The tile size, read BEFORE pseudo shrinks the window into it.
-        let (w, h) = (
+        target
+    };
+    if current == target {
+        return false;
+    }
+    let win = format!("window = \"address:{addr}\"");
+    let mut lua = String::new();
+    // Leave the old mode first, so the window is back in the layout before the
+    // new one is applied to it.
+    match current {
+        WindowMode::Pseudo => {
+            lua.push_str(&format!(
+                "hl.dispatch(hl.dsp.window.tag({{ tag = \"-{PSEUDO_TAG}\", {win} }})) \
+                 hl.dispatch(hl.dsp.window.pseudo({{ action = \"off\", {win} }})) "
+            ));
+        }
+        WindowMode::Floating => {
+            lua.push_str(&format!(
+                "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
+            ));
+        }
+        WindowMode::Fullscreen => {
+            lua.push_str(&format!(
+                "hl.dispatch(hl.dsp.window.fullscreen({{ action = \"toggle\", {win} }})) "
+            ));
+        }
+        WindowMode::Tiled => {}
+    }
+    // Then enter the new one.
+    let mut needs_second_pass = false;
+    match target {
+        WindowMode::Tiled => {}
+        WindowMode::Floating => {
+            lua.push_str(&format!(
+                "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
+            ));
+        }
+        WindowMode::Fullscreen => {
+            lua.push_str(&format!(
+                "hl.dispatch(hl.dsp.window.fullscreen({{ action = \"toggle\", {win} }})) "
+            ));
+        }
+        WindowMode::Pseudo => match pseudo_lua(&json, addr, current) {
+            Some(chunk) => lua.push_str(&chunk),
+            // Coming from fullscreen/floating: the tile size is still unknown.
+            // Leave the window tiled now and ask to be called again.
+            None => needs_second_pass = true,
+        },
+    }
+    if !lua.is_empty() {
+        if let Err(e) = request(&format!("eval {lua}")) {
+            debug!("window mode -> {target:?} failed: {e:#}");
+        }
+    }
+    needs_second_pass
+}
+
+/// The chunk that pseudotiles a window at Golem's fraction of its tile.
+///
+/// The window's own reported size is only the tile when it is *in* the layout;
+/// fullscreen it reports the output and floating it reports the float, and
+/// sizing off either would shrink the window to a fraction of the wrong
+/// rectangle. For those, the tile remembered on the way past is used instead,
+/// so the whole transition still lands in one motion.
+///
+/// `None` only when this window has never been seen tiled — it reached
+/// fullscreen without passing through here — and there is genuinely nothing to
+/// measure against yet.
+fn pseudo_lua(json: &serde_json::Value, addr: &str, current: WindowMode) -> Option<String> {
+    let (w, h) = if matches!(current, WindowMode::Tiled) {
+        (
             json["size"][0].as_f64().unwrap_or(0.0),
             json["size"][1].as_f64().unwrap_or(0.0),
-        );
-        if w < 1.0 || h < 1.0 {
-            return;
-        }
-        format!(
-            "hl.dispatch(hl.dsp.window.tag({{ tag = \"+{PSEUDO_TAG}\", window = \"address:{addr}\" }})) \
-             hl.dispatch(hl.dsp.window.pseudo({{ action = \"on\", window = \"address:{addr}\" }})) \
-             hl.dispatch(hl.dsp.window.resize({{ x = {}, y = {}, window = \"address:{addr}\" }}))",
-            (w * PSEUDO_W) as i64,
-            (h * PSEUDO_H) as i64,
         )
+    } else {
+        remembered_tile(addr)?
     };
-    if let Err(e) = request(&format!("eval {lua}")) {
-        debug!("pseudo toggle failed: {e:#}");
+    if w < 1.0 || h < 1.0 {
+        return None;
     }
+    Some(format!(
+        "hl.dispatch(hl.dsp.window.tag({{ tag = \"+{PSEUDO_TAG}\", window = \"address:{addr}\" }})) \
+         hl.dispatch(hl.dsp.window.pseudo({{ action = \"on\", window = \"address:{addr}\" }})) \
+         hl.dispatch(hl.dsp.window.resize({{ x = {}, y = {}, window = \"address:{addr}\" }})) ",
+        (w * PSEUDO_W) as i64,
+        (h * PSEUDO_H) as i64,
+    ))
 }
 
 /// Put a message on the COMPOSITOR's own notification OSD.
@@ -284,17 +434,6 @@ pub fn active_window_geom() -> Option<(i32, i32, i32, i32)> {
         return None;
     }
     Some((x, y, w, h))
-}
-
-/// Toggle pseudotile on the focused window (the OPTIONS square control) —
-/// Golem's policy version: see [`toggle_golem_pseudo`].
-pub fn pseudo_active() {
-    toggle_golem_pseudo();
-}
-
-/// Toggle fullscreen on the focused window.
-pub fn fullscreen_active() {
-    dispatch("hl.dsp.window.fullscreen({ action = \"toggle\" })");
 }
 
 /// Inject a modifier+key chord into the currently focused window via this fork's
@@ -745,6 +884,41 @@ fn zone_state_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One mode kills the other: whatever combination of the compositor's
+    /// overlapping flags a window is carrying, it reads back as exactly ONE of
+    /// the four modes, with fullscreen winning over floating and floating over
+    /// pseudo — because that is their order of visibility.
+    #[test]
+    fn a_window_is_in_exactly_one_mode() {
+        let win = |fullscreen: i64, floating: bool, pseudo: bool| {
+            serde_json::json!({
+                "address": "0x1",
+                "fullscreen": fullscreen,
+                "floating": floating,
+                "tags": if pseudo { vec![PSEUDO_TAG] } else { vec![] },
+            })
+        };
+        // The clean cases.
+        assert_eq!(mode_of(&win(0, false, false)), WindowMode::Tiled);
+        assert_eq!(mode_of(&win(0, false, true)), WindowMode::Pseudo);
+        assert_eq!(mode_of(&win(0, true, false)), WindowMode::Floating);
+        assert_eq!(mode_of(&win(2, false, false)), WindowMode::Fullscreen);
+        // The overlaps the compositor allows and the bar does not: every one
+        // resolves to the mode you can actually see.
+        assert_eq!(mode_of(&win(2, true, true)), WindowMode::Fullscreen);
+        assert_eq!(mode_of(&win(2, false, true)), WindowMode::Fullscreen);
+        assert_eq!(mode_of(&win(0, true, true)), WindowMode::Floating);
+        // Maximized (fullscreen == 1) is still fullscreen as far as the mode
+        // controls are concerned — only the bar's auto-hide distinguishes it.
+        assert_eq!(mode_of(&win(1, false, false)), WindowMode::Fullscreen);
+        // Missing fields (an older compositor, a partial reply) must not panic
+        // or invent a mode.
+        assert_eq!(
+            mode_of(&serde_json::json!({ "address": "0x1" })),
+            WindowMode::Tiled
+        );
+    }
 
     /// The real dock zone at default config: 720 wide centered on a
     /// 1280x800 layout, bottom 60 px.

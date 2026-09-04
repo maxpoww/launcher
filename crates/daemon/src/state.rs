@@ -163,6 +163,7 @@ impl UiState {
             Command::DebugClip
             | Command::DebugClipDetail
             | Command::DebugNotif
+            | Command::DebugSticky
             | Command::DebugDict
             | Command::DebugOptions
             | Command::DebugMediaBox

@@ -389,6 +389,12 @@ fn main() -> anyhow::Result<()> {
         options_hide_deadline: None,
         options_ctrl: options::CtrlAnim::default(),
         options_clock_meta: options::ClockMeta::default(),
+        options_title_meta: options::TitleMeta::default(),
+        options_leader: None,
+        options_lead: options::LeadAnim::default(),
+        options_acted: None,
+        options_sticky: None,
+        options_show: options::ShowAnim::default(),
         notif: notif::NotifState::new(notif_handle),
         clip: clipboard::ClipState::new(clip_handle, clip_thumbs, clip_unfurl),
         dict_tx,
@@ -887,6 +893,27 @@ pub struct App {
     /// Clock↔date "metamorphosis": the pill grows horizontally on hover and
     /// crossfades HH:MM into the full date, holding 3s after leave.
     options_clock_meta: options::ClockMeta,
+    /// Title "metamorphosis": the window pill eases between two title widths
+    /// and crossfades the two names, instead of jumping — the visible half of
+    /// the Leader rule (`OptionUXRules.md` §1).
+    options_title_meta: options::TitleMeta,
+    /// The Leader: the pill the pointer has hold of, if any. Its group is
+    /// laid out from it rather than from its resting anchor, so it holds
+    /// still while everything else re-flows (`OptionUXRules.md` §1).
+    options_leader: Option<options::Leader>,
+    /// Per-group displacement from the resting layout, and the ease home that
+    /// runs after the leader is released.
+    options_lead: options::LeadAnim,
+    /// The last control acted on from the bar, where it was drawn, and when —
+    /// so that a concealment arriving straight afterwards can be blamed on it
+    /// and leave that control behind (`OptionUXRules.md` §4).
+    options_acted: Option<(options::PillId, content::Rect, Instant)>,
+    /// The sticky OPTION currently standing on a concealed bar, if any: the
+    /// control that took the bar away, plus the doorway back to the rest.
+    options_sticky: Option<options::Sticky>,
+    /// The bar's own fade in/out, on the surface's shared tempo
+    /// (`OptionUXRules.md` §3).
+    options_show: options::ShowAnim,
     /// Notification OPTION: bell + peek + history dropdown (see [`crate::notif`]).
     notif: notif::NotifState,
     /// Clipboard OPTION: watched history + copy-back (see [`crate::clipboard`]).
@@ -1682,6 +1709,10 @@ impl App {
                 self.open_notif_box();
                 return;
             }
+            Command::DebugSticky => {
+                self.debug_stand_sticky();
+                return;
+            }
             Command::OverviewOn => {
                 self.set_overview(true);
                 return;
@@ -1707,9 +1738,13 @@ impl App {
                 self.note_interaction();
                 return;
             }
-            // Golem pseudo (the square pill's policy), for the keybind.
+            // Golem pseudo (the square pill's policy), for the keybind. Routed
+            // through the same mode switch the pill uses, so the keybind and
+            // the bar cannot drift apart: pressing it while fullscreen or
+            // floating leaves that mode and pseudotiles, rather than silently
+            // doing nothing as the bare toggle used to.
             Command::PseudoToggle => {
-                hypr::toggle_golem_pseudo();
+                self.set_window_mode(hypr::WindowMode::Pseudo);
                 return;
             }
             // Overview: the pill follows the pointer across the grid, and
@@ -2016,7 +2051,7 @@ impl App {
         }
         // The bar is always visible over the overview (even when the
         // focused window is fullscreen — the overview covers it anyway).
-        self.options_hidden = self.options_fullscreen && !active;
+        self.set_options_hidden(self.options_fullscreen && !active);
         self.options_reveal_deadline = None;
         self.options_hide_deadline = None;
         self.sync_options_input();

@@ -1108,7 +1108,12 @@ impl App {
         }
         // Concealed in fullscreen: render an empty (transparent) frame so the
         // bar disappears until a deliberate top-edge hold reveals it.
-        if self.options_hidden {
+        //
+        // Unless a sticky OPTION is standing (`OptionUXRules.md` §4) — then the
+        // frame carries exactly two pills, the control that took the bar away
+        // and its doorway, and falls through to the ordinary draw below so they
+        // get the surface's real styling rather than a special-case painting.
+        if self.options_hidden && self.options_sticky.is_none() && self.options_show.t <= 0.0 {
             if let Some(renderer) = self.options_renderer.as_mut() {
                 let scene = content::Scene {
                     alpha: 1.0,
@@ -1118,18 +1123,37 @@ impl App {
             }
             return;
         }
+        // The Leader's displacement is derived from the layout, so it is
+        // refreshed here — before anything consumes the pills — and this is
+        // where a leader that has left the layout is released
+        // (`OptionUXRules.md` §1).
+        self.sync_lead();
         let w = w as f32;
         let bar_h = self.options_bar_h();
         // Matched: opaque window colour, extended down over the window's top
         // border (the overhang) to hide the seam. Otherwise the faint
         // transparent strip, drawn only to the bar height.
-        let (color, bottom, matched) = match self.options_bar_matched {
+        let (mut color, bottom, matched) = match self.options_bar_matched {
             Some(c) => (c, bar_h + crate::OPTIONS_OVERHANG as f32, true),
             // Reduce-transparency: the see-through strip becomes the same
             // opaque slab the open boxes use (sampled backdrop + wash), so
             // the bar's ink always sits on solid ground. Hard-edged like a
             // matched bar — an opaque fill wants a crisp bottom cut.
-            None if self.config.accessibility.reduce_transparency => {
+            //
+            // A bar SUMMONED OVER A FULLSCREEN WINDOW takes the same slab, for
+            // the same reason. The colour-match that normally gives it ground
+            // is paused there on purpose — it is the continuous readback that
+            // blocks direct scanout — so the strip would otherwise fall back to
+            // 10% black and float unreadably over whatever the window happens
+            // to be showing.
+            //
+            // Blending in is not what this bar is for anyway. The match exists
+            // so a bar above a MAXIMIZED window reads as one surface with it;
+            // in fullscreen the bar is not part of the layout at all. You
+            // concealed it and then deliberately asked for it back, by holding
+            // the edge or through a doorway. A summoned overlay owes you
+            // legibility, not camouflage against content it does not belong to.
+            None if self.options_paused() || self.config.accessibility.reduce_transparency => {
                 (self.options_box_surface().0, bar_h, true)
             }
             None => ([0.0, 0.0, 0.0, 0.10], bar_h, false),
@@ -1140,6 +1164,10 @@ impl App {
         // When matched, draw the fill hard-edged (`glass = -1.0`) so its bottom
         // edge — which meets the window's identical colour — is a crisp cut
         // rather than a gamma-lifted AA seam. See `rounded_rect.wgsl`.
+        // The strip itself fades with the bar (`OptionUXRules.md` §3): the
+        // surface arrives and leaves on the same tempo its pills move at,
+        // instead of being the one thing up here that snaps.
+        color[3] *= self.options_show.t;
         let mut scene = content::Scene {
             alpha: 1.0,
             rects: vec![content::RectInst {

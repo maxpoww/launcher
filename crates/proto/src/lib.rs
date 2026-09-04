@@ -50,6 +50,10 @@ pub enum Command {
     DebugClipDetail,
     /// Debug/verification: force-open the notification history box.
     DebugNotif,
+    /// Debug/verification: stand a sticky OPTION on a concealed bar (the
+    /// fullscreen control plus its doorway) so §4 can be screenshotted without
+    /// a pointer and a real fullscreen window.
+    DebugSticky,
     /// Debug/verification: force-open the clipboard box on the dictionary
     /// "define a word" panel, pre-filled with a sample query.
     DebugDict,
@@ -113,6 +117,7 @@ impl fmt::Display for Command {
             Command::DebugClip => f.write_str("debug-clip"),
             Command::DebugClipDetail => f.write_str("debug-clip-detail"),
             Command::DebugNotif => f.write_str("debug-notif"),
+            Command::DebugSticky => f.write_str("debug-sticky"),
             Command::DebugDict => f.write_str("debug-dict"),
             Command::DebugOptions => f.write_str("debug-options"),
             Command::DebugMediaBox => f.write_str("debug-media-box"),
@@ -174,6 +179,7 @@ impl FromStr for Command {
             "debug-clip" => Ok(Command::DebugClip),
             "debug-clip-detail" => Ok(Command::DebugClipDetail),
             "debug-notif" => Ok(Command::DebugNotif),
+            "debug-sticky" => Ok(Command::DebugSticky),
             "debug-dict" => Ok(Command::DebugDict),
             "debug-options" => Ok(Command::DebugOptions),
             "debug-media-box" => Ok(Command::DebugMediaBox),
@@ -207,6 +213,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-clip",
     "debug-clip-detail",
     "debug-notif",
+    "debug-sticky",
     "debug-dict",
     "debug-options",
     "debug-media-box",
@@ -297,6 +304,7 @@ mod tests {
                 | Command::DebugClip
                 | Command::DebugClipDetail
                 | Command::DebugNotif
+                | Command::DebugSticky
                 | Command::DebugDict
                 | Command::DebugOptions
                 | Command::DebugMediaBox
@@ -323,6 +331,7 @@ mod tests {
             Command::DebugClip,
             Command::DebugClipDetail,
             Command::DebugNotif,
+            Command::DebugSticky,
             Command::DebugDict,
             Command::DebugOptions,
             Command::DebugMediaBox,

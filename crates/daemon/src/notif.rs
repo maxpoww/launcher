@@ -30,7 +30,12 @@ use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
 
-use crate::animation::{ease_toward, lerp};
+// The tempo comes from the surface, not from this module — One Material
+// (`OptionUXRules.md` §3). This import is the only place the bell's speed is
+// decided; there is deliberately no rate constant below.
+use crate::animation::{
+    ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SCROLL_RATE, SETTLE_PX,
+};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst};
 use crate::notifications::{
     action_pairs, ActiveNotification, NotifCommand, NotifEvent, NotifHandle,
@@ -181,16 +186,19 @@ const BATTERY_RED: [f32; 4] = [0.92, 0.26, 0.21, 1.0];
 /// fa-triangle-exclamation — the battery awareness symbol.
 const GLYPH_BATTERY_WARN: &str = "\u{f071}";
 
-/// Glide rate of the two morph progresses (exponential approach; a springier
-/// curve with overshoot is a later polish pass).
-const MORPH_RATE: f32 = 13.0;
+/// Below this a morph progress counts as "not showing at all" — a visibility
+/// test, not a settle threshold (the settle comes from
+/// [`animation::settle_t`], measured in real geometry).
 const MORPH_EPS: f32 = 0.001;
-/// How long the preview/history holds open after the pointer leaves, and how
-/// long a new notification auto-shows before collapsing (matches the date pill).
+/// How long a notification that arrived *on its own* stays readable before it
+/// withdraws — the baseline of the urgency ladder in [`flash_hold`].
+///
+/// This is an auto-withdraw dwell, NOT a leave-hold: nobody's pointer arrived,
+/// so nobody's pointer can leave. It answers "how long does this need to be
+/// readable", which is each OPTION's own question, and it is explicitly outside
+/// the shared hold (`OptionUXRules.md` §3) — collapsing a critical notification
+/// in a leave-hold's time would be data loss dressed as consistency.
 const HOLD: Duration = Duration::from_millis(1500);
-/// Shorter grace before collapsing once the pointer *leaves* — snappy to hide,
-/// but enough to survive crossing a small gap between the pill and mute pill.
-const LEAVE_HOLD: Duration = Duration::from_millis(300);
 /// After "Clear all", how long the box lingers on the empty state before it
 /// falls away on its own (even if the pointer is still over it).
 const EMPTY_HOLD: Duration = Duration::from_millis(950);
@@ -206,10 +214,6 @@ const NOTCH: f32 = 15.0;
 /// Pixels of list scroll per axis unit (so one wheel notch ≈ `NOTCH * SCROLL_SPEED`
 /// px of travel). Tunable for scroll feel.
 const SCROLL_SPEED: f32 = 3.0;
-/// Exponential approach rate of `list_scroll` toward `scroll_target` — higher is
-/// snappier, lower is floatier. This is what makes the wheel feel smooth rather
-/// than stepping a whole card at a time.
-const SCROLL_RATE: f32 = 20.0;
 
 /// Zebra striping for the history list — alternate rows get a wash so adjacent
 /// lines read as distinct (old-Finder style). Direction is **adaptive**: a dark
@@ -2697,25 +2701,38 @@ impl App {
         };
         let expand_target = if self.notif.expanded { 1.0 } else { 0.0 };
         let was_shown = self.notif.peek_t > MORPH_EPS;
-        let (pt, pm) = ease_toward(self.notif.peek_t, peek_target, dt, MORPH_RATE, MORPH_EPS);
+        // Each progress settles against the span it actually carries: the peek
+        // grows the pill out to the extended width, the expand drops the box to
+        // its full height (`OptionUXRules.md` §3).
+        let box_full = self.notif_full_h(self.notif_band_h());
+        let (pt, pm) = ease_toward(
+            self.notif.peek_t,
+            peek_target,
+            dt,
+            MORPH_RATE,
+            settle_t(self.nm().extended_w),
+        );
         let (et, em) = ease_toward(
             self.notif.expand_t,
             expand_target,
             dt,
             MORPH_RATE,
-            MORPH_EPS,
+            settle_t(box_full),
         );
         self.notif.peek_t = pt;
         self.notif.expand_t = et;
 
         // Ease the open-box height toward its content-fit target, so clearing to the
-        // empty state (or dismissing a card) morphs the box smoothly. A hair faster
-        // than the open morph so the shrink feels crisp, not sluggish. Only runs
+        // empty state (or dismissing a card) morphs the box smoothly. Only runs
         // while the box is open/animating — when collapsed the height is unused
         // (`open_notif_box` reseeds it), so there's no idle frame churn.
+        //
+        // This used to run at `MORPH_RATE * 1.3` "so the shrink feels crisp".
+        // That inline multiplier was the one genuinely off-tempo animation on
+        // the bar, and it is exactly what §3 forbids: a deviation typed at the
+        // call site, reviewed by nobody, permanent by default.
         let bm = if self.notif.expand_t > MORPH_EPS {
-            let box_target = self.notif_full_h(self.notif_band_h());
-            let (bh, moving) = ease_toward(self.notif.box_h, box_target, dt, MORPH_RATE * 1.3, 0.5);
+            let (bh, moving) = ease_toward(self.notif.box_h, box_full, dt, MORPH_RATE, SETTLE_PX);
             self.notif.box_h = bh;
             moving
         } else {
@@ -3809,5 +3826,22 @@ mod tests {
         assert_eq!(flash_hold(1), HOLD); // normal == baseline
         assert!(flash_hold(2) > flash_hold(1)); // critical > normal
         assert_eq!(flash_hold(9), HOLD); // unknown falls to normal
+    }
+
+    /// The arrival flash is an auto-withdraw dwell, NOT the shared leave-hold
+    /// (`OptionUXRules.md` §3). Nobody's pointer arrived, so nobody's pointer
+    /// can leave: it answers "how long must this stay readable", and unifying
+    /// it into the leave-hold would be data loss dressed as consistency.
+    #[test]
+    fn the_arrival_flash_is_not_the_leave_hold() {
+        for urgency in [0, 1, 2, 9] {
+            assert!(
+                flash_hold(urgency) > LEAVE_HOLD * 2,
+                "urgency {urgency} withdraws in {:?}, near a leave-hold — unreadable",
+                flash_hold(urgency)
+            );
+        }
+        // A critical one has to survive a glance away from the screen entirely.
+        assert!(flash_hold(2) >= Duration::from_secs(5));
     }
 }
