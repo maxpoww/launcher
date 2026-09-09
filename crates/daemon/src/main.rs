@@ -3580,7 +3580,7 @@ impl App {
                     p.failed = false;
                     p.started = std::time::Instant::now(); // restart the ring
                     p.completed_at = None;
-                    p.rescan_fired = false;
+                    p.last_rescan = None;
                     p.desktop_ids.clone()
                 });
             if let Some(desktop_ids) = desktop_ids {

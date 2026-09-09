@@ -559,13 +559,19 @@ impl App {
         // A finished install whose ring has now eased to full: fire the
         // deferred rescan that swaps the tile for the real app (held back so
         // the completion fill always plays — see `install_ring_progress`).
+        // NOT one-shot: the hold-end scan can run before the switch's async
+        // user activation has materialized the new `.desktop` (slow-disk
+        // ASUS: home-manager lagged the apply by ~90 s), so while the tile
+        // stays unresolved the rescan re-arms every RESOLVE_RESCAN_RETRY.
+        // Resolution removes the tile, which is what stops the retries.
         let mut fill_done = false;
         for p in &mut self.pending_installs {
-            if !p.rescan_fired
-                && p.completed_at
-                    .is_some_and(|c| c.elapsed() >= crate::install::INSTALL_HOLD)
+            if p.completed_at
+                .is_some_and(|c| c.elapsed() >= crate::install::INSTALL_HOLD)
+                && p.last_rescan
+                    .is_none_or(|t| t.elapsed() >= crate::install::RESOLVE_RESCAN_RETRY)
             {
-                p.rescan_fired = true;
+                p.last_rescan = Some(Instant::now());
                 fill_done = true;
             }
         }

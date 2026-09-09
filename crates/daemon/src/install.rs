@@ -63,8 +63,15 @@ pub(crate) struct PendingInstall {
     /// rescan swaps in the real app, so even a quick install fills the ring
     /// instead of popping at 20%.
     pub(crate) completed_at: Option<Instant>,
-    /// Whether the post-fill rescan has been fired (so it fires just once).
-    pub(crate) rescan_fired: bool,
+    /// When the post-fill rescan last fired (`None` = not yet). It fires at
+    /// hold-end, then RE-ARMS every [`RESOLVE_RESCAN_RETRY`] while the tile
+    /// stays unresolved: the hold-end scan can run before the switch's
+    /// ASYNC user activation (home-manager) has materialized the new
+    /// `.desktop` — a one-shot latch then strands a finished tile on
+    /// "Installing…" until unrelated activity happens to rescan (the ASUS,
+    /// audacity 2026-09-09: 91 s instead of the 1.4 s flourish). Resolution
+    /// removes the tile, which stops the retries.
+    pub(crate) last_rescan: Option<Instant>,
 }
 
 /// On-disk snapshot of one [`PendingInstall`] tile (`pending-installs.json`):
@@ -155,6 +162,12 @@ pub(crate) const INSTALL_SHINE: Duration = Duration::from_millis(950);
 /// The app's appearance is deferred this long so the whole completion flourish
 /// always plays.
 pub(crate) const INSTALL_HOLD: Duration = INSTALL_RING_FILL.saturating_add(INSTALL_SHINE);
+
+/// How often the post-fill rescan re-fires while a finished tile stays
+/// unresolved (see `PendingInstall::last_rescan`). Only an abnormal state
+/// keeps it firing — normally the first or second scan resolves the tile
+/// and removes it.
+pub(crate) const RESOLVE_RESCAN_RETRY: Duration = Duration::from_secs(2);
 
 /// Shine-sweep progress in `0.0..=1.0` for a finished install, or a negative
 /// value while the ring is still filling (no shine yet) or when not finished.
@@ -789,7 +802,7 @@ impl App {
             failed: false,
             started: Instant::now(),
             completed_at: None,
-            rescan_fired: false,
+            last_rescan: None,
         });
         // A dock drop was already pinned at its slot by the caller (via
         // `pin_dropped_on_dock`), so the tile shows there immediately; the
@@ -1357,7 +1370,7 @@ impl App {
                 failed: t.failed,
                 started,
                 completed_at: None,
-                rescan_fired: false,
+                last_rescan: None,
             });
         }
         for attr in state.managed {
