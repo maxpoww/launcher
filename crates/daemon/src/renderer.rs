@@ -952,7 +952,18 @@ impl Renderer {
         reserved: usize,
         chains: impl Iterator<Item = &'a Vec<u8>>,
     ) {
-        let layers = (count + reserved).max(1) as u32;
+        let mut layers = (count + reserved).max(1) as u32;
+        // wgpu's GLES backend cannot see our explicit D2Array view dimension
+        // and GUESSES it from the layer count: depth==6 → Cube, depth>6 &&
+        // depth%6==0 → CubeArray. When our icon atlas lands on 6 or a
+        // multiple of 6 layers it gets bound as a cubemap and the sampler
+        // reads black — the transient "app icons go black" bug on the
+        // GL-backend Haswell (Golem #42; the count shifts with app/pending
+        // counts, so icons render fine until a rescan hits a multiple of 6).
+        // One empty pad layer dodges every bad count; harmless on Vulkan.
+        if layers == 6 || (layers > 6 && layers % 6 == 0) {
+            layers += 1;
+        }
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("waverunner.icons"),
             size: wgpu::Extent3d {
