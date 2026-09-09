@@ -34,10 +34,9 @@ struct Globals {
     cursor: [f32; 2], // pointer in surface pixels; [-9999,-9999] = absent
     squircle: f32,    // icon corner superellipse exponent (icon.wgsl only; 0 = off)
     thumb_base: f32,  // first thumbnail texture layer (icon.wgsl; ≥ it skips squircle)
-    // Up to 4 simultaneous ripples: (x, y, age, 0); x < -9000 = inactive.
-    ripples: [[f32; 4]; 4],
-    // Up to 2 box-open/close waves: (cx, cy, age, 0); cx < -9000 = inactive.
-    box_waves: [[f32; 4]; 2],
+    // Banner blister: (bar_edge_y, k, _, _); the sunset module's banner rect
+    // smooth-unions with the half-plane above bar_edge_y. x < -9000 = off.
+    neck: [f32; 4],
 }
 
 /// Per-instance data for one rounded rectangle.
@@ -97,9 +96,12 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    /// The adapter renders on the CPU (llvmpipe & friends): every frame
-    /// costs real cores, so sustained animations must be throttled (F12).
-    software: bool,
+    /// Sustained ambient animation must be frame-throttled: true for a
+    /// software adapter (llvmpipe — every frame costs real cores) OR the GL
+    /// backend (its blocking Wayland present starves the single-threaded
+    /// loop). See [`Renderer::needs_frame_throttle`] and the constructor's
+    /// note (F12 / Golem #40).
+    frame_throttle: bool,
     /// Integer supersampling factor. `config.width/height` are physical
     /// (`logical × scale`); geometry is authored in logical px and scaled
     /// up automatically (see [`Renderer::render`]).
@@ -162,10 +164,6 @@ pub struct Renderer {
     /// there are no phase jumps when the dock hides and reappears.
     anim_time: f32,
     last_render: Option<std::time::Instant>,
-    /// Active ripples: (surface position, anim_time at spawn).
-    ripples: Vec<([f32; 2], f32)>,
-    /// Active box open/close waves: (icon center, anim_time at spawn).
-    box_waves: Vec<([f32; 2], f32)>,
 }
 
 /// Build the offscreen scene colour target (texture + view + blit bind
@@ -319,6 +317,18 @@ impl Renderer {
             anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
         })?;
         let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+        // The GL backend (old Intel iGPUs with no Vulkan — e.g. Haswell HD
+        // 4400) presents through Mesa's EGL/Wayland path, which does its own
+        // blocking wayland I/O on the display fd inside each swap. On the
+        // single-threaded loop a sustained animation there renders flat out
+        // and starves calloop's other sources — IPC, input, timers, the
+        // install-completion channel — exactly as a software adapter does
+        // (Golem changes.md #40, the ASUS X550LC 2026-09-09: one perpetual
+        // install ring took the whole desktop down). So it wants the same
+        // ambient-frame throttle. A modern Vulkan/Metal GPU (the dev box)
+        // does not — its present does not block the event thread.
+        let gl_backend = adapter.get_info().backend == wgpu::Backend::Gl;
+        let frame_throttle = software || gl_backend;
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -825,7 +835,7 @@ impl Renderer {
             device,
             queue,
             config,
-            software,
+            frame_throttle,
             scale: scale.max(1),
             globals_buf,
             globals_bind,
@@ -861,8 +871,6 @@ impl Renderer {
             label_cache: std::collections::HashMap::new(),
             anim_time: 0.0,
             last_render: None,
-            ripples: Vec::new(),
-            box_waves: Vec::new(),
         })
     }
 
@@ -923,6 +931,19 @@ impl Renderer {
         self.upload_icon_array(notif.len() + clip.len(), 0, notif.iter().chain(clip.iter()));
     }
 
+    /// Allocate an **empty** icon array of exactly `layers` layers, each to be
+    /// filled later by [`Renderer::update_icon_layer`].
+    ///
+    /// For surfaces that stream layers in one at a time — the STAGE deck — and
+    /// size their need up front. [`Renderer::set_icons`] would be wrong for
+    /// them twice over: it reserves the dock's 97 extra layers (~34MB of
+    /// texture the deck can never address), and growing by one means
+    /// reallocating and re-uploading the whole array. Pre-sized, an arriving
+    /// thumbnail is only ever a single-layer write.
+    pub fn alloc_icon_array(&mut self, layers: u32) {
+        self.upload_icon_array(layers as usize, 0, std::iter::empty());
+    }
+
     /// Shared core: (re)allocate the icon texture array with `count + reserved`
     /// layers, write each chain to its layer, and rebuild the sampler bind group.
     fn upload_icon_array<'a>(
@@ -974,9 +995,11 @@ impl Renderer {
     /// Width in pixels of `text` shaped at `font_px` — the same family
     /// and shaping the labels render with, so the search caret can sit
     /// exactly after the glyphs instead of guessing from char counts.
-    /// Whether frames are rendered on the CPU (see the `software` field).
-    pub fn is_software(&self) -> bool {
-        self.software
+    /// Whether sustained ambient animation must be frame-throttled to keep
+    /// the single-threaded event loop responsive — true on a software
+    /// adapter and on the GL backend (see the `frame_throttle` field).
+    pub fn needs_frame_throttle(&self) -> bool {
+        self.frame_throttle
     }
 
     pub fn measure_text(&mut self, text: &str, font_px: f32, family: Option<&str>) -> f32 {
@@ -1010,34 +1033,6 @@ impl Renderer {
             return;
         }
         write_icon_chain(&self.queue, texture, layer, pixels);
-    }
-
-    /// Spawn a ripple at the given surface position. Under reduce-motion
-    /// no ripple spawns — the click's effect is the feedback.
-    pub fn record_click(&mut self, x: f32, y: f32) {
-        if crate::animation::reduce_motion() {
-            return;
-        }
-        self.ripples.push(([x, y], self.anim_time));
-    }
-
-    /// True while any ripple is still animating.
-    pub fn has_active_ripple(&self) -> bool {
-        !self.ripples.is_empty()
-    }
-
-    /// Spawn a box open/close wave centred on the icon at (x, y). Skipped
-    /// under reduce-motion, like the click ripple.
-    pub fn record_box_wave(&mut self, x: f32, y: f32) {
-        if crate::animation::reduce_motion() {
-            return;
-        }
-        self.box_waves.push(([x, y], self.anim_time));
-    }
-
-    /// True while any box wave is still animating.
-    pub fn has_active_box_wave(&self) -> bool {
-        !self.box_waves.is_empty()
     }
 
     /// Render one frame of the given scene.
@@ -1087,21 +1082,7 @@ impl Renderer {
         self.last_render = Some(now);
         self.anim_time += dt;
 
-        // Expire ripples older than 3.5 s; box waves older than 1.0 s.
-        self.ripples.retain(|(_, t)| self.anim_time - t <= 3.5);
-        self.box_waves.retain(|(_, t)| self.anim_time - t <= 1.0);
-
         let cursor_px = cursor.map(|(x, y)| [x, y]).unwrap_or([-9999.0, -9999.0]);
-
-        let inactive = [-9999.0_f32, -9999.0, 999.0, 0.0];
-        let mut ripples = [inactive; 4];
-        for (slot, (pos, t)) in self.ripples.iter().rev().take(4).enumerate() {
-            ripples[slot] = [pos[0], pos[1], self.anim_time - t, 0.0];
-        }
-        let mut box_waves = [inactive; 2];
-        for (slot, (pos, t)) in self.box_waves.iter().rev().take(2).enumerate() {
-            box_waves[slot] = [pos[0], pos[1], self.anim_time - t, 0.0];
-        }
 
         self.queue.write_buffer(
             &self.globals_buf,
@@ -1113,8 +1094,7 @@ impl Renderer {
                 cursor: cursor_px,
                 squircle,
                 thumb_base: thumb_base as f32,
-                ripples,
-                box_waves,
+                neck: scene.neck.unwrap_or([-9999.0, 0.0, 0.0, 0.0]),
             }),
         );
 

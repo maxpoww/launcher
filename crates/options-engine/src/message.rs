@@ -7,8 +7,8 @@
 //! low-frequency one (battery), and one dead collector can't stall the rest.
 
 use crate::state::{
-    ActiveWindow, AppInternalContext, AudioState, DeployHealth, GitContext, Layer, MediaState,
-    NotificationContext, SystemMetrics, TextSelection,
+    ActiveWindow, AppInternalContext, AudioState, DaylightState, DeployHealth, GitContext, Layer,
+    MediaState, NotificationContext, SystemMetrics, TextSelection,
 };
 
 /// A partial change to the context. Only the variants the current collectors
@@ -46,6 +46,8 @@ pub enum ContextDelta {
     Notifications(NotificationContext),
     /// The most recently added Downloads file (or cleared when it ages out).
     RecentDownload(Option<std::path::PathBuf>),
+    /// Daylight state (sun below the horizon / hyprsunset running).
+    Daylight(DaylightState),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

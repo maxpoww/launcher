@@ -78,6 +78,16 @@ const PSEUDO_H: f64 = 0.84;
 /// rule, which restores rounding + border under smart gaps.
 const PSEUDO_TAG: &str = "golem-pseudo";
 
+/// Golem's floating size, as a fraction of the MONITOR — the float mode's
+/// answer to [`PSEUDO_W`]/[`PSEUDO_H`], and proportional for the same reason:
+/// it should read the same on every screen rather than being a pixel count
+/// that happens to suit one.
+///
+/// Taken from the window Max pointed at (2026-09-04): 1097×677 on a 2000×1250
+/// logical output. Big enough to work in, unmistakably not a tile.
+const FLOAT_W: f64 = 0.55;
+const FLOAT_H: f64 = 0.54;
+
 /// How a window is laid out. **Exactly one of these holds at a time** — the
 /// four are mutually exclusive, and picking one drops whatever was on.
 ///
@@ -233,6 +243,22 @@ pub fn set_window_mode(target: WindowMode) -> bool {
             lua.push_str(&format!(
                 "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
             ));
+            // A float gets Golem's size AND Golem's place, the way a pseudo
+            // gets Golem's size — so "float this" means one predictable shape
+            // in one predictable spot every time, instead of whatever geometry
+            // the window last happened to hold, wherever its tile happened to
+            // be. Centred after the resize so it centres the final size, and
+            // all in the same chunk as the toggle, so the window arrives
+            // floated, sized and placed in one motion (`OptionUXRules.md` §6).
+            //
+            // `center` respects the reserved area, so a centred float sits in
+            // the usable region rather than half under the bar.
+            if let Some((w, h)) = float_size() {
+                lua.push_str(&format!(
+                    "hl.dispatch(hl.dsp.window.resize({{ x = {w}, y = {h}, {win} }})) "
+                ));
+            }
+            lua.push_str(&format!("hl.dispatch(hl.dsp.window.center({{ {win} }})) "));
         }
         WindowMode::Fullscreen => {
             lua.push_str(&format!(
@@ -252,6 +278,16 @@ pub fn set_window_mode(target: WindowMode) -> bool {
         }
     }
     needs_second_pass
+}
+
+/// Golem's floating size in logical pixels, for the focused monitor.
+///
+/// Read per call rather than cached: the answer changes with the output, and a
+/// float toggle is far too rare for one `j/monitors` read to matter.
+fn float_size() -> Option<(i64, i64)> {
+    let m = focused_monitor().ok()?;
+    let (w, h) = ((m.w * FLOAT_W) as i64, (m.h * FLOAT_H) as i64);
+    (w > 1 && h > 1).then_some((w, h))
 }
 
 /// The chunk that pseudotiles a window at Golem's fraction of its tile.
@@ -322,6 +358,49 @@ pub fn close_window(addr: &str) {
 pub fn active_window() -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
     json["address"].as_str().map(str::to_owned)
+}
+
+/// The focused window's address and the workspace it is on, in one read — what
+/// the per-workspace focus memory records (see [`crate::focus_cycle`]).
+pub fn active_focus() -> Option<(String, i64)> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let addr = json["address"]
+        .as_str()
+        .filter(|a| !a.is_empty() && *a != "0x0")?
+        .to_owned();
+    Some((addr, json["workspace"]["id"].as_i64()?))
+}
+
+/// The window on `ws` the compositor focused most recently, by
+/// `focusHistoryID` (0 = current). The fallback for a space we hold no note of
+/// ourselves — trustworthy precisely when nothing is focused, because then
+/// nothing has arrived to displace the history.
+pub fn last_focused_on(ws: i64) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    json.as_array()?
+        .iter()
+        .filter(|c| c["workspace"]["id"].as_i64() == Some(ws))
+        .filter(|c| c["mapped"].as_bool().unwrap_or(true))
+        .min_by_key(|c| c["focusHistoryID"].as_i64().unwrap_or(i64::MAX))
+        .and_then(|c| c["address"].as_str())
+        .map(str::to_owned)
+}
+
+/// Whether `addr` is a live window on workspace `ws` — the check before
+/// restoring focus to a remembered window that may since have been closed or
+/// dragged somewhere else.
+pub fn window_is_on(addr: &str, ws: i64) -> bool {
+    let Ok(raw) = request("j/clients") else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    json.as_array().is_some_and(|cs| {
+        cs.iter().any(|c| {
+            c["address"].as_str() == Some(addr) && c["workspace"]["id"].as_i64() == Some(ws)
+        })
+    })
 }
 
 /// The focused window's address, title, and whether it's fullscreen — for the
@@ -657,7 +736,54 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 } else {
                                     format!("0x{addr}")
                                 };
-                                app.on_window_opened(&addr);
+                                // While the stage owns the screen the arrival
+                                // is the stage's to handle — the ordinary
+                                // path's plain focus broke the staged layout
+                                // (see `on_window_opened_staged`).
+                                if app.stage.is_on() {
+                                    app.on_window_opened_staged(&addr);
+                                } else {
+                                    app.on_window_opened(&addr);
+                                }
+                            }
+                        }
+                        // `workspacev2>>ID,NAME` — the space changed. Hand back
+                        // the window that was left there, if the way in didn't
+                        // (see [`crate::focus_cycle`]).
+                        if name.starts_with("workspace") && !name.starts_with("workspacerule") {
+                            if let Some(id) = line
+                                .split(">>")
+                                .nth(1)
+                                .and_then(|d| d.split(',').next())
+                                .and_then(|d| d.trim().parse::<i64>().ok())
+                            {
+                                app.on_workspace_changed(id);
+                            }
+                        }
+                        // `closewindowv2>>ADDRESS` — a window is gone. STAGE
+                        // mode keeps a deck of addresses, so it has to hear
+                        // about this or it will offer a tile that no longer
+                        // exists (and, if the staged one closed, sit in front
+                        // of nothing).
+                        if name.starts_with("closewindow") {
+                            if let Some(addr) = line.split(">>").nth(1).map(str::trim) {
+                                let addr = format!("0x{}", addr.trim_start_matches("0x"));
+                                let was_on = app.stage.is_on();
+                                app.stage.forget(&addr);
+                                // Addresses are window pointers and Hyprland
+                                // reuses them, so a thumbnail left filed under a
+                                // dead window's address would eventually be
+                                // shown for an unrelated application that
+                                // happened to land on it.
+                                app.deck_thumb_layer.remove(&addr);
+                                // `forget` fixes the stage's own bookkeeping;
+                                // the tiles are a separate copy and have to be
+                                // rebuilt, or the deck keeps offering a window
+                                // that is gone — clicking it raises and frames a
+                                // dead tile while the stage stays put.
+                                if was_on {
+                                    app.rebuild_deck();
+                                }
                             }
                         }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
@@ -783,6 +909,65 @@ pub fn top_fill(bar_h_logical: f64) -> Option<TopFill> {
     })
 }
 
+/// What the dock needs to colour-match a maximized window sitting flush
+/// above it — the bottom-edge twin of [`TopFill`]. Same fields, same
+/// meaning: `wl_output` name and the physical row to sample.
+pub struct BottomFill {
+    /// Connector name of the monitor to capture.
+    pub monitor: String,
+    /// Physical y of the sample row, just above the window's bottom edge.
+    pub sample_y: u32,
+}
+
+/// How far above the window's actual bottom edge (logical px) to sample —
+/// the bottom-edge mirror of [`WINDOW_TOP_INSET`]. Shallow, for the same
+/// reason: stay inside the chrome just past any bottom border/shadow
+/// without drifting up into unrelated content.
+const WINDOW_BOTTOM_INSET: f64 = 4.0;
+
+/// Detect a single tiled window filling the space down to the true screen
+/// bottom, so the dock (which floats over it, reserving no exclusive zone —
+/// unlike the bar) can take its colour. The bottom-edge twin of [`top_fill`];
+/// same ambiguity rule: an empty workspace, a split, or only floating
+/// windows return `None` and the dock falls back to its own frosted
+/// backdrop.
+pub fn bottom_fill() -> Option<BottomFill> {
+    let mon = focused_monitor().ok()?;
+    let clients: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    // Unlike the bar, the dock reserves NO exclusive zone (an auto-hide
+    // overlay, floating over whatever's there) — so a flush window tiles all
+    // the way to the real screen edge, not to `screen_bottom - dock_height`.
+    let usable_bottom = mon.y + mon.h;
+
+    let mut tiled = clients.as_array()?.iter().filter(|c| {
+        c["workspace"]["id"].as_i64() == Some(mon.active_ws)
+            && c["mapped"].as_bool().unwrap_or(false)
+            && !c["hidden"].as_bool().unwrap_or(false)
+            && !c["floating"].as_bool().unwrap_or(false)
+            && c["fullscreen"].as_i64().unwrap_or(0) == 0
+    });
+    let win = tiled.next()?;
+    if tiled.next().is_some() {
+        return None;
+    }
+    // Its bottom edge must sit right at the screen's bottom — at or a little
+    // above `usable_bottom` (a bottom gap pulls it up further), never past
+    // it by more than a hair.
+    let top = win["at"][1].as_f64()?;
+    let h = win["size"][1].as_f64()?;
+    let bottom = top + h;
+    if bottom > usable_bottom + 3.0 || bottom < usable_bottom - 40.0 {
+        return None;
+    }
+    Some(BottomFill {
+        monitor: mon.name,
+        // Sample a little above the window's actual bottom edge
+        // ([`WINDOW_BOTTOM_INSET`]) — past any bottom border/shadow, still
+        // inside the chrome.
+        sample_y: ((bottom - WINDOW_BOTTOM_INSET) * mon.scale.max(0.1)).round() as u32,
+    })
+}
+
 /// One live compositor window, for matching against dock apps.
 pub struct RunningWindow {
     /// Window address (`0x…`) — the focus/activate handle.
@@ -828,6 +1013,629 @@ pub fn running_windows() -> Vec<RunningWindow> {
         out.sort_by_key(|w| w.address != active);
     }
     out
+}
+
+// ─────────────────────────── STAGE mode primitives ───────────────────────────
+//
+// Everything here was verified live against Hyprland 0.55.4 on 2026-09-04
+// (scratch window, empty workspace). Wrong Lua names fail *silently* on this
+// fork, so nothing below is guessed — see `docs/hypr-api.md`.
+//
+// The stage rect is NOT set by positioning the window: this fork's Lua API has
+// no absolute-position dispatcher at all. It comes from a workspace rule whose
+// `gaps_out` opens exactly the inset we want, which the compositor then lays the
+// window into. Measured: the rule below puts the window at `[10,31] 1980×1019`
+// on Max's 2000×1250 output — the design rect, to the pixel.
+
+/// Run a Lua expression over the control socket. Best effort, like
+/// [`dispatch`]: the config API (`hl.workspace_rule`, `hl.animation`, …) is
+/// reachable this way, and a failure must never be fatal.
+pub fn eval(lua: &str) {
+    match request(&format!("eval {lua}")) {
+        Ok(reply) if reply.trim() == "ok" => {}
+        Ok(reply) => debug!("Hyprland eval {lua:?} replied: {}", reply.trim()),
+        Err(e) => debug!("Hyprland eval {lua:?} failed: {e:#}"),
+    }
+}
+
+/// The two workspace selectors that must be re-pointed for the stage inset.
+///
+/// `w[tv1]` (one tiled window) and `f[1]` (one fullscreen window) are the
+/// "smart gaps" rules from `/etc/nixos/hyprland.lua:357-358`, which normally
+/// zero the gaps so a solitary window sits flush. A solitary staged window
+/// matches the first; a *maximized* one (the sibling case) matches the second.
+/// Re-pointing both means the stage rect holds however many windows the
+/// workspace happens to contain.
+const SMART_GAP_SELECTORS: [&str; 2] = ["w[tv1]", "f[1]"];
+
+/// A runtime workspace rule BEATS the configured smart-gaps rule (verified), so
+/// this is how the stage rect is produced. `band` is the bottom gap — the deck's
+/// strip — and the other three come from [`crate::stage`], which is also where
+/// the thumbnail capture reads them, so the photograph frames exactly the
+/// window.
+///
+/// Assert the staged window's frame rule and the backdrop dim, every enter.
+///
+/// The rule lives in `/etc/nixos/hyprland.lua` too, but a `hyprctl reload`
+/// re-reads the *store* copy of the config — which lags `/etc/nixos` until the
+/// next `nixos-rebuild` — and wipes any runtime settings with it. That is
+/// exactly how the stage dim quietly vanished once (`dim_around` measured back
+/// at its 0.4 default; the strength here is 0.8, Max's pick). Re-asserting
+/// from the daemon on every enter makes the
+/// mode self-sufficient: idempotent, and whatever a reload did, entering the
+/// stage puts the stage's look back.
+///
+/// `dim_around` (the strength) is a global, but only a window carrying this
+/// rule's `dim_around = true` ever engages it — nothing else in the config
+/// does — so setting it without restoring is safe.
+pub fn assert_stage_frame() {
+    eval(
+        "hl.window_rule({ name = \"golem-stage-frame\", match = { tag = \"golem-stage\" }, \
+         border_size = 0, rounding = 12, no_shadow = false, dim_around = true }) \
+         hl.config({ [\"decoration.dim_around\"] = 0.8 })",
+    );
+}
+
+/// A workspace rule can be overridden but never *removed*, so
+/// [`clear_stage_gaps`] restores the literal values from the config rather than
+/// trying to undo this.
+pub fn set_stage_gaps(band: i32) {
+    let (top, side) = (crate::stage::GAP_TOP, crate::stage::GAP_SIDE);
+    for sel in SMART_GAP_SELECTORS {
+        eval(&format!(
+            "hl.workspace_rule({{ workspace = \"{sel}\", \
+             gaps_out = {{ top = {top}, left = {side}, right = {side}, bottom = {band} }}, \
+             gaps_in = 5 }})"
+        ));
+    }
+}
+
+/// Put the smart-gaps rules back to their configured values
+/// (`gaps_out = 0, gaps_in = 0`, `/etc/nixos/hyprland.lua:357-358`). Exactly
+/// reversible because the original is a known constant, not a guess.
+pub fn clear_stage_gaps() {
+    for sel in SMART_GAP_SELECTORS {
+        eval(&format!(
+            "hl.workspace_rule({{ workspace = \"{sel}\", gaps_out = 0, gaps_in = 0 }})"
+        ));
+    }
+}
+
+/// Silence **all** compositor animation while the stage is up.
+///
+/// Switching tasks maximizes one window and un-maximizes another, and Hyprland
+/// animates both — so a swap that is supposed to read as an instant cut came
+/// with a resize, a fade and a border transition riding along. The deck's own
+/// tile motion is drawn by us, inside our own surface, so it is untouched by
+/// this: the only animation left in the mode is the one that was designed.
+///
+/// `animations:enabled` is a single master bool and does not disturb the
+/// per-leaf configuration, so flipping it back is exact — unlike disabling the
+/// leaves one by one, which would have to restore every speed and curve from
+/// `/etc/nixos/hyprland.lua:172-188` by hand.
+/// The animation leaves a task switch goes through: the maximize/un-maximize,
+/// the workspace change, the fades and the border transition.
+const STAGE_LEAVES: &[&str] = &[
+    "global",
+    "windows",
+    "windowsIn",
+    "windowsOut",
+    "fade",
+    "fadeIn",
+    "fadeOut",
+    "border",
+    "workspaces",
+    "workspacesIn",
+    "workspacesOut",
+];
+
+/// One animation leaf's live settings.
+///
+/// Serializable so the snapshot can ride in the stage breadcrumb: a daemon that
+/// dies mid-stage would otherwise leave every one of these off, with no record
+/// of what they were, and recovery would have to guess from a copy of the config.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AnimLeaf {
+    name: String,
+    enabled: bool,
+    speed: f64,
+    /// As reported: either a bezier name, or `spring:NAME` for a spring.
+    bezier: String,
+    style: String,
+}
+
+/// Read the current settings of the leaves the stage silences.
+///
+/// Snapshotting beats hard-coding the values from `/etc/nixos/hyprland.lua`:
+/// restoring is then exact by construction and cannot go stale the day those
+/// curves are retuned.
+pub fn snapshot_animations() -> Vec<AnimLeaf> {
+    let Ok(raw) = request("j/animations") else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    // `j/animations` is `[[leaves…], [beziers…]]`.
+    v.get(0)
+        .and_then(|l| l.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|a| {
+            let name = a["name"].as_str()?.to_owned();
+            STAGE_LEAVES.contains(&name.as_str()).then(|| AnimLeaf {
+                name,
+                enabled: a["enabled"].as_bool().unwrap_or(false),
+                speed: a["speed"].as_f64().unwrap_or(0.0),
+                bezier: a["bezier"].as_str().unwrap_or("").to_owned(),
+                style: a["style"].as_str().unwrap_or("").to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Silence every leaf a switch animates.
+///
+/// The master `animations:enabled` flag is NOT enough on its own — measured:
+/// with it false, every leaf the config explicitly enabled still reported
+/// `enabled=1` and still animated. Nor does disabling the `global` leaf cascade
+/// to its children. Each leaf has to be turned off by name.
+pub fn silence_animations() {
+    eval("hl.config({ [\"animations.enabled\"] = false })");
+    for leaf in STAGE_LEAVES {
+        eval(&format!(
+            "hl.animation({{ leaf = \"{leaf}\", enabled = false }})"
+        ));
+    }
+}
+
+/// Put the leaves back from a [`snapshot_animations`] snapshot.
+///
+/// The full spec must be re-sent: disabling a leaf **wipes its speed and
+/// curve** (`spring:easy` @4.79 becomes `default` @1.00), and a bare
+/// `enabled = true` does not even re-enable it. Both measured the hard way.
+pub fn restore_animations(snapshot: &[AnimLeaf]) {
+    eval("hl.config({ [\"animations.enabled\"] = true })");
+    for leaf in snapshot {
+        if !leaf.enabled {
+            continue; // it was already off; leave it that way
+        }
+        let mut spec = format!(
+            "leaf = \"{}\", enabled = true, speed = {}",
+            leaf.name, leaf.speed
+        );
+        // A spring is reported as `spring:NAME` but must be set back as
+        // `spring = "NAME"` — feeding it as a bezier name would not resolve.
+        if let Some(spring) = leaf.bezier.strip_prefix("spring:") {
+            spec.push_str(&format!(", spring = \"{spring}\""));
+        } else if !leaf.bezier.is_empty() {
+            spec.push_str(&format!(", bezier = \"{}\"", leaf.bezier));
+        }
+        if !leaf.style.is_empty() {
+            spec.push_str(&format!(", style = \"{}\"", leaf.style));
+        }
+        eval(&format!("hl.animation({{ {spec} }})"));
+    }
+}
+
+/// Maximize (`fullscreen` state 1 — fills the workspace area, honouring the
+/// reserved bar and the gaps) or un-maximize the **focused** window.
+///
+/// BOTH fields are required: bare `{ internal = 1 }` is a silent no-op
+/// (verified). `client = 0` keeps the app itself unaware, so it renders as a
+/// normal window rather than going true-fullscreen.
+///
+/// Operates on the focused window because `fullscreen_state`'s support for a
+/// `window =` field is unverified — every caller here focuses first, so an
+/// address form is not needed.
+pub fn maximize_focused(on: bool) {
+    set_fullscreen_focused(i64::from(on));
+}
+
+/// Set the focused window's internal fullscreen state outright: 0 windowed,
+/// 1 maximized, 2 true fullscreen.
+///
+/// Staging must *restore* what it found rather than assume 0 — a window that was
+/// already true-fullscreen when it went on the stage has to come back
+/// fullscreen, or the mode has quietly destroyed user state.
+pub fn set_fullscreen_focused(internal: i64) {
+    dispatch(&format!(
+        "hl.dsp.window.fullscreen_state({{ internal = {internal}, client = 0 }})"
+    ));
+}
+
+/// Set a **named** window's internal fullscreen state, rather than the focused
+/// one's.
+///
+/// This is what the stage uses, and the distinction is not cosmetic.
+/// [`set_fullscreen_focused`] acts on whatever the compositor considers focused
+/// at that instant, and on a workspace holding several windows that is not
+/// reliably the window the stage just asked for: focusing across a workspace
+/// boundary is not settled by the time the next request lands, and the daemon's
+/// own workspace-focus restore can move focus again afterwards. The result was a
+/// stage that tagged the right window and maximized a different one — or none —
+/// leaving the whole workspace tiled on screen. Naming the window removes the
+/// question entirely.
+pub fn set_fullscreen_of(addr: &str, internal: i64) {
+    dispatch(&format!(
+        "hl.dsp.window.fullscreen_state({{ internal = {internal}, client = 0, \
+         window = \"address:{addr}\" }})"
+    ));
+}
+
+/// Ask waveview for square thumbnails of several windows at once, each written
+/// to `<dir>/<address>.rgba` as raw RGBA.
+///
+/// The compositor is the only thing that can photograph a window that is not on
+/// screen, and waveview already renders exactly this — a window's texture
+/// cropped into a small framebuffer — for the overview's minis. This is that
+/// render, read back and handed out.
+///
+/// **Always ask for the whole set at once**, even when it is one window. The
+/// plugin renders every workspace the set touches in a single pass, so a batch
+/// of eight costs about what one does; eight separate calls would pay the
+/// monitor-resolution workspace render eight times.
+///
+/// The plugin's own answer is deliberately not consulted: a file either exists
+/// at the expected length or it does not, and that holds whether the plugin is
+/// loaded, is an older build without the entry point, or is absent entirely —
+/// all of which degrade to title-only tiles rather than to an error.
+pub fn capture_deck(addrs: &[String], size: u32, tile_aspect: f32, dir: &std::path::Path) {
+    if addrs.is_empty() {
+        return;
+    }
+    let Some(d) = dir.to_str() else {
+        return;
+    };
+    eval(&format!(
+        "hl.plugin.waveview.capture_deck(\"{}\", {size}, {tile_aspect}, \"{d}\")",
+        addrs.join(",")
+    ));
+}
+
+/// The workspace floating windows are parked on while the stage is up.
+///
+/// An ordinary workspace, deliberately, not a **special** one: moving a window
+/// to a special workspace *shows* that workspace as an overlay, so the window
+/// stayed on screen — parked and still in the way. A plain move to a numbered
+/// workspace changes nothing about what is displayed, leaves the active
+/// workspace alone, and returns the window with its position and size intact.
+/// Chosen high to stay clear of the workspaces anyone binds keys to.
+pub const PARK_WS: i64 = 99;
+
+/// Move one floating window out of sight, and bring one home again.
+///
+/// Used on entering and leaving the mode, where a single eval buys nothing —
+/// one dispatch per window means a window that closed in between costs only
+/// itself, rather than aborting the rest (an eval stops at its first failure).
+pub fn park_window(addr: &str) {
+    unpark_window(addr, PARK_WS);
+}
+
+pub fn unpark_window(addr: &str, workspace: i64) {
+    dispatch(&format!(
+        "hl.dsp.window.move({{ workspace = {workspace}, window = \"address:{addr}\" }})"
+    ));
+}
+
+/// Everything one stage hand-over has to do, in the order it has to happen.
+pub struct Handover<'a> {
+    /// The task leaving the stage. It loses the frame but **keeps the stage
+    /// shape**, so coming back to it costs the client no relayout.
+    pub untag: Option<&'a str>,
+    /// Tasks that must give the shape back, as `(address, the fullscreen state
+    /// to return them to)`. A workspace holds one fullscreen window, so a task
+    /// already shaped on the incoming one's workspace has to let go first.
+    pub restore: &'a [(String, i64)],
+    /// Floating windows to move out of the way. Floating windows render *above*
+    /// tiled ones, so a maximized stage does not cover them — without this a
+    /// floating sibling sits on top of the staged task.
+    pub park: &'a [String],
+    /// Parked windows to bring home, as `(address, the workspace it came from)`.
+    pub unpark: &'a [(String, i64)],
+    /// The task arriving.
+    pub addr: &'a str,
+    /// A window sharing the arriving task's workspace, for the focus bounce
+    /// (focusing an already-focused window is a no-op, and the compositor only
+    /// moves the keyboard seat when focus actually changes).
+    ///
+    /// Supplied by the caller from the `window_states` read it already made —
+    /// looking it up here cost a second blocking `j/clients` round-trip at the
+    /// exact moment click latency shows.
+    pub neighbor: Option<&'a str>,
+}
+
+/// Hand the stage from one task to another: **the entire swap in one eval**.
+///
+/// Every part of this is here for a reason found the hard way:
+///
+/// * **Atomic.** Split into separate requests, the compositor renders between
+///   them — and a frame where one task has let go and the next has not yet taken
+///   hold shows that whole workspace tiled. Switching between two tasks on a
+///   ten-window workspace flashed all ten. In one eval nothing is drawn until
+///   every dispatch has run.
+/// * **Focus before maximize.** `fullscreen_state` silently does nothing to a
+///   window whose workspace is not the active one — and still answers `ok` — so
+///   the focus, which is what brings that workspace forward, has to land first.
+///   Maximizing first looked correct and did nothing, which is how a switch onto
+///   a busy workspace left the whole workspace on screen.
+/// * **Every window named.** The un-maximize and the maximize address their
+///   window rather than acting on "the focused one", which during a
+///   cross-workspace switch is not reliably either of them.
+/// * **Restores before the maximize.** Same one-per-workspace rule: the second
+///   `fullscreen_state` on a workspace is refused, silently.
+pub fn swap_stage_no_warp(h: Handover) {
+    let Handover {
+        untag,
+        restore,
+        park,
+        unpark,
+        addr,
+        neighbor,
+    } = h;
+    let mut lua = String::from("hl.config({ [\"cursor.no_warps\"] = true }) ");
+    if let Some(prev) = untag {
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.window.tag({{ tag = \"-{STAGE_TAG}\", \
+             window = \"address:{prev}\" }})) "
+        ));
+    }
+    // Bring parked tasks home before anything else — one of them may be the task
+    // arriving, and it cannot take a stage it is not on.
+    for (a, ws) in unpark {
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.window.move({{ workspace = {ws}, window = \"address:{a}\" }})) "
+        ));
+    }
+    for a in park {
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.window.move({{ workspace = {PARK_WS}, \
+             window = \"address:{a}\" }})) "
+        ));
+    }
+    for (a, fs) in restore {
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.window.fullscreen_state({{ internal = {fs}, client = 0, \
+             window = \"address:{a}\" }})) "
+        ));
+    }
+    // Focusing an already-focused window is a no-op, so the focus bounces off a
+    // neighbour first — the same detour `focus_window_no_warp` uses.
+    if let Some(other) = neighbor {
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.focus({{ window = \"address:{other}\" }})) "
+        ));
+    }
+    lua.push_str(&format!(
+        "hl.dispatch(hl.dsp.focus({{ window = \"address:{addr}\" }})) \
+         hl.dispatch(hl.dsp.window.fullscreen_state({{ internal = 1, client = 0, \
+         window = \"address:{addr}\" }})) \
+         hl.dispatch(hl.dsp.window.tag({{ tag = \"+{STAGE_TAG}\", \
+         window = \"address:{addr}\" }})) "
+    ));
+    lua.push_str("hl.config({ [\"cursor.no_warps\"] = false })");
+    if let Err(e) = request(&format!("eval {lua}")) {
+        debug!("swap_stage_no_warp({addr}) failed: {e:#}");
+    }
+}
+
+/// What the stage needs to know about a window it is about to touch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowState {
+    /// Internal fullscreen mode: 0 windowed, 1 maximized, 2 true fullscreen.
+    pub fullscreen: i64,
+    /// Which workspace it sits on. A workspace holds **one** fullscreen window,
+    /// so this decides which task has to give the stage shape back before
+    /// another can take it.
+    pub workspace: i64,
+    /// Floating windows render **above** tiled ones, so a maximized stage does
+    /// not cover them — they have to be moved aside instead. See [`PARK_WS`].
+    pub floating: bool,
+}
+
+/// Every live window's state, keyed by address — **one** `clients` read
+/// answering "does it still exist", "what state was it in" and "where is it".
+///
+/// The click path used to ask those questions separately, which meant three
+/// socket round-trips (~50ms of blocking) between the click and the first frame
+/// of the tile animation. One read keeps the swap feeling immediate.
+pub fn window_states() -> std::collections::HashMap<String, WindowState> {
+    let Ok(reply) = request("j/clients") else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+        return std::collections::HashMap::new();
+    };
+    clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            Some((
+                c["address"].as_str()?.to_owned(),
+                WindowState {
+                    fullscreen: c["fullscreen"].as_i64().unwrap_or(0),
+                    workspace: c["workspace"]["id"].as_i64().unwrap_or(i64::MIN),
+                    floating: c["floating"].as_bool().unwrap_or(false),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Take the compositor's overview keybind away while the stage owns the screen,
+/// and give it back on the way out.
+///
+/// `hl.unbind` is the only lever the Lua API offers here — verified live. The
+/// rebind restores the exact form from `/etc/nixos/hyprland.lua:282`, and it has
+/// to be a deferred lookup for the same reason the config binds it that way: the
+/// plugin's function is resolved at keypress, not at bind time.
+///
+/// NOTE the workspace-swipe **gestures** cannot be handled this way. There is no
+/// unregister, re-registering is refused ("will be overshadowed by a previous
+/// gesture") and `action = "none"` is rejected. They are neutralised instead by
+/// snapping focus back — see `App::on_workspace_changed`.
+/// Focus a window **without the compositor dragging the pointer to it**.
+///
+/// Focusing warps the cursor by default, so clicking a deck tile threw the mouse
+/// into the middle of the stage. `cursor.no_warps` suppresses that.
+///
+/// It is set and cleared *inside one eval*, around these dispatches only —
+/// deliberately not held for the whole mode. `cursor.no_warps` is a single
+/// global that other daemon paths also drive (the dock's focus hand-back via
+/// [`focus_window_direct`] sets it and resets it to `false`), so a mode-long
+/// setting gets silently clobbered — measured: it read `false` while staged.
+/// One atomic eval cannot be interleaved, and leaves the baseline untouched.
+///
+/// Keeps [`focus_window`]'s neighbour-bounce: the compositor only moves the
+/// keyboard seat when focus actually *changes* between windows.
+pub fn focus_window_no_warp(addr: &str) {
+    let mut lua = String::from("hl.config({ [\"cursor.no_warps\"] = true }) ");
+    if let Some(other) = same_workspace_neighbor(addr) {
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.focus({{ window = \"address:{other}\" }})) "
+        ));
+    }
+    lua.push_str(&format!(
+        "hl.dispatch(hl.dsp.focus({{ window = \"address:{addr}\" }})) "
+    ));
+    lua.push_str("hl.config({ [\"cursor.no_warps\"] = false })");
+    if let Err(e) = request(&format!("eval {lua}")) {
+        debug!("focus_window_no_warp({addr}) failed: {e:#}");
+    }
+}
+
+/// The tag that marks the window currently on the stage. It is BOTH the marker
+/// and the match key for hyprland.lua's `golem-stage-frame` rule, which hands
+/// the window back its border and rounding.
+///
+/// Needed because the staged window is tiled and maximized, so it matches the
+/// smart-gaps rules (`no-gaps-wtv1` / `no-gaps-f1`) that strip `border_size` and
+/// `rounding` to zero. On the stage the window is a card in its own inset and
+/// should read like one. Same mechanism as [`PSEUDO_TAG`].
+const STAGE_TAG: &str = "golem-stage";
+
+/// Tag or untag a window as the staged one. `rounding`/`border_size` are dynamic
+/// rule props, so the frame appears and disappears as the tag flips.
+pub fn set_stage_tag(addr: &str, on: bool) {
+    let sign = if on { '+' } else { '-' };
+    dispatch(&format!(
+        "hl.dsp.window.tag({{ tag = \"{sign}{STAGE_TAG}\", window = \"address:{addr}\" }})"
+    ));
+}
+
+/// Switch into the `stage` submap, or back out of it.
+///
+/// A submap is Hyprland's own "only these binds are live" mode, which is
+/// exactly the ask: while the stage owns the screen nothing should launch,
+/// close, tile or move a window. The submap is declared in
+/// `/etc/nixos/hyprland.lua` and holds only the ways out; the control keys
+/// (volume/brightness/media) survive because they are marked
+/// `submap_universal`. Ordinary typing is unaffected — a submap changes *binds*,
+/// not input, so the staged window still receives keystrokes.
+///
+/// Leaving is `"reset"`. Harmless to call when no submap is active.
+pub fn set_stage_submap(on: bool) {
+    let name = if on { "stage" } else { "reset" };
+    dispatch(&format!("hl.dsp.submap(\"{name}\")"));
+}
+
+/// Tell the waveview plugin whether the stage owns the screen.
+///
+/// This is the *only* thing that actually stops either the overview's 3-finger
+/// swipe or the workspace swipe: both are gestures, and the plugin is the one
+/// place able to consume them (`info.cancelled`). Unbinding Super+R covers the
+/// keyboard route only — the swipe never passes through the bind system, which
+/// is why the overview stayed reachable from the stage until now.
+///
+/// Best effort: an older plugin without `set_stage` just errors in the eval and
+/// the mode still works, minus the gesture lock.
+pub fn set_plugin_stage(on: bool) {
+    eval(&format!("hl.plugin.waveview.set_stage({on})"));
+}
+
+pub fn set_overview_bind(enabled: bool) {
+    // Always unbind first, even when re-enabling: `hl.bind` *adds*, so a rebind
+    // over a live bind leaves TWO, and one keypress would then toggle the
+    // overview twice — open and straight back shut, looking like a dead key.
+    // (Hit for real: the stranded-stage recovery re-enabled a bind that had
+    // never been removed.) Unbind-then-bind guarantees exactly one.
+    eval("hl.unbind(\"SUPER + R\")");
+    if enabled {
+        eval("hl.bind(\"SUPER + R\", function() hl.plugin.waveview.toggle() end)");
+    }
+}
+
+/// One task for the stage deck.
+pub struct StageTask {
+    pub address: String,
+    pub class: String,
+    pub title: String,
+    pub workspace: i64,
+    /// Compositor focus recency (0 = focused). Seeds the deck's initial order.
+    pub history: i64,
+    /// Internal fullscreen mode (0/1/2) — what the entry sweep records so exit
+    /// can restore it.
+    pub fullscreen: i64,
+    /// Floating windows render above the maximized stage and get parked; see
+    /// `stage::Stage::parked`.
+    pub floating: bool,
+    /// Owning process — how an audio stream is matched to its tile (the
+    /// stream's pid ancestry is walked and checked against this).
+    pub pid: i64,
+}
+
+/// Every mapped window as a deck task, most-recently-focused first — one
+/// `clients` read (~16ms measured). Empty (not an error) if Hyprland is
+/// unreachable, so the mode degrades to "nothing to show" instead of failing.
+pub fn stage_tasks() -> Vec<StageTask> {
+    let Ok(reply) = request("j/clients") else {
+        return Vec::new();
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+        return Vec::new();
+    };
+    let mut out: Vec<StageTask> = clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| {
+            c["mapped"].as_bool().unwrap_or(false) && !c["hidden"].as_bool().unwrap_or(false)
+        })
+        .filter_map(|c| {
+            Some(StageTask {
+                address: c["address"].as_str()?.to_owned(),
+                class: c["initialClass"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| c["class"].as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                title: c["title"].as_str().unwrap_or("").to_owned(),
+                workspace: c["workspace"]["id"].as_i64().unwrap_or(0),
+                history: c["focusHistoryID"].as_i64().unwrap_or(i64::MAX),
+                fullscreen: c["fullscreen"].as_i64().unwrap_or(0),
+                floating: c["floating"].as_bool().unwrap_or(false),
+                pid: c["pid"].as_i64().unwrap_or(0),
+            })
+        })
+        .collect();
+    out.sort_by_key(|t| t.history);
+    out
+}
+
+/// Whether `addr` is still a live mapped window — the check before focusing a
+/// remembered address (the anchor) that may have been closed meanwhile.
+pub fn window_exists(addr: &str) -> bool {
+    let Ok(reply) = request("j/clients") else {
+        return false;
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+        return false;
+    };
+    clients
+        .as_array()
+        .is_some_and(|cs| cs.iter().any(|c| c["address"].as_str() == Some(addr)))
 }
 
 /// Result of a dock-zone evaluation.

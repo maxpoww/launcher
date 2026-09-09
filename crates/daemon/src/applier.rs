@@ -266,6 +266,18 @@ fn applied_since_list_write() -> bool {
     })
 }
 
+/// Synchronous, side-effect-free "is this package already installed?" —
+/// declared in the list AND a successful apply postdates the list write.
+/// The same fast-path condition [`apply_install`] uses, but it triggers no
+/// rebuild. Used at restore so a pending tile whose install already
+/// finished is cleared rather than re-animated forever (the stale-tile /
+/// fresh-install deadlock: an "installing" ring that never completes spins
+/// the single-threaded loop and starves IPC + the very completion event
+/// that would clear it — Golem changes.md #37/#40).
+pub fn is_installed(attr: &str) -> bool {
+    list_attrs().iter().any(|a| a == attr) && applied_since_list_write()
+}
+
 /// Whether the startup reconcile (F13) has anything to prove: a non-empty
 /// declared list with no successful apply run postdating its last write —
 /// a daemon killed mid-install, a failed run whose revert never landed, or

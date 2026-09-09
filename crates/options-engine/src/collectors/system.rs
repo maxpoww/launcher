@@ -56,11 +56,13 @@ impl Collector for SystemCollector {
                     Some((pct, charging)) => (Some(pct), charging),
                     None => (None, false),
                 };
+                let on_ac = mains_online();
                 let metrics = SystemMetrics {
                     cpu_usage_pct,
                     ram_usage_pct,
                     battery_pct,
                     is_charging,
+                    on_ac,
                     has_backlight: has_backlight(),
                     is_camera_active: camera_in_use(),
                     is_network_down: network_down(),
@@ -360,6 +362,30 @@ fn read_battery() -> Option<(u8, bool)> {
 /// ("Full" on AC is not charging; "Discharging"/"Unknown" are not).
 fn charging_from_status(status: &str) -> bool {
     status.eq_ignore_ascii_case("Charging")
+}
+
+/// True if any Mains (AC adapter) supply reads `online`. Ground truth for
+/// "on wall power," independent of what the battery gauge claims — a dead
+/// battery on AC reports "Not charging 0%", which is not a drain.
+fn mains_online() -> bool {
+    let Ok(dir) = std::fs::read_dir("/sys/class/power_supply") else {
+        return false;
+    };
+    for entry in dir.flatten() {
+        let p = entry.path();
+        let Ok(kind) = std::fs::read_to_string(p.join("type")) else {
+            continue;
+        };
+        if kind.trim() != "Mains" {
+            continue;
+        }
+        if let Ok(online) = std::fs::read_to_string(p.join("online")) {
+            if online.trim() == "1" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

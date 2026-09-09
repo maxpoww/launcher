@@ -70,7 +70,7 @@ pub use mind::{
 };
 pub use self_capture::{begin_self_capture, end_self_capture};
 pub use state::{
-    ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, DeployHealth,
-    GitContext, Health, Layer, LayerHealth, MediaState, NotificationContext, SystemMetrics,
-    TextSelection,
+    ActiveWindow, AppInternalContext, AudioState, BehavioralMetrics, ContextState, DaylightState,
+    DeployHealth, GitContext, Health, Layer, LayerHealth, MediaState, NotificationContext,
+    SystemMetrics, TextSelection,
 };

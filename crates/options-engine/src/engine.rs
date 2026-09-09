@@ -96,6 +96,7 @@ fn default_collectors() -> Vec<Box<dyn Collector>> {
         Box::new(crate::collectors::deploy::DeployHealthCollector::new()),
         Box::new(crate::collectors::notifications::NotificationCollector::new()),
         Box::new(crate::collectors::downloads::DownloadsCollector::new()),
+        Box::new(crate::collectors::daylight::DaylightCollector::new()),
     ]
 }
 
@@ -139,6 +140,7 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
         ContextDelta::Deploy(d) => state.deploy = d,
         ContextDelta::Notifications(n) => state.notifications = n,
         ContextDelta::RecentDownload(d) => state.recent_download = d,
+        ContextDelta::Daylight(d) => state.daylight = d,
     }
 }
 

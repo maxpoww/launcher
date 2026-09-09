@@ -41,7 +41,7 @@ use crate::animation::{
 };
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
-    hover_grow, push_neumorph, wash, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY,
+    hover_grow, push_neumorph, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY,
     LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
@@ -81,15 +81,8 @@ const TEXT_GAP: f32 = 8.0;
 const TIME_COL_W: f32 = 52.0;
 /// The box's corner radius once fully open (the collapsed pill is a stadium).
 const BOX_RADIUS: f32 = 10.0;
-/// Adaptive zebra striping — lighten a dark box, darken a light one.
-const STRIPE_LIGHTEN: f32 = 0.31;
-const STRIPE_DARKEN: f32 = 0.48;
-/// Resting list-ink opacity; the hovered row spends the headroom these leave
-/// (see `options::hover_ink_for`). The twins of the notif box's — and see
-/// that file for why the two regimes sit so far apart: a dark box has
-/// contrast to spare, a backdrop-coloured light box does not.
-const LIST_DIM: f32 = 0.67;
-const LIST_DIM_LIGHT: f32 = 0.88;
+// Zebra striping and resting list-ink dim are shared with the notification
+// box — see `options::App::zebra_stripe`/`dim_ink`.
 const DELETE_SZ: f32 = 18.0;
 /// fa-trash-o (outline can with vertical lines) — the per-item delete controls
 /// (row + detail).
@@ -1445,9 +1438,18 @@ impl App {
         (self.options_bar_h() - 2.0 * PILL_MARGIN_Y).max(1.0)
     }
 
+    /// Whether the clipboard box currently extends below the bar — the
+    /// left-edge twin of `notif::NotifState::occludes_below_bar`, used the
+    /// same way: while its drawer is open it paints over the window right
+    /// where the colour-match samples the toolbar, so the sampler must
+    /// exclude it too.
+    pub(crate) fn clip_occludes_below_bar(&self) -> bool {
+        self.clip.expand_t > 0.01
+    }
+
     /// The element's current rect (used by hit-testing / scroll / input region),
     /// recomputed from the same anchor the layout uses.
-    fn clip_rect(&self) -> Rect {
+    pub(crate) fn clip_rect(&self) -> Rect {
         let ph = self.clip_band_h();
         self.clip_geom(crate::options::EDGE_PAD, PILL_MARGIN_Y, ph)
     }
@@ -1601,7 +1603,7 @@ impl App {
         let text_color = self.options_text_color();
         // The box is the pill grown: fill + ink both follow the bar's regime
         // (see `options_box_surface`), so the two never disagree.
-        let (fill, box_ink) = self.options_box_surface();
+        let (fill, box_ink) = self.clip_box_surface();
         scene.rects.push(RectInst {
             rect,
             radius,
@@ -1620,12 +1622,10 @@ impl App {
         });
 
         let ink = lerp4(text_color, box_ink, solid);
-        let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
         // The list rests at its darkest/strongest; the hovered row's text goes
         // LIGHTER (Max, 2026-08-31) — one clear direction, no row tinting.
         let hover_ink = crate::options::hover_ink_for(ink);
-        let list_dim = if dark_ink { LIST_DIM_LIGHT } else { LIST_DIM };
-        let dim_ink = [ink[0], ink[1], ink[2], ink[3] * list_dim];
+        let dim_ink = self.dim_ink(ink);
 
         // Collapsed preview of the newest clip, fading out as the box solidifies
         // (complementary to the list fading in, so they cross-fade cleanly).
@@ -1692,23 +1692,7 @@ impl App {
             return;
         }
 
-        // Adaptive zebra stripe, pre-composited over the fill into an OPAQUE
-        // colour so overlapping pieces overwrite rather than double-blend.
-        let flum = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2];
-        let stripe = if flum <= 0.179 {
-            wash(true, STRIPE_LIGHTEN)
-        } else {
-            wash(false, STRIPE_DARKEN)
-        };
-        let sa = stripe[3];
-        let stripe_opaque = [
-            stripe[0] * sa + fill[0] * (1.0 - sa),
-            stripe[1] * sa + fill[1] * (1.0 - sa),
-            stripe[2] * sa + fill[2] * (1.0 - sa),
-            // Matches the panel: an opaque stripe over a translucent panel
-            // blocks the compositor's blur on every other row.
-            self.box_panel_alpha(),
-        ];
+        let stripe_opaque = self.zebra_stripe(fill);
 
         // The content card grows out of the clicked row; the list is clipped to
         // the strip ABOVE the card (a hard partition, no cross-fade ghosting), so

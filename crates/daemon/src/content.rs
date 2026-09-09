@@ -160,6 +160,9 @@ pub struct Scene {
     /// Topmost icon quads, drawn over everything (the drag ghost —
     /// what's in your hand must never hide behind the grid).
     pub overlay: Vec<IconInst>,
+    /// Banner blister: `(bar_edge_y, k, _, _)` for the sunset module's swell.
+    /// `None` = no blister this frame.
+    pub neck: Option<[f32; 4]>,
 }
 
 /// What the pointer is over.
@@ -320,20 +323,16 @@ pub(crate) const DOCK_MAG_RADIUS: f32 = 120.0;
 /// (zero inside the band). Small on purpose: the effect must die out
 /// before the first grid row so hovering the grid never stirs the dock.
 pub(crate) const DOCK_MAG_VRADIUS: f32 = 28.0;
-/// AGUA splash ripple (decoration only — hover magnification is
-/// untouched): when a crest collapses (the pointer leaves or jumps),
-/// the falling swell pushes the surface down and a small wave expands
-/// across the neighbors, reflecting off the dock ends and decaying.
-/// Neighbor coupling (ripple travel speed).
-pub(crate) const RIPPLE_COUPLE: f32 = 700.0;
-/// Pull of the surface back to flat.
-pub(crate) const RIPPLE_RETURN: f32 = 120.0;
-/// Damping: lower = the ripple travels farther and lives longer.
-pub(crate) const RIPPLE_DAMP: f32 = 5.5;
-/// How much of a collapsing crest's fall converts into splash velocity.
-pub(crate) const SPLASH_GAIN: f32 = 3.0;
-/// Cap on the ripple's contribution to an icon's scale (±).
-pub(crate) const RIPPLE_MAX: f32 = 0.04;
+/// Temporal smoothing of the dock magnification (exponential approach,
+/// s⁻¹). The pointer only sets *targets*; each icon's drawn scale eases
+/// toward its target — quickly while growing (the crest stays tight
+/// under the cursor) and more gently while shrinking (icons melt back
+/// instead of snapping) — so entering, sweeping across, and leaving the
+/// dock all read as one liquid motion rather than per-event jumps.
+pub(crate) const DOCK_MAG_GROW_RATE: f32 = 36.0;
+pub(crate) const DOCK_MAG_RELEASE_RATE: f32 = 18.0;
+/// Settle threshold for the smoothed scales (scale units).
+pub(crate) const DOCK_MAG_SNAP: f32 = 0.002;
 /// Running-indicator dot radius (px) and its gap below the icon baseline.
 const DOCK_DOT_R: f32 = 2.0;
 const DOCK_DOT_GAP: f32 = 3.0;
@@ -348,6 +347,32 @@ const GRID_MAG_RADIUS: f32 = 95.0;
 pub(crate) fn falloff(d: f32, radius: f32) -> f32 {
     let t = (d.abs() / radius).min(1.0);
     0.5 * (1.0 + (std::f32::consts::PI * t).cos())
+}
+
+/// Target magnification scale for one dock slot given the raw pointer —
+/// the instantaneous value the smoothed `FrameInput::dock_mag` scales
+/// ease toward each frame (the pointer steers, the easing draws).
+pub(crate) fn dock_mag_target(
+    slot: Rect,
+    dock_hit_bottom: f32,
+    pointer: Option<(f32, f32)>,
+    icon_scale: f32,
+    mag_amount: f32,
+) -> f32 {
+    let Some((px, py)) = pointer else {
+        return 1.0;
+    };
+    let cx = slot.x + slot.w / 2.0;
+    // Below the icon, the live column reaches `dock_hit_bottom` (the
+    // screen edge while docked), so hovering the floating gap magnifies
+    // the icon just like hovering it directly.
+    let d_out = (slot.y - py).max(py - dock_hit_bottom).max(0.0);
+    let fy = falloff(d_out, DOCK_MAG_VRADIUS);
+    let dock_magnify = 1.0 + (DOCK_MAGNIFY - 1.0) * icon_scale;
+    1.0 + (dock_magnify - 1.0)
+        * falloff(px - cx, DOCK_MAG_RADIUS)
+        * fy
+        * mag_amount.clamp(0.0, 1.0)
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -816,11 +841,11 @@ pub struct FrameInput<'a> {
     /// Magnification amplitude (0..1): the caller fades it around
     /// drags and drops so the wave never pops in or out.
     pub mag_amount: f32,
-    /// AGUA splash ripple per dock slot (0 = flat): a decoration added
-    /// on top of the untouched hover magnification. Fed only when a
-    /// crest collapses, so hovering never dilutes the magnification.
-    /// Empty = no ripple.
-    pub dock_ripple: &'a [f32],
+    /// Smoothed per-slot dock magnification scales (1.0 = rest), eased
+    /// in the frame loop toward the pointer-derived targets (quick
+    /// bloom, slower melt — see `DOCK_MAG_GROW_RATE`). The dock draws
+    /// exactly these; empty = every icon at rest.
+    pub dock_mag: &'a [f32],
     /// Launch bounce: (entry index, upward offset in px).
     pub bounce: Option<(usize, f32)>,
     /// Live search query (empty shows the placeholder).
@@ -948,6 +973,19 @@ pub struct FrameInput<'a> {
     /// stack) rather than being a grid box inside the launcher. Gates the
     /// box's drop shadow — only floating-on-dock boxes get one.
     pub box_over_dock: bool,
+    /// Adaptive card fill — the dock's twin of the OPTIONS bar's colour
+    /// match: the flush window's colour, its sampled frosted backdrop, or
+    /// (before the first sample) the static theme background. See
+    /// `App::dock_surface`. Replaces every `config.theme.background_rgba()`
+    /// use in this file.
+    pub dock_bg: [f32; 4],
+    /// Adaptive ink measured against `dock_bg` — dark on a bright card,
+    /// light on a dark one. Replaces every `config.theme.text_rgba()` use in
+    /// this file (and is also the renderer's default label colour, see
+    /// `App::draw`).
+    pub dock_ink: [f32; 4],
+    /// Adaptive hover wash, replacing `config.theme.highlight_rgba()`.
+    pub dock_highlight: [f32; 4],
 }
 
 /// Local member index shown in 3×3 slot `slot` (row-major) of an open box
@@ -1029,7 +1067,7 @@ pub fn scene(
         alpha,
         pointer,
         mag_amount,
-        dock_ripple,
+        dock_mag,
         bounce,
         query,
         selected,
@@ -1069,12 +1107,14 @@ pub fn scene(
         card_open,
         card_shadow,
         box_over_dock,
+        dock_bg,
+        dock_ink,
+        dock_highlight,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     // Scaled drawing metrics — mirrors what layout() received.
     let dock_icon = DOCK_ICON * icon_scale;
     let dock_slot = DOCK_SLOT * icon_scale;
-    let dock_magnify = 1.0 + (DOCK_MAGNIFY - 1.0) * icon_scale;
     let grid_icon = GRID_ICON * icon_scale;
     let grid_icon_top = GRID_ICON_TOP * icon_scale;
     let box_tile = BOX_TILE * icon_scale;
@@ -1164,37 +1204,18 @@ pub fn scene(
     scene.rects.push(RectInst {
         rect: card_rect,
         radius: card_radius,
-        color: config.theme.background_rgba(),
+        color: dock_bg,
         glass: 1.0,
         border: 0.0,
     });
 
     // Dock row: per-icon magnification scales, then spread visual centers.
     // Hit-boxes stay at fixed slot positions; only drawn positions spread.
-    let dock_scales: Vec<f32> = layout
-        .dock_slots
-        .iter()
-        .enumerate()
-        .map(|(i, slot)| {
-            let cx = slot.x + slot.w / 2.0;
-            // Hover magnification — kept exactly as the original (crisp,
-            // full strength); the splash ripple is only ever added on top.
-            let crest = match pointer {
-                Some((px, py)) => {
-                    // Below the icon, the live column reaches `dock_hit_bottom`
-                    // (the screen edge while docked), so hovering the floating
-                    // gap magnifies the icon just like hovering it directly.
-                    let d_out = (slot.y - py).max(py - layout.dock_hit_bottom).max(0.0);
-                    let fy = falloff(d_out, DOCK_MAG_VRADIUS);
-                    1.0 + (dock_magnify - 1.0)
-                        * falloff(px - cx, DOCK_MAG_RADIUS)
-                        * fy
-                        * mag_amount.clamp(0.0, 1.0)
-                }
-                None => 1.0,
-            };
-            crest + dock_ripple.get(i).copied().unwrap_or(0.0)
-        })
+    // The scales are the frame loop's *smoothed* values (see
+    // `dock_mag_target` / `FrameInput::dock_mag`), never raw pointer math —
+    // the crest blooms and melts instead of snapping per pointer event.
+    let dock_scales: Vec<f32> = (0..layout.dock_slots.len())
+        .map(|i| dock_mag.get(i).copied().unwrap_or(1.0))
         .collect();
     // Each magnified icon widens its visual slot by the extra pixels it
     // grew, pushing neighbours apart. Row stays centered as a whole.
@@ -1222,7 +1243,7 @@ pub fn scene(
                 layout.dock_slots.get(div),
             ) {
                 let inset = slot.h * 0.22;
-                let fg = config.theme.text_rgba();
+                let fg = dock_ink;
                 scene.rects.push(RectInst {
                     rect: Rect::new(
                         (left + right) / 2.0 - DOCK_DIVIDER_W / 2.0,
@@ -1245,7 +1266,7 @@ pub fn scene(
                 scene.rects.push(RectInst {
                     rect: Rect::new(vcx - dock_slot / 2.0, slot.y, dock_slot, slot.h),
                     radius: 12.0,
-                    color: config.theme.highlight_rgba(),
+                    color: dock_highlight,
                     glass: 0.0,
                     border: 0.0,
                 });
@@ -1268,7 +1289,7 @@ pub fn scene(
         // Running indicator (macOS dot): a small dot beneath the icon.
         // Drawn before the icon so a magnified icon never hides it.
         if dock_running.get(slot).copied().unwrap_or(false) {
-            let fg = config.theme.text_rgba();
+            let fg = dock_ink;
             scene.rects.push(RectInst {
                 rect: Rect::new(
                     vcx - DOCK_DOT_R,
@@ -1296,7 +1317,7 @@ pub fn scene(
         );
         // A drag hovering this icon's center (a fold target) rings it.
         if drag.and_then(|d| d.over_dock) == Some(slot) {
-            let hl = config.theme.highlight_rgba();
+            let hl = dock_highlight;
             scene.rects.push(RectInst {
                 rect: Rect::new(
                     icon_rect.x - 4.0,
@@ -1322,7 +1343,7 @@ pub fn scene(
             scene.rects.push(RectInst {
                 rect,
                 radius: rect.h * 0.22,
-                color: trash_tile_color(config.theme.highlight_rgba(), trash_react),
+                color: trash_tile_color(dock_highlight, trash_react),
                 glass: 0.5,
                 border: 0.0,
             });
@@ -1331,7 +1352,7 @@ pub fn scene(
         }
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
             // A pinned box: a folder tile with a 2×2 mini preview.
-            let hl = config.theme.highlight_rgba();
+            let hl = dock_highlight;
             scene.rects.push(RectInst {
                 rect: icon_rect,
                 radius: size * 0.22,
@@ -1430,7 +1451,7 @@ pub fn scene(
                     let pill_w = name.chars().count() as f32 * font_px * 0.52 + 16.0;
                     let pill_h = line_px + 6.0;
                     let pill_y = (icon_top - 6.0 - pill_h).max(2.0);
-                    let mut bg = config.theme.background_rgba();
+                    let mut bg = dock_bg;
                     bg[3] = bg[3].max(0.92);
                     scene.rects.push(RectInst {
                         rect: Rect::new(vcx - pill_w / 2.0, pill_y, pill_w, pill_h),
@@ -1462,7 +1483,7 @@ pub fn scene(
         // Wash the section that would accept this drop.
         if let Some(target) = df.drop_section {
             let vp = &layout.sections[target].viewport;
-            let hl = config.theme.highlight_rgba();
+            let hl = dock_highlight;
             scene.rects.push(RectInst {
                 rect: Rect::new(vp.x - 6.0, vp.y - 4.0, vp.w + 12.0, vp.h + 8.0),
                 radius: 14.0,
@@ -1538,7 +1559,7 @@ pub fn scene(
         let cx = w / 2.0;
         let is_btn_hover = hover == Some(Hit::SearchButton) && search_expand < 0.5;
         let box_color = {
-            let hl = config.theme.highlight_rgba();
+            let hl = dock_highlight;
             let a = if is_btn_hover {
                 (hl[3] * 1.0).min(1.0)
             } else {
@@ -1604,7 +1625,7 @@ pub fn scene(
             // can't drift during the stretch.
             if !query.is_empty() && search_expand > 0.9 {
                 let caret_x = (cx + query_px / 2.0 + 3.0).min(draw_rect.x + sw - 8.0);
-                let t = config.theme.text_rgba();
+                let t = dock_ink;
                 sgrid.rects.push(RectInst {
                     rect: Rect::new(caret_x, boxx.y + 6.0, 1.5, SEARCH_H - 12.0),
                     radius: 0.75,
@@ -1725,7 +1746,7 @@ pub fn scene(
             }
             let cell = Rect::new(cell_x, cell_y, grid_cell_w, grid_cell_h);
             if selected == Some((s, i)) {
-                let hl = config.theme.highlight_rgba();
+                let hl = dock_highlight;
                 g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                     radius: 14.0,
@@ -1737,7 +1758,7 @@ pub fn scene(
                 g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                     radius: 14.0,
-                    color: config.theme.highlight_rgba(),
+                    color: dock_highlight,
                     glass: 0.0,
                     border: 0.0,
                 });
@@ -1745,7 +1766,7 @@ pub fn scene(
             // A drag hovering a cell that would take a drop
             // (group create/add) rings it brightly.
             if drag.and_then(|d| d.over_cell) == Some((s, i)) {
-                let hl = config.theme.highlight_rgba();
+                let hl = dock_highlight;
                 g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
                     radius: 16.0,
@@ -1778,7 +1799,7 @@ pub fn scene(
                 g.rects.push(RectInst {
                     rect,
                     radius: 14.0,
-                    color: trash_tile_color(config.theme.highlight_rgba(), trash_react),
+                    color: trash_tile_color(dock_highlight, trash_react),
                     glass: 0.5,
                     border: 0.0,
                 });
@@ -1803,7 +1824,7 @@ pub fn scene(
             if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
                 // Group cell: folder-style tile with a 2×2 mini
                 // preview of the first members.
-                let hl = config.theme.highlight_rgba();
+                let hl = dock_highlight;
                 let tile = box_tile;
                 g.rects.push(RectInst {
                     rect: Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile),
@@ -1962,7 +1983,7 @@ pub fn scene(
             let total_dots_w = sec.n_pages as f32 * dot_spacing - (dot_spacing - dot_r * 2.0);
             let dot_cx = sec.viewport.x + sec.viewport.w / 2.0;
             let page_frac = sec.scroll / page_w;
-            let hl = config.theme.highlight_rgba();
+            let hl = dock_highlight;
             for p in 0..sec.n_pages {
                 let x = dot_cx - total_dots_w / 2.0 + p as f32 * dot_spacing + dot_r;
                 // Cyclic distance: the highlight wraps with the pages.
@@ -2006,7 +2027,7 @@ pub fn scene(
         // Same base opacity as the main card (glass), fading in with the open
         // animation — so a group box reads as the same colour as the main box,
         // not a darker, more opaque panel.
-        let mut panel = config.theme.background_rgba();
+        let mut panel = dock_bg;
         panel[3] *= t;
         let (bjl, bjr, bjt, bjb) = box_push;
         let box_draw = Rect::new(
@@ -2171,7 +2192,7 @@ pub fn scene(
             let total_w = pages as f32 * spacing - (spacing - dot_r * 2.0);
             let dy = box_rect.y + box_rect.h + 12.0;
             let x0 = box_rect.x + box_rect.w / 2.0 - total_w / 2.0;
-            let hl = config.theme.highlight_rgba();
+            let hl = dock_highlight;
             for p in 0..pages {
                 let x = x0 + p as f32 * spacing + dot_r;
                 let a = if p == page { hl[3] } else { hl[3] * 0.35 };

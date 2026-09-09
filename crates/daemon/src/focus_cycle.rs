@@ -127,7 +127,162 @@ fn rank(mut cands: Vec<Candidate>) -> Vec<String> {
     cands.into_iter().map(|c| c.addr).collect()
 }
 
+// --- Per-workspace focus memory ---------------------------------------------
+// A workspace should be where you left it, including which window you were in.
+//
+// The compositor does remember, and restores it when a workspace is entered
+// through its focus dispatcher — which is what Super+N and the overview use, so
+// those already behave. A workspace arrived at by SWIPE does not go through
+// that path, and you land on the space you left but in whichever window the
+// cursor happens to be over. The space is restored; your place in it is not.
+//
+// So the daemon keeps the same note the compositor does, and hands it back when
+// nobody else has.
+
+/// How long to let the compositor settle its own focus after a workspace change
+/// before correcting it. Long enough that we are answering its final answer
+/// rather than racing it, short enough to read as arriving already focused.
+const WS_FOCUS_SETTLE: Duration = Duration::from_millis(90);
+
+/// Where a just-arrived-at workspace's focus should end up: our own note of
+/// where the user was, what the arrival actually focused, and the compositor's
+/// own history as the last resort. `None` means leave it alone.
+fn settle_target(
+    want: Option<&str>,
+    focused: Option<&str>,
+    history: Option<&str>,
+) -> Option<String> {
+    match (want, focused) {
+        // Our note wins: it is the window the user LEFT here, as against
+        // whatever the arrival happened to land on.
+        (Some(w), _) => Some(w.to_owned()),
+        // No note, but the space handed us something. A first visit is the
+        // compositor's call, not ours.
+        (None, Some(_)) => None,
+        // No note and nothing focused: the space is live but the user has
+        // landed nowhere — the cursor came down on an empty patch of a space
+        // whose windows all float, and no window claimed them. The
+        // compositor's history is trustworthy in exactly this case, because
+        // no arrival focus displaced it.
+        (None, None) => history.map(str::to_owned),
+    }
+}
+
 impl App {
+    /// Note which window is focused on which workspace, so the space can be
+    /// handed back intact later. Called wherever a focus change is noticed.
+    pub(crate) fn note_ws_focus(&mut self) {
+        let Some((addr, ws)) = hypr::active_focus() else {
+            return;
+        };
+        // A restore is in flight for this space: the focus being seen right now
+        // is the arrival focus we are about to correct, not a choice the user
+        // made. Recording it would overwrite the very note we are restoring
+        // from, and the memory would quietly become "wherever the cursor was".
+        if self.ws_restoring == Some(ws) {
+            return;
+        }
+        self.ws_focus.insert(ws, addr);
+    }
+
+    /// A workspace became active. If the way in did not restore the window you
+    /// left there, put it back.
+    pub(crate) fn on_workspace_changed(&mut self, ws: i64) {
+        // The overview owns focus while it is up: landing on a workspace by
+        // clicking a window in the map means that window, not the remembered
+        // one. Restoring here would overrule the click.
+        if self.overview_active {
+            return;
+        }
+        // STAGE mode owns the screen: the stage, the deck and the OPTIONS bar,
+        // nothing else. A workspace swipe would slide all three away.
+        //
+        // The gestures cannot simply be switched off — this compositor's Lua API
+        // has no way to unregister one (re-registering is refused as
+        // "overshadowed", and `action = "none"` is rejected), so instead the
+        // stage takes focus straight back. With the workspace animation already
+        // silenced for the mode, a swipe lands on nothing visible.
+        //
+        // The return is unconditional, and that matters: whichever way this
+        // workspace was arrived at, the restore below must not run while the
+        // stage is up. It hands focus to whatever that workspace last had
+        // focused — which on a workspace holding one window is the staged task
+        // and invisible, but on a workspace holding ten is some other window
+        // entirely, silently taken out from under the task just put on stage.
+        if self.stage.is_on() {
+            if let Some(addr) = self.stage.staged().map(str::to_owned) {
+                if !crate::hypr::window_is_on(&addr, ws) {
+                    crate::hypr::focus_window_no_warp(&addr);
+                }
+            }
+            return;
+        }
+        // No note is not the same as nothing to do: a space we have never held
+        // can still be arrived at with NOTHING focused at all, which is what
+        // happens when the cursor lands on an empty patch of a space whose
+        // windows all float. That is settled below from the compositor's own
+        // history rather than left as it is.
+        let want = self.ws_focus.get(&ws).cloned();
+        self.ws_restoring = Some(ws);
+        let timer = calloop::timer::Timer::from_duration(WS_FOCUS_SETTLE);
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                app.restore_ws_focus(ws, want.as_deref());
+                app.ws_restoring = None;
+                calloop::timer::TimeoutAction::Drop
+            });
+    }
+
+    /// Settle the focus of a workspace just arrived at, unless the world moved
+    /// on while we waited.
+    fn restore_ws_focus(&mut self, ws: i64, want: Option<&str>) {
+        // Someone opened the overview, or swiped on somewhere else entirely,
+        // in the 90 ms we spent waiting: their move, not ours.
+        if self.overview_active {
+            return;
+        }
+        // Where we are is read from the WORKSPACE, never from the focused
+        // window — because there may not be one. Arriving over an empty patch
+        // of a space whose windows all float leaves nothing focused at all,
+        // and asking a window that does not exist which space it is on used to
+        // make this give up exactly when it was needed most.
+        let Some((now_ws, _)) = hypr::active_workspace() else {
+            return;
+        };
+        if now_ws != ws {
+            return;
+        }
+        let focused = hypr::active_focus().map(|(a, _)| a);
+        // The history is only consulted when nothing is focused, so the extra
+        // read costs nothing on the ordinary path.
+        let history = focused
+            .is_none()
+            .then(|| hypr::last_focused_on(ws))
+            .flatten();
+        let Some(target) = settle_target(want, focused.as_deref(), history.as_deref()) else {
+            return;
+        };
+        // Already there: nothing to correct, and dispatching anyway would be a
+        // focus event nobody needed.
+        if focused.as_deref() == Some(target.as_str()) {
+            return;
+        }
+        // Closed since, or dragged to another space: the note is stale, and
+        // focusing a window that is not here would yank the user off the
+        // workspace they just arrived at.
+        if !hypr::window_is_on(&target, ws) {
+            self.ws_focus.remove(&ws);
+            return;
+        }
+        debug!(
+            "workspace {ws}: focusing {target} (arrived on {})",
+            focused.as_deref().unwrap_or("nothing")
+        );
+        hypr::focus_window(&target);
+        self.ws_focus.insert(ws, target);
+    }
+
     /// The user interacted with the focused window (waveview saw a key,
     /// click, or scroll aimed at it — one message per window visit). That
     /// commits any in-flight walk and earns the window its usage point:
@@ -291,5 +446,33 @@ mod tests {
         assert!((f.score("a", later) - f.score("a", now) / 2.0).abs() < 0.01);
         assert_eq!(f.score("ghost", now), 0.0);
         assert!(f.last("a").is_some() && f.last("ghost").is_none());
+    }
+
+    /// Arriving at a workspace: what focus should settle on, in each of the
+    /// four states the arrival can leave behind.
+    #[test]
+    fn a_space_hands_back_the_window_you_left_in_it() {
+        // Held a note: it wins over whatever the arrival landed on. This is
+        // the whole point — the swipe focuses the window under the cursor,
+        // and the user wants the one they were working in.
+        assert_eq!(
+            settle_target(Some("a"), Some("b"), None).as_deref(),
+            Some("a")
+        );
+        // Including when the arrival focused nothing at all.
+        assert_eq!(settle_target(Some("a"), None, None).as_deref(), Some("a"));
+        // First visit, and the space handed us something: the compositor's
+        // call, not ours. Overriding here would be inventing a preference we
+        // were never told.
+        assert_eq!(settle_target(None, Some("b"), Some("c")), None);
+        // The live bug (2026-09-04): scrolling into a space of floating
+        // windows with the cursor over an empty patch focuses NOTHING. No
+        // note to go on, so the compositor's own history settles it — which is
+        // trustworthy here precisely because no arrival focus displaced it.
+        assert_eq!(settle_target(None, None, Some("c")).as_deref(), Some("c"));
+        // A genuinely empty space has nothing to focus and must not invent
+        // one; a stale history entry is likewise checked against the space
+        // before it is used (see `restore_ws_focus`).
+        assert_eq!(settle_target(None, None, None), None);
     }
 }

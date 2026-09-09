@@ -93,6 +93,70 @@ pub(crate) const OPTION_GAP: f32 = 9.0;
 pub(crate) const PILL_HOVER_GROW: f32 = 2.0;
 const TITLE_MAX: usize = 48;
 
+// --- Sunset prompt ----------------------------------------------------------
+// The current-task pill as an INTERACTING MODULE. At sunset the Mind offers
+// eye protection (`sunset.eye_protection`, from the engine's daylight layer:
+// timezone → coordinates → live solar elevation). Instead of a glyph in the
+// OPTION cluster, the offer takes over the window pill: the title metamorphoses
+// into the question and a [turn on] pill rests INSIDE the module's right end.
+// One shape growing (the `become-more` flow) — not a popup, not a new pill.
+// [turn on] warms the screen (hyprsunset); a right-click on the module is
+// "not now". Either way the pill morphs back to the task it was showing.
+/// The message the module shows. Its own constant (never truncated) — it is
+/// also the key the morph fade uses to know the prompt is what's on the pill.
+pub(crate) const SUNSET_MSG: &str = "The sun is set, do you want to turn on eye protection?";
+const SUNSET_TURN_ON_LABEL: &str = "turn on";
+/// Gap between the two nested pills ([turn on] and the settings gear).
+const SUNSET_INNER_GAP: f32 = 4.0;
+/// The settings box's full size (logical px, pre-scale). The module morphs
+/// from its wide message pill to this centred panel — narrowing to a sensible
+/// settings width and dropping to full height, like the notif/clipboard boxes.
+pub(crate) const SUNSET_BOX_H: f32 = 168.0;
+pub(crate) const SUNSET_BOX_W: f32 = 340.0;
+/// The open box's corner radius — a rounded RECTANGLE like the dock's open
+/// card (`BOX_CORNER_RADIUS` = 24), only smaller for this compact panel.
+pub(crate) const SUNSET_PANEL_RADIUS: f32 = 24.0;
+/// The blister radius (logical px, pre-scale): how far the banner's swell
+/// fillets as it bulges around the module. The blister rect's quad is expanded
+/// by this so the bulge has room; the shader insets the SDF back. Fed to
+/// `Scene::neck`.
+pub(crate) const SUNSET_NECK_K: f32 = 14.0;
+/// How far the banner-behind layer extends past the glass pill on each side —
+/// the sliver of banner that shows around the pill, so the pill reads as
+/// sitting ON the banner (the banner is a distinct layer behind it).
+const SUNSET_BANNER_RIM: f32 = 9.0;
+/// The `glass` sentinel flagging a rect as the banner blister (solid fill of
+/// the bar colour, smooth-unioned with the bar edge — see `rounded_rect.wgsl`).
+const SUNSET_NECK_GLASS: f32 = 2.0;
+/// The engine affordance id the prompt is the surface for.
+pub(crate) const SUNSET_OFFER_ID: &str = "sunset.eye_protection";
+/// Gap between the message text and the nested [turn on] pill.
+const SUNSET_GAP: f32 = 9.0;
+/// The asking module's size step past a normal pill — a REAL step (the +2px
+/// hover lift is a whisper, and this must not read like one), while the
+/// nested [turn on] stays exactly normal-pill sized inside it: the size
+/// difference is what makes the nesting legible. The extra height hangs
+/// DOWNWARD: the top edge drops a couple of pixels clear of the screen edge
+/// and the bottom reaches a little past the bar line, the way the bell's
+/// preview pill steps out of the bar.
+const SUNSET_GROW_X: f32 = 6.0;
+pub(crate) const SUNSET_GROW_H: f32 = 13.0;
+const SUNSET_DROP_Y: f32 = 2.0;
+/// Alpha of the nested [turn on] pill's hairline border, in the module's own
+/// ink — a whisper, just enough to seat the button in the shared glass.
+const SUNSET_BORDER_A: f32 = 0.06;
+/// How far the nested [turn on] grows past a normal pill, per side — a little
+/// bigger so it fills the enlarged module rather than looking dwarfed in it.
+const SUNSET_CHILD_GROW: f32 = 1.5;
+/// How much more opaque the asking module's RESTING fill reads than an
+/// ordinary pill's wash (Max, 2026-09-08: "rise the pill opacity" — the
+/// message pill was reading almost as transparent as the banner behind it).
+/// Multiplies `options_rest_wash`'s alpha for this module only — every other
+/// pill keeps the shared wash exactly as it was. Capped at the open box's own
+/// alpha so the closed pill never reads MORE solid than the panel it grows
+/// into.
+const SUNSET_REST_ALPHA_BOOST: f32 = 10.0;
+
 // Nerd Font glyphs (Font Awesome range, present in JetBrainsMono NF).
 pub(crate) const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
 const GLYPH_SQUARE: &str = "\u{f096}"; // fa-square-o (pseudotile)
@@ -111,6 +175,9 @@ const GLYPH_PAUSE: &str = "\u{f04c}"; // fa-pause
 const GLYPH_VOL_DOWN: &str = "\u{f027}"; // fa-volume-down
 const GLYPH_VOL_UP: &str = "\u{f028}"; // fa-volume-up
 const GLYPH_VOL_MUTE: &str = "\u{f026}"; // fa-volume-off (mute)
+/// The deck's audible-task speaker (with waves, like a browser tab's) — pure
+/// status, no click behaviour.
+pub(crate) const GLYPH_VOL_LIVE: &str = "\u{f028}"; // fa-volume-up
 const GLYPH_BRIGHT_UP: &str = "\u{f185}"; // fa-sun-o
 const GLYPH_BRIGHT_DOWN: &str = "\u{f042}"; // fa-adjust (dim)
 const GLYPH_NEXT: &str = "\u{f051}"; // fa-step-forward
@@ -142,6 +209,7 @@ const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
 const GLYPH_MUSIC: &str = "\u{f001}"; // fa-music (open the media box)
 const GLYPH_TRASH: &str = "\u{f014}"; // fa-trash-o (empty the trash)
 const GLYPH_DISK: &str = "\u{f0a0}"; // fa-hdd-o (disk almost full)
+const GLYPH_GEAR: &str = "\u{f013}"; // fa-cog (settings — sunset module)
 /// Amber wash for a privacy/safety WARNING pill, so it reads as "heads up",
 /// not a button.
 const WARN_COLOR: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
@@ -151,7 +219,9 @@ const WARN_COLOR: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
 /// mic, or screen share). Battery/deploy warnings are excluded — they have
 /// their own dedicated surfaces (battery.rs, and the deploy nudge).
 pub(crate) fn is_surfaced_affordance(a: &options_engine::Affordance) -> bool {
-    a.action.is_actionable()
+    // The sunset offer is excluded like battery/deploy: its surface is the
+    // current-task pill's prompt, not a cluster glyph.
+    (a.action.is_actionable() && a.id != SUNSET_OFFER_ID)
         || (a.kind == options_engine::AffordanceKind::Warning
             && matches!(
                 a.id,
@@ -363,9 +433,13 @@ const LEAD_N: usize = 2;
 /// when the rule says the group lays out from the leader.
 pub(crate) fn group_of(id: PillId) -> PillGroup {
     match id {
-        PillId::Window | PillId::Close | PillId::Pseudo | PillId::Float | PillId::Fullscreen => {
-            PillGroup::Window
-        }
+        PillId::Window
+        | PillId::SunsetTurnOn
+        | PillId::SunsetSettings
+        | PillId::Close
+        | PillId::Pseudo
+        | PillId::Float
+        | PillId::Fullscreen => PillGroup::Window,
         PillId::Option(_) | PillId::MediaOpen => PillGroup::Mind,
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
         PillId::Notif | PillId::NotifMute => PillGroup::Notif,
@@ -610,6 +684,9 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Pseudo => 3,
         PillId::Close => 4,
         PillId::Window => 5,
+        // Nested inside the window pill, so they must draw over it.
+        PillId::SunsetTurnOn => 6,
+        PillId::SunsetSettings => 6,
         PillId::Clock => 6,
         // The preview/box (Notif) draws first; the fixed bell (NotifMute) draws
         // on top of it, capping its right end as it grows out from behind.
@@ -639,6 +716,8 @@ const NEU_LIGHT: f32 = 0.11; // white shadow on a dark bar
 pub(crate) enum PointerSurface {
     Dock,
     Options,
+    /// The STAGE deck strip on the bottom edge (see [`crate::deck`]).
+    Deck,
 }
 
 /// The pill modules currently on the bar.
@@ -662,6 +741,12 @@ pub(crate) enum PillId {
     /// when the focused app is a browser; a click copies its current page URL.
     ClipCopyLink,
     Window,
+    /// The sunset prompt's [turn on] pill, nested inside the window pill's
+    /// right end while the module is asking (see "Sunset prompt" above).
+    SunsetTurnOn,
+    /// The sunset prompt's settings gear, a circular pill at the module's
+    /// right end, right of [turn on].
+    SunsetSettings,
     Close,
     Pseudo,
     /// Out of the layout, free-floating — the fourth window mode.
@@ -734,6 +819,32 @@ const BOX_SLAB: [f32; 3] = [0.10, 0.10, 0.12];
 /// translucent panel hides the blur under every other row, which is exactly
 /// how it looked — one band frosted, the next flat.
 pub(crate) const BOX_ALPHA: f32 = 0.80;
+
+/// Zebra striping for a box's history list — alternate rows get a lightness
+/// shift so adjacent lines read as distinct (old-Finder style). Direction is
+/// **adaptive**: a dark box lightens its stripes, a light box darkens them,
+/// keyed off the box's own luminance. The shift is in HSL **lightness only**
+/// (hue/saturation untouched, see [`App::zebra_stripe`]) — units are sRGB
+/// `L` (0..1, perceptual), not the linear alpha the old wash-based version
+/// used, so these aren't directly comparable to a "wash alpha" intuition.
+/// Symmetric (unlike the old asymmetric wash alphas): HSL's `L` is already
+/// roughly perceptually uniform, so the gamma-driven asymmetry that white
+/// washes needed doesn't apply here.
+const STRIPE_LIFT_L: f32 = 0.18;
+const STRIPE_DIM_L: f32 = 0.18;
+/// Resting text opacity of an open box's list lines; the hovered line spends
+/// the headroom these leave (see [`hover_ink_for`]).
+///
+/// They differ a lot, and the reason is the CONTRAST CEILING of each regime,
+/// measured 2026-08-31: light ink on a dark box reaches ~7:1 easily, so it
+/// can rest well under full (0.67 still measures 6:1) and leave a wide gap
+/// for hover; dark ink on a backdrop-coloured light box tops out around
+/// 5.5:1, so it has to rest near full (0.88 ≈ 3.6:1) and the hover step is
+/// necessarily smaller. Muting the light-box text as far as the dark-box
+/// text is what made the content unreadable earlier in the day. See
+/// [`App::dim_ink`].
+const LIST_DIM: f32 = 0.67;
+const LIST_DIM_LIGHT: f32 = 0.88;
 
 impl crate::App {
     /// The open boxes' panel/zebra alpha: [`BOX_ALPHA`] glass normally,
@@ -851,6 +962,88 @@ fn ink_on(bg: [f32; 4]) -> [f32; 4] {
     }
 }
 
+/// A colour-matchable surface's live backdrop — a flush-window match, or a
+/// sampled frost fallback — and the adaptive wash/ink it implies. Shared by
+/// the OPTIONS bar and the dock, the only two surfaces that colour-match a
+/// window against the Hyprland layout (see [`crate::screencopy`]): "is this
+/// bright / what wash / what ink" is computed by ONE formula here instead of
+/// two hand-copied method families that could quietly drift apart — which is
+/// exactly what the bar's and the dock's each used to be.
+struct Backdrop {
+    /// The flush window's colour, when one is matched.
+    matched: Option<[f32; 4]>,
+    /// The sampled frosted backdrop, when nothing is matched.
+    frost: Option<[f32; 4]>,
+}
+
+impl Backdrop {
+    /// What this surface actually sits on right now: the match if there is
+    /// one, else the frost. `None` only before the first sample lands.
+    fn get(&self) -> Option<[f32; 4]> {
+        self.matched.or(self.frost)
+    }
+
+    /// Bright enough to want dark ink/washes. MATCHED colour only, on
+    /// purpose: this drives the resting wash (and the box fill it feeds),
+    /// i.e. how the surface *looks* — teaching it the frost too would
+    /// restyle everything over any light wallpaper, which historically was
+    /// not the contrast problem (only the ink needed to read the frost —
+    /// see `App::options_text_color`, which measures `get()` directly).
+    fn is_bright(&self) -> bool {
+        self.matched.is_some_and(|c| luminance(c) > 0.179)
+    }
+
+    /// Resting wash — asymmetric alphas because a white wash reads
+    /// stronger than a black one at equal alpha.
+    fn rest_wash(&self) -> [f32; 4] {
+        if self.is_bright() {
+            wash(false, 0.10)
+        } else {
+            wash(true, 0.11)
+        }
+    }
+
+    /// Hover wash — the stronger sibling of `rest_wash`, same asymmetry.
+    fn hover_wash(&self) -> [f32; 4] {
+        if self.is_bright() {
+            wash(false, 0.30)
+        } else {
+            wash(true, 0.27)
+        }
+    }
+
+    /// The surface's fill + the ink that reads on it: the backdrop with the
+    /// resting wash composited over it ("the surface is the pill grown"),
+    /// ink measured against that same washed result so the two can never
+    /// disagree. `(fallback_fill, fallback_ink)` covers the brief window
+    /// before the first sample lands — each caller's own native look
+    /// (an OPTIONS box's neutral slab, the dock's static theme colour).
+    ///
+    /// `opaque = false` re-takes the alpha from `fallback_fill` instead of
+    /// forcing it to `1.0`: the dock needs this (its Hyprland layer rule
+    /// blurs through real transparency — forcing it opaque would silently
+    /// kill the glass look); an OPTIONS box wants `true` (translucency is
+    /// layered on separately, at the box's own PANEL alpha).
+    fn surface(
+        &self,
+        fallback_fill: [f32; 4],
+        fallback_ink: [f32; 4],
+        opaque: bool,
+    ) -> ([f32; 4], [f32; 4]) {
+        match self.get() {
+            Some(backdrop) => {
+                let mut fill = box_fill(backdrop, self.rest_wash());
+                let ink = ink_on(fill);
+                if !opaque {
+                    fill[3] = fallback_fill[3];
+                }
+                (fill, ink)
+            }
+            None => (fallback_fill, fallback_ink),
+        }
+    }
+}
+
 /// Where each element belongs. Read it top to bottom to know the bar.
 fn presence(id: PillId) -> Presence {
     match id {
@@ -868,6 +1061,9 @@ fn presence(id: PillId) -> Presence {
         // Context controls act on the focused app — meaningless over the map.
         PillId::Option(_) => DESKTOP_ONLY,
         PillId::MediaOpen => DESKTOP_ONLY,
+        // The sunset question waits for the desktop — above the overview the
+        // window pill has its labelling job.
+        PillId::SunsetTurnOn | PillId::SunsetSettings => DESKTOP_ONLY,
         // Only ever present while a sticky OPTION is standing, which cannot
         // happen above the overview (it has its own strip and never conceals).
         PillId::Doorway => DESKTOP_ONLY,
@@ -943,6 +1139,72 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
+/// Inverse of [`srgb_to_linear`]: linear (shader) → sRGB (perceptual 0..1).
+/// Needed to do the zebra stripe's lightness shift (see [`App::zebra_stripe`])
+/// in the space HSL actually means "lightness" in — shifting L in *linear*
+/// RGB reads wrong (linear is not perceptually uniform), so the fill is
+/// brought to sRGB, shifted there, then converted back for the shader.
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// RGB (any consistent space, here sRGB 0..1) → HSL. Standard formula.
+fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    if (max - min).abs() < 1e-6 {
+        return (0.0, 0.0, l); // achromatic — hue is undefined, 0 is fine
+    }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let h = if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h / 6.0, s, l)
+}
+
+fn hue_to_rgb(p: f32, q: f32, t: f32) -> f32 {
+    let t = if t < 0.0 {
+        t + 1.0
+    } else if t > 1.0 {
+        t - 1.0
+    } else {
+        t
+    };
+    if t < 1.0 / 6.0 {
+        p + (q - p) * 6.0 * t
+    } else if t < 1.0 / 2.0 {
+        q
+    } else if t < 2.0 / 3.0 {
+        p + (q - p) * (2.0 / 3.0 - t) * 6.0
+    } else {
+        p
+    }
+}
+
+/// HSL → RGB (sRGB 0..1). Standard formula, the inverse of [`rgb_to_hsl`].
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s.abs() < 1e-6 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    (
+        hue_to_rgb(p, q, h + 1.0 / 3.0),
+        hue_to_rgb(p, q, h),
+        hue_to_rgb(p, q, h - 1.0 / 3.0),
+    )
+}
+
 /// Build a pill wash whose alpha `a` means its true **on-screen** strength.
 ///
 /// The bar's swapchain is an sRGB surface and the renderer outputs premultiplied
@@ -1001,6 +1263,7 @@ pub(crate) fn daemon_tag_known(tag: &str) -> bool {
     matches!(
         tag,
         "toggle_dnd"
+            | "eye_protection_on"
             | "find_in_page"
             | "reopen_tab"
             | "slide_next"
@@ -1220,7 +1483,8 @@ impl App {
         // toggles reveal); close rests beside it, ALWAYS visible; the mode
         // toggles hide until hover, at fixed resting spots right of the close:
         //   [window name] [X] [pseudo] [fullscreen]
-        if self.options_title.is_some() || self.overview_hover.is_some() {
+        if self.options_title.is_some() || self.overview_hover.is_some() || self.sunset_prompt_shown
+        {
             // Title, with the live resize readout appended while active.
             let shown = self.options_window_text().unwrap_or_default();
             // Morphing width, not the raw measurement: the pill eases between
@@ -1228,6 +1492,36 @@ impl App {
             let ww = (self.options_title_content_w() + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
             let wx = ((w - ww) / 2.0).max(EDGE_PAD);
+            // Sunset prompt: the [turn on] pill nests inside the module's right
+            // end. Listed BEFORE the window pill so the overlap hover resolves
+            // to it, and kept through the back-morph (alpha, not presence-flag,
+            // decides) so it can fade out with the question it belongs to.
+            let ta = self.sunset_turnon_alpha();
+            if ta > 0.01 {
+                // Single source of truth (also read by the message's clip in
+                // the draw pass below — see `sunset_nested_rects`).
+                let (turn_on, gear) = self.sunset_nested_rects();
+                pills.push(Pill {
+                    id: PillId::SunsetTurnOn,
+                    rect: turn_on,
+                    text: SUNSET_TURN_ON_LABEL.to_owned(),
+                    family: TEXT_FONT,
+                    glyph_color: None,
+                });
+                pills.push(Pill {
+                    id: PillId::SunsetSettings,
+                    // Gear when closed; an × once the box is (mostly) open, so
+                    // it reads as the panel's close button.
+                    rect: gear,
+                    text: if self.sunset_box_e > 0.5 {
+                        GLYPH_CLOSE.to_owned()
+                    } else {
+                        GLYPH_GEAR.to_owned()
+                    },
+                    family: Some(NERD),
+                    glyph_color: None,
+                });
+            }
             let circle = |pills: &mut Vec<Pill>, x: f32, id, glyph: &str, color| {
                 pills.push(Pill {
                     id,
@@ -1237,27 +1531,38 @@ impl App {
                     glyph_color: color,
                 });
             };
+            // The asking module's step, riding the morph so it swells and
+            // settles with the question and shrinks back with the title. When
+            // the gear opens the settings box the SAME rect grows downward into
+            // the panel (see `sunset_box_rect`) — one shape becoming the box,
+            // like the notif/clipboard OPTIONS.
             pills.push(Pill {
                 id: PillId::Window,
-                rect: Rect::new(wx, y, ww, ph),
+                rect: self.sunset_box_rect(),
                 text: shown,
                 family: TEXT_FONT,
                 glyph_color: None,
             });
-            // Close, right of the window name — a resting pill, no reveal.
-            let close_x = wx + ww + GROUP_GAP;
-            circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
-            // Window-mode toggles, right of the close (pseudo nearest,
-            // fullscreen outermost).
-            let mut cx = close_x + d + GROUP_GAP;
-            // The window modes, ordered by how far each takes the window from
-            // the layout: pseudo (still tiled, just smaller), float (out of the
-            // layout), fullscreen (over everything).
-            circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
-            cx += d + CTRL_GAP;
-            circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
-            cx += d + CTRL_GAP;
-            circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
+            // While the module is asking the sunset question, the window
+            // controls step aside: [X] beside "do you want…?" reads as an
+            // answer to the question, and the controls act on a task the pill
+            // is no longer showing. They return with the title.
+            if !self.sunset_prompt_shown {
+                // Close, right of the window name — a resting pill, no reveal.
+                let close_x = wx + ww + GROUP_GAP;
+                circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
+                // Window-mode toggles, right of the close (pseudo nearest,
+                // fullscreen outermost).
+                let mut cx = close_x + d + GROUP_GAP;
+                // The window modes, ordered by how far each takes the window
+                // from the layout: pseudo (still tiled, just smaller), float
+                // (out of the layout), fullscreen (over everything).
+                circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
+                cx += d + CTRL_GAP;
+                circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
+                cx += d + CTRL_GAP;
+                circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
+            }
         }
         // The presence contract, applied once: everything downstream (draw,
         // hit-test, hover, click) reads this list, so an element that does
@@ -1414,6 +1719,12 @@ impl App {
     /// In the overview the pill follows the POINTER instead of the focused
     /// window, so a hovered thumbnail's title supersedes it.
     fn options_window_text(&self) -> Option<String> {
+        // The sunset prompt takes the pill over (desktop only — above the
+        // overview the pill labels the hovered thumbnail, a job it keeps).
+        // Never truncated, never size-suffixed: the question is its own text.
+        if self.sunset_prompt_shown && !self.overview_active {
+            return Some(SUNSET_MSG.to_string());
+        }
         let title = self
             .overview_hover
             .as_ref()
@@ -1435,14 +1746,28 @@ impl App {
         // Pill text scales with the bar (see `options_bar_h`): measure at the
         // same scaled size the draw uses, so pill widths always fit their text.
         let font_px = FONT_PX * self.options_scale();
+        // The settings gear is a circle a pill-height wide (computed before the
+        // renderer borrow below).
+        let gear_w = self.options_pill_h();
         let Some(r) = self.options_renderer.as_mut() else {
             return;
         };
         let cw = r.measure_text(&clock, font_px, TEXT_FONT);
         let dw = r.measure_text(&date, font_px, TEXT_FONT);
-        let tw = title
+        let mut tw = title
             .as_deref()
             .map_or(0.0, |t| r.measure_text(t, font_px, TEXT_FONT));
+        // The sunset prompt carries its [turn on] pill AND a settings gear
+        // INSIDE the module, so the morph target width must include both — the
+        // expansion is one ease, question and controls arriving as one shape.
+        let is_prompt = title.as_deref() == Some(SUNSET_MSG);
+        if is_prompt {
+            let inner =
+                r.measure_text(SUNSET_TURN_ON_LABEL, font_px, TEXT_FONT) + 2.0 * PILL_PAD_X;
+            self.sunset_text_w = tw;
+            self.sunset_inner_w = inner;
+            tw += SUNSET_GAP + inner + SUNSET_INNER_GAP + gear_w;
+        }
         self.options_clock_w = cw;
         self.options_date_w = dw;
         // The window pill EASES between title widths instead of jumping (the
@@ -1457,6 +1782,17 @@ impl App {
         }
     }
 
+    /// The bar's live colour regime — matched window, else sampled frost.
+    /// The one place `options_bar_matched`/`options_pill_color` are read
+    /// into a [`Backdrop`]; every adaptive-colour method below goes through
+    /// this instead of touching those fields directly.
+    fn options_regime(&self) -> Backdrop {
+        Backdrop {
+            matched: self.options_bar_matched,
+            frost: self.options_pill_color,
+        }
+    }
+
     /// Whether the matched bar is bright enough to want dark text/ink.
     /// (`options_bar_matched` is stored linear, so this is true relative
     /// luminance; 0.179 is the WCAG flip point where black and white contrast
@@ -1468,8 +1804,7 @@ impl App {
     /// wallpaper, which is not the contrast problem (Max, 2026-08-31: "the
     /// change i asked you is only on the text color").
     pub(crate) fn options_bar_is_bright(&self) -> bool {
-        self.options_bar_matched
-            .is_some_and(|c| luminance(c) > 0.179)
+        self.options_regime().is_bright()
     }
 
     /// What the BAR's own pills sit on: the matched window colour when the bar
@@ -1481,8 +1816,18 @@ impl App {
     /// wallpaper: the bar used to fall back to a STATIC theme ink whenever it
     /// wasn't colour-matched, so it painted white text on whatever happened to
     /// be behind it (Max, 2026-08-31: "the contrast is garbage").
+    ///
+    /// One bar-wide value, deliberately — two attempts at anything smarter
+    /// (each pill measuring its own local bucket; then one sample averaged
+    /// across the whole bar instead of just beside notif) were both tried
+    /// and reverted 2026-09-08/09: the per-pill version read as an
+    /// inconsistent black/white patchwork, and the wide-average version
+    /// still visibly flipped over time — Max: "the algorithm clearly dont
+    /// know what to choose." Back to the one plain notif-adjacent sample.
+    /// See memory `clip-notif-frost-bug` before attempting either direction
+    /// again.
     fn options_backdrop(&self) -> Option<[f32; 4]> {
-        self.options_bar_matched.or(self.options_pill_color)
+        self.options_regime().get()
     }
 
     /// Adaptive text colour for the BAR's pills: measured against whatever
@@ -1503,11 +1848,7 @@ impl App {
     /// (we're far more sensitive to light added to darkness), so the white
     /// wash must be much lighter to feel as subtle as the black one.
     pub(crate) fn options_rest_wash(&self) -> [f32; 4] {
-        if self.options_bar_is_bright() {
-            wash(false, 0.10)
-        } else {
-            wash(true, 0.11)
-        }
+        self.options_regime().rest_wash()
     }
 
     /// The open OPTIONS boxes' fill + ink (clipboard, notifications).
@@ -1528,37 +1869,119 @@ impl App {
     ///
     /// (The slab is dark because Golem's theme is: a light theme would flip
     /// both that constant and the ink together.)
+    /// The banner (top-bar strip) fill: the ACTUAL surface the bar paints —
+    /// the matched window colour when colour-matched, the opaque slab under
+    /// reduce-transparency / a paused (fullscreen) bar, else the faint 10%
+    /// strip that lets the frosted wallpaper read through. Returned WITHOUT the
+    /// `options_show` fade so callers apply their own presence. `hard` = the
+    /// bar draws it with the crisp `glass = -1.0` cut (matched/opaque regimes).
+    /// The one definition of "the banner surface", shared by the strip and by
+    /// the layer drawn BEHIND the sunset module (so they are literally the same
+    /// material).
+    pub(crate) fn options_bar_fill(&self) -> ([f32; 4], bool) {
+        match self.options_bar_matched {
+            Some(c) => (c, true),
+            None if self.options_paused() || self.config.accessibility.reduce_transparency => {
+                (self.options_box_surface().0, true)
+            }
+            None => ([0.0, 0.0, 0.0, 0.10], false),
+        }
+    }
+
+    /// One formula for both regimes: the backdrop (matched window colour,
+    /// else the sampled wallpaper) with the pill wash over it — the box is
+    /// the pill grown. NOTE: opaque. Translucency belongs to the box PANEL
+    /// and its zebra only (each box applies [`BOX_ALPHA`] there); this fill
+    /// is also the clip detail card, the dictionary panel and the
+    /// notification icon discs, and making it translucent wholesale turned
+    /// those glassy too (Max, 2026-09-01: "the clipboard big pill became
+    /// transparent... i only want the boxes to be blured"). Ink is measured
+    /// against the box's OWN fill, so it lands on the same answer the bar
+    /// reaches for the same backdrop — the two agree by measurement rather
+    /// than by one borrowing the other's decision.
     pub(crate) fn options_box_surface(&self) -> ([f32; 4], [f32; 4]) {
-        let wash = self.options_rest_wash();
-        // One formula for both regimes: the backdrop (matched window colour,
-        // else the sampled wallpaper) with the pill wash over it — the box
-        // is the pill grown.
-        let mut fill = match self.options_backdrop() {
-            Some(backdrop) => box_fill(backdrop, wash),
-            // Not sampled yet (the first frames after opening): plain slab.
-            None => [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0],
-        };
-        // NOTE: opaque. Translucency belongs to the box PANEL and its zebra
-        // only (each box applies [`BOX_ALPHA`] there); this fill is also the
-        // clip detail card, the dictionary panel and the notification icon
-        // discs, and making it translucent wholesale turned those glassy too
-        // (Max, 2026-09-01: "the clipboard big pill became transparent... i
-        // only want the boxes to be blured").
-        fill[3] = 1.0;
-        // Ink measured against the box's OWN fill. Since that fill is now the
-        // backdrop plus a weak wash, this lands on the same answer the bar
-        // reaches for the same backdrop — the two agree by measurement rather
-        // than by one borrowing the other's decision.
-        (fill, ink_on(fill))
+        let slab = [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
+        self.options_regime().surface(slab, ink_on(slab), true)
+    }
+
+    /// The clipboard box's OWN regime — same matched window (that's genuinely
+    /// bar-wide, position-independent), but its OWN frosted backdrop, sampled
+    /// beside `clip_rect()` (left edge) rather than `notif_rect()` (right
+    /// edge). **This split is why `options_box_surface` used to be wrong for
+    /// the clipboard box**: both boxes read the ONE `options_pill_color`,
+    /// which is only ever sampled next to notif — so an unmatched clipboard
+    /// box took whatever the wallpaper happens to be on the *opposite side of
+    /// the screen*, not what's actually behind it (Max, 2026-09-08: caught
+    /// live — the clipboard zebra was violet, notif's was neutral grey, off
+    /// the same purple-nebula wallpaper sampled at two different x-positions).
+    fn clip_regime(&self) -> Backdrop {
+        Backdrop {
+            matched: self.options_bar_matched,
+            frost: self.clip_pill_color,
+        }
+    }
+
+    /// The clipboard box's twin of `options_box_surface` — identical formula,
+    /// its OWN correctly-positioned frost (see `clip_regime`).
+    pub(crate) fn clip_box_surface(&self) -> ([f32; 4], [f32; 4]) {
+        let slab = [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
+        self.clip_regime().surface(slab, ink_on(slab), true)
     }
 
     /// Hover wash — stronger than the resting wash, with the same asymmetry.
     pub(crate) fn options_hover_wash(&self) -> [f32; 4] {
-        if self.options_bar_is_bright() {
-            wash(false, 0.30)
+        self.options_regime().hover_wash()
+    }
+
+    /// Adaptive zebra stripe colour for a list row: lighten a dark `fill`,
+    /// darken a light one, pre-composited into an OPAQUE colour (so
+    /// overlapping stripe pieces overwrite instead of double-blending) at
+    /// the box's own panel alpha. The one formula every striped OPTIONS box
+    /// list shares (clipboard history, notification history) — it used to
+    /// be hand-copied into each, with nothing to stop them drifting apart.
+    ///
+    /// HSL, not a wash: blending toward pure white/black (the old approach —
+    /// `wash()` is achromatic by definition) desaturates every stripe toward
+    /// grey regardless of the fill's actual colour, and the more contrast you
+    /// ask for the greyer it gets — that IS the "always the same ugly grey"
+    /// Max flagged (2026-09-08), not a tuning problem. Shifting HSL
+    /// *lightness* only, at the fill's own hue and saturation, gives a
+    /// stripe that reads as "one shade lighter/darker of THIS colour" — a
+    /// purple box's stripe stays visibly purple, a green one stays green;
+    /// only an actually-neutral fill produces a neutral stripe. Done in sRGB
+    /// (`linear_to_srgb`) because HSL's L is only perceptually meaningful in
+    /// a perceptual space — shifting it in linear reads wrong.
+    pub(crate) fn zebra_stripe(&self, fill: [f32; 4]) -> [f32; 4] {
+        let srgb = [
+            linear_to_srgb(fill[0]).clamp(0.0, 1.0),
+            linear_to_srgb(fill[1]).clamp(0.0, 1.0),
+            linear_to_srgb(fill[2]).clamp(0.0, 1.0),
+        ];
+        let (h, s, l) = rgb_to_hsl(srgb[0], srgb[1], srgb[2]);
+        let new_l = if luminance(fill) <= 0.179 {
+            (l + STRIPE_LIFT_L).min(1.0)
         } else {
-            wash(true, 0.27)
-        }
+            (l - STRIPE_DIM_L).max(0.0)
+        };
+        let (r, g, b) = hsl_to_rgb(h, s, new_l);
+        [
+            srgb_to_linear(r),
+            srgb_to_linear(g),
+            srgb_to_linear(b),
+            self.box_panel_alpha(),
+        ]
+    }
+
+    /// Resting list-ink for a box's lines, dimmed by the shared
+    /// [`LIST_DIM`]/[`LIST_DIM_LIGHT`] (see there for why they differ so
+    /// much). `ink` must be one of the two fixed [`ink_on`] outputs
+    /// (`INK_LIGHT`/`INK_DARK`) — the channel-sum check is just a cheap
+    /// discriminator between those two known constants, not a real
+    /// luminance read.
+    pub(crate) fn dim_ink(&self, ink: [f32; 4]) -> [f32; 4] {
+        let is_light_ink = ink[0] + ink[1] + ink[2] < 1.5;
+        let list_dim = if is_light_ink { LIST_DIM_LIGHT } else { LIST_DIM };
+        [ink[0], ink[1], ink[2], ink[3] * list_dim]
     }
 
     /// Add the OPTIONS pills to the bar's scene (called after the base fill).
@@ -1698,6 +2121,87 @@ impl App {
                 self.push_clip_link(scene, pill.rect, &pill.text);
                 continue;
             }
+            // The sunset prompt's nested [turn on]: the SAME material as its
+            // parent — the module's own flat fill (glass:0.0, no rim/fresnel/
+            // iridescence), not the dock's liquid glass — so the button is
+            // cut from the same substance as the module, set apart only by a
+            // subtle hairline border and, on hover, the standard wash. Its
+            // presence rides the module's title morph rather than being a
+            // layout fact.
+            // Colour AND material match the parent pill (Max, 2026-09-08:
+            // "the gear and turn on buttons... are the dock material" — same
+            // box fill at the same alpha was still reading as a different
+            // substance while `glass: 1.0` ran the dock's shader on top of
+            // it; flat fill is what the parent itself uses now).
+            if matches!(pill.id, PillId::SunsetTurnOn | PillId::SunsetSettings) {
+                let mut a = self.sunset_turnon_alpha() * self.options_pill_fade(pill.id, pill.rect);
+                // [turn on] fades out as the settings box opens; the gear stays
+                // (it is the box's own close/settings affordance, top-right).
+                if pill.id == PillId::SunsetTurnOn {
+                    a *= 1.0 - self.sunset_box_e;
+                }
+                if a > 0.01 {
+                    // Ink measured against the module it stands on, not the
+                    // bar — same adaptive rule, right surface.
+                    let ink = self.sunset_module_ink();
+                    // It holds its size under the pointer — hover speaks with
+                    // the wash alone, not a lift, so the button sits steady
+                    // inside the module.
+                    let hovered = self.options_hover == Some(pill.id);
+                    let rect = pill.rect;
+                    let radius = rect.h / 2.0;
+                    // The parent's material, again: glass fill, in the box's
+                    // own fill colour AND alpha (`sunset_fill_alpha`) — the
+                    // exact pair the parent pill uses — rather than the
+                    // theme's raw background at its own separate opacity
+                    // (Max, 2026-09-08: "the child[ren], the same color as
+                    // the parent" — `bfill`'s alpha is always 1.0, which read
+                    // more solid than the parent once the parent's own alpha
+                    // stopped being 1.0 too).
+                    let (bfill, _) = self.options_box_surface();
+                    let fa = self.sunset_fill_alpha();
+                    scene.rects.push(RectInst {
+                        rect,
+                        radius,
+                        color: [bfill[0], bfill[1], bfill[2], fa * a],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                    // Hover feedback on top, as every pill gets.
+                    if hovered {
+                        scene.rects.push(RectInst {
+                            rect,
+                            radius,
+                            color: [hover_wash[0], hover_wash[1], hover_wash[2], hover_wash[3] * a],
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                    }
+                    // A subtle hairline in the module's own ink, so the button
+                    // reads as an inset of the same glass rather than floating.
+                    scene.rects.push(RectInst {
+                        rect,
+                        radius,
+                        color: [ink[0], ink[1], ink[2], SUNSET_BORDER_A * a],
+                        glass: 0.0,
+                        border: (1.2 * s).max(1.0),
+                    });
+                    scene.labels.push(Label {
+                        text: pill.text.clone(),
+                        pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - line_px) / 2.0),
+                        max_w: rect.w,
+                        font_px,
+                        line_px,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        family: pill.family,
+                        color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
+                        clip: None,
+                    });
+                }
+                continue;
+            }
             // Reveal animation for the control buttons: slide out horizontally
             // from behind the parent's near edge (slide 0 = tucked, 1 = rest),
             // fading in; the glyph is clipped to the emerge side so it reads as
@@ -1764,18 +2268,45 @@ impl App {
             // look shrunken, and the doorway stops reading as a full OPTION
             // (`OptionUXRules.md` §4: it is an OPTION, identical to the others,
             // only empty). There, hover speaks with colour alone.
-            let rect = if hovered && self.options_sticky.is_none() {
+            // The asking sunset module holds still under the pointer — its
+            // size step is a statement, not the hover lift, and lifting it
+            // would blur the two; only its nested [turn on] answers hover.
+            let module_t = if pill.id == PillId::Window {
+                self.sunset_module_t()
+            } else {
+                0.0
+            };
+            let rect = if hovered && module_t <= 0.001 && self.options_sticky.is_none() {
                 hover_grow(rect)
             } else {
                 rect
             };
-            let radius = rect.h / 2.0; // stadium ⇒ circle when w == h
-            push_neumorph(scene, rect, radius, bright, shadow_a);
+            // Stadium (h/2) normally; but the sunset module, as it opens into
+            // the settings box, morphs its corners from the pill's stadium to a
+            // small ROUNDED-RECTANGLE radius (like the dock's open card, only
+            // smaller) so the box is a panel, not a giant lozenge. The stadium
+            // is measured against the pill BAND height, not the grown box
+            // height, so it doesn't balloon as the box drops.
+            let radius = if pill.id == PillId::Window && module_t > 0.001 {
+                let band_h = self.options_pill_h() + SUNSET_GROW_H * module_t;
+                lerp(
+                    band_h / 2.0,
+                    SUNSET_PANEL_RADIUS * self.options_scale(),
+                    self.sunset_box_e,
+                )
+            } else {
+                rect.h / 2.0 // stadium ⇒ circle when w == h
+            };
+            // The module swaps its pill costume for waverunner's own material
+            // (drawn in the message branch below): the ordinary neumorph and
+            // wash fade out as that material fades in — one substance at a
+            // time, never stacked.
+            push_neumorph(scene, rect, radius, bright, shadow_a * (1.0 - module_t));
             let base = if hovered { hover_wash } else { rest_wash };
             scene.rects.push(RectInst {
                 rect,
                 radius,
-                color: [base[0], base[1], base[2], base[3] * a],
+                color: [base[0], base[1], base[2], base[3] * a * (1.0 - module_t)],
                 glass: 0.0,
                 border: 0.0,
             });
@@ -1807,6 +2338,138 @@ impl App {
             // pill's leader-facing edge is pinned, so this plays out entirely
             // on its far side (`OptionUXRules.md` §1).
             let tt = self.options_title_meta.t;
+            // The window pill while the sunset question is on it (arriving,
+            // standing, or leaving): the message lays out LEFT-anchored — the
+            // nested [turn on] owns the module's right end — while an ordinary
+            // title keeps its centre. Each label keeps its own anchor through
+            // the crossfade; the scissor clip does the reveal as always.
+            let msg_in = self.options_title_meta.shown == SUNSET_MSG;
+            let msg_out = self.options_title_meta.outgoing == SUNSET_MSG && tt < 0.999;
+            if pill.id == PillId::Window && (msg_in || msg_out) {
+                // waverunner's own coat — the dock card's material verbatim:
+                // its soft drop shadow, then the theme background over the
+                // liquid-glass pipeline (rim glow, fresnel, iridescence, the
+                // bottom vignette — every effect rides `glass: 1.0`). The
+                // compositor's layer blur reads through the tint's alpha
+                // exactly as it does under the dock. Presence animates through
+                // the tint, so the material is whole at every morph step.
+                let mt = self.sunset_module_t();
+                // LAYER 1 — the BANNER BEHIND, shape-shifting to sit under the
+                // pill. The bar's OWN material (`options_bar_fill`) is
+                // smooth-unioned with the bar edge (shader neck, flagged by
+                // SUNSET_NECK_GLASS), so it bulges DOWN out of the bar to a
+                // blister a small rim larger than the pill — the pill always
+                // sits ON this banner, and the banner changes shape with it
+                // (grows as the box opens). Quad = pill + rim + neck margin; the
+                // shader insets the SDF back by the neck `k` to (pill + rim).
+                let (banner, _) = self.options_bar_fill();
+                let rim = SUNSET_BANNER_RIM * s;
+                let nk = SUNSET_NECK_K * s;
+                let brect = Rect::new(
+                    rect.x - rim - nk,
+                    rect.y - rim - nk,
+                    rect.w + 2.0 * (rim + nk),
+                    rect.h + 2.0 * (rim + nk),
+                );
+                scene.rects.push(RectInst {
+                    rect: brect,
+                    radius: radius + rim,
+                    color: [banner[0], banner[1], banner[2], banner[3] * mt],
+                    glass: SUNSET_NECK_GLASS,
+                    border: 0.0,
+                });
+                // LAYER 2 — the pill/box ON TOP, in the REGULAR OPTIONS pill
+                // material (neumorph + the bar wash), just bigger — not the
+                // dock glass. Like the notif/clipboard OPTIONS it morphs from
+                // the small-pill rest-wash (closed) to the frosted box panel
+                // (`options_box_surface`) as it opens, so a big open box still
+                // occludes/frosts instead of being a see-through wash. Sits on
+                // the banner blister behind it.
+                let bright = self.options_bar_is_bright();
+                let (bfill, _) = self.options_box_surface();
+                let fa = self.sunset_fill_alpha();
+                push_neumorph(scene, rect, radius, bright, mt);
+                scene.rects.push(RectInst {
+                    rect,
+                    radius,
+                    // Colour: the SAME as the open box's own fill at every
+                    // step, not just once it's fully open (Max, 2026-09-08:
+                    // "make it the same color than action box is now") — the
+                    // alpha boost above already makes the resting pill read
+                    // as opaque as the box, so its colour should match too
+                    // rather than leaving a wash tint behind at rest.
+                    color: [bfill[0], bfill[1], bfill[2], fa * mt],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                let ink = self.sunset_module_ink();
+                let msg_cx = rect.x + PILL_PAD_X + self.sunset_text_w / 2.0;
+                let msg_w = self.sunset_text_w + 2.0;
+                let out = (1.0 - tt / TITLE_OUT_END).clamp(0.0, 1.0);
+                let inn = ((tt - TITLE_IN_START) / (1.0 - TITLE_IN_START)).clamp(0.0, 1.0);
+                // As the settings box opens the message fades out and stays
+                // pinned to the top band (it must not slide to the centre of the
+                // growing panel); the settings content fades in below it.
+                let bf = 1.0 - self.sunset_box_e;
+                let band_ty =
+                    rect.y + (self.options_pill_h() + SUNSET_GROW_H * mt - line_px) / 2.0;
+                // The message's own clip stops at `[turn on]`'s left edge, not
+                // the module's outer edge: during the arrival morph the box is
+                // still narrower than its settled width and `[turn on]` sits
+                // well inside it, so clipping to `rect` alone lets the
+                // sentence (drawn at its fixed final width throughout) run
+                // straight through the button until the box nearly catches up
+                // (found live 2026-09-08 — see `sunset_nested_rects`).
+                let (turn_on, _) = self.sunset_nested_rects();
+                let msg_clip_w = (turn_on.x - SUNSET_GAP - rect.x).clamp(0.0, rect.w);
+                let msg_clip = Rect::new(rect.x, rect.y, msg_clip_w, rect.h);
+                // The question in the slab's own ink, so text and surface are
+                // measured for each other exactly as inside the boxes.
+                let mk_at = |text: String, alpha: f32, at_cx: f32, max_w: f32| Label {
+                    pos: (at_cx, band_ty),
+                    color: Some([ink[0], ink[1], ink[2], ink[3] * alpha * bf]),
+                    ..mk(text, alpha, max_w, Some(msg_clip))
+                };
+                if tt >= 0.999 {
+                    // Settled on the question.
+                    scene
+                        .labels
+                        .push(mk_at(SUNSET_MSG.to_owned(), 1.0, msg_cx, msg_w));
+                } else if msg_in {
+                    // The old title fades out from its centre; the question
+                    // fades in on the left of the widening module.
+                    if out > 0.001 {
+                        scene.labels.push(mk(
+                            self.options_title_meta.outgoing.clone(),
+                            out,
+                            self.options_title_meta.from + 2.0,
+                            Some(rect),
+                        ));
+                    }
+                    if inn > 0.001 {
+                        scene
+                            .labels
+                            .push(mk_at(SUNSET_MSG.to_owned(), inn, msg_cx, msg_w));
+                    }
+                } else {
+                    // The question fades out on the left; the returning task
+                    // title fades in centred.
+                    if out > 0.001 {
+                        scene
+                            .labels
+                            .push(mk_at(SUNSET_MSG.to_owned(), out, msg_cx, msg_w));
+                    }
+                    if inn > 0.001 {
+                        scene.labels.push(mk(
+                            pill.text.clone(),
+                            inn,
+                            self.options_title_w + 2.0,
+                            Some(rect),
+                        ));
+                    }
+                }
+                continue;
+            }
             if pill.id == PillId::Window && tt < 0.999 {
                 let out = (1.0 - tt / TITLE_OUT_END).clamp(0.0, 1.0);
                 let inn = ((tt - TITLE_IN_START) / (1.0 - TITLE_IN_START)).clamp(0.0, 1.0);
@@ -1914,6 +2577,9 @@ impl App {
             if let Some(a) = addr.clone() {
                 self.note_focus_change(&a);
             }
+            // And remember where the user is on this workspace, so arriving
+            // back by swipe hands the space over intact.
+            self.note_ws_focus();
         }
         if self.options_active_addr != addr || self.options_title != title {
             self.options_active_addr = addr;
@@ -2040,10 +2706,15 @@ impl App {
             self.abort_capture();
             self.options_match = None;
             self.options_bar_matched = None;
+            self.bar_want = None;
+            self.dock_bar_matched = None;
+            self.dock_want = None;
+            self.clip_want = None;
         } else {
             // Back from fullscreen: resume the colour-match cadence.
             self.schedule_options_poll();
             self.reeval_options_bar();
+            self.reeval_dock_bar();
         }
     }
 
@@ -2409,7 +3080,11 @@ impl App {
         }
         let h = if self.options_hidden {
             REVEAL_PX.ceil() as i32
-        } else if self.notif.expanded || self.clip.expanded || self.media_box_open {
+        } else if self.notif.expanded
+            || self.clip.expanded
+            || self.media_box_open
+            || self.sunset_box_open
+        {
             // Extend the pointer-sensitive region down over whichever box is
             // open so scroll/hover/clicks there reach us instead of passing
             // through. Use the *fully-expanded* bottom (not the live animating
@@ -2423,6 +3098,9 @@ impl App {
             }
             if self.media_box_open {
                 bottom = bottom.max(self.media_input_bottom());
+            }
+            if self.sunset_box_open {
+                bottom = bottom.max(self.sunset_box_input_bottom());
             }
             bottom.ceil() as i32
         } else {
@@ -2442,8 +3120,47 @@ impl App {
             .is_some_and(|l| l.wl_surface() == surface)
         {
             PointerSurface::Options
+        } else if self
+            .deck_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            PointerSurface::Deck
         } else {
             PointerSurface::Dock
+        }
+    }
+
+    /// Route a pointer event that belongs to the STAGE deck: hover tracks the
+    /// tile under the pointer, a left release puts that task on the stage.
+    pub(crate) fn deck_pointer(&mut self, event: wl_pointer::Event) {
+        match event {
+            wl_pointer::Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            }
+            | wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => self.deck_motion(surface_x as f32, surface_y as f32),
+            wl_pointer::Event::Leave { .. } => {
+                self.pointer_surface = PointerSurface::Dock;
+                if self.deck.hover.take().is_some() {
+                    self.draw_deck();
+                }
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: WEnum::Value(wl_pointer::ButtonState::Released),
+                ..
+            } if button == BTN_LEFT => {
+                if let Some((x, y)) = self.deck_ptr {
+                    self.deck_click(x, y);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2491,6 +3208,9 @@ impl App {
                     self.schedule_sticky_drop();
                     self.draw_options();
                 }
+                // A sunset prompt that arrived (or resolved) while the hand
+                // was on the bar plays its held morph now (`§2`).
+                self.sync_sunset_prompt();
                 if !self.options_hidden {
                     self.options_hover = None;
                     self.update_ctrl_reveal(); // fade the buttons out
@@ -2739,6 +3459,12 @@ impl App {
         let Some(id) = self
             .options_hover
             .filter(|id| group_slot(group_of(*id)).is_some())
+            // The sunset module (the Window group while the prompt is shown) is
+            // a fixed panel that owns its own morph — it must NOT slide under
+            // the pointer like the window-title cluster (§1). Clicking its gear
+            // pinned the Window group as leader and shifted the glass panel off
+            // its own content. Exclude it from leading entirely.
+            .filter(|id| !(self.sunset_prompt_shown && group_of(*id) == PillGroup::Window))
         else {
             return;
         };
@@ -3136,7 +3862,241 @@ impl App {
         }
     }
 
+    // --- Sunset prompt (see the "Sunset prompt" constants above) ------------
+
+    /// The Mind's live sunset offer, if any. Read from the RAW option set:
+    /// the offer is deliberately not "surfaced" as a cluster pill
+    /// ([`is_surfaced_affordance`] excludes it) — this prompt is its surface.
+    fn sunset_offer(&self) -> Option<&options_engine::Affordance> {
+        self.options.items.iter().find(|a| a.id == SUNSET_OFFER_ID)
+    }
+
+    /// Whether the prompt WANTS the pill: offered (or debug-forced) and not
+    /// already answered by the user within this offer-cycle.
+    fn sunset_prompt_wanted(&self) -> bool {
+        !self.sunset_acted && (self.sunset_debug || self.sunset_offer().is_some())
+    }
+
+    /// Reconcile the drawn prompt with the want — called on every Mind
+    /// republish, on the debug toggle, and when the pointer leaves the bar.
+    ///
+    /// The Still Bar (`OptionUXRules.md` §2): the prompt arriving or
+    /// withdrawing is nobody's request, so while the pointer is on the bar
+    /// strip it WAITS — the morph plays once you leave. The user's own answer
+    /// goes through [`Self::resolve_sunset_prompt`] instead, which reflows at
+    /// once. A spent answer is forgotten once the Mind stops offering
+    /// (hyprsunset runs / the sun comes back), so the next sunset asks fresh.
+    pub(crate) fn sync_sunset_prompt(&mut self) {
+        if self.sunset_acted && !self.sunset_debug && self.sunset_offer().is_none() {
+            self.sunset_acted = false;
+        }
+        // The module stays present as long as its settings box is open (or
+        // still animating): the box IS the module expanded, so the offer
+        // withdrawing under it (e.g. picking a temperature starts hyprsunset,
+        // which pulls the offer) must NOT drop the module and bring the window
+        // controls back while the box is still on screen. Once the box is fully
+        // closed, `tick_sunset_box` re-syncs and the module withdraws if the
+        // offer is gone.
+        let want = self.sunset_prompt_wanted() || self.sunset_box_open || self.sunset_box_e > 0.001;
+        if want == self.sunset_prompt_shown || self.options_ptr_on_bar() {
+            return;
+        }
+        self.sunset_prompt_shown = want;
+        self.measure_options_text();
+        self.draw_options();
+    }
+
+    /// The user answered (turned it on, or right-clicked "not now"): the
+    /// module returns to its task NOW — this reflow is their own request.
+    fn resolve_sunset_prompt(&mut self) {
+        self.sunset_acted = true;
+        self.sunset_debug = false;
+        // The settings box belongs to the prompt — snap it fully shut BEFORE
+        // withdrawing the module, so there is never a frame with the module
+        // gone but a half-open box still on screen (the window controls behind
+        // a stray panel). A resolve is an abrupt answer; the box vanishes with
+        // it rather than easing.
+        self.sunset_box_open = false;
+        self.sunset_box_e = 0.0;
+        self.sunset_prompt_shown = false;
+        self.sync_options_input();
+        self.measure_options_text();
+        self.draw_options();
+    }
+
+    /// [turn on]: run the offer's declared action when the Mind's offer is
+    /// live; the same daemon capability directly when debug-forced.
+    fn sunset_turn_on(&mut self) {
+        let action = self.sunset_offer().map(|a| a.action.clone());
+        match action {
+            Some(a) => self.run_affordance_action(&a),
+            None => self.eye_protection_on(),
+        }
+        self.resolve_sunset_prompt();
+    }
+
+    /// Warm the screen: tell a running hyprsunset, else start one. 4000K is a
+    /// gentle evening warmth (hyprsunset's identity is 6500K).
+    fn eye_protection_on(&mut self) {
+        const CMD: &str = "hyprctl hyprsunset temperature 4000 || hyprsunset -t 4000";
+        if let Err(e) = crate::launch::launch(CMD, false, &self.config.launch.terminal) {
+            warn!("options: eye protection failed to start: {e:#}");
+        }
+    }
+
+    /// How present the asking module is, riding the title morph both ways:
+    /// 0 = an ordinary window pill, 1 = the question fully standing. Drives
+    /// the parent's size step and its opaque box surface, so the module's
+    /// whole costume arrives and leaves as one movement.
+    fn sunset_module_t(&self) -> f32 {
+        let m = &self.options_title_meta;
+        if m.shown == SUNSET_MSG {
+            m.t
+        } else if m.outgoing == SUNSET_MSG && m.t < 0.999 {
+            1.0 - m.t
+        } else {
+            0.0
+        }
+    }
+
+    /// The sunset module's nested `[turn on]` and settings-gear rects — the
+    /// module's right end. The SINGLE source of truth for where those two
+    /// pills sit, read both by the pill layout above and by the message
+    /// draw path below (which must clip the sentence to stop here, not at
+    /// the module's outer edge): during the arrival morph the box is still
+    /// narrower than its settled width, so the box's own edge is not a tight
+    /// enough bound — for most of that ease, `[turn on]` sits well INSIDE
+    /// the box, and a naive box-edge clip lets the (fixed-width, unresized)
+    /// message run straight through it. Found live 2026-09-08: the sentence
+    /// visibly overlapped `[turn on]` for the whole arrival morph, only
+    /// snapping clear in its last few percent.
+    fn sunset_nested_rects(&self) -> (Rect, Rect) {
+        let mt = self.sunset_module_t();
+        let ph = self.options_pill_h();
+        let y = PILL_MARGIN_Y;
+        let cg = SUNSET_CHILD_GROW * mt;
+        let ih = ph + 2.0 * cg;
+        let iw = self.sunset_inner_w.max(ph) + 2.0 * cg; // [turn on]
+        let gw = ih; // the settings gear is a circle
+        let iy = y + (SUNSET_DROP_Y + SUNSET_GROW_H / 2.0) * mt - cg;
+        // The gear sits at the module/box's right end; [turn on] a gap to its
+        // left. Anchored to the LIVE box rect, so as the box narrows into the
+        // settings panel the gear rides in with it and stays the panel's
+        // top-right corner.
+        let br = self.sunset_box_rect();
+        let gx = (br.x + br.w - PILL_PAD_X - gw).max(br.x);
+        let ix = (gx - SUNSET_INNER_GAP - iw).max(br.x);
+        (Rect::new(ix, iy, iw, ih), Rect::new(gx, iy, gw, ih))
+    }
+
+    /// The banner-blister parameters (bar-edge line + fillet radius `k`) when
+    /// the sunset module is on the bar, else `None` — set into `Scene::neck`.
+    /// Returned only while the blister rect is actually drawn (module
+    /// shown/morphing), so the flag and the params can't disagree.
+    pub(crate) fn sunset_neck(&self) -> Option<[f32; 4]> {
+        let m = &self.options_title_meta;
+        let active = m.shown == SUNSET_MSG || (m.outgoing == SUNSET_MSG && m.t < 0.999);
+        active.then(|| {
+            [
+                self.options_bar_h(),
+                SUNSET_NECK_K * self.options_scale(),
+                0.0,
+                0.0,
+            ]
+        })
+    }
+
+    /// The module/settings-box rect: the centred prompt pill, grown by its size
+    /// step (`sunset_module_t`) and then downward by the box progress
+    /// (`sunset_box_e`) into the full settings panel. The one place the shape
+    /// is defined — the layout draws the glass here, and [`crate::sunset`]
+    /// lays its content out against the same rect. With both progresses 0 it is
+    /// exactly the ordinary window pill.
+    pub(crate) fn sunset_box_rect(&self) -> Rect {
+        let sw = self.options_size.0 as f32;
+        let ph = self.options_pill_h();
+        let s = self.options_scale();
+        let y = PILL_MARGIN_Y;
+        let ww = (self.options_title_content_w() + 2.0 * PILL_PAD_X).max(ph);
+        let wx = ((sw - ww) / 2.0).max(EDGE_PAD);
+        let mt = self.sunset_module_t();
+        let mgx = SUNSET_GROW_X * mt;
+        let module_w = ww + 2.0 * mgx;
+        let module_h = ph + SUNSET_GROW_H * mt;
+        // The RIGHT edge (the gear side) stays fixed through the morph, so the
+        // box reveals leftward and downward FROM the gear — the × stays put
+        // under the pointer that opened it, and the content, laid out against
+        // this same rect, reveals with it (Max: "reveal in relation to the
+        // pointer position").
+        let right = wx - mgx + module_w;
+        let e = self.sunset_box_e;
+        let panel_w = (SUNSET_BOX_W * s).min(module_w);
+        let box_h = (SUNSET_BOX_H * s).max(module_h);
+        let w = lerp(module_w, panel_w, e);
+        let h = lerp(module_h, box_h, e);
+        Rect::new(right - w, y + SUNSET_DROP_Y * mt, w, h)
+    }
+
+    /// The module's ink: the BAR's own adaptive ink (`options_text_color`).
+    /// The module is now a regular OPTIONS pill (a translucent wash over the
+    /// banner), so its text must read on the banner exactly like the clock and
+    /// window-title do — measured against the same backdrop. It "changes" only
+    /// when the whole bar's ink does (matched vs frosted), not per-module.
+    pub(crate) fn sunset_module_ink(&self) -> [f32; 4] {
+        self.options_text_color()
+    }
+
+    /// The module's own background alpha — the ONE fill strength shared by
+    /// the parent pill's LAYER 2 and its nested [turn on]/gear children, so
+    /// they read as one continuous surface rather than two independently
+    /// tuned materials (Max, 2026-09-08: "the child[ren], the same color as
+    /// the parent"). Boosted past the ordinary pill wash (`SUNSET_REST_ALPHA_
+    /// BOOST`) at rest, easing to the open panel's own alpha as the settings
+    /// box opens — each caller still applies its OWN presence multiplier
+    /// (`mt` for the parent, the turn-on/gear fade for the children) on top.
+    pub(crate) fn sunset_fill_alpha(&self) -> f32 {
+        let rest_a =
+            (self.options_rest_wash()[3] * SUNSET_REST_ALPHA_BOOST).min(self.box_panel_alpha());
+        lerp(rest_a, self.box_panel_alpha(), self.sunset_box_e)
+    }
+
+    /// The nested [turn on] pill's presence, riding the title metamorphosis:
+    /// it fades in on the question's own incoming ramp and back out on its
+    /// outgoing one, so the module reads as ONE morph — never a pill popping
+    /// onto a pill. Keyed on the morph's actual endpoints (the message text),
+    /// not on intent flags, so it can't desynchronise from what's drawn.
+    fn sunset_turnon_alpha(&self) -> f32 {
+        let m = &self.options_title_meta;
+        if m.shown == SUNSET_MSG {
+            if m.t >= 0.999 {
+                1.0
+            } else {
+                ((m.t - TITLE_IN_START) / (1.0 - TITLE_IN_START)).clamp(0.0, 1.0)
+            }
+        } else if m.outgoing == SUNSET_MSG && m.t < 0.999 {
+            (1.0 - m.t / TITLE_OUT_END).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
     fn options_click(&mut self) {
+        // The open sunset settings box: the gear (top-right) closes it; a click
+        // on a control acts; a click anywhere else closes it. Checked before
+        // everything else so an open box owns the surface.
+        if self.sunset_box_e > 0.5 {
+            if self.options_hover == Some(PillId::SunsetSettings) {
+                self.toggle_sunset_box();
+                return;
+            }
+            if let Some((px, py)) = self.options_ptr {
+                if self.sunset_box_click(px, py) {
+                    return;
+                }
+                self.close_sunset_box();
+                return;
+            }
+        }
         // The open notification box handles its own hits (cards / controls /
         // footer / menu) first; if it consumes the click, stop.
         if self.notif_click() {
@@ -3190,6 +4150,15 @@ impl App {
                     hypr::close_window(&addr);
                 }
             }
+            // The sunset prompt's nested button: warm the screen, morph back.
+            Some(PillId::SunsetTurnOn) => self.sunset_turn_on(),
+            // The settings gear: expand the module into the settings box (or
+            // collapse it if already open).
+            Some(PillId::SunsetSettings) => self.toggle_sunset_box(),
+            // While the module is asking the sunset question a click on the
+            // message is neither answer — the button answers yes, a
+            // right-click answers "not now".
+            Some(PillId::Window) if self.sunset_prompt_shown => {}
             // The current-task pill cycles focus through this workspace's
             // windows, most-used first (see `crate::focus_cycle`).
             Some(PillId::Window) => self.cycle_focus(true),
@@ -3281,6 +4250,8 @@ impl App {
             // Internal daemon actions, mapped by tag to a shell capability.
             A::Daemon(tag) => match tag.as_str() {
                 "toggle_dnd" => self.toggle_notif_mute(),
+                // The sunset offer: warm the screen (hyprsunset).
+                "eye_protection_on" => self.eye_protection_on(),
                 // A compositor keystroke to the focused window (no extra dep,
                 // same path as the clipboard paste).
                 "find_in_page" => crate::hypr::send_shortcut_active("CTRL", "f"),
@@ -3348,6 +4319,17 @@ impl App {
             self.clip_box_right_click();
             return;
         }
+        // The sunset prompt's "not now": a right-click anywhere on the asking
+        // module resolves it for this offer (the Mind re-offers next sunset).
+        if self.sunset_prompt_shown
+            && matches!(
+                self.options_hover,
+                Some(PillId::Window | PillId::SunsetTurnOn | PillId::SunsetSettings)
+            )
+        {
+            self.resolve_sunset_prompt();
+            return;
+        }
         if self.options_hover == Some(PillId::Window) {
             self.cycle_focus(false);
         }
@@ -3398,6 +4380,126 @@ impl App {
             device.set_shape(self.enter_serial, shape);
             self.cursor_now = Some(shape);
         }
+    }
+}
+
+/// The dock's twin of the bar's adaptive-ink machinery above (see
+/// `options_regime`/`options_bar_is_bright`/`options_box_surface`) — same
+/// [`Backdrop`], read from `dock_bar_matched`/`dock_pill_color` instead of
+/// the bar's fields. Unlike the bar, the dock has no separate pill/box
+/// split: docked or open it is one continuous card (`content::scene`'s
+/// single `card_rect`), so there is only one fill to compute, not two.
+impl crate::App {
+    /// The dock's live colour regime — matched window, else sampled frost.
+    fn dock_regime(&self) -> Backdrop {
+        Backdrop {
+            matched: self.dock_bar_matched,
+            frost: self.dock_pill_color,
+        }
+    }
+
+    /// Hover wash for a highlighted dock/grid row — the stronger sibling of
+    /// the dock's own resting wash, same asymmetry as `options_hover_wash`.
+    pub(crate) fn dock_hover_wash(&self) -> [f32; 4] {
+        self.dock_regime().hover_wash()
+    }
+
+    /// The dock card's fill, and the ink that reads on it — one call, same
+    /// "the surface is the pill grown" formula as `options_box_surface`
+    /// (backdrop plus the resting wash, ink measured against that same
+    /// result so the two always agree).
+    ///
+    /// The returned fill's alpha is the THEME's own translucency
+    /// (`background`'s alpha channel), not forced opaque like
+    /// `options_box_surface`: the dock's Hyprland layer rule blurs through
+    /// exactly that transparency (`ignore_alpha = 0.5` in `hyprland.lua`) —
+    /// the AGUA glass look depends on it, so unlike an OPTIONS box this fill
+    /// must stay translucent. Ink is unaffected either way — `luminance`
+    /// never reads the alpha channel.
+    pub(crate) fn dock_surface(&self) -> ([f32; 4], [f32; 4]) {
+        let bg = self.config.theme.background_rgba();
+        let ink = self.config.theme.text_rgba();
+        self.dock_regime().surface(bg, ink, false)
+    }
+
+    /// [`Self::dock_surface`], temporally smoothed: the sampled colour only
+    /// sets *targets*; the drawn fill, ink, and hover wash each ease toward
+    /// theirs every frame instead of repainting in one hard set — a new
+    /// sample (window match acquired or dropped, wallpaper region change)
+    /// fades in over ~¼ s rather than blinking. The ink's *decision* is
+    /// still measured against the eased fill (it flips the moment the fill
+    /// actually crosses the readability threshold, never ahead of what's on
+    /// screen), but the flip itself is a quick crossfade too — slightly
+    /// faster than the fill, so text is only ever briefly mid-grey.
+    ///
+    /// While the dock is fully hidden everything snaps: colour changes that
+    /// happen off-screen (a workspace switch behind a hidden dock) must not
+    /// play as a fade during the reveal slide — the dock arrives already
+    /// wearing the right colour.
+    ///
+    /// Returns `(fill, ink, hover_wash, still_moving)` — the caller keeps
+    /// frames coming while any of the three settles.
+    pub(crate) fn dock_surface_eased(&mut self, dt: f32) -> ([f32; 4], [f32; 4], [f32; 4], bool) {
+        /// Fill approach rate (s⁻¹): τ ≈ 45 ms, settled in ~140 ms — just
+        /// enough blend to kill the one-frame blink, still reads instant.
+        const DOCK_FILL_RATE: f32 = 22.0;
+        /// Ink/wash approach rate (s⁻¹): faster still, so text spends the
+        /// least time between its two legible extremes.
+        const DOCK_INK_RATE: f32 = 30.0;
+        /// Per-channel ease of an RGBA value toward `target`; `None` (and
+        /// the hidden snap) seed instantly.
+        fn ease_rgba(
+            cur: &mut Option<[f32; 4]>,
+            target: [f32; 4],
+            dt: f32,
+            rate: f32,
+            snap: bool,
+        ) -> ([f32; 4], bool) {
+            if snap {
+                *cur = Some(target);
+                return (target, false);
+            }
+            let cur = cur.get_or_insert(target);
+            let mut moving = false;
+            for (c, t) in cur.iter_mut().zip(target) {
+                let (v, m) = crate::animation::ease_toward(*c, t, dt, rate, 0.002);
+                *c = v;
+                moving |= m;
+            }
+            (*cur, moving)
+        }
+        let hidden = self.ui.reveal() <= 0.001;
+        let (fill_target, fallback_ink) = self.dock_surface();
+        let (fill, fill_moving) = ease_rgba(
+            &mut self.dock_fill_anim,
+            fill_target,
+            dt,
+            DOCK_FILL_RATE,
+            hidden,
+        );
+        // Ink decision from the eased fill while a sample drives it; the
+        // theme's own ink for the (brief) sampleless fallback.
+        let ink_target = if self.dock_regime().get().is_some() {
+            ink_on(fill)
+        } else {
+            fallback_ink
+        };
+        let (ink, ink_moving) = ease_rgba(
+            &mut self.dock_ink_anim,
+            ink_target,
+            dt,
+            DOCK_INK_RATE,
+            hidden,
+        );
+        let wash_target = self.dock_hover_wash();
+        let (wash, wash_moving) = ease_rgba(
+            &mut self.dock_wash_anim,
+            wash_target,
+            dt,
+            DOCK_INK_RATE,
+            hidden,
+        );
+        (fill, ink, wash, fill_moving || ink_moving || wash_moving)
     }
 }
 

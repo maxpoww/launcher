@@ -48,6 +48,36 @@ pub fn create_layer_surface(
     layer
 }
 
+/// Create and commit the STAGE deck surface: a full-width strip on the bottom
+/// edge, where the task tiles are drawn while stage mode is up.
+///
+/// It reserves **no** exclusive zone. The band it paints into is opened by the
+/// staged workspace's `gaps_out.bottom` rule (see [`crate::stage`]), so the
+/// compositor has already left this space empty — claiming it again would shrink
+/// every other workspace for nothing.
+///
+/// Anchored left+right so the compositor hands back the full output width;
+/// `width = 0` asks it to decide. Input starts empty (click-through) and is
+/// opened only while the deck is actually up.
+pub fn create_deck_surface(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<App>,
+    height: u32,
+    render_scale: u32,
+) -> LayerSurface {
+    let surface = compositor.create_surface(qh);
+    let layer =
+        layer_shell.create_layer_surface(qh, surface, Layer::Top, Some("waverunner-deck"), None);
+    layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+    layer.set_size(0, height);
+    layer.set_exclusive_zone(0);
+    layer.wl_surface().set_buffer_scale(render_scale as i32);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    layer.commit();
+    layer
+}
+
 /// Create and commit the OPTIONS topbar surface: a strip anchored to the
 /// top edge, spanning the full output width, reserving its own exclusive
 /// zone so windows and the dock lay out beneath it.

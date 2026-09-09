@@ -124,10 +124,6 @@ impl App {
         self.box_from_dock = false; // opened from a grid folder tile
         self.app_group = Some(g);
         self.reset_stack_view();
-        let origin = self.group_origin.or(self.pointer_pos);
-        if let (Some(renderer), Some((wx, wy))) = (self.renderer.as_mut(), origin) {
-            renderer.record_box_wave(wx, wy);
-        }
     }
 
     /// The shared tail of every stack open (grid box, dock folder,
@@ -436,20 +432,6 @@ impl App {
         let slot = row * cols + col;
         let local = content::open_box_slot_member(self.box_is_left(), slot);
         Some(self.box_page * groups::PAGE_CAP + local)
-    }
-
-    /// Pixel center of the box cell the pointer is over — the landing
-    /// spot for a drop. Returns `None` if the box isn't in the layout.
-    pub(crate) fn box_drag_cell_center(&self, pos: (f32, f32)) -> Option<(f32, f32)> {
-        let box_rect = self.current_layout().open_box?;
-        let cols = content::OPEN_BOX_COLS;
-        let cell = box_rect.w / cols as f32;
-        let col = (((pos.0 - box_rect.x) / cell).floor() as usize).min(cols - 1);
-        let row = (((pos.1 - box_rect.y) / cell).floor() as usize).min(cols - 1);
-        Some((
-            box_rect.x + col as f32 * cell + cell * 0.5,
-            box_rect.y + row as f32 * cell + cell * 0.5,
-        ))
     }
 
     /// Pull a box member out into the loose grid (the box shrinks closed).

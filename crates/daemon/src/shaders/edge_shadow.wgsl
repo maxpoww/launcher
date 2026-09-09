@@ -10,8 +10,6 @@ struct Globals {
     time:      f32,
     cursor:    vec2<f32>,
     _pad:      vec2<f32>,
-    ripples:   array<vec4<f32>, 4>,
-    box_waves: array<vec4<f32>, 2>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;

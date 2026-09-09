@@ -8,6 +8,7 @@
 
 pub mod audio;
 pub mod bridge;
+pub mod daylight;
 pub mod deploy;
 pub mod downloads;
 pub mod git;

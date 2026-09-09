@@ -69,12 +69,15 @@ pub(crate) enum BatteryAlarm {
 /// The alarm rung for one battery reading. Pure: `charging` clears everything
 /// (whatever the gauge claims), a missing battery is calm, thresholds are the
 /// `<=` ladder above.
-pub(crate) fn alarm_for(pct: Option<u8>, charging: bool) -> BatteryAlarm {
+pub(crate) fn alarm_for(pct: Option<u8>, charging: bool, on_ac: bool) -> BatteryAlarm {
     let Some(pct) = pct else {
         return BatteryAlarm::None;
     };
     match pct {
-        _ if charging => BatteryAlarm::None,
+        // On wall power the battery is not draining, whatever it reads — a
+        // dead battery on AC reports "Not charging 0%", not a real 0% drain
+        // (the ASUS X550LC, 2026-09-09). Clears the alarm like charging does.
+        _ if charging || on_ac => BatteryAlarm::None,
         p if p <= SUSPEND_PCT => BatteryAlarm::Critical,
         p if p <= BEAT_PCT => BatteryAlarm::Beating,
         p if p <= LOW_PCT => BatteryAlarm::Low,
@@ -131,7 +134,7 @@ impl App {
             .is_some_and(|t| t.elapsed() > WAKE_GAP);
         self.battery_last_snapshot = Some(Instant::now());
 
-        let alarm = alarm_for(ctx.metrics.battery_pct, ctx.metrics.is_charging);
+        let alarm = alarm_for(ctx.metrics.battery_pct, ctx.metrics.is_charging, ctx.metrics.on_ac);
         let pct = ctx.metrics.battery_pct.unwrap_or(0);
         let prev = self.battery_alarm;
         self.set_battery_alarm(alarm);
@@ -308,18 +311,23 @@ mod tests {
     /// a machine with no battery at all (the VM, desktops).
     #[test]
     fn alarm_ladder_boundaries_and_clears() {
-        assert_eq!(alarm_for(None, false), BatteryAlarm::None);
-        assert_eq!(alarm_for(Some(100), false), BatteryAlarm::None);
-        assert_eq!(alarm_for(Some(11), false), BatteryAlarm::None);
-        assert_eq!(alarm_for(Some(10), false), BatteryAlarm::Low);
-        assert_eq!(alarm_for(Some(8), false), BatteryAlarm::Low);
-        assert_eq!(alarm_for(Some(7), false), BatteryAlarm::Beating);
-        assert_eq!(alarm_for(Some(6), false), BatteryAlarm::Beating);
-        assert_eq!(alarm_for(Some(5), false), BatteryAlarm::Critical);
-        assert_eq!(alarm_for(Some(0), false), BatteryAlarm::Critical);
+        assert_eq!(alarm_for(None, false, false), BatteryAlarm::None);
+        assert_eq!(alarm_for(Some(100), false, false), BatteryAlarm::None);
+        assert_eq!(alarm_for(Some(11), false, false), BatteryAlarm::None);
+        assert_eq!(alarm_for(Some(10), false, false), BatteryAlarm::Low);
+        assert_eq!(alarm_for(Some(8), false, false), BatteryAlarm::Low);
+        assert_eq!(alarm_for(Some(7), false, false), BatteryAlarm::Beating);
+        assert_eq!(alarm_for(Some(6), false, false), BatteryAlarm::Beating);
+        assert_eq!(alarm_for(Some(5), false, false), BatteryAlarm::Critical);
+        assert_eq!(alarm_for(Some(0), false, false), BatteryAlarm::Critical);
         // Charging clears EVERY rung, including the lying-gauge 0%.
         for pct in [0, 3, 5, 7, 10] {
-            assert_eq!(alarm_for(Some(pct), true), BatteryAlarm::None, "{pct}%");
+            assert_eq!(alarm_for(Some(pct), true, false), BatteryAlarm::None, "{pct}%");
+        }
+        // On AC clears EVERY rung too: a dead battery on wall power reads
+        // "Not charging 0%" (the ASUS X550LC, #38) — not a real drain.
+        for pct in [0, 3, 5, 7, 10] {
+            assert_eq!(alarm_for(Some(pct), false, true), BatteryAlarm::None, "{pct}% on AC");
         }
     }
 

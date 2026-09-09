@@ -1,17 +1,23 @@
-//! Colour-match the OPTIONS bar to a maximized window.
+//! Colour-match the OPTIONS bar (and the dock) to a maximized window.
 //!
 //! When Hyprland "smart gaps" leaves a single window filling the screen flush
-//! under the bar (see [`crate::hypr::top_fill`]), we sample that window's top
-//! row via the `wlr-screencopy` protocol and paint the bar that flat colour,
-//! so window + bar read as one continuous surface. Otherwise the bar stays
-//! its near-transparent self.
+//! under the bar (see [`crate::hypr::top_fill`]) or flush above the dock (see
+//! [`crate::hypr::bottom_fill`]), we sample that window's edge row via the
+//! `wlr-screencopy` protocol and paint the surface that flat colour, so
+//! window and surface read as one continuous piece. Otherwise each surface
+//! falls back to its own frosted backdrop — the blurred wallpaper right
+//! behind it.
 //!
 //! Wayland forbids reading another window's pixels directly, so screencopy is
 //! the only way. We capture the whole focused output into an shm buffer, read
-//! the single physical row at the window's top, and average it. Captures are
-//! event-driven (Hyprland layout events) plus a slow resample while matched
-//! (for content whose top colour changes). Everything degrades gracefully:
-//! without the protocol the bar simply never colour-matches.
+//! the physical rows either surface currently wants, and average each. Both
+//! surfaces share ONE capture per tick (a [`Slot`] per row wanted) rather than
+//! paying for two independent captures — the constant screencopy readback is
+//! already a flagged perf cost (see `POLL`), and doubling it would double
+//! that cost for nothing. Captures are event-driven (Hyprland layout events)
+//! plus a slow resample while anything is wanted (for content whose colour
+//! changes). Everything degrades gracefully: without the protocol neither
+//! surface ever colour-matches.
 
 use std::time::Duration;
 
@@ -31,24 +37,81 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::{
 
 use crate::{hypr, App};
 
-/// Poll cadence for re-evaluating the colour-match. Runs whenever the bar is
-/// enabled — matched or not — so the bar converges on the current window
-/// within one tick even if a compositor event was missed or arrived while the
-/// layout was mid-animation. It doubles as the resample loop that tracks a
-/// matched window whose content colour changes on the fly.
+/// Poll cadence for re-evaluating both surfaces' colour-match. Runs whenever
+/// either could plausibly match — matched or not — so each converges on the
+/// current window within one tick even if a compositor event was missed or
+/// arrived while the layout was mid-animation. It doubles as the resample
+/// loop that tracks a matched window whose content colour changes on the fly.
 const POLL: Duration = Duration::from_millis(700);
+
+/// A capture that has neither delivered nor failed after this long is
+/// presumed lost (compositor churn — e.g. rapid workspace swipes — can
+/// swallow a screencopy's events). Since only ONE capture may be in
+/// flight and identical wants never abort it, a lost capture would
+/// otherwise block every future sample and freeze the colour for good;
+/// the poll reaps it instead.
+const CAPTURE_STALL: Duration = Duration::from_millis(1500);
+
+/// Quick follow-up re-evaluation after a sample actually changed a
+/// colour: the screen was probably still moving when that capture read
+/// it (workspace slide, window animation), so look again shortly instead
+/// of letting a transitional colour sit until the next [`POLL`] tick.
+const SETTLE_BURST: Duration = Duration::from_millis(180);
 
 /// Colour histogram for the dominant-colour (mode) sample: quantised RGB key →
 /// (pixel count, r sum, g sum, b sum) so the winning bucket can be averaged.
 type ColorHist = std::collections::HashMap<(u8, u8, u8), (u32, u32, u32, u32)>;
 
-/// The output + row to sample for the current match.
+/// Which surface a sampled row feeds, and which regime it was read under.
+/// The bar and the dock each have a "matched a flush window" reading and a
+/// "no window, read the frosted backdrop" reading — four combinations total,
+/// each landing in its own `App` field (see [`App::options_capture_ready`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Slot {
+    /// OPTIONS bar, window-flush match → `options_bar_matched`.
+    BarMatch,
+    /// OPTIONS bar, no flush window → wallpaper frost beside the NOTIF box
+    /// (`notif_rect`) → `options_pill_color`.
+    BarFrost,
+    /// Dock, window-flush match → `dock_bar_matched`.
+    DockMatch,
+    /// Dock, no flush window → wallpaper frost → `dock_pill_color`.
+    DockFrost,
+    /// No flush window → wallpaper frost beside the CLIPBOARD box
+    /// (`clip_rect`) → `clip_pill_color`. Its own slot, sampled at its own
+    /// x-position: it used to just reuse `options_pill_color` (sampled next
+    /// to notif, the opposite edge of the bar), which is why the clipboard
+    /// box's fill/zebra took whatever the wallpaper happens to be on the far
+    /// side of the screen instead of what's actually behind it.
+    ClipFrost,
+}
+
+impl Slot {
+    /// Short tag for debug logging.
+    fn tag(self) -> &'static str {
+        match self {
+            Slot::BarMatch | Slot::BarFrost => "options",
+            Slot::DockMatch | Slot::DockFrost => "dock",
+            Slot::ClipFrost => "clip",
+        }
+    }
+}
+
+/// What a surface currently wants sampled: the output to capture and the
+/// physical row to read it from.
+#[derive(Clone)]
+pub(crate) struct SampleWant {
+    output: WlOutput,
+    slot: Slot,
+    sample_y: u32,
+}
+
+/// The merged capture target for the in-flight (or next) screencopy: one
+/// output, one or two rows to read from it (bar's want, dock's want, or
+/// both — whichever are currently `Some`).
 pub(crate) struct CaptureTarget {
     output: WlOutput,
-    sample_y: u32,
-    /// `true` = sampling the bar's own frosted colour (→ `options_pill_color`);
-    /// `false` = sampling a window under the bar (→ `options_bar_matched`).
-    frost: bool,
+    samples: Vec<(Slot, u32)>,
 }
 
 /// An in-flight screencopy of the focused output.
@@ -60,9 +123,14 @@ pub(crate) struct Capture {
     stride: u32,
     format: wl_shm::Format,
     y_invert: bool,
-    sample_y: u32,
-    frost: bool,
+    /// Rows wanted at capture-start; baked in so a want that changes while
+    /// this capture is in flight doesn't retroactively change what it reads
+    /// — the next poll tick picks up the fresh want (same tolerance the bar
+    /// alone used to rely on).
+    samples: Vec<(Slot, u32)>,
     copied: bool,
+    /// When this capture was requested, for the [`CAPTURE_STALL`] reaper.
+    started: std::time::Instant,
 }
 
 impl App {
@@ -78,15 +146,25 @@ impl App {
         // direct-scanout. The bar draws only a transparent frame meanwhile.
         // Resumed on fullscreen exit.
         if self.options_paused() {
-            self.abort_capture();
-            self.options_match = None;
+            self.bar_want = None;
+            self.clip_want = None;
+            self.rebuild_capture_target();
             return;
         }
         // Keep the safety-net poll alive whenever matching is possible, so a
-        // missed event can never leave the bar stuck (blue wallpaper or a
-        // stale colour). Idempotent — the pending guard collapses repeats.
+        // missed event can never leave either surface stuck (blue wallpaper
+        // or a stale colour). Idempotent — the pending guard collapses repeats.
         self.schedule_options_poll();
         if self.options_layer.is_none() || self.screencopy.is_none() {
+            return;
+        }
+        // On the stage the match is wrong twice over: the staged window is a
+        // card floating in its own inset, no longer flush under the bar, and
+        // the backdrop it should blend with is the dimmed wallpaper. So the
+        // bar keeps its transparent frost, sampling that backdrop instead
+        // (Max, 2026-09-06: "we don't need that on stage mode").
+        if self.stage.is_on() {
+            self.eval_transparent_bar();
             return;
         }
         match hypr::top_fill(self.options_bar_h() as f64) {
@@ -101,14 +179,57 @@ impl App {
         }
     }
 
+    /// The dock's twin of [`Self::reeval_options_bar`] — same triggers, same
+    /// fallback shape, [`hypr::bottom_fill`] instead of `top_fill`.
+    ///
+    /// One extra wrinkle the bar handles differently: while the card is
+    /// open it covers the screen region both dock sample rows cross — the
+    /// frost row at the dock's own mid-height and the match row just above
+    /// the dock band. Sampling those columns would read our OWN drawn card
+    /// and feed the paint back into itself (the stepped colour crawl).
+    /// Freezing instead left the open box colour-stale while the user
+    /// swiped workspaces behind it — so, like `BarMatch` dodging the
+    /// notif/clip drawers, `read_sample` excludes the card's columns while
+    /// the card is up and keeps reading the live screen to either side.
+    pub(crate) fn reeval_dock_bar(&mut self) {
+        if self.options_paused() {
+            self.dock_want = None;
+            self.rebuild_capture_target();
+            return;
+        }
+        self.schedule_options_poll();
+        if self.screencopy.is_none() {
+            return;
+        }
+        if self.stage.is_on() {
+            self.eval_transparent_dock();
+            return;
+        }
+        match hypr::bottom_fill() {
+            Some(bf) => match self.output_by_name(&bf.monitor) {
+                Some(output) => self.begin_dock_match(output, bf.sample_y),
+                None => {
+                    debug!("dock: no wl_output named {}", bf.monitor);
+                    self.clear_dock_match();
+                }
+            },
+            None => self.eval_transparent_dock(),
+        }
+    }
+
     /// No window to match ⇒ the bar stays transparent, floating on the
     /// blurred wallpaper. Sample that backdrop — the bar's *own* frosted
     /// colour — CONTINUOUSLY, not just while a drawer is open: it is what the
     /// pills' text and washes have to contrast against, so without it the bar
     /// paints a static theme ink and goes unreadable over a light wallpaper
     /// (Max, 2026-08-31: "with the bg i set up, the contrast is garbage").
-    /// The boxes use the same sample for their fill. Same 700ms cadence the
-    /// matched path already pays.
+    /// Same 700ms cadence the matched path already pays.
+    ///
+    /// Requests TWO frost samples off the same row — [`Slot::BarFrost`]
+    /// beside the notif box AND [`Slot::ClipFrost`] beside the clipboard box
+    /// — because they sit at opposite edges of the bar and a wallpaper can
+    /// genuinely differ between them (see [`Slot::ClipFrost`]'s doc for the
+    /// bug this fixes: the clipboard box used to borrow notif's sample).
     fn eval_transparent_bar(&mut self) {
         let had_match = self.options_bar_matched.take().is_some();
         if let Ok(mon) = hypr::focused_monitor() {
@@ -122,46 +243,141 @@ impl App {
                 if had_match {
                     self.draw_options();
                 }
-                self.options_match = Some(CaptureTarget {
-                    output,
+                self.bar_want = Some(SampleWant {
+                    output: output.clone(),
+                    slot: Slot::BarFrost,
                     sample_y,
-                    frost: true,
                 });
-                self.start_options_capture();
+                self.clip_want = Some(SampleWant {
+                    output,
+                    slot: Slot::ClipFrost,
+                    sample_y,
+                });
+                self.rebuild_capture_target();
                 return;
             }
         }
-        self.options_match = None;
-        self.abort_capture();
+        self.bar_want = None;
+        self.clip_want = None;
+        self.rebuild_capture_target();
         if had_match {
             self.draw_options();
         }
     }
 
-    /// Set the colour-match target to `output`/`sample_y` and kick a capture.
-    /// The always-on poll (see [`Self::schedule_options_poll`]) drives the
-    /// resample cadence, so this doesn't schedule one itself.
-    fn begin_options_match(
-        &mut self,
-        output: wayland_client::protocol::wl_output::WlOutput,
-        sample_y: u32,
-    ) {
-        self.options_match = Some(CaptureTarget {
-            output,
-            sample_y,
-            frost: false,
-        });
-        self.start_options_capture();
+    /// No window to match ⇒ the dock stays its frosted self. Sample a row at
+    /// the dock's own mid-height, the same way [`Self::eval_transparent_bar`]
+    /// does for the bar: at rest, that row is our own translucent card over
+    /// the wallpaper — reading it *through* our own blur is exactly the
+    /// backdrop the dock's ink needs to contrast against.
+    fn eval_transparent_dock(&mut self) {
+        let had_match = self.dock_bar_matched.take().is_some();
+        if let Ok(mon) = hypr::focused_monitor() {
+            if let Some(output) = self.output_by_name(&mon.name) {
+                let sample_y = ((mon.h - self.dock_bar_h() as f64 * 0.5) * mon.scale.max(0.1))
+                    .round()
+                    .max(1.0) as u32;
+                if had_match {
+                    self.draw();
+                }
+                self.dock_want = Some(SampleWant {
+                    output,
+                    slot: Slot::DockFrost,
+                    sample_y,
+                });
+                self.rebuild_capture_target();
+                return;
+            }
+        }
+        self.dock_want = None;
+        self.rebuild_capture_target();
+        if had_match {
+            self.draw();
+        }
     }
 
-    /// Drop any match and repaint the transparent bar.
+    /// Set the bar's colour-match target to `output`/`sample_y` and rebuild
+    /// the merged capture. The always-on poll (see
+    /// [`Self::schedule_options_poll`]) drives the resample cadence, so this
+    /// doesn't schedule one itself.
+    fn begin_options_match(&mut self, output: WlOutput, sample_y: u32) {
+        self.bar_want = Some(SampleWant {
+            output,
+            slot: Slot::BarMatch,
+            sample_y,
+        });
+        self.rebuild_capture_target();
+    }
+
+    /// The dock's twin of [`Self::begin_options_match`].
+    fn begin_dock_match(&mut self, output: WlOutput, sample_y: u32) {
+        self.dock_want = Some(SampleWant {
+            output,
+            slot: Slot::DockMatch,
+            sample_y,
+        });
+        self.rebuild_capture_target();
+    }
+
+    /// Drop the bar's match and repaint the transparent bar.
     fn clear_options_match(&mut self) {
-        let changed =
-            self.options_match.take().is_some() | self.options_bar_matched.take().is_some();
-        self.abort_capture();
+        let changed = self.bar_want.take().is_some() | self.options_bar_matched.take().is_some();
+        self.clip_want = None;
+        self.rebuild_capture_target();
         if changed {
             self.draw_options();
         }
+    }
+
+    /// The dock's twin of [`Self::clear_options_match`].
+    fn clear_dock_match(&mut self) {
+        let changed = self.dock_want.take().is_some() | self.dock_bar_matched.take().is_some();
+        self.rebuild_capture_target();
+        if changed {
+            self.draw();
+        }
+    }
+
+    /// Merge `bar_want`/`dock_want`/`clip_want` into the one `CaptureTarget`
+    /// a capture actually reads, and kick a capture if anything is wanted.
+    /// Called at the end of every path above, so the three surfaces' wants
+    /// are always folded into a single in-flight (or about-to-start)
+    /// screencopy rather than each paying for its own.
+    pub(crate) fn rebuild_capture_target(&mut self) {
+        let wants = [
+            self.bar_want.as_ref(),
+            self.dock_want.as_ref(),
+            self.clip_want.as_ref(),
+        ];
+        let samples: Vec<(Slot, u32)> = wants
+            .iter()
+            .filter_map(|w| w.as_ref().map(|w| (w.slot, w.sample_y)))
+            .collect();
+        if samples.is_empty() {
+            self.abort_capture();
+            self.options_match = None;
+            return;
+        }
+        // Any want's output — in the ordinary single-monitor-focused
+        // workflow they always agree; on the rare tick where they briefly
+        // disagree (a monitor change mid-evaluation) the next poll heals it.
+        let Some(output) = wants.iter().find_map(|w| w.map(|w| w.output.clone())) else {
+            return;
+        };
+        // A capture in flight was baked for the OLD wants; if they changed,
+        // waiting for it (then for the next poll) delays the fresh colour by
+        // up to `POLL`. Abort and recapture with the new rows instead, so an
+        // event-driven change lands within one capture round-trip. Identical
+        // wants leave the in-flight capture alone (no thrash on repeats).
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|cap| cap.samples != samples)
+        {
+            self.abort_capture();
+        }
+        self.options_match = Some(CaptureTarget { output, samples });
+        self.start_options_capture();
     }
 
     pub(crate) fn abort_capture(&mut self) {
@@ -180,7 +396,8 @@ impl App {
             .find(|o| self.output_state.info(o).and_then(|i| i.name).as_deref() == Some(name))
     }
 
-    /// Begin capturing the focused output (one capture at a time).
+    /// Begin capturing the focused output (one capture at a time — bar and
+    /// dock rows are both read out of it via `target.samples`).
     pub(crate) fn start_options_capture(&mut self) {
         if self.capture.is_some() {
             return;
@@ -192,8 +409,7 @@ impl App {
             return;
         };
         let output = target.output.clone();
-        let sample_y = target.sample_y;
-        let frost = target.frost;
+        let samples = target.samples.clone();
         // Declare the capture as ours BEFORE asking for it: Hyprland announces
         // every screencopy session on its event socket, and the OPTIONS Mind
         // would otherwise surface "Screen is being shared" for the bar's own
@@ -209,9 +425,9 @@ impl App {
             stride: 0,
             format: wl_shm::Format::Xrgb8888,
             y_invert: false,
-            sample_y,
-            frost,
+            samples,
             copied: false,
+            started: std::time::Instant::now(),
         });
     }
 
@@ -278,33 +494,77 @@ impl App {
         }
     }
 
-    /// `ready` event: the buffer holds the frame — sample the window's top
-    /// row, paint the bar, and schedule the next resample.
+    /// `ready` event: the buffer holds the frame — sample every row either
+    /// surface wanted, paint whichever changed, and let the poll schedule
+    /// the next resample.
     fn options_capture_ready(&mut self) {
         let Some(cap) = self.capture.take() else {
             return;
         };
-        let color = self.read_sample(&cap);
+        let mut bar_changed = false;
+        let mut dock_changed = false;
+        for &(slot, sample_y) in &cap.samples {
+            // A capture bakes its rows at start; the want may have moved on
+            // while it was in flight (regime flip, a workspace swipe moving
+            // the match row). Landing such a stale sample would flash an
+            // outdated colour one tick after the change — skip it. The row
+            // must match too: same slot at a different `sample_y` means a
+            // different window edge (fast swipes), read at the wrong place.
+            let still_wanted = match slot {
+                Slot::BarMatch | Slot::BarFrost => &self.bar_want,
+                Slot::DockMatch | Slot::DockFrost => &self.dock_want,
+                Slot::ClipFrost => &self.clip_want,
+            }
+            .as_ref()
+            .is_some_and(|w| w.slot == slot && w.sample_y == sample_y);
+            if !still_wanted {
+                continue;
+            }
+            let Some(color) = self.read_sample(&cap, slot, sample_y) else {
+                continue;
+            };
+            let target = match slot {
+                Slot::BarMatch => &mut self.options_bar_matched,
+                Slot::BarFrost => &mut self.options_pill_color,
+                Slot::DockMatch => &mut self.dock_bar_matched,
+                Slot::DockFrost => &mut self.dock_pill_color,
+                Slot::ClipFrost => &mut self.clip_pill_color,
+            };
+            if *target != Some(color) {
+                *target = Some(color);
+                match slot {
+                    Slot::BarMatch | Slot::BarFrost | Slot::ClipFrost => bar_changed = true,
+                    Slot::DockMatch | Slot::DockFrost => dock_changed = true,
+                }
+            }
+        }
         cap.frame.destroy();
         if let Some(buf) = cap.buffer {
             buf.destroy();
         }
         options_engine::end_self_capture();
-        // Update the colour if we got one; the poll runs on its own timer
-        // (see `schedule_options_poll`), so re-evaluation keeps going regardless.
-        // A frost capture feeds the box's pill colour; a normal one the bar.
-        if self.options_match.is_some() {
-            if let Some(color) = color {
-                let slot = if cap.frost {
-                    &mut self.options_pill_color
-                } else {
-                    &mut self.options_bar_matched
-                };
-                if *slot != Some(color) {
-                    *slot = Some(color);
-                    self.draw_options();
-                }
-            }
+        if bar_changed {
+            self.draw_options();
+        }
+        if dock_changed {
+            self.draw();
+        }
+        // A colour just moved — the screen was likely still animating when
+        // this capture read it (workspace slide, window settling). Look
+        // again shortly so the colour converges on the settled screen
+        // instead of a transitional read sitting until the next POLL tick.
+        if (bar_changed || dock_changed) && !self.options_burst_pending {
+            let timer = Timer::from_duration(SETTLE_BURST);
+            let armed = self
+                .loop_handle
+                .insert_source(timer, |_, _, app: &mut App| {
+                    app.options_burst_pending = false;
+                    app.reeval_options_bar();
+                    app.reeval_dock_bar();
+                    TimeoutAction::Drop
+                })
+                .is_ok();
+            self.options_burst_pending = armed;
         }
     }
 
@@ -313,14 +573,15 @@ impl App {
         debug!("options: screencopy failed");
     }
 
-    /// Read one opaque colour from the captured frame. Two modes:
-    /// - **window** (`cap.frost == false`): the *dominant* colour of the
-    ///   window's top strip (mode over the sides, skipping edges + the centre
-    ///   URL/search field) — the real header background.
-    /// - **frost** (`cap.frost == true`): the *mean* of the bar backdrop just
-    ///   left of the notification box — the wallpaper colour next to the pill,
-    ///   so the box matches it locally (see the frost branch below).
-    fn read_sample(&mut self, cap: &Capture) -> Option<[f32; 4]> {
+    /// Read one opaque colour from the captured frame for one wanted row.
+    /// Two regimes:
+    /// - **match** (`BarMatch`/`DockMatch`): the *dominant* colour of the
+    ///   window's edge strip (mode over the sides, skipping edges + the
+    ///   centre third) — the real header/footer background.
+    /// - **frost** (`BarFrost`/`DockFrost`): the *mean* of that surface's own
+    ///   backdrop — the bar reads a band beside the open notif box, the dock
+    ///   reads broadly across its own width.
+    fn read_sample(&mut self, cap: &Capture, slot: Slot, sample_y: u32) -> Option<[f32; 4]> {
         if cap.width == 0 || cap.height == 0 {
             return None;
         }
@@ -329,11 +590,11 @@ impl App {
         // rounding, the window border, a right-edge scrollbar) AND the central
         // third — where a browser's URL/search field or an app's centred title
         // sits. That centre block is a big patch of a *different* colour than
-        // the surrounding chrome (Chrome's grey omnibox on its black toolbar;
-        // Firefox's grey URL field on its white toolbar), and reading through
-        // it is exactly what made the bar match the field instead of the
-        // toolbar. Sampling only the sides reads the toolbar *background* — the
-        // colour the eye takes as "the window's top" — on any app.
+        // the surrounding chrome (Chrome: grey omnibox on **black**; Firefox:
+        // grey URL field on **white**), and reading through it is exactly what
+        // made a surface match the field instead of the toolbar. Sampling only
+        // the sides reads the toolbar/footer *background* — the colour the eye
+        // takes as "the window's edge" — on any app.
         let outer = (width / 33).clamp(4, 60);
         let cl = width * 34 / 100;
         let cr = width * 66 / 100;
@@ -341,64 +602,123 @@ impl App {
             return None;
         }
         let step = (width / 400).max(1);
-        // While the notification drawer is open it paints its panel over the
-        // window on the right, where we sample. Rather than freeze the match,
-        // exclude just the box's own columns so we keep reading the live window
-        // to either side of it — the bar recolours as you swipe workspaces with
-        // the box open. The box hugs the right edge; its rect is in surface-
-        // logical px, mapped to buffer columns by width / surface_width.
-        let exclude: Option<(usize, usize)> = if self.notif.occludes_below_bar() {
+
+        // Columns a sample must skip because something of OURS is painted
+        // there: the notif/clip drawer panels over the BAR's rows, and the
+        // open launcher card over the DOCK's rows (added below). Rather
+        // than freeze while occluded, exclude just those columns so the
+        // surface keeps reading the live screen to either side. A small
+        // Vec, not one range — the two drawers can be open at once.
+        let mut exclude: Vec<(usize, usize)> = Vec::new();
+        if slot == Slot::BarMatch {
             let sw = self.options_size.0 as f32;
-            let r = self.notif_rect();
-            if sw > 0.0 && r.w > 0.0 {
-                let px = width as f32 / sw;
-                let ex0 = (r.x * px).floor().max(0.0) as usize;
-                let ex1 = (((r.x + r.w) * px).ceil() as usize + 1).min(width);
-                (ex1 > ex0).then_some((ex0.saturating_sub(1), ex1))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        // Frost sample (transparent bar → the notification box's colour): read
-        // the bar backdrop *immediately left of the box*, so the box takes the
-        // wallpaper colour right next to the pill. Sampling the far side instead
-        // mis-matched on wallpapers that vary left-to-right. Averaged, not mode:
-        // the pill shows the blurred (≈ averaged) wallpaper, so a local mean is
-        // what it actually looks like.
-        let frost_band: Option<(usize, usize)> = if cap.frost {
-            let sw = self.options_size.0 as f32;
-            let r = self.notif_rect();
             if sw > 0.0 {
                 let px = width as f32 / sw;
-                let box_left = (r.x * px).max(0.0) as usize;
-                let gap = (width / 100).max(2);
-                let bandw = (width / 8).max(24);
-                let band_r = box_left.saturating_sub(gap).min(width);
-                let band_l = band_r.saturating_sub(bandw).max(outer);
-                (band_r > band_l + 2).then_some((band_l, band_r))
-            } else {
-                None
+                let mut push_exclusion = |r: crate::content::Rect| {
+                    if r.w <= 0.0 {
+                        return;
+                    }
+                    let ex0 = (r.x * px).floor().max(0.0) as usize;
+                    let ex1 = (((r.x + r.w) * px).ceil() as usize + 1).min(width);
+                    if ex1 > ex0 {
+                        exclude.push((ex0.saturating_sub(1), ex1));
+                    }
+                };
+                if self.notif.occludes_below_bar() {
+                    push_exclusion(self.notif_rect());
+                }
+                if self.clip_occludes_below_bar() {
+                    push_exclusion(self.clip_rect());
+                }
             }
-        } else {
-            None
+        }
+        // The open launcher card floats exactly across both dock sample
+        // rows. Freezing sampling while open left the box colour-stale as
+        // the user swiped workspaces behind it (Max, 2026-09-09); reading
+        // straight through fed our own paint back into itself (the stepped
+        // colour crawl before that). So do what BarMatch does with the
+        // drawers: exclude the card's own columns and keep reading the live
+        // screen to either side. The bar surface spans the full monitor
+        // width, so `options_size.0` doubles as the monitor's logical width
+        // for the logical→physical mapping; the card is centered on it.
+        if matches!(slot, Slot::DockMatch | Slot::DockFrost) && self.ui.open_progress() > 0.001 {
+            let sw = self.options_size.0 as f32;
+            if sw <= 0.0 {
+                // Can't place the card's columns — no sample beats reading
+                // our own card and re-entering the feedback loop.
+                return None;
+            }
+            let px = width as f32 / sw;
+            // Breath/jelly can push the card a few px past its rest rect.
+            let pad = 12.0;
+            let card_w = self.config.window.width as f32;
+            let l = ((sw - card_w) / 2.0 - pad).max(0.0);
+            let r = ((sw + card_w) / 2.0 + pad).min(sw);
+            let ex0 = (l * px).floor().max(0.0) as usize;
+            let ex1 = (((r * px).ceil() as usize) + 1).min(width);
+            if ex1 > ex0 {
+                exclude.push((ex0.saturating_sub(1), ex1));
+            }
+        }
+
+        // Frost band: the bar reads *immediately beside its own box* (so the
+        // box takes the wallpaper colour right next to the pill — sampling
+        // the far side instead mis-matches wallpapers that vary
+        // left-to-right) — notif reads leftward from its right-edge pill,
+        // clipboard reads rightward from its left-edge pill, its own
+        // dedicated sample so it stops borrowing notif's (see
+        // [`Slot::ClipFrost`]). The dock has no adjacent box to dodge, so it
+        // reads broadly across its own width instead.
+        let frost_band: Option<(usize, usize)> = match slot {
+            Slot::BarFrost => {
+                let sw = self.options_size.0 as f32;
+                let r = self.notif_rect();
+                if sw > 0.0 {
+                    let px = width as f32 / sw;
+                    let box_left = (r.x * px).max(0.0) as usize;
+                    let gap = (width / 100).max(2);
+                    let bandw = (width / 8).max(24);
+                    let band_r = box_left.saturating_sub(gap).min(width);
+                    let band_l = band_r.saturating_sub(bandw).max(outer);
+                    (band_r > band_l + 2).then_some((band_l, band_r))
+                } else {
+                    None
+                }
+            }
+            Slot::ClipFrost => {
+                let sw = self.options_size.0 as f32;
+                let r = self.clip_rect();
+                if sw > 0.0 {
+                    let px = width as f32 / sw;
+                    let box_right = ((r.x + r.w) * px).min(width as f32).max(0.0) as usize;
+                    let gap = (width / 100).max(2);
+                    let bandw = (width / 8).max(24);
+                    let band_l = (box_right + gap).min(width);
+                    let band_r = (band_l + bandw).min(width.saturating_sub(outer));
+                    (band_r > band_l + 2).then_some((band_l, band_r))
+                } else {
+                    None
+                }
+            }
+            Slot::DockFrost => (width > outer * 2).then_some((outer, width - outer)),
+            _ => None,
         };
+
         // `sample_y` is physical-from-top; in a y-inverted buffer that maps to a
         // row counted from the bottom. "Deeper into the window" is +dy from the
         // top, i.e. a smaller row index when inverted.
         let base = if cap.y_invert {
-            cap.height.saturating_sub(1).saturating_sub(cap.sample_y)
+            cap.height.saturating_sub(1).saturating_sub(sample_y)
         } else {
-            cap.sample_y
+            sample_y
         };
 
         let pool = self.shm_pool.as_mut()?;
         let map = pool.mmap();
         let bytes: &[u8] = &map[..];
 
-        // Frost path: average the band just left of the box (see above).
-        if cap.frost {
+        // Frost path: average the wanted band (see above).
+        if matches!(slot, Slot::BarFrost | Slot::DockFrost | Slot::ClipFrost) {
             let (bl, br) = frost_band?;
             let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
             for dy in 0u32..=5 {
@@ -413,6 +733,14 @@ impl App {
                 };
                 let mut x = bl;
                 while x < br {
+                    // Skip columns our own card/drawers occupy (see
+                    // `exclude` above) — same dodge the mode path does.
+                    if let Some(&(_, ex1)) =
+                        exclude.iter().find(|&&(ex0, ex1)| x >= ex0 && x < ex1)
+                    {
+                        x = ex1.max(x + 2);
+                        continue;
+                    }
                     let (rr, gg, bb) = channels(cap.format, &rowbytes[x * 4..x * 4 + 4]);
                     r += rr as u64;
                     g += gg as u64;
@@ -425,7 +753,7 @@ impl App {
                 return None;
             }
             let (mr, mg, mb) = ((r / n) as u8, (g / n) as u8, (b / n) as u8);
-            debug!("options: pill frost colour = #{mr:02x}{mg:02x}{mb:02x}");
+            debug!("{}: frost colour = #{mr:02x}{mg:02x}{mb:02x}", slot.tag());
             return Some([
                 srgb_to_linear(mr as f32 / 255.0),
                 srgb_to_linear(mg as f32 / 255.0),
@@ -461,12 +789,10 @@ impl App {
                     x = cr;
                     continue;
                 }
-                // Jump over the notification box's columns when it's open.
-                if let Some((ex0, ex1)) = exclude {
-                    if x >= ex0 && x < ex1 {
-                        x = ex1.max(x + step);
-                        continue;
-                    }
+                // Jump over the notif/clipboard box's columns when open.
+                if let Some(&(_, ex1)) = exclude.iter().find(|&&(ex0, ex1)| x >= ex0 && x < ex1) {
+                    x = ex1.max(x + step);
+                    continue;
                 }
                 let (rr, gg, bb) = channels(cap.format, &rowbytes[x * 4..x * 4 + 4]);
                 let e = buckets
@@ -484,8 +810,8 @@ impl App {
             return None;
         }
         let (mr, mg, mb) = ((rsum / n) as u8, (gsum / n) as u8, (bsum / n) as u8);
-        debug!("options: colour-match window top = #{mr:02x}{mg:02x}{mb:02x}");
-        // The captured bytes are sRGB-encoded (display values), but the bar's
+        debug!("{}: colour-match edge = #{mr:02x}{mg:02x}{mb:02x}", slot.tag());
+        // The captured bytes are sRGB-encoded (display values), but the
         // swapchain is an sRGB surface that re-encodes shader output — so we
         // must hand it the *linear* colour, or it comes out doubly-brightened
         // (a washed, greyish version of the real window colour).
@@ -497,17 +823,19 @@ impl App {
         ])
     }
 
-    /// Run the colour-match re-evaluation on a steady timer for as long as the
-    /// bar is enabled — whether or not it's currently matched.
+    /// Run the colour-match re-evaluation on a steady timer for as long as
+    /// either surface could plausibly match — whether or not either
+    /// currently is.
     ///
     /// This is the system's self-healing spine. Matching is otherwise driven
     /// by Hyprland layout events, but an event can be missed, or fire while a
     /// workspace-switch animation is still mid-flight (so the window isn't yet
-    /// where IPC will report it a beat later). Either way the bar could stick —
-    /// showing blurred wallpaper, or a stale colour from another window. The
-    /// poll guarantees the bar reconverges on the true current window within
-    /// one tick regardless. While matched it also serves as the resample loop,
-    /// tracking a window whose content colour changes with no layout event.
+    /// where IPC will report it a beat later). Either way a surface could
+    /// stick — showing blurred wallpaper, or a stale colour from another
+    /// window. The poll guarantees both reconverge on the true current window
+    /// within one tick regardless. While matched it also serves as the
+    /// resample loop, tracking a window whose content colour changes with no
+    /// layout event.
     ///
     /// Self-sustaining: each tick reschedules the next, so a transient failed
     /// capture or empty read can't stop it. The pending guard keeps the
@@ -528,7 +856,19 @@ impl App {
             .loop_handle
             .insert_source(timer, |_, _, app: &mut App| {
                 app.options_poll_pending = false;
+                // Reap a capture whose events never came (see
+                // [`CAPTURE_STALL`]) so the reevals below can start a
+                // fresh one instead of queuing behind a zombie forever.
+                if app
+                    .capture
+                    .as_ref()
+                    .is_some_and(|c| c.started.elapsed() > CAPTURE_STALL)
+                {
+                    debug!("options: capture stalled; reaping");
+                    app.abort_capture();
+                }
                 app.reeval_options_bar();
+                app.reeval_dock_bar();
                 TimeoutAction::Drop
             });
     }

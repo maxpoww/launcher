@@ -68,6 +68,10 @@ pub enum Command {
     /// pill and redraw, so its discoverability tooltip can be screenshotted
     /// without a pointer (there's no headless cursor warp on this compositor).
     DebugHoverOption,
+    /// Debug/verification: toggle the sunset eye-protection prompt (the
+    /// current-task pill's expansion into "the sun is set…" + [turn on]) as if
+    /// the Mind had offered it, so the UX can be demoed before real sunset.
+    DebugSunset,
     /// Trigger the dynamic OPTION offer with this affordance id (e.g.
     /// `media.playpause`, `git.commit`) — the same action a click on its pill
     /// runs. Exposed for scripting and for verifying the action end to end.
@@ -104,6 +108,14 @@ pub enum Command {
     /// Overview: a thumbnail is being resized at this size (`"1240x1000"`),
     /// shown as the pill's live readout. Empty payload = resize ended.
     OverviewResize(String),
+    /// STAGE mode on/off (bindable as Super+Enter): one task alone on screen at
+    /// the stage rect, the deck of every other task below it. Toggling off puts
+    /// the desktop back exactly as it was, focus included.
+    StageToggle,
+    /// While staged: put this window on the stage, by address (`0x…`). Empty
+    /// payload is a no-op. The deck's click will call this; it is a verb so the
+    /// mode can be driven and verified before the deck exists.
+    StageShow(String),
 }
 
 impl fmt::Display for Command {
@@ -122,6 +134,7 @@ impl fmt::Display for Command {
             Command::DebugOptions => f.write_str("debug-options"),
             Command::DebugMediaBox => f.write_str("debug-media-box"),
             Command::DebugHoverOption => f.write_str("debug-hover-option"),
+            Command::DebugSunset => f.write_str("debug-sunset"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
@@ -133,6 +146,8 @@ impl fmt::Display for Command {
             Command::PseudoToggle => f.write_str("pseudo-toggle"),
             Command::OverviewHover(t) => write!(f, "overview-hover {t}"),
             Command::OverviewResize(s) => write!(f, "overview-resize {s}"),
+            Command::StageToggle => f.write_str("stage-toggle"),
+            Command::StageShow(a) => write!(f, "stage-show {a}"),
         }
     }
 }
@@ -158,6 +173,7 @@ impl FromStr for Command {
                 "options-trigger",
                 Command::OptionsTrigger as fn(String) -> Command,
             ),
+            ("stage-show", Command::StageShow as fn(String) -> Command),
         ] {
             if let Some(rest) = line.strip_prefix(verb) {
                 // `verb` alone (or `verb ` + text) — anything else is a
@@ -184,6 +200,7 @@ impl FromStr for Command {
             "debug-options" => Ok(Command::DebugOptions),
             "debug-media-box" => Ok(Command::DebugMediaBox),
             "debug-hover-option" => Ok(Command::DebugHoverOption),
+            "debug-sunset" => Ok(Command::DebugSunset),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
@@ -192,6 +209,7 @@ impl FromStr for Command {
             "pseudo-toggle" => Ok(Command::PseudoToggle),
             "focus-next" => Ok(Command::FocusNext),
             "focus-other" => Ok(Command::FocusOther),
+            "stage-toggle" => Ok(Command::StageToggle),
             other => Err(ParseError::UnknownCommand(other.to_owned())),
         }
     }
@@ -218,6 +236,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-options",
     "debug-media-box",
     "debug-hover-option",
+    "debug-sunset",
     "options-trigger <id>",
     "overview-on",
     "overview-off",
@@ -229,6 +248,8 @@ pub const USAGE_VERBS: &[&str] = &[
     "pseudo-toggle",
     "overview-hover [title]",
     "overview-resize [WxH]",
+    "stage-toggle",
+    "stage-show <address>",
 ];
 
 /// A response sent from the daemon back to the client.
@@ -309,6 +330,7 @@ mod tests {
                 | Command::DebugOptions
                 | Command::DebugMediaBox
                 | Command::DebugHoverOption
+                | Command::DebugSunset
                 | Command::OptionsTrigger(_)
                 | Command::OverviewOn
                 | Command::OverviewOff
@@ -319,7 +341,9 @@ mod tests {
                 | Command::FocusOther
                 | Command::PseudoToggle
                 | Command::OverviewHover(_)
-                | Command::OverviewResize(_) => (),
+                | Command::OverviewResize(_)
+                | Command::StageToggle
+                | Command::StageShow(_) => (),
             }
         }
         vec![
@@ -336,6 +360,7 @@ mod tests {
             Command::DebugOptions,
             Command::DebugMediaBox,
             Command::DebugHoverOption,
+            Command::DebugSunset,
             Command::OptionsTrigger("media.playpause".into()),
             Command::OverviewOn,
             Command::OverviewOff,
@@ -347,6 +372,8 @@ mod tests {
             Command::PseudoToggle,
             Command::OverviewHover("A Window Title".into()),
             Command::OverviewResize("1240x1000".into()),
+            Command::StageToggle,
+            Command::StageShow("0x5c351e2e7660".into()),
         ]
     }
 

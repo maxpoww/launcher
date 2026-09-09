@@ -41,7 +41,7 @@ use crate::notifications::{
     action_pairs, ActiveNotification, NotifCommand, NotifEvent, NotifHandle,
 };
 use crate::options::{
-    hover_grow, push_neumorph, wash, PillId, BOND_GAP, EDGE_PAD, GLYPH_BELL, GLYPH_BELL_SLASH,
+    hover_grow, push_neumorph, PillId, BOND_GAP, EDGE_PAD, GLYPH_BELL, GLYPH_BELL_SLASH,
     NERD, OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
@@ -215,25 +215,10 @@ const NOTCH: f32 = 15.0;
 /// px of travel). Tunable for scroll feel.
 const SCROLL_SPEED: f32 = 3.0;
 
-/// Zebra striping for the history list — alternate rows get a wash so adjacent
-/// lines read as distinct (old-Finder style). Direction is **adaptive**: a dark
-/// box lightens its stripes, a light box darkens them, keyed off the box's own
-/// luminance. Asymmetric alphas because a white wash reads stronger than a
-/// black one at equal alpha (same reasoning as the pill washes).
-const STRIPE_LIGHTEN: f32 = 0.31;
-const STRIPE_DARKEN: f32 = 0.48;
-/// Resting text opacity of the open box's lines. The hovered line spends the
-/// headroom these leave (see `options::hover_ink_for`).
-///
-/// They differ a lot, and the reason is the CONTRAST CEILING of each regime,
-/// measured 2026-08-31: light ink on a dark box reaches ~7:1 easily, so it
-/// can rest well under full (0.67 still measures 6:1) and leave a wide gap
-/// for hover; dark ink on a backdrop-coloured light box tops out around
-/// 5.5:1, so it has to rest near full (0.88 ≈ 3.6:1) and the hover step is
-/// necessarily smaller. Muting the light-box text as far as the dark-box
-/// text is what made the content unreadable earlier in the day.
-const LIST_DIM: f32 = 0.67;
-const LIST_DIM_LIGHT: f32 = 0.88;
+// Zebra striping and resting list-ink dim are shared with the clipboard box
+// (see `options::App::zebra_stripe`/`dim_ink`) — used to be hand-copied here
+// with its own `STRIPE_LIGHTEN`/`LIST_DIM` consts, which is exactly the kind
+// of drift risk the shared version exists to remove.
 
 /// How recently a matching message must have been surfaced for a new arrival to
 /// count as its *echo* (same chat mirrored by the webapp + KDE Connect) and skip
@@ -1389,14 +1374,8 @@ impl App {
         // Spotlight ink: the list rests at its DARKEST/strongest, and the
         // hovered card's text goes LIGHTER (Max, 2026-08-31) — one clear
         // direction, no row tinting.
-        let dark_ink = ink[0] + ink[1] + ink[2] < 1.5;
         let hover_ink = crate::options::hover_ink_for(ink);
-        // Dark ink on a light box needs more presence than light ink on a dark one
-        // to read at the same muting (a black wash is perceptually weaker than a
-        // white one at equal alpha) — so lift the resting dim on light boxes and
-        // keep the tuned dark-box value.
-        let list_dim = if dark_ink { LIST_DIM_LIGHT } else { LIST_DIM };
-        let dim_ink = [ink[0], ink[1], ink[2], ink[3] * list_dim];
+        let dim_ink = self.dim_ink(ink);
         // The collapsed PREVIEW band is pill furniture, not box content: it sits
         // in the unscaled bar band beside the bell and clock, so it keeps the
         // pill's own text size (only the open box's content scales).
@@ -1410,26 +1389,7 @@ impl App {
         let right = rect.x + rect.w - PILL_PAD_X;
         let pa = ((self.notif.peek_t - 0.35) / 0.5).clamp(0.0, 1.0);
 
-        // Adaptive zebra stripe colour: lighten a dark box, darken a light one,
-        // off the box fill luminance (0.179 = the WCAG flip used for ink too).
-        // Pre-composited over the fill into an OPAQUE colour so overlapping stripe
-        // pieces overwrite instead of double-blending.
-        let flum =
-            0.2126 * expanded_fill[0] + 0.7152 * expanded_fill[1] + 0.0722 * expanded_fill[2];
-        let stripe = if flum <= 0.179 {
-            wash(true, STRIPE_LIGHTEN)
-        } else {
-            wash(false, STRIPE_DARKEN)
-        };
-        let sa = stripe[3];
-        let stripe_opaque = [
-            stripe[0] * sa + expanded_fill[0] * (1.0 - sa),
-            stripe[1] * sa + expanded_fill[1] * (1.0 - sa),
-            stripe[2] * sa + expanded_fill[2] * (1.0 - sa),
-            // Matches the panel: an opaque stripe over a translucent panel
-            // blocks the compositor's blur on every other card.
-            self.box_panel_alpha(),
-        ];
+        let stripe_opaque = self.zebra_stripe(expanded_fill);
 
         let content = self.notif_content_rect(rect);
         let full_h = self

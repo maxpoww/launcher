@@ -47,6 +47,53 @@ hl.layer_rule({ match = { namespace = "waverunner" }, ignore_alpha = 0.5 })
 hl.exec_cmd("/home/max/launcher/waverunner-dev")   -- launches the daemon
 ```
 
+## The COMPLETE `hl.dsp.window.*` surface (introspected 2026-09-04)
+
+Enumerated live, so this is exhaustive — if a name is not here it does not exist:
+
+```
+alter_zorder  bring_to_top  center      clear_tags  close     cycle_next
+deny_from_group  drag       float       fullscreen  fullscreen_state
+kill          move         pin         pseudo      resize    set_prop
+signal        swap         tag         toggle_swallow
+```
+
+And the top-level `hl.dsp.*` namespaces:
+
+```
+cursor  dpms  event  exec_cmd  exec_raw  exit  focus  force_idle
+force_renderer_reload  global  group  layout  no_op  pass
+send_key_state  send_shortcut  submap  window  workspace
+```
+
+**There is NO absolute-position dispatcher.** No `position`, no pixel move. `move`
+takes a *workspace*; `center` centres; `resize` sets a size. The C++ dispatchers
+`movewindowpixel` / `resizewindowpixel` / `movetoworkspacesilent` do exist in the
+binary, but **the Lua layer does not expose them** — so a window cannot be placed
+at an arbitrary x/y from here. Anything needing an exact rect must come from the
+compositor's own layout instead: layer-surface **exclusive zones** + `gaps_out`
+(+ `fullscreen_state` maximize), not pixel math.
+
+`hl.config`, `hl.animation`, `hl.workspace_rule` and `hl.monitor` are all plain
+functions and are **callable at runtime** over the socket, so gaps, animations and
+workspace rules can be changed live and put back.
+
+## Introspecting the API yourself (read-only, no side effects)
+
+`eval` runs arbitrary Lua but its **return value is not sent back** (you just get
+`ok`). Lua `io` works, so write the answer to a file and read it:
+
+```sh
+SOCK=$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock
+printf '%s' "eval local f=io.open('/tmp/x','w')
+  local t={} for k,v in pairs(hl.dsp.window) do t[#t+1]=k end
+  table.sort(t) f:write(table.concat(t,', ')) f:close()" | socat - "UNIX-CONNECT:$SOCK"
+```
+
+Argument *shapes* still can't be introspected — `share/hypr/stubs/hl.meta.lua`
+types every dispatcher as `fun(...)`. Unknown signatures need one live test on a
+scratch window; never guess, because a wrong field fails silently.
+
 ## If you need a dispatcher not listed here
 
 Check the compositor's own example config, which is authoritative for this

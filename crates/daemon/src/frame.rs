@@ -159,12 +159,19 @@ impl App {
 
         // F12: on a software (CPU) adapter every frame costs real cores —
         // a minutes-long install animation ran the daemon at 450% CPU in
-        // the 8-core VM and throttled its own install's download ~35x.
-        // While the user is actively interacting the throttle stands down
-        // (scrolls/drags stay smooth); ambient animation streams get
-        // spaced to SOFTWARE_FRAME_MIN with a timer. dt keeps accumulating
-        // across skipped frames, so animations advance by real time.
-        if self.renderer.as_ref().is_some_and(|r| r.is_software())
+        // the 8-core VM and throttled its own install's download ~35x. The
+        // GL backend (old Intel iGPUs, no Vulkan) has the same failure by a
+        // different route: its blocking Wayland present starves the
+        // single-threaded loop, so one perpetual install ring froze the
+        // whole desktop — IPC, input, timers all dead (Golem #40, ASUS
+        // 2026-09-09). Both want the same throttle (renderer.needs_frame_
+        // throttle()). While the user is actively interacting it stands down
+        // (scrolls/drags stay smooth); ambient animation streams get spaced
+        // to SOFTWARE_FRAME_MIN with a timer, and — crucially — that timer
+        // rides calloop, so the loop services IPC/input between frames. dt
+        // keeps accumulating across skipped frames, so animations advance by
+        // real time.
+        if self.renderer.as_ref().is_some_and(|r| r.needs_frame_throttle())
             && self.last_input.elapsed() > INPUT_ACTIVE_WINDOW
         {
             if let Some(remaining) = self
@@ -281,6 +288,12 @@ impl App {
                     }
                 }
             }
+            // The card just came to rest: re-evaluate the dock colour
+            // sample now rather than waiting ≤700 ms for the poll — the
+            // card's footprint (whose columns sampling excludes while the
+            // card is up) just changed shape, so the right sample columns
+            // did too.
+            self.reeval_dock_bar();
             // A box close settling to the dock rests a beat, then hides
             // (the timer's guard keeps it if the pointer is on the dock).
             if self.rest_hide_pending && self.ui.target() == Target::Dock {
@@ -582,67 +595,43 @@ impl App {
             None
         };
 
-        // AGUA splash ripple (decoration only — the hover magnification in
-        // scene() is untouched). The dock is a shallow 1-D water surface:
-        // one height per icon, coupled to its neighbors. Nothing feeds it
-        // while a crest simply sits under the pointer; only when a crest
-        // *collapses* (pointer leaves or jumps) does the falling swell push
-        // the surface down, and that dent propagates outward as an
-        // expanding ripple, reflecting off the dock ends and decaying.
-        let ripple_layout = self.current_layout();
-        let n_dock = ripple_layout.dock_slots.len();
-        if self.dock_wave_h.len() != n_dock {
-            self.dock_wave_h = vec![0.0; n_dock];
-            self.dock_wave_v = vec![0.0; n_dock];
-            self.dock_crest_prev = vec![0.0; n_dock];
+        // Dock magnification, temporally smoothed: the pointer only sets
+        // per-slot *targets* (the same cosine falloff as ever); the drawn
+        // scale eases toward its target — fast while growing so the crest
+        // stays tight under the cursor, gentler while shrinking so icons
+        // melt back instead of snapping. Entering, sweeping, and leaving
+        // the dock all become one continuous motion.
+        let mag_layout = self.current_layout();
+        let n_dock = mag_layout.dock_slots.len();
+        if self.dock_mag.len() != n_dock {
+            self.dock_mag = vec![1.0; n_dock];
         }
-        let mag = self.mag_amount.clamp(0.0, 1.0);
-        for (i, slot) in ripple_layout.dock_slots.iter().enumerate() {
-            // Crest fraction (0..1) — the same falloff scene() uses, but
-            // read here only to detect its *fall*, never to magnify.
-            let crest = match self.pointer_pos {
-                Some((px, py)) if mag > 0.0 => {
-                    let cx = slot.x + slot.w / 2.0;
-                    let d_out = (slot.y - py)
-                        .max(py - ripple_layout.dock_hit_bottom)
-                        .max(0.0);
-                    let fy = content::falloff(d_out, content::DOCK_MAG_VRADIUS);
-                    content::falloff(px - cx, content::DOCK_MAG_RADIUS) * fy * mag
-                }
-                _ => 0.0,
+        let icon_scale = self.icon_scale();
+        let mut mag_settling = false;
+        for (i, slot) in mag_layout.dock_slots.iter().enumerate() {
+            let target = content::dock_mag_target(
+                *slot,
+                mag_layout.dock_hit_bottom,
+                mag_pointer,
+                icon_scale,
+                self.mag_amount,
+            );
+            let rate = if target > self.dock_mag[i] {
+                content::DOCK_MAG_GROW_RATE
+            } else {
+                content::DOCK_MAG_RELEASE_RATE
             };
-            let drop = (self.dock_crest_prev[i] - crest).max(0.0);
-            self.dock_wave_v[i] -= content::SPLASH_GAIN * drop;
-            self.dock_crest_prev[i] = crest;
+            let (v, moving) = crate::animation::ease_toward(
+                self.dock_mag[i],
+                target,
+                dt,
+                rate,
+                content::DOCK_MAG_SNAP,
+            );
+            self.dock_mag[i] = v;
+            mag_settling |= moving;
         }
-        let mut remaining = dt.min(0.25);
-        while remaining > 0.0 {
-            let h = remaining.min(1.0 / 240.0);
-            for i in 0..n_dock {
-                // Reflective ends: a missing neighbor mirrors the cell.
-                let left = self.dock_wave_h[i.saturating_sub(1)];
-                let right = self.dock_wave_h[(i + 1).min(n_dock - 1)];
-                let lap = left + right - 2.0 * self.dock_wave_h[i];
-                let accel = content::RIPPLE_COUPLE * lap
-                    - content::RIPPLE_RETURN * self.dock_wave_h[i]
-                    - content::RIPPLE_DAMP * self.dock_wave_v[i];
-                self.dock_wave_v[i] += accel * h;
-            }
-            for i in 0..n_dock {
-                self.dock_wave_h[i] += self.dock_wave_v[i] * h;
-            }
-            remaining -= h;
-        }
-        let mut ripple_active = false;
-        let dock_ripple: Vec<f32> = self
-            .dock_wave_h
-            .iter()
-            .zip(&self.dock_wave_v)
-            .map(|(&hh, &vv)| {
-                ripple_active |= hh.abs() > 0.001 || vv.abs() > 0.01;
-                hh.clamp(-content::RIPPLE_MAX, content::RIPPLE_MAX)
-            })
-            .collect();
+        let dock_mag = self.dock_mag.clone();
 
         // Box open/close transition (duration from config, eased below).
         if self.group_anim != self.group_anim_target {
@@ -940,6 +929,13 @@ impl App {
             .iter()
             .map(|e| self.running.contains_key(e))
             .collect();
+        // Eased fill/ink/wash: a fresh colour sample fades in over ~¼ s
+        // instead of repainting in one frame — the ink's black↔white flip
+        // crossfades too. Keep frames coming while any of them settles.
+        let (dock_bg, dock_ink, dock_highlight, fill_moving) = self.dock_surface_eased(dt);
+        if fill_moving {
+            self.dirty = true;
+        }
         let scene = content::scene(
             &self.config,
             self.icon_scale(),
@@ -964,7 +960,7 @@ impl App {
                 alpha: self.ui.alpha(),
                 pointer: mag_pointer,
                 mag_amount: self.mag_amount,
-                dock_ripple: &dock_ripple,
+                dock_mag: &dock_mag,
                 bounce,
                 query: &self.search.query,
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
@@ -1009,6 +1005,9 @@ impl App {
                 // shadow; a grid box inside the launcher does not.
                 box_over_dock: self.dock_stack.is_some()
                     || self.dir_stack.as_ref().is_some_and(|ds| !ds.in_grid),
+                dock_bg,
+                dock_ink,
+                dock_highlight,
             },
         );
         let thumb_base = self.thumb_layer_base();
@@ -1017,7 +1016,7 @@ impl App {
         };
         if let Err(e) = renderer.render(
             &scene,
-            self.config.theme.text_rgba(),
+            dock_ink,
             self.pointer_pos,
             self.config.theme.icon_squircle,
             thumb_base,
@@ -1037,20 +1036,14 @@ impl App {
             self.dirty = true;
         }
         // AGUA: the water keeps sloshing briefly after the card lands, and
-        // a splash ripple keeps traveling the dock — keep frames coming
-        // until both rest.
-        if stretch_active || ripple_active {
+        // the dock magnification keeps easing toward its targets — keep
+        // frames coming until both rest.
+        if stretch_active || mag_settling {
             self.dirty = true;
         }
         // Pending jelly impulses waiting on their delay timers.
         if self.jelly.has_pending() || self.box_jelly.has_pending() {
             self.dirty = true;
-        }
-        // Glass click ripple / box wave: keep frames coming until they expire.
-        if let Some(r) = self.renderer.as_ref() {
-            if r.has_active_ripple() || r.has_active_box_wave() {
-                self.dirty = true;
-            }
         }
     }
 
@@ -1133,30 +1126,17 @@ impl App {
         // Matched: opaque window colour, extended down over the window's top
         // border (the overhang) to hide the seam. Otherwise the faint
         // transparent strip, drawn only to the bar height.
-        let (mut color, bottom, matched) = match self.options_bar_matched {
-            Some(c) => (c, bar_h + crate::OPTIONS_OVERHANG as f32, true),
-            // Reduce-transparency: the see-through strip becomes the same
-            // opaque slab the open boxes use (sampled backdrop + wash), so
-            // the bar's ink always sits on solid ground. Hard-edged like a
-            // matched bar — an opaque fill wants a crisp bottom cut.
-            //
-            // A bar SUMMONED OVER A FULLSCREEN WINDOW takes the same slab, for
-            // the same reason. The colour-match that normally gives it ground
-            // is paused there on purpose — it is the continuous readback that
-            // blocks direct scanout — so the strip would otherwise fall back to
-            // 10% black and float unreadably over whatever the window happens
-            // to be showing.
-            //
-            // Blending in is not what this bar is for anyway. The match exists
-            // so a bar above a MAXIMIZED window reads as one surface with it;
-            // in fullscreen the bar is not part of the layout at all. You
-            // concealed it and then deliberately asked for it back, by holding
-            // the edge or through a doorway. A summoned overlay owes you
-            // legibility, not camouflage against content it does not belong to.
-            None if self.options_paused() || self.config.accessibility.reduce_transparency => {
-                (self.options_box_surface().0, bar_h, true)
-            }
-            None => ([0.0, 0.0, 0.0, 0.10], bar_h, false),
+        // The banner surface (see `options_bar_fill` — the one definition,
+        // shared with the layer drawn behind the sunset module). Matched:
+        // opaque window colour, extended down over the window's top border (the
+        // overhang) to hide the seam. Reduce-transparency / a paused fullscreen
+        // bar: the opaque slab. Else: the faint 10% strip the frosted wallpaper
+        // reads through.
+        let (mut color, matched) = self.options_bar_fill();
+        let bottom = if self.options_bar_matched.is_some() {
+            bar_h + crate::OPTIONS_OVERHANG as f32
+        } else {
+            bar_h
         };
         // Bleed the top/left/right edges a couple px past the surface so the
         // SDF anti-aliasing seam falls off-screen instead of showing a 1px
@@ -1181,6 +1161,10 @@ impl App {
         };
         // The context-aware pill modules ride on top of the base fill.
         self.push_options_pills(&mut scene);
+        // The banner swells around the sunset module (metaball blister).
+        scene.neck = self.sunset_neck();
+        // The sunset settings box content, over the banner blister.
+        self.push_sunset_box(&mut scene);
         // A hover tooltip for the icon-only OPTION pills (discoverability).
         self.push_options_tooltip(&mut scene);
         // The media transport box grows into the reserved dropdown area.
@@ -1193,7 +1177,11 @@ impl App {
         let Some(renderer) = self.options_renderer.as_mut() else {
             return;
         };
-        if let Err(e) = renderer.render(&scene, text_rgba, None, squircle, 0) {
+        // The bar's pointer feeds the glass exactly as the dock's does — the
+        // sunset module wears the dock's liquid-glass material, and its
+        // cursor-tracked edge reflection is part of the material. Everything
+        // else on this surface is glass: 0.0, so nothing else changes.
+        if let Err(e) = renderer.render(&scene, text_rgba, self.options_ptr, squircle, 0) {
             error!("options render failed: {e:#}");
         }
     }

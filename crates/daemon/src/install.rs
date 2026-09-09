@@ -14,7 +14,7 @@ use waverunner_core::index::AppEntry;
 use waverunner_proto::Command;
 
 use crate::state::Target;
-use crate::{apps, content, launch, nix};
+use crate::{apps, applier, content, launch, nix};
 use crate::{App, PkgIndexState};
 
 /// A package dropped into the Apps grid and now installing in place. It
@@ -1283,6 +1283,7 @@ impl App {
             return false;
         };
         let mut rearmed = false;
+        let mut skipped_done = false;
         for (slot, t) in state
             .tiles
             .into_iter()
@@ -1290,6 +1291,24 @@ impl App {
             .enumerate()
         {
             if self.pending_installs.iter().any(|p| p.attr == t.attr) {
+                continue;
+            }
+            // A tile whose install already finished must NOT be re-staged as a
+            // live "installing" ring: that animation never completes (the work
+            // is done), and on the single-threaded loop a perpetual animation
+            // starves IPC, input, timers, and the nix-completion channel — the
+            // very event that would clear the tile — so it spins forever and
+            // takes the whole desktop down with it (Golem changes.md #37/#40;
+            // brave + alacritty both reproduced this on the ASUS 2026-09-09).
+            // The package is present and already in the app grid; just drop the
+            // stale tile. `is_installed` is synchronous, so this holds even
+            // when the loop would otherwise be starved.
+            if !t.failed && applier::is_installed(&t.attr) {
+                info!(
+                    "pending install {} already installed; dropping stale tile (no re-animate)",
+                    t.attr
+                );
+                skipped_done = true;
                 continue;
             }
             let icon_pixels = std::fs::read(pending_icon_path(&t.attr)).unwrap_or_default();
@@ -1340,6 +1359,11 @@ impl App {
                 attr,
             });
             rearmed = true;
+        }
+        // Persist the cleanup so a dropped already-installed tile does not
+        // reappear from disk on the next restart.
+        if skipped_done {
+            self.save_install_state();
         }
         rearmed
     }

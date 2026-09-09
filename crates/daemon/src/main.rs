@@ -17,6 +17,9 @@ mod brain;
 mod clip_source;
 mod clipboard;
 mod content;
+mod deck;
+mod deck_audio;
+mod deck_thumbs;
 mod dict;
 mod dragging;
 mod files;
@@ -51,6 +54,8 @@ mod persist;
 mod pins;
 mod renderer;
 mod screencopy;
+mod stage;
+mod sunset;
 mod state;
 mod surface;
 mod thumbs;
@@ -233,6 +238,18 @@ fn main() -> anyhow::Result<()> {
             config.options.render_scale.max(1),
         )
     });
+    // The STAGE deck: a full-width strip on the bottom edge, drawn into the gap
+    // the staged workspace's rule opens. Created up front (its renderer arrives
+    // on first configure) so entering the mode is instant; it paints nothing and
+    // takes no input until then.
+    let deck_layer = Some(surface::create_deck_surface(
+        &compositor,
+        &layer_shell,
+        &qh,
+        stage::BAND as u32,
+        config.options.render_scale.max(1),
+    ));
+
     // wlr-screencopy + shm for the smart-gaps colour-match. Both optional:
     // without them (or without Hyprland IPC) the bar just never matches.
     let shm = Shm::bind(&globals, &qh).ok();
@@ -276,6 +293,14 @@ fn main() -> anyhow::Result<()> {
     let (brain_tx, brain_rx) = channel::channel::<options_engine::ContextState>();
     let (options_tx, options_rx) = channel::channel::<options_engine::OptionSet>();
     brain::start(brain_tx, options_tx);
+
+    // STAGE deck thumbnails: captured off-loop as each task settles on stage.
+    let (deck_thumb_tx, deck_thumb_rx) = channel::channel::<deck_thumbs::Event>();
+    let deck_thumbs = deck_thumbs::spawn(deck_thumb_tx);
+
+    // STAGE deck audio badges: polled off-loop, only while the mode is up.
+    let (deck_audio_tx, deck_audio_rx) = channel::channel::<Vec<deck_audio::Stream>>();
+    let deck_audio = deck_audio::spawn(deck_audio_tx);
 
     // File thumbnails arrive from their own worker as they render.
     let (thumb_tx, thumb_rx) = channel::channel::<thumbs::Event>();
@@ -360,9 +385,16 @@ fn main() -> anyhow::Result<()> {
         shell_output: None,
         options_bar_matched: None,
         options_pill_color: None,
+        dock_bar_matched: None,
+        dock_pill_color: None,
+        clip_pill_color: None,
+        bar_want: None,
+        dock_want: None,
+        clip_want: None,
         options_match: None,
         capture: None,
         options_poll_pending: false,
+        options_burst_pending: false,
         screencopy,
         shm,
         shm_pool: None,
@@ -376,6 +408,21 @@ fn main() -> anyhow::Result<()> {
         overview_hover: None,
         resize_drag: false,
         resize_watch_running: false,
+        stage: stage::Stage::default(),
+        deck_layer,
+        deck_renderer: None,
+        deck_size: (0, 0),
+        deck_screen: (0.0, 0.0),
+        deck: deck::Deck::default(),
+        deck_last_frame: None,
+        deck_frame_pending: false,
+        deck_thumbs,
+        deck_audio,
+        deck_audio_map: HashSet::new(),
+        deck_thumb_layer: HashMap::new(),
+        deck_thumb_chains: Vec::new(),
+        deck_icon_capacity: 0,
+        deck_ptr: None,
         frecency: focus_cycle::Frecency::default(),
         focus_walk: None,
         walk_focus_pending: None,
@@ -383,6 +430,8 @@ fn main() -> anyhow::Result<()> {
         options_clock_w: 0.0,
         options_date_w: 0.0,
         options_title_w: 0.0,
+        sunset_text_w: 0.0,
+        sunset_inner_w: 0.0,
         options_fullscreen: false,
         options_hidden: false,
         options_reveal_deadline: None,
@@ -394,6 +443,8 @@ fn main() -> anyhow::Result<()> {
         options_lead: options::LeadAnim::default(),
         options_acted: None,
         options_sticky: None,
+        ws_focus: std::collections::HashMap::new(),
+        ws_restoring: None,
         options_show: options::ShowAnim::default(),
         notif: notif::NotifState::new(notif_handle),
         clip: clipboard::ClipState::new(clip_handle, clip_thumbs, clip_unfurl),
@@ -430,9 +481,10 @@ fn main() -> anyhow::Result<()> {
         jelly: jelly::JellyMembrane::new(),
         box_jelly: jelly::JellyMembrane::new(),
         pointer_inside_box: false,
-        dock_wave_h: Vec::new(),
-        dock_wave_v: Vec::new(),
-        dock_crest_prev: Vec::new(),
+        dock_mag: Vec::new(),
+        dock_fill_anim: None,
+        dock_ink_anim: None,
+        dock_wash_anim: None,
         modifiers: Modifiers::default(),
         force_new_instance: false,
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
@@ -523,6 +575,15 @@ fn main() -> anyhow::Result<()> {
         brain: None,
         options: Default::default(),
         options_sig: Vec::new(),
+        sunset_prompt_shown: false,
+        sunset_debug: false,
+        sunset_acted: false,
+        sunset_box_open: false,
+        sunset_box_e: 0.0,
+        sunset_box_last: None,
+        sunset_box_frame_pending: false,
+        sunset_auto: false,
+        sunset_temp: None,
         media_box_open: false,
         media_drag: None,
         overview_active: false,
@@ -612,6 +673,24 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("registering thumbs channel: {e}"))?;
+
+    event_loop
+        .handle()
+        .insert_source(deck_thumb_rx, |event, _, app| {
+            if let channel::Event::Msg(event) = event {
+                app.on_deck_thumb(event);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering deck thumbs channel: {e}"))?;
+
+    event_loop
+        .handle()
+        .insert_source(deck_audio_rx, |event, _, app| {
+            if let channel::Event::Msg(streams) = event {
+                app.on_deck_audio(streams);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering deck audio channel: {e}"))?;
 
     event_loop
         .handle()
@@ -785,6 +864,9 @@ fn main() -> anyhow::Result<()> {
     // Surface the Recycle Bin on the dock the first time (a one-shot pin; the
     // user can move or unpin it freely afterwards — we never re-pin it).
     app.pin_trash_once();
+    // If a previous daemon died while STAGE mode was up, its gap rules and its
+    // maximized window outlived it. Put them back before the user sees them.
+    stage::recover_if_stranded();
 
     info!("daemon up; try: waverunner-ctl toggle");
     while !app.exit {
@@ -833,12 +915,41 @@ pub struct App {
     /// *transparent* and the notification drawer is open, so the box can
     /// continue the pill's colour instead of a flat slab. See [`screencopy`].
     options_pill_color: Option<[f32; 4]>,
-    /// The output + row to sample for the current match (if any).
+    /// The dock's twin of `options_bar_matched`: a maximized window flush
+    /// above the dock, sampled and painted opaque; `None` = no match, the
+    /// dock falls back to `dock_pill_color`. See [`screencopy`].
+    dock_bar_matched: Option<[f32; 4]>,
+    /// The dock's twin of `options_pill_color`: its own frosted backdrop,
+    /// sampled continuously while nothing is matched (and frozen while the
+    /// card is open — see `screencopy::reeval_dock_bar`). See [`screencopy`].
+    dock_pill_color: Option<[f32; 4]>,
+    /// The clipboard box's OWN frosted backdrop, sampled beside `clip_rect`
+    /// (left edge) instead of `notif_rect` (right edge) — its own dedicated
+    /// sample, not a reuse of `options_pill_color`. See `Slot::ClipFrost`:
+    /// the two used to share one sample, which is why an unmatched
+    /// clipboard box took whatever the wallpaper is on the opposite side of
+    /// the screen from where it actually sits.
+    clip_pill_color: Option<[f32; 4]>,
+    /// What the bar currently wants sampled (`None` = nothing). Merged with
+    /// `dock_want`/`clip_want` into one capture — see
+    /// [`screencopy::App::rebuild_capture_target`].
+    bar_want: Option<screencopy::SampleWant>,
+    /// What the dock currently wants sampled (`None` = nothing, including
+    /// while frozen with the card open).
+    dock_want: Option<screencopy::SampleWant>,
+    /// What the clipboard box's frost sample currently wants (`None` =
+    /// nothing — only requested while the bar itself is unmatched, same as
+    /// `bar_want`'s own `BarFrost`).
+    clip_want: Option<screencopy::SampleWant>,
+    /// The output + rows to sample for the current merged capture (if any).
     options_match: Option<screencopy::CaptureTarget>,
     /// An in-flight screencopy of the focused output.
     capture: Option<screencopy::Capture>,
     /// Whether a resample timer is already queued.
     options_poll_pending: bool,
+    /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
+    /// follow-up capture after a sample changed a colour).
+    options_burst_pending: bool,
     /// wlr-screencopy manager + shm plumbing for the colour sampling.
     screencopy: Option<ZwlrScreencopyManagerV1>,
     shm: Option<Shm>,
@@ -865,6 +976,42 @@ pub struct App {
     resize_drag: bool,
     /// Whether the fast sampling mini-loop behind the readout is armed.
     resize_watch_running: bool,
+    /// STAGE mode (Super+Enter): one task alone on screen over the task deck.
+    /// Inert until entered — see `stage`.
+    stage: stage::Stage,
+    /// The deck's own bottom-edge layer surface + renderer, built on its first
+    /// configure like the topbar's. Present but empty (and click-through)
+    /// whenever stage mode is off.
+    deck_layer: Option<LayerSurface>,
+    deck_renderer: Option<Renderer>,
+    /// The deck surface's logical size.
+    deck_size: (u32, u32),
+    /// The output's logical size, so a tile can carry the screen's aspect.
+    deck_screen: (f32, f32),
+    /// Tile layout + the swap choreography — see `deck`.
+    deck: deck::Deck,
+    /// Last deck frame time, for dt-based tile motion.
+    deck_last_frame: Option<std::time::Instant>,
+    /// Whether a deck frame callback is already in flight, so a burst of
+    /// redraws does not stack callbacks.
+    deck_frame_pending: bool,
+    /// The off-loop window-thumbnail capturer for the deck.
+    deck_thumbs: deck_thumbs::DeckThumbs,
+    /// The audio poller (runs only while staged) and its latest answer:
+    /// window pid → (PipeWire node to mute, currently muted).
+    deck_audio: deck_audio::DeckAudio,
+    deck_audio_map: HashSet<String>,
+    /// Thumbnail texture layers on the deck's renderer, by window address, plus
+    /// the chains themselves (kept so a new layer can re-upload the whole array).
+    deck_thumb_layer: HashMap<String, u32>,
+    deck_thumb_chains: Vec<Vec<u8>>,
+    /// Layers allocated in the deck renderer's icon array. Pre-sized at
+    /// rebuild so a thumbnail arriving is a single-layer write, never a
+    /// reallocation. See `rebuild_deck`.
+    deck_icon_capacity: u32,
+    /// Pointer position on the deck surface — only `Enter`/`Motion` carry
+    /// coordinates, so the button handler reads the last one seen.
+    deck_ptr: Option<(f32, f32)>,
     /// Decaying focus-frequency scores driving the usage-aware focus cycle
     /// (clicking the current-task pill; see `focus_cycle`).
     frecency: focus_cycle::Frecency,
@@ -881,6 +1028,11 @@ pub struct App {
     options_clock_w: f32,
     options_date_w: f32,
     options_title_w: f32,
+    /// Sunset-prompt measurements: the question text alone, and the nested
+    /// [turn on] pill (label + its padding) — `options_title_w` carries their
+    /// sum while the prompt holds the window pill (see `measure_options_text`).
+    sunset_text_w: f32,
+    sunset_inner_w: f32,
     /// Fullscreen auto-hide: whether the focused window is fullscreen, whether
     /// the bar is currently concealed, and the dwell/grace timers that reveal
     /// it on a deliberate top-edge hold.
@@ -914,6 +1066,12 @@ pub struct App {
     /// The bar's own fade in/out, on the surface's shared tempo
     /// (`OptionUXRules.md` §3).
     options_show: options::ShowAnim,
+    /// Which window was last focused on each workspace, so a space entered by
+    /// swipe hands back the window you left there (see [`crate::focus_cycle`]).
+    ws_focus: std::collections::HashMap<i64, String>,
+    /// The workspace whose focus is mid-restore, if any — recording is paused
+    /// for it so the arrival focus cannot overwrite the note being restored.
+    ws_restoring: Option<i64>,
     /// Notification OPTION: bell + peek + history dropdown (see [`crate::notif`]).
     notif: notif::NotifState,
     /// Clipboard OPTION: watched history + copy-back (see [`crate::clipboard`]).
@@ -974,12 +1132,18 @@ pub struct App {
     box_jelly: jelly::JellyMembrane,
     /// Whether the pointer was inside the open box last motion event.
     pointer_inside_box: bool,
-    /// AGUA splash ripple surface across the dock: per-icon wave height
-    /// and velocity (0 = flat), plus last frame's per-icon crest so a
-    /// collapsing crest can splash the surface. Resized with the dock.
-    dock_wave_h: Vec<f32>,
-    dock_wave_v: Vec<f32>,
-    dock_crest_prev: Vec<f32>,
+    /// Smoothed per-slot dock magnification (1.0 = rest): each frame the
+    /// drawn scales ease toward the pointer-derived targets (quick bloom,
+    /// slower melt) instead of snapping per pointer event. Resized with
+    /// the dock; handed to `scene()` via `FrameInput::dock_mag`.
+    dock_mag: Vec<f32>,
+    /// The dock fill / ink / hover-wash colours actually on screen, each
+    /// easing toward its sampled target (see `dock_surface_eased`) so
+    /// colour changes fade instead of blinking — the ink's black↔white
+    /// flip included. `None` until the first frame seeds them.
+    dock_fill_anim: Option<[f32; 4]>,
+    dock_ink_anim: Option<[f32; 4]>,
+    dock_wash_anim: Option<[f32; 4]>,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
     /// Set only for the duration of a middle-click activation: force a
@@ -1276,6 +1440,26 @@ pub struct App {
     /// laid out, so a Mind republish that doesn't change the visible controls
     /// doesn't churn the pill layout.
     options_sig: Vec<(String, String)>,
+    /// The sunset eye-protection prompt (see `options.rs`, "sunset prompt"):
+    /// whether the current-task pill is currently showing it (the drawn state),
+    /// the debug force flag (`debug-sunset` ctl verb), and whether the user
+    /// already resolved this offer (clicked [turn on] / dismissed) so it stays
+    /// down until the Mind withdraws and re-offers it.
+    sunset_prompt_shown: bool,
+    sunset_debug: bool,
+    sunset_acted: bool,
+    /// The sunset settings box (the gear expands the module downward into a
+    /// panel, like the notif/clipboard boxes): whether it's open (intent) and
+    /// its eased open progress 0 (pill) → 1 (full box), plus the frame loop's
+    /// dt clock and pending guard. `sunset_auto` is the panel's stub toggle.
+    sunset_box_open: bool,
+    sunset_box_e: f32,
+    sunset_box_last: Option<Instant>,
+    sunset_box_frame_pending: bool,
+    sunset_auto: bool,
+    /// The screen temperature last chosen from the settings box (Kelvin), so
+    /// the panel can mark the active preset. `None` until one is picked.
+    sunset_temp: Option<u32>,
     /// The media transport box (a media player is active and its box pill was
     /// clicked): a full panel — track, prev/play-pause/next, seek + volume bars
     /// — grown into the topbar's reserved dropdown region. See `mediabox.rs`.
@@ -1533,6 +1717,17 @@ impl App {
         self.config.options.height as f32 * self.options_scale()
     }
 
+    /// The dock's LIVE reserved height (logical px): the same value its
+    /// intellihide dodge-zone check uses, and the twin of
+    /// [`Self::options_bar_h`] for [`hypr::bottom_fill`]'s edge test. Scales
+    /// with `icon_scale`, matching `scaled_extents`'s docked extent — a
+    /// smaller icon size means a shorter dock, and the window-flush test
+    /// must track the strip actually reserved, not a stale full-size one.
+    pub(crate) fn dock_bar_h(&self) -> f32 {
+        (self.config.window.input_bar_height + self.config.window.bottom_margin) as f32
+            * self.icon_scale()
+    }
+
     /// Re-apply the topbar's reserved (exclusive) zone at the live scale.
     ///
     /// The surface is created before outputs are enumerated, so the initial
@@ -1747,6 +1942,44 @@ impl App {
                 self.set_window_mode(hypr::WindowMode::Pseudo);
                 return;
             }
+            // STAGE mode (Super+Enter). Owns only the compositor state it
+            // changes; the launcher's rest-state machine is untouched.
+            Command::StageToggle => {
+                self.stage.toggle();
+                if self.stage.is_on() {
+                    // Only the window, the deck and the OPTIONS bar. Tuck the
+                    // dock away (its edge-reveal strip lives exactly where the
+                    // tiles now are), and close the overview if it is up — its
+                    // key is unbound from here on, so nothing can reopen it.
+                    if self.overview_active {
+                        hypr::close_overview();
+                    }
+                    self.handle_command(Command::Hide);
+                }
+                // The deck follows the mode: tiles on entering, empty and
+                // click-through on leaving. So does the audio poller — the
+                // speaker badges cost a pw-dump a second, which only the mode
+                // may spend.
+                self.deck_audio.set_active(self.stage.is_on());
+                if !self.stage.is_on() {
+                    self.deck_audio_map.clear();
+                }
+                self.rebuild_deck();
+                self.sync_input_region();
+                // And so does the bar's (and dock's) colour-match: suspended
+                // while the mode owns the screen, back the moment it lets go —
+                // decided here rather than left to whatever layout event
+                // happens to fire.
+                self.reeval_options_bar();
+                self.reeval_dock_bar();
+                return;
+            }
+            Command::StageShow(addr) => {
+                if !addr.is_empty() {
+                    self.stage_switch_to(addr.trim());
+                }
+                return;
+            }
             // Overview: the pill follows the pointer across the grid, and
             // shows the live size while a thumbnail is resized.
             Command::OverviewHover(title) => {
@@ -1776,8 +2009,8 @@ impl App {
             }
             // While the overview owns the screen, ignore reveals (its close
             // signal restores things); Hide stays allowed.
-            Command::Show | Command::Toggle | Command::Expand if self.overview_active => {
-                debug!("overview active: ignoring {command}");
+            Command::Show | Command::Toggle | Command::Expand if self.dock_suppressed() => {
+                debug!("dock suppressed: ignoring {command}");
                 return;
             }
             Command::DebugDict => {
@@ -1844,6 +2077,27 @@ impl App {
                 }
                 return;
             }
+            Command::DebugSunset => {
+                // When the prompt is already up, the verb instead toggles the
+                // settings box (so the gear's expand can be screenshotted
+                // without a cursor warp); otherwise it forces the prompt.
+                if self.sunset_prompt_shown {
+                    self.toggle_sunset_box();
+                    info!("debug-sunset: settings box {}", self.sunset_box_open);
+                    return;
+                }
+                self.sunset_debug = !self.sunset_debug;
+                // A fresh force starts a fresh offer: forget an old resolution.
+                if self.sunset_debug {
+                    self.sunset_acted = false;
+                }
+                info!(
+                    "debug-sunset: prompt force {}",
+                    if self.sunset_debug { "ON" } else { "OFF" }
+                );
+                self.sync_sunset_prompt();
+                return;
+            }
             _ => {}
         }
         // Summoning or expanding is the moment freshness matters:
@@ -1867,22 +2121,6 @@ impl App {
                 }
                 _ => {}
             }
-            // Horizontal wave when the launcher card fully opens or starts closing.
-            // Fires for both keyboard (Super+Space, Escape) and pointer paths since
-            // all state transitions funnel through handle_command.
-            let is_opening = prev != Target::Open && next == Target::Open;
-            let is_closing = prev == Target::Open && next != Target::Open;
-            if is_opening || is_closing {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    let sw = self.config.window.width as f32 + 2.0 * content::DRAG_MARGIN_X;
-                    let sh = self.config.window.height as f32
-                        + self.config.window.bottom_margin as f32
-                        + content::MAGNIFY_HEADROOM
-                        + content::DRAG_MARGIN_TOP;
-                    let (wx, wy) = self.pointer_pos.unwrap_or((sw * 0.5, sh));
-                    renderer.record_box_wave(wx, wy);
-                }
-            }
             self.schedule_frame();
         }
     }
@@ -1901,6 +2139,7 @@ impl App {
         // match (which depends on the fullscreen state).
         self.refresh_options_content();
         self.reeval_options_bar();
+        self.reeval_dock_bar();
         if !self.config.input.intellihide {
             return;
         }
@@ -1936,7 +2175,7 @@ impl App {
             // when the covering window is moved or closed). Not while the
             // overview owns the screen (its close re-evaluates the zone).
             self.hide_deadline = None;
-            if self.ui.target() == Target::Hidden && !self.overview_active {
+            if self.ui.target() == Target::Hidden && !self.dock_suppressed() {
                 self.handle_command(Command::Show);
             }
         } else if self.ui.target() == Target::Dock && self.pointer_pos.is_none() {
@@ -2027,6 +2266,15 @@ impl App {
     /// over a fullscreen window, and the window pill becomes
     /// overview-aware. Close: restore, and let intellihide re-evaluate
     /// the zone (a parked dock returns on its own if the zone is free).
+    /// Whether the dock must stay out of the way: something else owns the
+    /// screen. Two cases, and they suppress the same three things — reveal
+    /// commands, the auto-reveal when the zone clears, and the bottom-edge input
+    /// strip that would otherwise sit under the deck's tiles and eat their
+    /// clicks.
+    fn dock_suppressed(&self) -> bool {
+        self.overview_active || self.stage.is_on()
+    }
+
     fn set_overview(&mut self, active: bool) {
         if self.overview_active == active {
             return;
@@ -2137,6 +2385,11 @@ impl App {
             .collect();
         let changed = sig != self.options_sig;
         self.options = options;
+        // The sunset offer has its own surface (the current-task pill's
+        // prompt), so it is not in the surfaced signature above — reconcile it
+        // on every republish: raise on offer, and reset a spent resolution
+        // when the Mind withdraws (hyprsunset ran / the sun came back).
+        self.sync_sunset_prompt();
         if changed {
             if !self.options_sig.is_empty() || !sig.is_empty() {
                 info!(
@@ -2967,56 +3220,6 @@ impl App {
             || pos.1 > layout.card_top + layout.card_h
     }
 
-    /// Surface-pixel center of the slot an icon will land in for the
-    /// current drag. Call this *before* any drop mutation clears the
-    /// drag state. Returns `None` when no drag is active or the drop
-    /// position can't be resolved to a slot.
-    ///
-    /// Covers all three drop surfaces with the same logic:
-    ///   • box  — cell center snapped from the pointer position
-    ///   • dock — final slot center (accounts for the from-dock offset)
-    ///   • grid — reorder-slot center (or the icon's current slot)
-    fn drop_ripple_pos(&self) -> Option<(f32, f32)> {
-        let pos = self.pointer_pos?;
-
-        if self.box_drag.is_some() {
-            return self.box_drag_cell_center(pos);
-        }
-
-        let drag = self.gesture.dragging.as_ref()?;
-        let layout = self.current_layout();
-
-        if let Some(i) = self.drag_dock_insert(&layout, pos) {
-            let origin = self.dock_order.iter().position(|&e| e == drag.entry_idx);
-            let land =
-                i.saturating_sub(usize::from(drag.from_dock && origin.is_some_and(|o| o < i)));
-            let s = layout
-                .dock_slots
-                .get(land)
-                .or_else(|| layout.dock_slots.last())?;
-            return Some((s.x + s.w * 0.5, s.y + s.h * 0.5));
-        }
-
-        let sec = &layout.sections[content::SECTION_APPS];
-        let visible = &self.search.visible[content::SECTION_APPS];
-        let orig = visible.iter().position(|&v| v == drag.entry_idx);
-        let orig_slot = orig.and_then(|o| self.apps_slots.get(o).copied());
-        let slot = self.reorder_slot.or(orig_slot)?;
-        let cap = self.apps_cap.max(1);
-        let page = slot / cap;
-        let within = slot % cap;
-        let cols = sec.cols.max(1);
-        let cw = content::GRID_CELL_W * self.icon_scale();
-        let ch = content::GRID_CELL_H * self.icon_scale();
-        Some((
-            sec.viewport.x - sec.scroll
-                + page as f32 * sec.viewport.w
-                + (within % cols) as f32 * cw
-                + cw * 0.5,
-            sec.viewport.y + (within / cols) as f32 * ch + ch * 0.5,
-        ))
-    }
-
     /// Drop a pointer position left stale above the collapsed dock.
     ///
     /// When our input region shrinks out from under a motionless cursor
@@ -3520,7 +3723,7 @@ impl App {
             .round() as u32;
         if self.ui.target() == Target::Hidden
             && self.config.input.edge_reveal
-            && !self.overview_active
+            && !self.dock_suppressed()
         {
             extent = extent.max(self.config.input.edge_reveal_px);
         }
@@ -3909,9 +4112,21 @@ impl CompositorHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        // Route by surface. The deck runs its own tweens on its own renderer;
+        // without this its frame callback drove the DOCK's draw instead, so the
+        // tile motion advanced exactly one tick per click and then froze.
+        if self
+            .deck_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            self.deck_frame_pending = false;
+            self.draw_deck();
+            return;
+        }
         self.frame_pending = false;
         if self.ui.is_animating() || self.bounce.is_some() || self.dirty {
             self.draw();
@@ -3982,6 +4197,14 @@ impl LayerShellHandler for App {
             .is_some_and(|opt| opt.wl_surface() == layer.wl_surface())
         {
             self.configure_options(configure);
+            return;
+        }
+        if self
+            .deck_layer
+            .as_ref()
+            .is_some_and(|d| d.wl_surface() == layer.wl_surface())
+        {
+            self.configure_deck(configure);
             return;
         }
         let (mut width, mut height) = configure.new_size;
@@ -4215,6 +4438,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         if let wl_pointer::Event::Enter { surface, .. } = &event {
             app.pointer_surface = app.classify_pointer_surface(surface);
         }
+        if app.pointer_surface == options::PointerSurface::Deck {
+            app.deck_pointer(event);
+            return;
+        }
         if app.pointer_surface == options::PointerSurface::Options {
             app.options_pointer(event);
             return;
@@ -4248,25 +4475,22 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 let prev_pos = app.pointer_pos; // save before update for velocity
                 let pos = (surface_x as f32, surface_y as f32);
                 app.pointer_pos = Some(pos);
-                // Edge-crossing ripple: fire whenever the pointer crosses the
-                // card boundary (inside ↔ outside), regardless of click.
+                // Edge-crossing jelly poke: fire whenever the pointer crosses
+                // the card boundary (inside ↔ outside), regardless of click.
                 {
                     let layout = app.current_layout();
                     let now_inside = !app.outside_card(&layout, pos);
-                    if now_inside != app.pointer_inside_card {
-                        if let Some(renderer) = app.renderer.as_mut() {
-                            renderer.record_click(pos.0, pos.1);
-                        }
-                        if app.ui.target() == Target::Open {
-                            let rect = content::Rect::new(
-                                layout.card_x,
-                                layout.card_top,
-                                layout.card_w,
-                                layout.card_h,
-                            );
-                            app.jelly.poke(rect, pos, prev_pos, now_inside);
-                            app.schedule_frame();
-                        }
+                    if now_inside != app.pointer_inside_card
+                        && app.ui.target() == Target::Open
+                    {
+                        let rect = content::Rect::new(
+                            layout.card_x,
+                            layout.card_top,
+                            layout.card_w,
+                            layout.card_h,
+                        );
+                        app.jelly.poke(rect, pos, prev_pos, now_inside);
+                        app.schedule_frame();
                     }
                     app.pointer_inside_card = now_inside;
                 }
@@ -4274,9 +4498,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 if let Some(br) = app.current_layout().open_box {
                     let now_inside_box = br.contains(pos);
                     if now_inside_box != app.pointer_inside_box {
-                        if let Some(renderer) = app.renderer.as_mut() {
-                            renderer.record_click(pos.0, pos.1);
-                        }
                         app.box_jelly.poke(br, pos, prev_pos, now_inside_box);
                         app.schedule_frame();
                     }
@@ -4418,32 +4639,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         app.update_hover();
                         app.gesture.pressed = app.hover;
                         app.gesture.press_pos = app.pointer_pos;
-                        if let (Some((x, y)), Some(renderer)) =
-                            (app.pointer_pos, app.renderer.as_mut())
-                        {
-                            // Click ripple only. The box wave (a full-surface
-                            // darkening sweep) is reserved for box open/close,
-                            // not clicks inside an open box.
-                            renderer.record_click(x, y);
-                        }
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
                         app.gesture.press_pos = None;
                         if app.box_drag.is_some() {
-                            let rp = app.drop_ripple_pos();
                             app.drop_box_drag();
-                            if let (Some(r), Some((x, y))) = (app.renderer.as_mut(), rp) {
-                                r.record_click(x, y);
-                            }
                         } else if app.gesture.dragging.is_some() {
-                            let rp = app.drop_ripple_pos();
                             let drag = app.gesture.dragging.take().unwrap();
                             let layout = app.current_layout();
                             let insert = app.drag_dock_insert(&layout, drag.pos);
                             app.drop_drag(drag, insert, true);
-                            if let (Some(r), Some((x, y))) = (app.renderer.as_mut(), rp) {
-                                r.record_click(x, y);
-                            }
                         } else {
                             // Native button behavior: activate on release,
                             // only if it happens on the item the press armed
@@ -4451,11 +4656,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             app.update_hover();
                             if let Some(hit) = app.gesture.pressed.take() {
                                 if app.hover == Some(hit) {
-                                    if let (Some(renderer), Some((x, y))) =
-                                        (app.renderer.as_mut(), app.pointer_pos)
-                                    {
-                                        renderer.record_click(x, y);
-                                    }
                                     app.activate_hit(hit);
                                 }
                                 // else: drag-cancel — do nothing.

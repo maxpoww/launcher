@@ -10,7 +10,7 @@
 # that can affect the system or the boot.
 #
 # Usage:
-#   verify-ui.sh [--build] [--restart] [--reveal dock|open|none]
+#   verify-ui.sh [--build] [--restart] [--reveal dock|open|clip|clip-detail|notif|sunset|none]
 #                [--geom "X,Y WxH"] [--out PATH]
 #
 # Defaults: --build --restart --reveal none  (screenshot the whole screen)
@@ -68,12 +68,21 @@ if [ "$do_restart" = 1 ]; then
   # Keep the daemon's stdout/stderr in a log so runtime errors — notably wgpu
   # validating WGSL shaders at pipeline creation — are inspectable after a crash.
   setsid "$DEV_LAUNCHER" >"$SHOT_DIR/daemon.log" 2>&1 < /dev/null &
-  # Give the layer surface time to map.
-  sleep 1.5
-  if ! pgrep -f "$DAEMON_PAT" >/dev/null; then
+  # Give the layer surface time to map. Poll instead of a flat sleep — GPU/
+  # shader pipeline setup (wgpu adapter probe, WGSL compile) has been seen to
+  # take past 1.5s on this machine, which made a live daemon look dead.
+  up=0
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if pgrep -f "$DAEMON_PAT" >/dev/null; then up=1; break; fi
+    sleep 0.3
+  done
+  if [ "$up" != 1 ]; then
     echo "!! daemon did not come back up — check $DEV_LAUNCHER" >&2
     exit 1
   fi
+  # The process existing isn't the same as the surface being mapped yet —
+  # keep the old fixed settle after the poll confirms it's alive.
+  sleep 1.5
 fi
 
 case "$reveal" in
@@ -82,8 +91,9 @@ case "$reveal" in
   clip)        "$CTL" debug-clip 2>/dev/null || true; sleep 0.8 ;;
   clip-detail) "$CTL" debug-clip-detail 2>/dev/null || true; sleep 0.9 ;;
   notif)       "$CTL" debug-notif 2>/dev/null || true; sleep 0.8 ;;
+  sunset)      "$CTL" debug-sunset 2>/dev/null || true; sleep 0.8 ;;
   none) ;;
-  *) echo "verify-ui: --reveal must be dock|open|clip|clip-detail|notif|none" >&2; exit 2 ;;
+  *) echo "verify-ui: --reveal must be dock|open|clip|clip-detail|notif|sunset|none" >&2; exit 2 ;;
 esac
 
 echo ">> capturing screenshot…" >&2

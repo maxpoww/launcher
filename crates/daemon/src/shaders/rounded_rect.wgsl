@@ -9,11 +9,19 @@ struct Globals {
     time:      f32,
     cursor:    vec2<f32>,  // pointer in surface pixels; (-9999,-9999) = absent
     _pad:      vec2<f32>,
-    // Up to 4 simultaneous ripples: (x, y, age, 0); x < -9000 = inactive.
-    ripples:   array<vec4<f32>, 4>,
-    // Up to 2 box open/close waves: (cx, cy, age, 0); cx < -9000 = inactive.
-    box_waves: array<vec4<f32>, 2>,
+    // Banner blister: (bar_edge_y, k, _, _). A blister-flagged rect (glass≈2)
+    // is the bar's own material smooth-unioned with the half-plane above
+    // bar_edge_y — the banner swells around the module like a snake with the
+    // pill inside. x < -9000 = off.
+    neck:      vec4<f32>,
 };
+
+// Polynomial smooth-min: blends two SDFs with a fillet of radius ~k — the
+// metaball union that makes two shapes merge with a smooth bulge.
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -73,36 +81,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let coverage = clamp(0.5 - sd, 0.0, 1.0);
 
-    // Box open/close wave: applied to ALL rects so the effect is visible
-    // even when the box overlay covers the card background.
-    //
-    // Two layers, both full card-width (no lateral taper):
-    //   flash — immediate bright pulse at the icon, fades in ~0.15 s
-    //   ring  — Gaussian envelope riding the wave front at 200 px/s
-    //
-    // Result is mixed toward white so it reads clearly on any background.
-    var box_wave = 0.0;
-    for (var i = 0u; i < 2u; i++) {
-        let bw  = globals.box_waves[i];
-        if bw.x > -9000.0 {
-            let dy    = in.px.y - bw.y;
-            let age   = bw.z;
-            let front = abs(dy) - age * 900.0;
-            let age_decay = exp(-age * 4.0);
-            // Three bands trailing the wave front, each fatter than the last.
-            let b0 = exp(-front * front / 80000.0) * 0.65;
-            let b1 = exp(-(front + 70.0)  * (front + 70.0)  / 160000.0) * 0.48;
-            let b2 = exp(-(front + 150.0) * (front + 150.0) / 350000.0) * 0.32;
-            let flash = exp(-abs(dy) * 0.06) * exp(-age * 14.0) * 0.40;
-            box_wave += (b0 + b1 + b2) * age_decay + flash;
-        }
+    // Banner blister (glass ≈ 2): a SOLID fill of the bar's own colour whose
+    // shape is the rounded rect smooth-unioned with the half-plane above the
+    // bar edge — so the banner bulges around the module (drawn on a quad
+    // expanded by `k`, the SDF inset back by `k` to the true rect).
+    if abs(in.glass - 2.0) < 0.5 && globals.neck.x > -9000.0 {
+        let k = globals.neck.y;
+        let half2 = half - vec2<f32>(k);
+        let r2 = min(in.radius, min(half2.x, half2.y));
+        let q2 = abs(p) - half2 + vec2<f32>(r2);
+        let d_rect = length(max(q2, vec2<f32>(0.0))) + min(max(q2.x, q2.y), 0.0) - r2;
+        let d_bar = in.px.y - globals.neck.x; // <0 above the bar edge (in the bar)
+        let du = smin(d_rect, d_bar, k);
+        // Clip the blister to BELOW the bar edge: the full-width bar strip
+        // already paints the banner above the line, and the strip + this
+        // blister are the SAME (translucent) banner material — drawing both
+        // over the same pixels stacked their opacity and darkened the banner
+        // (Max). So the strip owns the bar band; the blister only adds the
+        // bulge below it. `below` fades in across the edge (±0.5px AA).
+        let below = clamp((in.px.y - globals.neck.x) + 0.5, 0.0, 1.0);
+        let cov = clamp(0.5 - du, 0.0, 1.0) * below;
+        let rgb = in.color.rgb;
+        let a = in.color.a * globals.alpha * cov;
+        return vec4<f32>(rgb * a, a);
     }
-    // Subtle darkening sweep; negative = darken.
-    let box_lum = -box_wave * 0.015;
 
     // Solid fill (hover highlights, dividers, box overlay, etc.)
     if in.glass < 0.5 {
-        var rgb = clamp(in.color.rgb + vec3<f32>(box_lum), vec3<f32>(0.0), vec3<f32>(1.0));
+        var rgb = in.color.rgb;
         // Hard-edged fill (glass < -0.5): no SDF anti-aliasing. Used by the
         // colour-matched OPTIONS bar, whose bottom edge abuts a window of the
         // SAME colour. A fractional-alpha AA edge there gets gamma-lifted by
@@ -140,18 +146,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let norm_x  = from_left / rect_w;
     let side    = abs(norm_x - 0.5) * 2.0;
     let fresnel = clamp((side - 0.48) / 0.52, 0.0, 1.0) * 0.02 * in.glass;
-
-    // Ripples: each active ripple adds an expanding circular sine wave.
-    var ripple = 0.0;
-    for (var i = 0u; i < 4u; i++) {
-        let rp = globals.ripples[i];
-        if rp.x > -9000.0 {
-            let dist  = length(in.px - rp.xy);
-            let front = dist - rp.z * 150.0;
-            let decay = exp(-rp.z * 1.0) * exp(-abs(front) * 0.03);
-            ripple   += sin(front * 0.10) * decay * 0.0013;
-        }
-    }
 
     // Layer 6 — boundary rim glow: thin bright ring at the SDF card edge.
     // Scaled by `in.glass` so group boxes (0.5) get half the glow of the main card (1.0).
@@ -203,7 +197,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         spotlight *= 0.06;
     }
 
-    let lum = vig + fresnel + ripple + box_lum + boundary + spotlight;
+    let lum = vig + fresnel + boundary + spotlight;
     var rgb  = clamp(in.color.rgb + vec3<f32>(lum), vec3<f32>(0.0), vec3<f32>(1.0));
     rgb     += iri;
 

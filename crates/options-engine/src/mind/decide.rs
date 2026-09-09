@@ -83,6 +83,7 @@ const PROVIDERS: &[Provider] = &[
     creative_provider,
     presentation_provider,
     notifications_provider,
+    sunset_provider,
 ];
 
 /// Decide the current option set from a context snapshot alone (no temporal
@@ -359,6 +360,7 @@ fn layer_alive(ctx: &ContextState, layer: Layer) -> bool {
         Layer::Hardware => ctx.health.hardware.alive,
         Layer::System => ctx.health.system.alive,
         Layer::Notifications => ctx.health.notifications.alive,
+        Layer::Daylight => ctx.health.daylight.alive,
     }
 }
 
@@ -415,12 +417,44 @@ fn deploy_provider(ctx: &ContextState) -> Vec<Affordance> {
     vec![]
 }
 
+/// Sunset → eye protection: the sun has gone down and the screen is still
+/// cold-white, so offer to warm it. Appearing exactly when its use becomes
+/// logical (pillar 3) and withdrawing by itself once hyprsunset runs (however
+/// it was started) or the sun comes back. The surface gives this offer the
+/// current-task pill itself — see the daemon's sunset prompt — so it is
+/// excluded from the generic OPTION-pill cluster there.
+fn sunset_provider(ctx: &ContextState) -> Vec<Affordance> {
+    let d = &ctx.daylight;
+    if !d.after_sunset || d.eye_protection_on {
+        return vec![];
+    }
+    vec![Affordance {
+        id: "sunset.eye_protection",
+        // A direct control, not fade-for-experts scaffolding: the sun sets for
+        // an expert too, so skill must never erode it (`AffordanceKind::Action`
+        // let routine media controls on an Idle/empty workspace crowd it out of
+        // `max_items` before it reached the surface). Ranks just under the
+        // safety warnings and clear of the control band, so the offer always
+        // survives to its dedicated surface (the current-task pill prompt),
+        // whatever the user is — or isn't — doing.
+        kind: AffordanceKind::Control,
+        title: "Turn on eye protection".into(),
+        detail: "The sun is set — warm the screen".into(),
+        relevance: 0.75,
+        reason: "sun below the horizon, hyprsunset not running",
+        source: Layer::Daylight,
+        action: AffordanceAction::Daemon("eye_protection_on".into()),
+    }]
+}
+
 /// Battery: escalating urgency as it drains on battery power.
 fn battery_provider(ctx: &ContextState) -> Vec<Affordance> {
     let Some(pct) = ctx.metrics.battery_pct else {
         return vec![];
     };
-    if ctx.metrics.is_charging {
+    // On wall power (or actively charging) the battery isn't draining — a
+    // dead battery on AC reads "Not charging 0%", not a real drain (#38).
+    if ctx.metrics.is_charging || ctx.metrics.on_ac {
         return vec![];
     }
     if pct <= 15 {
@@ -1972,7 +2006,32 @@ mod tests {
         ctx.health.selection.alive = true;
         ctx.health.system.alive = true;
         ctx.health.notifications.alive = true;
+        ctx.health.daylight.alive = true;
         ctx
+    }
+
+    #[test]
+    fn sunset_offers_eye_protection_until_taken() {
+        let mut ctx = live_ctx();
+        ctx.daylight.after_sunset = true;
+        let opts = decide(&ctx, &Tuning::default());
+        let offer = opts
+            .items
+            .iter()
+            .find(|a| a.id == "sunset.eye_protection")
+            .expect("sunset offer");
+        assert_eq!(
+            offer.action,
+            AffordanceAction::Daemon("eye_protection_on".into())
+        );
+        // Once hyprsunset runs — however it was started — the offer withdraws.
+        ctx.daylight.eye_protection_on = true;
+        let opts = decide(&ctx, &Tuning::default());
+        assert!(opts.items.iter().all(|a| a.id != "sunset.eye_protection"));
+        // And it never appears in daytime.
+        ctx.daylight = Default::default();
+        let opts = decide(&ctx, &Tuning::default());
+        assert!(opts.items.iter().all(|a| a.id != "sunset.eye_protection"));
     }
 
     #[test]

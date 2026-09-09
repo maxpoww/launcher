@@ -168,6 +168,7 @@ impl UiState {
             | Command::DebugOptions
             | Command::DebugMediaBox
             | Command::DebugHoverOption
+            | Command::DebugSunset
             | Command::OptionsTrigger(_)
             | Command::OverviewOn
             | Command::OverviewOff
@@ -178,7 +179,11 @@ impl UiState {
             | Command::FocusNext
             | Command::FocusOther
             | Command::OverviewHover(_)
-            | Command::OverviewResize(_) => false,
+            | Command::OverviewResize(_)
+            // STAGE mode drives compositor state, not the launcher's rest
+            // states — handled in `handle_command` before it reaches here.
+            | Command::StageToggle
+            | Command::StageShow(_) => false,
         }
     }
 

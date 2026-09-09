@@ -129,6 +129,14 @@ pub struct SystemMetrics {
     pub ram_usage_pct: f32,
     pub battery_pct: Option<u8>,
     pub is_charging: bool,
+    /// Whether a Mains (AC) supply reads `online` — the machine is on wall
+    /// power. A present-but-dead battery reports "Not charging 0%" (not
+    /// "Discharging") while plugged in (the ASUS X550LC, 2026-09-09; the
+    /// class the battery ladder's comments already knew as "old machines
+    /// report discharging 0% on AC"). `is_charging` alone can't tell that
+    /// apart from a real drain, so both the alarm and the battery
+    /// affordance also clear on `on_ac`.
+    pub on_ac: bool,
     /// Whether this machine has a controllable backlight (`/sys/class/backlight`
     /// is non-empty) — a laptop panel, not a desktop monitor. Lets the mind
     /// offer brightness controls only where they'd actually do something.
@@ -175,6 +183,27 @@ pub struct DeployHealth {
     pub stale_generation: bool,
 }
 
+/// Layer 4 (part) — daylight: where the sun stands relative to the horizon at
+/// this machine's location, and whether the screen is already compensating.
+///
+/// Location comes from the system timezone (`/etc/localtime` → the tzdb's
+/// `zone1970.tab` coordinates) — city-level accuracy, which is all a sunset
+/// needs, and fully local: no network, no GPS, no configuration.
+///
+/// Both flags default to `false` (daytime, no filter) — also the resting value
+/// when the collector can't resolve a location, where the [`Layer::Daylight`]
+/// health simply stays dark and the mind never surfaces daylight affordances.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaylightState {
+    /// The sun is below the horizon — from sunset, through the night, until
+    /// sunrise. Computed, not scheduled: "is it set *now*", so a session that
+    /// starts at 23:00 still knows the sun is down.
+    pub after_sunset: bool,
+    /// A `hyprsunset` process is running, i.e. the screen is already warmed —
+    /// however it was started. Lets the offer withdraw itself once taken.
+    pub eye_protection_on: bool,
+}
+
 /// The collector layers, used to stamp per-layer [`Health`]. One layer may feed
 /// several fields of [`ContextState`]; this identifies the *source*, not the
 /// destination field (e.g. focus-switch velocity is a behavioural metric but is
@@ -199,6 +228,10 @@ pub enum Layer {
     /// `org.options.Notifications`. Its own layer so liveness reflects the
     /// notification bus alone (the daemon being reachable).
     Notifications,
+    /// Layer 4 (part) — daylight (sun above/below the horizon + hyprsunset
+    /// presence). Its own layer so an unresolvable location leaves it dark
+    /// rather than asserting "daytime".
+    Daylight,
 }
 
 /// Liveness and freshness of one collector layer.
@@ -223,6 +256,7 @@ pub struct Health {
     pub hardware: LayerHealth,
     pub system: LayerHealth,
     pub notifications: LayerHealth,
+    pub daylight: LayerHealth,
 }
 
 impl Health {
@@ -235,6 +269,7 @@ impl Health {
             Layer::Hardware => &mut self.hardware,
             Layer::System => &mut self.system,
             Layer::Notifications => &mut self.notifications,
+            Layer::Daylight => &mut self.daylight,
         }
     }
 
@@ -268,6 +303,7 @@ pub struct ContextState {
     pub metrics: SystemMetrics,
     pub deploy: DeployHealth,
     pub notifications: NotificationContext,
+    pub daylight: DaylightState,
     pub hypr_submap: String,
     pub active_layout: String,
     pub is_screencasting: bool,
