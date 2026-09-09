@@ -969,10 +969,22 @@ impl App {
         // still building (busy) hasn't got its real `.desktop` yet, so it
         // must wait for its own rescan rather than latch onto whatever the
         // scan currently holds (another package's app, or a phantom).
+        // EXCEPTION (Golem #43): a tile can be stuck `busy` forever if its
+        // completion signal was lost — e.g. a second install started while
+        // it was still building, so the single nix worker never delivered
+        // its `Done` and `busy_ids` was never cleared. If the package is
+        // provably installed-and-applied it demonstrably HAS its `.desktop`,
+        // so resolving it is safe (no phantom-latch risk) and rescues the
+        // stuck "Installing…" tile. On the ASUS 2026-09-09 a darktable tile
+        // hung this way (unlaunchable) behind an overlapping ebay install.
+        // The resolve loop below clears `busy_ids` for whatever it resolves.
         let pending: Vec<(String, Vec<String>, Option<String>)> = self
             .pending_installs
             .iter()
-            .filter(|p| !p.failed && !self.busy_ids.contains(&p.attr))
+            .filter(|p| {
+                !p.failed
+                    && (!self.busy_ids.contains(&p.attr) || applier::is_installed(&p.attr))
+            })
             // Hold a just-finished tile until its ring fill and shine sweep
             // have both played, so the completion flourish always finishes
             // before the swap-in.
@@ -1087,8 +1099,10 @@ impl App {
         // desktop ids or name matches the attr, else its CLI tile.
         let mut resolved_managed: Vec<String> = Vec::new();
         for attr in self.managed_install_attrs.clone() {
-            if self.busy_ids.contains(&attr) {
+            if self.busy_ids.contains(&attr) && !applier::is_installed(&attr) {
                 continue; // still installing — wait for its own rescan
+                // (#43: a confirmed-installed attr resolves even if a lost
+                // completion left it stuck busy — same as the tile path.)
             }
             let desktop_ids = self.managed.desktop_ids_for(&attr);
             let hit = resolve_hit(&attr, &desktop_ids, &current, &newly, &claimed);
