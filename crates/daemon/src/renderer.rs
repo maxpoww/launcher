@@ -961,7 +961,7 @@ impl Renderer {
         // GL-backend Haswell (Golem #42; the count shifts with app/pending
         // counts, so icons render fine until a rescan hits a multiple of 6).
         // One empty pad layer dodges every bad count; harmless on Vulkan.
-        if layers == 6 || (layers > 6 && layers % 6 == 0) {
+        if layers == 6 || (layers > 6 && layers.is_multiple_of(6)) {
             layers += 1;
         }
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {

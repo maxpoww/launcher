@@ -13,7 +13,8 @@
 //!
 //! The status file is the truth the daemon trusts (F9/F10/F11, 2026-08-30):
 //! declared-in-the-list only counts as installed once a successful run
-//! postdates the list write; a busy helper means QUEUED, not failed (and
+//! STARTED after the list write (only such a run read the written list);
+//! a busy helper means QUEUED, not failed (and
 //! systemd drops path triggers that fire mid-run, so the waiter re-trips
 //! the watch when the foreign run lands); an empty first-boot seed writes
 //! nothing at all.
@@ -51,11 +52,11 @@ struct ApplyStatus {
     /// `Some(true|false)` on a finished run, `None` while building.
     #[serde(default)]
     ok: Option<bool>,
-    /// Unix epoch (fractional seconds) the run started / finished.
+    /// Unix epoch (fractional seconds) the run started. The file also
+    /// carries `finished`, but coverage is started-based (only a run that
+    /// STARTED after a write read that write), so the daemon ignores it.
     #[serde(default)]
     started: f64,
-    #[serde(default)]
-    finished: f64,
     /// The `nixos-rebuild` error tail on failure.
     #[serde(default)]
     error: Option<String>,
@@ -258,11 +259,15 @@ fn list_mtime_epoch() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Whether a SUCCESSFUL apply run finished after the last list write —
-/// i.e. what the list declares is what the system actually has.
+/// Whether a SUCCESSFUL apply run covers the last list write — i.e. what
+/// the list declares is what the system actually has. A run only proves
+/// the list it READ, so it must have STARTED at or after the write: a run
+/// that started earlier and merely *finished* after it built the previous
+/// list (an install landing mid-run resolved as done while its package was
+/// absent from the built generation — the ASUS overlap hole, Golem #43b).
 fn applied_since_list_write() -> bool {
     read_status().is_some_and(|st| {
-        st.phase == "done" && st.ok == Some(true) && st.finished >= list_mtime_epoch()
+        st.phase == "done" && st.ok == Some(true) && st.started >= list_mtime_epoch()
     })
 }
 
@@ -331,11 +336,30 @@ const LIVENESS_EVERY: Duration = Duration::from_secs(5);
 /// left `building` behind and the next morning's startup reconcile hung on
 /// it). Query failures err on "alive", so an environment without systemd
 /// degrades to the old timeout behavior instead of spuriously nudging.
+///
+/// NOT `systemctl is-active`: a `Type=oneshot` service reports
+/// `ActiveState=activating` for the whole time its ExecStart runs, and
+/// `is-active` exits non-zero for that — so every LIVE build read as a
+/// corpse, the waiter nudged into the void (path triggers are dropped
+/// while the unit is activating) and false-failed the install at
+/// [`START_TIMEOUT`], reverting the list mid-build (the ASUS, 2026-09-09:
+/// proven with `is-active` = `activating` polled through a real 36 s run).
 fn helper_active() -> bool {
     std::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", "waverunner-apply.service"])
-        .status()
-        .map(|s| s.success())
+        .args([
+            "show",
+            "waverunner-apply.service",
+            "-p",
+            "ActiveState",
+            "--value",
+        ])
+        .output()
+        .map(|o| {
+            matches!(
+                String::from_utf8_lossy(&o.stdout).trim(),
+                "active" | "activating" | "reloading" | "deactivating"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -366,13 +390,17 @@ fn apply_mechanism_present() -> bool {
 /// Block until the apply helper reports a terminal status for a run that
 /// covers a list write made at `since`. Returns the rebuild's success.
 ///
-/// F10 rules: a run that STARTED BEFORE `since` and is still `building` is
-/// someone else's rebuild, not a missing trigger — our edit is already on
-/// disk, but systemd DROPS path triggers that fire while the service is
-/// active, so when that run completes we re-trip the watch by rewriting
-/// the (unchanged) list and keep waiting. Only a status that never moves
-/// at all fails the [`START_TIMEOUT`] "trigger not wired" escape; a run
-/// past [`BUILD_TIMEOUT`] is a hard timeout.
+/// F10 rules: only a run that STARTED at or after `since` read our edit —
+/// a run that started before it (someone else's rebuild) built the old
+/// list, even if it finishes after us. While such a foreign run is alive
+/// we just wait: our edit is already on disk, but systemd DROPS path
+/// triggers that fire while the service is active, so when it lands the
+/// nudge below re-trips the watch by rewriting the (unchanged) list and
+/// the wait continues into the fresh run. A `building` status with the
+/// helper dead — ours or foreign — is a corpse to nudge past, not a run
+/// to honor. [`START_TIMEOUT`] measures IDLE time (nothing running,
+/// nothing picked up), so a slow foreign build can't burn the pickup
+/// budget; [`BUILD_TIMEOUT`] stays the wall-clock hard cap.
 fn wait_for_apply(since: f64) -> bool {
     // No apply unit on this machine (live ISO / no flake checkout): the list
     // write triggered nothing and never will. Fail immediately rather than
@@ -386,27 +414,28 @@ fn wait_for_apply(since: f64) -> bool {
         return false;
     }
     let start = Instant::now();
-    let mut saw_ours = false;
     let mut nudges = 0u32;
     let mut idle_since = Instant::now();
     let mut liveness: Option<(Instant, bool)> = None;
     loop {
         std::thread::sleep(POLL);
-        let mut foreign_building = false;
-        let status = read_status();
-        if let Some(st) = &status {
-            if st.started >= since || st.finished >= since {
-                saw_ours = true;
-                if st.phase == "done" && st.finished >= since {
-                    if let Some(err) = st.error.as_deref().filter(|_| st.ok != Some(true)) {
-                        warn!("apply failed: {}", err.trim());
-                    }
-                    return st.ok.unwrap_or(false);
+        // A live rebuild is in flight — ours or someone else's. Either way
+        // the machinery works and a nudge now would be dropped, so just
+        // keep waiting.
+        let mut busy = false;
+        if let Some(st) = read_status() {
+            if st.phase == "done" && st.started >= since {
+                // A terminal run that started after our edit read our
+                // edit: this is our answer. (A foreign run finishing after
+                // us built the OLD list — it proves nothing and falls
+                // through to the nudge below.)
+                if let Some(err) = st.error.as_deref().filter(|_| st.ok != Some(true)) {
+                    warn!("apply failed: {}", err.trim());
                 }
-            } else if st.phase == "building" {
-                // A pre-existing run is mid-flight; our trigger was
-                // swallowed. Wait it out — the nudge below fires once it
-                // lands. But only if the helper is actually ALIVE: a
+                return st.ok.unwrap_or(false);
+            }
+            if st.phase == "building" {
+                // Mid-flight — but only if the helper is actually ALIVE: a
                 // "building" status with the service inactive is a corpse
                 // (died mid-run, no terminal status ever written) — treat
                 // it as idle so the nudge re-trips the watch instead of
@@ -425,7 +454,7 @@ fn wait_for_apply(since: f64) -> bool {
                     }
                 };
                 if alive {
-                    foreign_building = true;
+                    busy = true;
                     idle_since = Instant::now();
                 }
             }
@@ -434,11 +463,7 @@ fn wait_for_apply(since: f64) -> bool {
         // run never appeared: the write raced the helper's read or the
         // trigger was dropped — re-trip the watch with an identical
         // rewrite.
-        if !saw_ours
-            && !foreign_building
-            && nudges < MAX_NUDGES
-            && idle_since.elapsed() > NUDGE_AFTER
-        {
+        if !busy && nudges < MAX_NUDGES && idle_since.elapsed() > NUDGE_AFTER {
             info!(
                 "apply run not picked up; re-tripping the watch (nudge {})",
                 nudges + 1
@@ -447,15 +472,14 @@ fn wait_for_apply(since: f64) -> bool {
             nudges += 1;
             idle_since = Instant::now();
         }
-        let elapsed = start.elapsed();
-        if !saw_ours && !foreign_building && elapsed > START_TIMEOUT {
+        if !busy && idle_since.elapsed() > START_TIMEOUT {
             warn!(
-                "waverunner-apply never started (after {nudges} nudges, {}s) — is the systemd path unit installed?",
+                "waverunner-apply never picked up the change (after {nudges} nudges, {}s idle) — is the systemd path unit installed?",
                 START_TIMEOUT.as_secs()
             );
             return false;
         }
-        if elapsed > BUILD_TIMEOUT {
+        if start.elapsed() > BUILD_TIMEOUT {
             warn!(
                 "waverunner-apply timed out after {}s",
                 BUILD_TIMEOUT.as_secs()
