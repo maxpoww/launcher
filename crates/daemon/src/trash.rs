@@ -133,6 +133,7 @@ impl Trash {
     }
 
     /// How many entries are in the trash (cheap-ish; counts `info/`).
+    #[allow(dead_code)] // trash API surface — the Recycle Bin UI cycles through callers
     pub fn is_empty(&self) -> bool {
         fs::read_dir(self.info_dir())
             .map(|mut d| d.next().is_none())
@@ -164,6 +165,7 @@ impl Trash {
     }
 
     /// Permanently erase one entry (its `files/` item and `.trashinfo`).
+    #[allow(dead_code)] // trash API surface
     pub fn erase(&self, name: &str) -> io::Result<()> {
         let file = self.files_dir().join(name);
         let meta = fs::symlink_metadata(&file);
@@ -178,6 +180,7 @@ impl Trash {
 
     /// Restore an entry to its original path, then drop its `.trashinfo`.
     /// Creates the original parent directory if it has since gone away.
+    #[allow(dead_code)] // trash API surface
     pub fn restore(&self, name: &str) -> io::Result<PathBuf> {
         let text = fs::read_to_string(self.info_dir().join(format!("{name}.trashinfo")))?;
         let (dest, _) = parse_trashinfo(&text)

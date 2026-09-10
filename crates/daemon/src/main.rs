@@ -65,6 +65,7 @@ mod unfurl;
 // tested but not yet triggered from the UI — drop this allow once the
 // empty/restore gestures land.
 #[allow(dead_code)]
+mod residue;
 mod trash;
 mod usage;
 mod webapps;

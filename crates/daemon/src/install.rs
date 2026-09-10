@@ -454,6 +454,13 @@ impl App {
                     // still installed and still tracked (apply_uninstall
                     // re-added the list line), so leave both in place.
                     if ok {
+                        // Residue sweep (#60) BEFORE the cache entry goes:
+                        // the stored desktop ids are match candidates. The
+                        // app's config/cache/data dirs follow it into the
+                        // Recycle Bin — an uninstall leaves nothing behind.
+                        let mut ids = self.managed.desktop_ids_for(&attr);
+                        ids.push(id.clone());
+                        crate::residue::sweep(&attr, &ids);
                         self.managed.remove(&attr);
                         self.pins.unpin(&id);
                         self.recompute_removable();
