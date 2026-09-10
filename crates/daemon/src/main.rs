@@ -2454,6 +2454,21 @@ impl App {
         if self.apps_fingerprint == Some(loaded.fingerprint) {
             debug!("app index unchanged; skipping rebuild");
             self.file_index = loaded.files;
+            // An unchanged scan must STILL re-run pending-install
+            // resolution: a scan can capture a fresh `.desktop` into the
+            // fingerprint while its tile is still busy/held (the window
+            // between the file materializing and the install's Done), and
+            // once that fingerprint is stored every later scan lands here
+            // — the resolve below the rebuild would never run again and
+            // the tile stays "Installing…" forever on an idle-but-
+            // unchanged index (the ASUS vlc, 2026-09-09; the #46 2 s
+            // retry scans made the window a near-certainty). Cheap: a
+            // filter over the pending tiles against the stored entries,
+            // which an unchanged fingerprint guarantees are identical to
+            // this scan's.
+            if !self.pending_installs.is_empty() {
+                self.resolve_pending_installs();
+            }
             self.refilter();
             self.schedule_frame();
             return;
