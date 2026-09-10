@@ -213,6 +213,104 @@ pub fn apply_install(attr: &str) -> bool {
     false
 }
 
+/// One operation of a coalesced batch (#52): an install or an uninstall
+/// of a nixpkgs attr.
+pub struct BatchOp {
+    pub attr: String,
+    pub install: bool,
+}
+
+/// What [`plan_batch`] decided for one op: already settled without any
+/// rebuild, or riding the batch's single rebuild.
+#[derive(Debug, PartialEq, Eq)]
+enum BatchAction {
+    /// Resolved by the F9 fast path (already in/absent from the list with
+    /// a covering successful run) — no rebuild needed for this op.
+    Fast(bool),
+    /// Its list edit (or its join of the pending state) rides the wait.
+    Ride,
+}
+
+/// Pure batch planner (#52): fold every op's list edit into ONE new list.
+/// `applied` is [`applied_since_list_write`] at planning time — it decides
+/// the F9 fast paths exactly as the single-op functions do. Returns the
+/// folded list plus each op's action, in op order.
+fn plan_batch(current: &[String], ops: &[BatchOp], applied: bool) -> (Vec<String>, Vec<BatchAction>) {
+    let mut list: Vec<String> = current.to_vec();
+    let mut actions = Vec::with_capacity(ops.len());
+    for op in ops {
+        let present = list.iter().any(|a| a == &op.attr);
+        let action = match (op.install, present) {
+            (true, true) | (false, false) if applied => BatchAction::Fast(true),
+            (true, true) | (false, false) => BatchAction::Ride, // declared-but-unapplied: join
+            (true, false) => {
+                list.push(op.attr.clone());
+                BatchAction::Ride
+            }
+            (false, true) => {
+                list.retain(|a| a != &op.attr);
+                BatchAction::Ride
+            }
+        };
+        actions.push(action);
+    }
+    (list, actions)
+}
+
+/// Apply a COALESCED batch of installs/uninstalls with ONE list write and
+/// ONE rebuild wait (#52): N drags queued behind a running rebuild used to
+/// cost N sequential rebuilds (~40 s each on the map machines — a 5-drag
+/// batch burned ~4 minutes). Failure is attributed batch-wide: a failed
+/// rebuild reverts every edited op (same honest semantics as the single-op
+/// revert — the helper's last-good already kept the tree buildable) and
+/// each op reports false; a retry then runs it alone. Returns each op's
+/// outcome, in op order.
+pub fn apply_batch(ops: &[BatchOp]) -> Vec<bool> {
+    let current = list_attrs();
+    let (new_list, actions) = plan_batch(&current, ops, applied_since_list_write());
+    if actions.iter().all(|a| matches!(a, BatchAction::Fast(_))) {
+        return actions
+            .iter()
+            .map(|a| matches!(a, BatchAction::Fast(true)))
+            .collect();
+    }
+    let since = now_epoch();
+    let names: Vec<&str> = ops.iter().map(|o| o.attr.as_str()).collect();
+    info!(
+        "coalesced apply of {} ops ({}) — one rebuild",
+        ops.len(),
+        names.join(", ")
+    );
+    if new_list != current {
+        write_list(&new_list);
+    }
+    let ok = wait_for_apply(since);
+    if !ok {
+        warn!("coalesced apply failed; reverting the batch's edits");
+        // Restore exactly the pre-batch declarations for the batch's attrs
+        // (the list may have been edited by others meanwhile — touch only
+        // our own attrs, like the single-op reverts do).
+        let mut reverted = list_attrs();
+        for op in ops {
+            let was_present = current.iter().any(|a| a == &op.attr);
+            let is_present = reverted.iter().any(|a| a == &op.attr);
+            if was_present && !is_present {
+                reverted.push(op.attr.clone());
+            } else if !was_present && is_present {
+                reverted.retain(|a| a != &op.attr);
+            }
+        }
+        write_list(&reverted);
+    }
+    actions
+        .iter()
+        .map(|a| match a {
+            BatchAction::Fast(v) => *v,
+            BatchAction::Ride => ok,
+        })
+        .collect()
+}
+
 /// Remove `attr` from the list and block until the rebuild finishes.
 /// Returns whether the package is now gone. A failed rebuild re-adds the
 /// line (the helper kept the last-good Nix, so the package is still there).
@@ -527,6 +625,45 @@ evil; rm\n\
                 "vlc".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn batch_planner_folds_edits_and_honors_fast_paths() {
+        let cur = vec!["vlc".to_string(), "mousepad".to_string()];
+        let ops = vec![
+            BatchOp { attr: "gimp".into(), install: true },      // new install → edit
+            BatchOp { attr: "vlc".into(), install: false },      // uninstall present → edit
+            BatchOp { attr: "mousepad".into(), install: true },  // already in list…
+            BatchOp { attr: "krita".into(), install: false },    // …and already absent
+        ];
+        // With a covering run: the last two are F9 fast-trues.
+        let (list, actions) = plan_batch(&cur, &ops, true);
+        assert_eq!(list, vec!["mousepad".to_string(), "gimp".to_string()]);
+        assert_eq!(
+            actions,
+            vec![
+                BatchAction::Ride,
+                BatchAction::Ride,
+                BatchAction::Fast(true),
+                BatchAction::Fast(true),
+            ]
+        );
+        // Without a covering run: everyone rides (declared-but-unapplied
+        // must join the rebuild, same as the single-op F9 rule).
+        let (_, actions) = plan_batch(&cur, &ops, false);
+        assert!(actions.iter().all(|a| *a == BatchAction::Ride));
+    }
+
+    #[test]
+    fn batch_planner_folds_conflicting_ops_in_order() {
+        // install X then uninstall X in one batch: last op wins the list.
+        let ops = vec![
+            BatchOp { attr: "gimp".into(), install: true },
+            BatchOp { attr: "gimp".into(), install: false },
+        ];
+        let (list, actions) = plan_batch(&[], &ops, true);
+        assert!(list.is_empty());
+        assert_eq!(actions, vec![BatchAction::Ride, BatchAction::Ride]);
     }
 
     #[test]

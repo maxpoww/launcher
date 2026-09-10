@@ -251,44 +251,87 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
         .name("waverunner-nix-mut".into())
         .spawn(move || {
             while let Ok(request) = mutations_rx.recv() {
-                // One install/uninstall at a time: a switch never races the
-                // generation it applies.
-                let event = match request {
+                // One rebuild at a time: a switch never races the
+                // generation it applies. But ops that QUEUED while a
+                // rebuild ran are drained and COALESCED (#52): their list
+                // edits fold into one write and one rebuild instead of N
+                // sequential ones (~40 s each on the map machines). The
+                // first drag still starts building immediately — draining
+                // only ever picks up what accumulated behind it.
+                let mut ops: Vec<(String, crate::applier::BatchOp)> = Vec::new();
+                let mut reconcile: Option<bool> = None;
+                let queue_op = |req: Request, ops: &mut Vec<(String, crate::applier::BatchOp)>| match req {
                     Request::Install { id, attr } => {
-                        // Declarative: add the attr to the package list and
-                        // block until the privileged helper's rebuild lands.
-                        // The rebuild completes before this returns, so the
-                        // package's real `.desktop` is already in the scan;
-                        // `resolve_pending_installs` reads GUI-ness from that
-                        // (authoritative) instead of a second `nix build`.
-                        let ok = crate::applier::apply_install(&attr);
-                        Event::Done {
-                            id,
-                            ok,
-                            desktop_ids: None,
-                        }
+                        ops.push((id, crate::applier::BatchOp { attr, install: true }));
+                        None
                     }
                     Request::Remove { id, attr } => {
-                        let ok = crate::applier::apply_uninstall(&attr);
-                        Event::Done {
-                            id,
-                            ok,
-                            desktop_ids: None,
+                        ops.push((id, crate::applier::BatchOp { attr, install: false }));
+                        None
+                    }
+                    Request::EnsureApplied { force } => Some(force),
+                    // Routed to their own threads.
+                    Request::Rank { .. } | Request::Realize { .. } => None,
+                };
+                reconcile = queue_op(request, &mut ops).or(reconcile);
+                while let Ok(more) = mutations_rx.try_recv() {
+                    reconcile = queue_op(more, &mut ops).or(reconcile);
+                }
+                match ops.len() {
+                    0 => {}
+                    1 => {
+                        // Single op: the existing per-op path, unchanged
+                        // semantics (fast paths, per-attr revert, logs).
+                        let (id, op) = ops.remove(0);
+                        let ok = if op.install {
+                            crate::applier::apply_install(&op.attr)
+                        } else {
+                            crate::applier::apply_uninstall(&op.attr)
+                        };
+                        if mut_events
+                            .send(Event::Done {
+                                id,
+                                ok,
+                                desktop_ids: None,
+                            })
+                            .is_err()
+                        {
+                            return;
                         }
                     }
-                    Request::EnsureApplied { force } => {
-                        let ok = crate::applier::ensure_applied(force);
-                        Event::Done {
+                    _ => {
+                        let batch: Vec<crate::applier::BatchOp> =
+                            ops.iter().map(|(_, o)| crate::applier::BatchOp {
+                                attr: o.attr.clone(),
+                                install: o.install,
+                            }).collect();
+                        let results = crate::applier::apply_batch(&batch);
+                        for ((id, _), ok) in ops.into_iter().zip(results) {
+                            if mut_events
+                                .send(Event::Done {
+                                    id,
+                                    ok,
+                                    desktop_ids: None,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+                if let Some(force) = reconcile {
+                    let ok = crate::applier::ensure_applied(force);
+                    if mut_events
+                        .send(Event::Done {
                             id: RECONCILE_ID.to_owned(),
                             ok,
                             desktop_ids: None,
-                        }
+                        })
+                        .is_err()
+                    {
+                        return;
                     }
-                    // Routed to their own threads.
-                    Request::Rank { .. } | Request::Realize { .. } => continue,
-                };
-                if mut_events.send(event).is_err() {
-                    return;
                 }
             }
         });
