@@ -2812,6 +2812,9 @@ fn push_notif_icon(scene: &mut Scene, content: Rect, icon: Rect, layer: u32) {
         layer,
         tint: [0.0; 4],
         ring: -1.0,
+        // App icons here wore the baked white frost before the plates went
+        // live; the notif card doesn't colour-match, so keep that look.
+        plate: crate::content::PLATE_STATIC,
     });
 }
 

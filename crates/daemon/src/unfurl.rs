@@ -155,11 +155,29 @@ fn youtube_oembed(url: &str) -> Option<(String, String)> {
 /// `curl` a URL and return its body (capped at [`MAX_HTML`]). `None` on any
 /// failure (curl absent, network error, non-2xx). Extra args go before the URL.
 fn fetch(url: &str, extra: &[&str]) -> Option<String> {
+    if private_host(url) {
+        debug!("unfurl: refusing private/loopback target {url}");
+        return None;
+    }
     let out = Command::new("curl")
         .args([
             "-sL",
             "--max-time",
             TIMEOUT_SECS,
+            // The unfurl worker fetches URLs the user merely COPIED — treat
+            // every target as hostile: web protocols only (initial AND
+            // after redirects — no file:/ftp:/gopher: pivots), and a hard
+            // download ceiling so a malicious page can't stream gigabytes
+            // into the `output()` buffer (MAX_HTML truncates only after
+            // the transfer). Private/loopback hosts are refused above;
+            // DNS-rebinding past that check is accepted residual risk for
+            // an off-by-default share-card feature.
+            "--proto",
+            "=http,https",
+            "--proto-redir",
+            "=http,https",
+            "--max-filesize",
+            "2M",
             "-A",
             USER_AGENT,
             "--fail",
@@ -185,11 +203,22 @@ fn download_image(id: u64, image_url: &str) -> Option<PathBuf> {
             return None;
         }
     }
+    if private_host(image_url) {
+        debug!("unfurl: refusing private/loopback image target {image_url}");
+        return None;
+    }
     let ok = Command::new("curl")
         .args([
             "-sL",
             "--max-time",
             TIMEOUT_SECS,
+            // Same hostile-target posture as `fetch`.
+            "--proto",
+            "=http,https",
+            "--proto-redir",
+            "=http,https",
+            "--max-filesize",
+            "8M",
             "-A",
             USER_AGENT,
             "--fail",
@@ -308,6 +337,49 @@ fn decode_entities(s: &str) -> String {
 }
 
 /// Resolve a possibly-relative image URL against the page URL.
+/// Whether a URL's host is loopback, link-local, or a private range — targets
+/// an unfurl of a merely-copied URL must never touch (a copied link that
+/// redirects into `http://192.168.1.1/…` or `http://169.254.169.254/…` would
+/// otherwise be fetched, parsed, and its content stored). Literal-address
+/// check only: a public hostname that RESOLVES privately (DNS rebinding) is
+/// accepted residual risk for this off-by-default feature.
+fn private_host(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@') // strip userinfo
+        .next()
+        .unwrap_or("");
+    // [v6]:port or bare v6
+    let host = host.trim_start_matches('[');
+    let host = host.split(']').next().unwrap_or(host);
+    // v4/name: strip :port
+    let name = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    if name.is_empty() || name == "localhost" || name.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(v4) = name.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback()
+            || v4.is_private()
+            || v4.is_link_local()
+            || v4.is_unspecified()
+            || v4.is_broadcast();
+    }
+    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+        let seg = v6.segments();
+        return v6.is_loopback()
+            || v6.is_unspecified()
+            || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+            || (seg[0] & 0xffc0) == 0xfe80; // fe80::/10 link local
+    }
+    false
+}
+
 fn absolutize(page: &str, img: &str) -> Option<String> {
     if img.starts_with("http://") || img.starts_with("https://") {
         Some(img.to_owned())
@@ -372,6 +444,36 @@ fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_hosts_are_refused_public_ones_are_not() {
+        for bad in [
+            "http://localhost/x",
+            "http://sub.localhost:8080/",
+            "https://127.0.0.1/",
+            "http://127.8.9.1:81/x",
+            "http://10.0.0.5/",
+            "http://172.16.0.1/",
+            "http://192.168.1.1/admin",
+            "http://169.254.169.254/latest/meta-data",
+            "http://0.0.0.0/",
+            "http://[::1]/",
+            "http://[fe80::1]:9/",
+            "http://[fd00::5]/",
+            "http://user:pw@192.168.0.9/",
+        ] {
+            assert!(private_host(bad), "should refuse {bad}");
+        }
+        for good in [
+            "https://example.com/page",
+            "http://93.184.216.34/",
+            "https://i.ytimg.com/vi/x/hq.jpg",
+            "https://172.15.0.1/", // just outside 172.16/12
+            "https://[2606:4700::1]/",
+        ] {
+            assert!(!private_host(good), "should allow {good}");
+        }
+    }
 
     #[test]
     fn extracts_open_graph_tags() {

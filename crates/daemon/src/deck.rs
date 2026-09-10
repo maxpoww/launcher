@@ -675,6 +675,7 @@ impl App {
                     layer,
                     tint: [0.0, 0.0, 0.0, 0.0],
                     ring: -1.0,
+                    plate: crate::content::NO_PLATE,
                 });
             } else {
                 // No picture yet: a plain strip so the title stays readable.

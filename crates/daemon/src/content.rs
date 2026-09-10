@@ -61,7 +61,21 @@ pub struct IconInst {
     /// progress ring (that fraction filled) instead of a textured icon; a
     /// negative value (the default) draws the icon normally.
     pub ring: f32,
+    /// Squircle plate drawn *in the shader* under the glyph (rgba;
+    /// `a <= 0` = no plate). The plate used to be baked white into the
+    /// icon texture cache; drawing it live lets it take the surface's
+    /// adaptive colour and ride the same eases as everything else, at the
+    /// cost of two SDFs per icon pixel. [`NO_PLATE`] for image thumbnails
+    /// and special-mode quads (rings, shine, the bin); [`PLATE_STATIC`]
+    /// keeps the old baked look on static surfaces (notif card).
+    pub plate: [f32; 4],
 }
+
+/// No plate under this icon quad (image thumbnails, ring/shine overlays).
+pub const NO_PLATE: [f32; 4] = [0.0; 4];
+/// The old baked plate's exact look — translucent white frost (84/255).
+/// Static surfaces that don't colour-match keep this.
+pub const PLATE_STATIC: [f32; 4] = [1.0, 1.0, 1.0, 0.33];
 
 /// One continuous soft drop shadow wrapping a rounded rect (the dock). The
 /// shader renders only the exterior penumbra (nothing under the shape, so the
@@ -846,6 +860,11 @@ pub struct FrameInput<'a> {
     /// bloom, slower melt — see `DOCK_MAG_GROW_RATE`). The dock draws
     /// exactly these; empty = every icon at rest.
     pub dock_mag: &'a [f32],
+    /// Live plate colour for app-icon squircle plates (see
+    /// [`IconInst::plate`]) — the surface's adaptive frost, eased in the
+    /// frame loop alongside the fill. Zero alpha (the `Default`) draws no
+    /// plates at all (`icon_plate` off, tests).
+    pub plate: [f32; 4],
     /// Launch bounce: (entry index, upward offset in px).
     pub bounce: Option<(usize, f32)>,
     /// Live search query (empty shows the placeholder).
@@ -1042,6 +1061,7 @@ fn bin_icon(rect: Rect, react: f32) -> IconInst {
         // the caller) carries the grey→red colour. Only the openness varies.
         tint: [0.95, 0.96, 0.97, 1.0],
         ring: -2.0 - r,
+        plate: NO_PLATE,
     }
 }
 
@@ -1068,6 +1088,7 @@ pub fn scene(
         pointer,
         mag_amount,
         dock_mag,
+        plate,
         bounce,
         query,
         selected,
@@ -1112,6 +1133,16 @@ pub fn scene(
         dock_highlight,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
+    // Plate for an app entry's icon: the live adaptive colour — except the
+    // `asset-*` file-type carriers, which render unplated (matching the
+    // rasterizer, which never plated them either).
+    let plate_of = |i: usize| {
+        if entries.get(i).is_some_and(|e| e.id.starts_with("asset-")) {
+            NO_PLATE
+        } else {
+            plate
+        }
+    };
     // Scaled drawing metrics — mirrors what layout() received.
     let dock_icon = DOCK_ICON * icon_scale;
     let dock_slot = DOCK_SLOT * icon_scale;
@@ -1376,6 +1407,7 @@ pub fn scene(
                     layer: *layer,
                     tint: [0.0; 4],
                     ring: -1.0,
+                    plate,
                 });
             }
             continue;
@@ -1385,6 +1417,7 @@ pub fn scene(
             layer: layer_of(entry_idx),
             tint: [0.0; 4],
             ring: -1.0,
+            plate: plate_of(entry_idx),
         });
         // A package installing straight onto the dock (drag-to-dock pins the
         // tile there) animates the same macOS-style progress ring the grid
@@ -1396,6 +1429,7 @@ pub fn scene(
                 layer: 0,
                 tint: [0.0; 4],
                 ring: dock_prog.clamp(0.0, 1.0),
+                plate: NO_PLATE,
             });
         }
         // A just-installed app surfaced here plays a one-shot glass shine over
@@ -1409,6 +1443,7 @@ pub fn scene(
                 layer: layer_of(entry_idx),
                 tint: [0.0; 4],
                 ring: 2.0 + dock_shine.clamp(0.0, 1.0),
+                plate: NO_PLATE,
             });
         }
         if placeholders.get(entry_idx).copied().unwrap_or(false) {
@@ -1530,6 +1565,7 @@ pub fn scene(
                     layer: *layer,
                     tint,
                     ring: ghost_ring,
+                    plate,
                 });
             }
         } else {
@@ -1538,6 +1574,7 @@ pub fn scene(
                 layer: layer_of(df.entry_idx),
                 tint,
                 ring: ghost_ring,
+                plate: plate_of(df.entry_idx),
             });
         }
     }
@@ -1847,6 +1884,7 @@ pub fn scene(
                             m,
                         ),
                         layer: *layer,
+                        plate,
                         tint: [0.0; 4],
                         ring: -1.0,
                     });
@@ -1888,6 +1926,13 @@ pub fn scene(
                 layer: layer_of(entry_idx),
                 tint: [0.0; 4],
                 ring: -1.0,
+                // Files rows are thumbnails and file-type carriers — the
+                // rasterizer never plated those, so neither do we.
+                plate: if s == SECTION_FILES {
+                    NO_PLATE
+                } else {
+                    plate_of(entry_idx)
+                },
             });
             if !covered && placeholders.get(entry_idx).copied().unwrap_or(false) {
                 if let Some(ch) = entry.name.chars().next() {
@@ -1933,6 +1978,7 @@ pub fn scene(
                     layer: 0,
                     tint: [0.0; 4],
                     ring: prog.clamp(0.0, 1.0),
+                    plate: NO_PLATE,
                 });
             } else if is_installing && shine_p >= 0.0 {
                 // Shine instance: samples the app icon's silhouette (its layer)
@@ -1942,6 +1988,7 @@ pub fn scene(
                     layer: layer_of(entry_idx),
                     tint: [0.0; 4],
                     ring: 2.0 + shine_p.clamp(0.0, 1.0),
+                    plate: NO_PLATE,
                 });
             }
             let name = if is_busy && is_launching {
@@ -2141,6 +2188,7 @@ pub fn scene(
                 layer: layer_of(idx),
                 tint: [0.0; 4],
                 ring: -1.0,
+                plate: plate_of(idx),
             });
             if placeholders.get(idx).copied().unwrap_or(false) {
                 if let Some(ch) = entries.get(idx).and_then(|e| e.name.chars().next()) {
@@ -2216,6 +2264,7 @@ pub fn scene(
             layer: layer_of(entry),
             tint: [0.0; 4],
             ring: -1.0,
+            plate: plate_of(entry),
         });
     }
 

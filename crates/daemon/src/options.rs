@@ -4437,9 +4437,8 @@ impl crate::App {
     /// play as a fade during the reveal slide — the dock arrives already
     /// wearing the right colour.
     ///
-    /// Returns `(fill, ink, hover_wash, still_moving)` — the caller keeps
-    /// frames coming while any of the three settles.
-    pub(crate) fn dock_surface_eased(&mut self, dt: f32) -> ([f32; 4], [f32; 4], [f32; 4], bool) {
+    /// The caller keeps frames coming while [`DockPaint::moving`] is set.
+    pub(crate) fn dock_surface_eased(&mut self, dt: f32) -> DockPaint {
         /// Fill approach rate (s⁻¹): τ ≈ 45 ms, settled in ~140 ms — just
         /// enough blend to kill the one-frame blink, still reads instant.
         const DOCK_FILL_RATE: f32 = 22.0;
@@ -4499,8 +4498,75 @@ impl crate::App {
             DOCK_INK_RATE,
             hidden,
         );
-        (fill, ink, wash, fill_moving || ink_moving || wash_moving)
+        // Icon squircle plates: the fill itself, one lightness step away at
+        // its OWN hue — the `zebra_stripe` recipe. A plain white/black
+        // frost was tried first and read as one fixed colour no matter what
+        // the surface did (Max, 2026-09-10); shifting HSL lightness of the
+        // eased fill makes a plate that is visibly "THIS surface's colour,
+        // one shade lighter/darker" — a green-matched dock gets green
+        // plates. Lift on dark fills, dim on bright, computed in sRGB where
+        // L is perceptually meaningful.
+        //
+        // One strength for BOTH states: a docked/open blend (subtle frost
+        // at rest, strong chip open) was tried and Max explicitly chose
+        // the strong open look everywhere — "make the dock look like
+        // that" (2026-09-10).
+        /// Plate lightness lift over a dark fill / dim under a bright one.
+        const PLATE_LIFT_L: f32 = 0.20;
+        const PLATE_DIM_L: f32 = 0.16;
+        /// Plate opacity — strong enough that the hue clearly reads.
+        const PLATE_ALPHA: f32 = 0.85;
+        let plate_target = {
+            let (lift, dim, alpha) = (PLATE_LIFT_L, PLATE_DIM_L, PLATE_ALPHA);
+            let srgb = [
+                linear_to_srgb(fill[0]).clamp(0.0, 1.0),
+                linear_to_srgb(fill[1]).clamp(0.0, 1.0),
+                linear_to_srgb(fill[2]).clamp(0.0, 1.0),
+            ];
+            let (h, s, l) = rgb_to_hsl(srgb[0], srgb[1], srgb[2]);
+            let new_l = if luminance(fill) <= 0.179 {
+                (l + lift).min(1.0)
+            } else {
+                (l - dim).max(0.0)
+            };
+            let (r, g, b) = hsl_to_rgb(h, s, new_l);
+            [
+                srgb_to_linear(r),
+                srgb_to_linear(g),
+                srgb_to_linear(b),
+                alpha,
+            ]
+        };
+        let (plate, plate_moving) = ease_rgba(
+            &mut self.dock_plate_anim,
+            plate_target,
+            dt,
+            DOCK_INK_RATE,
+            hidden,
+        );
+        DockPaint {
+            fill,
+            ink,
+            wash,
+            plate,
+            moving: fill_moving || ink_moving || wash_moving || plate_moving,
+        }
     }
+}
+
+/// The dock's eased on-screen colours for one frame — everything
+/// [`crate::App::dock_surface_eased`] animates, in one bundle.
+pub(crate) struct DockPaint {
+    /// Card fill (the adaptive glass colour).
+    pub fill: [f32; 4],
+    /// Ink that reads on that fill (labels, glyphs, dots).
+    pub ink: [f32; 4],
+    /// Hover/selection wash.
+    pub wash: [f32; 4],
+    /// Icon squircle-plate colour (shader-drawn, see `IconInst::plate`).
+    pub plate: [f32; 4],
+    /// True while any of the four is still easing — keep frames coming.
+    pub moving: bool,
 }
 
 #[cfg(test)]

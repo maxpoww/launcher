@@ -76,8 +76,11 @@ struct IconInstance {
     // padding.
     tint: [f32; 4],
     // Progress-ring mode: >=0 draws a circular install ring that filled, <0
-    // draws the icon. Offset 36 → the struct is exactly 40 bytes, Pod-clean.
+    // draws the icon. Offset 36.
     ring: f32,
+    // Squircle plate drawn under the glyph in-shader (rgba; a <= 0 = none).
+    // Offset 40 → the struct is exactly 56 bytes, Pod-clean.
+    plate: [f32; 4],
 }
 
 /// Per-instance data for the open box's frosted backdrop quad.
@@ -568,7 +571,8 @@ impl Renderer {
                     array_stride: std::mem::size_of::<IconInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32
+                        0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32,
+                        5 => Float32x4
                     ],
                 }],
             },
@@ -1622,6 +1626,7 @@ fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
         layer: i.layer,
         tint: i.tint,
         ring: i.ring,
+        plate: i.plate,
     }
 }
 

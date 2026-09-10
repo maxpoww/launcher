@@ -160,6 +160,10 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Owner-only state dirs (clipboard text + notification bodies live
+    // there) — before any store is written this session.
+    persist::harden_state_dirs();
+
     // Translation table for every tr() below — before the first draw and
     // before any worker thread that renders text exists.
     i18n::init();
@@ -485,6 +489,7 @@ fn main() -> anyhow::Result<()> {
         dock_fill_anim: None,
         dock_ink_anim: None,
         dock_wash_anim: None,
+        dock_plate_anim: None,
         modifiers: Modifiers::default(),
         force_new_instance: false,
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
@@ -1144,6 +1149,7 @@ pub struct App {
     dock_fill_anim: Option<[f32; 4]>,
     dock_ink_anim: Option<[f32; 4]>,
     dock_wash_anim: Option<[f32; 4]>,
+    dock_plate_anim: Option<[f32; 4]>,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
     /// Set only for the duration of a middle-click activation: force a

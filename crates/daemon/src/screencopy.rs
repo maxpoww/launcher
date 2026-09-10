@@ -182,15 +182,15 @@ impl App {
     /// The dock's twin of [`Self::reeval_options_bar`] — same triggers, same
     /// fallback shape, [`hypr::bottom_fill`] instead of `top_fill`.
     ///
-    /// One extra wrinkle the bar handles differently: while the card is
-    /// open it covers the screen region both dock sample rows cross — the
-    /// frost row at the dock's own mid-height and the match row just above
-    /// the dock band. Sampling those columns would read our OWN drawn card
-    /// and feed the paint back into itself (the stepped colour crawl).
-    /// Freezing instead left the open box colour-stale while the user
-    /// swiped workspaces behind it — so, like `BarMatch` dodging the
-    /// notif/clip drawers, `read_sample` excludes the card's columns while
-    /// the card is up and keeps reading the live screen to either side.
+    /// One extra wrinkle the bar handles differently: the dock's own card
+    /// crosses both of its sample rows (the frost row at dock mid-height,
+    /// the match row just above the dock band — and the open card covers
+    /// far more). Sampling our own columns would read our OWN drawn card
+    /// and feed the paint back into itself, so `read_sample` excludes the
+    /// card's footprint UNCONDITIONALLY and reads the clean screen beside
+    /// it — in EVERY state, so the resting dock and the open box always
+    /// compute the same colour from the same source. No colour switch on
+    /// open/close (Max, 2026-09-10).
     pub(crate) fn reeval_dock_bar(&mut self) {
         if self.options_paused() {
             self.dock_want = None;
@@ -265,11 +265,15 @@ impl App {
         }
     }
 
-    /// No window to match ⇒ the dock stays its frosted self. Sample a row at
-    /// the dock's own mid-height, the same way [`Self::eval_transparent_bar`]
-    /// does for the bar: at rest, that row is our own translucent card over
-    /// the wallpaper — reading it *through* our own blur is exactly the
-    /// backdrop the dock's ink needs to contrast against.
+    /// No window to match ⇒ the dock stays its frosted self. Sample a row
+    /// at the dock's own mid-height, the same way
+    /// [`Self::eval_transparent_bar`] does for the bar — but NOT through
+    /// our own card: `read_sample` excludes the card's columns in every
+    /// state (see [`Self::reeval_dock_bar`]), so this reads the raw
+    /// wallpaper/windows beside the dock. It used to read through the
+    /// card's own translucency at rest, which made the resting dock a
+    /// muddier, self-tinted colour than the open box computed — the
+    /// docked-vs-open colour switch Max vetoed.
     fn eval_transparent_dock(&mut self) {
         let had_match = self.dock_bar_matched.take().is_some();
         if let Ok(mon) = hypr::focused_monitor() {
@@ -632,16 +636,22 @@ impl App {
                 }
             }
         }
-        // The open launcher card floats exactly across both dock sample
-        // rows. Freezing sampling while open left the box colour-stale as
-        // the user swiped workspaces behind it (Max, 2026-09-09); reading
-        // straight through fed our own paint back into itself (the stepped
-        // colour crawl before that). So do what BarMatch does with the
-        // drawers: exclude the card's own columns and keep reading the live
-        // screen to either side. The bar surface spans the full monitor
-        // width, so `options_size.0` doubles as the monitor's logical width
-        // for the logical→physical mapping; the card is centered on it.
-        if matches!(slot, Slot::DockMatch | Slot::DockFrost) && self.ui.open_progress() > 0.001 {
+        // The dock NEVER reads its own columns — docked, opening, or open.
+        // History, in order: reading straight through fed our own paint
+        // back into itself (the stepped colour crawl); freezing while open
+        // left the box colour-stale during workspace swipes; and excluding
+        // the card only WHILE OPEN meant the resting dock (sampling through
+        // its own translucent card) and the open box (sampling the clean
+        // screen beside it) wore two DIFFERENT colours, switching on every
+        // open/close — Max, 2026-09-10: "i want all to look all time as the
+        // OPEN BOX! i dont want a colors switch between the dock and the
+        // open boxmenu." So the exclusion is unconditional: both states
+        // read the same clean columns beside the card's footprint — one
+        // colour source, no switch. Same trick BarMatch uses for the
+        // notif/clip drawers. The bar surface spans the full monitor width,
+        // so `options_size.0` doubles as the monitor's logical width for
+        // the logical→physical mapping; the card is centered on it.
+        if matches!(slot, Slot::DockMatch | Slot::DockFrost) {
             let sw = self.options_size.0 as f32;
             if sw <= 0.0 {
                 // Can't place the card's columns — no sample beats reading

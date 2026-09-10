@@ -479,6 +479,17 @@ fn capture(last_hash: &mut Option<u64>) -> Option<ClipEntry> {
     if types.is_empty() {
         return None;
     }
+    // Password-manager copies are marked sensitive (the de-facto
+    // `x-kde-passwordManagerHint` type, offered by KeePassXC/Bitwarden/
+    // KDE apps when copying secrets): NEVER record them. Without this
+    // check, copied passwords landed verbatim in the plaintext on-disk
+    // history (DockMenu security pass, 2026-09-09). Presence of the type
+    // is the signal — checking its value would mean reading the secret's
+    // sibling offer for nothing.
+    if types.iter().any(|t| t == "x-kde-passwordManagerHint") {
+        debug!("clipboard: sensitive clip (password-manager hint) — not recorded");
+        return None;
+    }
     let mut entry = if let Some(mime) = image_mime(&types) {
         classify_image(&mime)?
     } else if types
@@ -1883,6 +1894,7 @@ impl App {
                         layer,
                         tint: [0.0; 4],
                         ring: -1.0,
+                        plate: crate::content::NO_PLATE,
                     });
                 } else {
                     // Not resolved yet — a soft placeholder with the kind glyph.
@@ -2835,6 +2847,7 @@ impl App {
                 layer,
                 tint: [0.0; 4],
                 ring: -1.0,
+                plate: crate::content::NO_PLATE,
             });
         } else if entry.kind == ClipKind::Text {
             let tx = card.x + DETAIL_TEXT_MX;
@@ -2887,6 +2900,7 @@ impl App {
                             layer,
                             tint: [0.0; 4],
                             ring: -1.0,
+                            plate: crate::content::NO_PLATE,
                         });
                     } else {
                         self.push_clip_tile_glyph(scene, tile, glyph, ink, a, card);

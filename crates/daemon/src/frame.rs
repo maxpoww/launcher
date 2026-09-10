@@ -935,13 +935,22 @@ impl App {
             .iter()
             .map(|e| self.running.contains_key(e))
             .collect();
-        // Eased fill/ink/wash: a fresh colour sample fades in over ~¼ s
-        // instead of repainting in one frame — the ink's black↔white flip
-        // crossfades too. Keep frames coming while any of them settles.
-        let (dock_bg, dock_ink, dock_highlight, fill_moving) = self.dock_surface_eased(dt);
-        if fill_moving {
+        // Eased fill/ink/wash/plate: a fresh colour sample fades in instead
+        // of repainting in one frame — the ink's black↔white flip and the
+        // icon plates' polarity crossfade too. Keep frames coming while
+        // anything settles.
+        let paint = self.dock_surface_eased(dt);
+        let (dock_bg, dock_ink, dock_highlight) = (paint.fill, paint.ink, paint.wash);
+        if paint.moving {
             self.dirty = true;
         }
+        // Plates only when the theme wants them at all — `icon_plate` off
+        // means raw un-normalized tiles, which a plate would look wrong on.
+        let icon_plate = if self.config.theme.icon_plate {
+            paint.plate
+        } else {
+            content::NO_PLATE
+        };
         let scene = content::scene(
             &self.config,
             self.icon_scale(),
@@ -967,6 +976,7 @@ impl App {
                 pointer: mag_pointer,
                 mag_amount: self.mag_amount,
                 dock_mag: &dock_mag,
+                plate: icon_plate,
                 bounce,
                 query: &self.search.query,
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),

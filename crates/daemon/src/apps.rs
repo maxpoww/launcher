@@ -611,14 +611,15 @@ struct DiskCache {
 
 impl DiskCache {
     fn new() -> Self {
-        // The cache stores finished tiles (plated + mipped), so its identity
-        // must track the plate appearance: the directory carries a hash of
-        // every plate parameter, so any tuning lands in a fresh directory
-        // instead of serving stale tiles (and `raw` when plating is off).
+        // The cache stores finished tiles (normalized + mipped), so its
+        // identity must track that processing: the directory carries a hash
+        // of every normalize parameter, so any tuning lands in a fresh
+        // directory instead of serving stale tiles (and `raw` when plating
+        // is off). The `live` marker parts this cache from the old one that
+        // baked the plate pixels in (the plate is shader-drawn now).
         let variant = if icon_plate_enabled() {
-            let params = format!(
-                "{PLATE_CONTENT}|{PLATE_INSET}|{PLATE_RADIUS}|{PLATE_FILL_ALPHA}|{PLATE_EDGE_ALPHA}|{PLATE_EDGE_WIDTH}|{PLATE_ICON_DESAT}|{PLATE_ICON_OPACITY}"
-            );
+            let params =
+                format!("live|{PLATE_CONTENT}|{PLATE_ICON_DESAT}|{PLATE_ICON_OPACITY}");
             format!("plate-{:08x}", fnv1a64(&params))
         } else {
             "raw".to_owned()
@@ -1005,17 +1006,6 @@ fn icon_plate_enabled() -> bool {
 /// Icon content fills this fraction of the plate's larger dimension; the
 /// rest is the frosted margin that unifies differently-sized icons.
 const PLATE_CONTENT: f32 = 0.80;
-/// Plate margin inside the `ICON_SIZE` tile (at `ICON_SIZE = 256`). Small,
-/// so the plate fills its slot like a group box does.
-const PLATE_INSET: f32 = 6.0;
-/// Plate corner radius (~22% of the side, matching the group-box tiles).
-const PLATE_RADIUS: f32 = 56.0;
-/// Frosted fill (white) and hairline-edge (white) opacities over the dark
-/// card, plus the edge width. Edge is thick at `ICON_SIZE` so it survives
-/// downscaling to the small dock size (~1px there).
-const PLATE_FILL_ALPHA: u8 = 84;
-const PLATE_EDGE_ALPHA: u8 = 112;
-const PLATE_EDGE_WIDTH: f32 = 5.0;
 /// The icon sitting on the plate is muted for a calmer, cohesive dock:
 /// pulled `PLATE_ICON_DESAT` of the way toward its own luminance (0 = full
 /// color, 1 = greyscale) and drawn at `PLATE_ICON_OPACITY` so the frosted
@@ -1023,28 +1013,30 @@ const PLATE_EDGE_WIDTH: f32 = 5.0;
 const PLATE_ICON_DESAT: f32 = 0.0;
 const PLATE_ICON_OPACITY: f32 = 1.0;
 
-/// Turn a raw `ICON_SIZE`² base tile into the uploaded mip chain, plating
-/// it first when `icon_plate` is on.
+/// Turn a raw `ICON_SIZE`² base tile into the uploaded mip chain,
+/// normalizing it first when `icon_plate` is on. The plate itself is no
+/// longer painted here: it is drawn live in the icon shader (see
+/// `IconInst::plate` / `icon.wgsl`) so it can wear the surface's adaptive
+/// colour — the raster only guarantees the glyph geometry the plate frames.
 pub(crate) fn finish_tile(base: Vec<u8>) -> Vec<u8> {
     if icon_plate_enabled() {
-        with_mips(plate_tile(base))
+        with_mips(normalize_tile(base))
     } else {
         with_mips(base)
     }
 }
 
-/// Composite `base` onto a frosted rounded-square plate: trim it to its
-/// alpha content, scale that to [`PLATE_CONTENT`] of the tile and center
-/// it, so a mix of circular, square and padded theme icons all share one
-/// silhouette. Returns a plain `ICON_SIZE`² premultiplied tile (the caller
-/// mips it).
-fn plate_tile(base: Vec<u8>) -> Vec<u8> {
+/// Normalize `base` for the live-drawn plate: trim it to its alpha
+/// content, scale that to [`PLATE_CONTENT`] of the tile and center it, so
+/// a mix of circular, square and padded theme icons all share one
+/// silhouette on the plate. Returns a plain `ICON_SIZE`² premultiplied
+/// tile (the caller mips it).
+fn normalize_tile(base: Vec<u8>) -> Vec<u8> {
     let bounds = alpha_bounds(&base);
     let mut tile = match tiny_skia::Pixmap::new(ICON_SIZE, ICON_SIZE) {
         Some(p) => p,
         None => return base,
     };
-    draw_plate(&mut tile);
     if let (Some((x0, y0, x1, y1)), Some(size)) =
         (bounds, tiny_skia::IntSize::from_wh(ICON_SIZE, ICON_SIZE))
     {
@@ -1086,45 +1078,6 @@ fn desaturate_premult(px: &mut [u8], amount: f32) {
         p[1] = (g + (lum - g) * amount).round() as u8;
         p[2] = (b + (lum - b) * amount).round() as u8;
     }
-}
-
-/// Draw the frosted plate: a translucent white rounded square with a
-/// slightly brighter hairline edge, so it reads as glass over the dark
-/// card. The shape's transparent corners give the cohesive silhouette.
-fn draw_plate(tile: &mut tiny_skia::Pixmap) {
-    let s = ICON_SIZE as f32;
-    let Some(path) = rounded_rect_path(
-        PLATE_INSET,
-        PLATE_INSET,
-        s - 2.0 * PLATE_INSET,
-        s - 2.0 * PLATE_INSET,
-        PLATE_RADIUS,
-    ) else {
-        return;
-    };
-    let mut fill = tiny_skia::Paint::default();
-    fill.set_color_rgba8(255, 255, 255, PLATE_FILL_ALPHA);
-    fill.anti_alias = true;
-    tile.fill_path(
-        &path,
-        &fill,
-        tiny_skia::FillRule::Winding,
-        tiny_skia::Transform::identity(),
-        None,
-    );
-    let mut edge = tiny_skia::Paint::default();
-    edge.set_color_rgba8(255, 255, 255, PLATE_EDGE_ALPHA);
-    edge.anti_alias = true;
-    tile.stroke_path(
-        &path,
-        &edge,
-        &tiny_skia::Stroke {
-            width: PLATE_EDGE_WIDTH,
-            ..Default::default()
-        },
-        tiny_skia::Transform::identity(),
-        None,
-    );
 }
 
 /// Tight bounding box `(x0, y0, x1, y1)` (high ends exclusive) of pixels

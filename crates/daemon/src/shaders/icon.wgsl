@@ -25,6 +25,7 @@ struct Instance {
     @location(2) layer: u32,           // texture array layer
     @location(3) tint: vec4<f32>,      // silhouette tint: rgb + strength (a)
     @location(4) ring: f32,            // >=0 = draw a progress ring, that filled
+    @location(5) plate: vec4<f32>,     // squircle plate under the glyph; a <= 0 = none
 };
 
 struct VsOut {
@@ -33,6 +34,7 @@ struct VsOut {
     @location(1) @interpolate(flat) layer: u32,
     @location(2) @interpolate(flat) tint: vec4<f32>,
     @location(3) @interpolate(flat) ring: f32,
+    @location(4) @interpolate(flat) plate: vec4<f32>,
 };
 
 @vertex
@@ -46,6 +48,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.layer = inst.layer;
     out.tint = inst.tint;
     out.ring = inst.ring;
+    out.plate = inst.plate;
     return out;
 }
 
@@ -202,6 +205,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let cc = vec3<f32>(0.45, 0.08, 0.06);
         rgb = cc * can + rgb * (1.0 - can);
         a = can + a * (1.0 - can);
+    }
+    // Squircle plate under the glyph (plate.a > 0): the frosted rounded
+    // square that used to be BAKED white into the icon texture, now drawn
+    // live so it can wear the surface's adaptive colour and ride its eases.
+    // Same geometry as the old raster (inset 6/256, radius 56/256, hairline
+    // edge 5/256 at 4/3 the fill's alpha), clipped by the squircle mask.
+    if (in.plate.a > 0.0) {
+        let q = in.uv - vec2<f32>(0.5);
+        let inset = 0.0234375;   // 6 / 256
+        let rad = 0.21875;       // 56 / 256
+        let dpl = sd_box(q, vec2<f32>(0.5 - inset - rad)) - rad;
+        let fillc = fill_cov(dpl, px);
+        let edgec = stroke_cov(dpl, 0.0098, px);
+        var pa = in.plate.a * fillc;
+        var prgb = in.plate.rgb * pa;
+        // Hairline edge over the fill, same colour, a touch stronger.
+        let ea = min(in.plate.a * 1.33, 1.0) * edgec;
+        prgb = in.plate.rgb * ea + prgb * (1.0 - ea);
+        pa = ea + pa * (1.0 - ea);
+        prgb = prgb * mask;
+        pa = pa * mask;
+        // Glyph over plate, premultiplied.
+        rgb = rgb + prgb * (1.0 - a);
+        a = a + pa * (1.0 - a);
     }
     return vec4<f32>(rgb, a) * globals.alpha;
 }

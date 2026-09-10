@@ -26,6 +26,31 @@ pub fn data_path(file_name: &str) -> PathBuf {
     base.join("waverunner").join(file_name)
 }
 
+/// Restrict the daemon's state dirs to their owner (0700), best-effort,
+/// once at startup: the stores hold clipboard text and notification
+/// bodies — no other account's business on a shared machine. Individual
+/// files inherit the umask (0644 typically); the directory bit is the
+/// reliable gate, and it also covers side dirs (notif-images,
+/// clipboard-previews, webapp-chrome) in one stroke.
+pub fn harden_state_dirs() {
+    use std::os::unix::fs::PermissionsExt;
+    let config = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
+        })
+        .join("waverunner");
+    let data = data_path("");
+    for dir in [data, config] {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Err(e) = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)) {
+            warn!("cannot restrict {dir:?} to 0700: {e}");
+        }
+    }
+}
+
 /// Parse `path` as JSON. Missing → `None`, quietly (first run).
 /// Malformed → the original is PRESERVED beside the store as
 /// `<name>.corrupt-<epoch>` and `None` is returned. Never silently
