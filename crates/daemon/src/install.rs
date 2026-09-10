@@ -572,6 +572,18 @@ impl App {
         self.managed.contains(&p.attr)
             || p.icons.iter().any(|s| self.installed_app_ids.contains(s))
             || self.installed_app_ids.contains(&p.attr)
+            // Golem #39 (the #3 catalog overlap): a package whose GUI app is
+            // already on the machine under a DIFFERENT id (`chromium` while
+            // `chromium-browser` sits in the grid) passed every check above —
+            // the index carries no desktop hints for it and the attr is not
+            // the id — so an installed app was still offered as installable.
+            // The prefix relation, not `ids_relate`: hiding a listing on a
+            // loose substring match would hide `code` because Decoder is
+            // installed; a prefix miss merely keeps today's behavior.
+            || self
+                .installed_app_ids
+                .iter()
+                .any(|id| attr_prefixes_id(&p.attr, id))
     }
 
     /// Copy the current package-hit icons into the icon texture array's
