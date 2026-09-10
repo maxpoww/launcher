@@ -26,11 +26,45 @@ pub fn data_path(file_name: &str) -> PathBuf {
     base.join("waverunner").join(file_name)
 }
 
-/// Parse `path` as JSON, or `None` if it's missing or malformed.
+/// Parse `path` as JSON. Missing → `None`, quietly (first run).
+/// Malformed → the original is PRESERVED beside the store as
+/// `<name>.corrupt-<epoch>` and `None` is returned. Never silently
+/// discard: with the old behavior the next write destroyed the user's
+/// data under a fresh default (the dev box lost its whole grid order to
+/// exactly this, 2026-09-03 — `apps-order.json.bak-…-shredded`). A
+/// schema change that stops parsing an old store lands here too, which
+/// is the right call: preserve, start clean, leave the bytes for rescue.
+/// The rescue is loud so the DockMenu aging check can collect it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let rescue = sibling(path, &format!(".corrupt-{secs}"));
+            match std::fs::rename(path, &rescue) {
+                Ok(()) => warn!(
+                    "{path:?} is corrupt ({e}); preserved as {rescue:?}, starting empty"
+                ),
+                Err(re) => warn!(
+                    "{path:?} is corrupt ({e}); rescue rename failed too ({re}); starting empty"
+                ),
+            }
+            None
+        }
+    }
+}
+
+/// `path` with `suffix` APPENDED to its file name (`foo.json` →
+/// `foo.json<suffix>`) — unlike `with_extension`, which would substitute
+/// the extension and let two stores differing only by extension collide.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
 }
 
 /// Serialize `value` (pretty, for hand-inspection) and write it
@@ -56,7 +90,10 @@ pub fn write_bytes(tag: &str, path: &Path, bytes: &[u8]) {
             return;
         }
     }
-    let tmp = path.with_extension("tmp");
+    // Appended, not substituted (`foo.json` → `foo.json.tmp`): with
+    // `with_extension`, stores differing only by extension would share
+    // one temp name.
+    let tmp = sibling(path, ".tmp");
     let write = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
     if let Err(e) = write {
         warn!("{tag}: cannot write {path:?}: {e}");
@@ -71,12 +108,45 @@ mod tests {
     #[test]
     fn round_trips_and_tolerates_garbage() {
         let dir = std::env::temp_dir().join("waverunner-persist-test");
+        let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("store.json");
         write_json("test", &path, &vec!["a".to_string(), "b".to_string()]);
         let back: Option<Vec<String>> = read_json(&path);
         assert_eq!(back, Some(vec!["a".to_string(), "b".to_string()]));
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(read_json::<Vec<String>>(&path), None);
+        // The corrupt original is PRESERVED beside the store, and the
+        // store path itself is now free (a rewrite starts clean).
+        assert!(!path.exists(), "corrupt store should be renamed away");
+        let rescued: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("store.json.corrupt-")
+            })
+            .collect();
+        assert_eq!(rescued.len(), 1, "exactly one rescue file");
+        assert_eq!(
+            std::fs::read_to_string(rescued[0].path()).unwrap(),
+            "not json",
+            "rescue preserves the original bytes"
+        );
+        // A missing store stays quiet (no rescue spawned).
+        assert_eq!(read_json::<Vec<String>>(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tmp_name_is_appended_not_substituted() {
+        assert_eq!(
+            sibling(Path::new("/a/b/foo.json"), ".tmp"),
+            PathBuf::from("/a/b/foo.json.tmp")
+        );
+        assert_eq!(
+            sibling(Path::new("/a/b/foo.rgba"), ".tmp"),
+            PathBuf::from("/a/b/foo.rgba.tmp")
+        );
     }
 }

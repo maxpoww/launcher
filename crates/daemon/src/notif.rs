@@ -228,9 +228,16 @@ const DUP_WINDOW_MS: u64 = 20_000;
 
 /// On-disk store for the browsable history (in the daemon's XDG data dir, next
 /// to the other stores). Reloaded on startup so notifications survive reboots.
-/// Grows unbounded by design — nothing auto-prunes; the user decides when to
-/// erase.
+/// The user decides when to erase — but the STORE is capped at
+/// [`HISTORY_CAP`] cards so a 5-year machine's startup parse (and its
+/// image cache, swept against the store on save) stays as small as day
+/// one. With stack-collapse dedup, 500 distinct stacks is far beyond
+/// anything the box can usefully show — the cap is invisible in practice
+/// (DockMenu #50; was "grows unbounded by design").
 const HISTORY_FILE: &str = "notif-history.json";
+
+/// Most cards the durable history keeps (newest win). See [`HISTORY_FILE`].
+const HISTORY_CAP: usize = 500;
 
 /// On-disk store for the OPTION's *interaction* state — DND (mute) and read-state
 /// — so the whole thing looks identical after a waverunner restart or a reboot.
@@ -448,6 +455,10 @@ impl NotifState {
             ))
             .unwrap_or_default()
             .into_iter()
+            // Aging cap (#50) applied on load too, so a store written by an
+            // older (uncapped) daemon shrinks on first use instead of
+            // carrying years of cards forever.
+            .take(HISTORY_CAP)
             .map(|s| {
                 // Rehydrate the image from the on-disk cache before converting,
                 // so a reloaded card shows its real avatar (not the fallback).
@@ -796,7 +807,7 @@ impl App {
     /// [`crate::persist`]). Called whenever the history changes so it survives a
     /// reboot; the running session's in-memory copy is always authoritative.
     fn save_notif_history(&self) {
-        let stored: Vec<StoredNotification> = self
+        let mut stored: Vec<StoredNotification> = self
             .notif
             .history
             .iter()
@@ -816,11 +827,15 @@ impl App {
                 s
             })
             .collect();
+        // Aging cap (#50): the history is newest-first, so truncation drops
+        // the oldest cards. Keeps a 5-year store the same size as a 5-day one.
+        stored.truncate(HISTORY_CAP);
         crate::persist::write_json(
             "notif-history",
             &crate::persist::data_path(HISTORY_FILE),
             &stored,
         );
+        sweep_orphan_images(&stored);
     }
 
     /// Auto-show the newest notification in the preview pill, then hold and
@@ -2873,6 +2888,27 @@ fn store_image(hash: u64, rgba: &[u8]) -> String {
         crate::persist::write_bytes("notif-image", &path, rgba);
     }
     file
+}
+
+/// Remove cache files no stored card references (#50): before this sweep
+/// nothing EVER deleted from [`IMAGE_DIR`], so images of cleared/collapsed/
+/// capped-out cards accumulated forever (153 files after months on the dev
+/// box). Runs on every history save — a read_dir over ≤ a few hundred
+/// entries, trivially cheap next to the JSON write beside it.
+fn sweep_orphan_images(stored: &[StoredNotification]) {
+    let referenced: HashSet<&str> = stored.iter().filter_map(|s| s.image_file.as_deref()).collect();
+    let dir = crate::persist::data_path(IMAGE_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return; // no cache dir yet — nothing to sweep
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if let Some(name) = name.to_str() {
+            if !referenced.contains(name) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Load a persisted image back into raw RGBA, or `None` if it's missing or the
