@@ -432,52 +432,67 @@ impl App {
             // A startup-reconcile run (F13), not a user install: on success
             // the system now provably matches the list — rescan so any app
             // the run (re)materialized appears. No tile, no busy id.
-            nix::Event::Done { id, ok, .. } if id == nix::RECONCILE_ID => {
-                if ok {
-                    info!("startup reconcile applied; rescanning");
-                    self.indexer.request_rescan_fresh();
-                } else {
-                    warn!("startup reconcile failed; leaving state for the next run");
-                }
-            }
             nix::Event::Done {
                 id,
+                op,
                 ok,
                 desktop_ids,
             } => {
                 debug!("declarative op for {id}: ok={ok}");
+                match op {
+                    nix::DoneOp::Reconcile => {
+                        if ok {
+                            info!("startup reconcile applied; rescanning");
+                            self.indexer.request_rescan_fresh();
+                        } else {
+                            warn!("startup reconcile failed; leaving state for the next run");
+                        }
+                        return;
+                    }
+                    nix::DoneOp::Remove { attr } => {
+                        // Routed by the EVENT's kind, never by the
+                        // `uninstalling` map (#57): a rescan landing between
+                        // the switch removing the desktop files and the
+                        // worker noticing completion prunes the map first,
+                        // and the Done then mis-routed into the install
+                        // branch — confirming the very managed entry it
+                        // should remove, and skipping the residue sweep
+                        // (reproduced 12/12 on the ASUS batch, 2026-09-10).
+                        self.busy_ids.remove(&id);
+                        if ok {
+                            // Residue sweep (#60) BEFORE the cache entry
+                            // goes: the stored desktop ids are match
+                            // candidates. The app's config/cache/data dirs
+                            // follow it into the Recycle Bin.
+                            let mut ids = self.managed.desktop_ids_for(&attr);
+                            ids.push(id.clone());
+                            crate::residue::sweep(&attr, &ids);
+                            self.managed.remove(&attr);
+                            self.pins.unpin(&id);
+                            self.recompute_removable();
+                            self.indexer.request_rescan_fresh();
+                            // The `uninstalling` entry (when a rescan hasn't
+                            // pruned it yet) keeps the app hidden through
+                            // the seconds between the rebuild finishing and
+                            // the reindex — `on_apps_loaded` prunes it once
+                            // the real entry is actually gone.
+                        } else {
+                            // Rebuild failed: the app is still installed, so
+                            // un-hide it and flash the failure.
+                            self.uninstalling.remove(&id);
+                            self.flash_failed(id);
+                            self.refilter();
+                        }
+                        self.save_install_state();
+                        self.update_hover();
+                        self.schedule_frame();
+                        return;
+                    }
+                    nix::DoneOp::Install => {}
+                }
                 self.busy_ids.remove(&id);
                 let _ = &desktop_ids; // reserved for a future authoritative gui probe
-                if let Some(attr) = self.uninstalling.get(&id).cloned() {
-                    // An uninstall finished. Only now — on success — drop the
-                    // cache entry and dock pin; on failure the package is
-                    // still installed and still tracked (apply_uninstall
-                    // re-added the list line), so leave both in place.
-                    if ok {
-                        // Residue sweep (#60) BEFORE the cache entry goes:
-                        // the stored desktop ids are match candidates. The
-                        // app's config/cache/data dirs follow it into the
-                        // Recycle Bin — an uninstall leaves nothing behind.
-                        let mut ids = self.managed.desktop_ids_for(&attr);
-                        ids.push(id.clone());
-                        crate::residue::sweep(&attr, &ids);
-                        self.managed.remove(&attr);
-                        self.pins.unpin(&id);
-                        self.recompute_removable();
-                        self.indexer.request_rescan_fresh();
-                        // Keep `id` in `uninstalling` so the app stays hidden
-                        // (see `is_removing`) through the seconds between the
-                        // rebuild finishing and the reindex — `on_apps_loaded`
-                        // prunes it once the real entry is actually gone.
-                        // Otherwise it flashes back onto the grid mid-rebuild.
-                    } else {
-                        // Rebuild failed: the app is still installed, so
-                        // un-hide it and flash the failure.
-                        self.uninstalling.remove(&id);
-                        self.flash_failed(id);
-                        self.refilter();
-                    }
-                } else if ok {
+                if ok {
                     // Install succeeded: mark THIS attr confirmed and persist.
                     // Only confirmed packages reach managed.json, so other
                     // stages still queued behind it (a batch of simultaneous

@@ -82,17 +82,25 @@ pub enum Event {
     /// A declarative install or uninstall finished — the package list was
     /// edited and the privileged apply helper ran `nixos-rebuild switch` to
     /// completion (see [`crate::applier`]). `id` echoes the request's cell
-    /// id (package attr on install, app id on uninstall). `desktop_ids` is
-    /// `Some(stems)` after a successful install — the `.desktop` entry stems
-    /// the installed package actually ships, read straight from its store
-    /// path (an empty vec = a CLI-only tool with no GUI launcher). It is
-    /// `None` for a removal, a failed install, or when the store path could
-    /// not be resolved. The daemon records it so a just-installed GUI app is
-    /// never stood in for by a synthetic terminal tile while its `.desktop`
-    /// is still propagating into the scan (which used to pin a green-box
-    /// "CLI" in the real app's place).
+    /// id (package attr on install, app id on uninstall). `op` says WHAT
+    /// finished — the handler must never infer it from daemon state: the
+    /// `uninstalling` map is pruned by rescans, and a scan landing between
+    /// the switch removing the desktop files and the worker noticing
+    /// completion made a Remove-Done mis-route into the install branch
+    /// (confirming the very managed entry it should remove — #57, the
+    /// leaked-uninstall race, reproduced 12/12 on the ASUS batch
+    /// 2026-09-10). `desktop_ids` is `Some(stems)` after a successful
+    /// install — the `.desktop` entry stems the installed package actually
+    /// ships, read straight from its store path (an empty vec = a CLI-only
+    /// tool with no GUI launcher). It is `None` for a removal, a failed
+    /// install, or when the store path could not be resolved. The daemon
+    /// records it so a just-installed GUI app is never stood in for by a
+    /// synthetic terminal tile while its `.desktop` is still propagating
+    /// into the scan (which used to pin a green-box "CLI" in the real
+    /// app's place).
     Done {
         id: String,
+        op: DoneOp,
         ok: bool,
         desktop_ids: Option<Vec<String>>,
     },
@@ -145,6 +153,18 @@ pub enum Request {
 /// `:` — an invalid attr character — so it can never collide with a real
 /// package install's id.
 pub const RECONCILE_ID: &str = "waverunner:reconcile";
+
+/// What a [`Event::Done`] completed. Carried IN the event so routing can
+/// never depend on racy daemon-side maps (#57).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DoneOp {
+    Install,
+    /// The uninstall's package attr rides along: the handler needs it for
+    /// the managed-cache removal and the residue sweep even when the
+    /// `uninstalling` map entry was already pruned by a rescan.
+    Remove { attr: String },
+    Reconcile,
+}
 
 /// How many top-ranked packages a `Ranked` reply carries. The renderer
 /// reserves this many texture-array layers for their icons.
@@ -288,9 +308,15 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                         } else {
                             crate::applier::apply_uninstall(&op.attr)
                         };
+                        let done_op = if op.install {
+                            DoneOp::Install
+                        } else {
+                            DoneOp::Remove { attr: op.attr.clone() }
+                        };
                         if mut_events
                             .send(Event::Done {
                                 id,
+                                op: done_op,
                                 ok,
                                 desktop_ids: None,
                             })
@@ -306,10 +332,16 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                                 install: o.install,
                             }).collect();
                         let results = crate::applier::apply_batch(&batch);
-                        for ((id, _), ok) in ops.into_iter().zip(results) {
+                        for ((id, o), ok) in ops.into_iter().zip(results) {
+                            let done_op = if o.install {
+                                DoneOp::Install
+                            } else {
+                                DoneOp::Remove { attr: o.attr.clone() }
+                            };
                             if mut_events
                                 .send(Event::Done {
                                     id,
+                                    op: done_op,
                                     ok,
                                     desktop_ids: None,
                                 })
@@ -325,6 +357,7 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                     if mut_events
                         .send(Event::Done {
                             id: RECONCILE_ID.to_owned(),
+                            op: DoneOp::Reconcile,
                             ok,
                             desktop_ids: None,
                         })
