@@ -209,6 +209,21 @@ impl ManagedDb {
             .collect()
     }
 
+    /// Attrs concluded CLI-only (`gui == Some(false)`). The scan reconciler
+    /// re-checks these against the live apps: a package installed while its
+    /// GUI app was ALREADY on the machine used to fall through to the CLI
+    /// fallback and get cached `false` with the catalog's (wrong) ids — a
+    /// phantom terminal tile shadowing a real app (the ASUS chromium /
+    /// fritzing, Golem #48). A genuine CLI tool relates to no scanned app,
+    /// so re-checking it every scan is a cheap no-op.
+    pub fn cli_concluded_attrs(&self) -> Vec<String> {
+        self.pkgs
+            .iter()
+            .filter(|p| p.gui == Some(false))
+            .map(|p| p.attr.clone())
+            .collect()
+    }
+
     /// Desktop ids stored for `attr` (used for dock-pin resolution after
     /// a managed install without a pending grid tile).
     pub fn desktop_ids_for(&self, attr: &str) -> Vec<String> {

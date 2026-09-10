@@ -1029,12 +1029,30 @@ impl App {
         // CLI-only fallback: a pending install that matched no scanned GUI
         // app but has a synthetic CLI tile (id == attr) is a command-line
         // tool — resolve it to that tile so it lands and stops "installing".
+        //
+        // But first: an install of a package whose GUI app is ALREADY on
+        // the machine (chromium dragged from the install list while
+        // `chromium-browser` sits in the grid — the #3 catalog overlap)
+        // matches no shipped id and no NEWLY appeared app, and used to fall
+        // through here — fabricating a phantom "Command-line tool" tile and
+        // caching gui=false (the ASUS, Golem #48). An unclaimed id already
+        // in the scan that relates to the attr is that real app — resolve
+        // to it instead of inventing a terminal tile for a GUI program.
         for (attr, _, anchor) in &pending {
             if resolved.iter().any(|(ra, _, _, _)| ra == attr) {
                 continue;
             }
             if self.cli_ids.contains(attr) {
-                resolved.push((attr.clone(), attr.clone(), anchor.clone(), false));
+                if let Some(app_id) = current
+                    .iter()
+                    .find(|id| !claimed.contains(id.as_str()) && ids_relate(attr, id))
+                    .cloned()
+                {
+                    claimed.insert(app_id.clone());
+                    resolved.push((attr.clone(), app_id, anchor.clone(), true));
+                } else {
+                    resolved.push((attr.clone(), attr.clone(), anchor.clone(), false));
+                }
             }
         }
 
@@ -1121,7 +1139,17 @@ impl App {
             let hit = resolve_hit(&attr, &desktop_ids, &current, &newly, &claimed);
             let (app_id, gui) = match hit {
                 Some(app_id) => (app_id, true),
-                None if self.cli_ids.contains(&attr) => (attr.clone(), false),
+                // Same rescue as the tile path: a related app already in
+                // the scan is the real thing — never fabricate a terminal
+                // tile for an already-present GUI program (#48).
+                None if self.cli_ids.contains(&attr) => match current
+                    .iter()
+                    .find(|id| !claimed.contains(id.as_str()) && ids_relate(&attr, id))
+                    .cloned()
+                {
+                    Some(app_id) => (app_id, true),
+                    None => (attr.clone(), false),
+                },
                 None => continue,
             };
             claimed.insert(app_id.clone());
@@ -1173,6 +1201,45 @@ impl App {
                     changed = true;
                 }
                 None => {} // its app may simply not be scanned yet — retry next scan
+            }
+        }
+
+        // Heal past misfiles (#48): attrs cached CLI-only that demonstrably
+        // have a live GUI app. Two shapes, both left behind by the
+        // pre-rescue fallback concluding `false` while the GUI app already
+        // sat in the grid (the ASUS brave/darktable/fritzing/chromium
+        // gui:false entries): (a) a stored desktop id matches a scanned app
+        // — its own record proves GUI; (b) none do (so a phantom terminal
+        // tile is live, attr ∈ cli_ids) but the attr RELATES to a scanned
+        // app — the same rescue relation as above. Relabeling stores the
+        // real id, so shape-(b) phantoms evaporate on the next scan. A
+        // genuine CLI tool matches neither and stays untouched.
+        for attr in self.managed.cli_concluded_attrs() {
+            if self.busy_ids.contains(&attr)
+                || self.pending_installs.iter().any(|p| p.attr == attr)
+            {
+                continue;
+            }
+            let stored = self.managed.desktop_ids_for(&attr);
+            let hit = stored
+                .iter()
+                .find(|d| current.contains(d.as_str()) && !claimed.contains(d.as_str()))
+                .cloned()
+                .or_else(|| {
+                    self.cli_ids.contains(&attr).then(|| {
+                        current
+                            .iter()
+                            .find(|id| !claimed.contains(id.as_str()) && ids_relate(&attr, id))
+                            .cloned()
+                    })?
+                });
+            if let Some(app_id) = hit {
+                info!("reconcile: {attr} was cached CLI-only but {app_id} is its live app; relabeling");
+                claimed.insert(app_id.clone());
+                self.managed
+                    .note_installed(&attr, std::slice::from_ref(&app_id), true);
+                changed = true;
+                linked_real = true;
             }
         }
 
@@ -1490,6 +1557,22 @@ mod tests {
         let current = set(&["gimp"]);
         let hit = resolve_hit("gimp", &[], &current, &[], &HashSet::new());
         assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn already_present_rescue_relation_covers_the_misfiled_apps() {
+        // The #48 rescue matches a confirmed-installed attr to an app that
+        // was ALREADY in the grid before the install (so never in `newly`):
+        // the same fuzzy relation the newly-route uses, applied to
+        // `current` only when the alternative is fabricating a phantom
+        // terminal tile. These are the shapes that were misfiled on the
+        // ASUS (gui:false + phantom):
+        assert!(ids_relate("chromium", "chromium-browser"));
+        assert!(ids_relate("fritzing", "org.fritzing.Fritzing"));
+        assert!(ids_relate("brave", "brave-browser"));
+        assert!(ids_relate("darktable", "org.darktable.darktable"));
+        // Short attrs stay equality-only — no accidental claims.
+        assert!(!ids_relate("go", "google-chrome"));
     }
 
     #[test]
