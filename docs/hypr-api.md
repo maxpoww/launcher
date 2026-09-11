@@ -58,11 +58,19 @@ hl.config({ general = { col = { active_border = {
     colors = { 'rgba(RRGGBBff)', ... }, angle = 90 } } } })
 ```
 
-Verified live 2026-09-11: **up to 10 colour stops**, plus `angle` in degrees;
-`angle = 90` puts the FIRST stop at the top of the frame. Read it back with
-`hyprctl getoption general:col.active_border`. A plugin sees the same object
-via `CConfigValue<Config::IComplexConfigValue>("general:col.active_border")`
-— that is how waveview's overview rings inherit the border's paint.
+`angle` is in degrees; `angle = 90` puts the FIRST stop at the top of the
+frame (verified live 2026-09-11). Read the value back with `hyprctl getoption
+general:col.active_border`.
+
+**Ten stops is the ceiling, and the config will not tell you so.** The
+parser accepts more — twelve set and stored fine in a live test — but the
+border shader's uniform is `vec4 gradient[10]` (`src/render/shaders/glsl/
+border.glsl`), so anything past the tenth is more than the renderer can
+read. Stay at or under 10.
+
+A plugin sees the same object via
+`CConfigValue<Config::IComplexConfigValue>("general:col.active_border")` —
+that is how waveview's overview rings inherit the border's paint.
 
 ## `hl.dsp.cursor.*` argument shape (verified live 2026-09-11)
 

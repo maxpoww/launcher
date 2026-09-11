@@ -76,12 +76,7 @@ fn scrim() -> [f32; 4] {
 }
 /// A white hairline rim at 10%.
 const TILE_RIM: [f32; 4] = [1.0, 1.0, 1.0, 0.10];
-/// The staged tile's frame colour — whatever the staged WINDOW is wearing
-/// right now. Both come from `App::border_stops`, so this is the same paint
-/// as the border around the window on screen, live with the wallpaper
-/// (Max, 2026-09-11: the stage tiles' border matches dynamically too). It
-/// used to be the fixed `#ffbe98` the desktop border used to be.
-/// Width of that frame on a tile — the window's own `border_size`, not a
+/// Width of the staged tile's frame — the window's own `border_size`, not a
 /// scaled-down version of it. The frame is a marking, not part of the
 /// miniature, so it reads at the same weight in both places.
 const STAGE_BORDER_W: f32 = 3.0;
@@ -628,8 +623,12 @@ impl App {
         let (w, h) = self.deck_size;
         let (sw, sh) = self.deck_screen;
         let tw = tile_w(sw, sh, self.deck.tiles.len());
-        // The staged tile's frame: the live window-border colour (see the
-        // `stage_rim` docs above), read once for the whole deck.
+        // The staged tile's frame colour: whatever the staged WINDOW is
+        // wearing right now. Both come from `App::border_stops`, so a tile's
+        // frame is the same paint as the border around the window it stands
+        // for and the two cannot drift (Max, 2026-09-11). It used to be a
+        // fixed `#ffbe98`, matched by hand to what the desktop border used
+        // to be. Read once for the whole deck.
         let stage_rim = self.border_tint();
         let mut scene = Scene {
             alpha: 1.0,

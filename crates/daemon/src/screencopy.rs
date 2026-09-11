@@ -545,6 +545,7 @@ impl App {
         let Some(cap) = self.capture.take() else {
             return;
         };
+        self.options_capture_failing = false;
         let mut bar_changed = false;
         let mut dock_changed = false;
         for &(slot, sample_y) in &cap.samples {
@@ -632,8 +633,14 @@ impl App {
         debug!("options: screencopy failed");
         // Retry on the burst rather than waiting out a whole POLL: a
         // failure is most likely mid-transition (the compositor was busy),
-        // which is exactly when the colour must not sit still.
-        self.arm_settle_burst();
+        // which is exactly when the colour must not sit still. Only the
+        // FIRST of a run, though — if failures are persistent, retrying
+        // several times a second buys nothing and the slow poll is the
+        // right cadence to keep knocking at.
+        if !self.options_capture_failing {
+            self.arm_settle_burst();
+        }
+        self.options_capture_failing = true;
     }
 
     /// Read one opaque colour from the captured frame for one wanted row.

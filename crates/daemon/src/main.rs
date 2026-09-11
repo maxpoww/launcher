@@ -400,6 +400,7 @@ fn main() -> anyhow::Result<()> {
         capture: None,
         options_poll_pending: false,
         options_burst_pending: false,
+        options_capture_failing: false,
         screencopy,
         shm,
         shm_pool: None,
@@ -958,6 +959,11 @@ pub struct App {
     /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
     /// follow-up capture after a sample changed a colour).
     options_burst_pending: bool,
+    /// The last capture ended in `failed`. A single failure earns a quick
+    /// burst retry (it is usually transient, and mid-transition is exactly
+    /// when the colour must not sit still); a *run* of them falls back to
+    /// the slow poll instead of retrying several times a second forever.
+    options_capture_failing: bool,
     /// wlr-screencopy manager + shm plumbing for the colour sampling.
     screencopy: Option<ZwlrScreencopyManagerV1>,
     shm: Option<Shm>,
