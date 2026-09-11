@@ -4423,7 +4423,23 @@ impl crate::App {
     /// for a *miniature* of a window (the STAGE deck's tiles) takes its
     /// colour from the same three, so a tile's frame can never drift from
     /// the frame around the window it stands for.
+    ///
+    /// **The stage borrows the desktop's.** STAGE mode dims the whole
+    /// backdrop on purpose (`dim_around = 0.8`), and all three samples read
+    /// that backdrop — so sampling live there collapses every stop toward
+    /// black, and the lightness step turns the collapse into grey. That is
+    /// precisely when this colour is most on show: the deck tiles' frames
+    /// and the staged window's border are made of it (Max, 2026-09-11: the
+    /// deck tile borders "go kind of gray after the images of the tiles
+    /// load" — the dim fading in, not the thumbnails). A deliberate dim
+    /// must not redefine the shell's colour, so while the stage is up we
+    /// keep the last colour the desktop had.
     pub(crate) fn border_stops(&self) -> [[f32; 4]; 3] {
+        if self.stage.is_on() {
+            if let Some(desktop) = self.border_desktop {
+                return desktop;
+            }
+        }
         /// Border-strength lightness step (the plate/zebra recipe, turned
         /// up): each stop keeps its region's HUE but moves a clear step
         /// away in lightness — lifted over a dark sample, dimmed over a
@@ -4495,6 +4511,11 @@ impl crate::App {
     pub(crate) fn push_window_border(&mut self) {
         const EPS: f32 = 0.006; // ~1.5/255 per linear channel
         let stops = self.border_stops();
+        // Remember what the desktop looks like, so the stage has something
+        // to borrow rather than sampling its own dim (see `border_stops`).
+        if !self.stage.is_on() {
+            self.border_desktop = Some(stops);
+        }
         if self.border_pushed.is_some_and(|last| {
             last.iter()
                 .flatten()

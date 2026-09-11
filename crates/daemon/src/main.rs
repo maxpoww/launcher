@@ -492,6 +492,7 @@ fn main() -> anyhow::Result<()> {
         dock_wash_anim: None,
         dock_plate_anim: None,
         border_pushed: None,
+        border_desktop: None,
         modifiers: Modifiers::default(),
         force_new_instance: false,
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
@@ -1157,6 +1158,11 @@ pub struct App {
     /// samples) — the throttle that keeps sampling noise off the
     /// compositor socket. `None` until the first push.
     border_pushed: Option<[[f32; 4]; 3]>,
+    /// The border stops as last computed with the DESKTOP on screen, kept
+    /// so the stage can borrow them instead of sampling its own dimmed
+    /// backdrop (see [`App::border_stops`]). `None` only before the first
+    /// desktop sample — e.g. a daemon started while the stage is already up.
+    border_desktop: Option<[[f32; 4]; 3]>,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
     /// Set only for the duration of a middle-click activation: force a
