@@ -47,6 +47,30 @@ hl.layer_rule({ match = { namespace = "waverunner" }, ignore_alpha = 0.5 })
 hl.exec_cmd("/home/max/launcher/waverunner-dev")   -- launches the daemon
 ```
 
+## Runtime config writes (how the dynamic window border works)
+
+`hl.config` is callable over the socket, so the *colours* Hyprland draws
+windows with can be changed live — that is how the daemon keeps the window
+border matched to the shell (`options.rs::push_window_border`):
+
+```lua
+hl.config({ general = { col = { active_border = {
+    colors = { 'rgba(RRGGBBff)', ... }, angle = 90 } } } })
+```
+
+Verified live 2026-09-11: **up to 10 colour stops**, plus `angle` in degrees;
+`angle = 90` puts the FIRST stop at the top of the frame. Read it back with
+`hyprctl getoption general:col.active_border`. A plugin sees the same object
+via `CConfigValue<Config::IComplexConfigValue>("general:col.active_border")`
+— that is how waveview's overview rings inherit the border's paint.
+
+## `hl.dsp.cursor.*` argument shape (verified live 2026-09-11)
+
+`move` takes a **named table**, not positional args: `hl.dsp.cursor.move({ x =
+900, y = 700 })`. `hl.dsp.cursor.move(900, 700)` errors with "expected a table
+{ x, y }", and the array form `{ 900, 700 }` errors with "'x' is required" —
+both loudly, unusually for this API.
+
 ## The COMPLETE `hl.dsp.window.*` surface (introspected 2026-09-04)
 
 Enumerated live, so this is exhaustive — if a name is not here it does not exist:

@@ -491,6 +491,7 @@ fn main() -> anyhow::Result<()> {
         dock_ink_anim: None,
         dock_wash_anim: None,
         dock_plate_anim: None,
+        border_pushed: None,
         modifiers: Modifiers::default(),
         force_new_instance: false,
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
@@ -1151,6 +1152,11 @@ pub struct App {
     dock_ink_anim: Option<[f32; 4]>,
     dock_wash_anim: Option<[f32; 4]>,
     dock_plate_anim: Option<[f32; 4]>,
+    /// Last gradient stops pushed to Hyprland as the active window-border
+    /// colours (`push_window_border`: dock / notif-side / clipboard-side
+    /// samples) — the throttle that keeps sampling noise off the
+    /// compositor socket. `None` until the first push.
+    border_pushed: Option<[[f32; 4]; 3]>,
     /// Held keyboard modifiers (Ctrl+V pastes into the query).
     modifiers: Modifiers,
     /// Set only for the duration of a middle-click activation: force a
@@ -1722,17 +1728,6 @@ impl App {
     /// creation; [`Self::sync_options_zone`] re-reserves once outputs arrive.
     pub(crate) fn options_bar_h(&self) -> f32 {
         self.config.options.height as f32 * self.options_scale()
-    }
-
-    /// The dock's LIVE reserved height (logical px): the same value its
-    /// intellihide dodge-zone check uses, and the twin of
-    /// [`Self::options_bar_h`] for [`hypr::bottom_fill`]'s edge test. Scales
-    /// with `icon_scale`, matching `scaled_extents`'s docked extent — a
-    /// smaller icon size means a shorter dock, and the window-flush test
-    /// must track the strip actually reserved, not a stale full-size one.
-    pub(crate) fn dock_bar_h(&self) -> f32 {
-        (self.config.window.input_bar_height + self.config.window.bottom_margin) as f32
-            * self.icon_scale()
     }
 
     /// Re-apply the topbar's reserved (exclusive) zone at the live scale.

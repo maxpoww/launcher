@@ -962,6 +962,19 @@ fn ink_on(bg: [f32; 4]) -> [f32; 4] {
     }
 }
 
+/// The DOCK's ink rule: same WCAG flip as [`ink_on`], but the dark-regime
+/// ink is pure white (Max, 2026-09-10: "make the text white") instead of
+/// the warm `INK_LIGHT` — the dock's cool translucent glass wanted the
+/// clean white, while the OPTIONS bar keeps its warm ink (the 2026-08-31
+/// never-pure-white rule still stands there).
+fn dock_ink_on(bg: [f32; 4]) -> [f32; 4] {
+    if luminance(bg) > 0.179 {
+        INK_DARK
+    } else {
+        [1.0, 1.0, 1.0, 1.0]
+    }
+}
+
 /// A colour-matchable surface's live backdrop — a flush-window match, or a
 /// sampled frost fallback — and the adaptive wash/ink it implies. Shared by
 /// the OPTIONS bar and the dock, the only two surfaces that colour-match a
@@ -4404,6 +4417,105 @@ impl crate::App {
         self.dock_regime().hover_wash()
     }
 
+    /// The three border-gradient stops, top to bottom. THE definition of
+    /// "the border colour" for the whole shell: the compositor push below
+    /// wears them on real windows, and every border the shell draws itself
+    /// for a *miniature* of a window (the STAGE deck's tiles) takes its
+    /// colour from the same three, so a tile's frame can never drift from
+    /// the frame around the window it stands for.
+    pub(crate) fn border_stops(&self) -> [[f32; 4]; 3] {
+        /// Border-strength lightness step (the plate/zebra recipe, turned
+        /// up): each stop keeps its region's HUE but moves a clear step
+        /// away in lightness — lifted over a dark sample, dimmed over a
+        /// bright one — so the frame reads on any wallpaper instead of
+        /// dissolving into it (Max, 2026-09-11: "there is no contrast").
+        const BORDER_LIFT_L: f32 = 0.30;
+        const BORDER_DIM_L: f32 = 0.24;
+        let bg = self.config.theme.background_rgba();
+        let ink = self.config.theme.text_rgba();
+        let stop = |b: Backdrop| {
+            let fill = b.surface(bg, ink, false).0;
+            let srgb = [
+                linear_to_srgb(fill[0]).clamp(0.0, 1.0),
+                linear_to_srgb(fill[1]).clamp(0.0, 1.0),
+                linear_to_srgb(fill[2]).clamp(0.0, 1.0),
+            ];
+            let (h, s, l) = rgb_to_hsl(srgb[0], srgb[1], srgb[2]);
+            let new_l = if luminance(fill) <= 0.179 {
+                (l + BORDER_LIFT_L).min(1.0)
+            } else {
+                (l - BORDER_DIM_L).max(0.0)
+            };
+            let (r, g, b) = hsl_to_rgb(h, s, new_l);
+            [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), 1.0]
+        };
+        [
+            stop(self.dock_regime()),
+            stop(self.options_regime()),
+            stop(self.clip_regime()),
+        ]
+    }
+
+    /// One colour standing for [`Self::border_stops`], for a frame too
+    /// small to carry a gradient (a deck tile is a few hundred px wide —
+    /// three stops across it would read as one muddy average anyway, so
+    /// average them honestly instead). Opaque, like the stops.
+    pub(crate) fn border_tint(&self) -> [f32; 4] {
+        let stops = self.border_stops();
+        let mean = |i: usize| stops.iter().map(|s| s[i]).sum::<f32>() / stops.len() as f32;
+        [mean(0), mean(1), mean(2), 1.0]
+    }
+
+    /// The window borders follow the shell's three screen samples as a
+    /// vertical gradient, each colour placed on the OPPOSITE side of the
+    /// frame from where it was sampled (Max, 2026-09-11: "the sample we
+    /// take at the top, put it down") so the border always separates from
+    /// the wallpaper around it: the dock's colour (sampled at the screen
+    /// bottom) tops the frame; the notif-side and clipboard-side colours
+    /// (sampled along the top edge) sink to the bottom. Angle 90 puts the
+    /// FIRST stop at the top (calibrated live, 2026-09-11).
+    ///
+    /// Each stop is its regime's `surface()` fill — matched window colour
+    /// or wallpaper frost, mixed exactly like the surfaces themselves.
+    /// Pushed to Hyprland via runtime `hl.config` only when a stop actually
+    /// moves (small-delta throttle keeps sampling noise off the socket);
+    /// the compositor's own border animation (`leaf = "border"` in
+    /// hyprland.lua) does the easing, so pushing targets rather than eased
+    /// values is exactly right. Best effort like all hypr IPC — without
+    /// Hyprland nothing happens.
+    ///
+    /// Driven by the COLOUR pipeline (`screencopy`: a sample landing, or a
+    /// regime re-evaluation), never by the frame loop. It first hung off
+    /// `dock_surface_eased`, which runs once per drawn frame: a transition
+    /// then fired this *blocking* compositor round-trip at up to the
+    /// refresh rate, starving the very draws the colour switch was riding
+    /// — the switch appeared to stick (Max, 2026-09-11). A hidden dock
+    /// draws nothing at all, so the border also stopped following the
+    /// screen entirely whenever the dock was away.
+    pub(crate) fn push_window_border(&mut self) {
+        const EPS: f32 = 0.006; // ~1.5/255 per linear channel
+        let stops = self.border_stops();
+        if self.border_pushed.is_some_and(|last| {
+            last.iter()
+                .flatten()
+                .zip(stops.iter().flatten())
+                .all(|(a, b)| (a - b).abs() < EPS)
+        }) {
+            return;
+        }
+        self.border_pushed = Some(stops);
+        let hex = |c: [f32; 4]| {
+            let byte = |v: f32| (linear_to_srgb(v).clamp(0.0, 1.0) * 255.0).round() as u8;
+            format!("rgba({:02x}{:02x}{:02x}ff)", byte(c[0]), byte(c[1]), byte(c[2]))
+        };
+        crate::hypr::eval(&format!(
+            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ '{}', '{}', '{}' }}, angle = 90 }} }} }} }})",
+            hex(stops[0]),
+            hex(stops[1]),
+            hex(stops[2]),
+        ));
+    }
+
     /// The dock card's fill, and the ink that reads on it — one call, same
     /// "the surface is the pill grown" formula as `options_box_surface`
     /// (backdrop plus the resting wash, ink measured against that same
@@ -4476,10 +4588,11 @@ impl crate::App {
             DOCK_FILL_RATE,
             hidden,
         );
-        // Ink decision from the eased fill while a sample drives it; the
-        // theme's own ink for the (brief) sampleless fallback.
+        // Ink decision from the eased fill while a sample drives it (the
+        // dock's white-in-the-dark rule, see `dock_ink_on`); the theme's
+        // own ink for the (brief) sampleless fallback.
         let ink_target = if self.dock_regime().get().is_some() {
-            ink_on(fill)
+            dock_ink_on(fill)
         } else {
             fallback_ink
         };
@@ -4515,7 +4628,10 @@ impl crate::App {
         const PLATE_LIFT_L: f32 = 0.20;
         const PLATE_DIM_L: f32 = 0.16;
         /// Plate opacity — strong enough that the hue clearly reads.
-        const PLATE_ALPHA: f32 = 0.85;
+        /// Was 0.85; stepped down and settled at 0.40 (Max, 2026-09-10 —
+        /// 0.30 read too faint once the rim landed). Same strength for
+        /// ALL plates, dock and grid alike.
+        const PLATE_ALPHA: f32 = 0.50;
         let plate_target = {
             let (lift, dim, alpha) = (PLATE_LIFT_L, PLATE_DIM_L, PLATE_ALPHA);
             let srgb = [

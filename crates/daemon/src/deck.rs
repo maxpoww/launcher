@@ -76,11 +76,11 @@ fn scrim() -> [f32; 4] {
 }
 /// A white hairline rim at 10%.
 const TILE_RIM: [f32; 4] = [1.0, 1.0, 1.0, 0.10];
-/// `#ffbe98` — the system's "this one" colour, the exact border the staged
-/// window itself wears.
-fn stage_rim() -> [f32; 4] {
-    srgb(0xff, 0xbe, 0x98, 1.0)
-}
+/// The staged tile's frame colour — whatever the staged WINDOW is wearing
+/// right now. Both come from `App::border_stops`, so this is the same paint
+/// as the border around the window on screen, live with the wallpaper
+/// (Max, 2026-09-11: the stage tiles' border matches dynamically too). It
+/// used to be the fixed `#ffbe98` the desktop border used to be.
 /// Width of that frame on a tile — the window's own `border_size`, not a
 /// scaled-down version of it. The frame is a marking, not part of the
 /// miniature, so it reads at the same weight in both places.
@@ -628,6 +628,9 @@ impl App {
         let (w, h) = self.deck_size;
         let (sw, sh) = self.deck_screen;
         let tw = tile_w(sw, sh, self.deck.tiles.len());
+        // The staged tile's frame: the live window-border colour (see the
+        // `stage_rim` docs above), read once for the whole deck.
+        let stage_rim = self.border_tint();
         let mut scene = Scene {
             alpha: 1.0,
             ..Default::default()
@@ -768,7 +771,7 @@ impl App {
             // raise rather than snapping, so a switch stays one movement.
             let raised = (tile.lift / RAISE).clamp(0.0, 1.0);
             if raised > 0.01 {
-                let c = stage_rim();
+                let c = stage_rim;
                 scene.rects.push(RectInst {
                     rect: Rect {
                         x: body.x - STAGE_BORDER_W,

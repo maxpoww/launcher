@@ -49,8 +49,15 @@ const POLL: Duration = Duration::from_millis(700);
 /// swallow a screencopy's events). Since only ONE capture may be in
 /// flight and identical wants never abort it, a lost capture would
 /// otherwise block every future sample and freeze the colour for good;
-/// the poll reaps it instead.
-const CAPTURE_STALL: Duration = Duration::from_millis(1500);
+/// [`App::reap_stalled_capture`] clears it.
+///
+/// A real round-trip is single-digit milliseconds, so this is ~100x
+/// headroom — it was 1500ms, which (reaped only on a [`POLL`] tick, so
+/// rounded up to the next multiple) could freeze a colour switch for
+/// well over two seconds. Reaping now also happens on demand, before
+/// each capture, so the worst case is this value plus one round-trip
+/// rather than this value plus a poll period.
+const CAPTURE_STALL: Duration = Duration::from_millis(600);
 
 /// Quick follow-up re-evaluation after a sample actually changed a
 /// colour: the screen was probably still moving when that capture read
@@ -266,19 +273,27 @@ impl App {
     }
 
     /// No window to match ⇒ the dock stays its frosted self. Sample a row
-    /// at the dock's own mid-height, the same way
-    /// [`Self::eval_transparent_bar`] does for the bar — but NOT through
-    /// our own card: `read_sample` excludes the card's columns in every
-    /// state (see [`Self::reeval_dock_bar`]), so this reads the raw
-    /// wallpaper/windows beside the dock. It used to read through the
-    /// card's own translucency at rest, which made the resting dock a
-    /// muddier, self-tinted colour than the open box computed — the
-    /// docked-vs-open colour switch Max vetoed.
+    /// in the BOTTOM GAP — the `gaps_out` wallpaper strip under the
+    /// windows — not at dock mid-height: with tiled windows the mid-height
+    /// row crossed their bottom edges and window borders, so the dock (and
+    /// the window-border gradient it feeds) tinted itself from window
+    /// content — and once the borders went adaptive, from its own paint
+    /// (Max, 2026-09-11: "it should still sample the bg at the bottom of
+    /// the windows"). The gap row is honest wallpaper in every non-flush
+    /// layout; a window sitting flush at the bottom is the DockMatch case,
+    /// not this one. Still NOT through our own card: `read_sample`
+    /// excludes the card's columns in every state (see
+    /// [`Self::reeval_dock_bar`]), so the floating dock never reads its
+    /// own paint from the strip beneath it.
     fn eval_transparent_dock(&mut self) {
+        /// Logical px above the screen's bottom edge: inside the 10px
+        /// `gaps_out` strip, below the ~3px window borders that hug the
+        /// window edge at the top of the gap.
+        const GAP_ROW_UP: f64 = 3.0;
         let had_match = self.dock_bar_matched.take().is_some();
         if let Ok(mon) = hypr::focused_monitor() {
             if let Some(output) = self.output_by_name(&mon.name) {
-                let sample_y = ((mon.h - self.dock_bar_h() as f64 * 0.5) * mon.scale.max(0.1))
+                let sample_y = ((mon.h - GAP_ROW_UP) * mon.scale.max(0.1))
                     .round()
                     .max(1.0) as u32;
                 if had_match {
@@ -348,6 +363,13 @@ impl App {
     /// are always folded into a single in-flight (or about-to-start)
     /// screencopy rather than each paying for its own.
     pub(crate) fn rebuild_capture_target(&mut self) {
+        // Every path that changes a surface's colour REGIME ends here (see
+        // the doc above), so this is where the window borders learn about
+        // it — the sample-landed half lives in `options_capture_ready`.
+        // Between them they cover every writer of the matched/frost fields,
+        // and both are event-driven: the push must never ride the frame
+        // loop (see `push_window_border`).
+        self.push_window_border();
         let wants = [
             self.bar_want.as_ref(),
             self.dock_want.as_ref(),
@@ -384,6 +406,19 @@ impl App {
         self.start_options_capture();
     }
 
+    /// Drop a capture that is past [`CAPTURE_STALL`] — its events are never
+    /// coming, and it would otherwise hold the one in-flight slot forever.
+    pub(crate) fn reap_stalled_capture(&mut self) {
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|c| c.started.elapsed() > CAPTURE_STALL)
+        {
+            debug!("options: capture stalled; reaping");
+            self.abort_capture();
+        }
+    }
+
     pub(crate) fn abort_capture(&mut self) {
         if let Some(cap) = self.capture.take() {
             cap.frame.destroy();
@@ -403,6 +438,11 @@ impl App {
     /// Begin capturing the focused output (one capture at a time — bar and
     /// dock rows are both read out of it via `target.samples`).
     pub(crate) fn start_options_capture(&mut self) {
+        // Before concluding a capture is already in flight, make sure it is
+        // alive: a zombie blocks every future sample, so waiting for a poll
+        // tick to notice it is exactly the window in which a colour switch
+        // looks stuck. Any event-driven re-evaluation clears it here.
+        self.reap_stalled_capture();
         if self.capture.is_some() {
             return;
         }
@@ -547,6 +587,11 @@ impl App {
             buf.destroy();
         }
         options_engine::end_self_capture();
+        if bar_changed || dock_changed {
+            // Fresh colours: hand the window borders their new gradient
+            // (the regime half of this lives in `rebuild_capture_target`).
+            self.push_window_border();
+        }
         if bar_changed {
             self.draw_options();
         }
@@ -557,24 +602,38 @@ impl App {
         // this capture read it (workspace slide, window settling). Look
         // again shortly so the colour converges on the settled screen
         // instead of a transitional read sitting until the next POLL tick.
-        if (bar_changed || dock_changed) && !self.options_burst_pending {
-            let timer = Timer::from_duration(SETTLE_BURST);
-            let armed = self
-                .loop_handle
-                .insert_source(timer, |_, _, app: &mut App| {
-                    app.options_burst_pending = false;
-                    app.reeval_options_bar();
-                    app.reeval_dock_bar();
-                    TimeoutAction::Drop
-                })
-                .is_ok();
-            self.options_burst_pending = armed;
+        if bar_changed || dock_changed {
+            self.arm_settle_burst();
         }
+    }
+
+    /// Re-evaluate both surfaces after [`SETTLE_BURST`] — the quick
+    /// follow-up used both when a colour just moved and when a capture
+    /// failed outright. Idempotent: a burst already armed is left alone.
+    fn arm_settle_burst(&mut self) {
+        if self.options_burst_pending {
+            return;
+        }
+        let timer = Timer::from_duration(SETTLE_BURST);
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.options_burst_pending = false;
+                app.reeval_options_bar();
+                app.reeval_dock_bar();
+                TimeoutAction::Drop
+            })
+            .is_ok();
+        self.options_burst_pending = armed;
     }
 
     fn options_capture_failed(&mut self) {
         self.abort_capture();
         debug!("options: screencopy failed");
+        // Retry on the burst rather than waiting out a whole POLL: a
+        // failure is most likely mid-transition (the compositor was busy),
+        // which is exactly when the colour must not sit still.
+        self.arm_settle_burst();
     }
 
     /// Read one opaque colour from the captured frame for one wanted row.
@@ -869,14 +928,9 @@ impl App {
                 // Reap a capture whose events never came (see
                 // [`CAPTURE_STALL`]) so the reevals below can start a
                 // fresh one instead of queuing behind a zombie forever.
-                if app
-                    .capture
-                    .as_ref()
-                    .is_some_and(|c| c.started.elapsed() > CAPTURE_STALL)
-                {
-                    debug!("options: capture stalled; reaping");
-                    app.abort_capture();
-                }
+                // `start_options_capture` reaps too — this is the net for
+                // the case where no want survives to get that far.
+                app.reap_stalled_capture();
                 app.reeval_options_bar();
                 app.reeval_dock_bar();
                 TimeoutAction::Drop

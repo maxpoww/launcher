@@ -183,7 +183,11 @@ impl Default for WindowConfig {
             // Tall enough for the three popup sections: the 6×3 app
             // grid plus the single-row Install and Files strips.
             height: 680,
-            input_bar_height: 42,
+            // 46 wraps the 40px dock icons with matching ~3px breathing
+            // room above AND below (the icon baseline floats 2px off the
+            // slot bottom — see content's DOCK_BASELINE_PAD); at 42 the
+            // icons sat flush on the bar's bottom edge.
+            input_bar_height: 46,
             bottom_margin: 8,
             render_scale: 2,
         }

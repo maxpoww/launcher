@@ -214,6 +214,12 @@ const SECTION_GAP: f32 = 8.0;
 pub const DOCK_ICON: f32 = 40.0;
 const DOCK_SLOT: f32 = 44.0;
 const DOCK_PAD_X: f32 = 10.0;
+/// Breathing room under the dock icons: the icon baseline floats this many
+/// px above the slot bottom instead of sitting ON it (Max, 2026-09-10: the
+/// icons sat flush on the bar's bottom edge, gap only above). With the
+/// 46px bar (`input_bar_height`) wrapping the 44px slot, this lands the
+/// 40px icon with ~3px of card showing above and below it.
+const DOCK_BASELINE_PAD: f32 = 2.0;
 pub const GRID_CELL_W: f32 = 104.0;
 pub const GRID_CELL_H: f32 = 86.0;
 pub const GRID_ICON: f32 = 54.0;
@@ -285,6 +291,16 @@ pub(crate) const JELLY_SCALE: f32 = 2.0;
 /// card (`theme.corner_radius`), which stays subtle for a macOS-dock look.
 pub(crate) const BOX_CORNER_RADIUS: f32 = 24.0;
 
+/// How much of the theme's card translucency the RESTING dock keeps (Max,
+/// 2026-09-10: "more transparent dock — not the icons, and not the box").
+/// The card fill's alpha is scaled by this while docked, easing back to the
+/// theme's full alpha as `card_open` rises — so calling the box gradually
+/// restores the current look. Note the docked alpha lands *under* the
+/// compositor's `ignore_alpha` threshold (0.5, hyprland.lua), so the
+/// resting card reads as CLEAR glass — crisp see-through, no layer blur —
+/// with the frost arriving as the fill crosses the threshold mid-open.
+pub(crate) const DOCK_REST_FILL: f32 = 0.65;
+
 /// Dock drop shadow. One continuous soft shadow wraps the whole rounded
 /// dock; `BLUR` is how far the penumbra reaches out from every edge, and the
 /// four `ALPHA`s set per-edge darkness (corners blend the two neighbours, so
@@ -329,8 +345,10 @@ const BASIN_MARGIN_X: f32 = 16.0;
 /// horizontal narrowing (and the landing squash to a widening spill).
 const SPILL: f32 = 0.6;
 pub const DRAG_MARGIN_TOP: f32 = 56.0;
-/// Peak scale of a dock icon directly under the cursor.
-pub(crate) const DOCK_MAGNIFY: f32 = 1.5;
+/// Peak scale of a dock icon directly under the cursor. Was 1.5;
+/// softened in steps (Max, 2026-09-10: "make the magnification on hover
+/// subtler") to 1.25 — a gentle rise, not a lunge.
+pub(crate) const DOCK_MAGNIFY: f32 = 1.25;
 /// Horizontal falloff radius of dock magnification, in pixels.
 pub(crate) const DOCK_MAG_RADIUS: f32 = 120.0;
 /// Vertical attenuation radius, measured from the dock band's edges
@@ -1024,24 +1042,32 @@ pub fn open_box_slot_member(left: bool, slot: usize) -> usize {
 /// `react` (0 = grey, lid shut at rest; 1 = red, lid wide open while an app is
 /// being dragged). Rendered by the icon shader's bin mode (`ring <= -2`, its
 /// fractional part the lid openness); the texture layer is ignored.
-/// The Recycle Bin tile's rounded-rect fill colour for reaction `react`, given
-/// the theme's `highlight` rgba. At rest it is byte-for-byte the box/folder
-/// tile fill (`hl` with alpha `(hl.a*4).min(0.72)`), so it can't look different
-/// from them; it lerps to a translucent red as an app arms the drop.
-fn trash_tile_color(highlight: [f32; 4], react: f32) -> [f32; 4] {
+/// The Recycle Bin tile's rounded-rect fill colour for reaction `react`. At
+/// rest it wears the live adaptive PLATE colour — the same hue-shifted frost
+/// every app icon's squircle plate wears (Max, 2026-09-10: "add the color to
+/// the recycle can plate too") — so the bin sits in the row as one of them;
+/// it lerps to a translucent red as an app arms the drop.
+/// Rim colour for a plate-coloured tile: the fill's hue lifted toward
+/// white with a floor of visibility — the CPU-side twin of the icon
+/// shader's plate hairline (icon.wgsl) so the Recycle Bin tile's border
+/// matches the app-icon plates around it.
+fn plate_rim(fill: [f32; 4]) -> [f32; 4] {
+    [
+        lerp(fill[0], 1.0, 0.15),
+        lerp(fill[1], 1.0, 0.15),
+        lerp(fill[2], 1.0, 0.15),
+        (fill[3] + 0.06).min(1.0),
+    ]
+}
+
+fn trash_tile_color(plate: [f32; 4], react: f32) -> [f32; 4] {
     let r = react.clamp(0.0, 1.0);
-    let rest = [
-        highlight[0],
-        highlight[1],
-        highlight[2],
-        (highlight[3] * 4.0).min(0.72),
-    ];
     let red = [0.80, 0.20, 0.17, 0.66];
     [
-        lerp(rest[0], red[0], r),
-        lerp(rest[1], red[1], r),
-        lerp(rest[2], red[2], r),
-        lerp(rest[3], red[3], r),
+        lerp(plate[0], red[0], r),
+        lerp(plate[1], red[1], r),
+        lerp(plate[2], red[2], r),
+        lerp(plate[3], red[3], r),
     ]
 }
 
@@ -1232,12 +1258,32 @@ pub fn scene(
             ],
         });
     }
+    // The card fill: the resting dock wears only `DOCK_REST_FILL` of the
+    // theme's translucency, gathering the full alpha as `card_open` rises
+    // (eased upstream, so the ride is gradual). Only the card — the group
+    // box panel, tooltip pills, and icon plates keep their own fills.
+    // Reduce-transparency keeps its forced-opaque card in every state.
+    let mut card_fill = dock_bg;
+    if !config.accessibility.reduce_transparency {
+        card_fill[3] *= lerp(DOCK_REST_FILL, 1.0, card_open);
+    }
     scene.rects.push(RectInst {
         rect: card_rect,
         radius: card_radius,
-        color: dock_bg,
+        color: card_fill,
         glass: 1.0,
         border: 0.0,
+    });
+    // The same subtle rim the icon plates wear (`plate_rim`, Max
+    // 2026-09-10: "add the same border on the dock"), traced along the
+    // card edge. Derived from the live fill, so it rests as faint as the
+    // resting veil and firms up with the open ramp.
+    scene.rects.push(RectInst {
+        rect: card_rect,
+        radius: card_radius,
+        color: plate_rim(card_fill),
+        glass: 0.0,
+        border: 1.0,
     });
 
     // Dock row: per-icon magnification scales, then spread visual centers.
@@ -1290,20 +1336,8 @@ pub fn scene(
             }
         }
     }
-    // Hover highlight (suppressed while dragging).
-    if drag.is_none() {
-        if let Some(Hit::DockIcon(i)) = hover {
-            if let (Some(slot), Some(&vcx)) = (layout.dock_slots.get(i), dock_vcx.get(i)) {
-                scene.rects.push(RectInst {
-                    rect: Rect::new(vcx - dock_slot / 2.0, slot.y, dock_slot, slot.h),
-                    radius: 12.0,
-                    color: dock_highlight,
-                    glass: 0.0,
-                    border: 0.0,
-                });
-            }
-        }
-    }
+    // No hover wash on the dock (removed, Max 2026-09-10): the magnification
+    // wave and tooltip are the hover feedback; the wash read as a smudge.
     // Dock icons: slot index → entry index via dock_order. `dock_slide`
     // parts the row around a hovering drag; a dock-origin drag's own
     // icon is hidden (its ghost is in hand).
@@ -1316,7 +1350,7 @@ pub fn scene(
         }
         let slot_rect = &layout.dock_slots[slot];
         let vcx = dock_vcx[slot] + dock_slide.get(slot).copied().unwrap_or(0.0) * dock_slot;
-        let baseline = slot_rect.y + slot_rect.h;
+        let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
         // Running indicator (macOS dot): a small dot beneath the icon.
         // Drawn before the icon so a magnified icon never hides it.
         if dock_running.get(slot).copied().unwrap_or(false) {
@@ -1362,21 +1396,31 @@ pub fn scene(
                 border: 0.0,
             });
         }
-        // The Recycle Bin: the same rounded "squircle" tile the box/folder
-        // cells use (rect-shader `radius` + glass), so it matches them — a grey
-        // plate that warms to red while an app is dragged, with a can on top.
+        // The Recycle Bin: the same rounded "squircle" tile shape the
+        // box/folder cells use (rect-shader `radius` + glass), wearing the
+        // live adaptive plate colour like every app icon's plate — warming
+        // to red while an app is dragged, with a can on top.
         if entries
             .get(entry_idx)
             .is_some_and(|e| crate::groups::is_trash(&e.id))
         {
             // Swell it while a dragged icon hovers it as the drop target.
             let rect = grow_bottom(icon_rect, 1.0 + 0.18 * trash_hover);
+            let tile = trash_tile_color(plate, trash_react);
             scene.rects.push(RectInst {
                 rect,
                 radius: rect.h * 0.22,
-                color: trash_tile_color(dock_highlight, trash_react),
+                color: tile,
                 glass: 0.5,
                 border: 0.0,
+            });
+            // The same subtle rim the icon plates wear (see `plate_rim`).
+            scene.rects.push(RectInst {
+                rect,
+                radius: rect.h * 0.22,
+                color: plate_rim(tile),
+                glass: 0.0,
+                border: 1.0,
             });
             scene.icons.push(bin_icon(rect, trash_react));
             continue;
@@ -1829,16 +1873,26 @@ pub fn scene(
                     && ly < b.y + b.h
             });
             // The Recycle Bin, if it's been moved onto the grid: the same
-            // rounded box-style tile + a can on top (grey → red while dragging).
+            // rounded box-style tile in the live adaptive plate colour + a
+            // can on top (plate → red while dragging).
             if crate::groups::is_trash(&entry.id) {
                 let tile = box_tile;
                 let rect = Rect::new(cx - tile / 2.0, icon_cy - tile / 2.0, tile, tile);
+                let fill = trash_tile_color(plate, trash_react);
                 g.rects.push(RectInst {
                     rect,
                     radius: 14.0,
-                    color: trash_tile_color(dock_highlight, trash_react),
+                    color: fill,
                     glass: 0.5,
                     border: 0.0,
+                });
+                // The same subtle rim the icon plates wear (see `plate_rim`).
+                g.rects.push(RectInst {
+                    rect,
+                    radius: 14.0,
+                    color: plate_rim(fill),
+                    glass: 0.0,
+                    border: 1.0,
                 });
                 g.icons.push(bin_icon(rect, trash_react));
                 if !covered {

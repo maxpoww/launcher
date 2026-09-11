@@ -220,9 +220,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let edgec = stroke_cov(dpl, 0.0098, px);
         var pa = in.plate.a * fillc;
         var prgb = in.plate.rgb * pa;
-        // Hairline edge over the fill, same colour, a touch stronger.
-        let ea = min(in.plate.a * 1.33, 1.0) * edgec;
-        prgb = in.plate.rgb * ea + prgb * (1.0 - ea);
+        // Hairline border: the plate's own hue lifted toward white, with a
+        // floor of visibility over the (now faint) fill — a glass rim that
+        // still reads at low plate alpha (Max, 2026-09-10: "give the
+        // plates a subtle border"). Mirrored CPU-side by `plate_rim` in
+        // content.rs for the Recycle Bin tile.
+        let rim_rgb = mix(in.plate.rgb, vec3<f32>(1.0), 0.15);
+        let ea = min(in.plate.a + 0.06, 1.0) * edgec;
+        prgb = rim_rgb * ea + prgb * (1.0 - ea);
         pa = ea + pa * (1.0 - ea);
         prgb = prgb * mask;
         pa = pa * mask;
