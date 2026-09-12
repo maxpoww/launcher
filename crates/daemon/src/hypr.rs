@@ -26,6 +26,12 @@ use crate::App;
 
 /// Events that can change whether a window overlaps the dock zone.
 /// Prefix-matched, so `movewindowv2`, `workspacev2` etc. count too.
+/// Events after which the screen's colour matrix may have been thrown away
+/// under us — the output's DRM state is rebuilt and the CTM goes with it.
+/// They are deliberately NOT in [`RELEVANT`]: this costs one idempotent
+/// `hyprctl` call, not a layout re-evaluation.
+const SCREEN_DRIFT: &[&str] = &["monitoradded", "monitorremoved", "configreloaded"];
+
 const RELEVANT: &[&str] = &[
     "openwindow",
     "closewindow",
@@ -785,6 +791,15 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                     app.rebuild_deck();
                                 }
                             }
+                        }
+                        // A monitor coming/going or the config being re-read
+                        // rebuilds the output's DRM state, which silently drops
+                        // the colour matrix hyprsunset set (Hyprland pushes a
+                        // CTM only when it *changes*, so nothing puts it back).
+                        // Re-assert the remembered screen look — see `screen.rs`.
+                        if SCREEN_DRIFT.iter().any(|r| name.starts_with(r)) {
+                            debug!("hypr event: {} — re-asserting screen", name.trim());
+                            app.reassert_screen_state();
                         }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());

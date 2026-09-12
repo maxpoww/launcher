@@ -106,6 +106,9 @@ const TITLE_MAX: usize = 48;
 /// also the key the morph fade uses to know the prompt is what's on the pill.
 pub(crate) const SUNSET_MSG: &str = "The sun is set, do you want to turn on eye protection?";
 const SUNSET_TURN_ON_LABEL: &str = "turn on";
+/// What [turn on] asks for (Kelvin) — the evening warmth the offer promises,
+/// and one of the panel's presets so the box agrees with the prompt.
+const SUNSET_TURN_ON_K: u32 = 4000;
 /// Gap between the two nested pills ([turn on] and the settings gear).
 const SUNSET_INNER_GAP: f32 = 4.0;
 /// The settings box's full size (logical px, pre-scale). The module morphs
@@ -3948,13 +3951,11 @@ impl App {
         self.resolve_sunset_prompt();
     }
 
-    /// Warm the screen: tell a running hyprsunset, else start one. 4000K is a
-    /// gentle evening warmth (hyprsunset's identity is 6500K).
+    /// Warm the screen. 4000K is a gentle evening warmth (hyprsunset's identity
+    /// is 6500K). Goes through `screen.rs` like every other screen effect, so
+    /// the choice is remembered and re-asserted rather than fired and forgotten.
     fn eye_protection_on(&mut self) {
-        const CMD: &str = "hyprctl hyprsunset temperature 4000 || hyprsunset -t 4000";
-        if let Err(e) = crate::launch::launch(CMD, false, &self.config.launch.terminal) {
-            warn!("options: eye protection failed to start: {e:#}");
-        }
+        self.set_screen_temperature(SUNSET_TURN_ON_K);
     }
 
     /// How present the asking module is, riding the title morph both ways:
@@ -4036,18 +4037,17 @@ impl App {
         let mgx = SUNSET_GROW_X * mt;
         let module_w = ww + 2.0 * mgx;
         let module_h = ph + SUNSET_GROW_H * mt;
-        // The RIGHT edge (the gear side) stays fixed through the morph, so the
-        // box reveals leftward and downward FROM the gear — the × stays put
-        // under the pointer that opened it, and the content, laid out against
-        // this same rect, reveals with it (Max: "reveal in relation to the
-        // pointer position").
-        let right = wx - mgx + module_w;
+        // The CENTRE stays fixed through the morph: the box narrows inward from
+        // both sides and drops downward, staying centred on the bar whatever
+        // the pointer did. (The gear/× rides in with the right edge — it is
+        // anchored to this rect, not to the pointer that opened it.)
+        let cx = wx - mgx + module_w / 2.0;
         let e = self.sunset_box_e;
         let panel_w = (SUNSET_BOX_W * s).min(module_w);
         let box_h = (SUNSET_BOX_H * s).max(module_h);
         let w = lerp(module_w, panel_w, e);
         let h = lerp(module_h, box_h, e);
-        Rect::new(right - w, y + SUNSET_DROP_Y * mt, w, h)
+        Rect::new(cx - w / 2.0, y + SUNSET_DROP_Y * mt, w, h)
     }
 
     /// The module's ink: the BAR's own adaptive ink (`options_text_color`).

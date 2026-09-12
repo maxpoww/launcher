@@ -18,8 +18,10 @@ use crate::options::{push_neumorph, FONT_PX, LINE_PX, SUNSET_GROW_H};
 use crate::App;
 
 /// The screen-temperature presets the panel offers (Kelvin). 6500 is
-/// hyprsunset's neutral identity (protection off); lower is warmer.
-const PRESETS: [u32; 4] = [6500, 5000, 4000, 3000];
+/// hyprsunset's neutral identity (protection off); lower is warmer. Picking one
+/// goes through [`App::set_screen_temperature`] — `screen.rs` owns the choice,
+/// remembers it, and puts it back whenever the compositor loses it.
+const PRESETS: [u32; 4] = [crate::screen::NEUTRAL_K, 5000, 4000, 3000];
 
 impl App {
     /// Open/close the settings box (the gear toggles it). Opening starts the
@@ -210,7 +212,7 @@ impl App {
                 border: 0.0,
             });
             // Hairline border, a touch stronger on the active temperature.
-            let active = self.sunset_temp == Some(k);
+            let active = self.screen.temperature_k == Some(k);
             let ba = if active { 0.5 } else { 0.11 };
             scene.rects.push(RectInst {
                 rect: br,
@@ -304,17 +306,5 @@ impl App {
         // A click inside the panel (but not on a control) is swallowed so it
         // doesn't dismiss anything; only a click OUTSIDE closes the box.
         rect.contains(p)
-    }
-
-    /// Apply a screen temperature via hyprsunset (starting it if needed), and
-    /// remember it so the panel can mark the active preset. 6500 K is neutral
-    /// (protection effectively off).
-    fn set_screen_temperature(&mut self, k: u32) {
-        let cmd = format!("hyprctl hyprsunset temperature {k} || hyprsunset -t {k}");
-        if let Err(e) = crate::launch::launch(&cmd, false, &self.config.launch.terminal) {
-            tracing::warn!("options: set temperature {k} failed: {e:#}");
-        }
-        self.sunset_temp = Some(k);
-        self.draw_options();
     }
 }

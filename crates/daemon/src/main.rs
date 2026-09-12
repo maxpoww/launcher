@@ -53,6 +53,7 @@ mod pages;
 mod persist;
 mod pins;
 mod renderer;
+mod screen;
 mod screencopy;
 mod stage;
 mod sunset;
@@ -592,7 +593,7 @@ fn main() -> anyhow::Result<()> {
         sunset_box_last: None,
         sunset_box_frame_pending: false,
         sunset_auto: false,
-        sunset_temp: None,
+        screen: screen::ScreenState::load(),
         media_box_open: false,
         media_drag: None,
         overview_active: false,
@@ -842,6 +843,13 @@ fn main() -> anyhow::Result<()> {
             Err(e) => warn!("Hyprland IPC unavailable: {e:#}"),
         }
     }
+
+    // Put the remembered screen look back on. This is the reboot/login arm of
+    // `screen.rs`: nothing else on the system remembers that the user asked for
+    // warmth, and on a fresh boot no hyprsunset is running at all — the applier
+    // starts one. (The other arm is Hyprland's monitor/config events, which
+    // catch the CTM the compositor drops mid-session.)
+    app.reassert_screen_state();
 
     // Declarative installs: the package list is the source of truth.
     // Restore installs that were mid-flight when the daemon last stopped
@@ -1482,9 +1490,11 @@ pub struct App {
     sunset_box_last: Option<Instant>,
     sunset_box_frame_pending: bool,
     sunset_auto: bool,
-    /// The screen temperature last chosen from the settings box (Kelvin), so
-    /// the panel can mark the active preset. `None` until one is picked.
-    sunset_temp: Option<u32>,
+    /// What the screen should look like — the eye-protection temperature
+    /// today, colour filters later. Persisted and re-asserted, so the panel can
+    /// mark its active preset and the look survives a dropped CTM or a reboot.
+    /// See `screen.rs`; nothing outside it may set a screen effect.
+    screen: crate::screen::ScreenState,
     /// The media transport box (a media player is active and its box pill was
     /// clicked): a full panel — track, prev/play-pause/next, seek + volume bars
     /// — grown into the topbar's reserved dropdown region. See `mediabox.rs`.
