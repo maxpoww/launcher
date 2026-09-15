@@ -9,7 +9,29 @@
 # vanished after a rebuild (2026-09-03). Deriving them each start is self-healing
 # — the flake (flake.lock) is the single source of truth and GC can never
 # desync us from it.
-LDP="$(nix develop /home/max/launcher --command sh -c 'printf %s "$LD_LIBRARY_PATH"' 2>/dev/null)"
+#
+# ...but resolving means EVAL, and eval can need the network: on 2026-09-15 the
+# daily nix-gc swept the (unrooted) devshell closure and the nixpkgs source
+# tree, and the next boot ran us 3 s in — before the link was up — so the
+# resolve came back empty and the shell started invisible (no vulkan-loader →
+# no wgpu surface). Hence belt and braces: the resolve goes through a PROFILE
+# (a GC root — the devshell closure can no longer be swept) and the resolved
+# string is cached; a failed resolve falls back to the cache, whose paths the
+# profile keeps alive. The flake stays the source of truth — every successful
+# resolve refreshes both, and stale profile generations are pruned so old
+# closures don't pile up on disk.
+STATE="$HOME/.local/state/waverunner"
+mkdir -p "$STATE"
+LDP="$(nix develop --profile "$STATE/devshell" /home/max/launcher \
+        --command sh -c 'printf %s "$LD_LIBRARY_PATH"' 2>/dev/null)"
+if [ -n "$LDP" ]; then
+  printf %s "$LDP" > "$STATE/ld-library-path"
+  nix profile wipe-history --profile "$STATE/devshell" >/dev/null 2>&1
+else
+  LDP="$(cat "$STATE/ld-library-path" 2>/dev/null)"
+  [ -n "$LDP" ] && echo "waverunner-dev: flake resolve failed (offline boot?);" \
+                        "using the cached, profile-rooted env." >&2
+fi
 if [ -n "$LDP" ]; then
   export LD_LIBRARY_PATH="$LDP${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 else
@@ -18,13 +40,28 @@ else
 fi
 
 # Point the clipboard dictionary panel at the flake-built, declaratively-pinned
-# data (English Webster + Spanish RAE). Built + cached by Nix; if the build is
-# unavailable (offline first run) the vars stay empty and the daemon falls back
-# to ~/.local/share/waverunner/.
-DICTS="$(nix build --no-link --print-out-paths /home/max/launcher#dictionaries 2>/dev/null)"
+# data (English Webster + Spanish RAE). Built + cached by Nix and ROOTED via the
+# out-link (same GC lesson as above); if the build fails (offline boot) the
+# out-link from the last success still serves, and only with neither does the
+# daemon fall back to ~/.local/share/waverunner/.
+DICTS="$(nix build --out-link "$STATE/dictionaries" --print-out-paths /home/max/launcher#dictionaries 2>/dev/null)"
+[ -z "$DICTS" ] && [ -e "$STATE/dictionaries" ] && DICTS="$STATE/dictionaries"
 if [ -n "$DICTS" ]; then
   export WAVERUNNER_DICT="$DICTS/share/waverunner/dictionary.json"
   export WAVERUNNER_DICT_ES="$DICTS/share/waverunner/dictionary-es.json"
 fi
 
-exec /home/max/launcher/target/debug/waverunner "$@"
+# Which build to run. Debug stays the default so the dev loop (and verify-ui,
+# which matches the daemon by `target/debug/waverunner`) is unchanged; set
+# WAVERUNNER_PROFILE=release for the daily driver. It is not a micro-optimisation:
+# the engine's collectors parse a ~290 KB `pw-dump` per read, and unoptimised
+# serde makes that cost roughly an order of magnitude more CPU — which on a
+# laptop is battery.
+PROFILE="${WAVERUNNER_PROFILE:-debug}"
+BIN="/home/max/launcher/target/$PROFILE/waverunner"
+if [ ! -x "$BIN" ]; then
+  [ "$PROFILE" = release ] && FLAG=" --release" || FLAG=""
+  echo "waverunner-dev: no $PROFILE build at $BIN; run: nix develop -c cargo build$FLAG" >&2
+  exit 1
+fi
+exec "$BIN" "$@"
