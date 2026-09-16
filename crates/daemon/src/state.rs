@@ -162,13 +162,17 @@ impl UiState {
             // signals likewise drive concealment there, never the launcher.
             Command::DebugClip
             | Command::DebugClipDetail
+            | Command::DebugClipSearch(_)
+            | Command::DebugEmoji(_)
             | Command::DebugNotif
             | Command::DebugSticky
             | Command::DebugDict
             | Command::DebugOptions
-            | Command::DebugMediaBox
             | Command::DebugHoverOption
             | Command::DebugSunset
+            | Command::DebugModuleBox
+            | Command::DebugStats(_)
+            | Command::FloatMode(_)
             | Command::OptionsTrigger(_)
             | Command::OverviewOn
             | Command::OverviewOff
@@ -183,7 +187,16 @@ impl UiState {
             // STAGE mode drives compositor state, not the launcher's rest
             // states — handled in `handle_command` before it reaches here.
             | Command::StageToggle
-            | Command::StageShow(_) => false,
+            | Command::StageShow(_)
+            | Command::StageMode
+            | Command::StageSwipe(_)
+            | Command::StageSwipeEnd(_)
+            | Command::StagePick(_)
+            | Command::WindowMode(_)
+            // Minimize-to-dock tiles too (`minimized.rs`) — the dock's
+            // content changes, never its rest state.
+            | Command::MinAdd(_)
+            | Command::MinDel(_) => false,
         }
     }
 

@@ -32,6 +32,11 @@ use crate::App;
 /// `hyprctl` call, not a layout re-evaluation.
 const SCREEN_DRIFT: &[&str] = &["monitoradded", "monitorremoved", "configreloaded"];
 
+/// Events that change how many tiles a space is divided between — what Golem's
+/// solitary-pseudo rule answers to. `movewindow` covers both spaces it touches,
+/// since the sweep looks at every workspace anyway.
+const LAYOUT_SHAPE: &[&str] = &["openwindow", "closewindow", "movewindow"];
+
 const RELEVANT: &[&str] = &[
     "openwindow",
     "closewindow",
@@ -71,6 +76,25 @@ pub fn dispatch(lua: &str) {
         Ok(reply) if reply.trim() == "ok" => {}
         Ok(reply) => debug!("Hyprland dispatch {lua:?} replied: {}", reply.trim()),
         Err(e) => debug!("Hyprland dispatch {lua:?} failed: {e:#}"),
+    }
+}
+
+/// [`dispatch`] for state the daemon OWNS — the float rule, anything whose
+/// loss degrades silently. A focus nicety that fails is a `debug!`; a lost
+/// mode assertion left a whole morning's windows tiled under a floating
+/// store with nothing in the log to say why (2026-09-15). Same best-effort
+/// contract, but the failure is said out loud and handed back.
+pub fn dispatch_checked(lua: &str) -> bool {
+    match request(&format!("dispatch {lua}")) {
+        Ok(reply) if reply.trim() == "ok" => true,
+        Ok(reply) => {
+            warn!("Hyprland dispatch {lua:?} replied: {}", reply.trim());
+            false
+        }
+        Err(e) => {
+            warn!("Hyprland dispatch {lua:?} failed: {e:#}");
+            false
+        }
     }
 }
 
@@ -175,6 +199,129 @@ fn mode_of(json: &serde_json::Value) -> WindowMode {
     } else {
         WindowMode::Tiled
     }
+}
+
+/// One window, as the LAYOUT rules see it: where it is, what it is, and the
+/// rectangle a pseudo would be a fraction of.
+pub struct LayoutWindow {
+    pub address: String,
+    pub workspace: i64,
+    pub mode: WindowMode,
+}
+
+impl LayoutWindow {
+    /// Whether this window is a **tile** — one of the things sharing the
+    /// workspace's space. Floating windows are over the layout rather than in
+    /// it, and a fullscreen one is a deliberate act that owns the whole output;
+    /// neither is a tile, and neither should be counted when asking "how many
+    /// windows is this space divided between".
+    pub fn is_tile(&self) -> bool {
+        matches!(self.mode, WindowMode::Tiled | WindowMode::Pseudo)
+    }
+}
+
+/// Every mapped window as the layout sees it — one `j/clients` read, so a rule
+/// that has to look at a whole workspace at once costs one round trip rather
+/// than one per window.
+pub fn layout_windows() -> Vec<LayoutWindow> {
+    let Ok(raw) = request("j/clients") else {
+        return Vec::new();
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| {
+            c["mapped"].as_bool().unwrap_or(false) && !c["hidden"].as_bool().unwrap_or(false)
+        })
+        .filter_map(|c| {
+            Some(LayoutWindow {
+                address: c["address"].as_str()?.to_owned(),
+                workspace: c["workspace"]["id"].as_i64().unwrap_or(0),
+                mode: mode_of(c),
+            })
+        })
+        .collect()
+}
+
+/// The rectangle a window ALONE on a workspace fills: the output minus what the
+/// layer surfaces have reserved, and nothing else.
+///
+/// Computed rather than measured, and that is the whole point: measuring means
+/// waiting for the window to finish animating into its tile before the pseudo
+/// can be sized from it, which is exactly the half-second of "it opens, then it
+/// shrinks" the rule is not allowed to have. The value is knowable in advance —
+/// a lone tile takes the whole usable output, because the smart-gaps rule
+/// (`w[tv1]`, `/etc/nixos/hyprland.lua`) zeroes its gaps for this very case.
+/// Measured against it: `[0,28] 2000×1222` on a 2000×1250 output with a 28px bar.
+///
+/// Reads the FOCUSED monitor: a window opening unfocused on a second output
+/// would be sized from the wrong one, which is a real limit and not one this
+/// machine can hit.
+pub fn solitary_tile() -> Option<(f64, f64)> {
+    let m = focused_monitor().ok()?;
+    let (l, t, r, b) = m.reserved;
+    let (w, h) = (m.w - l - r, m.h - t - b);
+    (w > 1.0 && h > 1.0).then_some((w, h))
+}
+
+/// Pseudotile one window at Golem's fraction of `tile`.
+///
+/// [`set_window_mode`] is about the window you are looking at; this is for the
+/// ones the LAYOUT decides for (see `App::sync_solitary_pseudo`). It is handed
+/// the tile rather than reading one, so it can act the instant a window maps —
+/// while the window is still animating in, which is what makes it look like it
+/// opened this way rather than settled into it.
+pub fn pseudo_on(addr: &str, tile: (f64, f64)) {
+    let (w, h) = tile;
+    if w < 1.0 || h < 1.0 {
+        return;
+    }
+    let lua = format!(
+        "hl.dispatch(hl.dsp.window.tag({{ tag = \"+{PSEUDO_TAG}\", window = \"address:{addr}\" }})) \
+         hl.dispatch(hl.dsp.window.pseudo({{ action = \"on\", window = \"address:{addr}\" }})) \
+         hl.dispatch(hl.dsp.window.resize({{ x = {}, y = {}, window = \"address:{addr}\" }})) ",
+        (w * PSEUDO_W) as i64,
+        (h * PSEUDO_H) as i64,
+    );
+    if let Err(e) = request(&format!("eval {lua}")) {
+        debug!("pseudo_on({addr}) failed: {e:#}");
+    }
+}
+
+/// Hand one window back to the plain layout.
+pub fn pseudo_off(addr: &str) {
+    let lua = format!(
+        "hl.dispatch(hl.dsp.window.tag({{ tag = \"-{PSEUDO_TAG}\", window = \"address:{addr}\" }})) \
+         hl.dispatch(hl.dsp.window.pseudo({{ action = \"off\", window = \"address:{addr}\" }})) "
+    );
+    if let Err(e) = request(&format!("eval {lua}")) {
+        debug!("pseudo_off({addr}) failed: {e:#}");
+    }
+}
+
+/// Which of the four modes the focused window is in, or `None` when there is no
+/// focused window.
+///
+/// The bar shows this (the state pill beside the close), so it is read rather
+/// than remembered: a window can be sent fullscreen by the client itself — a
+/// video going full-screen, a game starting — with nothing passing through
+/// [`set_window_mode`] to notice.
+/// Returns the window's ADDRESS with its mode: a mode means nothing without
+/// knowing whose it is. The caller compares addresses to tell "this window just
+/// changed" from "focus landed on a different window", which decide very
+/// different things.
+pub fn active_window_mode() -> Option<(String, WindowMode)> {
+    let raw = request("j/activewindow").ok()?;
+    let json = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let addr = json["address"]
+        .as_str()
+        .filter(|a| !a.is_empty() && *a != "0x0")?
+        .to_owned();
+    Some((addr, mode_of(&json)))
 }
 
 /// Put the focused window into `target`, leaving whatever mode it was in.
@@ -346,7 +493,12 @@ pub fn notify_user(msg: &str) {
 /// Close the waveview overview (its Lua toggle, which closes when open) —
 /// the topbar's X while the overview owns the screen.
 pub fn close_overview() {
-    if let Err(e) = request("eval hl.plugin.waveview.toggle()") {
+    // `close`, not `toggle`. The plugin shuts the map itself when it is told the
+    // stage is opening, so this call lands on an overview that is already on its
+    // way out — and a toggle there opened it straight back up, which is why
+    // entering the stage from the map used to leave the map on screen. A close
+    // that is a close is idempotent, and two of them are still one close.
+    if let Err(e) = request("eval hl.plugin.waveview.close()") {
         debug!("overview close failed: {e:#}");
     }
 }
@@ -537,6 +689,22 @@ pub fn send_shortcut_active(mods: &str, key: &str) {
     ));
 }
 
+/// Send a shortcut to a specific window, focused or not.
+///
+/// The escape hatch for players that publish MPRIS and then ignore it. Firefox
+/// does exactly that (2026-09-12): it advertises `CanControl: true`, accepts
+/// `PlayPause` over D-Bus without error, and keeps playing — and it ignores the
+/// `XF86AudioPlay` keysym too. An ordinary key sent to its window does work.
+///
+/// Targeted by ADDRESS rather than by focusing first: pausing a video should
+/// not steal your place, and the window making the sound is usually not the one
+/// you are looking at.
+pub fn send_key_to(addr: &str, mods: &str, key: &str) {
+    dispatch(&format!(
+        "hl.dsp.send_shortcut({{ mods = \"{mods}\", key = \"{key}\", window = \"address:{addr}\" }})"
+    ));
+}
+
 /// Inject a paste (Ctrl+V) into the focused window.
 pub fn paste_active() {
     send_shortcut_active("CTRL", "v");
@@ -566,6 +734,24 @@ pub fn active_workspace() -> Option<(i64, Option<String>)> {
         .filter(|a| !a.is_empty() && *a != "0x0")
         .map(str::to_owned);
     Some((id, last))
+}
+
+/// Whether the ACTIVE workspace holds no windows — a **new** workspace, in
+/// Max's words (2026-09-12), and one of the five arrangement states OPTIONS is
+/// conditioned on.
+///
+/// One `activeworkspace` read, which carries its own `windows` count, rather
+/// than walking every client and filtering by workspace id. This is deliberately
+/// NOT inferred from "nothing is focused": an unfocused floating window leaves
+/// the workspace occupied while focus is empty, and the two states want
+/// different OPTIONS — a new workspace is an invitation, an unfocused one is
+/// just a pause.
+///
+/// `None` when the compositor cannot be reached; callers keep their last
+/// answer rather than claiming the workspace emptied.
+pub fn active_workspace_is_empty() -> Option<bool> {
+    let ws: serde_json::Value = serde_json::from_str(&request("j/activeworkspace").ok()?).ok()?;
+    Some(ws["windows"].as_i64()? == 0)
 }
 
 /// Switch to a workspace by id (`hl.dsp.focus` with a `workspace` field —
@@ -753,6 +939,14 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 }
                             }
                         }
+                        // The space's shape changed: a window arrived, left, or
+                        // moved between spaces. Golem pseudotiles a space that
+                        // is down to one tile and hands the proportions back
+                        // when it has to be shared — see
+                        // `App::sync_solitary_pseudo`.
+                        if LAYOUT_SHAPE.iter().any(|r| name.starts_with(r)) {
+                            app.schedule_solitary_pseudo();
+                        }
                         // `workspacev2>>ID,NAME` — the space changed. Hand back
                         // the window that was left there, if the way in didn't
                         // (see [`crate::focus_cycle`]).
@@ -790,8 +984,42 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 if was_on {
                                     app.rebuild_deck();
                                 }
+                                // The dock's minimized tiles are keyed by this
+                                // same reusable address: evict now rather than
+                                // trusting the plugin's `min-del` to arrive (a
+                                // window can die minimized), or a click on the
+                                // stale tile would "restore" whatever window
+                                // later inherits the address.
+                                if app.evict_minimized(&addr) {
+                                    app.refilter();
+                                }
                             }
                         }
+                        // `openwindow>>ADDRESS,WS,CLASS,TITLE` — while Golem
+                        // is a FLOATING window manager a window that arrives
+                        // TILED is proof the compositor no longer has the
+                        // float rule: it forgets runtime rules on config
+                        // reload, and a re-assertion lost in a socket race
+                        // stays lost (2026-09-15 — a whole morning's windows
+                        // mapped tiled). Heal both halves: the rule, and the
+                        // window that slipped past it.
+                        if name.starts_with("openwindow") {
+                            if let Some(addr) = line
+                                .split(">>")
+                                .nth(1)
+                                .and_then(|d| d.split(',').next())
+                            {
+                                let addr =
+                                    format!("0x{}", addr.trim().trim_start_matches("0x"));
+                                app.heal_floating_map(&addr);
+                            }
+                        }
+                        // (No `changefloatingmode` hook here on purpose: this
+                        // fork never emits one — measured on the event socket
+                        // 2026-09-12, across float toggles by address. The bar's
+                        // state pill watches the engine's `is_floating` instead,
+                        // which costs no read at all.)
+                        //
                         // A monitor coming/going or the config being re-read
                         // rebuilds the output's DRM state, which silently drops
                         // the colour matrix hyprsunset set (Hyprland pushes a
@@ -800,6 +1028,7 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         if SCREEN_DRIFT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {} — re-asserting screen", name.trim());
                             app.reassert_screen_state();
+                            app.reassert_floating_mode();
                         }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());
@@ -826,6 +1055,10 @@ pub struct MonitorInfo {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    /// What layer surfaces have taken out of the output, logical px, in
+    /// Hyprland's order: left, top, right, bottom. The OPTIONS bar is the 28 at
+    /// the top.
+    pub reserved: (f64, f64, f64, f64),
     pub active_ws: i64,
     /// Output scale factor (physical = logical × scale).
     pub scale: f64,
@@ -852,6 +1085,10 @@ pub fn focused_monitor() -> anyhow::Result<MonitorInfo> {
                 y: m["y"].as_f64().unwrap_or(0.0),
                 w: m["width"].as_f64().unwrap_or(0.0) / scale,
                 h: m["height"].as_f64().unwrap_or(0.0) / scale,
+                reserved: {
+                    let r = |i: usize| m["reserved"][i].as_f64().unwrap_or(0.0);
+                    (r(0), r(1), r(2), r(3))
+                },
                 active_ws: m["activeWorkspace"]["id"].as_i64().unwrap_or(-1),
                 scale,
                 name: m["name"].as_str().unwrap_or("").to_owned(),
@@ -1105,6 +1342,93 @@ pub fn set_stage_gaps(band: i32) {
     }
 }
 
+/// The desktop's general gaps, as the config left them.
+///
+/// Values are in CSS order — top, right, bottom, left — because that is how
+/// Hyprland reports them, and reading them back in the same order they arrive is
+/// one fewer place to get a rotation wrong.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GapSnapshot {
+    out: [i64; 4],
+    inner: i64,
+}
+
+impl Default for GapSnapshot {
+    /// `/etc/nixos/hyprland.lua:126-134` — what to put back when there is no
+    /// reading to put back instead (a socket error, or a breadcrumb written by
+    /// a daemon that predates the snapshot).
+    fn default() -> Self {
+        GapSnapshot {
+            out: [3, 10, 10, 10],
+            inner: 5,
+        }
+    }
+}
+
+/// Read the general gaps before the stage changes them.
+///
+/// Snapshotting rather than hard-coding, for the reason the animation leaves are
+/// snapshotted: restoring is then exact by construction and cannot go stale the
+/// day those numbers are retuned in the config.
+pub fn snapshot_general_gaps() -> GapSnapshot {
+    fn css(option: &str) -> Option<Vec<i64>> {
+        let raw = request(&format!("j/getoption {option}")).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        let css = v["css"].as_str()?;
+        let parts: Vec<i64> = css
+            .split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        (parts.len() == 4).then_some(parts)
+    }
+    let fallback = GapSnapshot::default();
+    GapSnapshot {
+        out: css("general:gaps_out")
+            .and_then(|p| p.try_into().ok())
+            .unwrap_or(fallback.out),
+        inner: css("general:gaps_in")
+            .map(|p| p[0])
+            .unwrap_or(fallback.inner),
+    }
+}
+
+/// Open the stage inset on **every** workspace at once, by moving the desktop's
+/// general gaps.
+///
+/// [`set_stage_gaps`] is enough for a staged task: it is maximized, so it
+/// matches the smart-gaps selectors that rule is re-pointing. A whole desk
+/// matches neither selector — it is however many windows the user put there — so
+/// the general gaps are what lay it out, and those are what the stage moves.
+///
+/// A **numeric** workspace rule was the obvious alternative and is wrong: a
+/// workspace rule can be overridden but never removed, and a numeric rule beats
+/// the `w[tv1]` smart-gaps selector, so every desk visited would have come out
+/// of the mode permanently un-smart — measured, a lone window landing at
+/// `[10,31]` where it belonged flush at `[0,28]`. A global is restored exactly
+/// because it is one value with one previous reading.
+pub fn set_general_gaps(band: i32) {
+    let (top, side) = (crate::stage::GAP_TOP, crate::stage::GAP_SIDE);
+    eval(&format!(
+        "hl.config({{ general = {{ \
+         gaps_out = {{ top = {top}, left = {side}, right = {side}, bottom = {band} }} }} }})"
+    ));
+}
+
+/// Put the general gaps back to what [`snapshot_general_gaps`] found.
+///
+/// Harmless when the stage never moved them — it writes the same values that
+/// are already there — which is what lets both the exit path and crash recovery
+/// call it unconditionally rather than tracking whether it is owed.
+pub fn restore_general_gaps(snap: &GapSnapshot) {
+    let [top, right, bottom, left] = snap.out;
+    let inner = snap.inner;
+    eval(&format!(
+        "hl.config({{ general = {{ \
+         gaps_out = {{ top = {top}, right = {right}, bottom = {bottom}, left = {left} }}, \
+         gaps_in = {inner} }} }})"
+    ));
+}
+
 /// Put the smart-gaps rules back to their configured values
 /// (`gaps_out = 0, gaps_in = 0`, `/etc/nixos/hyprland.lua:357-358`). Exactly
 /// reversible because the original is a known constant, not a guess.
@@ -1305,6 +1629,34 @@ pub fn capture_deck(addrs: &[String], size: u32, tile_aspect: f32, dir: &std::pa
     eval(&format!(
         "hl.plugin.waveview.capture_deck(\"{}\", {size}, {tile_aspect}, \"{d}\")",
         addrs.join(",")
+    ));
+}
+
+/// Ask waveview for square thumbnails of several **workspaces** at once, each
+/// written to `<dir>/ws-<id>.rgba` as raw RGBA.
+///
+/// The desk deck's counterpart to [`capture_deck`]: a tile there stands for a
+/// whole workspace, so the picture has to be the workspace — its windows where
+/// the user put them, not one of them on its own. The plugin already renders
+/// exactly that for the overview's grid.
+///
+/// Same contract as [`capture_deck`] in every other respect: one call for the
+/// whole set, and the answer is read off the filesystem rather than from the
+/// plugin, so an absent or older plugin degrades to title-only tiles.
+pub fn capture_desks(workspaces: &[i64], size: u32, tile_aspect: f32, dir: &std::path::Path) {
+    if workspaces.is_empty() {
+        return;
+    }
+    let Some(d) = dir.to_str() else {
+        return;
+    };
+    let list = workspaces
+        .iter()
+        .map(|ws| ws.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    eval(&format!(
+        "hl.plugin.waveview.capture_desks(\"{list}\", {size}, {tile_aspect}, \"{d}\")"
     ));
 }
 
@@ -1569,17 +1921,11 @@ pub fn set_plugin_stage(on: bool) {
     eval(&format!("hl.plugin.waveview.set_stage({on})"));
 }
 
-pub fn set_overview_bind(enabled: bool) {
-    // Always unbind first, even when re-enabling: `hl.bind` *adds*, so a rebind
-    // over a live bind leaves TWO, and one keypress would then toggle the
-    // overview twice — open and straight back shut, looking like a dead key.
-    // (Hit for real: the stranded-stage recovery re-enabled a bind that had
-    // never been removed.) Unbind-then-bind guarantees exactly one.
-    eval("hl.unbind(\"SUPER + R\")");
-    if enabled {
-        eval("hl.bind(\"SUPER + R\", function() hl.plugin.waveview.toggle() end)");
-    }
-}
+// The stage used to take Super+R away while it owned the screen; it doesn't any
+// more (the overview opens over the stage now), so the unbind/rebind pair that
+// did it is gone. The lesson it left is still worth keeping: `hl.bind` **adds**,
+// so binding over a live bind leaves TWO and one press fires both — which is
+// why nothing here rebinds a key it did not first unbind.
 
 /// One task for the stage deck.
 pub struct StageTask {
@@ -1829,4 +2175,179 @@ mod tests {
         assert!(!is_browser_class("org.gnome.Nautilus"));
         assert!(!is_browser_class(""));
     }
+}
+
+/// The name of the window rule that makes every window OPEN floating — one
+/// named rule, re-declared to flip it, because this fork addresses rules by
+/// name and has no "remove".
+const FLOAT_RULE: &str = "golem-float-mode";
+
+/// Turn Golem's floating mode on or off **at the compositor**: a catch-all
+/// window rule that floats every window AS IT MAPS.
+///
+/// This is the whole reason the mode is a rule and not a sweep on
+/// `openwindow`: a rule is applied while the window is being mapped, so an app
+/// *launches* floating. Reacting to the open event instead would let it arrive
+/// tiled and then jump — which is exactly what Max ruled out (2026-09-13: *"i
+/// dont want them to come tiled and become floating, they have to launch as
+/// floating"*).
+///
+/// Verified live on this fork the same day: a named rule can be re-declared to
+/// replace it, and `enabled` is honoured — `enabled = true` gave a floating
+/// window, `enabled = false` a tiled one, with no reload and no rule pile-up.
+/// `remove` is NOT a field (it errors), so `enabled` is the off switch.
+pub fn set_float_rule(on: bool) {
+    // `hl.window_rule` is not a dispatcher, and the socket's `dispatch` wraps
+    // whatever it is given in `hl.dispatch(...)` — which rejects a non-dispatch
+    // value. Wrapping the call in a function that ends with `no_op` gives the
+    // socket the dispatcher it insists on while the rule call does the work.
+    // Golem's float SIZE and PLACE ride the same rule, so a window arrives
+    // floated, sized and centred in ONE motion rather than being floated and
+    // then shoved (Max, 2026-09-13: *"i want them placed and sized for
+    // Golem"*).
+    //
+    // ⚠️ ABSOLUTE logical pixels, not percentages. `size = "55% 54%"` is
+    // ACCEPTED by the parser and then silently does nothing (measured: the
+    // window kept its own 700x500 while `center` took effect) — the one form
+    // that actually applies is a pixel pair. So the rule carries
+    // `float_size()`, the same numbers the per-window float toggle uses, and
+    // is re-declared when the monitor changes, which `reassert_floating_mode`
+    // already does off Hyprland's monitor events.
+    //
+    // `center = true` DOES respect the reserved area — measured at
+    // y = 302 on a 1250-tall output under a 28px bar, i.e. centred in the
+    // usable 1222, not in the whole screen.
+    let size = match float_size() {
+        Some((w, h)) => format!("size = {{ {w}, {h} }}, center = true, "),
+        None => String::new(),
+    };
+    // Checked, not fire-and-forget: this rule is the floating mode. When the
+    // assertion is lost (a socket race at session start, a reply that is an
+    // error) every window from then on maps tiled and nothing says why —
+    // measured 2026-09-15. The heal on `openwindow` (`heal_floating_map`)
+    // catches whatever still slips through.
+    dispatch_checked(&format!(
+        "(function() hl.window_rule({{ name = \"{FLOAT_RULE}\", \
+         match = {{ class = \".*\" }}, float = true, {size}enabled = {on} }}) \
+         return hl.dsp.no_op() end)()"
+    ));
+}
+
+/// Bring every window that is currently in the wrong state into the mode: all
+/// tiles float, or all floats return to the layout.
+///
+/// **Fullscreen windows are left alone.** Fullscreen is neither tiled nor
+/// floating — it is a third thing the user asked for explicitly, and toggling
+/// float underneath it would drop them out of it for a reason they did not ask
+/// for. They join the mode when they leave fullscreen.
+///
+/// One dispatch for the whole sweep: the toggles arrive in a single chunk so
+/// the screen re-lays-out once rather than once per window.
+pub fn float_all(on: bool) {
+    let windows = layout_windows();
+    // Where a swept window lands. A window that merely STOPS being tiled keeps
+    // whatever the layout gave it — which for a maximized tile is the whole
+    // screen, so the desk filled up with huge floats (Max, 2026-09-13: *"the
+    // windows that are already open go huge"*). They get Golem's float size and
+    // place, the same as one arriving under the rule.
+    let place = float_size().zip(focused_monitor().ok());
+    // Counted per WORKSPACE: the cascade is about what you can see at once, and
+    // two desks' windows never overlap on screen.
+    let mut nth: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    let mut lua = String::new();
+    for w in &windows {
+        let wrong = match w.mode {
+            WindowMode::Tiled | WindowMode::Pseudo => on,
+            WindowMode::Floating => !on,
+            WindowMode::Fullscreen => false,
+        };
+        if !wrong {
+            continue;
+        }
+        let win = format!("window = \"address:{}\"", w.address);
+        // A pseudo is a tile wearing Golem's proportions; drop the tag with it
+        // so the frame rule does not keep painting a pseudo that is now a float.
+        if w.mode == WindowMode::Pseudo {
+            lua.push_str(&format!(
+                "hl.dispatch(hl.dsp.window.tag({{ tag = \"-{PSEUDO_TAG}\", {win} }})) \
+                 hl.dispatch(hl.dsp.window.pseudo({{ action = \"off\", {win} }})) "
+            ));
+        }
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
+        ));
+        if !on {
+            continue; // back into the layout; the layout decides the geometry
+        }
+        if let Some(((fw, fh), m)) = place.as_ref() {
+            let (fw, fh) = (*fw, *fh);
+            let i = nth.entry(w.workspace).or_default();
+            let (x, y) = cascade_at(m, (fw, fh), *i);
+            *i += 1;
+            // Size THEN place, in this order and in the same chunk: `resize`
+            // grows from the window's centre, so placing first would leave the
+            // window somewhere else by the time it is sized.
+            lua.push_str(&format!(
+                "hl.dispatch(hl.dsp.window.resize({{ x = {fw}, y = {fh}, {win} }})) \
+                 hl.dispatch(hl.dsp.window.move({{ x = {x}, y = {y}, {win} }})) "
+            ));
+        }
+    }
+    if lua.is_empty() {
+        return;
+    }
+    dispatch(&format!("(function() {lua} return hl.dsp.no_op() end)()"));
+}
+
+/// Float ONE window, Golem-style — the single-window arm of [`float_all`],
+/// for a window that mapped tiled while the mode says floating (the rule was
+/// lost; see `settings.rs::heal_floating_map`). Same moves in the same order
+/// as the sweep: pseudo tag off with the pseudo, float, then size THEN place
+/// in one chunk.
+pub fn float_window(w: &LayoutWindow) {
+    let win = format!("window = \"address:{}\"", w.address);
+    let mut lua = String::new();
+    if w.mode == WindowMode::Pseudo {
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.window.tag({{ tag = \"-{PSEUDO_TAG}\", {win} }})) \
+             hl.dispatch(hl.dsp.window.pseudo({{ action = \"off\", {win} }})) "
+        ));
+    }
+    lua.push_str(&format!(
+        "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
+    ));
+    let place = float_size().zip(focused_monitor().ok());
+    if let Some(((fw, fh), m)) = place.as_ref() {
+        let (fw, fh) = (*fw, *fh);
+        let (x, y) = cascade_at(m, (fw, fh), 0);
+        lua.push_str(&format!(
+            "hl.dispatch(hl.dsp.window.resize({{ x = {fw}, y = {fh}, {win} }})) \
+             hl.dispatch(hl.dsp.window.move({{ x = {x}, y = {y}, {win} }})) "
+        ));
+    }
+    dispatch(&format!("(function() {lua} return hl.dsp.no_op() end)()"));
+}
+
+/// How far each window in a cascade steps down and right from the one before.
+/// About a titlebar's worth — enough that every window in the pile shows its
+/// own top edge.
+const CASCADE_STEP: f64 = 30.0;
+/// How many windows the cascade walks before starting over at the top. Without
+/// it the tenth window on a busy desk marches off the screen.
+const CASCADE_WRAP: usize = 5;
+
+/// Where the `i`th swept window goes: centred in the USABLE area (the output
+/// minus what the bar and the dock reserve), then stepped down-right so a pile
+/// of them reads as a pile rather than as one window.
+///
+/// Clamped to the usable area, so the step can never push a window under the
+/// bar or off the right edge however the numbers are set.
+fn cascade_at(m: &MonitorInfo, size: (i64, i64), i: usize) -> (i64, i64) {
+    let (l, t, r, b) = m.reserved;
+    let (uw, uh) = (m.w - l - r, m.h - t - b);
+    let (fw, fh) = (size.0 as f64, size.1 as f64);
+    let step = CASCADE_STEP * (i % CASCADE_WRAP) as f64;
+    let x = (l + (uw - fw) / 2.0 + step).clamp(l, (l + uw - fw).max(l));
+    let y = (t + (uh - fh) / 2.0 + step).clamp(t, (t + uh - fh).max(t));
+    (x.round() as i64, y.round() as i64)
 }

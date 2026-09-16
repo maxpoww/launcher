@@ -54,12 +54,20 @@ impl App {
             self.apps_span
                 .max(self.search.visible[content::SECTION_APPS].len())
         };
+        // Aspects of the minimized tiles, dock-tail order (== `minimized`
+        // order): each shapes its variable-width tile. `dock_min_count` picks
+        // up how many actually draw (0 while the launcher hides them).
+        let min_aspects: Vec<f32> = self.minimized.iter().map(|w| w.aspect).collect();
         let mut layout = content::layout(
             &self.config,
             self.icon_scale(),
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             extent,
             self.dock_order.len(),
+            // How many of those are minimized-window tiles (the tail of the
+            // order): the zone the dock widens to fit rather than clamp.
+            self.dock_min_count,
+            &min_aspects,
             [
                 apps_cells,
                 self.search.visible[content::SECTION_INSTALL].len(),
@@ -935,6 +943,9 @@ impl App {
             .iter()
             .map(|e| self.running.contains_key(e))
             .collect();
+        // Corner app-icon badge per minimized tile (dock-tail order); already
+        // resolved to a texture layer in `recompute_dock_order`.
+        let min_badges: Vec<Option<u32>> = self.minimized.iter().map(|w| w.badge_layer).collect();
         // Eased fill/ink/wash/plate: a fresh colour sample fades in instead
         // of repainting in one frame — the ink's black↔white flip and the
         // icon plates' polarity crossfade too. Keep frames coming while
@@ -986,6 +997,7 @@ impl App {
                 dock_order: &self.dock_order,
                 dock_running: &dock_running,
                 dock_divider: self.dock_divider,
+                min_badges: &min_badges,
                 drag: drag_frame,
                 trash_react: self.trash_react,
                 trash_hover: self.trash_hover,
@@ -1178,15 +1190,13 @@ impl App {
         // The context-aware pill modules ride on top of the base fill.
         self.push_options_pills(&mut scene);
         // The banner swells around the sunset module (metaball blister).
-        scene.neck = self.sunset_neck();
+        scene.neck = self.module_neck();
         // The sunset settings box content, over the banner blister.
-        self.push_sunset_box(&mut scene);
+        self.push_module_box(&mut scene);
+        // The gear's stats readout, over the pill the layout drew for it.
+        self.push_stats_child(&mut scene);
         // A hover tooltip for the icon-only OPTION pills (discoverability).
         self.push_options_tooltip(&mut scene);
-        // The media transport box grows into the reserved dropdown area.
-        if self.media_box_open {
-            self.push_media_box(&mut scene);
-        }
         // Adaptive: black text on a bright matched bar, white on a dark one.
         let text_rgba = self.options_text_color();
         let squircle = self.config.theme.icon_squircle;

@@ -8,6 +8,7 @@
 //! `wl_surface.frame` callback per drawn frame; once settled we stop, and
 //! the process goes fully idle.
 
+mod action_track;
 mod animation;
 mod applier;
 mod apps;
@@ -22,6 +23,8 @@ mod deck_audio;
 mod deck_thumbs;
 mod dict;
 mod dragging;
+mod emoji;
+mod emoji_table;
 mod files;
 mod focus_cycle;
 mod frame;
@@ -34,6 +37,7 @@ mod jelly;
 mod launch;
 mod managed;
 mod managed_webapps;
+mod minimized;
 mod nix;
 // Notification OPTION data plane: a D-Bus worker that mirrors the options-notify
 // daemon's active list into the UI and sends back dismiss/act/reply. The render
@@ -44,7 +48,6 @@ mod notifications;
 // The notification OPTION UI (bell → peek → history dropdown) on the topbar.
 mod notif;
 // Off-thread resolver: a notification's app icon → premultiplied mip chain.
-mod mediabox;
 mod notif_icons;
 mod options;
 mod order;
@@ -52,13 +55,18 @@ mod pager;
 mod pages;
 mod persist;
 mod pins;
+mod play_art;
+mod playbox;
 mod renderer;
 mod screen;
+mod settings;
 mod screencopy;
 mod stage;
-mod sunset;
 mod state;
+mod module_box;
+mod stats;
 mod surface;
+mod task_title;
 mod thumbs;
 mod unfurl;
 // FreeDesktop trash backend. Read (`list`/`file_path`) and trash (drop a file
@@ -298,7 +306,13 @@ fn main() -> anyhow::Result<()> {
     // OptionSet (the dynamic OPTION pills — context-aware controls).
     let (brain_tx, brain_rx) = channel::channel::<options_engine::ContextState>();
     let (options_tx, options_rx) = channel::channel::<options_engine::OptionSet>();
-    brain::start(brain_tx, options_tx);
+    // Cover art for the playing box, decoded off the loop.
+    let (art_tx, art_rx) = channel::channel::<play_art::Art>();
+    let play_art_loader = play_art::spawn(art_tx);
+    // The Brain's two directions: context + options flow out of it, the shell's
+    // own arrangement (STAGE / overview / screens) flows in — the collectors
+    // cannot sense a mode that belongs to waverunner itself.
+    let shell_tx = brain::start(brain_tx, options_tx);
 
     // STAGE deck thumbnails: captured off-loop as each task settles on stage.
     let (deck_thumb_tx, deck_thumb_rx) = channel::channel::<deck_thumbs::Event>();
@@ -412,10 +426,15 @@ fn main() -> anyhow::Result<()> {
         options_date: App::options_date_init(),
         options_title: None,
         options_resize_live: None,
+        options_mode: hypr::WindowMode::Tiled,
+        options_mode_addr: None,
+        options_mode_shown: hypr::WindowMode::Tiled,
+        pseudo_sweep_pending: false,
         overview_hover: None,
+        overview_hover_addr: None,
         resize_drag: false,
         resize_watch_running: false,
-        stage: stage::Stage::default(),
+        stage: stage::Stage::new(),
         deck_layer,
         deck_renderer: None,
         deck_size: (0, 0),
@@ -427,6 +446,11 @@ fn main() -> anyhow::Result<()> {
         deck_audio,
         deck_audio_map: HashSet::new(),
         deck_thumb_layer: HashMap::new(),
+        deck_desk_counts: HashMap::new(),
+        deck_swipe: None,
+        deck_swipe_last: std::time::Instant::now(),
+        deck_swipe_guard: false,
+        deck_swipe_ended: std::time::Instant::now(),
         deck_thumb_chains: Vec::new(),
         deck_icon_capacity: 0,
         deck_ptr: None,
@@ -434,10 +458,14 @@ fn main() -> anyhow::Result<()> {
         focus_walk: None,
         walk_focus_pending: None,
         options_active_addr: None,
+        options_class: None,
+        options_title_addr: None,
+        options_title_at: None,
         options_clock_w: 0.0,
         options_date_w: 0.0,
         options_title_w: 0.0,
-        sunset_text_w: 0.0,
+        module_text_w: 0.0,
+
         sunset_inner_w: 0.0,
         options_fullscreen: false,
         options_hidden: false,
@@ -455,6 +483,7 @@ fn main() -> anyhow::Result<()> {
         options_show: options::ShowAnim::default(),
         notif: notif::NotifState::new(notif_handle),
         clip: clipboard::ClipState::new(clip_handle, clip_thumbs, clip_unfurl),
+        emoji: emoji::EmojiState::default(),
         dict_tx,
         notif_icons_handle,
         notif_icon_chains: Vec::new(),
@@ -585,17 +614,49 @@ fn main() -> anyhow::Result<()> {
         brain: None,
         options: Default::default(),
         options_sig: Vec::new(),
-        sunset_prompt_shown: false,
-        sunset_debug: false,
+        module_shown: None,
+        module_debug: None,
+        stats: stats::StatsState::default(),
         sunset_acted: false,
-        sunset_box_open: false,
-        sunset_box_e: 0.0,
-        sunset_box_last: None,
-        sunset_box_frame_pending: false,
+        sunset_recalled: false,
+        module_box_open: false,
+        module_box_e: 0.0,
+        module_box_last: None,
+        module_box_frame_pending: false,
         sunset_auto: false,
+        settings: settings::Settings::load(),
+        action_tracks: action_track::load(),
         screen: screen::ScreenState::load(),
-        media_box_open: false,
-        media_drag: None,
+        cava_reveal: 0.0,
+        cava_tick: None,
+        cava_scroll: 0.0,
+        cava_prev_text: String::new(),
+        cava_prev_w: 0.0,
+        cava_assume: None,
+        cava_scroll_accum_v: 0.0,
+        cava_scroll_accum_h: 0.0,
+        cava_vol_assume: None,
+        play_box_open: false,
+        play_box_e: 0.0,
+        play_art_chains: Vec::new(),
+        play_art_slot: std::collections::HashMap::new(),
+        play_art_pending: std::collections::HashSet::new(),
+        play_art: Some(play_art_loader),
+        cava_last_player: None,
+        cava_mpris_dead: std::collections::HashSet::new(),
+        cava_out_t: 0.0,
+        cava_swap: 0.0,
+        cava_frame_pending: false,
+        cava_now_measured: String::new(),
+        cava_out_measured: String::new(),
+        cava_vol_measured: String::new(),
+        cava_time_measured: String::new(),
+        cava_now_w: 0.0,
+        cava_out_w: 0.0,
+        cava_vol_w: 0.0,
+        cava_time_w: 0.0,
+        shell_tx,
+        shell_sent: options_engine::ShellState::default(),
         overview_active: false,
         battery_alarm: battery::BatteryAlarm::default(),
         battery_beat_epoch: None,
@@ -617,8 +678,10 @@ fn main() -> anyhow::Result<()> {
         usage: usage::UsageDb::load(),
         pins: pins::PinDb::load(),
         dock_order: Vec::new(),
+        dock_min_count: 0,
         running: HashMap::new(),
         dock_divider: None,
+        minimized: Vec::new(),
         last_rescan: Instant::now(),
         bounce: None,
         placeholders: Vec::new(),
@@ -665,6 +728,15 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("registering options channel: {e}"))?;
+
+    event_loop
+        .handle()
+        .insert_source(art_rx, |event, _, app| {
+            if let channel::Event::Msg(art) = event {
+                app.on_play_art(art);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering art channel: {e}"))?;
 
     event_loop
         .handle()
@@ -850,6 +922,10 @@ fn main() -> anyhow::Result<()> {
     // starts one. (The other arm is Hyprland's monitor/config events, which
     // catch the CTM the compositor drops mid-session.)
     app.reassert_screen_state();
+    // Same shape for the window MODE: the float rule lives in the compositor,
+    // which forgets it when it restarts, while the store still remembers
+    // (`settings.rs`).
+    app.reassert_floating_mode();
 
     // Declarative installs: the package list is the source of truth.
     // Restore installs that were mid-flight when the daemon last stopped
@@ -992,7 +1068,26 @@ pub struct App {
     /// While the overview owns the screen, the title of the thumbnail
     /// under the pointer — the pill follows the pointer instead of the
     /// focused window (waveview reports it; `None` = nothing hovered).
+    /// What the focused window IS — tiled, floating, pseudo, fullscreen.
+    /// `refresh_window_mode` keeps it current; clicks act on it.
+    options_mode: hypr::WindowMode,
+    /// The window `options_mode` was read from. Comparing it against the next
+    /// read is what tells a window CHANGING shape from focus landing on a
+    /// different one — see `refresh_window_mode`.
+    options_mode_addr: Option<String>,
+    /// Whether a solitary-pseudo sweep is already waiting on its timer, so a
+    /// burst of window events costs one sweep — see `schedule_solitary_pseudo`.
+    pseudo_sweep_pending: bool,
+    /// The mode the bar is currently laid out from. Catches up with
+    /// `options_mode` only once the pointer leaves the surface, so the buttons
+    /// never move under the hand that pressed them — `OptionUXRules.md` §2, via
+    /// `sync_window_state`.
+    options_mode_shown: hypr::WindowMode,
     overview_hover: Option<String>,
+    /// The window under the pointer in the overview, by address. What entering
+    /// the stage from the map puts on it — the title alone cannot say which
+    /// window it was.
+    overview_hover_addr: Option<String>,
     /// Whether a resize drag is in flight (waveview watches the
     /// compositor's drag state and writes resize-drag-on/off to the socket).
     resize_drag: bool,
@@ -1023,10 +1118,15 @@ pub struct App {
     /// window pid → (PipeWire node to mute, currently muted).
     deck_audio: deck_audio::DeckAudio,
     deck_audio_map: HashSet<String>,
-    /// Thumbnail texture layers on the deck's renderer, by window address, plus
-    /// the chains themselves (kept so a new layer can re-upload the whole array).
+    /// Thumbnail texture layers on the deck's renderer, by tile key (a window
+    /// address, or `ws-N` for a desk), plus the chains themselves (kept so a new
+    /// layer can re-upload the whole array).
     deck_thumb_layer: HashMap<String, u32>,
     deck_thumb_chains: Vec<Vec<u8>>,
+    /// Windows per workspace as of the last deck rebuild. A desk's picture is of
+    /// the whole workspace, so it goes stale when the workspace gains or loses a
+    /// window even though its tile has not moved — this is what notices.
+    deck_desk_counts: HashMap<i64, u32>,
     /// Layers allocated in the deck renderer's icon array. Pre-sized at
     /// rebuild so a thumbnail arriving is a single-layer write, never a
     /// reallocation. See `rebuild_deck`.
@@ -1034,6 +1134,16 @@ pub struct App {
     /// Pointer position on the deck surface — only `Enter`/`Motion` carry
     /// coordinates, so the button handler reads the last one seen.
     deck_ptr: Option<(f32, f32)>,
+    /// A 3/4-finger swipe walking the border along the deck, from the waveview
+    /// plugin (`stage-swipe`). `None` between gestures.
+    deck_swipe: Option<deck::DeckSwipe>,
+    /// When the last swipe message landed, and whether the quiet-gesture guard
+    /// is already waiting — see `arm_deck_swipe_guard`.
+    deck_swipe_last: std::time::Instant,
+    deck_swipe_guard: bool,
+    /// When the last gesture committed, so its own late messages cannot be read
+    /// as the start of another one.
+    deck_swipe_ended: std::time::Instant,
     /// Decaying focus-frequency scores driving the usage-aware focus cycle
     /// (clicking the current-task pill; see `focus_cycle`).
     frecency: focus_cycle::Frecency,
@@ -1044,17 +1154,28 @@ pub struct App {
     /// walk's doing, not user signal, so the stats hook skips it.
     walk_focus_pending: Option<String>,
     options_active_addr: Option<String>,
+    /// The focused window's app class. The witness the title grooming needs to
+    /// recognise an app's signature on its own title (see [`crate::task_title`]):
+    /// only `firefox` can say that `" — Mozilla Firefox"` is chrome.
+    options_class: Option<String>,
+    /// The window the pill's current text belongs to, and when that text last
+    /// changed — the pair [`App::title_churn`] reads to tell a window retitling
+    /// itself on its own timer from a task you actually switched to.
+    options_title_addr: Option<String>,
+    options_title_at: Option<std::time::Instant>,
     /// Measured (logical px) widths of the clock, date, and window-title text,
     /// so the proportional-font pills can be sized without re-measuring every
     /// frame.
     options_clock_w: f32,
     options_date_w: f32,
     options_title_w: f32,
-    /// Sunset-prompt measurements: the question text alone, and the nested
-    /// [turn on] pill (label + its padding) — `options_title_w` carries their
-    /// sum while the prompt holds the window pill (see `measure_options_text`).
-    sunset_text_w: f32,
+    /// Module measurements (see `measure_options_text`): the module's sentence
+    /// alone, and the sunset module's nested [turn on] pill (label + its
+    /// padding). `options_title_w` carries their sum while a module holds the
+    /// window pill, so the whole expansion is one ease.
+    module_text_w: f32,
     sunset_inner_w: f32,
+
     /// Fullscreen auto-hide: whether the focused window is fullscreen, whether
     /// the bar is currently concealed, and the dwell/grace timers that reveal
     /// it on a deliberate top-edge hold.
@@ -1098,6 +1219,8 @@ pub struct App {
     notif: notif::NotifState,
     /// Clipboard OPTION: watched history + copy-back (see [`crate::clipboard`]).
     clip: clipboard::ClipState,
+    /// Emoji picker: a mode of the clipboard box (see [`crate::emoji`]).
+    emoji: emoji::EmojiState,
     /// Sender for the offline dictionary load worker (clipboard "define a word"
     /// panel). `None` when the topbar is disabled; the load is kicked lazily the
     /// first time the panel opens, and the finished map arrives on the loop.
@@ -1473,36 +1596,145 @@ pub struct App {
     /// laid out, so a Mind republish that doesn't change the visible controls
     /// doesn't churn the pill layout.
     options_sig: Vec<(String, String)>,
-    /// The sunset eye-protection prompt (see `options.rs`, "sunset prompt"):
-    /// whether the current-task pill is currently showing it (the drawn state),
-    /// the debug force flag (`debug-sunset` ctl verb), and whether the user
-    /// already resolved this offer (clicked [turn on] / dismissed) so it stays
-    /// down until the Mind withdraws and re-offers it.
-    sunset_prompt_shown: bool,
-    sunset_debug: bool,
+    /// Which module the current-task pill is wearing right now — the DRAWN
+    /// state, reconciled with what is wanted by `App::sync_module` (the sunset
+    /// question, the empty room; see `options.rs`, [`options::Module`]). `None`
+    /// is the ordinary bar: the pill shows the task.
+    ///
+    /// One field rather than a flag per module, because the pill is one object
+    /// and can only wear one sentence (`OptionUXRules.md` §5).
+    module_shown: Option<options::Module>,
+    /// A module forced onto the pill for demos and screenshots (the
+    /// `debug-sunset` ctl verb), as if the Mind had offered it.
+    ///
+    /// Not a nicety: the topbar is pointer-only on this compositor, and a module
+    /// is conditional on the world (the sun has to be down), so without a force
+    /// the only way to look at one is to wait for it.
+    module_debug: Option<options::Module>,
+    /// The settings gear's hover child: CPU/RAM/DISK/BATTERY sliding out from
+    /// behind it, the clipboard peek mirrored (see `stats.rs`).
+    stats: stats::StatsState,
+    /// Whether the user already resolved the sunset offer (clicked [turn on] /
+    /// dismissed), so it stays down until the Mind withdraws and re-offers it.
     sunset_acted: bool,
+    /// The user called this offer back from its notification record
+    /// (`action_track.rs`), so the prompt stands even though the Mind has
+    /// withdrawn the offer. Cleared by the answer, like the rest.
+    sunset_recalled: bool,
     /// The sunset settings box (the gear expands the module downward into a
     /// panel, like the notif/clipboard boxes): whether it's open (intent) and
     /// its eased open progress 0 (pill) → 1 (full box), plus the frame loop's
     /// dt clock and pending guard. `sunset_auto` is the panel's stub toggle.
-    sunset_box_open: bool,
-    sunset_box_e: f32,
-    sunset_box_last: Option<Instant>,
-    sunset_box_frame_pending: bool,
+    module_box_open: bool,
+    module_box_e: f32,
+    module_box_last: Option<Instant>,
+    module_box_frame_pending: bool,
     sunset_auto: bool,
+    /// Golem's own settings — what the gear's pages set (see `settings.rs`).
+    settings: settings::Settings,
+    /// Offers Golem made and the user answered, keyed by the timestamp of the
+    /// notification card that records each one. See `action_track.rs`: the card
+    /// is the visible half, this is the memory behind it (what was offered, the
+    /// answer, and the action to run again on a click).
+    action_tracks: std::collections::HashMap<u64, crate::action_track::ActionTrack>,
     /// What the screen should look like — the eye-protection temperature
     /// today, colour filters later. Persisted and re-asserted, so the panel can
     /// mark its active preset and the look survives a dropped CTM or a reboot.
     /// See `screen.rs`; nothing outside it may set a screen effect.
     screen: crate::screen::ScreenState,
-    /// The media transport box (a media player is active and its box pill was
-    /// clicked): a full panel — track, prev/play-pause/next, seek + volume bars
-    /// — grown into the topbar's reserved dropdown region. See `mediabox.rs`.
-    media_box_open: bool,
-    /// An in-progress drag on the media box's seek or volume bar: the bar and
-    /// the current fraction, shown live and committed (playerctl/wpctl) on
-    /// release. `None` when not dragging.
-    media_drag: Option<crate::mediabox::MediaDrag>,
+    /// How far the cava pill's children are revealed, 0…1. Eased on the shared
+    /// `MORPH_RATE` (§3) — the cluster declares no tempo of its own.
+    cava_reveal: f32,
+    /// Wall clock of the last reveal advance, for a dt-based ease.
+    cava_tick: Option<std::time::Instant>,
+    /// Seconds into the marquee cycle for an over-long track name. Reset to
+    /// zero whenever the title changes, so a new song is read from its start.
+    cava_scroll: f32,
+    /// The title being retired while a new one arrives, and its width — kept so
+    /// a track change can be a crossfade rather than a substitution.
+    cava_prev_text: String,
+    cava_prev_w: f32,
+    /// What we assume playback is doing until the bus catches up.
+    ///
+    /// MPRIS is polled at 1 Hz, so pressing play meant staring at a pause glyph
+    /// for up to a second while the pill waited to be told what the user had
+    /// just done (Max, 2026-09-12: "it should not take time"). The click knows
+    /// the answer; the poll only confirms it.
+    ///
+    /// Carries a deadline so a command that silently failed cannot leave the
+    /// bar asserting something untrue forever — the whole point of the honesty
+    /// clause is that the surface says only true things, and an optimistic
+    /// state is a loan against that, not an exemption from it.
+    cava_assume: Option<(bool, std::time::Instant)>,
+    /// Accumulated scroll over the cava cluster, per axis: vertical drives the
+    /// volume, horizontal skips tracks. Reset when the direction reverses.
+    cava_scroll_accum_v: f32,
+    cava_scroll_accum_h: f32,
+    /// The level a scroll just asked for, shown until the sink is polled.
+    cava_vol_assume: Option<(u32, std::time::Instant)>,
+    /// The playing box is open: every source, one row each.
+    play_box_open: bool,
+    /// Its opening, 0…1.
+    play_box_e: f32,
+    /// Decoded cover art, in the order it arrived. These are the LAST block of
+    /// the OPTIONS icon array — notif avatars, then clipboard, then these — so
+    /// a row's layer is `notif.len() + clip.len() + slot`.
+    play_art_chains: Vec<Vec<u8>>,
+    /// `art_url` → its slot in `play_art_chains`.
+    play_art_slot: std::collections::HashMap<String, u32>,
+    /// Art already asked for, so a url is decoded once rather than once per
+    /// frame while the loader is still working.
+    play_art_pending: std::collections::HashSet<String>,
+    /// The off-loop cover decoder.
+    play_art: Option<play_art::PlayArt>,
+    /// The last player seen actually playing. Keeps the cluster's subject from
+    /// wandering the moment you pause — see `cava_player`'s scoring.
+    cava_last_player: Option<String>,
+    /// Players that publish MPRIS and then ignore it, learned by watching a
+    /// command fail. Firefox is the known member: it advertises
+    /// `CanControl: true`, accepts `PlayPause` without error, and keeps
+    /// playing. Once a player is in here the cluster stops asking politely and
+    /// sends a keystroke to its window instead.
+    ///
+    /// Learned rather than hard-coded, because "which players lie" is a fact
+    /// about the machine in front of us and changes with every browser update —
+    /// a list in the source would be wrong somewhere the day it was written.
+    cava_mpris_dead: std::collections::HashSet<String>,
+    /// How far the output pill has opened from its circle, 0…1.
+    ///
+    /// At rest it is a glyph in a circle — which device the sound goes to is
+    /// worth a symbol, not a sentence, until you ask. Hovering it metamorphoses
+    /// the circle into a pill carrying the device's name, the same move the
+    /// clock makes becoming the date.
+    cava_out_t: f32,
+    /// The swap's progress, 1 → 0. The old words fade out over the first half,
+    /// the new ones in over the second, while the pill's width eases across the
+    /// whole thing — so a song change is one movement instead of a snap.
+    cava_swap: f32,
+    /// A reveal frame is already queued — the 8 ms chain, same shape as the
+    /// clipboard's. The reveal used to ride the spectrum stream, which sounded
+    /// elegant and was wrong: `pw-record` delivers on its latency (100 ms by
+    /// default), so the ease advanced in 100 ms steps and closed 73% of the
+    /// remaining distance each one. That is a jump wearing an animation's name.
+    cava_frame_pending: bool,
+    /// The exact strings the measured widths belong to, so a track change can
+    /// be noticed and re-measured. Without this the pill keeps the width of the
+    /// PREVIOUS song and the text runs out of it.
+    cava_now_measured: String,
+    cava_out_measured: String,
+    cava_vol_measured: String,
+    cava_time_measured: String,
+    /// Measured widths of the two text children (see `measure_options_text`).
+    cava_now_w: f32,
+    cava_out_w: f32,
+    cava_vol_w: f32,
+    cava_time_w: f32,
+    /// The door to the Mind for the arrangement axis (`ShellState`): normal
+    /// tile / stage / overview, an empty workspace, how many screens. Pushed
+    /// whenever one of those changes — see [`App::sync_shell_state`].
+    shell_tx: tokio::sync::watch::Sender<options_engine::ShellState>,
+    /// The last arrangement actually sent, so a no-op change costs nothing.
+    shell_sent: options_engine::ShellState,
     /// The compositor overview (waveview) is open: every waverunner surface
     /// stays concealed and reveals are ignored until it closes.
     overview_active: bool,
@@ -1551,6 +1783,12 @@ pub struct App {
     /// Dock display order: maps slot index → entry index. Rebuilt
     /// whenever entries are loaded or pins change.
     dock_order: Vec<usize>,
+    /// How many trailing `dock_order` entries are minimized-window tiles
+    /// (`min:<addr>`). Set alongside `dock_order` by `recompute_dock_order`;
+    /// handed to `content::layout`, which widens the dock to fit this zone
+    /// instead of clamping it off. Zero while the launcher is open (the
+    /// tiles hide then — `minimized_entries`).
+    dock_min_count: usize,
     /// Running apps (macOS dock model): entry index → its live window
     /// addresses, most-recently-used first. Presence ⇒ the app is
     /// running (shows the indicator dot; a click activates instead of
@@ -1560,6 +1798,11 @@ pub struct App {
     /// divider position), or `None` when no such apps are shown. Slots
     /// `[divider..]` are ephemeral running apps that vanish on quit.
     dock_divider: Option<usize>,
+    /// Minimized windows shown as dock tiles (macOS minimize-to-dock, fed
+    /// by the waveview plugin over `min-add`/`min-del`). Kept in minimize
+    /// order, oldest first — the dock appends the newest at the end of the
+    /// ephemeral zone. See `minimized.rs`.
+    minimized: Vec<minimized::MinimizedWin>,
     /// When the last rescan was requested, for the reveal cooldown.
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
@@ -1673,6 +1916,20 @@ enum BoxTarget {
     Dir(String),
 }
 
+/// Which surface an activation came from — the two answer "it's already
+/// running" differently, because they are different tools.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchFrom {
+    /// The dock: a *switcher*. Clicking a running app goes to its window
+    /// (macOS's dock model); a fresh instance is the right/middle-click.
+    Dock,
+    /// The box — the grid, the search results, a folder open inside the
+    /// card: a *launcher*. It always opens a new one. Searching for an app
+    /// and pressing Enter must never teleport you to a window you already
+    /// had; that's what the dock is for.
+    Box,
+}
+
 /// Accumulated scroll (in wl_pointer axis units; one wheel notch ≈ 15)
 /// needed to trigger the dock-expand / popup-collapse gesture.
 const SCROLL_THRESHOLD: f64 = 10.0;
@@ -1784,7 +2041,6 @@ impl App {
                 self.close_clip_box();
             }
             self.force_collapse_notif();
-            self.media_box_open = false;
         }
         // The scale moved: pill text metrics and the notif rows were measured
         // at the old scale — re-measure and redraw at the new one. (All are
@@ -1924,6 +2180,22 @@ impl App {
                 self.open_clip_detail(0);
                 return;
             }
+            Command::DebugClipSearch(query) => {
+                self.open_clip_search_with(&query);
+                return;
+            }
+            Command::DebugEmoji(query) => {
+                // A trailing "!" also TYPES the first match, so the whole path
+                // (serve → hand the keyboard back → paste → re-grab) can be
+                // exercised without a pointer. Verified live this way.
+                if let Some(q) = query.strip_suffix('!') {
+                    self.open_emoji_with(q);
+                    self.type_emoji_at(0);
+                    return;
+                }
+                self.open_emoji_with(&query);
+                return;
+            }
             Command::DebugNotif => {
                 self.open_notif_box();
                 return;
@@ -1969,7 +2241,20 @@ impl App {
             // STAGE mode (Super+Enter). Owns only the compositor state it
             // changes; the launcher's rest-state machine is untouched.
             Command::StageToggle => {
+                // Entering **from the map** stages the window the map is
+                // pointing at. The stage opens on whatever is focused, so the
+                // pointer's window is focused first and the ordinary path does
+                // the rest — one move from "I can see it over there" to "it is
+                // the only thing on screen", with no stop on the desktop in
+                // between. Nothing under the pointer (empty space, no map at
+                // all) leaves the focused window as the entry task.
+                if !self.stage.is_on() && self.overview_active {
+                    if let Some(addr) = self.overview_hover_addr.clone() {
+                        hypr::focus_window_no_warp(&addr);
+                    }
+                }
                 self.stage.toggle();
+                self.sync_shell_state();
                 if self.stage.is_on() {
                     // Only the window, the deck and the OPTIONS bar. Tuck the
                     // dock away (its edge-reveal strip lives exactly where the
@@ -1989,7 +2274,35 @@ impl App {
                     self.deck_audio_map.clear();
                 }
                 self.rebuild_deck();
+                // The opening is left animated and the silence follows it (see
+                // `Stage::silence`), so entering reads as the task being carried
+                // into the stage rather than cut to it. Armed here because the
+                // stage has no timer of its own; firing late, or after the mode
+                // has already closed, is a no-op by construction.
+                if self.stage.is_on() {
+                    let timer = calloop::timer::Timer::from_duration(stage::ANIM_SETTLE);
+                    let _ = self
+                        .loop_handle
+                        .insert_source(timer, |_, _, app: &mut App| {
+                            app.stage.silence();
+                            calloop::timer::TimeoutAction::Drop
+                        });
+                }
                 self.sync_input_region();
+                // Leaving gives the dock back. Entering tucked it away, and
+                // nothing else would return it: the desktop comes out of the
+                // mode exactly as it went in, so the intellihide watcher sees no
+                // change to react to and the dock would sit hidden until an edge
+                // touch. Asked the same way the overview's close asks it —
+                // re-read the zone, and show only if nothing is covering it, so
+                // a window that was dodging the dock before the stage is still
+                // dodging it after.
+                if !self.stage.is_on() {
+                    self.on_layout_changed();
+                    if self.zone_free && self.ui.target() == Target::Hidden {
+                        self.handle_command(Command::Show);
+                    }
+                }
                 // And so does the bar's (and dock's) colour-match: suspended
                 // while the mode owns the screen, back the moment it lets go —
                 // decided here rather than left to whatever layout event
@@ -2004,10 +2317,91 @@ impl App {
                 }
                 return;
             }
+            // One task, or one whole desk — the same switch the bar's pill
+            // makes. Off the stage it only chooses what the next one opens as.
+            Command::StageMode => {
+                self.toggle_stage_mode();
+                return;
+            }
+            // The trackpad walking the deck's border. Both carry the gesture's
+            // total travel; an unreadable one is not fatal — an update is simply
+            // ignored, and an end commits the border where it stands.
+            Command::StageSwipe(dx) => {
+                if let Ok(dx) = dx.trim().parse::<f32>() {
+                    self.stage_swipe(dx);
+                }
+                return;
+            }
+            Command::StageSwipeEnd(dx) => {
+                self.stage_swipe_end(dx.trim().parse::<f32>().ok());
+                return;
+            }
+            // The four window modes, by name — the titlebar's "back to the
+            // layout" button comes through here so it uses Golem's mode
+            // machinery (and so the solitary-pseudo rule notices) rather than
+            // the compositor's own float toggle.
+            // Golem as a whole: tiling or floating (`settings.rs`). The gear's
+            // page-1 switch sends the same thing. An explicit "on"/"off" that
+            // matches the current mode is a REPAIR — rule re-asserted, windows
+            // swept — so `waverunner-ctl floating on` is also the hand lever
+            // for a desk where the compositor lost the rule.
+            Command::FloatMode(mode) => {
+                match mode.trim() {
+                    "on" => self.set_floating_mode(true),
+                    "off" => self.set_floating_mode(false),
+                    "" | "toggle" => self.toggle_floating_mode(),
+                    other => warn!("float-mode: unknown mode {other:?}"),
+                }
+                let now = if self.floating_mode() {
+                    "floating"
+                } else {
+                    "tiling"
+                };
+                info!("float-mode: {now}");
+                return;
+            }
+            Command::WindowMode(mode) => {
+                let target = match mode.trim() {
+                    "tiled" => Some(hypr::WindowMode::Tiled),
+                    "float" | "floating" => Some(hypr::WindowMode::Floating),
+                    "pseudo" => Some(hypr::WindowMode::Pseudo),
+                    "fullscreen" => Some(hypr::WindowMode::Fullscreen),
+                    other => {
+                        warn!("window-mode: unknown mode {other:?}");
+                        None
+                    }
+                };
+                if let Some(target) = target {
+                    self.set_window_mode(target);
+                }
+                return;
+            }
+            // The waveview plugin minimized a window into the dock, or a
+            // minimized one came back / died. The plugin owns the windows;
+            // this side only keeps the tiles — see `minimized.rs`.
+            Command::MinAdd(payload) => {
+                self.on_min_add(&payload);
+                return;
+            }
+            Command::MinDel(addr) => {
+                self.on_min_del(&addr);
+                return;
+            }
+            // Super+N while staged: the numbered tile takes the stage.
+            Command::StagePick(n) => {
+                if let Ok(n) = n.trim().parse::<i64>() {
+                    self.stage_pick(n);
+                }
+                return;
+            }
             // Overview: the pill follows the pointer across the grid, and
             // shows the live size while a thumbnail is resized.
-            Command::OverviewHover(title) => {
-                self.set_overview_hover((!title.is_empty()).then_some(title));
+            Command::OverviewHover(payload) => {
+                let (addr, title) = options::split_overview_hover(&payload);
+                // Kept for the stage: entering from the map stages what the map
+                // is pointing at, and by then the map is closing.
+                self.overview_hover_addr = addr;
+                self.set_overview_hover(title);
                 return;
             }
             Command::OverviewResize(size) => {
@@ -2080,17 +2474,6 @@ impl App {
                 self.trigger_option_by_id(&id);
                 return;
             }
-            Command::DebugMediaBox => {
-                if self.media_now().is_some() {
-                    self.media_box_open = true;
-                    self.sync_options_input();
-                    self.draw_options();
-                    info!("debug-media-box: opened the media transport box");
-                } else {
-                    warn!("debug-media-box: no active media player");
-                }
-                return;
-            }
             Command::DebugHoverOption => {
                 if self.surfaced_options().is_empty() {
                     warn!("debug-hover-option: no OPTION pills surfaced");
@@ -2105,21 +2488,40 @@ impl App {
                 // When the prompt is already up, the verb instead toggles the
                 // settings box (so the gear's expand can be screenshotted
                 // without a cursor warp); otherwise it forces the prompt.
-                if self.sunset_prompt_shown {
-                    self.toggle_sunset_box();
-                    info!("debug-sunset: settings box {}", self.sunset_box_open);
+                if self.sunset_prompt_shown() {
+                    self.toggle_module_box();
+                    info!("debug-sunset: settings box {}", self.module_box_open);
                     return;
                 }
-                self.sunset_debug = !self.sunset_debug;
-                // A fresh force starts a fresh offer: forget an old resolution.
-                if self.sunset_debug {
-                    self.sunset_acted = false;
+                self.force_module(options::Module::Sunset);
+                return;
+            }
+            Command::DebugStats(page) => {
+                match page {
+                    Some(p) => {
+                        self.stats.reveal = true;
+                        self.stats_open_page(p);
+                        info!("debug-stats: page {p}");
+                    }
+                    None => info!("debug-stats: {}", self.toggle_stats_debug()),
                 }
-                info!(
-                    "debug-sunset: prompt force {}",
-                    if self.sunset_debug { "ON" } else { "OFF" }
-                );
-                self.sync_sunset_prompt();
+                return;
+            }
+            Command::DebugModuleBox => {
+                // The gear's own act, without a pointer. A module has to be on
+                // the pill for there to be a box at all — say so rather than
+                // opening a panel belonging to nothing.
+                match self.module_shown {
+                    Some(m) => {
+                        self.toggle_module_box();
+                        info!(
+                            "debug-module-box: {} box {}",
+                            m.panel_title(),
+                            if self.module_box_open { "open" } else { "shut" }
+                        );
+                    }
+                    None => info!("debug-module-box: no module on the pill"),
+                }
                 return;
             }
             _ => {}
@@ -2145,6 +2547,14 @@ impl App {
                 }
                 _ => {}
             }
+            // Minimized dock tiles hide while the launcher is open and return
+            // when it closes (`minimized_entries` gate) — rebuild the dock
+            // order for the new state as the launcher crosses that edge.
+            // (refilter schedules its own frame; this is the only trigger,
+            // since the open/close command changes no entry content.)
+            if (prev == Target::Open) != (next == Target::Open) && !self.minimized.is_empty() {
+                self.refilter();
+            }
             self.schedule_frame();
         }
     }
@@ -2159,12 +2569,26 @@ impl App {
         // regardless of intellihide (the macOS dot + activate-on-click
         // need it even when the dock never dodges).
         self.refresh_running();
+        // Window open/close and workspace switches are exactly when a
+        // workspace becomes empty or stops being empty — the arrangement
+        // axis learns here, before the intellihide early-return below.
+        self.sync_shell_state();
         // Update the window pill + fullscreen state first, then the colour
         // match (which depends on the fullscreen state).
         self.refresh_options_content();
         self.reeval_options_bar();
         self.reeval_dock_bar();
         if !self.config.input.intellihide {
+            return;
+        }
+        // A window that has just opened alone on a space is about to be
+        // pseudotiled (`sync_solitary_pseudo`, ~60ms away), which lifts it clear
+        // of the dock's zone. Judging the layout now would read the tile it
+        // arrived as, dodge, and then un-dodge a breath later — the dock
+        // flinching at a window that was never going to cover it (Max,
+        // 2026-09-13). The sweep calls back here when it has finished, and the
+        // answer it produces is about the desktop that will actually be there.
+        if self.pseudo_sweep_pending {
             return;
         }
         // On IPC failure, keep the last known state — a transient socket
@@ -2299,21 +2723,303 @@ impl App {
         self.overview_active || self.stage.is_on()
     }
 
+    /// Push the shell's arrangement to the Mind — the axis Max named alongside
+    /// the seventeen contexts: *normal tile, stage, overview, empty workspace,
+    /// second monitor*. Cheap and idempotent, so it can be called from every
+    /// place that might have changed one of them; an unchanged state is
+    /// dropped rather than waking the decision loop.
+    /// Hover moved on or off the cava cluster: aim the reveal and, if it has
+    /// anywhere to travel, start the frame chain.
+    pub(crate) fn update_cava_reveal(&mut self) {
+        let want = self.cava_reveal_target();
+        // Start the chain when the reveal has somewhere to travel — OR when it
+        // is already open over a title too long for its pill. The second case
+        // is what the marquee needs: the chain stops as soon as the reveal
+        // settles, so a scroll that only becomes possible LATER (the width is
+        // measured lazily, after the text changes) had no one left to run it.
+        // That is why scrolling used to need a leave-and-come-back.
+        if (self.cava_reveal - want).abs() > f32::EPSILON
+            || (self.cava_out_t - self.cava_out_target()).abs() > f32::EPSILON
+            || (want > 0.0 && self.cava_now_overflows())
+        {
+            self.schedule_cava_frame();
+        }
+    }
+
+    /// Queue the next reveal frame — 8 ms, the same cadence every other morph
+    /// on this bar runs at, so the slide reads as the same material (§3).
+    fn schedule_cava_frame(&mut self) {
+        if self.cava_frame_pending {
+            return;
+        }
+        self.cava_frame_pending = true;
+        if self.cava_tick.is_none() {
+            self.cava_tick = Some(std::time::Instant::now());
+        }
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(8));
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.cava_frame_pending = false;
+                app.tick_cava();
+                calloop::timer::TimeoutAction::Drop
+            });
+    }
+
+    /// Advance the reveal one frame.
+    fn tick_cava(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = self
+            .cava_tick
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f32())
+            .min(0.05);
+        self.cava_tick = Some(now);
+
+        let want = self.cava_reveal_target();
+        let (reveal, moving) = crate::animation::ease_toward(
+            self.cava_reveal,
+            want,
+            dt,
+            crate::animation::MORPH_RATE,
+            crate::animation::settle_t(self.options_pill_h()),
+        );
+        let moved = reveal != self.cava_reveal;
+        self.cava_reveal = reveal;
+        if moved {
+            // The children's rects moved, so the pointer may now be over a
+            // different one and the input region has to follow them out.
+            self.sync_options_input();
+            self.draw_options();
+        }
+
+        // A title too long for its pill walks past, so the whole thing can be
+        // read. Only while the cluster is actually open: scrolling text nobody
+        // is looking at would keep this chain — and the frame throttle — awake
+        // for no one's benefit.
+
+        // The playing box growing down out of the bar, or folding back up.
+        let (box_e, boxing) = crate::animation::ease_toward(
+            self.play_box_e,
+            f32::from(u8::from(self.play_box_open)),
+            dt,
+            crate::animation::MORPH_RATE,
+            crate::animation::SETTLE_ALPHA,
+        );
+        if box_e != self.play_box_e {
+            self.play_box_e = box_e;
+            self.sync_options_input();
+            self.draw_options();
+        }
+
+        // The output circle opening into its name, or closing back.
+        let out_want = self.cava_out_target();
+        let (out_t, expanding) = crate::animation::ease_toward(
+            self.cava_out_t,
+            out_want,
+            dt,
+            crate::animation::MORPH_RATE,
+            crate::animation::settle_t(self.options_pill_h()),
+        );
+        if out_t != self.cava_out_t {
+            self.cava_out_t = out_t;
+            // It changes width, so the pointer may now be over something else
+            // and the input region has to follow it.
+            self.sync_options_input();
+            self.draw_options();
+        }
+
+        // A title change plays out over CAVA_SWAP_SECS: words out, words in,
+        // width easing across the whole of it.
+        let swapping = self.cava_swap > 0.0;
+        if swapping {
+            self.cava_swap = (self.cava_swap - dt / crate::options::CAVA_SWAP_SECS).max(0.0);
+            if self.cava_swap == 0.0 {
+                self.cava_prev_text.clear();
+            }
+            self.sync_options_input();
+            self.draw_options();
+        }
+
+        let scrolling = self.cava_reveal > 0.99 && self.cava_now_overflows();
+        if scrolling {
+            self.cava_scroll += dt;
+            self.draw_options();
+        } else if self.cava_scroll != 0.0 {
+            // Back to the first word, ready for the next look.
+            self.cava_scroll = 0.0;
+            self.draw_options();
+        }
+
+        if moving || scrolling || swapping || expanding || boxing {
+            self.schedule_cava_frame();
+        } else {
+            self.cava_tick = None;
+        }
+    }
+
+    /// Nudge the default output's volume.
+    ///
+    /// `wpctl` on the sink rather than MPRIS on the player: the cluster's
+    /// volume is the one the pill is SHOWING — the device's level, the number
+    /// in the circle — and a player's own volume is a different quantity that
+    /// happens to share a name. `-l 1.0` caps the boost, so a scroll cannot
+    /// push the sink past 100% and into clipping.
+    fn cava_volume_step(&mut self, up: bool) {
+        const STEP: u32 = 5;
+        let delta = if up { "5%+" } else { "5%-" };
+        if let Err(e) = std::process::Command::new("wpctl")
+            .args(["set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", delta])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            warn!("cava: volume {delta} failed: {e}");
+            return;
+        }
+        // Show the new level NOW. The collector polls every 2 s, and a readout
+        // that lags two seconds behind the hand turning the knob is not a
+        // readout. The value is computed rather than guessed — the step and
+        // the 0…100 clamp are both ours — and it is held only until the sink
+        // is next polled, which then wins.
+        let from = self.cava_vol_pct().unwrap_or(0);
+        let next = if up {
+            (from + STEP).min(100)
+        } else {
+            from.saturating_sub(STEP)
+        };
+        self.cava_vol_assume = Some((
+            next,
+            std::time::Instant::now() + std::time::Duration::from_millis(2500),
+        ));
+        // The number changed width (9% → 10%), so the circle has to be
+        // re-measured before it is drawn or the text will not fit it.
+        self.measure_options_text();
+        self.draw_options();
+    }
+
+    /// Toggle playback, by whichever means this player actually answers to.
+    ///
+    /// MPRIS first, because it is the real interface and it reaches players
+    /// with no window at all. A keystroke to the player's own window is the
+    /// fallback for the ones that lie — and `space` rather than a media key,
+    /// because Firefox ignores `XF86AudioPlay` too while honouring an ordinary
+    /// key (verified on the dev box, 2026-09-12).
+    fn cava_play_pause(&mut self) {
+        let known_deaf = self
+            .cava_target_player()
+            .is_some_and(|p| self.cava_mpris_dead.contains(&p));
+        if known_deaf {
+            self.cava_send_play_key();
+        } else {
+            self.cava_transport("play-pause");
+        }
+    }
+
+    /// Press play/pause the blunt way: a `space` into the player's window.
+    fn cava_send_play_key(&mut self) {
+        let Some(addr) = self.cava_player_window() else {
+            warn!("cava: no window to send a key to");
+            return;
+        };
+        crate::hypr::send_key_to(&addr, "", "space");
+        info!("cava: play-pause via keystroke → {addr}");
+    }
+
+    /// Run a transport verb against the cava cluster's target player.
+    ///
+    /// `playerctl` rather than speaking MPRIS from the daemon: the daemon has
+    /// no D-Bus media client today, the tool is already installed, and one
+    /// fire-and-forget spawn is a far smaller surface than a second MPRIS
+    /// implementation living beside the engine's.
+    fn cava_transport(&mut self, verb: &str) {
+        let Some(player) = self.cava_target_player() else {
+            // Sound with no transport behind it — a raw PipeWire stream (a
+            // game, an `ffplay`). Nothing to press, and saying so beats
+            // pressing something else's buttons.
+            warn!("cava: nothing with a transport is playing ({verb} ignored)");
+            return;
+        };
+        match std::process::Command::new("playerctl")
+            .args(["-p", &player, verb])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => info!("cava: {verb} → {player}"),
+            Err(e) => warn!("cava: {verb} failed: {e}"),
+        }
+    }
+
+    fn sync_shell_state(&mut self) {
+        use options_engine::{ShellMode, ShellState};
+        let mode = if self.overview_active {
+            // The overview wins over STAGE: it owns the whole screen, so it is
+            // what the user is looking at even if a stage is set up beneath it.
+            ShellMode::Overview
+        } else if self.stage.is_on() {
+            ShellMode::Stage
+        } else {
+            ShellMode::NormalTile
+        };
+        let next = ShellState {
+            mode,
+            // COUNTED, not inferred from "nothing is focused" (Max, 2026-09-12:
+            // an empty workspace is "a NEW one"). An unfocused floating window
+            // leaves the workspace occupied while focus is empty, and those two
+            // want different OPTIONS. If the compositor cannot be reached we
+            // keep the last answer rather than claiming the workspace emptied.
+            workspace_empty: hypr::active_workspace_is_empty()
+                .unwrap_or(self.shell_sent.workspace_empty),
+            monitors: self.output_state.outputs().count().min(255) as u8,
+        };
+        if next == self.shell_sent {
+            return;
+        }
+        self.shell_sent = next;
+        // Only fails once the Brain thread is gone, which is not recoverable
+        // here and is already logged on that side.
+        let _ = self.shell_tx.send(next);
+    }
+
     fn set_overview(&mut self, active: bool) {
         if self.overview_active == active {
             return;
         }
         info!("overview: {}", if active { "open" } else { "closed" });
         self.overview_active = active;
+        // The arrangement changed: the Mind decides against it, so it learns
+        // before the frame is drawn rather than after.
+        self.sync_shell_state();
         // The pointer-follow title and any thumbnail-resize readout belong
         // to the overview; drop them with it.
         if !active {
             self.overview_hover = None;
+            self.overview_hover_addr = None;
             self.options_resize_live = None;
             self.measure_options_text();
         }
         if active && self.ui.target() != Target::Hidden {
             self.handle_command(Command::Hide);
+        }
+        // The map can be opened from inside the stage. The deck steps aside
+        // while it is up — it is the stage's furniture, and the overview is now
+        // the thing on screen — and rises again, pictures intact, when it shuts.
+        self.sync_deck_overview();
+        // Landing on a workspace from the map, with the stage still up, means
+        // "put that on the stage": the overview is the picker, and whatever it
+        // leaves focused is the answer. Task mode stages that window, desk mode
+        // shows its desk, and landing back where you started is a no-op.
+        if !active && self.stage.is_on() {
+            if let Some(addr) = hypr::active_window() {
+                self.stage_switch_to(&addr);
+            }
+            // The map is also where the desktop gets REARRANGED — windows
+            // dragged between workspaces, resized, closed. The deck has to be
+            // re-derived (order and membership) and re-photographed (every
+            // picture may now be of a window that has moved or changed shape),
+            // because none of that reaches it any other way.
+            self.rebuild_deck();
+            self.refresh_deck_thumbs();
         }
         // The clipboard isn't present in the overview (see `options::
         // presence`), so an open drawer must collapse rather than linger
@@ -2373,27 +3079,119 @@ impl App {
             );
         }
         self.check_battery(&ctx);
-        // Did a player appear / disappear (the media pill's presence)?
-        let media_presence_changed =
-            self.brain.as_ref().map(|p| p.media.is_some()) != Some(ctx.media.is_some());
+        // Compared by reference, not by cloning both sides: this runs on every
+        // brain update, which is often.
+        let playing_changed = self.brain.as_ref().is_none_or(|c| c.playing != ctx.playing);
         self.brain = Some(ctx);
-        if window_changed {
-            self.refresh_options_content();
+        // The gear's readout is live while it is out: its numbers ARE this
+        // snapshot, so a new one is a new reading to draw. Nothing else on the
+        // bar watches `metrics`, so without this the CPU figure would freeze at
+        // whatever it was when the pointer arrived.
+        if self.stats_out() {
+            self.measure_stats();
+            self.draw_options();
         }
-        // The media pill appears/disappears with the player.
-        if media_presence_changed {
-            if self.media_box_open && self.media_now().is_none() {
-                // The player went away while its box was open — close it.
-                self.media_box_open = false;
-                self.sync_options_input();
+        if playing_changed {
+            // The bus has caught up with the click: hand the loan back the
+            // moment reality agrees, rather than waiting out the deadline.
+            // The bus has spoken. Whether it AGREES or not, the assumption is
+            // over: a player that took the command has confirmed it, and one
+            // that ignored it has refused it. Holding an optimistic state
+            // through a disagreement is the bar asserting something it has just
+            // been told is false.
+            //
+            // A disagreement is also *information*: this player accepted a
+            // command and did nothing. Remember that, and reach for the
+            // keystroke from here on — then do the thing that was asked, so
+            // the failure costs one late press rather than a dead button.
+            if let Some((assumed, _)) = self.cava_assume.take() {
+                let real = self.cava_player().is_some_and(|p| p.is_playing());
+                if real != assumed {
+                    if let Some(name) = self.cava_target_player() {
+                        if self.cava_mpris_dead.insert(name.clone()) {
+                            warn!("cava: {name} ignores MPRIS — using keystrokes for it");
+                        }
+                    }
+                    self.cava_send_play_key();
+                }
+            }
+            // Same for the level: hand it back the moment the sink reports what
+            // the scroll asked for, rather than waiting out the deadline and
+            // letting the number flick back and forth in between.
+            if let Some((assumed, _)) = self.cava_vol_assume {
+                let real = self.brain.as_ref().map(|c| {
+                    c.default_output()
+                        .map(|o| o.volume_pct)
+                        .filter(|v| *v > 0)
+                        .unwrap_or(c.audio.default_sink_volume)
+                });
+                if real == Some(assumed) {
+                    self.cava_vol_assume = None;
+                }
+            }
+            // Play/pause may have flipped, which changes the pill's face — the
+            // frame chain is usually asleep, so it has to be woken.
+            self.schedule_cava_frame();
+            self.draw_options();
+        }
+        // Remember whatever is actually playing. Only ever overwritten by
+        // something else that is *also* playing, so pausing leaves the memory
+        // standing and the cluster keeps naming what you were listening to.
+        if let Some(p) = self.cava_player() {
+            if p.is_playing() {
+                if let Some(id) = App::playing_id(p) {
+                    self.cava_last_player = Some(id);
+                }
+            }
+        }
+        // The cluster's text is the only pill text on this bar that changes on
+        // somebody else's schedule — a new track, a different output. Compare
+        // against what was actually measured and re-measure when it moves, or
+        // the pill stays sized for the last song.
+        // **Which text changed matters.** The clock ticks every second, so
+        // lumping it in with the title meant the marquee restarted and the swap
+        // re-armed once a second — the scroll visibly jumped on the beat, and
+        // the slide and the scroll looked bonded together because they were
+        // both being kicked by the same 1 Hz event.
+        let title_changed = self.cava_now_text() != self.cava_now_measured;
+        let chrome_changed = self.cava_out_text() != self.cava_out_measured
+            || self.cava_vol_text() != self.cava_vol_measured
+            || self.cava_time_text() != self.cava_time_measured;
+        if title_changed || chrome_changed {
+            // Hold the outgoing title and its width so the change can be
+            // played rather than applied. Only when there WAS one — the first
+            // track of a session arrives out of nothing and has nothing to
+            // cross-fade from.
+            if title_changed {
+                let outgoing = std::mem::take(&mut self.cava_now_measured);
+                if !outgoing.is_empty() {
+                    self.cava_prev_text = outgoing;
+                    self.cava_prev_w = self.cava_now_w;
+                    self.cava_swap = 1.0;
+                }
+                // A new title is read from its first word, not from wherever
+                // the last one had scrolled to. A ticking clock is not a new
+                // title and must not move the words.
+                self.cava_scroll = 0.0;
+            }
+            self.measure_options_text();
+            // The width the marquee depends on only just became correct, so the
+            // chain has to be told — it may well have given up while the old
+            // width said "this fits". The same call starts the swap's frames.
+            self.update_cava_reveal();
+            if self.cava_swap > 0.0 {
+                self.schedule_cava_frame();
             }
             self.draw_options();
         }
-        // Keep the OPEN media box live (seek position, title, play/pause) — a
-        // media delta arrives ~once a second while playing.
-        if self.media_box_open {
-            self.draw_options();
+        if window_changed {
+            self.refresh_options_content();
         }
+        // Nothing on the bar tracks media any more: the transport box was
+        // removed with the uncurated work (2026-09-12), and the engine's media
+        // providers went with the rest. The `media` collector still runs and
+        // `ContextState.media` is still populated — a curated media OPTION
+        // picks it up from there.
     }
 
     /// The Mind published a fresh option set. Store it and, when the visible
@@ -2409,11 +3207,11 @@ impl App {
             .collect();
         let changed = sig != self.options_sig;
         self.options = options;
-        // The sunset offer has its own surface (the current-task pill's
-        // prompt), so it is not in the surfaced signature above — reconcile it
-        // on every republish: raise on offer, and reset a spent resolution
-        // when the Mind withdraws (hyprsunset ran / the sun came back).
-        self.sync_sunset_prompt();
+        // A module offer has its own surface (the current-task pill), so it is
+        // not in the surfaced signature above — reconcile it on every republish:
+        // raise on offer, and reset a spent resolution when the Mind withdraws
+        // (hyprsunset ran / the sun came back).
+        self.sync_module();
         if changed {
             if !self.options_sig.is_empty() || !sig.is_empty() {
                 info!(
@@ -2571,6 +3369,7 @@ impl App {
                 self.upload_pkg_icons();
                 self.reupload_pending_icons();
                 self.reupload_thumb_icons();
+                self.reupload_min_thumbs();
             }
             None => self.pending_icons = Some(icons),
         }
@@ -2856,6 +3655,10 @@ impl App {
         // entries; an open directory stack lists its contents the same way.
         self.pinned_path_entries();
         self.rebuild_dir_stack();
+        // So do minimized windows (id `min:<addr>`, one per window) —
+        // recreated each refilter like the path pins, picked up by
+        // `recompute_dock_order` below. See `minimized.rs`.
+        self.minimized_entries();
         self.search.visible = visible;
         // Search results are a flat ranked list: dense identity slots. (A
         // resting grid keeps the paged slots built just above.)
@@ -3068,6 +3871,30 @@ impl App {
         }
     }
 
+    /// Resolve each minimized window's corner badge — the icon texture layer
+    /// of the app whose class matches the window, matched exactly as
+    /// [`Self::refresh_running`] matches live windows to apps. `None` when the
+    /// class (e.g. `?`) resolved to no indexed app, so the tile shows no badge
+    /// (never a placeholder). Called from `recompute_dock_order`, which fires
+    /// on every edge that could move the app set, its icon layers, or the
+    /// minimized list.
+    fn refresh_min_badges(&mut self) {
+        if self.minimized.is_empty() {
+            return;
+        }
+        // class (lowercased) → the app's icon texture layer, resolved once.
+        let mut by_class: HashMap<String, u32> = HashMap::new();
+        for (idx, (entry, &kind)) in self.entries.iter().zip(&self.kinds).enumerate() {
+            let layer = self.icon_layers.get(idx).copied().unwrap_or(idx as u32);
+            for key in Self::app_match_keys(entry, kind) {
+                by_class.entry(key).or_insert(layer);
+            }
+        }
+        for w in &mut self.minimized {
+            w.badge_layer = by_class.get(&w.class.to_lowercase()).copied();
+        }
+    }
+
     /// A just-installed dock notify becomes "seen" the first time its app is
     /// running, and is dropped the first time a seen one has fully closed —
     /// unpinning it from the dock so the app returns to its grid slot.
@@ -3244,9 +4071,32 @@ impl App {
                 zone.push(idx);
             }
         }
+        // Minimized windows join the same ephemeral zone (macOS parks them
+        // by the trash), after the running apps so that zone keeps its
+        // stable alphabetical order. Within themselves: minimize order,
+        // newest LAST, so a fresh minimize appends at the end instead of
+        // reshuffling the row under the pointer. They are the tail of
+        // `dock_order`, which is what lets `layout()` widen the dock to fit
+        // them rather than clamp them off — `dock_min_count` records how
+        // many landed (none while the launcher hides them, below).
+        let mut min_count = 0usize;
+        for w in &self.minimized {
+            let id = minimized::entry_id(&w.addr);
+            if let Some(idx) = self.entries.iter().position(|e| e.id == id) {
+                if !zone.contains(&idx) {
+                    zone.push(idx);
+                    min_count += 1;
+                }
+            }
+        }
+        self.dock_min_count = min_count;
         self.dock_divider = (!zone.is_empty()).then_some(pinned_count);
         self.dock_order.extend(zone);
-        // No truncation here — layout() clamps to the available width.
+        // No truncation here — layout() honors the minimized tail (widening
+        // the dock) and clamps only normal icons / the surface-width cap.
+        // The tiles' corner badges depend on the app set + icon layers, both
+        // of which this pass may have just moved — re-resolve them.
+        self.refresh_min_badges();
     }
 
     /// Whether `pos` is outside the popup card entirely — the drop zone
@@ -3505,6 +4355,20 @@ impl App {
         match hit {
             Hit::DockIcon(slot) => {
                 if let Some(&entry_idx) = self.dock_order.get(slot) {
+                    // A minimized window's tile: the click asks the PLUGIN to
+                    // put the window back, and nothing else — the tile leaves
+                    // only on the plugin's confirming `min-del`, never here
+                    // (single source of truth; a failed restore keeps the
+                    // window reachable). See `minimized.rs`.
+                    if let Some(addr) = self
+                        .entries
+                        .get(entry_idx)
+                        .and_then(|e| e.id.strip_prefix("min:"))
+                        .map(str::to_owned)
+                    {
+                        self.restore_minimized(&addr);
+                        return;
+                    }
                     // A pinned box opens its folder as a stack above the dock
                     // (the same magnified box, anchored to the icon); an app
                     // launches.
@@ -3544,7 +4408,7 @@ impl App {
                             return;
                         }
                     }
-                    self.activate(entry_idx);
+                    self.activate(entry_idx, LaunchFrom::Dock);
                 }
             }
             Hit::GridCell(s, i) => {
@@ -3563,7 +4427,7 @@ impl App {
                         }
                         return;
                     }
-                    self.activate(entry_idx);
+                    self.activate(entry_idx, LaunchFrom::Box);
                 }
             }
             Hit::SearchButton => {
@@ -3576,9 +4440,17 @@ impl App {
             }
             // Click a filled box slot to launch it; an empty slot is inert
             // (the box stays open — only a click outside it closes it).
+            // Which tool it counts as follows where the box is standing:
+            // grown into the open card it's part of the box, floating above
+            // the dock (a dock folder / pinned directory) it's the dock.
             Hit::OpenBoxCell(k) => {
+                let from = if self.ui.target() == Target::Open {
+                    LaunchFrom::Box
+                } else {
+                    LaunchFrom::Dock
+                };
                 if let Some(idx) = self.open_box_member_idx(k) {
-                    self.activate(idx);
+                    self.activate(idx, from);
                 }
             }
         }
@@ -3592,17 +4464,34 @@ impl App {
         // A dock stack (group or directory) closes with the launcher.
         self.dock_stack = None;
         self.dir_stack = None;
-        let command = if self.ui.target() == Target::Open {
-            Command::Collapse
-        } else {
-            Command::Hide
-        };
-        self.handle_command(command);
+        if self.ui.target() == Target::Open {
+            self.handle_command(Command::Collapse);
+            return;
+        }
+        // The dock's spot is free — park visible instead of hiding. The
+        // doc above always claimed this; nothing enforced it, so launching
+        // an app tucked the dock away whether or not the new window ever
+        // took its place (Max, 2026-09-13).
+        //
+        // It has to be answered HERE, at the moment of the hide, not only
+        // where that hide was armed: a launch arms one while the window is
+        // still the full-size tile it is only passing through, and Golem
+        // pseudotiles it clear a breath later (`sync_solitary_pseudo`).
+        //
+        // `zone_free` is only ever true with intellihide on, so the dock
+        // still hides outright when the feature is off; the stage and the
+        // overview own the whole screen, and hide it regardless.
+        if self.zone_free && !self.dock_suppressed() {
+            debug!("dismiss: zone free → dock parks visible");
+            return;
+        }
+        self.handle_command(Command::Hide);
     }
 
     /// Launch an entry by index; its icon plays a bounce (macOS launch
-    /// feedback), then the card gets out of the way.
-    fn activate(&mut self, index: usize) {
+    /// feedback), then the card gets out of the way. `from` decides what a
+    /// running app means — see [`LaunchFrom`].
+    fn activate(&mut self, index: usize, from: LaunchFrom) {
         let Some(entry) = self.entries.get(index) else {
             return;
         };
@@ -3644,11 +4533,13 @@ impl App {
         }
         let (exec, id) = (entry.exec.clone(), entry.id.clone());
         let needs_terminal = entry.needs_terminal;
-        // macOS dock model: a running app activates (focus its
-        // most-recently-used window) instead of launching a duplicate.
-        // Ctrl-click forces a fresh instance (macOS's Cmd+click / New
-        // Window), falling through to the launch path below.
-        let force_new = self.modifiers.ctrl || self.force_new_instance;
+        // macOS dock model, and only on the dock: a running app activates
+        // (focus its most-recently-used window) instead of launching a
+        // duplicate. Ctrl-click forces a fresh instance (macOS's Cmd+click
+        // / New Window), falling through to the launch path below — as do
+        // the right/middle-click arms, and *every* launch out of the box:
+        // you went looking for an app there, so you get one.
+        let force_new = self.modifiers.ctrl || self.force_new_instance || from == LaunchFrom::Box;
         if !force_new {
             if let Some(addr) = self.running.get(&index).and_then(|w| w.first()).cloned() {
                 info!("activating running app {id} -> window {addr}");
@@ -3937,6 +4828,12 @@ impl App {
         // its search field consumes every key before the launcher's shortcuts.
         if self.clip.dict_open {
             self.dict_key(keysym, utf8);
+            return;
+        }
+        // The open history box holds the keyboard too (type-to-search), so it
+        // takes every key next — Escape there gives it back.
+        if self.clip.expanded {
+            self.clip_key(keysym, utf8);
             return;
         }
         // Ctrl+Plus/Minus cycles icon size through 4 levels.
@@ -4395,9 +5292,18 @@ impl KeyboardHandler for App {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
+        // We hold the keyboard on TWO surfaces: the launcher, and the OPTIONS
+        // bar while the clipboard box is open (type-to-search). Only the
+        // launcher losing it means what's handled below — the OPTIONS surface
+        // releases its grab on every box close, which must not collapse an open
+        // launcher or drop the window it means to hand focus back to.
+        if surface != self.layer.wl_surface() {
+            debug!("keyboard focus left the OPTIONS surface");
+            return;
+        }
         debug!(
             "keyboard focus lost; target={:?}, restore={:?}",
             self.ui.target(),
@@ -4519,9 +5425,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 {
                     let layout = app.current_layout();
                     let now_inside = !app.outside_card(&layout, pos);
-                    if now_inside != app.pointer_inside_card
-                        && app.ui.target() == Target::Open
-                    {
+                    if now_inside != app.pointer_inside_card && app.ui.target() == Target::Open {
                         let rect = content::Rect::new(
                             layout.card_x,
                             layout.card_top,
@@ -4584,11 +5488,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     Hit::SearchButton | Hit::OpenBoxCell(_) => None,
                                 };
                                 // Busy cells (a profile mutation in
-                                // flight) never start a drag.
+                                // flight) never start a drag; neither do
+                                // minimized-window tiles — they are not
+                                // pins, and the plugin owns their lifetime.
                                 let undraggable = entry_idx.is_some_and(|i| {
-                                    app.entries
-                                        .get(i)
-                                        .is_some_and(|e| app.busy_ids.contains(&e.id))
+                                    app.entries.get(i).is_some_and(|e| {
+                                        app.busy_ids.contains(&e.id) || e.id.starts_with("min:")
+                                    })
                                 });
                                 if let (Some(entry_idx), false) = (entry_idx, undraggable) {
                                     let from_dock = matches!(hit, Hit::DockIcon(_));
@@ -4829,6 +5735,8 @@ impl OutputHandler for App {
         // its geometry re-derives here too (see refresh_scaled_geometry).
         self.sync_options_zone();
         self.refresh_scaled_geometry();
+        // A screen arrived: "second monitor" is one of the arrangement states.
+        self.sync_shell_state();
     }
 
     fn update_output(
@@ -4839,6 +5747,7 @@ impl OutputHandler for App {
     ) {
         self.sync_options_zone();
         self.refresh_scaled_geometry();
+        self.sync_shell_state();
     }
 
     fn output_destroyed(
@@ -4849,6 +5758,9 @@ impl OutputHandler for App {
     ) {
         self.sync_options_zone();
         self.refresh_scaled_geometry();
+        // A screen left — the state has to fall back as readily as it rose, or
+        // an OPTION that only makes sense with two screens outlives the second.
+        self.sync_shell_state();
     }
 }
 

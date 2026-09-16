@@ -365,11 +365,57 @@ pub(crate) const DOCK_MAG_GROW_RATE: f32 = 36.0;
 pub(crate) const DOCK_MAG_RELEASE_RATE: f32 = 18.0;
 /// Settle threshold for the smoothed scales (scale units).
 pub(crate) const DOCK_MAG_SNAP: f32 = 0.002;
+/// How much of the magnified row's spread the CARD takes. The magnified
+/// icons part to make room and the card widens out of that same motion —
+/// same curve, same moment, because both read the one smoothed
+/// `dock_mag` — but at a shorter reach, so the bar breathes with the row
+/// rather than tracking it pixel for pixel. `1.0` welds them edge to edge;
+/// `0.0` leaves the card perfectly still under a moving row.
+///
+/// Tuned by feel, live: 1.0 (welded, ~13.5px a side) → 0.5 → 0.25 → 0.15
+/// → back to **0.25** (~3.4px a side at the default magnification), which
+/// is where it landed: 0.15 was too little to read as the bar giving with
+/// the row. Whatever the value, the card's motion stays the row's own —
+/// only its amplitude changes.
+pub(crate) const DOCK_SPREAD_FOLLOW: f32 = 0.25;
 /// Running-indicator dot radius (px) and its gap below the icon baseline.
 const DOCK_DOT_R: f32 = 2.0;
 const DOCK_DOT_GAP: f32 = 3.0;
 /// Width (px) of the divider between the pinned and running-unpinned zones.
 const DOCK_DIVIDER_W: f32 = 1.5;
+/// Extra air before the minimized-window tiles, setting them off from the
+/// pinned/trash icons as their own group (Max, 2026-09-16). Base px, scaled
+/// by `icon_scale` at use.
+// Sized so the divider sits MIN_TILE_PAD past the trash and the first
+// thumbnail sits MIN_TILE_PAD past the divider — i.e. the divider↔thumbnail
+// gap equals the thumbnail↔thumbnail gap (Max, 2026-09-16: "make the space
+// between the thumbnail and the divider the same as between the thumbnails").
+// The thumbnail zone starts DOCK_MIN_GAP past the pinned zone; a tile's
+// picture sits MIN_TILE_PAD/2 into its slot, so 1.5×MIN_TILE_PAD here leaves
+// exactly MIN_TILE_PAD of air after the divider (which is drawn MIN_TILE_PAD
+// past the pinned edge — see scene()).
+const DOCK_MIN_GAP: f32 = MIN_TILE_PAD * 1.5;
+/// A minimized tile carries the window's aspect (wide window → wide tile),
+/// clamped to this band so a pathological window can't grow a monstrous tile
+/// or a hairline sliver. Aspect 1.0 lands exactly on the square dock slot.
+const MIN_TILE_ASPECT: f32 = 0.4;
+const MAX_TILE_ASPECT: f32 = 3.0;
+/// The thumbnail PICTURE is drawn smaller than a pinned dock icon (Max,
+/// 2026-09-16: "make the thumbnails smaller") — this fraction of the dock
+/// icon height, centered in the band. Its width follows the window aspect.
+const MIN_TILE_SCALE: f32 = 0.85;
+/// Horizontal air a minimized tile keeps beside its (smaller) picture, base
+/// px scaled by `icon_scale`. Deliberately generous so the dock CARD grows
+/// into a roomy shelf around the thumbnails (Max: "make the dock card grow")
+/// even as the pictures shrink — it replaces the tiny `dock_slot − dock_icon`
+/// breathing the tiles used to take.
+const MIN_TILE_PAD: f32 = 8.0;
+/// The macOS-style app-icon badge in a minimized tile's bottom-right corner:
+/// its side as a fraction of the tile height, and its inset from that corner
+/// (base px, scaled by `icon_scale`). Small — it identifies the app without
+/// hiding the thumbnail.
+const MIN_BADGE_FRAC: f32 = 0.45;
+const MIN_BADGE_INSET: f32 = 2.0;
 /// Peak scale of a grid icon under the cursor.
 const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
@@ -401,10 +447,7 @@ pub(crate) fn dock_mag_target(
     let d_out = (slot.y - py).max(py - dock_hit_bottom).max(0.0);
     let fy = falloff(d_out, DOCK_MAG_VRADIUS);
     let dock_magnify = 1.0 + (DOCK_MAGNIFY - 1.0) * icon_scale;
-    1.0 + (dock_magnify - 1.0)
-        * falloff(px - cx, DOCK_MAG_RADIUS)
-        * fy
-        * mag_amount.clamp(0.0, 1.0)
+    1.0 + (dock_magnify - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy * mag_amount.clamp(0.0, 1.0)
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -478,7 +521,19 @@ pub struct Layout {
     pub dock_hit_bottom: f32,
     /// Dock slot rects, one per shown dock icon (entry index == slot
     /// index: the dock shows the first N entries, unaffected by search).
+    /// The normal zone is uniform `DOCK_SLOT`-wide; each minimized-window
+    /// tile (`>= dock_min_start`) carries its own aspect-derived width, so
+    /// `.w` varies across the tail. `scene()` reads these widths back so the
+    /// drawn thumbnail matches its hit-box.
     pub dock_slots: Vec<Rect>,
+    /// First dock slot that is a minimized-window tile (`usize::MAX` when
+    /// there are none). A small extra gap sits before this index, so the
+    /// thumbnails read as their own group set off from the pinned icons
+    /// (Max, 2026-09-16: "a little more space between the separator and the
+    /// thumbnail"). `scene()` must apply the same gap to the drawn centers.
+    pub dock_min_start: usize,
+    /// That gap in scaled px (0 when no minimized tiles are shown).
+    pub dock_min_gap: f32,
     /// The popup sections, top to bottom (Apps, Install, Files).
     pub sections: [SectionLayout; N_SECTIONS],
     /// Fully expanded search box (centered, fixed width).
@@ -494,9 +549,12 @@ pub struct Layout {
 /// Compute the layout for the current animation state.
 ///
 /// `surface` is the full surface size, `extent` the card's rise,
-/// `n_entries` the total (unfiltered) entry count for the dock,
-/// `n_visible` the filtered count per section, `scroll` the unclamped
-/// per-section grid offsets.
+/// `n_entries` the total (unfiltered) entry count for the dock, `n_min`
+/// how many of those (the tail of `dock_order`) are minimized-window
+/// tiles — the zone the dock widens to fit rather than clamp — `min_aspects`
+/// those tiles' window aspects (dock-tail order, one per `n_min`) that shape
+/// each tile's width, `n_visible` the filtered count per section, `scroll`
+/// the unclamped per-section grid offsets.
 // Geometry naturally takes many independent inputs; a params struct
 // would just rename them.
 /// The four icon-size levels, indexed by `App::icon_size` (default 1).
@@ -518,6 +576,10 @@ pub fn layout(
     surface: (f32, f32),
     extent: f32,
     n_entries: usize,
+    n_min: usize,
+    // Window aspects of the minimized tiles, in dock-tail order (`n_min`
+    // long); each shapes its tile's width. Short/empty ⇒ square fallback.
+    min_aspects: &[f32],
     n_visible: [usize; N_SECTIONS],
     scroll: [f32; N_SECTIONS],
     // Whether an app group ("box") is open over the Apps grid.
@@ -531,6 +593,7 @@ pub fn layout(
 
     // Scaled size metrics — all icon/slot dimensions respond to icon_scale.
     let dock_slot = DOCK_SLOT * icon_scale;
+    let dock_icon = DOCK_ICON * icon_scale;
     let dock_pad_x = DOCK_PAD_X * icon_scale;
     let grid_cell_w = GRID_CELL_W * icon_scale;
     let grid_cell_h = GRID_CELL_H * icon_scale;
@@ -540,6 +603,61 @@ pub fn layout(
     // around it; all card content lays out within these bounds, not
     // the full surface.
     let card_w = w - 2.0 * DRAG_MARGIN_X;
+    // Dock slot budget. Two zones with different ceilings so a burst of
+    // minimized windows can never be clamped off a half-empty bar (Max,
+    // verified live: only ~2 thumbnails showed, the rest dropped — the old
+    // single clamp was the *open* card width even while docked, wasting the
+    // wide resting basin):
+    //
+    //   • Normal (pinned/running) icons keep the base clamp to the card
+    //     width — nobody pins more than fit, so their layout is untouched.
+    //   • Minimized-window tiles (`n_min`, the tail of `dock_order`) are
+    //     NEVER clamped by the card width: they WIDEN the dock to the right
+    //     instead. Max: "build them to the right; when they reach the edge,
+    //     push the icons to the left; when there is no more room, the dock
+    //     stretches." The row is centered on the surface, so honoring more
+    //     tiles pushes the left content leftward on its own, and the basin
+    //     (below) grows to wrap the wider row.
+    //
+    // The one ceiling is the physical surface: the whole row may not exceed
+    // it less a dock-padding margin a side, or the rounded corners run off
+    // the fixed-size surface. Past that hard cap the excess is held back — a
+    // last resort that needs ~a monitor width of minimized windows. Because
+    // `dock_order` ends newest-last and the drawn row is its prefix, the very
+    // newest minimize is the first held back; the count is logged on add.
+    let n_normal = n_entries.saturating_sub(n_min);
+    let base_slots = (((card_w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
+    let hard_cap = (((w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
+    let n_normal_shown = n_normal.min(base_slots);
+    // Minimized tiles earn their honored slots only once every normal icon is
+    // shown: if the pins alone overflow the base width, the tail of
+    // `dock_order` past `n_normal_shown` is a pinned icon, not a minimized
+    // one, and the prefix slot→entry mapping must not shift under it.
+    let n_min_shown = if n_normal_shown == n_normal {
+        n_min.min(hard_cap.saturating_sub(n_normal_shown))
+    } else {
+        0
+    };
+    let n_dock = n_normal_shown + n_min_shown;
+    // The minimized zone is set off by DOCK_MIN_GAP: the tiles begin at
+    // `dock_min_start`, and everything from there is shifted right by the
+    // gap (the row and card grow to hold it — see the basin below).
+    let dock_min_start = if n_min_shown > 0 { n_normal_shown } else { usize::MAX };
+    let dock_min_gap = if n_min_shown > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
+    // A minimized tile's WIDTH follows its window's aspect over a SMALLER
+    // picture height (`dock_icon × MIN_TILE_SCALE`), plus a generous
+    // `MIN_TILE_PAD` of side air so the card grows into a roomy shelf. The
+    // tail is therefore VARIABLE-width, unlike the uniform normal zone.
+    let min_tile_h = dock_icon * MIN_TILE_SCALE;
+    let min_tile_pad = MIN_TILE_PAD * icon_scale;
+    let min_slot_w = |k: usize| {
+        let aspect = min_aspects.get(k).copied().unwrap_or(1.0);
+        min_tile_h * aspect.clamp(MIN_TILE_ASPECT, MAX_TILE_ASPECT) + min_tile_pad
+    };
+    // Total base (unmagnified) width of the honored row: the uniform normal
+    // slots, the variable minimized tail, and the group gap before the tail.
+    let min_zone_w: f32 = (0..n_min_shown).map(min_slot_w).sum();
+    let row_base_w = n_normal_shown as f32 * dock_slot + min_zone_w + dock_min_gap;
     let card_top = h - extent;
     let dock_h = config.window.input_bar_height as f32 * icon_scale;
     let float_gap = config.window.bottom_margin as f32 * icon_scale;
@@ -554,7 +672,15 @@ pub fn layout(
     let full_extent = (config.window.height + config.window.bottom_margin) as f32 * icon_scale;
     let dock_extent = dock_h + float_gap;
     let rise = ((extent - dock_extent) / (full_extent - dock_extent).max(1.0)).clamp(0.0, 1.0);
-    let basin_w = w - 2.0 * BASIN_MARGIN_X;
+    // The dock stretches to wrap its row when the minimized tiles push it
+    // past the default basin, never past the surface (a dock-padding margin
+    // aside) and never below the default. Docked-only in practice: the
+    // launcher hides the tiles as it opens (main.rs gate), so this wide
+    // basin has gathered back to the box width by the time the card is up.
+    let default_basin = w - 2.0 * BASIN_MARGIN_X;
+    let max_basin = (w - 2.0 * dock_pad_x).max(default_basin);
+    let dock_row_w = row_base_w + 2.0 * dock_pad_x;
+    let basin_w = dock_row_w.clamp(default_basin, max_basin);
     let gathered = basin_w + (card_w - basin_w) * rise;
     let card_w_now = (gathered * (1.0 - (stretch.0 - 1.0) * SPILL)).min(w);
     let card_x = (w - card_w_now) / 2.0;
@@ -585,20 +711,29 @@ pub fn layout(
         h
     };
 
-    // Dock uses n_entries so search never hides dock icons.
-    let max_slots = (((card_w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
-    let n_dock = n_entries.min(max_slots);
-    let start_x = (w - n_dock as f32 * dock_slot) / 2.0;
-    let dock_slots = (0..n_dock)
-        .map(|i| {
-            Rect::new(
-                start_x + i as f32 * dock_slot,
-                card_top + (dock_h - dock_slot).max(0.0) / 2.0,
-                dock_slot,
-                dock_slot.min(dock_h),
-            )
-        })
-        .collect();
+    // `n_dock` (the honored slot count) and the widened basin were computed
+    // up top so the card silhouette could grow with the row. The whole row
+    // (`row_base_w`) centers on the surface, so it stays centered as the
+    // variable tiles widen it — the same anchor `scene()` uses for the drawn
+    // icon centers. Positions ACCUMULATE per-tile width (the tail varies),
+    // and the min-gap opens once, at `dock_min_start`.
+    let start_x = (w - row_base_w) / 2.0;
+    let slot_y = card_top + (dock_h - dock_slot).max(0.0) / 2.0;
+    let slot_h = dock_slot.min(dock_h);
+    let mut dock_slots = Vec::with_capacity(n_dock);
+    let mut slot_x = start_x;
+    for i in 0..n_dock {
+        if i == dock_min_start {
+            slot_x += dock_min_gap;
+        }
+        let sw = if i >= dock_min_start {
+            min_slot_w(i - dock_min_start)
+        } else {
+            dock_slot
+        };
+        dock_slots.push(Rect::new(slot_x, slot_y, sw, slot_h));
+        slot_x += sw;
+    }
 
     // Compact button and minimum-width search box; scene() stretches the
     // box dynamically with the query so layout just anchors the y position.
@@ -718,6 +853,8 @@ pub fn layout(
         card_h,
         dock_hit_bottom,
         dock_slots,
+        dock_min_start,
+        dock_min_gap,
         sections,
         search_box,
         search_btn,
@@ -909,6 +1046,11 @@ pub struct FrameInput<'a> {
     /// Dock slot at which the running-but-unpinned zone begins: a thin
     /// divider is drawn just left of it. `None` (or 0) draws no divider.
     pub dock_divider: Option<usize>,
+    /// Corner app-icon badge per minimized tile, in dock-tail order (index k
+    /// = the k-th minimized tile, `slot - dock_min_start`): the texture layer
+    /// of the app matching the window's class, or `None` for no badge. Short/
+    /// empty slice ⇒ no badges.
+    pub min_badges: &'a [Option<u32>],
     /// Active drag for ghost icon and insertion indicator; `None` at rest.
     pub drag: Option<DragFrame>,
     /// Recycle-bin reaction (0 = shut/grey at rest, 1 = open/red while an app
@@ -1124,6 +1266,7 @@ pub fn scene(
         dock_order,
         dock_running,
         dock_divider,
+        min_badges,
         drag,
         trash_react,
         trash_hover,
@@ -1223,18 +1366,88 @@ pub fn scene(
         _ => 0.0,
     };
 
+    // Dock row: per-icon magnification scales, then spread visual centers.
+    // Hit-boxes stay at fixed slot positions; only drawn positions spread.
+    // The scales are the frame loop's *smoothed* values (see
+    // `dock_mag_target` / `FrameInput::dock_mag`), never raw pointer math —
+    // the crest blooms and melts instead of snapping per pointer event.
+    //
+    // Computed HERE, above the card, because the card is built from these
+    // same numbers: the row's growth drives the card's growth (Max,
+    // 2026-09-13: "the icons move to the sides and the card too, same
+    // movement"). Sharing the arithmetic is what welds them — a second
+    // eased value tuned to look the same would drift apart the moment
+    // either side is retuned. The card takes a *fraction* of the travel
+    // (`DOCK_SPREAD_FOLLOW`), which is a scale on one shared motion, not a
+    // second motion: same curve, same moment, shorter reach.
+    let dock_scales: Vec<f32> = (0..layout.dock_slots.len())
+        .map(|i| dock_mag.get(i).copied().unwrap_or(1.0))
+        .collect();
+    // Per-slot VISUAL width once magnified. The BASE width is uniform
+    // `dock_slot` in the normal zone and the aspect-derived tile width
+    // layout() baked into `.w` for the minimized tail — reading it back keeps
+    // the drawn tiles and their hit-boxes on one source of truth. GROW is the
+    // horizontal reach of magnification: a normal icon grows by `dock_icon`;
+    // a thumbnail grows by its own (un-padded) picture width, so it keeps its
+    // shape while it swells.
+    let min_tile_pad = MIN_TILE_PAD * icon_scale;
+    let dock_vw: Vec<f32> = layout
+        .dock_slots
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let grow = if i >= layout.dock_min_start {
+                (r.w - min_tile_pad).max(0.0)
+            } else {
+                dock_icon
+            };
+            r.w + grow * (dock_scales[i] - 1.0)
+        })
+        .collect();
+    // Each magnified slot widens by the pixels its icon/thumbnail grew,
+    // pushing neighbours apart. Row stays centered as a whole.
+    let total_vw: f32 = dock_vw.iter().sum();
+    let dock_vcx: Vec<f32> = {
+        // The minimized-tile gap is part of the row's visual width and sits
+        // before `dock_min_start` — same offset layout() baked into the
+        // hit-test slots, so drawn centers and hit-boxes stay aligned.
+        let mut x = (w - (total_vw + layout.dock_min_gap)) / 2.0;
+        let mut centers = Vec::with_capacity(dock_vw.len());
+        for (i, &vw) in dock_vw.iter().enumerate() {
+            if i == layout.dock_min_start {
+                x += layout.dock_min_gap;
+            }
+            centers.push(x + vw / 2.0);
+            x += vw;
+        }
+        centers
+    };
+    // How much wider the magnified row is than its resting width. The row
+    // is centered, so each of its outer edges travels half of this.
+    let row_base_total: f32 = layout.dock_slots.iter().map(|r| r.w).sum();
+    let row_spread = (total_vw - row_base_total).max(0.0);
+    // What the CARD takes of that travel — the same motion at
+    // `DOCK_SPREAD_FOLLOW` of the reach.
+    //
+    // Clamped to the surface: the resting basin leaves only
+    // `BASIN_MARGIN_X` a side, and a magnification tuned far past the
+    // default would otherwise push the card's rounded corners off the
+    // fixed-size surface and cut them square.
+    let card_spread = (row_spread * DOCK_SPREAD_FOLLOW).min((w - layout.card_w).max(0.0));
+
     // Card background: the AGUA silhouette — wide basin at rest,
     // gathered to the box width risen, spilling on the landing.
     // `breath_offset` expands all four edges equally (card center fixed,
     // icons stay anchored); positive = exhale (card grows), negative = inhale.
+    // `card_spread` widens it in step with the magnified row (above).
     // Per-edge jelly: each spring moves only its own edge.
     // (left, right, top, bottom) offsets; positive = inward.
     // Combined with breath (uniform expansion from all edges).
     let (jl, jr, jt, jb) = card_push;
     let card_rect = Rect::new(
-        layout.card_x - breath_offset + jl,
+        layout.card_x - card_spread / 2.0 - breath_offset + jl,
         layout.card_top - breath_offset + jt,
-        layout.card_w + 2.0 * breath_offset - jl + jr,
+        layout.card_w + card_spread + 2.0 * breath_offset - jl + jr,
         card_h + 2.0 * breath_offset - jt + jb,
     );
     // Subtle/macOS-dock rounding while docked, rounding up to the shared box
@@ -1286,30 +1499,6 @@ pub fn scene(
         border: 1.0,
     });
 
-    // Dock row: per-icon magnification scales, then spread visual centers.
-    // Hit-boxes stay at fixed slot positions; only drawn positions spread.
-    // The scales are the frame loop's *smoothed* values (see
-    // `dock_mag_target` / `FrameInput::dock_mag`), never raw pointer math —
-    // the crest blooms and melts instead of snapping per pointer event.
-    let dock_scales: Vec<f32> = (0..layout.dock_slots.len())
-        .map(|i| dock_mag.get(i).copied().unwrap_or(1.0))
-        .collect();
-    // Each magnified icon widens its visual slot by the extra pixels it
-    // grew, pushing neighbours apart. Row stays centered as a whole.
-    let dock_vcx: Vec<f32> = {
-        let total_vw: f32 = dock_scales
-            .iter()
-            .map(|&s| dock_slot + dock_icon * (s - 1.0))
-            .sum();
-        let mut x = (w - total_vw) / 2.0;
-        let mut centers = Vec::with_capacity(dock_scales.len());
-        for &s in &dock_scales {
-            let vw = dock_slot + dock_icon * (s - 1.0);
-            centers.push(x + vw / 2.0);
-            x += vw;
-        }
-        centers
-    };
     // Divider between the pinned zone and the running-but-unpinned zone
     // (macOS): a short, faint vertical line centered between the two icons.
     if let Some(div) = dock_divider {
@@ -1321,9 +1510,24 @@ pub fn scene(
             ) {
                 let inset = slot.h * 0.22;
                 let fg = dock_ink;
+                // Normally the line sits at the midpoint. But when this seam
+                // is the minimized-tile boundary, the min-gap opens on the
+                // RIGHT of it: the separator belongs to the pinned group, so
+                // anchor it just past the left icon and let the whole gap
+                // fall between it and the thumbnail (Max, 2026-09-16: "more
+                // space between the separator and the thumbnail").
+                let x_mid = if div == layout.dock_min_start {
+                    // MIN_TILE_PAD past the pinned zone's right edge, so the
+                    // divider sits the same distance from the trash as the
+                    // thumbnails sit from each other (DOCK_MIN_GAP then leaves
+                    // an equal gap after it).
+                    left + dock_slot / 2.0 + MIN_TILE_PAD * icon_scale
+                } else {
+                    (left + right) / 2.0
+                };
                 scene.rects.push(RectInst {
                     rect: Rect::new(
-                        (left + right) / 2.0 - DOCK_DIVIDER_W / 2.0,
+                        x_mid - DOCK_DIVIDER_W / 2.0,
                         slot.y + inset,
                         DOCK_DIVIDER_W,
                         (slot.h - inset * 2.0).max(1.0),
@@ -1395,6 +1599,60 @@ pub fn scene(
                 glass: 0.0,
                 border: 0.0,
             });
+        }
+        // A minimized-window tile: the window's live thumbnail drawn at the
+        // window's own shape (the square texture un-stretches into the aspect
+        // rect layout() sized this slot to), with the app's icon badged into
+        // the bottom-right corner (macOS). A tile whose thumbnail failed to
+        // load falls through to the letter-tile path below. Recovering the
+        // tile width from the slot (rather than re-reading the aspect) keeps
+        // draw and hit-test on the one shape.
+        let is_min = slot >= layout.dock_min_start;
+        if is_min && !placeholders.get(entry_idx).copied().unwrap_or(false) {
+            // Smaller than a pinned icon (MIN_TILE_SCALE) and vertically
+            // CENTERED in the icon band, so the shrunken thumbnail sits
+            // balanced in its roomy slot rather than sinking to the baseline.
+            let pic_h_rest = dock_icon * MIN_TILE_SCALE;
+            let content_w = (slot_rect.w - min_tile_pad).max(1.0); // rest picture width
+            let tile_h = size * MIN_TILE_SCALE;
+            let tile_w = tile_h * content_w / pic_h_rest; // hold the aspect at any scale
+            let icon_cy = baseline - (size + lift(entry_idx)) * drop / 2.0; // the pinned icon's vertical mid
+            let thumb = Rect::new(
+                vcx - tile_w / 2.0,
+                icon_cy - tile_h * drop / 2.0,
+                tile_w,
+                tile_h * drop,
+            );
+            // The thumbnail fills the rect UNPLATED: it is a picture, not a
+            // glyph, so it keeps its true rectangular corners (the shader
+            // skips the squircle for `layer >= thumb_base`).
+            scene.icons.push(IconInst {
+                rect: thumb,
+                layer: layer_of(entry_idx),
+                tint: [0.0; 4],
+                ring: -1.0,
+                plate: NO_PLATE,
+            });
+            // App-icon badge, bottom-right — a normal app icon, so it wears
+            // the squircle + adaptive plate. Skipped when the window's class
+            // matched no app (no placeholder badge, per the design).
+            if let Some(Some(badge_layer)) = min_badges.get(slot - layout.dock_min_start).copied() {
+                let bs = tile_h * MIN_BADGE_FRAC;
+                let inset = MIN_BADGE_INSET * icon_scale;
+                scene.icons.push(IconInst {
+                    rect: Rect::new(
+                        thumb.x + thumb.w - bs - inset,
+                        thumb.y + thumb.h - bs - inset,
+                        bs,
+                        bs,
+                    ),
+                    layer: badge_layer,
+                    tint: [0.0; 4],
+                    ring: -1.0,
+                    plate,
+                });
+            }
+            continue;
         }
         // The Recycle Bin: the same rounded "squircle" tile shape the
         // box/folder cells use (rect-shader `radius` + glass), wearing the
@@ -2371,6 +2629,8 @@ mod tests {
             SURFACE,
             OPEN,
             n,
+            0,
+            &[],
             [n, 0, 0],
             [scroll, 0.0, 0.0],
             false,
@@ -2387,6 +2647,8 @@ mod tests {
             SURFACE,
             48.0,
             20,
+            0,
+            &[],
             [20, 0, 6],
             [0.0; N_SECTIONS],
             false,
@@ -2455,6 +2717,8 @@ mod tests {
             SURFACE,
             OPEN,
             10,
+            0,
+            &[],
             [4, 0, 6],
             [0.0; N_SECTIONS],
             false,
@@ -2509,6 +2773,8 @@ mod tests {
             SURFACE,
             OPEN,
             10,
+            0,
+            &[],
             [10, 0, 6],
             [0.0; N_SECTIONS],
             false,
@@ -2558,6 +2824,8 @@ mod tests {
             SURFACE,
             OPEN,
             10,
+            0,
+            &[],
             [10, 0, 6],
             [0.0; N_SECTIONS],
             false,
@@ -2655,5 +2923,248 @@ mod tests {
         let r = dock_box_rect(edge, 200.0, 1000.0);
         assert!(r.x + r.w <= 1000.0 + 0.01, "clamped within the surface");
         assert!(r.x >= 0.0);
+    }
+
+    /// The card and the row it holds are one movement (Max, 2026-09-13).
+    /// The *acceleration* is shared by construction — a single eased
+    /// `dock_mag` feeds both, so there is no second animator that could
+    /// lag — which leaves the distance as the thing a test can pin: each
+    /// card edge travels `DOCK_SPREAD_FOLLOW` of what the outer icon
+    /// beside it travels, symmetrically, wherever the crest happens to be.
+    #[test]
+    fn magnification_carries_the_card_edges_with_the_row() {
+        let cfg = config();
+        let n = 9;
+        let l = layout(
+            &cfg,
+            1.0,
+            SURFACE,
+            48.0,
+            n,
+            0,
+            &[],
+            [n, 0, 0],
+            [0.0; N_SECTIONS],
+            false,
+            (1.0, 1.0),
+        );
+        assert_eq!(l.dock_slots.len(), n, "every entry gets a slot");
+        let es = entries(n);
+        let order = idslots(n);
+        // The card fill plus the row's two outer edges, for a given set of
+        // per-slot magnification scales.
+        let shot = |mag: &[f32]| {
+            let s = scene(
+                &cfg,
+                1.0,
+                &l,
+                &es,
+                &vis(n),
+                SURFACE,
+                &FrameInput {
+                    alpha: 1.0,
+                    dock_order: &order,
+                    dock_mag: mag,
+                    ..Default::default()
+                },
+            );
+            let first = s.icons.first().expect("dock icons drawn").rect;
+            let last = s.icons.last().expect("dock icons drawn").rect;
+            (s.rects[0].rect, first.x, last.x + last.w)
+        };
+
+        let (rest_card, rest_l, rest_r) = shot(&vec![1.0; n]);
+        assert!(
+            (rest_card.x - l.card_x).abs() < 0.01 && (rest_card.w - l.card_w).abs() < 0.01,
+            "an unmagnified row leaves the card exactly at its layout rect"
+        );
+
+        // A crest under the middle icon, melting away to both sides — the
+        // same cosine falloff the pointer drives.
+        let mag: Vec<f32> = (0..n)
+            .map(|i| {
+                1.0 + (DOCK_MAGNIFY - 1.0) * falloff((i as f32 - 4.0) * DOCK_SLOT, DOCK_MAG_RADIUS)
+            })
+            .collect();
+        let (card, l_edge, r_edge) = shot(&mag);
+
+        let row_left_travel = rest_l - l_edge;
+        let row_right_travel = r_edge - rest_r;
+        let card_left_travel = rest_card.x - card.x;
+        let card_right_travel = (card.x + card.w) - (rest_card.x + rest_card.w);
+        assert!(
+            row_left_travel > 1.0,
+            "the fixture must actually spread the row ({row_left_travel}px)"
+        );
+        // The card takes its fixed share of whatever the row travelled —
+        // stated against the constant, so retuning the follow retunes the
+        // test with it and only a *decoupling* can fail here.
+        assert!(
+            (row_left_travel * DOCK_SPREAD_FOLLOW - card_left_travel).abs() < 0.01,
+            "left edge: row moved {row_left_travel}px, card {card_left_travel}px \
+             (want {DOCK_SPREAD_FOLLOW}× the row)"
+        );
+        assert!(
+            (row_right_travel * DOCK_SPREAD_FOLLOW - card_right_travel).abs() < 0.01,
+            "right edge: row moved {row_right_travel}px, card {card_right_travel}px \
+             (want {DOCK_SPREAD_FOLLOW}× the row)"
+        );
+        assert!(
+            (card_left_travel - card_right_travel).abs() < 0.01,
+            "the card must grow symmetrically wherever the crest sits"
+        );
+        // …and the grown card still fits the fixed-size surface.
+        assert!(
+            card.x >= 0.0 && card.x + card.w <= SURFACE.0 + 0.01,
+            "card grew off the surface: {card:?}"
+        );
+    }
+
+    #[test]
+    fn minimized_tiles_widen_the_dock_and_are_never_clamped() {
+        let cfg = config();
+        let docked = 48.0;
+        // Square tiles (aspect 1.0) so each minimized slot equals the uniform
+        // `DOCK_SLOT` — this test pins the widen/clamp behaviour, which is
+        // independent of the tile shapes (covered by the aspect test below).
+        let lay = |total: usize, n_min: usize| {
+            let aspects = vec![1.0f32; n_min];
+            layout(
+                &cfg,
+                1.0,
+                SURFACE,
+                docked,
+                total,
+                n_min,
+                &aspects,
+                [total, 0, 0],
+                [0.0; N_SECTIONS],
+                false,
+                (1.0, 1.0),
+            )
+        };
+
+        // 17 tiles, 7 of them minimized. The base card width (w − drag
+        // margins) fits only 15; the old single clamp dropped the 2 tail
+        // (minimized) tiles even though the surface has room. Now every
+        // minimized tile keeps its slot.
+        let with_min = lay(17, 7);
+        assert_eq!(
+            with_min.dock_slots.len(),
+            17,
+            "minimized tiles are never clamped away while the surface has room"
+        );
+        // The SAME count as plain pins still hits the base-width clamp —
+        // proof it is the minimized zone that escapes it; normal icons keep
+        // their slots and their behaviour.
+        let all_normal = lay(17, 0);
+        assert!(
+            all_normal.dock_slots.len() < 17,
+            "normal (pinned/running) icons keep the base-width clamp"
+        );
+        assert!(
+            with_min.dock_slots.len() > all_normal.dock_slots.len(),
+            "the minimized zone widens the row past the normal clamp"
+        );
+
+        // Enough minimized WIDTH to push the row past the default resting
+        // basin: the card stretches to wrap it (docked, so card_w == basin).
+        // Wide-aspect tiles (real windows are rarely square), so a handful
+        // suffice regardless of the tile-height scale.
+        let lay_wide = |total: usize, n_min: usize| {
+            let aspects = vec![MAX_TILE_ASPECT; n_min];
+            layout(
+                &cfg, 1.0, SURFACE, docked, total, n_min, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
+            )
+        };
+        let stretched = lay_wide(15, 5);
+        let small = lay(8, 0);
+        assert!(
+            stretched.card_w > small.card_w,
+            "the dock stretches ({} → {}) to wrap the wide minimized row",
+            small.card_w,
+            stretched.card_w
+        );
+        // …but never off the fixed-size surface (a dock-padding margin aside).
+        assert!(
+            stretched.card_x >= 0.0 && stretched.card_x + stretched.card_w <= SURFACE.0 + 0.01,
+            "the stretched card stays on the surface: {stretched:?}"
+        );
+    }
+
+    /// Each minimized tile carries its window's shape: a wide window tiles
+    /// wider than a tall one, while the pinned zone stays uniform — and the
+    /// same widths reach the drawn thumbnails, with the app-icon badge only
+    /// where the class resolved.
+    #[test]
+    fn minimized_tile_width_follows_the_window_aspect() {
+        let cfg = config();
+        // 3 pins + 2 minimized tiles (a wide window, a tall one).
+        let aspects = [2.0f32, 0.5];
+        let l = layout(
+            &cfg,
+            1.0,
+            SURFACE,
+            48.0,
+            5,
+            2,
+            &aspects,
+            [5, 0, 0],
+            [0.0; N_SECTIONS],
+            false,
+            (1.0, 1.0),
+        );
+        let n = l.dock_slots.len();
+        assert_eq!(n, 5, "all five tiles are shown");
+        let (wide_slot, tall_slot, pin) = (l.dock_slots[3], l.dock_slots[4], l.dock_slots[0]);
+        assert!(
+            wide_slot.w > tall_slot.w,
+            "a wide window tiles wider than a tall one ({} vs {})",
+            wide_slot.w,
+            tall_slot.w
+        );
+        assert!(
+            (pin.w - DOCK_SLOT).abs() < 0.01,
+            "the pinned zone keeps the uniform square slot"
+        );
+        assert!(
+            wide_slot.w > pin.w && tall_slot.w < pin.w,
+            "the wide tile exceeds and the tall tile trails the square slot"
+        );
+
+        // scene() draws the thumbnails at those same widths, and badges only
+        // the tile whose class resolved (here: the wide one).
+        let es = entries(5);
+        let order = idslots(5);
+        let s = scene(
+            &cfg,
+            1.0,
+            &l,
+            &es,
+            &vis(5),
+            SURFACE,
+            &FrameInput {
+                alpha: 1.0,
+                stretch: 1.0, // rest: the default 0.0 collapses tile heights
+                dock_order: &order,
+                min_badges: &[Some(7), None],
+                ..Default::default()
+            },
+        );
+        // Draw order: 3 pins, then (wide thumb, wide badge), then tall thumb.
+        assert_eq!(s.icons.len(), 6, "3 pins + 2 thumbs + 1 badge");
+        let (wide_thumb, badge, tall_thumb) = (s.icons[3].rect, s.icons[4].rect, s.icons[5].rect);
+        assert!(
+            wide_thumb.w > tall_thumb.w,
+            "the drawn wide thumbnail is wider than the tall one ({} vs {})",
+            wide_thumb.w,
+            tall_thumb.w
+        );
+        assert!(
+            badge.w < wide_thumb.h && badge.w < wide_thumb.w,
+            "the badge is a small corner overlay, not the whole tile"
+        );
+        assert_eq!(s.icons[3].layer, 3, "the thumbnail keeps the tile's own layer");
+        assert_eq!(s.icons[4].layer, 7, "the badge draws the resolved app layer");
     }
 }

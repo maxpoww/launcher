@@ -48,6 +48,13 @@ pub enum Command {
     /// Debug/verification: force-open the clipboard box on the newest row's
     /// metadata detail view.
     DebugClipDetail,
+    /// Debug/verification: force-open the clipboard box with the type-to-search
+    /// field out and this query typed into it (empty = the bare field), so the
+    /// filtered list can be screenshotted without a keyboard.
+    DebugClipSearch(String),
+    /// Debug/verification: force-open the clipboard box on the emoji picker,
+    /// optionally with this search query typed into the box's field.
+    DebugEmoji(String),
     /// Debug/verification: force-open the notification history box.
     DebugNotif,
     /// Debug/verification: stand a sticky OPTION on a concealed bar (the
@@ -61,9 +68,6 @@ pub enum Command {
     /// ranked offers with their ids/actions) to the journal, so the OPTIONS
     /// engine's live decisions can be inspected without a GUI click.
     DebugOptions,
-    /// Debug/verification: force-open the media transport box (when a player is
-    /// active), so it can be screenshotted without a pointer click.
-    DebugMediaBox,
     /// Debug/verification: force the hover state onto the first dynamic OPTION
     /// pill and redraw, so its discoverability tooltip can be screenshotted
     /// without a pointer (there's no headless cursor warp on this compositor).
@@ -72,6 +76,19 @@ pub enum Command {
     /// current-task pill's expansion into "the sun is set…" + [turn on]) as if
     /// the Mind had offered it, so the UX can be demoed before real sunset.
     DebugSunset,
+    /// Debug/verification: toggle the settings BOX of whichever module is on the
+    /// current-task pill (the gear's own act). The topbar is pointer-only on this
+    /// compositor, so this is how an open panel gets screenshotted at all.
+    DebugModuleBox,
+    /// Debug/verification: raise the gear's readout, then its panel, then put both away — or, with
+    /// a page number, press that button directly (1 = the gear, 2.. = each
+    /// reading in the order they are drawn). The pointer-free way to exercise
+    /// the pages.
+    DebugStats(Option<usize>),
+    /// Golem as a floating window manager instead of a tiling one: `on`, `off`
+    /// or `toggle` (empty = toggle). The gear's page-1 switch sends the same
+    /// thing; a verb so it can be bound to a key and driven without a pointer.
+    FloatMode(String),
     /// Trigger the dynamic OPTION offer with this affordance id (e.g.
     /// `media.playpause`, `git.commit`) — the same action a click on its pill
     /// runs. Exposed for scripting and for verifying the action end to end.
@@ -116,6 +133,51 @@ pub enum Command {
     /// payload is a no-op. The deck's click will call this; it is a verb so the
     /// mode can be driven and verified before the deck exists.
     StageShow(String),
+    /// Switch the stage between showing one task and showing one whole desk
+    /// (per-window / per-workspace). The bar's stage-mode pill does the same;
+    /// this is the way to drive it without a pointer, and it works off the stage
+    /// too, where it chooses the mode the stage will next open in.
+    StageMode,
+    /// While staged: a 3/4-finger swipe is walking the deck's border. The
+    /// payload is the gesture's **total** travel in logical px so far, positive
+    /// rightward (`"-243.5"`). Sent by the waveview plugin, which owns the
+    /// trackpad while the stage is up; nothing is staged until the end below, so
+    /// scrubbing across the deck costs no window switches.
+    ///
+    /// Absolute rather than incremental so a message that arrives late or not at
+    /// all cannot leave the border a tile out of step.
+    StageSwipe(String),
+    /// The swipe's fingers left the pad: stage whatever the border landed on.
+    /// The payload is the final total travel; an empty or unreadable one commits
+    /// the border where it stands.
+    StageSwipeEnd(String),
+    /// While staged: put a numbered tile on the stage (`Super+N`, bound inside
+    /// the stage submap). The payload is the number as typed — the n-th tile in
+    /// task mode, workspace n in desk mode, whichever the deck is showing. A
+    /// number with no tile does nothing.
+    StagePick(String),
+    /// Put the focused window into a window mode: `tiled`, `float`, `pseudo` or
+    /// `fullscreen` — the same four the bar's pills offer, and the same toggle
+    /// rule (asking for the mode it is already in returns it to the layout).
+    ///
+    /// Exists so things outside the daemon can use Golem's mode machinery
+    /// rather than the compositor's: the titlebar's "back to the layout" button
+    /// goes through here, which is what makes the solitary-pseudo rule notice a
+    /// window rejoining the layout.
+    WindowMode(String),
+    /// The waveview plugin minimized a window into the dock (macOS style).
+    /// Payload: `<addr> <ws> <aspect> <class> <path> <title…>` — window
+    /// address (`0x…`), workspace id (informational; the plugin owns
+    /// restore), the window's width/height ratio (its tile shape), its
+    /// Hyprland class (one token, `?` if unknown — resolves the corner app
+    /// badge), the raw-RGBA thumbnail file it rendered, then the window
+    /// title, which MAY CONTAIN SPACES (everything after the path). Stays one
+    /// opaque String here; `minimized.rs` on the daemon splits the fields.
+    MinAdd(String),
+    /// The minimized window came back or died: drop its dock tile. Payload
+    /// is the window address; an unknown one is a no-op — the daemon's own
+    /// `closewindow` eviction may have beaten this message to it.
+    MinDel(String),
 }
 
 impl fmt::Display for Command {
@@ -128,13 +190,18 @@ impl fmt::Display for Command {
             Command::Collapse => f.write_str("collapse"),
             Command::DebugClip => f.write_str("debug-clip"),
             Command::DebugClipDetail => f.write_str("debug-clip-detail"),
+            Command::DebugClipSearch(q) => write!(f, "debug-clip-search {q}"),
+            Command::DebugEmoji(q) => write!(f, "debug-emoji {q}"),
             Command::DebugNotif => f.write_str("debug-notif"),
             Command::DebugSticky => f.write_str("debug-sticky"),
             Command::DebugDict => f.write_str("debug-dict"),
             Command::DebugOptions => f.write_str("debug-options"),
-            Command::DebugMediaBox => f.write_str("debug-media-box"),
             Command::DebugHoverOption => f.write_str("debug-hover-option"),
             Command::DebugSunset => f.write_str("debug-sunset"),
+            Command::DebugModuleBox => f.write_str("debug-module-box"),
+            Command::DebugStats(None) => f.write_str("debug-stats"),
+            Command::DebugStats(Some(p)) => write!(f, "debug-stats {p}"),
+            Command::FloatMode(m) => write!(f, "float-mode {m}"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
@@ -148,6 +215,13 @@ impl fmt::Display for Command {
             Command::OverviewResize(s) => write!(f, "overview-resize {s}"),
             Command::StageToggle => f.write_str("stage-toggle"),
             Command::StageShow(a) => write!(f, "stage-show {a}"),
+            Command::StageMode => f.write_str("stage-mode"),
+            Command::StageSwipe(dx) => write!(f, "stage-swipe {dx}"),
+            Command::StageSwipeEnd(dx) => write!(f, "stage-swipe-end {dx}"),
+            Command::StagePick(n) => write!(f, "stage-pick {n}"),
+            Command::WindowMode(m) => write!(f, "window-mode {m}"),
+            Command::MinAdd(p) => write!(f, "min-add {p}"),
+            Command::MinDel(a) => write!(f, "min-del {a}"),
         }
     }
 }
@@ -173,7 +247,25 @@ impl FromStr for Command {
                 "options-trigger",
                 Command::OptionsTrigger as fn(String) -> Command,
             ),
+            (
+                "debug-clip-search",
+                Command::DebugClipSearch as fn(String) -> Command,
+            ),
+            ("debug-emoji", Command::DebugEmoji as fn(String) -> Command),
             ("stage-show", Command::StageShow as fn(String) -> Command),
+            // Before its own prefix: `stage-swipe` would otherwise be tried
+            // against `stage-swipe-end …` first. (It declines — the remainder
+            // starts with `-`, not a space — but the order says the intent.)
+            (
+                "stage-swipe-end",
+                Command::StageSwipeEnd as fn(String) -> Command,
+            ),
+            ("stage-swipe", Command::StageSwipe as fn(String) -> Command),
+            ("stage-pick", Command::StagePick as fn(String) -> Command),
+            ("window-mode", Command::WindowMode as fn(String) -> Command),
+            ("float-mode", Command::FloatMode as fn(String) -> Command),
+            ("min-add", Command::MinAdd as fn(String) -> Command),
+            ("min-del", Command::MinDel as fn(String) -> Command),
         ] {
             if let Some(rest) = line.strip_prefix(verb) {
                 // `verb` alone (or `verb ` + text) — anything else is a
@@ -198,9 +290,16 @@ impl FromStr for Command {
             "debug-sticky" => Ok(Command::DebugSticky),
             "debug-dict" => Ok(Command::DebugDict),
             "debug-options" => Ok(Command::DebugOptions),
-            "debug-media-box" => Ok(Command::DebugMediaBox),
             "debug-hover-option" => Ok(Command::DebugHoverOption),
             "debug-sunset" => Ok(Command::DebugSunset),
+            "debug-module-box" => Ok(Command::DebugModuleBox),
+            // `debug-stats` alone cycles; `debug-stats N` presses button N. Its
+            // payload is a NUMBER, not a string, so it cannot ride the
+            // `fn(String) -> Command` table above and is matched here instead.
+            "debug-stats" => Ok(Command::DebugStats(None)),
+            s if s.starts_with("debug-stats ") => Ok(Command::DebugStats(
+                s.trim_start_matches("debug-stats ").trim().parse().ok(),
+            )),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
@@ -210,6 +309,7 @@ impl FromStr for Command {
             "focus-next" => Ok(Command::FocusNext),
             "focus-other" => Ok(Command::FocusOther),
             "stage-toggle" => Ok(Command::StageToggle),
+            "stage-mode" => Ok(Command::StageMode),
             other => Err(ParseError::UnknownCommand(other.to_owned())),
         }
     }
@@ -230,13 +330,16 @@ pub const USAGE_VERBS: &[&str] = &[
     "collapse",
     "debug-clip",
     "debug-clip-detail",
+    "debug-clip-search [query]",
+    "debug-emoji [query]",
     "debug-notif",
     "debug-sticky",
     "debug-dict",
     "debug-options",
-    "debug-media-box",
     "debug-hover-option",
     "debug-sunset",
+    "debug-module-box",
+    "debug-stats",
     "options-trigger <id>",
     "overview-on",
     "overview-off",
@@ -250,6 +353,14 @@ pub const USAGE_VERBS: &[&str] = &[
     "overview-resize [WxH]",
     "stage-toggle",
     "stage-show <address>",
+    "stage-mode",
+    "stage-swipe <dx>",
+    "stage-swipe-end <dx>",
+    "stage-pick <n>",
+    "window-mode <tiled|float|pseudo|fullscreen>",
+    "float-mode <on|off|toggle>",
+    "min-add <addr> <ws> <aspect> <class> <path> <title…>",
+    "min-del <addr>",
 ];
 
 /// A response sent from the daemon back to the client.
@@ -324,13 +435,17 @@ mod tests {
                 | Command::Collapse
                 | Command::DebugClip
                 | Command::DebugClipDetail
+                | Command::DebugClipSearch(_)
+                | Command::DebugEmoji(_)
                 | Command::DebugNotif
                 | Command::DebugSticky
                 | Command::DebugDict
                 | Command::DebugOptions
-                | Command::DebugMediaBox
                 | Command::DebugHoverOption
                 | Command::DebugSunset
+                | Command::DebugModuleBox
+                | Command::DebugStats(_)
+                | Command::FloatMode(_)
                 | Command::OptionsTrigger(_)
                 | Command::OverviewOn
                 | Command::OverviewOff
@@ -343,7 +458,14 @@ mod tests {
                 | Command::OverviewHover(_)
                 | Command::OverviewResize(_)
                 | Command::StageToggle
-                | Command::StageShow(_) => (),
+                | Command::StageShow(_)
+                | Command::StageMode
+                | Command::StageSwipe(_)
+                | Command::StageSwipeEnd(_)
+                | Command::StagePick(_)
+                | Command::WindowMode(_)
+                | Command::MinAdd(_)
+                | Command::MinDel(_) => (),
             }
         }
         vec![
@@ -354,13 +476,17 @@ mod tests {
             Command::Collapse,
             Command::DebugClip,
             Command::DebugClipDetail,
+            Command::DebugClipSearch("shot".into()),
+            Command::DebugEmoji("happy".into()),
             Command::DebugNotif,
             Command::DebugSticky,
             Command::DebugDict,
             Command::DebugOptions,
-            Command::DebugMediaBox,
             Command::DebugHoverOption,
             Command::DebugSunset,
+        Command::DebugModuleBox,
+        Command::DebugStats(None),
+        Command::FloatMode(String::new()),
             Command::OptionsTrigger("media.playpause".into()),
             Command::OverviewOn,
             Command::OverviewOff,
@@ -374,6 +500,16 @@ mod tests {
             Command::OverviewResize("1240x1000".into()),
             Command::StageToggle,
             Command::StageShow("0x5c351e2e7660".into()),
+            Command::StageMode,
+            Command::StageSwipe("-243.5".into()),
+            Command::StageSwipeEnd("-243.5".into()),
+            Command::StagePick("3".into()),
+            Command::WindowMode("pseudo".into()),
+            // The title tail may contain spaces — the round-trip must keep it.
+            Command::MinAdd(
+                "0x5c351e2e7660 3 1.6296 firefox /run/user/1000/min.rgba A Window Title".into(),
+            ),
+            Command::MinDel("0x5c351e2e7660".into()),
         ]
     }
 

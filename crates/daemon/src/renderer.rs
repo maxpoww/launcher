@@ -341,8 +341,9 @@ impl Renderer {
                     // Allow surface expansion to full screen height (>2048 on 4K displays).
                     max_texture_dimension_2d: 8192,
                     // The icon array is one texture layer per app icon plus a
-                    // reserved block (rank hits + pending installs + thumbs =
-                    // 97). downlevel_defaults() caps texture_array_layers at
+                    // reserved block (rank hits + pending installs + thumbs +
+                    // minimized = 113). downlevel_defaults() caps
+                    // texture_array_layers at
                     // 256, so a machine with ~160+ .desktop entries overflowed
                     // it — create_texture("waverunner.icons") panicked the
                     // daemon on cold start (267 layers on a 170-app machine,
@@ -913,15 +914,18 @@ impl Renderer {
 
     /// Upload the icon texture array delivered by the indexer thread.
     /// `icons` holds one premultiplied RGBA8 `ICON_SIZE`² image per app.
-    /// `RANK_HITS_MAX` + `PENDING_INSTALL_CAP` extra layers are reserved
-    /// past the end: the first block for the dynamic package-search icons,
-    /// the second for packages installing in the grid
+    /// `RANK_HITS_MAX` + `PENDING_INSTALL_CAP` + `THUMB_CAP` +
+    /// `MIN_THUMB_CAP` extra layers are reserved past the end, in that
+    /// order: dynamic package-search icons, packages installing in the
+    /// grid, file thumbnails, and minimized-window thumbnails
     /// ([`Renderer::update_icon_layer`]).
     pub fn set_icons(&mut self, icons: &[Vec<u8>]) {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
-        let reserved =
-            crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP + crate::thumbs::THUMB_CAP;
+        let reserved = crate::nix::RANK_HITS_MAX
+            + crate::nix::PENDING_INSTALL_CAP
+            + crate::thumbs::THUMB_CAP
+            + crate::minimized::MIN_THUMB_CAP;
         self.upload_icon_array(icons.len(), reserved, icons.iter());
     }
 
@@ -931,8 +935,16 @@ impl Renderer {
     /// clipboard thumbnails follow at `[notif.len(), notif.len() + clip.len())`,
     /// each addressed by [`IconInst::layer`]. Re-uploaded wholesale whenever
     /// either set changes (see `App::upload_options_icons`).
-    pub fn set_options_icons(&mut self, notif: &[Vec<u8>], clip: &[Vec<u8>]) {
-        self.upload_icon_array(notif.len() + clip.len(), 0, notif.iter().chain(clip.iter()));
+    /// The OPTIONS surface's icon array: notification avatars, then clipboard
+    /// thumbnails, then the playing box's cover art. Order is the layer
+    /// numbering, so every caller offsets by the lengths of the arrays before
+    /// its own — see `App::play_art_slot`.
+    pub fn set_options_icons(&mut self, notif: &[Vec<u8>], clip: &[Vec<u8>], art: &[Vec<u8>]) {
+        self.upload_icon_array(
+            notif.len() + clip.len() + art.len(),
+            0,
+            notif.iter().chain(clip.iter()).chain(art.iter()),
+        );
     }
 
     /// Allocate an **empty** icon array of exactly `layers` layers, each to be
