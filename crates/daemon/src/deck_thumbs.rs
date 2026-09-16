@@ -41,6 +41,7 @@ use calloop::channel::Sender;
 use tracing::{debug, warn};
 
 use crate::apps::ICON_SIZE;
+use crate::deck::Subject;
 
 /// How long to let the compositor settle before photographing.
 ///
@@ -55,9 +56,12 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(450);
 ///
 /// A job carries a *set* because the plugin renders every workspace the set
 /// touches in one pass — so filling several tiles costs about what filling one
-/// does. Single-window jobs are just a set of one.
+/// does. Single-tile jobs are just a set of one.
+///
+/// Tiles are named by [`crate::deck::Subject::key`], so one list can carry both
+/// windows and desks; the worker sorts them out.
 pub struct Request {
-    pub addrs: Vec<String>,
+    pub keys: Vec<String>,
     /// The shape the thumbnail will finally be drawn at. The atlas layer is
     /// square and the tile stretches it, so the capture has to be pre-squashed
     /// by exactly this to come out true — the compositor does that squash when
@@ -66,9 +70,9 @@ pub struct Request {
 }
 
 /// A finished thumbnail: premultiplied RGBA8 `ICON_SIZE`² plus its mip chain,
-/// ready for `Renderer::update_icon_layer`.
+/// ready for `Renderer::update_icon_layer`, filed under the tile's key.
 pub struct Event {
-    pub addr: String,
+    pub key: String,
     pub pixels: Vec<u8>,
 }
 
@@ -78,18 +82,18 @@ pub struct DeckThumbs {
 }
 
 impl DeckThumbs {
-    /// Queue a capture of one window. Dropped silently if the worker is gone —
+    /// Queue a capture of one tile. Dropped silently if the worker is gone —
     /// a missing thumbnail must never be worth a crash.
-    pub fn request(&self, addr: String, aspect: f32) {
-        self.request_many(vec![addr], aspect);
+    pub fn request(&self, key: String, aspect: f32) {
+        self.request_many(vec![key], aspect);
     }
 
     /// Queue a capture of a whole set — one workspace pass for all of them.
-    pub fn request_many(&self, addrs: Vec<String>, aspect: f32) {
-        if addrs.is_empty() {
+    pub fn request_many(&self, keys: Vec<String>, aspect: f32) {
+        if keys.is_empty() {
             return;
         }
-        let _ = self.requests.send(Request { addrs, aspect });
+        let _ = self.requests.send(Request { keys, aspect });
     }
 }
 
@@ -103,8 +107,8 @@ pub fn spawn(results: Sender<Event>) -> DeckThumbs {
                 // Let the swap finish before photographing. Waiting here rather
                 // than on a timer keeps the delay off the event loop entirely.
                 std::thread::sleep(SETTLE);
-                for (addr, pixels) in capture(&req.addrs, req.aspect) {
-                    if results.send(Event { addr, pixels }).is_err() {
+                for (key, pixels) in capture(&req.keys, req.aspect) {
+                    if results.send(Event { key, pixels }).is_err() {
                         return; // event loop is gone
                     }
                 }
@@ -116,12 +120,17 @@ pub fn spawn(results: Sender<Event>) -> DeckThumbs {
     DeckThumbs { requests }
 }
 
-/// Photograph a set of windows through waveview and turn each into an
+/// Photograph a set of tiles through waveview and turn each into an
 /// icon-array layer.
+///
+/// Windows and desks are two different renders in the compositor — one window on
+/// its own, or a whole workspace — so the set is split and each half asked for
+/// in one pass. Both write `<key>.rgba`, which is what lets one loop read them
+/// back.
 ///
 /// Best effort throughout: without the plugin the deck simply keeps title-only
 /// tiles, which is a degraded look rather than a broken one.
-fn capture(addrs: &[String], tile_aspect: f32) -> Vec<(String, Vec<u8>)> {
+fn capture(keys: &[String], tile_aspect: f32) -> Vec<(String, Vec<u8>)> {
     // One directory per daemon, emptied as it is read: the plugin writes one
     // file per window and this is the only reader. Under `XDG_RUNTIME_DIR`
     // (0700, tmpfs) rather than /tmp — these are pictures of the user's
@@ -133,14 +142,30 @@ fn capture(addrs: &[String], tile_aspect: f32) -> Vec<(String, Vec<u8>)> {
     if std::fs::create_dir_all(&dir).is_err() {
         return Vec::new();
     }
-    crate::hypr::capture_deck(addrs, ICON_SIZE, tile_aspect, &dir);
+    let (desks, windows): (Vec<&String>, Vec<&String>) = keys
+        .iter()
+        .partition(|k| matches!(crate::deck::Subject::from_key(k), Some(Subject::Desk(_))));
+    let windows: Vec<String> = windows.into_iter().cloned().collect();
+    let desk_ids: Vec<i64> = desks
+        .iter()
+        .filter_map(|k| match crate::deck::Subject::from_key(k) {
+            Some(Subject::Desk(ws)) => Some(ws),
+            _ => None,
+        })
+        .collect();
+    if !windows.is_empty() {
+        crate::hypr::capture_deck(&windows, ICON_SIZE, tile_aspect, &dir);
+    }
+    if !desk_ids.is_empty() {
+        crate::hypr::capture_desks(&desk_ids, ICON_SIZE, tile_aspect, &dir);
+    }
 
     let mut out = Vec::new();
     // Logged because every failure mode here is silent: the plugin may be
     // absent, an older build, or unable to reach a window, and each of those
     // just leaves a tile looking stale rather than raising anything.
-    debug!("deck: asked for {} thumbnail(s)", addrs.len());
-    for addr in addrs {
+    debug!("deck: asked for {} thumbnail(s)", keys.len());
+    for addr in keys {
         let path = dir.join(format!("{addr}.rgba"));
         let raw = std::fs::read(&path).ok();
         let _ = std::fs::remove_file(&path);
@@ -151,7 +176,7 @@ fn capture(addrs: &[String], tile_aspect: f32) -> Vec<(String, Vec<u8>)> {
             _ => debug!("deck: no thumbnail for {addr}"),
         }
     }
-    debug!("deck: {} of {} landed", out.len(), addrs.len());
+    debug!("deck: {} of {} landed", out.len(), keys.len());
     out
 }
 

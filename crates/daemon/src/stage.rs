@@ -1,10 +1,26 @@
-//! STAGE mode — one task alone on screen, the deck of every other task below.
+//! STAGE mode — one thing alone on screen, the deck of everything else below.
 //!
-//! Bound to Super+Enter. On: the focused task sits alone at the stage rect with
-//! a strip of task thumbnails in the gap beneath it; clicking one puts that task
-//! on the stage. Off: every window's geometry is exactly as it was, and you are
-//! left on whichever task was on the stage — so the mode doubles as a way to
-//! travel rather than only a place to look.
+//! Bound to Super+Enter. On: one task sits alone at the stage rect with a strip
+//! of thumbnails in the gap beneath it; clicking one puts that on the stage.
+//! Off: every window's geometry is exactly as it was, and you are left on
+//! whichever task was on the stage — so the mode doubles as a way to travel
+//! rather than only a place to look.
+//!
+//! ## Two modes: a task, or a desk
+//!
+//! What "one thing" means is [`Mode`], switched from the bar's stage-mode pill
+//! (or `waverunner-ctl stage-mode`) and remembered between sessions:
+//!
+//! * [`Mode::Task`] — one **window**, maximized so it covers its workspace's
+//!   siblings; the deck holds every window.
+//! * [`Mode::Desk`] — one **workspace**, whole, its own tiling laid out inside
+//!   the stage rect; the deck holds every occupied workspace.
+//!
+//! They are the same machine with two settings, not two features. A desk needs
+//! *less*: nothing is maximized, nothing is parked, and showing one is the same
+//! focus that shows a task. The one thing it needs that a task does not is that
+//! the inset reach a workspace of several windows, which the smart-gaps
+//! selectors do not cover — see [`hypr::set_general_gaps`].
 //!
 //! ## Nothing moves
 //!
@@ -60,6 +76,58 @@ pub const GAP_SIDE: i32 = 30;
 /// The air between the OPTIONS bar and the top of the staged window.
 pub const GAP_TOP: i32 = 10;
 
+/// How long the opening is given to play before the compositor's animation is
+/// taken away (see [`Stage::silence`]).
+///
+/// Covers the `windows` leaf, which is the `easy` spring at speed 4.79 in
+/// `/etc/nixos/hyprland.lua` — a little under half a second in practice. Erring
+/// long costs only that a task switch made inside the first half-second animates
+/// like an ordinary resize; erring short would cut the entrance in half, which
+/// is the thing this exists to stop.
+pub const ANIM_SETTLE: std::time::Duration = std::time::Duration::from_millis(520);
+
+/// What the stage puts in the rect — one task, or one whole desk.
+///
+/// The mechanism is the same either way (the inset is a workspace rule, and
+/// showing something is a focus), so the difference is small in code and large
+/// in use: [`Mode::Task`] maximizes one window so it covers its siblings and the
+/// deck holds every window; [`Mode::Desk`] maximizes nothing, so the workspace's
+/// own tiling lays itself out inside the stage rect and the deck holds one tile
+/// per workspace.
+///
+/// Chosen from the bar (the stage-mode pill) or `waverunner-ctl stage-mode`, and
+/// remembered across sessions — it is a preference about how you work, not a
+/// per-session mood.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum Mode {
+    /// One task alone on the stage; a tile per window.
+    #[default]
+    Task,
+    /// A whole workspace, tiling intact, inside the stage rect; a tile per
+    /// workspace.
+    Desk,
+}
+
+impl Mode {
+    /// The other one — the whole of what the bar's pill does.
+    pub fn flipped(self) -> Self {
+        match self {
+            Mode::Task => Mode::Desk,
+            Mode::Desk => Mode::Task,
+        }
+    }
+}
+
+/// Where the chosen mode is remembered between sessions.
+fn mode_path() -> std::path::PathBuf {
+    crate::persist::data_path("stage-mode.json")
+}
+
+/// The mode the stage should open in, from the last session's choice.
+pub fn remembered_mode() -> Mode {
+    crate::persist::read_json(&mode_path()).unwrap_or_default()
+}
+
 /// Stage-mode state. Inert while `on` is false — the mode costs nothing when
 /// it is not running.
 ///
@@ -68,6 +136,9 @@ pub const GAP_TOP: i32 = 10;
 #[derive(Default)]
 pub struct Stage {
     on: bool,
+    /// One task, or one whole desk. Survives the mode being off — it is the
+    /// mode the stage will open in next time.
+    mode: Mode,
     /// The window currently on the stage.
     staged: Option<String>,
     /// Every window whose fullscreen state the stage has changed, mapped to the
@@ -109,12 +180,50 @@ pub struct Stage {
     /// The animation leaves as they were before the stage silenced them, so
     /// leaving restores exactly what it found.
     anim_snapshot: Vec<hypr::AnimLeaf>,
+    /// Whether the silence has landed yet — it arrives a beat after the mode
+    /// opens, so the opening itself still animates. See [`Stage::silence`].
+    silenced: bool,
     /// The deck, left to right: EVERY task, including the staged one, ordered by
     /// workspace. Tiles never change place — see `deck_order`.
     deck: Vec<String>,
+    /// The deck in [`Mode::Desk`]: every occupied workspace, ascending. The
+    /// same promise as `deck` and for the same reason — a desk is always where
+    /// you last saw it, and the order is the one `Super+N` already taught.
+    desks: Vec<i64>,
+    /// The workspace on the stage in [`Mode::Desk`].
+    desk: Option<i64>,
+    /// The desktop's general gaps as the mode found them.
+    ///
+    /// [`Mode::Task`] leaves them alone: the one window on the stage is
+    /// maximized, so it matches the smart-gaps selectors the mode re-points. A
+    /// desk holds however many windows the user put there, which matches neither
+    /// selector, so it is the general gaps that lay it out — and moving them is
+    /// how the desk gets its inset (see [`hypr::set_general_gaps`]).
+    ///
+    /// This is the only record of what they were, so it rides in the breadcrumb:
+    /// a desktop left with a 155px hole along the bottom of every workspace is
+    /// exactly the kind of wrong a dead daemon must not leave behind.
+    gaps: hypr::GapSnapshot,
+    /// The lone window currently wearing the stage frame in [`Mode::Desk`].
+    ///
+    /// A desk showing one window is the same picture as a staged task, and the
+    /// smart-gaps window rules would strip that window's rounding — so it gets
+    /// the frame, exactly as a staged task does. A desk showing several does
+    /// not: dimming *around* each of them would dim them against each other,
+    /// and a borderless window on a desk of three is one you can no longer tell
+    /// is focused.
+    desk_tagged: Option<String>,
 }
 
 impl Stage {
+    /// Off, and opening in whichever mode was last chosen.
+    pub fn new() -> Self {
+        Stage {
+            mode: remembered_mode(),
+            ..Default::default()
+        }
+    }
+
     // Read by the deck's renderer, which lands in the next step; the mode is
     // driven by `stage-toggle` / `stage-show` until then.
     #[allow(dead_code)]
@@ -128,10 +237,158 @@ impl Stage {
         &self.deck
     }
 
-    /// The address on the stage, if any.
+    /// The address on the stage, if any. In [`Mode::Desk`] this is the task
+    /// focus sits on within the shown desk — what the mode leaves you on.
     #[allow(dead_code)]
     pub fn staged(&self) -> Option<&str> {
         self.staged.as_deref()
+    }
+
+    /// One task, or one whole desk.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// The deck in [`Mode::Desk`]: every occupied workspace, ascending.
+    pub fn desks(&self) -> &[i64] {
+        &self.desks
+    }
+
+    /// The workspace on the stage in [`Mode::Desk`].
+    pub fn desk(&self) -> Option<i64> {
+        self.desk
+    }
+
+    /// Switch between showing one task and showing one desk.
+    ///
+    /// Off the stage this only records the preference for next time. On it, the
+    /// screen changes under the user, so the compositor work happens here: the
+    /// two modes differ by what is maximized, what is parked, and which
+    /// workspaces carry the inset.
+    pub fn set_mode(&mut self, mode: Mode) {
+        if self.mode == mode {
+            return;
+        }
+        crate::persist::write_json("stage", &mode_path(), &mode);
+        if !self.on {
+            self.mode = mode;
+            info!("stage: mode {mode:?} (for next time)");
+            return;
+        }
+        let tasks = hypr::stage_tasks();
+        match mode {
+            Mode::Desk => {
+                // Nothing is maximized on a desk. The debt itself stays —
+                // `shaped` still records what each window was found in, which is
+                // what exit hands back — but every stage shape is let go now, so
+                // the workspace lays out as the user built it.
+                for addr in self.shaped.keys() {
+                    hypr::set_fullscreen_of(addr, 0);
+                }
+                if let Some(a) = self.staged.clone() {
+                    hypr::set_stage_tag(&a, false);
+                }
+                // Floating windows are part of the desk — they were only in the
+                // way of a maximized window covering its siblings.
+                for (addr, ws) in std::mem::take(&mut self.parked) {
+                    hypr::unpark_window(&addr, ws);
+                }
+                self.mode = Mode::Desk;
+                self.desks = desk_order(&tasks);
+                self.desk = self
+                    .staged
+                    .as_ref()
+                    .and_then(|a| tasks.iter().find(|t| &t.address == a))
+                    .map(|t| t.workspace)
+                    .or_else(|| self.desks.first().copied());
+                // The inset every desk is laid out into. The snapshot to put
+                // back was taken on the way into the mode, so flipping modes
+                // repeatedly can never record the stage's own gaps as the
+                // desktop's.
+                hypr::set_general_gaps(BAND);
+                self.retag_desk(&tasks);
+            }
+            Mode::Task => {
+                self.mode = Mode::Task;
+                // The desktop's own gaps come back: a staged task is maximized
+                // and takes its rect from the smart-gaps selectors instead, so
+                // leaving the general ones moved would only be felt by the
+                // workspaces nobody is looking at.
+                hypr::restore_general_gaps(&self.gaps);
+                if let Some(a) = self.desk_tagged.take() {
+                    hypr::set_stage_tag(&a, false);
+                }
+                self.deck = deck_order(&tasks, &self.parked);
+                // The task you were looking at takes the stage. Cleared first so
+                // the switch runs its full course — parking the floating
+                // siblings, evicting whatever holds the workspace's fullscreen
+                // slot, maximizing and tagging — rather than returning early on
+                // "already staged".
+                let addr = self
+                    .staged
+                    .take()
+                    .or_else(|| tasks.first().map(|t| t.address.clone()));
+                if let Some(a) = addr {
+                    self.show(&a);
+                }
+            }
+        }
+        write_breadcrumb(&self.anim_snapshot, &self.shaped, &self.parked, &self.gaps);
+        info!("stage: mode {mode:?}");
+    }
+
+    /// Hand the stage frame to the shown desk's window when it is the only one
+    /// there, and take it off whoever had it.
+    fn retag_desk(&mut self, tasks: &[hypr::StageTask]) {
+        let on_desk: Vec<&hypr::StageTask> = tasks
+            .iter()
+            .filter(|t| Some(t.workspace) == self.desk)
+            .collect();
+        // Only a lone TILED window: a lone floating one keeps its own frame
+        // (the smart-gaps rules never touched it), and dimming around it would
+        // darken the desk it is floating over.
+        let alone = match on_desk.as_slice() {
+            [t] if !t.floating => Some(t.address.clone()),
+            _ => None,
+        };
+        if alone == self.desk_tagged {
+            return;
+        }
+        if let Some(prev) = self.desk_tagged.take() {
+            hypr::set_stage_tag(&prev, false);
+        }
+        if let Some(a) = alone {
+            hypr::set_stage_tag(&a, true);
+            self.desk_tagged = Some(a);
+        }
+    }
+
+    /// Take the compositor's animation away, once the opening has played.
+    ///
+    /// The mode wants both things at different moments: the way **in** is a
+    /// movement and should be seen, while switching tasks inside it must be an
+    /// instant cut (Max: "too much animation on the window switching… only the
+    /// ones on the deck"). So the silence arrives late, on the daemon's timer,
+    /// rather than before the window has moved.
+    ///
+    /// Idempotent, and a no-op once the mode is off: the timer can always fire
+    /// after a stage that has already closed, and a silence landing then would
+    /// leave the *desktop* un-animated with nothing left to restore it.
+    pub fn silence(&mut self) {
+        if !self.on || self.silenced {
+            return;
+        }
+        // Silencing wipes every leaf's speed and curve, and the snapshot is the
+        // only thing that can put them back — a bare `enabled = true` does not
+        // even re-enable a leaf. So an empty snapshot (socket error, parse
+        // failure) means silencing would leave the desktop permanently
+        // un-animated, with the breadcrumb recording nothing to recover from
+        // either. A stage that animates its switches is much the lesser evil.
+        if self.anim_snapshot.is_empty() {
+            return;
+        }
+        hypr::silence_animations();
+        self.silenced = true;
     }
 
     pub fn toggle(&mut self) {
@@ -168,6 +425,7 @@ impl Stage {
         // else — focus has to travel to it before it can be maximized there.
         let travelled = focused_live.is_none();
         self.deck = deck_order(&tasks, &self.parked);
+        self.desks = desk_order(&tasks);
         for (i, addr) in self.deck.iter().enumerate() {
             if let Some(t) = tasks.iter().find(|t| &t.address == addr) {
                 debug!(
@@ -196,61 +454,77 @@ impl Stage {
         self.shaped.entry(focused.clone()).or_insert(0);
         // Floating windows sharing the opening task's workspace go out of sight:
         // a maximized stage covers tiled siblings only, and a floating one would
-        // sit on top of it. See [`Stage::parked`].
+        // sit on top of it. See [`Stage::parked`]. A desk has nothing to cover —
+        // its windows are all meant to be on screen — so nothing is parked there.
         self.parked.clear();
         let focused_ws = tasks
             .iter()
             .find(|t| t.address == focused)
             .map(|t| t.workspace);
-        for t in &tasks {
-            if t.floating && t.address != focused && Some(t.workspace) == focused_ws {
-                if let Some(ws) = focused_ws {
-                    self.parked.insert(t.address.clone(), ws);
+        if self.mode == Mode::Task {
+            for t in &tasks {
+                if t.floating && t.address != focused && Some(t.workspace) == focused_ws {
+                    if let Some(ws) = focused_ws {
+                        self.parked.insert(t.address.clone(), ws);
+                    }
                 }
             }
         }
         self.staged = Some(focused);
+        self.desk = focused_ws;
         self.on = true;
 
         // Snapshot the animation leaves BEFORE silencing them, and write it into
         // the breadcrumb — silencing wipes each leaf's speed and curve, so this
         // record is the only way back if the daemon dies while staged.
         self.anim_snapshot = hypr::snapshot_animations();
-        write_breadcrumb(&self.anim_snapshot, &self.shaped, &self.parked);
+        // Read before anything is moved, and in both modes: a mid-session switch
+        // to desks must find the desktop's own numbers here, not the stage's.
+        self.gaps = hypr::snapshot_general_gaps();
+        if self.mode == Mode::Desk {
+            hypr::set_general_gaps(BAND);
+        }
+        write_breadcrumb(&self.anim_snapshot, &self.shaped, &self.parked, &self.gaps);
         // Silencing wipes every leaf's speed and curve, and the snapshot is the
         // only thing that can put them back — a bare `enabled = true` does not
         // even re-enable a leaf. So an empty snapshot (socket error, parse
         // failure) means silencing would leave the desktop permanently
         // un-animated, with the breadcrumb recording nothing to recover from
         // either. A stage that animates its switches is much the lesser evil.
-        let silenced = !self.anim_snapshot.is_empty();
-        if !silenced {
+        if self.anim_snapshot.is_empty() {
             warn!("stage: no animation snapshot; leaving compositor animation alone");
         }
+        // NOT silenced here: the opening itself is a movement, and the whole of
+        // it is the compositor carrying the task into the stage rect. Silencing
+        // before that made the mode arrive as a cut. [`Stage::silence`] takes the
+        // animation away once the opening has played — see `ANIM_SETTLE`.
         hypr::set_stage_gaps(BAND);
         hypr::assert_stage_frame();
-        // The stage owns the screen: only the window, the deck and the OPTIONS
-        // bar. The overview would cover all three, so its key goes away.
-        hypr::set_overview_bind(false);
+        // The overview stays reachable from inside the mode (Max, 2026-09-12):
+        // it is the map you use to find the task you want on the stage, and it
+        // hands whatever you land on straight to it. Super+R therefore keeps its
+        // binding; the stage submap carries its own copy, since a submap hides
+        // the ordinary keymap.
         hypr::set_plugin_stage(true);
-        if silenced {
-            hypr::silence_animations();
-        }
         hypr::set_stage_submap(true);
         // The entry sweep: everything that arrived fullscreen comes out of it,
         // so no pre-existing fullscreen window can hold its workspace's one slot
         // against a task the user later puts on the stage. The task taking the
         // stage is skipped — it goes straight to the stage shape rather than
-        // through plain windowed, which would be a visible bounce.
+        // through plain windowed, which would be a visible bounce. On a desk
+        // nothing is maximized at all, so it is swept with the rest: a
+        // fullscreen window there would cover the whole screen, gaps and deck
+        // included.
         //
         // One dispatch each, deliberately: a single eval aborts at the first
         // window that has closed since the read above, leaving the rest
         // fullscreen with no record that they were missed.
         let staged = self.staged.clone();
+        let keep_shaped = (self.mode == Mode::Task).then(|| staged.clone()).flatten();
         for addr in self
             .shaped
             .keys()
-            .filter(|a| Some(a.as_str()) != staged.as_deref())
+            .filter(|a| Some(a.as_str()) != keep_shaped.as_deref())
         {
             hypr::set_fullscreen_of(addr, 0);
         }
@@ -264,10 +538,23 @@ impl Stage {
             if travelled {
                 hypr::focus_window_no_warp(&a);
             }
-            hypr::set_fullscreen_of(&a, 1);
-            hypr::set_stage_tag(&a, true);
+            match self.mode {
+                Mode::Task => {
+                    hypr::set_fullscreen_of(&a, 1);
+                    hypr::set_stage_tag(&a, true);
+                }
+                // The desk needs no shaping: the workspace rule is the whole of
+                // it, and the compositor has already laid the windows into the
+                // inset. All that is left is the frame for a desk of one.
+                Mode::Desk => self.retag_desk(&tasks),
+            }
         }
-        info!("stage: on ({} in the deck)", self.deck.len());
+        info!(
+            "stage: on, {:?} ({} tasks, {} desks)",
+            self.mode,
+            self.deck.len(),
+            self.desks.len()
+        );
     }
 
     /// Leave: un-maximize, put the smart-gaps rules and the animation back, and
@@ -284,6 +571,13 @@ impl Stage {
         if !self.on {
             return;
         }
+        // The animation comes back BEFORE anything moves, so the way out is the
+        // way in played backwards: the task settles out of the stage rect
+        // instead of snapping there. Everything below this line is a resize the
+        // user should see happen. (It used to be the last thing restored, which
+        // is exactly why leaving read as a cut.)
+        hypr::restore_animations(&std::mem::take(&mut self.anim_snapshot));
+        self.silenced = false;
         // Focus the staged task FIRST — both because that is where we are
         // deliberately leaving the user, and because focusing a window kicks
         // fullscreen off its same-workspace siblings: done after the restore,
@@ -307,10 +601,15 @@ impl Stage {
         for (addr, ws) in std::mem::take(&mut self.parked) {
             hypr::unpark_window(&addr, ws);
         }
+        if let Some(addr) = self.desk_tagged.take() {
+            hypr::set_stage_tag(&addr, false);
+        }
         hypr::clear_stage_gaps();
-        hypr::restore_animations(&std::mem::take(&mut self.anim_snapshot));
+        // Unconditionally, whichever mode was up: it writes back what was read
+        // on the way in, so on a stage that never showed a desk it writes the
+        // values that are already there.
+        hypr::restore_general_gaps(&self.gaps);
         hypr::set_stage_submap(false);
-        hypr::set_overview_bind(true);
         hypr::set_plugin_stage(false);
 
         // Nothing to travel back to: focus is already on the staged task, which
@@ -318,7 +617,9 @@ impl Stage {
 
         self.on = false;
         self.staged = None;
+        self.desk = None;
         self.deck.clear();
+        self.desks.clear();
         clear_breadcrumb();
         info!("stage: off");
     }
@@ -390,7 +691,10 @@ impl Stage {
         // Moving a user's window is the most consequential thing this mode does,
         // so every move it makes is on the record.
         if !park.is_empty() || !unpark.is_empty() {
-            debug!("stage: park {park:?} -> ws{}, unpark {unpark:?}", hypr::PARK_WS);
+            debug!(
+                "stage: park {park:?} -> ws{}, unpark {unpark:?}",
+                hypr::PARK_WS
+            );
         }
 
         // Whoever holds the fullscreen slot on the workspace we are moving to
@@ -440,7 +744,10 @@ impl Stage {
         // The deck itself does not change — tiles keep their places. Only which
         // one is raised.
         self.staged = Some(addr.to_owned());
-        write_breadcrumb(&self.anim_snapshot, &self.shaped, &self.parked);
+        // Kept current even here, so switching to desks lands on the desk of the
+        // task you were just looking at rather than the one you opened on.
+        self.desk = target_ws.or(self.desk);
+        write_breadcrumb(&self.anim_snapshot, &self.shaped, &self.parked, &self.gaps);
 
         // The focus bounce's neighbour, from the read already made — a lookup
         // inside the swap cost a second `j/clients` round-trip at click time.
@@ -450,9 +757,7 @@ impl Stage {
         let neighbor = states
             .iter()
             .find(|(a, s)| {
-                a.as_str() != addr
-                    && Some(s.workspace) == target_ws
-                    && !park.contains(*a)
+                a.as_str() != addr && Some(s.workspace) == target_ws && !park.contains(*a)
             })
             .map(|(a, _)| a.clone());
 
@@ -469,6 +774,44 @@ impl Stage {
         true
     }
 
+    /// Put workspace `ws` on the stage — the desk-mode switch.
+    ///
+    /// Nothing is moved, shaped or parked: a desk is shown by **focusing** a
+    /// task on it, which is what brings its workspace forward. Focus lands on
+    /// that desk's most recently used task, so a desk you come back to hands you
+    /// the window you left off in rather than an arbitrary one.
+    ///
+    /// Returns whether the desk is now on the stage, so the deck can decline to
+    /// raise a tile it failed to show.
+    pub fn show_desk(&mut self, ws: i64) -> bool {
+        if !self.on || self.mode != Mode::Desk {
+            debug!("stage: show_desk({ws}) ignored, not on a desk");
+            return false;
+        }
+        if self.desk == Some(ws) {
+            return true;
+        }
+        // Focus-recency ordered, so the first match IS the task last used there.
+        let tasks = hypr::stage_tasks();
+        let Some(task) = tasks.iter().find(|t| t.workspace == ws) else {
+            // The deck can outlive a desk whose last window closed behind our
+            // back.
+            warn!("stage: desk {ws} is empty, dropping it from the deck");
+            self.desks.retain(|d| *d != ws);
+            return false;
+        };
+        // Nothing to set up: the inset is the desktop's general gaps, so a desk
+        // that did not exist when the mode opened already has it.
+        self.desk = Some(ws);
+        // What the mode will leave the user on, exactly as `staged` means in
+        // task mode.
+        self.staged = Some(task.address.clone());
+        hypr::focus_window_no_warp(&task.address);
+        self.retag_desk(&tasks);
+        write_breadcrumb(&self.anim_snapshot, &self.shaped, &self.parked, &self.gaps);
+        true
+    }
+
     /// Re-derive the deck from the live task list, keeping whatever is on stage.
     ///
     /// The deck is a map of the desktop, and the desktop changes while the mode
@@ -481,6 +824,12 @@ impl Stage {
             return;
         }
         self.deck = deck_order(tasks, &self.parked);
+        self.desks = desk_order(tasks);
+        if self.mode == Mode::Desk {
+            // The window that appeared (or the one that closed) may have changed
+            // whether the shown desk is a desk of one.
+            self.retag_desk(tasks);
+        }
     }
 
     /// Drop a closed window from the deck (called on a compositor close event).
@@ -496,6 +845,35 @@ impl Stage {
         // address that no longer exists.
         self.shaped.remove(addr);
         self.parked.remove(addr);
+        if self.desk_tagged.as_deref() == Some(addr) {
+            self.desk_tagged = None;
+        }
+        if self.mode == Mode::Desk {
+            let tasks = hypr::stage_tasks();
+            self.desks = desk_order(&tasks);
+            // Only an emptied desk needs anything done: the shown desk survives
+            // its other windows closing, and the compositor hands focus on to a
+            // sibling by itself.
+            if self.desk.is_some_and(|ws| !self.desks.contains(&ws)) {
+                self.desk = None;
+                self.staged = None;
+                let candidates = self.desks.clone();
+                for ws in candidates {
+                    if self.show_desk(ws) {
+                        break;
+                    }
+                }
+            } else {
+                if self.staged.as_deref() == Some(addr) {
+                    self.staged = tasks
+                        .iter()
+                        .find(|t| Some(t.workspace) == self.desk)
+                        .map(|t| t.address.clone());
+                }
+                self.retag_desk(&tasks);
+            }
+            return;
+        }
         if self.staged.as_deref() == Some(addr) {
             self.staged = None;
             // Walk the deck rather than trying only the leftmost: several
@@ -535,6 +913,28 @@ fn deck_order(
     ordered.into_iter().map(|t| t.address.clone()).collect()
 }
 
+/// The desk deck's order: every **occupied** workspace, ascending.
+///
+/// Empty workspaces are left out — a desk with nothing on it is not a place you
+/// travel to, and the row would carry a tile you could never recognise. Ascending
+/// rather than by recency for the same reason the task deck sorts by workspace:
+/// it is the order `Super+N` already taught, so the row is a map rather than a
+/// history.
+fn desk_order(tasks: &[hypr::StageTask]) -> Vec<i64> {
+    let mut out: Vec<i64> = tasks
+        .iter()
+        // The park workspace is machinery, not a desk: it only ever holds
+        // windows the mode itself moved out of the way, and it is dissolved on
+        // exit. (It cannot hold any in desk mode, but a mode switch mid-session
+        // can leave one there for as long as it takes to bring it home.)
+        .filter(|t| t.workspace != hypr::PARK_WS)
+        .map(|t| t.workspace)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// Breadcrumb path — runtime dir, so it cannot survive a reboot.
 fn breadcrumb() -> Option<PathBuf> {
     let dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join("waverunner");
@@ -546,6 +946,7 @@ fn write_breadcrumb(
     animations: &[hypr::AnimLeaf],
     shaped: &std::collections::BTreeMap<String, i64>,
     parked: &std::collections::BTreeMap<String, i64>,
+    gaps: &hypr::GapSnapshot,
 ) {
     let Some(path) = breadcrumb() else {
         return;
@@ -556,8 +957,15 @@ fn write_breadcrumb(
     // parked on another workspace, and in both cases where each belongs is not
     // visible from the outside. A parked window nobody remembers is a window the
     // user has simply lost.
-    let body =
-        serde_json::json!({ "animations": animations, "shaped": shaped, "parked": parked });
+    // The general gaps travel too: showing a desk moves them, and a dead daemon
+    // would otherwise leave a 155px hole along the bottom of every workspace
+    // with nothing on screen to explain it.
+    let body = serde_json::json!({
+        "animations": animations,
+        "shaped": shaped,
+        "parked": parked,
+        "gaps": gaps,
+    });
     if let Err(e) = std::fs::write(&path, body.to_string()) {
         warn!("stage: could not write breadcrumb: {e}");
     }
@@ -630,6 +1038,15 @@ pub fn recover_if_stranded() {
         hypr::unpark_window(addr, *ws);
     }
     hypr::clear_stage_gaps();
+    // The general gaps, which a desk on the stage had moved. Nothing on screen
+    // says what they were, so the record is the only way back — and its default
+    // is the config's own numbers, for a breadcrumb too old or too broken to
+    // carry them.
+    let gaps: hypr::GapSnapshot = record
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v["gaps"].clone()).ok())
+        .unwrap_or_default();
+    hypr::restore_general_gaps(&gaps);
     // The tag sweep is wider than the shaped set on purpose: a breadcrumb
     // written before the last switch would name the wrong window, and a leftover
     // `golem-stage` tag keeps a border and rounding on it forever. Clearing it
@@ -640,7 +1057,6 @@ pub fn recover_if_stranded() {
     // Most important of the lot: a stranded stage leaves the keyboard in the
     // stage submap, where almost nothing is bound.
     hypr::set_stage_submap(false);
-    hypr::set_overview_bind(true);
     hypr::set_plugin_stage(false);
 
     if let Some(v) = record {
@@ -752,5 +1168,52 @@ mod tests {
         let after = deck_order(&tasks, &Default::default());
         assert_eq!(before, after);
         assert_eq!(before, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn a_desk_deck_holds_one_tile_per_occupied_workspace() {
+        // Three windows on ws1 are ONE desk — that is the whole difference
+        // between the two decks.
+        let tasks = vec![
+            task("a", 1),
+            task("b", 1),
+            task("c", 1),
+            task("d", 4),
+            task("e", 2),
+        ];
+        assert_eq!(desk_order(&tasks), vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn the_desk_deck_is_ascending_whatever_the_focus_order() {
+        // `stage_tasks` hands them over most-recently-focused first; the row is
+        // a map, so it sorts by number regardless.
+        let tasks = vec![task("a", 10), task("b", 1), task("c", 4)];
+        assert_eq!(desk_order(&tasks), vec![1, 4, 10]);
+    }
+
+    #[test]
+    fn the_park_workspace_is_not_a_desk() {
+        // Windows the mode itself moved aside must not grow a tile of their
+        // own — it would be a desk the user never made and cannot get back to.
+        let tasks = vec![task("a", 1), task("floater", hypr::PARK_WS)];
+        assert_eq!(desk_order(&tasks), vec![1]);
+    }
+
+    #[test]
+    fn a_desk_stays_in_its_slot_when_another_empties() {
+        // The task deck's promise, for desks: closing everything on ws4 must not
+        // move ws10's tile relative to ws1's.
+        let before = desk_order(&[task("a", 1), task("b", 4), task("c", 10)]);
+        let after = desk_order(&[task("a", 1), task("c", 10)]);
+        assert_eq!(before, vec![1, 4, 10]);
+        assert_eq!(after, vec![1, 10]);
+        assert_eq!(before.first(), after.first());
+    }
+
+    #[test]
+    fn the_mode_flips_and_comes_back() {
+        assert_eq!(Mode::Task.flipped(), Mode::Desk);
+        assert_eq!(Mode::Desk.flipped().flipped(), Mode::Desk);
     }
 }

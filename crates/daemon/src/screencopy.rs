@@ -69,6 +69,54 @@ const SETTLE_BURST: Duration = Duration::from_millis(180);
 /// (pixel count, r sum, g sum, b sum) so the winning bucket can be averaged.
 type ColorHist = std::collections::HashMap<(u8, u8, u8), (u32, u32, u32, u32)>;
 
+/// A bar-side frost sample reads from beside its box to the middle of the
+/// screen — ITS OWN HALF, not a fixed-width patch beside the box.
+///
+/// Both extremes were tried on 2026-09-13. A narrow patch tracks a gradient
+/// beautifully and is far too twitchy: it slides whenever a satellite pill
+/// appears next to it, and a 90px slide over a wallpaper with any feature in it
+/// swung the clipboard's colour by 3x on open. The whole screen, on the other
+/// hand, is what the clipboard box used to read and the reason it wore the far
+/// side's colour. Half each is the stable middle: it still tells a blue left
+/// from an orange right (which is the whole point of two samples), and one pill
+/// moving changes a twentieth of it.
+const FROST_HALF: f32 = 0.5;
+
+/// The columns a sample may read: starting at `anchor` and stepping outward in
+/// direction `dir`, take every second column that isn't ours, until `want` are
+/// gathered or the walk leaves `lo..hi`. Runs of our own paint (`exclude`) are
+/// jumped over, not merely skipped — the walk comes out the far side and keeps
+/// collecting, so a box wider than the sample can no longer starve it.
+fn clean_cols(
+    anchor: usize,
+    dir: isize,
+    want: usize,
+    lo: usize,
+    hi: usize,
+    exclude: &[(usize, usize)],
+) -> Vec<usize> {
+    let mut cols = Vec::with_capacity(want.min(hi.saturating_sub(lo) / 2 + 1));
+    let mut x = anchor as isize;
+    while cols.len() < want && x >= lo as isize && (x as usize) < hi {
+        let xu = x as usize;
+        match exclude.iter().find(|&&(ex0, ex1)| xu >= ex0 && xu < ex1) {
+            // Land one column clear of the run, in the direction of travel.
+            Some(&(ex0, ex1)) => {
+                x = if dir > 0 {
+                    ex1 as isize
+                } else {
+                    ex0 as isize - 1
+                }
+            }
+            None => {
+                cols.push(xu);
+                x += dir * 2;
+            }
+        }
+    }
+    cols
+}
+
 /// Which surface a sampled row feeds, and which regime it was read under.
 /// The bar and the dock each have a "matched a flush window" reading and a
 /// "no window, read the frosted backdrop" reading — four combinations total,
@@ -77,19 +125,19 @@ type ColorHist = std::collections::HashMap<(u8, u8, u8), (u32, u32, u32, u32)>;
 pub(crate) enum Slot {
     /// OPTIONS bar, window-flush match → `options_bar_matched`.
     BarMatch,
-    /// OPTIONS bar, no flush window → wallpaper frost beside the NOTIF box
-    /// (`notif_rect`) → `options_pill_color`.
+    /// OPTIONS bar, no flush window → wallpaper frost over the bar's RIGHT
+    /// half, outward from the notification box → `options_pill_color`.
     BarFrost,
     /// Dock, window-flush match → `dock_bar_matched`.
     DockMatch,
     /// Dock, no flush window → wallpaper frost → `dock_pill_color`.
     DockFrost,
-    /// No flush window → wallpaper frost beside the CLIPBOARD box
-    /// (`clip_rect`) → `clip_pill_color`. Its own slot, sampled at its own
-    /// x-position: it used to just reuse `options_pill_color` (sampled next
-    /// to notif, the opposite edge of the bar), which is why the clipboard
-    /// box's fill/zebra took whatever the wallpaper happens to be on the far
-    /// side of the screen instead of what's actually behind it.
+    /// No flush window → wallpaper frost over the bar's LEFT half, outward
+    /// from the clipboard/settings drawers → `clip_pill_color`. Its own slot,
+    /// sampled on its own side: it used to just reuse `options_pill_color`
+    /// (read next to notif, the opposite edge of the bar), which is why the
+    /// clipboard box's fill/zebra took whatever the wallpaper happens to be on
+    /// the far side of the screen instead of what's actually behind it.
     ClipFrost,
 }
 
@@ -232,11 +280,14 @@ impl App {
     /// (Max, 2026-08-31: "with the bg i set up, the contrast is garbage").
     /// Same 700ms cadence the matched path already pays.
     ///
-    /// Requests TWO frost samples off the same row — [`Slot::BarFrost`]
-    /// beside the notif box AND [`Slot::ClipFrost`] beside the clipboard box
-    /// — because they sit at opposite edges of the bar and a wallpaper can
-    /// genuinely differ between them (see [`Slot::ClipFrost`]'s doc for the
-    /// bug this fixes: the clipboard box used to borrow notif's sample).
+    /// Requests TWO frost samples off the same row — [`Slot::BarFrost`] for
+    /// the right half of the bar, [`Slot::ClipFrost`] for the left — because
+    /// the boxes sit at opposite edges and a wallpaper can genuinely differ
+    /// between them (see [`Slot::ClipFrost`]'s doc for the bug this fixes: the
+    /// clipboard box used to borrow notif's sample). Each reads outward from
+    /// its own edge's drawers to the middle of the screen; what makes that
+    /// honest is [`read_sample`](App::read_sample) skipping every column we
+    /// paint ourselves, pills included.
     fn eval_transparent_bar(&mut self) {
         let had_match = self.options_bar_matched.take().is_some();
         if let Ok(mon) = hypr::focused_monitor() {
@@ -680,7 +731,7 @@ impl App {
         // surface keeps reading the live screen to either side. A small
         // Vec, not one range — the two drawers can be open at once.
         let mut exclude: Vec<(usize, usize)> = Vec::new();
-        if slot == Slot::BarMatch {
+        if matches!(slot, Slot::BarMatch | Slot::BarFrost | Slot::ClipFrost) {
             let sw = self.options_size.0 as f32;
             if sw > 0.0 {
                 let px = width as f32 / sw;
@@ -694,11 +745,40 @@ impl App {
                         exclude.push((ex0.saturating_sub(1), ex1));
                     }
                 };
-                if self.notif.occludes_below_bar() {
-                    push_exclusion(self.notif_rect());
-                }
-                if self.clip_occludes_below_bar() {
-                    push_exclusion(self.clip_rect());
+                if slot == Slot::BarMatch {
+                    // Below the bar, only what is actually painted there.
+                    if self.notif.occludes_below_bar() {
+                        push_exclusion(self.notif_rect());
+                    }
+                    if self.clip_occludes_below_bar() {
+                        push_exclusion(self.clip_rect());
+                    }
+                    if self.stats_occludes_below_bar() {
+                        push_exclusion(self.stats_geom());
+                    }
+                } else {
+                    // The FROST row runs through the middle of the bar — the
+                    // one row no window can reach (the reserved zone), which is
+                    // exactly why it is sampled there. But it is also the row
+                    // every PILL sits on, and a pill is our own paint: the band
+                    // beside the clipboard landed squarely on the clipboard and
+                    // cava pills and averaged OUR grey (#282a2c) while the band
+                    // beside notif read the true wallpaper (#01060a) — so one
+                    // box came out twice as light as the other with nothing on
+                    // screen to explain it (Max, 2026-09-13: "why is the
+                    // clipboard bluer than the notis?").
+                    for r in self.options_pill_columns() {
+                        push_exclusion(r);
+                    }
+                    // And each edge's drawers are excluded at their FULL width
+                    // whether they are open or not, so opening a box cannot
+                    // move the sample — otherwise the colour would switch on
+                    // open, the one thing Max already ruled out for the dock
+                    // ("i dont want a colors switch between the dock and the
+                    // open boxmenu", 2026-09-10).
+                    let span = |l: f32, r: f32| crate::content::Rect::new(l, 0.0, r - l, 1.0);
+                    push_exclusion(span(0.0, self.options_left_drawer_right()));
+                    push_exclusion(span(self.options_right_drawer_left(), sw));
                 }
             }
         }
@@ -737,45 +817,49 @@ impl App {
             }
         }
 
-        // Frost band: the bar reads *immediately beside its own box* (so the
-        // box takes the wallpaper colour right next to the pill — sampling
-        // the far side instead mis-matches wallpapers that vary
-        // left-to-right) — notif reads leftward from its right-edge pill,
-        // clipboard reads rightward from its left-edge pill, its own
-        // dedicated sample so it stops borrowing notif's (see
-        // [`Slot::ClipFrost`]). The dock has no adjacent box to dodge, so it
-        // reads broadly across its own width instead.
-        let frost_band: Option<(usize, usize)> = match slot {
+        // Frost sample: the bar reads *immediately beside its own box* (so the
+        // box takes the wallpaper colour right next to the pill — sampling the
+        // far side instead mis-matches wallpapers that vary left-to-right) —
+        // notif walks leftward from its right-edge pill, the clipboard walks
+        // rightward from its left-edge pill, its own dedicated sample so it
+        // stops borrowing notif's (see [`Slot::ClipFrost`]).
+        //
+        // It WALKS outward instead of reading a fixed band because everything
+        // of ours on that row is excluded (every pill, and an open box's top
+        // strip). A fixed band can be covered entirely — the settings
+        // readout's panel is wider than the clipboard's, so with it open the
+        // whole band was our own paint and the left frost went stale — while a
+        // walk steps over what is ours and keeps going until it has
+        // [`FROST_COLS`] clean columns of real screen. Nearest clean pixels
+        // win, which is the rule the frost always meant.
+        //
+        // The dock has no adjacent box to dodge, so it reads broadly across
+        // its own width instead.
+        let frost_walk: Option<(usize, isize)> = match slot {
             Slot::BarFrost => {
                 let sw = self.options_size.0 as f32;
-                let r = self.notif_rect();
-                if sw > 0.0 {
+                (sw > 0.0).then(|| {
                     let px = width as f32 / sw;
-                    let box_left = (r.x * px).max(0.0) as usize;
+                    let edge = (self.options_right_drawer_left() * px).max(0.0) as usize;
                     let gap = (width / 100).max(2);
-                    let bandw = (width / 8).max(24);
-                    let band_r = box_left.saturating_sub(gap).min(width);
-                    let band_l = band_r.saturating_sub(bandw).max(outer);
-                    (band_r > band_l + 2).then_some((band_l, band_r))
-                } else {
-                    None
-                }
+                    let anchor = edge.saturating_sub(gap).min(width.saturating_sub(1));
+                    (anchor, -1)
+                })
             }
             Slot::ClipFrost => {
                 let sw = self.options_size.0 as f32;
-                let r = self.clip_rect();
-                if sw > 0.0 {
+                (sw > 0.0).then(|| {
                     let px = width as f32 / sw;
-                    let box_right = ((r.x + r.w) * px).min(width as f32).max(0.0) as usize;
+                    let edge = (self.options_left_drawer_right() * px)
+                        .min(width as f32)
+                        .max(0.0) as usize;
                     let gap = (width / 100).max(2);
-                    let bandw = (width / 8).max(24);
-                    let band_l = (box_right + gap).min(width);
-                    let band_r = (band_l + bandw).min(width.saturating_sub(outer));
-                    (band_r > band_l + 2).then_some((band_l, band_r))
-                } else {
-                    None
-                }
+                    ((edge + gap).min(width.saturating_sub(1)), 1)
+                })
             }
+            _ => None,
+        };
+        let frost_band: Option<(usize, usize)> = match slot {
             Slot::DockFrost => (width > outer * 2).then_some((outer, width - outer)),
             _ => None,
         };
@@ -793,9 +877,27 @@ impl App {
         let map = pool.mmap();
         let bytes: &[u8] = &map[..];
 
-        // Frost path: average the wanted band (see above).
+        // Frost path: average the clean columns this slot asked for (see above)
+        // — the nearest ones outward from a bar box, or the dock's own width.
         if matches!(slot, Slot::BarFrost | Slot::DockFrost | Slot::ClipFrost) {
-            let (bl, br) = frost_band?;
+            let cols = match (frost_walk, frost_band) {
+                (Some((anchor, dir)), _) => {
+                    // Bounded by the screen's middle (see [`FROST_HALF`]) —
+                    // unless the drawers already reach past it, in which case
+                    // this side takes what is left rather than nothing.
+                    let mid = (width as f32 * FROST_HALF) as usize;
+                    let (lo, hi) = match dir {
+                        d if d > 0 => (outer, mid.max(anchor + 2).min(width - outer)),
+                        _ => (mid.min(anchor.saturating_sub(2)).max(outer), width - outer),
+                    };
+                    clean_cols(anchor, dir, usize::MAX, lo, hi, &exclude)
+                }
+                (None, Some((bl, br))) => clean_cols(bl, 1, usize::MAX, bl, br, &exclude),
+                (None, None) => return None,
+            };
+            if cols.is_empty() {
+                return None;
+            }
             let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
             for dy in 0u32..=5 {
                 let row = if cap.y_invert {
@@ -807,29 +909,25 @@ impl App {
                 let Some(rowbytes) = bytes.get(start..start + width * 4) else {
                     continue;
                 };
-                let mut x = bl;
-                while x < br {
-                    // Skip columns our own card/drawers occupy (see
-                    // `exclude` above) — same dodge the mode path does.
-                    if let Some(&(_, ex1)) =
-                        exclude.iter().find(|&&(ex0, ex1)| x >= ex0 && x < ex1)
-                    {
-                        x = ex1.max(x + 2);
-                        continue;
-                    }
+                for &x in &cols {
                     let (rr, gg, bb) = channels(cap.format, &rowbytes[x * 4..x * 4 + 4]);
                     r += rr as u64;
                     g += gg as u64;
                     b += bb as u64;
                     n += 1;
-                    x += 2;
                 }
             }
             if n == 0 {
                 return None;
             }
             let (mr, mg, mb) = ((r / n) as u8, (g / n) as u8, (b / n) as u8);
-            debug!("{}: frost colour = #{mr:02x}{mg:02x}{mb:02x}", slot.tag());
+            let (first, last) = (cols[0], cols[cols.len() - 1]);
+            tracing::trace!("{}: frost skipped {exclude:?}", slot.tag());
+            debug!(
+                "{}: frost colour = #{mr:02x}{mg:02x}{mb:02x} ({} clean cols {first}..{last} @ row {base})",
+                slot.tag(),
+                cols.len()
+            );
             return Some([
                 srgb_to_linear(mr as f32 / 255.0),
                 srgb_to_linear(mg as f32 / 255.0),
@@ -1027,5 +1125,39 @@ impl Dispatch<WlBuffer, ()> for App {
     ) {
         // Release is ignored — screencopy buffers are single-use and we
         // destroy them explicitly after reading.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_cols;
+
+    /// With nothing of ours in the way the walk is just "every second column,
+    /// outward from the anchor" — in both directions.
+    #[test]
+    fn walks_outward_from_the_anchor() {
+        assert_eq!(clean_cols(10, 1, 3, 0, 100, &[]), vec![10, 12, 14]);
+        assert_eq!(clean_cols(10, -1, 3, 0, 100, &[]), vec![10, 8, 6]);
+    }
+
+    /// A run of our own paint is JUMPED, not abandoned: the walk comes out the
+    /// far side and keeps collecting. This is what stops a box wider than the
+    /// sample from starving it (the settings readout over the clip band).
+    #[test]
+    fn jumps_over_our_own_paint() {
+        let ours = [(12, 40)];
+        assert_eq!(clean_cols(10, 1, 3, 0, 100, &ours), vec![10, 40, 42]);
+        // …and leftward, landing one column clear of the run's near edge.
+        assert_eq!(clean_cols(45, -1, 3, 0, 100, &ours), vec![45, 43, 41]);
+        assert_eq!(clean_cols(41, -1, 2, 0, 100, &ours), vec![41, 11]);
+    }
+
+    /// Bounds end the walk; an anchor with no room at all yields nothing
+    /// (the caller keeps the previous colour rather than inventing one).
+    #[test]
+    fn stops_at_the_bounds() {
+        assert_eq!(clean_cols(6, -1, 9, 4, 100, &[]), vec![6, 4]);
+        assert!(clean_cols(50, 1, 9, 0, 50, &[]).is_empty());
+        assert!(clean_cols(10, 1, 9, 0, 100, &[(0, 100)]).is_empty());
     }
 }

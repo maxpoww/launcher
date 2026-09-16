@@ -1,7 +1,10 @@
-//! The STAGE deck — the strip of task tiles under the staged window.
+//! The STAGE deck — the strip of tiles under the stage.
 //!
-//! One tile per open task — **including the one on stage** — floating on the
-//! wallpaper near the bottom edge: no band, no glass, nothing behind them.
+//! One tile per thing the stage can show — **including the one on it** —
+//! floating on the wallpaper near the bottom edge: no band, no glass, nothing
+//! behind them. What a tile stands for follows [`crate::stage::Mode`]: a window
+//! in task mode, a whole workspace in desk mode (see [`Subject`]). The row, the
+//! motion and the rules below are the same either way.
 //!
 //! ## Tiles never move
 //!
@@ -41,6 +44,57 @@ const BOTTOM_MARGIN: f32 = 4.0;
 const RAISE: f32 = 5.0;
 /// The raise, in seconds — the deck's only motion now.
 const RAISE_DUR: f32 = 0.20;
+
+/// How far below its slot a tile starts when the mode opens: its own height,
+/// the margin under it, and a little more so the frame of a raised tile clears
+/// the screen edge too. Far enough to be entirely off the surface, which is
+/// what makes the arrival read as coming from outside the screen rather than
+/// from inside the band.
+const RISE: f32 = TILE_H + BOTTOM_MARGIN + 24.0;
+/// How long the row takes to rise into place, in seconds. A little under the
+/// compositor's own window animation, so the deck is home just before the task
+/// finishes settling into the stage rect rather than trailing it.
+const RISE_DUR: f32 = 0.26;
+
+/// Finger travel, in logical px, that moves the border one tile along.
+///
+/// Shorter than the compositor's `workspace_swipe_distance` (300) on purpose: a
+/// workspace swipe commits to one place per gesture, while this one scrubs a row
+/// of small things and wants two or three of them in a comfortable flick.
+const SWIPE_STEP: f32 = 120.0;
+
+/// How long after a gesture commits that a *new* one is ignored.
+///
+/// The plugin sends each message on its own thread, so the end can overtake the
+/// last update — and an update landing after the commit looks exactly like the
+/// first message of a fresh gesture. Without this it would walk the border off
+/// the task just staged, and the guard below would then stage *that*: one flick,
+/// two switches. A tail this short cannot swallow a real second gesture, which
+/// takes a finger lift and a new touch.
+const SWIPE_QUARANTINE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How long a swipe may go quiet before the border is committed anyway.
+///
+/// The end event is what normally commits. This is the backstop for never
+/// getting one — a lost event, a plugin that died mid-gesture — because the one
+/// thing the deck must never do is keep pointing at a task that is not on the
+/// stage.
+const SWIPE_GUARD: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// A 3/4-finger swipe in progress over the deck.
+///
+/// The border moves as you go and nothing is staged until you let go, so the
+/// gesture is a *look* rather than a series of switches: scrubbing past four
+/// tasks does not put four windows on the stage on the way through.
+pub struct DeckSwipe {
+    /// Where the gesture started from. Every update is measured from here rather
+    /// than from the last one, so the daemon's answer depends only on the
+    /// *total* travel the plugin reports — and a message that arrives late, or
+    /// not at all, cannot leave the border one tile out.
+    base: usize,
+    /// Where the border stands now.
+    at: usize,
+}
 
 /// Inset of the speaker indicator from a sounding tile's top-left corner.
 const BADGE_PAD: f32 = 8.0;
@@ -91,14 +145,53 @@ const SCRIM_H: f32 = 34.0;
 const TITLE_PX: f32 = 18.0;
 const TITLE_LINE: f32 = 22.0;
 
+/// What a tile stands for — and so what clicking it puts on the stage.
+///
+/// The deck is the same row of miniatures either way; only what a miniature is
+/// *of* changes with [`crate::stage::Mode`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Subject {
+    /// One window.
+    Task(String),
+    /// One workspace, whole.
+    Desk(i64),
+}
+
+impl Subject {
+    /// The tile's identity: what its picture is filed under, and what "this one
+    /// is current" is tested against. Window addresses are already unique and a
+    /// workspace id cannot be mistaken for one, so the two namespaces cannot
+    /// collide.
+    pub fn key(&self) -> String {
+        match self {
+            Subject::Task(addr) => addr.clone(),
+            Subject::Desk(ws) => format!("ws-{ws}"),
+        }
+    }
+
+    /// Read a key back — the inverse of [`Subject::key`], so the two namespaces
+    /// are defined in exactly one place. The thumbnail worker uses it to tell
+    /// which of the compositor's two renders a tile wants.
+    pub fn from_key(key: &str) -> Option<Subject> {
+        match key.strip_prefix("ws-") {
+            Some(ws) => ws.parse().ok().map(Subject::Desk),
+            None => Some(Subject::Task(key.to_owned())),
+        }
+    }
+}
+
 /// One tile. Its slot `x` is fixed — tiles never trade places — so the only
 /// thing that moves is `lift`: the current task's tile stands proud of the rest.
 #[derive(Debug, Clone)]
 pub struct Tile {
-    pub addr: String,
+    pub subject: Subject,
+    /// `subject.key()`, held rather than rebuilt: it is read several times per
+    /// frame, per tile.
+    pub key: String,
     pub title: String,
-    /// Owning process, for matching audio streams to this tile.
-    pub pid: i64,
+    /// Owning processes, for matching audio streams to this tile — one for a
+    /// task, however many the desk holds for a desk.
+    pub pids: Vec<i64>,
     /// Fixed slot position. Only recomputed when the deck's membership changes.
     x: f32,
     /// How far this tile currently stands above the row, easing toward
@@ -129,6 +222,12 @@ pub struct Deck {
     pub tiles: Vec<Tile>,
     /// Tile under the pointer, for the hover lift.
     pub hover: Option<usize>,
+    /// How far the row has risen into view: 0 = below the screen's edge,
+    /// 1 = home. The mode's own entrance and exit, and the reason the deck no
+    /// longer appears and vanishes in one frame while the task it belongs to
+    /// takes half a second to arrive.
+    reveal: f32,
+    reveal_to: f32,
 }
 
 /// Tile width for an output `screen_w` wide — a tile is a miniature of the
@@ -185,10 +284,18 @@ impl Deck {
     /// opening the mode does not play an animation.
     pub fn reset(&mut self, tiles: Vec<Tile>, screen_w: f32, tw: f32, current: Option<&str>) {
         let count = tiles.len();
+        // A deck being built where there was none is the mode opening: the row
+        // comes up from off screen. A rebuild while it is already up (a window
+        // opened, the mode changed) keeps its place — only the first one is an
+        // entrance.
+        if self.tiles.is_empty() {
+            self.reveal = 0.0;
+        }
+        self.reveal_to = 1.0;
         self.tiles = tiles;
         for (n, tile) in self.tiles.iter_mut().enumerate() {
             tile.x = slot_x(n, count, screen_w, tw);
-            let raised = current == Some(tile.addr.as_str());
+            let raised = current == Some(tile.key.as_str());
             tile.lift = if raised { RAISE } else { 0.0 };
             tile.lift_to = tile.lift;
         }
@@ -202,8 +309,28 @@ impl Deck {
     /// proud of it.
     pub fn set_current(&mut self, current: &str) {
         for tile in &mut self.tiles {
-            tile.lift_to = if tile.addr == current { RAISE } else { 0.0 };
+            tile.lift_to = if tile.key == current { RAISE } else { 0.0 };
         }
+    }
+
+    /// Send the row back down — the mode is closing, or the overview has taken
+    /// the screen. The tiles stay until it lands (see [`Deck::gone`]); clearing
+    /// them here is what used to make the deck disappear a frame before the
+    /// desktop came back.
+    pub fn hide(&mut self) {
+        self.reveal_to = 0.0;
+    }
+
+    /// Bring the row back up without rebuilding it — the overview that was
+    /// covering the stage has closed.
+    pub fn show(&mut self) {
+        self.reveal_to = 1.0;
+    }
+
+    /// Whether the row has finished going away, so its tiles and pictures can be
+    /// let go of.
+    pub fn gone(&self) -> bool {
+        self.reveal_to == 0.0 && self.reveal <= 0.002
     }
 
     /// Advance the lifts. Returns whether anything still moves.
@@ -213,6 +340,14 @@ impl Deck {
     /// membership change, so a fade could never actually play.)
     pub fn tick(&mut self, dt: f32) -> bool {
         let mut busy = false;
+        if (self.reveal - self.reveal_to).abs() > 0.002 {
+            self.reveal += (self.reveal_to - self.reveal) * approach(dt, RISE_DUR);
+            if (self.reveal - self.reveal_to).abs() < 0.004 {
+                self.reveal = self.reveal_to;
+            } else {
+                busy = true;
+            }
+        }
         for tile in &mut self.tiles {
             if (tile.lift - tile.lift_to).abs() > 0.01 {
                 let step = approach(dt, RAISE_DUR);
@@ -225,6 +360,78 @@ impl Deck {
             }
         }
         busy
+    }
+}
+
+/// Where `dx` of finger travel puts the border, counted from the tile the
+/// gesture began on.
+///
+/// The whole of the gesture's arithmetic, and the reason a dropped message costs
+/// nothing: it reads the gesture's **total** travel, so any single message is a
+/// complete answer rather than one step in a sum.
+///
+/// Fingers right walks the border *right* — you push the marking along the row
+/// rather than dragging the row under it (Max, 2026-09-12, after trying it the
+/// other way). The workspace swipe's inversion does not carry over: there the
+/// hand moves a surface, here it moves a pointer along one.
+pub fn swipe_target(base: usize, dx: f32, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let steps = (dx / SWIPE_STEP).round() as i32;
+    Some((base as i32 + steps).clamp(0, count as i32 - 1) as usize)
+}
+
+/// A tile for one window: its own title, its own process.
+fn task_tile(task: &crate::hypr::StageTask) -> Tile {
+    let subject = Subject::Task(task.address.clone());
+    Tile {
+        key: subject.key(),
+        subject,
+        title: if task.title.is_empty() {
+            task.class.clone()
+        } else {
+            task.title.clone()
+        },
+        pids: vec![task.pid],
+        x: 0.0,
+        lift: 0.0,
+        lift_to: 0.0,
+    }
+}
+
+/// A tile for one workspace.
+///
+/// A desk is named the way the user names it: by its **number** — the one
+/// `Super+N` addresses — then by the task last used on it, which is what the
+/// picture will mostly be showing. `+2` for the rest, because "how much is over
+/// there" is the other thing the row is asked at a glance.
+fn desk_tile(ws: i64, tasks: &[crate::hypr::StageTask]) -> Tile {
+    // `stage_tasks` is focus-recency ordered, so the first match is the task
+    // last used on this desk.
+    let on_desk: Vec<&crate::hypr::StageTask> =
+        tasks.iter().filter(|t| t.workspace == ws).collect();
+    let lead = on_desk.first().map(|t| {
+        if t.title.is_empty() {
+            t.class.clone()
+        } else {
+            t.title.clone()
+        }
+    });
+    let title = match (lead, on_desk.len()) {
+        (None, _) => format!("{ws}"),
+        (Some(lead), 1) => format!("{ws} · {lead}"),
+        (Some(lead), n) => format!("{ws} · {lead}  +{}", n - 1),
+    };
+    let subject = Subject::Desk(ws);
+    Tile {
+        key: subject.key(),
+        subject,
+        title,
+        pids: on_desk.iter().map(|t| t.pid).collect(),
+        x: 0.0,
+        lift: 0.0,
+        lift_to: 0.0,
     }
 }
 
@@ -292,6 +499,24 @@ impl App {
         self.draw_deck();
     }
 
+    /// The overview opened or closed over a live stage: the deck goes down while
+    /// the map owns the screen, and comes back with its pictures intact.
+    ///
+    /// The tiles are kept either way — this is the same slide the mode's own
+    /// entrance uses, not a teardown.
+    pub(crate) fn sync_deck_overview(&mut self) {
+        if !self.stage.is_on() {
+            return;
+        }
+        if self.overview_active {
+            self.deck.hide();
+        } else {
+            self.deck.show();
+        }
+        self.sync_deck_input();
+        self.draw_deck();
+    }
+
     /// The deck takes pointer input only while it is up; the rest of the time
     /// its surface is click-through so the desktop underneath behaves normally.
     pub(crate) fn sync_deck_input(&mut self) {
@@ -299,7 +524,7 @@ impl App {
             return;
         };
         let (w, h) = self.deck_size;
-        if self.stage.is_on() && !self.deck.tiles.is_empty() {
+        if self.stage.is_on() && !self.overview_active && !self.deck.tiles.is_empty() {
             crate::surface::set_input_rects(&self.compositor, layer, &[(0, 0, w as i32, h as i32)]);
         } else {
             crate::surface::set_input_rects(&self.compositor, layer, &[]);
@@ -310,14 +535,13 @@ impl App {
     /// opens, and whenever the task list changes underneath it.
     pub(crate) fn rebuild_deck(&mut self) {
         if !self.stage.is_on() {
-            self.deck.tiles.clear();
-            // The thumbnail cache is session-scoped: the mode re-photographs
-            // the whole deck on open anyway, so pictures kept across sessions
-            // could never be shown — holding them would only grow the chain
-            // store (~350KB per window ever seen) for nothing.
-            self.deck_thumb_layer.clear();
-            self.deck_thumb_chains.clear();
-            self.sync_deck_input();
+            // The mode is closing: send the row down and let it land. The tiles
+            // and their pictures are let go of in `draw_deck`, once it has —
+            // dropping them here is what made the deck vanish in one frame
+            // while the task took half a second to settle back.
+            self.deck.hide();
+            self.deck_swipe = None;
+            self.sync_deck_input(); // click-through at once, whatever is drawn
             self.draw_deck();
             return;
         }
@@ -333,15 +557,29 @@ impl App {
         // arrival or departure moves, which is the rule the deck promises.
         let tasks = crate::hypr::stage_tasks();
         self.stage.resync(&tasks);
-        let order: Vec<String> = self.stage.deck().to_vec();
-        let tiles: Vec<Tile> = order
-            .iter()
-            .filter_map(|addr| tasks.iter().find(|t| &t.address == addr))
-            .map(|t| self.deck_tile(t))
-            .collect();
+        // The deck is a row of miniatures of whatever the stage shows: one per
+        // window, or one per workspace.
+        let (tiles, current): (Vec<Tile>, Option<String>) = match self.stage.mode() {
+            crate::stage::Mode::Task => (
+                self.stage
+                    .deck()
+                    .iter()
+                    .filter_map(|addr| tasks.iter().find(|t| &t.address == addr))
+                    .map(task_tile)
+                    .collect(),
+                self.stage.staged().map(str::to_owned),
+            ),
+            crate::stage::Mode::Desk => (
+                self.stage
+                    .desks()
+                    .iter()
+                    .map(|ws| desk_tile(*ws, &tasks))
+                    .collect(),
+                self.stage.desk().map(|ws| format!("ws-{ws}")),
+            ),
+        };
         let (sw, sh) = self.deck_screen;
         let tw = tile_w(sw, sh, tiles.len());
-        let current = self.stage.staged().map(str::to_owned);
         self.deck.reset(tiles, sw, tw, current.as_deref());
         self.sync_deck_input();
         // Size the icon array for this deck up front, so an arriving thumbnail
@@ -363,16 +601,42 @@ impl App {
         // stage). Mid-session rebuilds — a window opened or closed — reach here
         // too, where "missing" is just the newcomer: the rest keep the picture
         // they have rather than being re-photographed for an identical image.
+        //
+        // A DESK has a second way to go stale that a task does not: its picture
+        // is of a whole workspace, so a window opening or closing on it makes
+        // the picture wrong even though the tile itself is unchanged. Its window
+        // count is therefore kept, and a desk whose count moved is re-taken.
+        let counts = self.desk_counts(&tasks);
+        let stale = |app: &Self, t: &Tile| match &t.subject {
+            Subject::Task(_) => false,
+            Subject::Desk(ws) => app.deck_desk_counts.get(ws) != counts.get(ws),
+        };
         let missing: Vec<String> = self
             .deck
             .tiles
             .iter()
-            .filter(|t| !self.deck_thumb_layer.contains_key(&t.addr))
-            .map(|t| t.addr.clone())
+            .filter(|t| !self.deck_thumb_layer.contains_key(&t.key) || stale(self, t))
+            .map(|t| t.key.clone())
             .collect();
+        self.deck_desk_counts = counts;
         self.deck_thumbs
             .request_many(missing, self.deck_tile_aspect());
         self.draw_deck();
+    }
+
+    /// Let go of everything the closed deck was holding.
+    ///
+    /// Called once the row has finished going down, never while it is still on
+    /// screen. The thumbnail cache is session-scoped: the mode re-photographs
+    /// the whole deck on open anyway, so pictures kept across sessions could
+    /// never be shown — holding them would only grow the chain store (~350KB per
+    /// window ever seen) for nothing.
+    fn clear_deck_visuals(&mut self) {
+        self.deck.tiles.clear();
+        self.deck_thumb_layer.clear();
+        self.deck_thumb_chains.clear();
+        self.deck_desk_counts.clear();
+        self.deck.hover = None;
     }
 
     /// Draw one deck frame, advancing the tile tweens and asking for another
@@ -389,6 +653,13 @@ impl App {
             .unwrap_or(0.0);
         self.deck_last_frame = Some(now);
         let busy = self.deck.tick(dt);
+        // The row has landed off screen: this is the frame that may forget it.
+        // Only when the MODE is over, though — the deck also goes down for the
+        // overview opening over the stage, and that one comes straight back up,
+        // so throwing its pictures away would cost a whole re-photograph.
+        if self.deck.gone() && !self.stage.is_on() && !self.deck.tiles.is_empty() {
+            self.clear_deck_visuals();
+        }
 
         let scene = self.deck_scene();
         if let Some(renderer) = self.deck_renderer.as_mut() {
@@ -456,8 +727,14 @@ impl App {
             .deck
             .tiles
             .iter()
-            .filter(|t| streams.iter().any(|s| s.ancestors.contains(&t.pid)))
-            .map(|t| t.addr.clone())
+            // A desk sounds when anything on it does — the indicator answers
+            // "where is that coming from", and a desk is one place.
+            .filter(|t| {
+                t.pids
+                    .iter()
+                    .any(|pid| streams.iter().any(|s| s.ancestors.contains(pid)))
+            })
+            .map(|t| t.key.clone())
             .collect();
         if sounding != self.deck_audio_map {
             self.deck_audio_map = sounding;
@@ -473,33 +750,186 @@ impl App {
     /// Nothing is rebuilt and nothing changes place: the deck just raises a
     /// different tile.
     pub(crate) fn stage_switch_to_index(&mut self, i: usize) {
-        let Some(addr) = self.deck.tiles.get(i).map(|t| t.addr.clone()) else {
+        let Some(tile) = self.deck.tiles.get(i) else {
             return;
         };
-        let outgoing = self.stage.staged().map(str::to_owned);
+        let (subject, key) = (tile.subject.clone(), tile.key.clone());
+        let outgoing = self.deck_current_key();
         // The frame follows the stage, not the click. A tile whose window died
         // between the last deck rebuild and this click cannot be staged, and
         // raising it anyway would put the "this is the one you are looking at"
         // marking on a task that is not on screen — the deck lying about the
         // desktop, which is the one thing it must never do.
-        if !self.stage.show(&addr) {
+        let shown = match &subject {
+            Subject::Task(addr) => self.stage.show(addr),
+            Subject::Desk(ws) => self.stage.show_desk(*ws),
+        };
+        if !shown {
             self.rebuild_deck();
             return;
         }
-        // Photograph the task that just LEFT — the single update a tile ever
-        // gets. Its tile then shows what you were actually looking at when you
-        // left it, which is the most a thumbnail can honestly promise: the task
-        // stops painting the moment it is off screen, so this frame is also the
-        // freshest one that will ever exist for it.
+        // Photograph what just LEFT — the single update a tile ever gets. Its
+        // tile then shows what you were actually looking at when you left it,
+        // which is the most a thumbnail can honestly promise: what is off screen
+        // stops painting, so this frame is also the freshest one that will ever
+        // exist for it.
         //
-        // The arriving task is deliberately not photographed. It used to be, 450ms
+        // What is arriving is deliberately not photographed. It used to be, 450ms
         // in, which caught some clients still relaying out after the resize.
-        if let Some(prev) = outgoing.filter(|p| p != &addr) {
+        if let Some(prev) = outgoing.filter(|p| p != &key) {
             self.deck_thumbs.request(prev, self.deck_tile_aspect());
         }
-        self.deck.set_current(&addr);
+        self.deck.set_current(&key);
         self.sync_deck_input();
         self.draw_deck();
+    }
+
+    /// Move the border with a live 3/4-finger swipe (`stage-swipe`).
+    ///
+    /// `dx` is the gesture's **total** travel so far, positive rightward, and
+    /// the border goes the way your fingers do (see [`swipe_target`]).
+    pub(crate) fn stage_swipe(&mut self, dx: f32) {
+        let base = match &self.deck_swipe {
+            Some(sw) => sw.base,
+            // First message of a gesture: it starts from whatever is on stage —
+            // unless it is really the tail of the one that just committed, which
+            // is what the quarantine is for.
+            None if self.deck_swipe_ended.elapsed() < SWIPE_QUARANTINE => return,
+            None => self.deck_current_index().unwrap_or(0),
+        };
+        let Some(at) = self.deck_swipe_target(dx, base) else {
+            return;
+        };
+        self.deck_swipe_last = std::time::Instant::now();
+        self.arm_deck_swipe_guard();
+        if self.deck_swipe.as_ref().map(|sw| sw.at) == Some(at) {
+            return; // same tile, nothing to redraw
+        }
+        self.deck_swipe = Some(DeckSwipe { base, at });
+        // The border and the raise are the deck's existing "this one" marking,
+        // so the gesture drives them rather than inventing a second cue: what
+        // moves under your fingers is exactly what a click would light up.
+        if let Some(key) = self.deck.tiles.get(at).map(|t| t.key.clone()) {
+            self.deck.set_current(&key);
+            self.draw_deck();
+        }
+    }
+
+    /// The fingers left the pad: stage whatever the border landed on.
+    ///
+    /// `dx` is the gesture's final total travel, or `None` when the ending
+    /// carries no reading (the guard below, or a malformed message) — in which
+    /// case the border is committed exactly where it stands.
+    pub(crate) fn stage_swipe_end(&mut self, dx: Option<f32>) {
+        let Some(sw) = self.deck_swipe.take() else {
+            return;
+        };
+        self.deck_swipe_ended = std::time::Instant::now();
+        // Recomputed from the final reading rather than trusting the last
+        // update to have arrived: the end message is the one that decides, so it
+        // carries everything it needs to decide with.
+        let at = dx
+            .and_then(|dx| self.deck_swipe_target(dx, sw.base))
+            .unwrap_or(sw.at);
+        self.stage_switch_to_index(at);
+    }
+
+    /// [`swipe_target`] against the live deck.
+    fn deck_swipe_target(&self, dx: f32, base: usize) -> Option<usize> {
+        if !self.stage.is_on() {
+            return None;
+        }
+        swipe_target(base, dx, self.deck.tiles.len())
+    }
+
+    /// Slot of the tile the stage is actually showing.
+    fn deck_current_index(&self) -> Option<usize> {
+        let key = self.deck_current_key()?;
+        self.deck.tiles.iter().position(|t| t.key == key)
+    }
+
+    /// Keep a watch on a swipe that has gone quiet, so a gesture whose end never
+    /// arrives still settles on the tile it was pointing at.
+    fn arm_deck_swipe_guard(&mut self) {
+        if self.deck_swipe_guard {
+            return;
+        }
+        self.deck_swipe_guard = true;
+        let timer = calloop::timer::Timer::from_duration(SWIPE_GUARD);
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.deck_swipe_guard = false;
+                if app.deck_swipe.is_some() {
+                    if app.deck_swipe_last.elapsed() >= SWIPE_GUARD {
+                        app.stage_swipe_end(None);
+                    } else {
+                        app.arm_deck_swipe_guard(); // still moving; look again later
+                    }
+                }
+                calloop::timer::TimeoutAction::Drop
+            });
+    }
+
+    /// Put a numbered tile on the stage — `Super+N` while staged.
+    ///
+    /// What the number means is what the deck is showing, so the key agrees
+    /// with what you are looking at:
+    ///
+    /// * **task mode** — the n-th tile, counted from the left. There is no other
+    ///   reading: several windows can share a workspace, so no number belongs to
+    ///   a window.
+    /// * **desk mode** — workspace `n`, which is the number printed on the tile
+    ///   and the one `Super+N` means everywhere else. Counting tiles instead
+    ///   would put `Super+3` on the desk labelled 4 as soon as a workspace
+    ///   between them emptied.
+    ///
+    /// A number with no tile does nothing, rather than landing on the nearest
+    /// one: a key that quietly picks a neighbour is worse than a key that misses.
+    pub(crate) fn stage_pick(&mut self, n: i64) {
+        if !self.stage.is_on() || n < 1 {
+            return;
+        }
+        let found = match self.stage.mode() {
+            crate::stage::Mode::Task => {
+                (n as usize <= self.deck.tiles.len()).then(|| n as usize - 1)
+            }
+            crate::stage::Mode::Desk => self
+                .deck
+                .tiles
+                .iter()
+                .position(|t| t.subject == Subject::Desk(n)),
+        };
+        let Some(i) = found else {
+            tracing::debug!("deck: nothing at {n}");
+            return;
+        };
+        // The key beats a swipe still in the air: two things aiming the border
+        // at once, and the one with a number on it wins outright.
+        self.deck_swipe = None;
+        self.stage_switch_to_index(i);
+    }
+
+    /// The key of whatever the stage is showing — a window address, or a desk.
+    fn deck_current_key(&self) -> Option<String> {
+        match self.stage.mode() {
+            crate::stage::Mode::Task => self.stage.staged().map(str::to_owned),
+            crate::stage::Mode::Desk => self.stage.desk().map(|ws| format!("ws-{ws}")),
+        }
+    }
+
+    /// Switch between showing one task and showing one desk (the bar's
+    /// stage-mode pill, and the `stage-mode` verb).
+    ///
+    /// Off the stage this only records the preference; the deck and the bar are
+    /// redrawn either way, since the pill's own glyph has changed.
+    pub(crate) fn toggle_stage_mode(&mut self) {
+        self.stage.set_mode(self.stage.mode().flipped());
+        // The deck is now a row of different things: rebuilt, not re-laid-out.
+        // Pictures of the other mode's subjects stay in the cache — switching
+        // back costs no re-photographing.
+        self.rebuild_deck();
+        self.draw_options();
     }
 
     /// A window mapped while the stage owns the screen.
@@ -518,6 +948,13 @@ impl App {
         // The stage satisfies the launch-focus intent; the 10s grace must not
         // fire a second, plain focus later.
         self.focus_launched = None;
+        // A desk shows its workspace whole, so a newcomer there is already where
+        // it belongs and already visible — nothing to stage, tiled or floating.
+        // It only needs its desk brought forward if it landed somewhere else.
+        if self.stage.mode() == crate::stage::Mode::Desk {
+            self.stage_switch_to(addr);
+            return;
+        }
         let floating = crate::hypr::window_states()
             .get(addr)
             .map(|s| s.floating)
@@ -532,7 +969,34 @@ impl App {
     /// Switch to a task by address (the `stage-show` verb). Animated, exactly
     /// as a click is.
     pub(crate) fn stage_switch_to(&mut self, addr: &str) {
-        if let Some(i) = self.deck.tiles.iter().position(|t| t.addr == addr) {
+        // On a desk, "show me this window" means "show me the desk it is on" —
+        // the mode's unit is the workspace, and the window is already on screen
+        // once its desk is up. A rebuild follows anyway, which is where a
+        // newcomer's own tile comes from.
+        if self.stage.mode() == crate::stage::Mode::Desk {
+            if let Some(ws) = crate::hypr::window_states().get(addr).map(|s| s.workspace) {
+                if let Some(i) = self
+                    .deck
+                    .tiles
+                    .iter()
+                    .position(|t| t.subject == Subject::Desk(ws))
+                {
+                    self.stage_switch_to_index(i);
+                } else {
+                    // A desk that did not exist at the last rebuild: show it,
+                    // then let the rebuild give it its tile.
+                    self.stage.show_desk(ws);
+                }
+            }
+            self.rebuild_deck();
+            return;
+        }
+        if let Some(i) = self
+            .deck
+            .tiles
+            .iter()
+            .position(|t| t.subject == Subject::Task(addr.to_owned()))
+        {
             self.stage_switch_to_index(i);
         } else {
             // Not on the deck (already staged, or gone): let the stage decide,
@@ -553,14 +1017,14 @@ impl App {
     /// cannot be about anything but the task it names, and that guard would
     /// throw away every result of a whole-deck fill.
     pub(crate) fn on_deck_thumb(&mut self, ev: crate::deck_thumbs::Event) {
-        if !self.deck.tiles.iter().any(|t| t.addr == ev.addr) {
+        if !self.deck.tiles.iter().any(|t| t.key == ev.key) {
             tracing::debug!(
                 "deck: dropping thumbnail for {}, no longer on the deck",
-                ev.addr
+                ev.key
             );
             return;
         }
-        let layer = match self.deck_thumb_layer.get(&ev.addr).copied() {
+        let layer = match self.deck_thumb_layer.get(&ev.key).copied() {
             Some(layer) => layer,
             None => {
                 let layer = self.deck_thumb_chains.len() as u32;
@@ -577,7 +1041,7 @@ impl App {
                     }
                 }
                 self.deck_thumb_chains.push(Vec::new());
-                self.deck_thumb_layer.insert(ev.addr.clone(), layer);
+                self.deck_thumb_layer.insert(ev.key.clone(), layer);
                 layer
             }
         };
@@ -592,6 +1056,24 @@ impl App {
         self.draw_deck();
     }
 
+    /// Re-photograph **every** tile on the deck.
+    ///
+    /// The ordinary rule is that a picture is taken once and updated only when
+    /// its task leaves the stage — a window that is not on screen stops painting,
+    /// so re-taking it buys an identical image. The overview breaks that rule:
+    /// inside the map windows are dragged between workspaces, resized and
+    /// closed, and none of it passes through the stage. Nothing about those
+    /// changes reaches the deck except its own eyes, and no cheaper test can
+    /// tell which tiles moved — two windows swapping workspaces leaves every
+    /// count identical — so coming back from the map re-takes the lot.
+    pub(crate) fn refresh_deck_thumbs(&mut self) {
+        if !self.stage.is_on() {
+            return;
+        }
+        let keys: Vec<String> = self.deck.tiles.iter().map(|t| t.key.clone()).collect();
+        self.deck_thumbs.request_many(keys, self.deck_tile_aspect());
+    }
+
     /// The shape a thumbnail will finally be drawn at — the tile's own aspect,
     /// which the compositor needs so its capture survives the atlas round trip
     /// undistorted. Read live rather than assumed constant, because `tile_w`
@@ -602,20 +1084,14 @@ impl App {
         (tw / TILE_H).max(0.1)
     }
 
-    /// Build a tile for a task.
-    pub(crate) fn deck_tile(&mut self, task: &crate::hypr::StageTask) -> Tile {
-        Tile {
-            addr: task.address.clone(),
-            title: if task.title.is_empty() {
-                task.class.clone()
-            } else {
-                task.title.clone()
-            },
-            pid: task.pid,
-            x: 0.0,
-            lift: 0.0,
-            lift_to: 0.0,
+    /// How many windows each desk holds — the one thing that makes a desk's
+    /// picture stale while its tile stays put.
+    fn desk_counts(&self, tasks: &[crate::hypr::StageTask]) -> std::collections::HashMap<i64, u32> {
+        let mut counts = std::collections::HashMap::new();
+        for t in tasks {
+            *counts.entry(t.workspace).or_insert(0) += 1;
         }
+        counts
     }
 
     /// Compose the deck's scene: floating tiles, nothing behind them.
@@ -630,11 +1106,17 @@ impl App {
         // fixed `#ffbe98`, matched by hand to what the desktop border used
         // to be. Read once for the whole deck.
         let stage_rim = self.border_tint();
+        // The row rides its reveal in and out: a slide up from under the screen's
+        // edge, with a fade so the last of it does not cut off at the boundary.
+        // Both are ours — the deck is our own surface, so this is the one piece
+        // of the mode's entrance that does not depend on the compositor.
+        let reveal = self.deck.reveal.clamp(0.0, 1.0);
+        let rise = (1.0 - reveal) * RISE;
         let mut scene = Scene {
-            alpha: 1.0,
+            alpha: reveal,
             ..Default::default()
         };
-        if w == 0 {
+        if w == 0 || reveal <= 0.002 {
             return scene;
         }
 
@@ -649,7 +1131,7 @@ impl App {
             } else {
                 0.0
             };
-            let y = tile_y(h as f32, tile.lift + hover);
+            let y = tile_y(h as f32, tile.lift + hover) + rise;
             let body = Rect {
                 x: tile.x,
                 y,
@@ -670,7 +1152,7 @@ impl App {
             // requested for the whole deck at open). Stored square and
             // pre-squashed to the tile's aspect, so drawing it into the tile
             // rect stretches it back true.
-            let thumb = self.deck_thumb_layer.get(&tile.addr).copied();
+            let thumb = self.deck_thumb_layer.get(&tile.key).copied();
             if let Some(layer) = thumb {
                 scene.icons.push(IconInst {
                     rect: body,
@@ -726,7 +1208,7 @@ impl App {
             // behaviour, and a silent task (paused, muted, whatever) carries
             // nothing. (The workspace number that used to sit here is gone —
             // Max dropped it 2026-09-06; the title is the tile's identity.)
-            if self.deck_audio_map.contains(&tile.addr) {
+            if self.deck_audio_map.contains(&tile.key) {
                 scene.labels.push(Label {
                     text: crate::options::GLYPH_VOL_LIVE.to_owned(),
                     // Hugging the corner a touch tighter vertically than
@@ -794,10 +1276,12 @@ mod tests {
     use super::*;
 
     fn tile(addr: &str) -> Tile {
+        let subject = Subject::Task(addr.into());
         Tile {
-            addr: addr.into(),
+            key: subject.key(),
+            subject,
             title: addr.into(),
-            pid: 0,
+            pids: vec![0],
             x: 0.0,
             lift: 0.0,
             lift_to: 0.0,
@@ -938,5 +1422,86 @@ mod tests {
         let band = 200.0;
         let x = deck.tiles[0].x + 5.0;
         assert_eq!(hit(&deck.tiles, x, band - 2.0, 211.0, band), None);
+    }
+
+    #[test]
+    fn the_row_arrives_from_under_the_screen() {
+        let mut deck = Deck::default();
+        deck.reset(vec![tile("a"), tile("b")], 2000.0, 211.0, Some("a"));
+        // It starts fully below the band's bottom edge — off the surface, so the
+        // arrival comes from outside the screen rather than out of thin air.
+        assert_eq!(deck.reveal, 0.0);
+        let band = crate::stage::BAND as f32;
+        assert!(
+            tile_y(band, 0.0) + RISE >= band,
+            "a hidden tile should sit past the bottom edge"
+        );
+        // …and it settles home on its own.
+        let mut ticks = 0;
+        while deck.tick(1.0 / 60.0) && ticks < 600 {
+            ticks += 1;
+        }
+        assert!(ticks < 600, "the row never settled");
+        assert_eq!(deck.reveal, 1.0);
+    }
+
+    #[test]
+    fn a_rebuild_is_not_a_second_entrance() {
+        // A window opening mid-session rebuilds the deck. The row is already up
+        // and must stay up — only the mode opening is an arrival.
+        let mut deck = Deck::default();
+        deck.reset(vec![tile("a")], 2000.0, 211.0, Some("a"));
+        while deck.tick(1.0 / 60.0) {}
+        deck.reset(vec![tile("a"), tile("b")], 2000.0, 211.0, Some("a"));
+        assert_eq!(deck.reveal, 1.0);
+    }
+
+    #[test]
+    fn closing_keeps_the_tiles_until_the_row_has_gone() {
+        // The pictures have to outlive the closing frame — dropping them when
+        // the mode ends is what made the deck vanish while the task was still
+        // settling back.
+        let mut deck = Deck::default();
+        deck.reset(vec![tile("a")], 2000.0, 211.0, Some("a"));
+        while deck.tick(1.0 / 60.0) {}
+        deck.hide();
+        assert!(!deck.gone(), "gone the instant it was told to close");
+        assert!(!deck.tiles.is_empty());
+        let mut ticks = 0;
+        while deck.tick(1.0 / 60.0) && ticks < 600 {
+            ticks += 1;
+        }
+        assert!(deck.gone(), "the row never finished leaving");
+    }
+
+    #[test]
+    fn the_border_goes_the_way_the_fingers_do() {
+        // The border is a marking you push along a fixed row, not a row you drag
+        // under a fixed marking — so it follows the fingers rather than
+        // inverting like the workspace swipe.
+        assert_eq!(swipe_target(3, SWIPE_STEP, 6), Some(4));
+        assert_eq!(swipe_target(3, -SWIPE_STEP, 6), Some(2));
+        assert_eq!(swipe_target(3, 2.0 * SWIPE_STEP, 6), Some(5));
+    }
+
+    #[test]
+    fn a_swipe_is_read_from_its_total_travel() {
+        // The same reading twice is the same answer — what makes a message the
+        // plugin drops (or delivers late) cost nothing.
+        let dx = -2.4 * SWIPE_STEP;
+        assert_eq!(swipe_target(1, dx, 8), swipe_target(1, dx, 8));
+        // …and half a step of travel has not reached the next tile yet.
+        assert_eq!(swipe_target(1, 0.4 * SWIPE_STEP, 8), Some(1));
+        assert_eq!(swipe_target(1, 0.6 * SWIPE_STEP, 8), Some(2));
+    }
+
+    #[test]
+    fn the_border_stops_at_the_ends_of_the_row() {
+        // A long flick parks on the last tile rather than wrapping: the deck is
+        // a row you can see the ends of, and wrapping past one reads as a jump.
+        assert_eq!(swipe_target(0, 40.0 * SWIPE_STEP, 4), Some(3));
+        assert_eq!(swipe_target(0, -40.0 * SWIPE_STEP, 4), Some(0));
+        assert_eq!(swipe_target(0, SWIPE_STEP, 1), Some(0));
+        assert_eq!(swipe_target(0, 0.0, 0), None);
     }
 }
