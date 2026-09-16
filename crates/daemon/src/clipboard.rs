@@ -19,7 +19,7 @@
 //! summary collector and the notification OPTION's live list.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -37,11 +37,11 @@ use tracing::{debug, warn};
 // (`OptionUXRules.md` §3). This import is the only place the clipboard's speed
 // is decided; there is deliberately no rate constant below.
 use crate::animation::{
-    ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SCROLL_RATE, SETTLE_PX,
+    ease_toward, lerp, lerp4, settle_t, LEAVE_HOLD, MORPH_RATE, SCROLL_RATE, SETTLE_PX,
 };
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
-    hover_grow, push_neumorph, PillId, BOND_GAP, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY,
+    hover_grow, push_neumorph, PillId, BOND_GAP, EMOJI_FONT, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY,
     LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
@@ -55,8 +55,6 @@ const PEEK_W: f32 = 380.0;
 const MORPH_EPS: f32 = 0.001;
 
 // ---- history box (mirrors the notification history drawer) ----
-/// Fully-expanded box height (within the reserved dropdown area).
-const EXPANDED_H: f32 = 505.0;
 /// Box height with no clips — a small "Nothing copied yet" panel.
 const EMPTY_H: f32 = 120.0;
 /// A clip row shows up to this many lines of the clip (text word-wrapped to the
@@ -80,7 +78,7 @@ const TEXT_GAP: f32 = 8.0;
 /// can't disagree on where lines break.
 const TIME_COL_W: f32 = 52.0;
 /// The box's corner radius once fully open (the collapsed pill is a stadium).
-const BOX_RADIUS: f32 = 10.0;
+pub(crate) const BOX_RADIUS: f32 = 10.0;
 // Zebra striping and resting list-ink dim are shared with the notification
 // box — see `options::App::zebra_stripe`/`dim_ink`.
 const DELETE_SZ: f32 = 18.0;
@@ -91,8 +89,28 @@ const GLYPH_TRASH: &str = "\u{f014}";
 const GLYPH_NOTE: &str = "\u{f040}";
 /// fa-book — the footer "dictionary" button.
 const GLYPH_BOOK: &str = "\u{f02d}";
+/// 🙂 — the footer "emoji picker" button. A real emoji rather than a monochrome
+/// glyph: the button shows what it opens (and that the picker is in colour).
+const GLYPH_EMOJI: &str = "\u{1f642}";
+/// fa-search — the leading glyph of the type-to-search field the footer morphs
+/// into (there is no search *button*: typing is the affordance).
+const GLYPH_SEARCH: &str = "\u{f002}";
 /// Gap between the two footer buttons (new note / dictionary).
 const FOOTER_GAP: f32 = 26.0;
+/// Side inset of the search field from the box edge once fully morphed out.
+const SEARCH_FIELD_PAD: f32 = 12.0;
+/// How long the window below gets to take the keyboard back — and with it the
+/// clipboard offer — before the paste is injected (see
+/// `paste_into_window_below`).
+const PASTE_FOCUS_MS: u64 = 160;
+/// The beat a freshly-served clip needs before a paste can read it — the source
+/// lives on its own thread and has to own the selection first.
+const PASTE_SETTLE_MS: u64 = 70;
+/// How many characters of a clip's text the search scans. A clip can hold
+/// [`TEXT_CAP`] characters; lowercasing all of them for every entry on every
+/// keystroke is not worth it, and a match that far into a document is not what
+/// anyone is looking for.
+const SEARCH_TEXT_CAP: usize = 4096;
 /// Height of the dictionary panel's search field — taller than a clip row for a
 /// comfortable, obvious input box.
 const DICT_FIELD_H: f32 = 46.0;
@@ -154,6 +172,17 @@ fn stagger(p: f32, a: f32, b: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// [`lerp`] over a rect — one shape growing into another (the footer buttons
+/// into the search field).
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    Rect::new(
+        lerp(a.x, b.x, t),
+        lerp(a.y, b.y, t),
+        lerp(a.w, b.w, t),
+        lerp(a.h, b.h, t),
+    )
+}
+
 /// What the pointer is over inside the open history box.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClipHit {
@@ -164,6 +193,11 @@ pub(crate) enum ClipHit {
     Delete(usize),
     /// The footer's "new note" button — opens the floating note editor.
     NewNote,
+    /// The footer's 🙂 button — opens the emoji picker over the list.
+    Emoji,
+    /// The search field the footer morphs into — clicking it takes the keyboard
+    /// back after a paste handed it to the window below.
+    SearchField,
     /// The footer's "dictionary" button.
     Dictionary,
     /// The footer's "clear all" can (mirrors the notification box's).
@@ -448,11 +482,16 @@ fn run_watch(events: &Sender<ClipEvent>, last_hash: &mut Option<u64>) -> std::io
     // The command is a bare trigger: it fires on every selection change (any
     // type, including image-only), and we re-read the content ourselves so the
     // classification and any binary handling stays in Rust.
-    let mut child = Command::new("wl-paste")
-        .args(["--watch", "sh", "-c", "printf '\\n'"])
+    let mut cmd = Command::new("wl-paste");
+    cmd.args(["--watch", "sh", "-c", "printf '\\n'"])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    // This watcher lives as long as the session, and `std::process` has no
+    // `kill_on_drop` at all — only the UI-gone path below reaps it. Anything
+    // else (SIGKILL, panic, a dev restart) orphans it to systemd, holding a
+    // Wayland connection for the rest of the login.
+    options_engine::die_with_parent(&mut cmd);
+    let mut child = cmd.spawn()?;
     let stdout = child
         .stdout
         .take()
@@ -1050,6 +1089,33 @@ pub(crate) struct ClipState {
     /// Pre-measured per-row heights (parallel to `history`), so the variable-
     /// height list lays out identically in the draw and the hit-test.
     row_heights: Vec<f32>,
+    // ---- type-to-search ----
+    /// Indices into `history` the list currently shows — the search filter's
+    /// result, or every index when there is no query. ONE source for the draw,
+    /// the hit-test, the stacked height and the scroll span, so they can never
+    /// disagree; kept in step with `history` by `refilter_clips`.
+    shown: Vec<usize>,
+    /// The search field is out (the footer has morphed into it). Set by the
+    /// first printable key, cleared by Escape.
+    search_open: bool,
+    /// What has been typed into it. Empty with the field out = "Search clips…".
+    search_query: String,
+    /// Morph progress of the footer: 0 = the three circles, 1 = the field.
+    search_t: f32,
+    /// Keyboard-selected row, by stable clip id — moved with Up/Down and copied
+    /// by Enter. Held by id, not index, because a clip captured mid-search
+    /// shifts every index in the history under it. Distinct from `hover_row`,
+    /// which the pointer owns and the scroll re-derives.
+    search_sel: Option<u64>,
+    /// Whether the OPTIONS surface currently holds the keyboard for us, so the
+    /// grab is committed only on a real change (see `sync_clip_keyboard`).
+    keyboard_held: bool,
+    /// Hash of a clip we served WITHOUT meaning to record it (the emoji picker's
+    /// "type this"), so our own capture of it can be dropped instead of filed.
+    suppress_hash: Option<u64>,
+    /// The box handed the keyboard back to the window below (for a paste) and
+    /// must not take it again until asked — see `yield_clip_keyboard`.
+    keyboard_yielded: bool,
     // ---- metadata detail view ----
     /// The clip (by stable id) whose metadata detail is showing, if any. A
     /// right-click on a row opens it; the back button closes it.
@@ -1158,8 +1224,17 @@ impl ClipState {
         // Provisional (scale 1.0 — no App yet); `open_clip_box` re-measures at
         // the live options_scale before the box ever lays out.
         let row_heights = history.iter().map(|e| row_height_of(e, 1.0)).collect();
+        let shown = (0..history.len()).collect();
         Self {
             handle,
+            shown,
+            search_open: false,
+            search_query: String::new(),
+            search_t: 0.0,
+            search_sel: None,
+            keyboard_held: false,
+            suppress_hash: None,
+            keyboard_yielded: false,
             dict_open: false,
             dict_t: 0.0,
             dict_p: 0.0,
@@ -1273,6 +1348,50 @@ fn row_height_of(entry: &ClipEntry, scale: f32) -> f32 {
     text_h.max(tile_h) + 2.0 * ROW_PAD_Y * scale
 }
 
+/// Whether a clip answers the search `needle` (already lowercased and trimmed).
+/// Everything the row and its detail can show is searchable — the clip's own
+/// text (its head, see [`SEARCH_TEXT_CAP`]), the one-line preview, a link's
+/// title, and where it was copied from — so "firefox" finds what you copied out
+/// of the browser and "png" finds the screenshot by its file name.
+fn clip_matches(entry: &ClipEntry, needle: &str) -> bool {
+    let head = cap(&entry.text, SEARCH_TEXT_CAP);
+    [
+        head.as_str(),
+        entry.preview.as_str(),
+        entry.title.as_str(),
+        entry.description.as_str(),
+        entry.source.as_str(),
+    ]
+    .iter()
+    .any(|hay| contains_ci(hay, needle))
+}
+
+/// Case-insensitive substring test. Folds the haystack a character at a time
+/// through a sliding window instead of building a lowercased copy of it — this
+/// runs over every clip (and every emoji) on every keystroke, and a clip can be
+/// [`SEARCH_TEXT_CAP`] characters long. The needle is folded as it is collected,
+/// so callers needn't pre-lowercase (they may, and usually have).
+pub(crate) fn contains_ci(hay: &str, needle: &str) -> bool {
+    let pat: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    if pat.is_empty() {
+        return true;
+    }
+    if hay.len() < pat.len() {
+        return false; // bytes ≥ chars, so a shorter haystack can't hold it
+    }
+    let mut win: VecDeque<char> = VecDeque::with_capacity(pat.len());
+    for c in hay.chars().flat_map(char::to_lowercase) {
+        if win.len() == pat.len() {
+            win.pop_front();
+        }
+        win.push_back(c);
+        if win.len() == pat.len() && win.iter().copied().eq(pat.iter().copied()) {
+            return true;
+        }
+    }
+    false
+}
+
 impl App {
     /// A clipboard change arrived from the worker: fold it into the history
     /// (newest first, de-duplicated) and persist.
@@ -1281,6 +1400,13 @@ impl App {
             ClipEvent::Pasted => self.record_clip_paste(),
             ClipEvent::Captured(entry) => {
                 let mut entry = *entry;
+                // A character the emoji picker typed: it owns the clipboard but
+                // is not a clip the user copied, so it never enters the history.
+                if self.clip.suppress_hash == Some(entry.hash) {
+                    self.clip.suppress_hash = None;
+                    debug!("clipboard: transient serve captured; not recorded");
+                    return;
+                }
                 // A re-copied clip moves to the top rather than piling up; it
                 // keeps its original id (so any UI reference stays valid) and its
                 // accumulated metadata (original source + paste log).
@@ -1313,6 +1439,9 @@ impl App {
                     }
                 }
                 self.measure_clip_rows();
+                // The list's index map must never outlive the history it points
+                // into — a fresh clip shifts every index by one.
+                self.refilter_clips();
                 self.save_clip_history();
                 // Own the freshly captured clip ourselves so it stays pasteable
                 // after the app that produced it drops the selection (a plain
@@ -1377,11 +1506,13 @@ impl App {
     /// Click on the small pill: paste the current clip where the user is
     /// working. The newest history entry is always exactly the live clipboard
     /// (we capture every change), so this just injects the paste — no re-copy.
-    pub(crate) fn clip_paste(&self) {
+    pub(crate) fn clip_paste(&mut self) {
         if self.clip.history.is_empty() {
             return;
         }
-        crate::hypr::paste_active();
+        // Via the hand-back path: with the box open we hold the keyboard, and a
+        // paste injected then arrives at an app with no clipboard offer.
+        self.paste_into_window_below();
     }
 
     /// Restore history entry `idx` to the system clipboard (a row click).
@@ -1390,6 +1521,27 @@ impl App {
             return;
         };
         self.serve_clip(e);
+    }
+
+    /// Put `text` on the clipboard WITHOUT recording it in the history — the
+    /// emoji picker's "type this" (you asked to type a character, not to copy
+    /// one). It still takes the clipboard over, exactly as any copy does, so a
+    /// second Ctrl+V repeats it.
+    pub(crate) fn serve_transient_text(&mut self, text: &str) {
+        let Some(mut entry) = classify_text(text, "text/plain;charset=utf-8".into()) else {
+            return;
+        };
+        entry.id = 0;
+        // Already ours: re-serving would tear the selection down and build it
+        // again, and a paste landing in that gap reads nothing (picking the same
+        // emoji twice in a row did exactly that — 2026-09-13).
+        if self.clip.served_hash == Some(entry.hash) {
+            return;
+        }
+        // Our own `wl-paste --watch` will see this land; `on_clip_event` drops
+        // the capture whose hash matches instead of filing it.
+        self.clip.suppress_hash = Some(entry.hash);
+        self.serve_clip(entry);
     }
 
     /// Hand `entry` to our data-control source so it owns the selection with its
@@ -1444,9 +1596,31 @@ impl App {
         Rect::new(left, y, w, h)
     }
 
+    /// The right edge this element can EVER reach: peeked all the way out, box
+    /// open. Independent of the animation on purpose — it is what the frost
+    /// sampler treats as "ours" so the colour a box wears cannot change as it
+    /// opens (the rule the dock already lives by; see `screencopy::read_sample`).
+    pub(crate) fn clip_span_full_right(&self) -> f32 {
+        let ph = self.clip_band_h();
+        self.options_left_start() + (ph + BOND_GAP) + PEEK_W * self.options_scale()
+    }
+
     /// Band height of the resting pill (bar minus its top/bottom margins).
     fn clip_band_h(&self) -> f32 {
         (self.options_bar_h() - 2.0 * PILL_MARGIN_Y).max(1.0)
+    }
+
+    /// Whether the box has widened enough to stand over its neighbours on the
+    /// bar, so they step out of the layout while it is there — the clipboard's
+    /// twin of [`App::stats_covering`], same threshold and same reason: those
+    /// pills draw themselves and `continue` before the per-pill fade exists,
+    /// and glyphs are one late pass, so a covered icon lands on top of the box
+    /// covering it (Max, 2026-09-13: *"i can see 'play' under clipboard when it
+    /// grows"* — the media transport symbols, straight through the history).
+    /// Tripping a little before contact means the swap happens while the pills
+    /// are about to be covered, not out in the open.
+    pub(crate) fn clip_covering(&self) -> bool {
+        self.clip.peek_t > 0.12
     }
 
     /// Whether the clipboard box currently extends below the bar — the
@@ -1462,12 +1636,65 @@ impl App {
     /// recomputed from the same anchor the layout uses.
     pub(crate) fn clip_rect(&self) -> Rect {
         let ph = self.clip_band_h();
-        self.clip_geom(crate::options::EDGE_PAD, PILL_MARGIN_Y, ph)
+        self.clip_geom(self.options_left_start(), PILL_MARGIN_Y, ph)
     }
 
-    /// Total stacked height of all rows.
+    /// Total stacked height of the rows the list shows (the search filter's, or
+    /// all of them when there is no query).
     fn clip_rows_total_h(&self) -> f32 {
-        self.clip.row_heights.iter().sum()
+        self.clip
+            .shown
+            .iter()
+            .filter_map(|&i| self.clip.row_heights.get(i))
+            .sum()
+    }
+
+    /// Re-run the search filter over the history. The one writer of
+    /// `ClipState::shown` — call it after ANY history change and after any edit
+    /// to the query, so the list, the hit-test and the heights stay in step.
+    fn refilter_clips(&mut self) {
+        let needle = self.clip.search_query.trim().to_lowercase();
+        self.clip.shown = if needle.is_empty() {
+            (0..self.clip.history.len()).collect()
+        } else {
+            self.clip
+                .history
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| clip_matches(e, &needle))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        // The keyboard selection exists only while the field is out; one that
+        // filtered away drops to the top match (what Enter would take).
+        if !self.clip.search_open {
+            self.clip.search_sel = None;
+        } else if self
+            .clip
+            .search_sel
+            .is_none_or(|id| self.clip_shown_pos(id).is_none())
+        {
+            self.clip.search_sel = self.clip_shown_id(0);
+        }
+    }
+
+    /// The clip id shown at list position `pos`, if any.
+    fn clip_shown_id(&self, pos: usize) -> Option<u64> {
+        let idx = *self.clip.shown.get(pos)?;
+        Some(self.clip.history.get(idx)?.id)
+    }
+
+    /// Where the clip with `id` sits in the filtered list, if it's shown.
+    fn clip_shown_pos(&self, id: u64) -> Option<usize> {
+        self.clip
+            .shown
+            .iter()
+            .position(|&i| self.clip.history.get(i).is_some_and(|e| e.id == id))
+    }
+
+    /// The history index of the clip with `id`, if it still exists.
+    fn clip_index_of(&self, id: u64) -> Option<usize> {
+        self.clip.history.iter().position(|e| e.id == id)
     }
 
     /// Recompute the per-row heights after any history change (the variable-
@@ -1484,15 +1711,21 @@ impl App {
             .collect();
     }
 
-    /// Fully-expanded box height: fit to content (rows + pad + footer, capped),
-    /// or a small panel for the empty state.
+    /// Fully-expanded box height: the bar's ONE drawer height
+    /// ([`options::BOX_DRAWER_H`]), or a small panel for the empty state.
+    ///
+    /// It used to fit itself to its content, capped at the drawer — which meant
+    /// this box, the notification drawer and the settings panel each opened to
+    /// a different size, and they are the same object in three places (Max,
+    /// 2026-09-13: *"gear, clipboard and notis should be the same height"*).
+    /// Fitting also made the box walk under the typing hand while the search
+    /// field filtered rows away, which needed a whole pin (`search_h`) to
+    /// defend against; a constant height has nothing to defend.
     fn clip_full_h(&self) -> f32 {
-        let s = self.options_scale();
         if self.clip.history.is_empty() {
-            return EMPTY_H * s;
+            return EMPTY_H * self.options_scale();
         }
-        let content = self.clip_rows_total_h() + LIST_PAD * s + self.clip_footer_h();
-        content.clamp(self.clip_band_h(), EXPANDED_H * s)
+        self.options_box_drawer_h()
     }
 
     /// Diameter of the footer ✕ pill (larger than a bar pill — the box's primary
@@ -1502,7 +1735,7 @@ impl App {
     }
 
     /// Height reserved at the box bottom for the floating ✕ pill.
-    fn clip_footer_h(&self) -> f32 {
+    pub(crate) fn clip_footer_h(&self) -> f32 {
         if self.clip.history.is_empty() {
             return 0.0;
         }
@@ -1521,26 +1754,42 @@ impl App {
     }
 
     /// The footer zone rect at the box bottom.
-    fn clip_footer_rect(&self, rect: Rect) -> Rect {
+    pub(crate) fn clip_footer_rect(&self, rect: Rect) -> Rect {
         let h = self.clip_footer_h();
         Rect::new(rect.x, rect.y + rect.h - h, rect.w, h)
     }
 
-    /// The two footer buttons — `[new note] [dictionary]` — a centred pair of
-    /// equal circles with [`FOOTER_GAP`] between them, vertically centred in the
-    /// footer zone. Shared by the draw and the hit-test.
-    fn clip_footer_buttons(&self, rect: Rect) -> [(ClipHit, Rect); 3] {
+    /// The footer buttons — `[new note] [emoji] [dictionary] [clear all]` — a
+    /// centred row of equal circles with [`FOOTER_GAP`] between them, vertically
+    /// centred in the footer zone. Shared by the draw and the hit-test. The
+    /// compose tools (note, emoji) lead; the reference and the can follow.
+    fn clip_footer_buttons(&self, rect: Rect) -> [(ClipHit, Rect); 4] {
         let f = self.clip_footer_rect(rect);
         let d = self.clip_footer_button_d();
-        let total = 3.0 * d + 2.0 * FOOTER_GAP;
+        let total = 4.0 * d + 3.0 * FOOTER_GAP;
         let x0 = f.x + (f.w - total) / 2.0;
         let y = f.y + (f.h - d) / 2.0;
         let step = d + FOOTER_GAP;
         [
             (ClipHit::NewNote, Rect::new(x0, y, d, d)),
-            (ClipHit::Dictionary, Rect::new(x0 + step, y, d, d)),
-            (ClipHit::ClearAll, Rect::new(x0 + 2.0 * step, y, d, d)),
+            (ClipHit::Emoji, Rect::new(x0 + step, y, d, d)),
+            (ClipHit::Dictionary, Rect::new(x0 + 2.0 * step, y, d, d)),
+            (ClipHit::ClearAll, Rect::new(x0 + 3.0 * step, y, d, d)),
         ]
+    }
+
+    /// The search field's rect once fully out: the footer zone's full width,
+    /// keeping the buttons' height so the morph is a stretch, not a resize. It
+    /// grows from the middle button's seat (see `push_clip_footer`).
+    fn clip_search_field_rect(&self, rect: Rect) -> Rect {
+        let f = self.clip_footer_rect(rect);
+        let d = self.clip_footer_button_d();
+        Rect::new(
+            f.x + SEARCH_FIELD_PAD,
+            f.y + (f.h - d) / 2.0,
+            (f.w - 2.0 * SEARCH_FIELD_PAD).max(d),
+            d,
+        )
     }
 
     /// A history row's delete-can rect — ONE definition for the draw and the
@@ -1559,28 +1808,48 @@ impl App {
         Rect::new(dr.x - 3.0, dr.y - 3.0, dr.w + 6.0, dr.h + 6.0)
     }
 
-    /// Visible clip rows: `(index, row rect)`, newest (index 0) flush at the
-    /// content top, each stacked below by its own (variable) height, shifted up
-    /// by `list_scroll`. Shared by the draw and the hit-test so they can't
-    /// disagree.
-    fn clip_rows(&self, rect: Rect) -> Vec<(usize, Rect)> {
+    /// Visible clip rows: `(list position, history index, row rect)`, topmost
+    /// shown row flush at the content top, each stacked below by its own
+    /// (variable) height, shifted up by `list_scroll`. Walks `shown`, so a
+    /// search filter drops rows here once and every caller follows. The position
+    /// is the row's place in the *list* (what the zebra stripes), the index its
+    /// place in `history` (what every click acts on). Shared by the draw and the
+    /// hit-test so they can't disagree.
+    fn clip_rows(&self, rect: Rect) -> Vec<(usize, usize, Rect)> {
         let content = self.clip_content_rect(rect);
         let mut out = Vec::new();
         let mut top = content.y - self.clip.list_scroll;
-        for (idx, &h) in self.clip.row_heights.iter().enumerate() {
+        for (pos, &idx) in self.clip.shown.iter().enumerate() {
+            let Some(&h) = self.clip.row_heights.get(idx) else {
+                continue;
+            };
             let bottom = top + h;
             if bottom > content.y && top < content.y + content.h {
-                out.push((idx, Rect::new(rect.x, top, rect.w, h)));
+                out.push((pos, idx, Rect::new(rect.x, top, rect.w, h)));
             }
             top = bottom;
         }
         out
     }
 
-    /// Maximum scroll (px): the list bottom past the visible content area.
+    /// Where a shown row sits in the stacked list, in pixels from the list top
+    /// (ignoring the scroll) — for scrolling a keyboard selection into view.
+    fn clip_row_offset(&self, pos: usize) -> f32 {
+        self.clip
+            .shown
+            .iter()
+            .take(pos)
+            .filter_map(|&i| self.clip.row_heights.get(i))
+            .sum()
+    }
+
+    /// Maximum scroll (px): the list bottom past the visible content area. Both
+    /// sides come from the same place the open box's height does
+    /// ([`clip_full_h`](Self::clip_full_h)), so a scaled box — or one pinned
+    /// while the search field is out — can still reach its last row.
     fn clip_scroll_span(&self) -> f32 {
-        let visible = (EXPANDED_H - self.clip_footer_h()).max(0.0);
-        (self.clip_rows_total_h() + LIST_PAD - visible).max(0.0)
+        let visible = (self.clip_full_h() - self.clip_footer_h()).max(0.0);
+        (self.clip_rows_total_h() + LIST_PAD * self.options_scale() - visible).max(0.0)
     }
 
     /// Draw the preview/box element: the pill that slides out to the right from
@@ -1703,6 +1972,40 @@ impl App {
             return;
         }
 
+        // The emoji picker is a full-cover mode too — but it keeps the footer,
+        // because the search field down there is what filters its grid.
+        if self.emoji_open() {
+            self.push_clip_emoji(scene, rect, e, ink, dim_ink, fill);
+            self.push_clip_footer(scene, rect, solid, bright);
+            return;
+        }
+
+        // A search that matches nothing: the box holds its shape (§2) and says
+        // so where the rows were, with the field still live to edit. (Not while
+        // a detail view is up — it owns the box and draws its own way out.)
+        if self.clip.shown.is_empty() && self.clip.detail_t < 0.02 {
+            let s = self.options_scale();
+            let a = [dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * solid];
+            scene.labels.push(Label {
+                text: crate::i18n::tr("No clips match").to_owned(),
+                pos: (
+                    content.x + content.w / 2.0,
+                    content.y + (content.h - LINE_PX * s) / 2.0,
+                ),
+                max_w: content.w,
+                font_px: FONT_PX * s,
+                line_px: LINE_PX * s,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: None,
+                color: Some(a),
+                clip: Some(content),
+            });
+            self.push_clip_footer(scene, rect, solid, bright);
+            return;
+        }
+
         let stripe_opaque = self.zebra_stripe(fill);
 
         // The content card grows out of the clicked row; the list is clipped to
@@ -1729,9 +2032,10 @@ impl App {
             (card_top - list_top).max(0.0),
         );
         if list_clip.h > 0.5 {
-            for (idx, rr) in self.clip_rows(rect) {
+            for (pos, idx, rr) in self.clip_rows(rect) {
                 self.push_clip_row(
                     scene,
+                    pos,
                     idx,
                     rr,
                     list_clip,
@@ -1762,6 +2066,7 @@ impl App {
     fn push_clip_row(
         &self,
         scene: &mut Scene,
+        pos: usize,
         idx: usize,
         rr: Rect,
         content: Rect,
@@ -1778,15 +2083,20 @@ impl App {
         // line height, tile, pads, wrap width) multiplies by this SAME value
         // the measure used (`measure_clip_rows`), so layout and heights agree.
         let s = self.options_scale();
-        let hovered = self.clip.hover_row == Some(idx);
+        // The pointer's hover and the search's keyboard selection light a row
+        // the same way; only a real hover grows the × (there is nothing to
+        // click it with otherwise).
+        let pointed = self.clip.hover_row == Some(idx);
+        let hovered = pointed || self.clip.search_sel == Some(entry.id);
         // Clip the row to the content region so it can't spill over the footer.
         let top = rr.y.max(content.y);
         let bot = (rr.y + rr.h).min(content.y + content.h);
         if bot <= top {
             return;
         }
-        // Zebra on odd rows (newest = 0 stays plain).
-        if idx % 2 == 1 {
+        // Zebra on odd LIST positions (topmost stays plain) — striping follows
+        // what is on screen, so a filtered list still alternates.
+        if pos % 2 == 1 {
             scene.rects.push(RectInst {
                 rect: Rect::new(rr.x, top, rr.w, bot - top),
                 radius: 0.0,
@@ -1822,7 +2132,7 @@ impl App {
 
         // Trailing time (or the × delete on hover) at the right.
         let right = rr.x + rr.w - TRAIL_PAD_X;
-        let text_right = if hovered {
+        let text_right = if pointed {
             // Delete hot-square, top-right.
             let dr = Rect::new(
                 rr.x + rr.w - TRAIL_PAD_X - DELETE_SZ,
@@ -1972,17 +2282,27 @@ impl App {
         let d0 = self.clip_footer_button_d();
         let gpx = d0 * 0.62;
         let g = self.options_text_color();
+        // Typing stretches the middle button's seat into the search field; the
+        // three circles fade as it takes the footer over.
+        let t = self.clip.search_t;
+        if t > 0.001 {
+            self.push_clip_search_field(scene, rect, alpha * t.min(1.0), bright);
+        }
+        let btn_a = alpha * (1.0 - t);
+        if btn_a <= 0.01 {
+            return;
+        }
         for (hit, br0) in self.clip_footer_buttons(rect) {
             let hovered = self.clip.hit == hit;
             let br = if hovered { hover_grow(br0) } else { br0 };
             let radius = br.h / 2.0;
-            push_neumorph(scene, br, radius, bright, alpha);
+            push_neumorph(scene, br, radius, bright, btn_a);
             let mut base = if hovered {
                 self.options_hover_wash()
             } else {
                 self.options_rest_wash()
             };
-            base[3] *= alpha;
+            base[3] *= btn_a;
             scene.rects.push(RectInst {
                 rect: br,
                 radius,
@@ -1991,25 +2311,132 @@ impl App {
                 border: 0.0,
             });
             let glyph = match hit {
+                ClipHit::Emoji => GLYPH_EMOJI,
                 ClipHit::Dictionary => GLYPH_BOOK,
                 ClipHit::ClearAll => GLYPH_TRASH,
                 _ => GLYPH_NOTE,
             };
+            // The emoji button IS an emoji — it has to be drawn in the colour
+            // font by name, at its own ink (the glyph carries its own colour).
+            let emoji = hit == ClipHit::Emoji;
             let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
             scene.labels.push(Label {
                 text: glyph.to_owned(),
-                pos: (br.x + br.w / 2.0, br.y + (br.h - gpx) / 2.0),
+                pos: (
+                    br.x + br.w / 2.0,
+                    br.y + (br.h - if emoji { gpx * 0.86 } else { gpx }) / 2.0,
+                ),
                 max_w: br.w + 16.0,
-                font_px: gpx,
-                line_px: gpx,
+                font_px: if emoji { gpx * 0.86 } else { gpx },
+                line_px: if emoji { gpx * 0.86 } else { gpx },
                 centered: true,
                 dim: false,
                 cache: true,
-                family: Some(NERD),
-                color: Some([g[0], g[1], g[2], g[3] * alpha]),
+                family: Some(if emoji { EMOJI_FONT } else { NERD }),
+                color: Some(if emoji {
+                    [1.0, 1.0, 1.0, btn_a]
+                } else {
+                    [g[0], g[1], g[2], g[3] * btn_a]
+                }),
                 clip: Some(gclip),
             });
         }
+    }
+
+    /// Draw the type-to-search field the footer morphs into: a stadium stretched
+    /// out of the middle button's seat, with a leading magnifier, the query (or
+    /// its prompt) and a caret. There is no button to press — the field arrives
+    /// because you started typing, and Escape sends it back.
+    fn push_clip_search_field(&self, scene: &mut Scene, rect: Rect, a: f32, bright: bool) {
+        let t = self.clip.search_t.clamp(0.0, 1.0);
+        // Grows from the CENTRE of the button row (no button is at the middle of
+        // an even row), so the stretch reads as the footer becoming the field.
+        let f = self.clip_footer_rect(rect);
+        let d = self.clip_footer_button_d();
+        let seat = Rect::new(f.x + (f.w - d) / 2.0, f.y + (f.h - d) / 2.0, d, d);
+        let full = self.clip_search_field_rect(rect);
+        let fr = lerp_rect(seat, full, t);
+        let radius = fr.h / 2.0;
+        push_neumorph(scene, fr, radius, bright, a);
+        let mut wash = self.options_rest_wash();
+        wash[3] *= a;
+        scene.rects.push(RectInst {
+            rect: fr,
+            radius,
+            color: wash,
+            glass: 0.0,
+            border: 0.0,
+        });
+        // The contents arrive once the stretch is mostly done, so they never
+        // spill out of a field still the width of a button.
+        let ta = (((t - 0.45) / 0.55).clamp(0.0, 1.0) * a).clamp(0.0, 1.0);
+        if ta <= 0.01 {
+            return;
+        }
+        let ink = self.clip_box_surface().1;
+        let dim = self.dim_ink(ink);
+        let s = self.options_scale();
+        let font = FONT_PX * s;
+        let gx = fr.x + PILL_PAD_X;
+        let cy = fr.y + (fr.h - LINE_PX * s) / 2.0;
+        let fclip = Rect::new(fr.x, fr.y, fr.w, fr.h);
+        scene.labels.push(Label {
+            text: GLYPH_SEARCH.to_owned(),
+            pos: (gx, cy),
+            max_w: font * 2.0,
+            font_px: font * 0.95,
+            line_px: LINE_PX * s,
+            centered: false,
+            dim: false,
+            cache: true,
+            family: Some(NERD),
+            color: Some([dim[0], dim[1], dim[2], dim[3] * ta]),
+            clip: Some(fclip),
+        });
+        let tx = gx + font * 1.7;
+        let empty = self.clip.search_query.is_empty();
+        let (text, col) = if empty {
+            // The field serves whichever grid is up.
+            let prompt = if self.emoji_open() {
+                "Search emoji…"
+            } else {
+                "Search clips…"
+            };
+            (crate::i18n::tr(prompt).to_owned(), dim)
+        } else {
+            (self.clip.search_query.clone(), ink)
+        };
+        scene.labels.push(Label {
+            text,
+            pos: (tx, cy),
+            max_w: (fr.x + fr.w - PILL_PAD_X - tx).max(0.0),
+            font_px: font,
+            line_px: LINE_PX * s,
+            centered: false,
+            dim: false,
+            cache: empty,
+            family: None,
+            color: Some([col[0], col[1], col[2], col[3] * ta]),
+            clip: Some(fclip),
+        });
+        // The caret shows only while the box actually holds the keyboard: after
+        // it has handed it back for a paste, typing goes to your window, and a
+        // blinking caret here would lie about where the keys land. Clicking the
+        // field takes it back.
+        if !self.clip.keyboard_held {
+            return;
+        }
+        // Caret after the estimated query width — the same half-em guess the
+        // dictionary field uses (a `&self` draw can't measure the font).
+        let cw = self.clip.search_query.chars().count() as f32 * font * 0.5;
+        let caret_x = (tx + cw).min(fr.x + fr.w - PILL_PAD_X);
+        scene.rects.push(RectInst {
+            rect: Rect::new(caret_x, fr.y + fr.h * 0.26, 2.0, fr.h * 0.48),
+            radius: 1.0,
+            color: [ink[0], ink[1], ink[2], ink[3] * ta * 0.8],
+            glass: 0.0,
+            border: 0.0,
+        });
     }
 
     /// Draw the dictionary "define a word" panel over the list: an opaque cover
@@ -2040,42 +2467,7 @@ impl App {
         });
 
         // ---- "‹ Back" button (same seat / visuals as the detail view) ----
-        let back = self.clip_dict_back_rect(rect);
-        let hv = self.clip.hit == ClipHit::Back;
-        let bcol = [
-            ink[0],
-            ink[1],
-            ink[2],
-            ink[3] * if hv { 1.0 } else { 0.72 } * a,
-        ];
-        let cy = back.y + (back.h - LINE_PX) / 2.0;
-        let gclip = Rect::new(back.x - 4.0, back.y - 4.0, back.w + 8.0, back.h + 8.0);
-        scene.labels.push(Label {
-            text: GLYPH_BACK.to_owned(),
-            pos: (back.x, cy),
-            max_w: 20.0,
-            font_px: FONT_PX * 0.92,
-            line_px: LINE_PX,
-            centered: false,
-            dim: false,
-            cache: true,
-            family: Some(NERD),
-            color: Some(bcol),
-            clip: Some(gclip),
-        });
-        scene.labels.push(Label {
-            text: crate::i18n::tr("Back").to_owned(),
-            pos: (back.x + 16.0, cy),
-            max_w: back.w,
-            font_px: FONT_PX * 0.95,
-            line_px: LINE_PX,
-            centered: false,
-            dim: false,
-            cache: true,
-            family: None,
-            color: Some(bcol),
-            clip: Some(gclip),
-        });
+        self.push_clip_back(scene, rect, a, self.clip.hit == ClipHit::Back, ink);
 
         // ---- typed search field (a taller stadium input under the back row) ----
         let (field, res) = self.clip_dict_layout(rect);
@@ -2195,9 +2587,14 @@ impl App {
         // Dictionary panel: only the "‹ Back" button is hittable; typing drives
         // the rest, and the list is hidden behind the panel.
         if self.clip.dict_open {
-            if self.clip_dict_back_rect(rect).contains(p) {
+            if self.clip_back_seat(rect).contains(p) {
                 return ClipHit::Back;
             }
+            return ClipHit::None;
+        }
+        // Emoji picker: it owns the box (its own hit-test runs in `emoji.rs`);
+        // the footer's buttons are out of reach until "‹ Back".
+        if self.emoji_open() {
             return ClipHit::None;
         }
         // Detail view: only the top pills are hittable; the list is hidden.
@@ -2210,6 +2607,12 @@ impl App {
             return ClipHit::None;
         }
         if self.clip_footer_rect(rect).contains(p) {
+            // Once the footer has become the search field the buttons are gone
+            // (Escape brings them back); the field itself is the way to take the
+            // keyboard back after a paste handed it to the window below.
+            if self.clip.search_t > 0.5 {
+                return ClipHit::SearchField;
+            }
             for (hit, br) in self.clip_footer_buttons(rect) {
                 if br.contains(p) {
                     return hit;
@@ -2217,7 +2620,7 @@ impl App {
             }
             return ClipHit::None;
         }
-        for (idx, rr) in self.clip_rows(rect) {
+        for (_, idx, rr) in self.clip_rows(rect) {
             if rr.contains(p) {
                 // Same rect the can is DRAWN at (top-aligned, TRAIL_PAD_X)
                 // plus click slack — see `clip_row_can_rect`.
@@ -2233,6 +2636,13 @@ impl App {
     /// Recompute the box hit target + hovered row from the pointer; returns
     /// whether anything changed (so the caller can redraw). On pointer motion.
     pub(crate) fn update_clip_hit(&mut self) -> bool {
+        if self.emoji_open() {
+            let changed = self.update_emoji_hit();
+            let cleared = self.clip.hit != ClipHit::None || self.clip.hover_row.is_some();
+            self.clip.hit = ClipHit::None;
+            self.clip.hover_row = None;
+            return changed || cleared;
+        }
         let hit = self.clip_hit();
         let hover_row = match hit {
             ClipHit::Row(i) | ClipHit::Delete(i) => Some(i),
@@ -2246,6 +2656,9 @@ impl App {
 
     /// Whether the pointer is on a clickable box target (for the cursor shape).
     pub(crate) fn clip_box_hit_clickable(&self) -> bool {
+        if self.emoji_open() {
+            return self.emoji.hit != crate::emoji::EmojiHit::None;
+        }
         !matches!(self.clip.hit, ClipHit::None)
     }
 
@@ -2259,7 +2672,12 @@ impl App {
         };
         if self.clip.expanded {
             self.clip.hold_deadline = None; // a scroll keeps it open
-                                            // In the dictionary panel, the wheel scrolls the answer.
+                                            // In the emoji picker, the wheel scrolls the grid.
+            if self.emoji_open() {
+                self.emoji_axis(delta * SCROLL_SPEED);
+                return;
+            }
+            // In the dictionary panel, the wheel scrolls the answer.
             if self.clip.dict_open {
                 let span = self.clip_dict_scroll_span();
                 self.clip.dict_scroll_target =
@@ -2318,9 +2736,109 @@ impl App {
         }
     }
 
+    /// The OPTIONS surface holds the keyboard exactly while the clipboard box is
+    /// open: the list types-to-search and the dictionary panel types its query,
+    /// so the grab belongs to the box itself rather than to either mode. The
+    /// window below loses focus for as long as the drawer is out and gets it
+    /// straight back on the collapse — the price of typing into a layer surface,
+    /// and the reason the grab is released the moment the box is done.
+    fn sync_clip_keyboard(&mut self) {
+        // `keyboard_yielded`: the box handed the keyboard back for a paste and
+        // must not snatch it again behind the user's hand.
+        let want = (self.clip.expanded || self.clip.dict_open) && !self.clip.keyboard_yielded;
+        self.set_clip_keyboard(want);
+    }
+
+    /// Take or release the grab (committed only on a real change).
+    fn set_clip_keyboard(&mut self, want: bool) {
+        if want == self.clip.keyboard_held {
+            return;
+        }
+        self.clip.keyboard_held = want;
+        debug!("clip: keyboard grab {}", if want { "on" } else { "off" });
+        if let Some(layer) = &self.options_layer {
+            crate::surface::set_interactive(layer, want);
+        }
+    }
+
+    /// Inject a paste into the window below, handing the keyboard back for the
+    /// moment it takes.
+    ///
+    /// Wayland offers the clipboard ONLY to the keyboard-focused client. While
+    /// the box holds the grab (type-to-search), the window underneath has no
+    /// selection offer — the injected Ctrl+V arrives and pastes *nothing*
+    /// (verified live 2026-09-13: the keystroke lands in the app, the paste is
+    /// empty). So the grab is dropped, the compositor re-offers the selection to
+    /// the re-focused window, the paste goes in, and the grab is taken back so
+    /// typing still searches.
+    pub(crate) fn paste_into_window_below(&mut self) {
+        if !self.clip.keyboard_held {
+            // Nothing held the keyboard: the app already has focus and the
+            // offer, so this is just the keystroke. The common case once the
+            // box has yielded — picking a second emoji costs no focus dance,
+            // only the beat the freshly-served selection needs to settle.
+            self.after_ms(PASTE_SETTLE_MS, |_| crate::hypr::paste_active());
+            return;
+        }
+        // Whose paste this is, read BEFORE anything moves — the window stays
+        // `activewindow` throughout, which is exactly why it needs re-focusing
+        // by hand (see `hypr::focus_window`: dropping the grab leaves the
+        // keyboard seat stranded on the layer, so the window would get its keys
+        // but never its clipboard offer).
+        let Some(addr) = crate::hypr::active_window() else {
+            return;
+        };
+        self.yield_clip_keyboard(&addr);
+        self.after_ms(PASTE_FOCUS_MS, move |_| {
+            crate::hypr::send_key_to(&addr, "CTRL", "v");
+        });
+    }
+
+    /// Give the keyboard back to window `addr` and LEAVE it there.
+    ///
+    /// Releasing the grab is not enough on its own: the window never stopped
+    /// being `activewindow`, so the compositor leaves the seat stranded on the
+    /// layer and the window gets neither keys nor a clipboard offer (verified
+    /// live 2026-09-13 — with the cursor inside the window, too). It takes an
+    /// explicit focus, and it must be the NON-WARPING one: focusing by
+    /// dispatcher normally drags the pointer into the window, which pulls it off
+    /// the box mid-pick (Max: "the window where it gets pasted takes my
+    /// pointer"). The interactivity commit is flushed first, or the compositor
+    /// answers the focus while we still claim exclusivity.
+    ///
+    /// The box does not take the keyboard back by itself afterwards — you asked
+    /// for your window, you keep it (Max: "i can't really keep writing on the
+    /// window"). `rearm_clip_keyboard` is the way back in.
+    fn yield_clip_keyboard(&mut self, addr: &str) {
+        self.set_clip_keyboard(false);
+        let _ = self.conn.flush();
+        crate::hypr::focus_window_no_warp(addr);
+        self.clip.keyboard_yielded = true;
+    }
+
+    /// Take the keyboard back for the box (the search field was clicked). Undoes
+    /// a `yield_clip_keyboard` — the only thing that does, short of reopening.
+    pub(crate) fn rearm_clip_keyboard(&mut self) {
+        self.clip.keyboard_yielded = false;
+        if !self.clip.search_open {
+            self.open_clip_search();
+        }
+        self.sync_clip_keyboard();
+        self.update_clip_hit();
+        self.schedule_clip_frame();
+    }
+
     /// Open the history drawer from the collapsed preview, newest flush at top.
     pub(crate) fn open_clip_box(&mut self) {
         if self.clip.history.is_empty() {
+            return;
+        }
+        if self.clip.expanded {
+            // Already open: hold it, but do NOT wipe what the user is in the
+            // middle of (the scroll, the picker, a typed search — and above all
+            // not the keyboard hand-back, which would snatch the keys back from
+            // the window they are writing in).
+            self.clip.hold_deadline = None;
             return;
         }
         // Timed (logged below): the whole body runs synchronously on the event
@@ -2357,6 +2875,20 @@ impl App {
         self.clip.dict_query.clear();
         self.clip.dict_scroll = 0.0;
         self.clip.dict_scroll_target = 0.0;
+        // …nor a search: a fresh box shows the whole history, with the footer
+        // back on its three buttons, waiting for the first key.
+        self.clip.search_open = false;
+        self.clip.search_query.clear();
+        self.clip.search_sel = None;
+        self.refilter_clips();
+        // …nor an emoji picker.
+        self.reset_emoji();
+        // A fresh box takes the keyboard again, whatever the last one yielded.
+        self.clip.keyboard_yielded = false;
+        // The box holds the keyboard while it is open — that is what makes
+        // typing search instead of falling through to the window below (until
+        // it hands it back for a paste; see `yield_clip_keyboard`).
+        self.sync_clip_keyboard();
         self.sync_options_input();
         self.reeval_options_bar();
         self.request_clip_thumbs();
@@ -2376,14 +2908,22 @@ impl App {
             self.clip.expanded = false;
             self.clip.hit = ClipHit::None;
             self.clip.hover_row = None;
-            // Release the keyboard grab if the dictionary panel held it (it fades
-            // away with the collapsing box; `open_clip_box` clears the rest).
-            if self.clip.dict_open {
-                self.clip.dict_open = false;
-                if let Some(layer) = &self.options_layer {
-                    crate::surface::set_interactive(layer, false);
-                }
+            // The search field goes with it (its rows are about to be gone);
+            // `open_clip_box` clears the rest on the way back in.
+            self.clip.search_open = false;
+            self.clip.search_query.clear();
+            self.clip.search_sel = None;
+            self.refilter_clips();
+            self.clip.dict_open = false;
+            self.emoji.open = false;
+            // Hand the keyboard back to the window under us as the box goes —
+            // by focus, not just by dropping the grab, or the seat stays
+            // stranded on the layer and the window can't be typed in at all.
+            match crate::hypr::active_window() {
+                Some(addr) if self.clip.keyboard_held => self.yield_clip_keyboard(&addr),
+                _ => self.sync_clip_keyboard(),
             }
+            self.clip.keyboard_yielded = false;
             // The detail view (and scroll) are NOT reset here: the box collapses
             // showing whatever was on screen (the detail shrinks + fades away with
             // it), and `open_clip_box` wipes it back to a fresh list on the next
@@ -2403,16 +2943,16 @@ impl App {
         let id = entry.id;
         // Capture the clicked row's rect so the content card can grow from it.
         let rect = self.clip_rect();
-        let src = self
-            .clip_rows(rect)
-            .into_iter()
-            .find(|(i, _)| *i == idx)
-            .map(|(_, rr)| rr)
+        let row = self.clip_rows(rect).into_iter().find(|(_, i, _)| *i == idx);
+        let src = row
+            .map(|(_, _, rr)| rr)
             .unwrap_or_else(|| self.clip_detail_regions(rect).0);
         self.clip.detail_id = Some(id);
         self.clip.detail_open = true;
         self.clip.detail_src = src;
-        self.clip.detail_src_striped = idx % 2 == 1; // matches the zebra in push_clip_row
+        // Matches the zebra in `push_clip_row` — the LIST position, not the
+        // history index (they part company under a search filter).
+        self.clip.detail_src_striped = row.is_some_and(|(pos, _, _)| pos % 2 == 1);
         self.clip.detail_scroll = 0.0;
         self.clip.detail_meta_t = 0.0;
         self.clip.detail_meta_target = 0.0;
@@ -2459,9 +2999,10 @@ impl App {
         })
     }
 
-    /// The dictionary panel's "‹ Back" button rect — same seat as the detail
-    /// view's back button (top-left, aligned with the pill row).
-    fn clip_dict_back_rect(&self, rect: Rect) -> Rect {
+    /// The "‹ Back" seat shared by every full-cover mode of the box (the
+    /// dictionary panel, the emoji picker) — the detail view's back-button spot,
+    /// top-left, aligned with the pill row.
+    pub(crate) fn clip_back_seat(&self, rect: Rect) -> Rect {
         let d = self.clip_band_h();
         Rect::new(
             rect.x + DETAIL_PILL_X,
@@ -2471,10 +3012,56 @@ impl App {
         )
     }
 
+    /// Draw that shared "‹ Back" button.
+    pub(crate) fn push_clip_back(
+        &self,
+        scene: &mut Scene,
+        rect: Rect,
+        a: f32,
+        hovered: bool,
+        ink: [f32; 4],
+    ) {
+        let back = self.clip_back_seat(rect);
+        let col = [
+            ink[0],
+            ink[1],
+            ink[2],
+            ink[3] * if hovered { 1.0 } else { 0.72 } * a,
+        ];
+        let cy = back.y + (back.h - LINE_PX) / 2.0;
+        let gclip = Rect::new(back.x - 4.0, back.y - 4.0, back.w + 8.0, back.h + 8.0);
+        scene.labels.push(Label {
+            text: GLYPH_BACK.to_owned(),
+            pos: (back.x, cy),
+            max_w: 20.0,
+            font_px: FONT_PX * 0.92,
+            line_px: LINE_PX,
+            centered: false,
+            dim: false,
+            cache: true,
+            family: Some(NERD),
+            color: Some(col),
+            clip: Some(gclip),
+        });
+        scene.labels.push(Label {
+            text: crate::i18n::tr("Back").to_owned(),
+            pos: (back.x + 16.0, cy),
+            max_w: back.w,
+            font_px: FONT_PX * 0.95,
+            line_px: LINE_PX,
+            centered: false,
+            dim: false,
+            cache: true,
+            family: None,
+            color: Some(col),
+            clip: Some(gclip),
+        });
+    }
+
     /// The dictionary panel's geometry: `(search field, answer area)`. Shared by
     /// the draw and the scroll-span so line breaks and bounds always agree.
     fn clip_dict_layout(&self, rect: Rect) -> (Rect, Rect) {
-        let back = self.clip_dict_back_rect(rect);
+        let back = self.clip_back_seat(rect);
         let field = Rect::new(
             rect.x + ROW_PAD_X,
             back.y + back.h + DETAIL_PILL_GAP + 6.0,
@@ -2564,9 +3151,10 @@ impl App {
                 crate::dict::spawn_load(tx.clone());
             }
         }
-        if let Some(layer) = &self.options_layer {
-            crate::surface::set_interactive(layer, true);
-        }
+        // The panel is a typing surface: it needs the keyboard even if the box
+        // yielded it for an earlier paste.
+        self.clip.keyboard_yielded = false;
+        self.sync_clip_keyboard();
         self.update_clip_hit();
         self.schedule_clip_frame();
     }
@@ -2588,12 +3176,12 @@ impl App {
         self.schedule_clip_frame();
     }
 
-    /// Close the dictionary panel and release the keyboard grab.
+    /// Close the dictionary panel, back to the list. The keyboard stays with us
+    /// while the box is open (the list types-to-search) — `sync_clip_keyboard`
+    /// releases it only if the panel was outliving its box.
     pub(crate) fn close_dict(&mut self) {
         self.clip.dict_open = false;
-        if let Some(layer) = &self.options_layer {
-            crate::surface::set_interactive(layer, false);
-        }
+        self.sync_clip_keyboard();
         self.update_clip_hit();
         self.schedule_clip_frame();
     }
@@ -2642,6 +3230,220 @@ impl App {
         self.clip.dict_scroll = 0.0;
         self.clip.dict_scroll_target = 0.0;
         self.schedule_clip_frame();
+    }
+
+    /// Handle one key while the open history box holds the keyboard (the
+    /// dictionary panel takes its own first). Any printable key brings the
+    /// search field out of the footer and filters the list live; Up/Down move
+    /// the selection (or scroll, with no field out), Enter copies the selected
+    /// clip and closes, and Escape backs out one layer at a time — query, then
+    /// field, then the box itself (which hands the keyboard back).
+    pub(crate) fn clip_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // The detail view owns the box while it is up: only its way out.
+        if self.clip.detail_open {
+            if keysym == Keysym::Escape {
+                self.close_clip_detail();
+            }
+            return;
+        }
+        match keysym {
+            Keysym::Escape => {
+                // One layer at a time: the query, then the field, then whatever
+                // mode is up, then the box (which hands the keyboard back).
+                if !self.clip.search_query.is_empty() {
+                    self.clip.search_query.clear();
+                    self.after_clip_search_edit();
+                } else if self.clip.search_open {
+                    self.close_clip_search();
+                } else if self.emoji_open() {
+                    self.close_emoji();
+                } else {
+                    self.close_clip_box();
+                }
+                return;
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                // In the picker, Enter types the first match — the whole point
+                // of searching "happy" is not to then reach for the mouse.
+                if self.emoji_open() {
+                    self.type_emoji_at(0);
+                    return;
+                }
+                // The selection, or the top of the list when nothing is picked.
+                let target = self
+                    .clip
+                    .search_sel
+                    .and_then(|id| self.clip_index_of(id))
+                    .or_else(|| self.clip.shown.first().copied());
+                if let Some(idx) = target {
+                    self.copy_clip(idx);
+                    self.close_clip_box();
+                }
+                return;
+            }
+            Keysym::Down | Keysym::Up => {
+                let down = keysym == Keysym::Down;
+                if self.emoji_open() {
+                    // Arrows scroll the grid a row at a time.
+                    let step = NOTCH * SCROLL_SPEED;
+                    self.emoji_axis(if down { step } else { -step });
+                } else if self.clip.search_open {
+                    self.move_clip_sel(down);
+                } else {
+                    // No field out, so nothing to select: the arrows are a
+                    // wheel notch. Never flipped by natural-scroll — an arrow
+                    // key means the direction it points.
+                    let step = NOTCH * SCROLL_SPEED;
+                    let span = self.clip_scroll_span();
+                    let d = if down { step } else { -step };
+                    self.clip.scroll_target = (self.clip.scroll_target + d).clamp(0.0, span);
+                    self.request_clip_thumbs();
+                    self.schedule_clip_frame();
+                }
+                return;
+            }
+            Keysym::BackSpace => {
+                if self.clip.search_query.pop().is_some() {
+                    self.after_clip_search_edit();
+                }
+                return;
+            }
+            _ => {}
+        }
+        // A printable key starts (or extends) the search. A modifier combo is
+        // not text — swallow it rather than typing the letter it carries.
+        if self.modifiers.ctrl || self.modifiers.alt || self.modifiers.logo {
+            return;
+        }
+        let Some(s) = utf8 else {
+            return;
+        };
+        if s.is_empty() || s.chars().any(char::is_control) {
+            return;
+        }
+        if !self.clip.search_open {
+            self.open_clip_search();
+        }
+        self.clip.search_query.push_str(s);
+        self.after_clip_search_edit();
+    }
+
+    /// Open the box with the search field out and `query` already typed — the
+    /// `debug-clip-search` verb, so the filtered list can be captured without a
+    /// keyboard (the same sequence typing performs).
+    pub(crate) fn open_clip_search_with(&mut self, query: &str) {
+        self.open_clip_box();
+        if !self.clip.expanded {
+            return; // nothing copied yet — no list to search
+        }
+        self.open_clip_search_with_query(query);
+    }
+
+    /// Bring the field out of an already-open box with `query` in it — the same
+    /// sequence typing performs, for the debug verbs.
+    pub(crate) fn open_clip_search_with_query(&mut self, query: &str) {
+        self.open_clip_search();
+        self.clip.search_query = query.to_owned();
+        self.after_clip_search_edit();
+    }
+
+    /// Bring the search field out of the footer (the first key typed into an
+    /// open box).
+    fn open_clip_search(&mut self) {
+        self.clip.search_open = true;
+        self.clip.search_sel = self.clip_shown_id(0);
+        // Typing holds the box open the way the dictionary panel does: the hand
+        // is on the keyboard, not on the pointer that was keeping it alive.
+        self.clip.hold_deadline = None;
+    }
+
+    /// Bring the field out with nothing typed (the emoji picker's footer is its
+    /// search field from the moment it opens).
+    pub(crate) fn arm_clip_search_field(&mut self) {
+        if !self.clip.search_open {
+            self.open_clip_search();
+        }
+    }
+
+    /// Send the search field back to the footer buttons and restore the full
+    /// history (Escape on an empty query).
+    pub(crate) fn close_clip_search(&mut self) {
+        self.clip.search_open = false;
+        self.clip.search_query.clear();
+        self.clip.search_sel = None;
+        self.after_clip_search_edit();
+    }
+
+    /// Re-filter, re-home the list and redraw after the query changed. The one
+    /// field serves whichever grid is up — the clips, or the emoji picker's.
+    fn after_clip_search_edit(&mut self) {
+        if self.emoji_open() {
+            self.refilter_emoji();
+            self.update_clip_hit();
+            self.schedule_clip_frame();
+            return;
+        }
+        self.refilter_clips();
+        // A new result set reads from its top.
+        self.clip.list_scroll = 0.0;
+        self.clip.scroll_target = 0.0;
+        self.request_clip_thumbs();
+        self.update_clip_hit();
+        self.schedule_clip_frame();
+    }
+
+    /// The current search query, trimmed and lowercased — what both filters
+    /// match against (empty = show everything).
+    pub(crate) fn clip_search_needle(&self) -> String {
+        self.clip.search_query.trim().to_lowercase()
+    }
+
+    /// Empty the search field without closing it (entering/leaving the emoji
+    /// picker: a query aimed at clips means nothing to the grid, and vice
+    /// versa).
+    pub(crate) fn clear_clip_search_query(&mut self) {
+        self.clip.search_query.clear();
+        self.refilter_clips();
+    }
+
+    /// Move the keyboard selection one row down/up the filtered list, scrolling
+    /// it into view.
+    fn move_clip_sel(&mut self, down: bool) {
+        if self.clip.shown.is_empty() {
+            return;
+        }
+        let last = self.clip.shown.len() - 1;
+        let cur = self.clip.search_sel.and_then(|id| self.clip_shown_pos(id));
+        let pos = match cur {
+            Some(p) if down => (p + 1).min(last),
+            Some(p) => p.saturating_sub(1),
+            None if down => 0,
+            None => last,
+        };
+        self.clip.search_sel = self.clip_shown_id(pos);
+        self.scroll_clip_sel_into_view(pos);
+        self.request_clip_thumbs();
+        self.schedule_clip_frame();
+    }
+
+    /// Nudge the list so the row at list position `pos` is fully visible.
+    fn scroll_clip_sel_into_view(&mut self, pos: usize) {
+        let content = self.clip_content_rect(self.clip_rect());
+        let top = self.clip_row_offset(pos);
+        let h = self
+            .clip
+            .shown
+            .get(pos)
+            .and_then(|&i| self.clip.row_heights.get(i))
+            .copied()
+            .unwrap_or(0.0);
+        let mut target = self.clip.scroll_target;
+        if top < target {
+            target = top;
+        } else if top + h > target + content.h {
+            target = top + h - content.h;
+        }
+        self.clip.scroll_target = target.clamp(0.0, self.clip_scroll_span());
     }
 
     /// Height of the top pill-row zone: tight to the pill height (the pills sit
@@ -3150,7 +3952,19 @@ impl App {
     /// Handle a click inside the open box (footer / row delete / row). Returns
     /// whether it consumed the click.
     pub(crate) fn clip_box_click(&mut self) -> bool {
+        // The picker owns the box while it is up (its cells aren't `ClipHit`s).
+        if self.emoji_open() {
+            return self.emoji_click();
+        }
         match self.clip.hit {
+            ClipHit::Emoji => {
+                self.open_emoji();
+                true
+            }
+            ClipHit::SearchField => {
+                self.rearm_clip_keyboard();
+                true
+            }
             ClipHit::NewNote => {
                 // TODO: open the floating centred note editor.
                 debug!("clip: new-note button (editor not yet wired)");
@@ -3265,6 +4079,7 @@ impl App {
             remove_clip_side_files(&entry);
         }
         self.measure_clip_rows();
+        self.refilter_clips();
         self.save_clip_history();
         self.close_clip_box();
         self.update_clip_hit();
@@ -3278,6 +4093,7 @@ impl App {
         let entry = self.clip.history.remove(idx);
         remove_clip_side_files(&entry);
         self.measure_clip_rows();
+        self.refilter_clips();
         self.save_clip_history();
         if self.clip.history.is_empty() {
             self.close_clip_box();
@@ -3387,7 +4203,7 @@ impl App {
         let reqs: Vec<(String, u64)> = self
             .clip_rows(rect)
             .into_iter()
-            .filter_map(|(idx, _)| {
+            .filter_map(|(_, idx, _)| {
                 let entry = self.clip.history.get(idx)?;
                 match clip_tile(entry) {
                     ClipTile::Thumb { path, key, .. }
@@ -3502,10 +4318,14 @@ impl App {
                 self.clip.last = None;
                 self.schedule_clip_frame();
             }
-        } else if self.clip.peek_reveal && self.clip.hold_deadline.is_none() && !self.clip.dict_open
+        } else if self.clip.peek_reveal
+            && self.clip.hold_deadline.is_none()
+            && !self.clip.dict_open
+            && !self.clip.search_open
         {
-            // The dictionary panel holds the box open regardless of the pointer —
-            // the user has to leave the box to reach the keyboard to type.
+            // The dictionary panel and a typed search hold the box open
+            // regardless of the pointer — the user has to leave the box to
+            // reach the keyboard to type.
             self.schedule_clip_collapse(LEAVE_HOLD);
         }
     }
@@ -3595,7 +4415,7 @@ impl App {
     }
 
     /// Run `f` on the event loop once, after `ms` milliseconds (one-shot timer).
-    fn after_ms(&self, ms: u64, f: impl FnOnce(&mut App) + 'static) {
+    pub(crate) fn after_ms(&self, ms: u64, f: impl FnOnce(&mut App) + 'static) {
         let timer = Timer::from_duration(Duration::from_millis(ms));
         let mut f = Some(f);
         let _ = self
@@ -3618,20 +4438,20 @@ impl App {
             .insert_source(timer, move |_, _, app: &mut App| {
                 if app.clip.hold_deadline == Some(deadline) {
                     app.clip.hold_deadline = None;
+                    // A typed search holds the box open exactly like the
+                    // dictionary panel: the hand is on the keyboard, not on
+                    // the pointer that was keeping it alive.
                     if !app.clip.dict_open
+                        && !app.clip.search_open
                         && !matches!(
                             app.options_hover,
                             Some(PillId::Clipboard | PillId::ClipboardBox)
                         )
                     {
                         app.clip.peek_reveal = false;
-                        // Collapse the history drawer too, if it was open.
-                        if app.clip.expanded {
-                            app.clip.expanded = false;
-                            app.clip.hit = ClipHit::None;
-                            app.clip.hover_row = None;
-                            app.sync_options_input();
-                        }
+                        // Collapse the history drawer too, if it was open (this
+                        // is also what hands the keyboard back).
+                        app.close_clip_box();
                         app.clip.last = None;
                         app.schedule_clip_frame();
                     }
@@ -3640,7 +4460,7 @@ impl App {
             });
     }
 
-    fn schedule_clip_frame(&mut self) {
+    pub(crate) fn schedule_clip_frame(&mut self) {
         if self.clip.frame_pending {
             return;
         }
@@ -3677,7 +4497,7 @@ impl App {
         self.clip.last = Some(now);
         // Each progress settles against the span it actually carries — the peek
         // widens to `PEEK_W`, the link pill slides one pill plus its bond gap,
-        // the drawer grows to `EXPANDED_H` (`OptionUXRules.md` §3).
+        // the drawer grows to `BOX_DRAWER_H` (`OptionUXRules.md` §3).
         let target = if self.clip.peek_reveal { 1.0 } else { 0.0 };
         let (pt, moving) = ease_toward(self.clip.peek_t, target, dt, MORPH_RATE, settle_t(PEEK_W));
         self.clip.peek_t = pt;
@@ -3698,7 +4518,7 @@ impl App {
             etarget,
             dt,
             MORPH_RATE,
-            settle_t(EXPANDED_H),
+            settle_t(crate::options::BOX_DRAWER_H),
         );
         self.clip.expand_t = et;
         // Open/close the detail: advance a LINEAR progress at a constant rate,
@@ -3734,6 +4554,42 @@ impl App {
         }
         let dp = self.clip.dict_p;
         self.clip.dict_t = dp * dp * (3.0 - 2.0 * dp);
+        // The emoji picker's wipe, the same constant-rate progress smoothstepped.
+        let etarget2 = if self.emoji.open { 1.0 } else { 0.0 };
+        let emojim = self.emoji.p != etarget2;
+        if emojim {
+            let step = dt / DETAIL_OPEN_SECS;
+            self.emoji.p = if etarget2 > self.emoji.p {
+                (self.emoji.p + step).min(1.0)
+            } else {
+                (self.emoji.p - step).max(0.0)
+            };
+        }
+        let ep = self.emoji.p;
+        self.emoji.t = ep * ep * (3.0 - 2.0 * ep);
+        // …and its grid's eased scroll.
+        let (es, esm) = ease_toward(
+            self.emoji.scroll,
+            self.emoji.scroll_target,
+            dt,
+            SCROLL_RATE,
+            0.5,
+        );
+        self.emoji.scroll = es;
+        if esm {
+            self.update_clip_hit();
+        }
+        // Stretch the footer buttons into the search field (and back). It
+        // travels the field's width, so that is what it settles against.
+        let starget = if self.clip.search_open { 1.0 } else { 0.0 };
+        let (st, sm) = ease_toward(
+            self.clip.search_t,
+            starget,
+            dt,
+            MORPH_RATE,
+            settle_t(PEEK_W - 2.0 * SEARCH_FIELD_PAD),
+        );
+        self.clip.search_t = st;
         // Ease the metadata rise + its internal scroll toward the wheel targets.
         let (nmt, mm1) = ease_toward(
             self.clip.detail_meta_t,
@@ -3803,7 +4659,20 @@ impl App {
             self.clip.blink_until = None;
         }
         self.draw_options();
-        if moving || lmoving || em || bm || lm || dm || dictm || dsm || mm || beating {
+        if moving
+            || lmoving
+            || em
+            || bm
+            || lm
+            || dm
+            || dictm
+            || dsm
+            || mm
+            || sm
+            || emojim
+            || esm
+            || beating
+        {
             self.schedule_clip_frame();
         } else {
             self.clip.last = None;
@@ -4017,15 +4886,6 @@ fn fmt_datetime(ms: u64) -> String {
     }
 }
 
-fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-    [
-        lerp(a[0], b[0], t),
-        lerp(a[1], b[1], t),
-        lerp(a[2], b[2], t),
-        lerp(a[3], b[3], t),
-    ]
-}
-
 /// Draw an OPAQUE band with only its TOP corners rounded (the bottom is squared
 /// off by a second rect). Colour must be opaque — the two rects overlap, so a
 /// translucent colour would double up.
@@ -4112,6 +4972,42 @@ mod tests {
             (h1 - expect_h1).abs() < 0.01,
             "scale 1.0 == original formula"
         );
+    }
+
+    #[test]
+    fn search_is_case_insensitive_and_unanchored() {
+        assert!(contains_ci("Hello World", "lo wo"));
+        assert!(contains_ci("HELLO", "hello"));
+        assert!(contains_ci("hello", "HELLO"), "the needle folds too");
+        assert!(contains_ci("El CORAZÓN", "corazón"));
+        assert!(contains_ci("anything", "")); // no query = everything shows
+        assert!(!contains_ci("hello", "hellos")); // needle longer than haystack
+        assert!(!contains_ci("hello world", "word"));
+    }
+
+    #[test]
+    fn search_matches_every_field_a_row_can_show() {
+        let mut e = base_entry();
+        e.text = "the quick brown fox".into();
+        e.preview = "the quick brown fox".into();
+        e.source = "Firefox — a page".into();
+        e.title = "Release notes".into();
+        assert!(clip_matches(&e, "brown"), "the clip's own text");
+        assert!(clip_matches(&e, "firefox"), "where it was copied from");
+        assert!(clip_matches(&e, "release"), "a link's title");
+        assert!(!clip_matches(&e, "zebra"));
+    }
+
+    #[test]
+    fn search_scans_only_the_head_of_a_long_clip() {
+        let mut e = base_entry();
+        e.text = format!("{}needle", "x".repeat(SEARCH_TEXT_CAP));
+        assert!(
+            !clip_matches(&e, "needle"),
+            "past the scan cap, deliberately not searched"
+        );
+        e.text = format!("needle{}", "x".repeat(SEARCH_TEXT_CAP));
+        assert!(clip_matches(&e, "needle"));
     }
 
     #[test]
