@@ -10,8 +10,12 @@
 # that can affect the system or the boot.
 #
 # Usage:
-#   verify-ui.sh [--build] [--restart] [--reveal dock|open|clip|clip-detail|notif|sunset|none]
-#                [--geom "X,Y WxH"] [--out PATH]
+#   verify-ui.sh [--build] [--restart]
+#                [--reveal dock|open|clip|clip-detail|clip-search|notif|sunset|none]
+#                [--query TEXT] [--geom "X,Y WxH"] [--out PATH]
+#
+# --query is the text `--reveal clip-search` types into the clipboard box's
+# type-to-search field (empty = the bare field, nothing typed).
 #
 # Defaults: --build --restart --reveal none  (screenshot the whole screen)
 set -euo pipefail
@@ -38,6 +42,7 @@ while [ $# -gt 0 ]; do
     --restart)  do_restart=1 ;;
     --no-restart) do_restart=0 ;;
     --reveal)   reveal="${2:-none}"; shift ;;
+    --query)    REVEAL_ARG="${2:-}"; shift ;;
     --geom)     geom="${2:-}"; shift ;;
     --out)      out="${2:-}"; shift ;;
     *) echo "verify-ui: unknown arg: $1" >&2; exit 2 ;;
@@ -90,10 +95,12 @@ case "$reveal" in
   open)        "$CTL" expand 2>/dev/null || true; sleep 0.6 ;;
   clip)        "$CTL" debug-clip 2>/dev/null || true; sleep 0.8 ;;
   clip-detail) "$CTL" debug-clip-detail 2>/dev/null || true; sleep 0.9 ;;
+  clip-search) "$CTL" debug-clip-search "${REVEAL_ARG:-}" 2>/dev/null || true; sleep 0.9 ;;
+  emoji)       "$CTL" debug-emoji "${REVEAL_ARG:-}" 2>/dev/null || true; sleep 0.9 ;;
   notif)       "$CTL" debug-notif 2>/dev/null || true; sleep 0.8 ;;
   sunset)      "$CTL" debug-sunset 2>/dev/null || true; sleep 0.8 ;;
   none) ;;
-  *) echo "verify-ui: --reveal must be dock|open|clip|clip-detail|notif|sunset|none" >&2; exit 2 ;;
+  *) echo "verify-ui: --reveal must be dock|open|clip|clip-detail|clip-search|notif|sunset|none" >&2; exit 2 ;;
 esac
 
 echo ">> capturing screenshot…" >&2

@@ -31,6 +31,22 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+/// [`lerp`] over an RGBA quad — the one every OPTIONS surface uses to cross a
+/// pill's colour into a box's.
+///
+/// It lived as a private copy in `notif.rs` AND in `clipboard.rs`, and the
+/// playing box would have made a third. Two identical copies are a coincidence;
+/// three are a habit, and §3's argument about rate constants applies just as
+/// well to formulas — equal only until someone tunes one of them.
+pub fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        lerp(a[0], b[0], t),
+        lerp(a[1], b[1], t),
+        lerp(a[2], b[2], t),
+        lerp(a[3], b[3], t),
+    ]
+}
+
 // --- One Material (OptionUXRules.md §3) --------------------------------------
 // The OPTIONS surface moves at ONE tempo: every morph is an exponential approach
 // sharing the time constant below, so a long travel and a short one have the

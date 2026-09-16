@@ -24,11 +24,16 @@ Common invocations:
 - Just the dock sliver: `verify-ui.sh --reveal dock`
 - The clipboard box: `verify-ui.sh --reveal clip`
 - The clipboard metadata detail view: `verify-ui.sh --reveal clip-detail`
+- The emoji picker: `verify-ui.sh --reveal emoji [--query cat]`
+- The clipboard type-to-search: `verify-ui.sh --reveal clip-search --query stage`
+  (opens the box with the field out and that text typed; omit `--query` for the
+  bare field). It leaves the box **holding the keyboard** — restart the daemon
+  (a plain `verify-ui.sh`) when done, or the user has to press Escape.
 - The notification box: `verify-ui.sh --reveal notif`
 - A tight region (less to look at, cheaper): `verify-ui.sh --geom "0,0 900x220"`
 - Screenshot only, don't disturb the running daemon: `verify-ui.sh --no-build --no-restart`
 
-`--reveal clip|clip-detail|notif` drive the daemon's `debug-*` ctl verbs
+`--reveal clip|clip-detail|clip-search|notif` drive the daemon's `debug-*` ctl verbs
 (`waverunner-ctl debug-clip` etc.), which force-open the OPTIONS surfaces so
 they can be captured without pointer input.
 

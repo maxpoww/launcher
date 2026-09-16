@@ -71,9 +71,9 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
                 .unwrap_or(0);
             let rescue = sibling(path, &format!(".corrupt-{secs}"));
             match std::fs::rename(path, &rescue) {
-                Ok(()) => warn!(
-                    "{path:?} is corrupt ({e}); preserved as {rescue:?}, starting empty"
-                ),
+                Ok(()) => {
+                    warn!("{path:?} is corrupt ({e}); preserved as {rescue:?}, starting empty")
+                }
                 Err(re) => warn!(
                     "{path:?} is corrupt ({e}); rescue rename failed too ({re}); starting empty"
                 ),

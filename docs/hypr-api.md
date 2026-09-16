@@ -21,6 +21,7 @@ args in Lua and does **not** accept the classic `movecursor 5 5` syntax.
 | `hl.dsp.window.tag({ tag = "+name"\|"-name"\|"name", window? })` | Set/unset/toggle a window tag. Tags show in `clients -j` and are matchable in `hl.window_rule` (`match = { tag = "name" }`, no negation). Dynamic rule props (rounding, border_size) re-apply on tag flips; static ones (pseudo, size) apply at map only. |
 | `hl.dsp.window.fullscreen({ action = "toggle" })` | Toggle fullscreen on the focused window. |
 | `hl.dsp.window.move({ workspace = N \| "special:magic" })` | Move focused window to a workspace. |
+| `hl.dsp.window.move({ x, y, relative?, window? })` | Move a window to a PIXEL position — the same dispatcher; it accepts `direction`, `x`+`y`(+`relative`), `workspace`, `into_group`, `out_of_group`, and says so when given anything else. `hl.dsp.window.center({ window? })` centres one and respects the reserved area. |
 | `hl.dsp.window.resize()` / `hl.dsp.window.drag()` | Interactive mouse resize / move (bound to mouse). |
 | `hl.dsp.window.alter_zorder(...)` | Change stacking order. |
 | `hl.dsp.focus({ window = "address:0x…" })` | Focus a window by address. |
@@ -136,3 +137,56 @@ fork's API surface:
 ```
 
 Grep it for the real name/signature before writing a new `dispatch(...)` call.
+
+## Runtime WINDOW RULES — `hl.window_rule` (verified live 2026-09-13)
+
+Rules can be declared **at runtime**, not just from the config, and that is how
+Golem's floating mode makes apps *launch* floating (`hypr::set_float_rule`):
+
+```lua
+hl.window_rule({ name = "golem-float-mode", match = { class = ".*" },
+                 float = true, enabled = true })
+```
+
+- **`name` makes a rule addressable**: re-declaring the same name REPLACES it,
+  so a toggle does not pile rules up and needs no reload.
+- **`enabled = false` is the off switch.** `remove` is not a field — it errors
+  with `unknown field 'remove'` (unknown fields are rejected loudly, which is
+  how to probe this API safely).
+- ⚠️ **`size` takes PIXELS, not percentages.** `size = "55% 54%"` parses fine
+  and then silently does nothing; `size = { 1100, 675 }` applies. (`center =
+  true` works either way, and DOES respect the reserved area — measured y=302
+  on a 1250-tall output under a 28px bar.) Golem re-declares the rule with fresh
+  pixels when the monitor changes.
+- Measured: `enabled = true` → the next window opened `"floating": true`;
+  `enabled = false` → the next one opened tiled. A rule applies **as the window
+  maps**, which is the whole point — reacting to the `openwindow` event instead
+  lets the window arrive tiled and then jump.
+
+⚠️ **`hl.window_rule` is not a dispatcher.** The socket's `dispatch` wraps its
+argument in `hl.dispatch(...)`, which rejects a non-dispatch value — the rule
+still applies, but the reply is an error. Wrap it so the socket gets what it
+wants:
+
+```lua
+(function() hl.window_rule({ … }) return hl.dsp.no_op() end)()
+```
+
+## The COMPLETE `hl.*` surface (introspected 2026-09-13)
+
+`hyprctl dispatch 'error(<expr>)'` is the trick for reading a Lua value back —
+the error text carries it.
+
+```
+animation bind config curve define_submap device dispatch dsp env exec_cmd
+gesture get_active_monitor get_active_special_workspace get_active_window
+get_active_workspace get_config get_current_submap get_cursor_pos get_last_window
+get_last_workspace get_layers get_monitor get_monitor_at get_monitor_at_cursor
+get_monitors get_urgent_window get_window get_windows get_workspace
+get_workspace_windows get_workspaces layer_rule layout monitor notification on
+permission plugin timer unbind version window_rule workspace_rule
+```
+
+Note `hl.on(event, fn)` (the config uses `"hyprland.start"` and
+`"window.active"`) and the `get_*` readers, which are a cheaper alternative to
+`request("j/…")` for Lua-side work.

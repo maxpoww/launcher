@@ -618,8 +618,7 @@ impl DiskCache {
         // is off). The `live` marker parts this cache from the old one that
         // baked the plate pixels in (the plate is shader-drawn now).
         let variant = if icon_plate_enabled() {
-            let params =
-                format!("live|{PLATE_CONTENT}|{PLATE_ICON_DESAT}|{PLATE_ICON_OPACITY}");
+            let params = format!("live|{PLATE_CONTENT}|{PLATE_ICON_DESAT}|{PLATE_ICON_OPACITY}");
             format!("plate-{:08x}", fnv1a64(&params))
         } else {
             "raw".to_owned()
