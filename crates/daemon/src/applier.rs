@@ -235,7 +235,11 @@ enum BatchAction {
 /// `applied` is [`applied_since_list_write`] at planning time — it decides
 /// the F9 fast paths exactly as the single-op functions do. Returns the
 /// folded list plus each op's action, in op order.
-fn plan_batch(current: &[String], ops: &[BatchOp], applied: bool) -> (Vec<String>, Vec<BatchAction>) {
+fn plan_batch(
+    current: &[String],
+    ops: &[BatchOp],
+    applied: bool,
+) -> (Vec<String>, Vec<BatchAction>) {
     let mut list: Vec<String> = current.to_vec();
     let mut actions = Vec::with_capacity(ops.len());
     for op in ops {
@@ -631,10 +635,22 @@ evil; rm\n\
     fn batch_planner_folds_edits_and_honors_fast_paths() {
         let cur = vec!["vlc".to_string(), "mousepad".to_string()];
         let ops = vec![
-            BatchOp { attr: "gimp".into(), install: true },      // new install → edit
-            BatchOp { attr: "vlc".into(), install: false },      // uninstall present → edit
-            BatchOp { attr: "mousepad".into(), install: true },  // already in list…
-            BatchOp { attr: "krita".into(), install: false },    // …and already absent
+            BatchOp {
+                attr: "gimp".into(),
+                install: true,
+            }, // new install → edit
+            BatchOp {
+                attr: "vlc".into(),
+                install: false,
+            }, // uninstall present → edit
+            BatchOp {
+                attr: "mousepad".into(),
+                install: true,
+            }, // already in list…
+            BatchOp {
+                attr: "krita".into(),
+                install: false,
+            }, // …and already absent
         ];
         // With a covering run: the last two are F9 fast-trues.
         let (list, actions) = plan_batch(&cur, &ops, true);
@@ -658,8 +674,14 @@ evil; rm\n\
     fn batch_planner_folds_conflicting_ops_in_order() {
         // install X then uninstall X in one batch: last op wins the list.
         let ops = vec![
-            BatchOp { attr: "gimp".into(), install: true },
-            BatchOp { attr: "gimp".into(), install: false },
+            BatchOp {
+                attr: "gimp".into(),
+                install: true,
+            },
+            BatchOp {
+                attr: "gimp".into(),
+                install: false,
+            },
         ];
         let (list, actions) = plan_batch(&[], &ops, true);
         assert!(list.is_empty());

@@ -14,7 +14,7 @@ use waverunner_core::index::AppEntry;
 use waverunner_proto::Command;
 
 use crate::state::Target;
-use crate::{apps, applier, content, launch, nix};
+use crate::{applier, apps, content, launch, nix};
 use crate::{App, PkgIndexState};
 
 /// A package dropped into the Apps grid and now installing in place. It
@@ -1029,8 +1029,7 @@ impl App {
             .pending_installs
             .iter()
             .filter(|p| {
-                !p.failed
-                    && (!self.busy_ids.contains(&p.attr) || applier::is_installed(&p.attr))
+                !p.failed && (!self.busy_ids.contains(&p.attr) || applier::is_installed(&p.attr))
             })
             // Hold a just-finished tile until its ring fill and shine sweep
             // have both played, so the completion flourish always finishes
@@ -1166,8 +1165,8 @@ impl App {
         for attr in self.managed_install_attrs.clone() {
             if self.busy_ids.contains(&attr) && !applier::is_installed(&attr) {
                 continue; // still installing — wait for its own rescan
-                // (#43: a confirmed-installed attr resolves even if a lost
-                // completion left it stuck busy — same as the tile path.)
+                          // (#43: a confirmed-installed attr resolves even if a lost
+                          // completion left it stuck busy — same as the tile path.)
             }
             let desktop_ids = self.managed.desktop_ids_for(&attr);
             let hit = resolve_hit(&attr, &desktop_ids, &current, &newly, &claimed);
@@ -1249,8 +1248,7 @@ impl App {
         // real id, so shape-(b) phantoms evaporate on the next scan. A
         // genuine CLI tool matches neither and stays untouched.
         for attr in self.managed.cli_concluded_attrs() {
-            if self.busy_ids.contains(&attr)
-                || self.pending_installs.iter().any(|p| p.attr == attr)
+            if self.busy_ids.contains(&attr) || self.pending_installs.iter().any(|p| p.attr == attr)
             {
                 continue;
             }

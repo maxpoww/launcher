@@ -162,7 +162,9 @@ pub enum DoneOp {
     /// The uninstall's package attr rides along: the handler needs it for
     /// the managed-cache removal and the residue sweep even when the
     /// `uninstalling` map entry was already pruned by a rescan.
-    Remove { attr: String },
+    Remove {
+        attr: String,
+    },
     Reconcile,
 }
 
@@ -280,19 +282,32 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                 // only ever picks up what accumulated behind it.
                 let mut ops: Vec<(String, crate::applier::BatchOp)> = Vec::new();
                 let mut reconcile: Option<bool> = None;
-                let queue_op = |req: Request, ops: &mut Vec<(String, crate::applier::BatchOp)>| match req {
-                    Request::Install { id, attr } => {
-                        ops.push((id, crate::applier::BatchOp { attr, install: true }));
-                        None
-                    }
-                    Request::Remove { id, attr } => {
-                        ops.push((id, crate::applier::BatchOp { attr, install: false }));
-                        None
-                    }
-                    Request::EnsureApplied { force } => Some(force),
-                    // Routed to their own threads.
-                    Request::Rank { .. } | Request::Realize { .. } => None,
-                };
+                let queue_op =
+                    |req: Request, ops: &mut Vec<(String, crate::applier::BatchOp)>| match req {
+                        Request::Install { id, attr } => {
+                            ops.push((
+                                id,
+                                crate::applier::BatchOp {
+                                    attr,
+                                    install: true,
+                                },
+                            ));
+                            None
+                        }
+                        Request::Remove { id, attr } => {
+                            ops.push((
+                                id,
+                                crate::applier::BatchOp {
+                                    attr,
+                                    install: false,
+                                },
+                            ));
+                            None
+                        }
+                        Request::EnsureApplied { force } => Some(force),
+                        // Routed to their own threads.
+                        Request::Rank { .. } | Request::Realize { .. } => None,
+                    };
                 reconcile = queue_op(request, &mut ops).or(reconcile);
                 while let Ok(more) = mutations_rx.try_recv() {
                     reconcile = queue_op(more, &mut ops).or(reconcile);
@@ -311,7 +326,9 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                         let done_op = if op.install {
                             DoneOp::Install
                         } else {
-                            DoneOp::Remove { attr: op.attr.clone() }
+                            DoneOp::Remove {
+                                attr: op.attr.clone(),
+                            }
                         };
                         if mut_events
                             .send(Event::Done {
@@ -326,17 +343,21 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                         }
                     }
                     _ => {
-                        let batch: Vec<crate::applier::BatchOp> =
-                            ops.iter().map(|(_, o)| crate::applier::BatchOp {
+                        let batch: Vec<crate::applier::BatchOp> = ops
+                            .iter()
+                            .map(|(_, o)| crate::applier::BatchOp {
                                 attr: o.attr.clone(),
                                 install: o.install,
-                            }).collect();
+                            })
+                            .collect();
                         let results = crate::applier::apply_batch(&batch);
                         for ((id, o), ok) in ops.into_iter().zip(results) {
                             let done_op = if o.install {
                                 DoneOp::Install
                             } else {
-                                DoneOp::Remove { attr: o.attr.clone() }
+                                DoneOp::Remove {
+                                    attr: o.attr.clone(),
+                                }
                             };
                             if mut_events
                                 .send(Event::Done {
@@ -643,13 +664,16 @@ fn rank_hits(
 }
 
 /// Generic fallback icon names for packages nothing else matched — the
-/// standard freedesktop "software installer" box, best first.
-const GENERIC_PKG_ICONS: [&str; 4] = [
-    "system-software-install",
-    "package-x-generic",
-    "package",
-    "application-x-executable",
-];
+/// theme's own default package face, best first.
+///
+/// `package-x-generic` leads deliberately: it is the freedesktop default a
+/// package wears everywhere else on the system, so the Install section
+/// looks like the rest of the desktop rather than like our own idea of a
+/// package. `system-software-install` used to lead (commit 1bc4ab1) and was
+/// dropped (Max, 2026-09-13: "let's use default, keep it simple") — it is
+/// an app-*store* icon, a multicoloured white box, where the default is the
+/// plain green zippered one.
+const GENERIC_PKG_ICONS: [&str; 3] = ["package-x-generic", "package", "application-x-executable"];
 
 /// Re-sweep the icon availability map when older than this: a freshly
 /// installed package drops its bundled icon into hicolor, and the next

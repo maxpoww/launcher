@@ -118,9 +118,7 @@ fn candidates(attr: &str, app_ids: &[String]) -> Vec<String> {
         }
     }
     for (pkg, names) in CURATED {
-        if pkg.eq_ignore_ascii_case(attr)
-            || app_ids.iter().any(|i| i.eq_ignore_ascii_case(pkg))
-        {
+        if pkg.eq_ignore_ascii_case(attr) || app_ids.iter().any(|i| i.eq_ignore_ascii_case(pkg)) {
             for n in *names {
                 push(n);
             }
@@ -188,7 +186,10 @@ mod tests {
         // Full reverse-DNS id also allowed (some apps use it as dir name).
         assert!(c.contains(&"org.kde.kdenlive".to_string()));
         // The attr's package-set prefix never leaks in as its own candidate.
-        assert!(!c.contains(&"kdepackages".to_string()) || c.contains(&"kdepackages.kdenlive".to_string()));
+        assert!(
+            !c.contains(&"kdepackages".to_string())
+                || c.contains(&"kdepackages.kdenlive".to_string())
+        );
     }
 
     #[test]
