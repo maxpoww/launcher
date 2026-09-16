@@ -25,7 +25,7 @@ use zbus::Connection;
 
 use crate::collector::{Collector, CollectorFuture};
 use crate::message::{ContextDelta, Update};
-use crate::state::{ContextState, Layer, MediaState};
+use crate::state::{ContextState, Layer, PlaybackState, Playing, PlayingSource};
 
 const POLL: Duration = Duration::from_millis(1000);
 const RECONNECT: Duration = Duration::from_secs(5);
@@ -65,7 +65,7 @@ impl Collector for MediaCollector {
                         continue;
                     }
                 };
-                let mut last: Option<Option<MediaState>> = None;
+                let mut last: Option<Vec<Playing>> = None;
                 loop {
                     match reconcile(&conn).await {
                         Ok(state) => {
@@ -74,7 +74,7 @@ impl Collector for MediaCollector {
                                 if tx
                                     .send(Update::Delta(
                                         Layer::Hardware,
-                                        ContextDelta::Media(state),
+                                        ContextDelta::MprisPlayers(state),
                                     ))
                                     .await
                                     .is_err()
@@ -96,8 +96,11 @@ impl Collector for MediaCollector {
     }
 }
 
-/// Read every MPRIS player and choose the one that matters.
-async fn reconcile(conn: &Connection) -> zbus::Result<Option<MediaState>> {
+/// Read EVERY MPRIS player. Nothing is chosen and nothing is discarded — that
+/// was finding #83: `pick_best` kept one and dropped the rest, so two players
+/// were indistinguishable from one, and the phone won over the desktop as often
+/// as not.
+async fn reconcile(conn: &Connection) -> zbus::Result<Vec<Playing>> {
     let dbus = DBusProxy::new(conn).await?;
     let names = dbus.list_names().await?;
     let mut candidates = Vec::new();
@@ -109,20 +112,11 @@ async fn reconcile(conn: &Connection) -> zbus::Result<Option<MediaState>> {
             }
         }
     }
-    Ok(pick_best(candidates))
-}
-
-/// A playing player wins over a paused one; otherwise the first present.
-fn pick_best(candidates: Vec<MediaState>) -> Option<MediaState> {
-    candidates
-        .iter()
-        .find(|c| c.is_playing)
-        .cloned()
-        .or_else(|| candidates.into_iter().next())
+    Ok(candidates)
 }
 
 /// Read one player's state, or `None` if it can't be queried.
-async fn read_player(conn: &Connection, bus_name: &str) -> Option<MediaState> {
+async fn read_player(conn: &Connection, bus_name: &str) -> Option<Playing> {
     let props = PropertiesProxy::builder(conn)
         .destination(bus_name.to_owned())
         .ok()?
@@ -141,10 +135,15 @@ async fn read_player(conn: &Connection, bus_name: &str) -> Option<MediaState> {
         .get("PlaybackStatus")
         .and_then(as_string)
         .unwrap_or_default();
-    // Skip fully stopped players — nothing to surface.
-    if status == "Stopped" {
-        return None;
-    }
+    // Stopped players are KEPT now. They used to be dropped here as "nothing to
+    // surface", which is a decision, and deciding is not this layer's job — it
+    // is also precisely how "a video paused on ws8" became unsayable. The mind
+    // filters; the collector reports (pillar 2).
+    let state = match status.as_str() {
+        "Playing" => PlaybackState::Playing,
+        "Paused" => PlaybackState::Paused,
+        _ => PlaybackState::Stopped,
+    };
     let metadata: HashMap<String, OwnedValue> = player
         .get("Metadata")
         .and_then(|v| v.try_to_owned().ok())
@@ -180,14 +179,42 @@ async fn read_player(conn: &Connection, bus_name: &str) -> Option<MediaState> {
         .and_then(as_i64)
         .map(us_to_secs)
         .unwrap_or(0);
+    // Cover art. Kept only when it is a local file — see `Playing::art_url`.
+    let art_url = metadata
+        .get("mpris:artUrl")
+        .and_then(as_string)
+        .filter(|u| u.starts_with("file://"));
 
-    Some(MediaState {
-        player_name,
+    // **The join key.** D-Bus knows which process owns a bus name, so asking it
+    // turns an MPRIS player into a pid — and a pid is a window, and a window is
+    // a workspace. This one call is what makes "music on Spotify on ws5"
+    // expressible; without it a player is a name floating free of the screen.
+    //
+    // `None` is a real answer, not a failure: a phone over kdeconnect and a
+    // headless mpd genuinely have no local window, and the mind must be able to
+    // tell "somewhere else on this machine" from "not on this machine at all".
+    let pid = DBusProxy::new(conn)
+        .await
+        .ok()?
+        .get_connection_unix_process_id(bus_name.try_into().ok()?)
+        .await
+        .ok();
+
+    Some(Playing {
+        source: PlayingSource::Mpris {
+            bus: bus_name.to_owned(),
+        },
+        app: player_name,
         title,
         artist,
-        is_playing: status == "Playing",
+        state,
+        pid,
+        // MPRIS has no idea where its sound is routed; the PipeWire side fills
+        // this in when the two are merged by pid.
+        output: None,
         position_secs,
         length_secs,
+        art_url,
     })
 }
 
@@ -209,35 +236,9 @@ fn as_string_list(v: &OwnedValue) -> Option<Vec<String>> {
     Vec::<String>::try_from(v.try_clone().ok()?).ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ms(name: &str, playing: bool) -> MediaState {
-        MediaState {
-            player_name: name.into(),
-            title: "t".into(),
-            artist: "a".into(),
-            is_playing: playing,
-            position_secs: 0,
-            length_secs: 0,
-        }
-    }
-
-    #[test]
-    fn prefers_a_playing_player() {
-        let best = pick_best(vec![ms("paused", false), ms("playing", true)]);
-        assert_eq!(best.unwrap().player_name, "playing");
-    }
-
-    #[test]
-    fn falls_back_to_first_when_none_playing() {
-        let best = pick_best(vec![ms("first", false), ms("second", false)]);
-        assert_eq!(best.unwrap().player_name, "first");
-    }
-
-    #[test]
-    fn none_when_empty() {
-        assert!(pick_best(vec![]).is_none());
-    }
-}
+// No unit tests here any more, and the reason is the point of finding #83:
+// everything this module used to test — `pick_best` preferring a playing
+// player, falling back to the first, returning None when empty — was testing
+// the *discarding*. There is no longer a choice to make: every player on the
+// bus is reported, and the merge that marries them to PipeWire streams is
+// tested in `engine.rs` where it lives.

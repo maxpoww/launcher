@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::activity::Activity;
+use super::shell::ShowsIn;
 use crate::state::Layer;
 
 // `AffordanceKind` round-trips (no borrows); `Affordance`/`OptionSet` are
@@ -39,7 +40,7 @@ pub enum AffordanceKind {
 /// What triggering an affordance *does*. The engine describes the action
 /// declaratively; the surface (the waverunner daemon) executes it. Kept to a
 /// small, safe vocabulary that covers the overwhelming majority of desktop
-/// offers — see `/home/max/Golem/options-catalog.md`.
+/// offers — see `/home/max/Golem/OPTIONS/catalog.md`.
 ///
 /// `Deserialize` too (unlike the rest of the affordance): a surface may want to
 /// round-trip an action, and the payloads are owned `String`s, not the
@@ -99,6 +100,32 @@ pub struct Affordance {
     /// a [`AffordanceKind::Control`] (or an actionable `Action`). This is the
     /// field that turns a described offer into a working button.
     pub action: AffordanceAction,
+    /// Whether this offer skips the appear-dwell (`settle.rs`) and takes its
+    /// pill on the first decision that proposes it.
+    ///
+    /// The dwell exists because most context *drifts*: with `follow_mouse = 2` a
+    /// pointer crossing a window rewrites the whole set, and an offer that
+    /// appears and vanishes before it can be read teaches the user to ignore the
+    /// bar. That reasoning does not hold for an offer whose trigger is a
+    /// **discrete act by the user** — switching to an empty workspace, plugging
+    /// in a screen. Those cannot flap, because nothing is sampling them: the act
+    /// happened or it did not. Making such an offer wait does not read as care,
+    /// it reads as lag, and the user is already looking at the thing the offer is
+    /// about.
+    ///
+    /// `false` is the ordinary answer and the safe one — an offer derived from a
+    /// polled sensor must earn its place. [`AffordanceKind::Warning`] skips the
+    /// wait regardless of this field: safety is never made to queue.
+    pub immediate: bool,
+    /// Which surface this OPTION belongs to — the arrangement half of the
+    /// curated list's `Shows in:` line. [`ShowsIn::Context`] is the ordinary
+    /// answer; the overview shows only [`ShowsIn::Overview`].
+    ///
+    /// Required rather than defaulted on purpose. It was added on 2026-09-12,
+    /// the one day in this codebase's life when **no providers existed** — so
+    /// every OPTION ever written has to answer the question, and none can
+    /// inherit an answer nobody chose.
+    pub shows_in: ShowsIn,
 }
 
 /// The mind's output: the ranked, suppressed, capped set of options for one

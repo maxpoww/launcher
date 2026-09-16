@@ -7,11 +7,13 @@
 //! [`Collector`]: crate::collector::Collector
 
 pub mod audio;
+pub mod bluetooth;
 pub mod bridge;
 pub mod daylight;
 pub mod deploy;
 pub mod downloads;
 pub mod git;
+pub(crate) mod gpu;
 pub mod hyprland;
 pub mod media;
 pub mod notifications;

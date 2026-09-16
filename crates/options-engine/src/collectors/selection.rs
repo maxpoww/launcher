@@ -68,12 +68,15 @@ impl Collector for SelectionCollector {
 async fn watch_clipboard(tx: &mpsc::Sender<Update>) -> anyhow::Result<()> {
     // The helper prints the piped clipboard content then a NUL terminator, so
     // each change is one framed record on our stdout.
-    let mut child = Command::new("wl-paste")
-        .args(["--watch", "sh", "-c", "cat; printf '\\0'"])
+    let mut cmd = Command::new("wl-paste");
+    cmd.args(["--watch", "sh", "-c", "cat; printf '\\0'"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    // Session-long helper: `kill_on_drop` cannot run if we are killed rather
+    // than dropped, and an orphaned watcher holds a Wayland connection forever.
+    crate::child::die_with_parent(cmd.as_std_mut());
+    let mut child = cmd.spawn()?;
     let stdout = child
         .stdout
         .take()

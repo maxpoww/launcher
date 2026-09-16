@@ -59,14 +59,44 @@ async fn main() {
                 n.active_count, n.has_critical, n.latest_app, n.latest_summary
             );
         }
-        if let Some(m) = &ctx.media {
+        if !ctx.windows.is_empty() {
+            let mut ws: Vec<String> = ctx
+                .windows
+                .iter()
+                .map(|w| format!("{}#{} ws{}", w.class, w.pid, w.workspace_id))
+                .collect();
+            ws.sort();
+            println!("       windows({}): {}", ctx.windows.len(), ws.join(" · "));
+        }
+        // Everything making or holding sound — all of it, with where it lives.
+        for p in &ctx.playing {
+            let place = match ctx.window_of(p) {
+                Some(w) => format!("{} ws{}", w.class, w.workspace_id),
+                None => "no window".to_owned(),
+            };
             println!(
-                "      ♪ {} — {} · {} [{}]",
-                m.player_name,
-                m.title,
-                m.artist,
-                if m.is_playing { "playing" } else { "paused" }
+                "      ♪ {} — {} · {} [{:?}] @ {} → {}",
+                p.app,
+                p.title,
+                p.artist,
+                p.state,
+                place,
+                p.output.as_deref().unwrap_or("default"),
             );
+        }
+        if !ctx.outputs.is_empty() {
+            let names: Vec<String> = ctx
+                .outputs
+                .iter()
+                .map(|o| {
+                    if o.is_default {
+                        format!("*{}", o.description)
+                    } else {
+                        o.description.clone()
+                    }
+                })
+                .collect();
+            println!("       outputs: {}", names.join(" · "));
         }
         let ai = &ctx.app_internal;
         if ai.shell_last_cmd.is_some() || ai.editor_file.is_some() || ai.browser_url.is_some() {

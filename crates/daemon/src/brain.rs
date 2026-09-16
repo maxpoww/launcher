@@ -30,7 +30,8 @@
 //! [`Health`]: options_engine::Health
 
 use calloop::channel::Sender;
-use options_engine::{ContextState, Engine, Mind, OptionSet, Tuning};
+use options_engine::{ContextState, Engine, Mind, OptionSet, ShellState, Tuning};
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 /// The daemon's decision tuning. A roomier `max_items` than the engine default
@@ -49,7 +50,24 @@ fn daemon_tuning() -> Tuning {
 /// context snapshots go to `ctx_tx` (the window pill, battery); the Mind's
 /// ranked [`OptionSet`] goes to `opt_tx` (the dynamic OPTION pills). Both flow
 /// until their receiving end closes (UI gone).
-pub fn start(ctx_tx: Sender<ContextState>, opt_tx: Sender<OptionSet>) {
+///
+/// Returns the door for the **other** direction: a [`ShellState`] sender the
+/// event loop calls whenever the arrangement changes (STAGE on/off, the
+/// overview, a screen plugged in). That axis travels surface → mind because the
+/// collectors cannot sense it — STAGE and the overview are waverunner's own
+/// modes, invisible to the compositor. `send` is synchronous and needs no
+/// runtime, so the calloop thread can call it directly.
+pub fn start(ctx_tx: Sender<ContextState>, opt_tx: Sender<OptionSet>) -> watch::Sender<ShellState> {
+    let (shell_tx, shell_rx) = watch::channel(ShellState::default());
+    spawn_brain(ctx_tx, opt_tx, shell_rx);
+    shell_tx
+}
+
+fn spawn_brain(
+    ctx_tx: Sender<ContextState>,
+    opt_tx: Sender<OptionSet>,
+    mut shell_rx: watch::Receiver<ShellState>,
+) {
     let spawned = std::thread::Builder::new()
         .name("options-brain".into())
         .spawn(move || {
@@ -92,6 +110,25 @@ pub fn start(ctx_tx: Sender<ContextState>, opt_tx: Sender<OptionSet>) {
                             if opt_tx.send(options).is_err() {
                                 return; // event loop is gone
                             }
+                        }
+                        r = shell_rx.changed() => {
+                            if r.is_err() {
+                                // The event loop dropped its sender — the shell
+                                // is gone. Return rather than `continue`: a
+                                // closed watch reports Err immediately and
+                                // forever, so continuing would spin this thread
+                                // at 100% for the rest of the session.
+                                warn!("brain: shell watch closed");
+                                return;
+                            }
+                            let shell = *shell_rx.borrow_and_update();
+                            info!(
+                                "brain: arrangement → {} ({} screen(s){})",
+                                shell.mode.name(),
+                                shell.monitors,
+                                if shell.workspace_empty { ", empty workspace" } else { "" }
+                            );
+                            mind.set_shell(shell);
                         }
                     }
                 }

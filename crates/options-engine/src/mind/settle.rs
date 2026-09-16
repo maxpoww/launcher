@@ -18,12 +18,19 @@
 //! control that does the wrong thing when clicked — "Commit all" for a repo you
 //! have left. Slow to appear, immediate to leave.
 //!
-//! Warnings skip the wait entirely. "Your camera is on" is not a suggestion.
+//! Two kinds of offer skip the wait entirely:
+//!
+//! - **Warnings.** "Your camera is on" is not a suggestion.
+//! - **Offers marked [`Affordance::immediate`]** — the ones whose trigger is a
+//!   discrete act by the user rather than a drifting sensor. The dwell is a
+//!   defence against sampling noise, and an act has none: you switched to an
+//!   empty workspace or you did not. Making those wait reads as lag, not care
+//!   (Max, 2026-09-13, of the empty room: *"make it appear instantly"*).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::{AffordanceKind, OptionSet};
+use super::{Affordance, AffordanceKind, OptionSet};
 
 /// How long an offer must stay on the decision before it may take a pill.
 /// Long enough that a pointer crossing a window cannot rewrite the bar, short
@@ -40,20 +47,28 @@ pub(crate) struct Settle {
     since: HashMap<&'static str, Instant>,
 }
 
+/// Whether this offer has to earn its pill by staying put. Safety never does,
+/// and neither does an offer whose trigger is an act rather than a sample (see
+/// [`Affordance::immediate`]).
+fn waits(a: &Affordance) -> bool {
+    a.kind != AffordanceKind::Warning && !a.immediate
+}
+
 impl Settle {
     /// Filter `set` down to the offers that have earned a place, updating the
     /// arrival bookkeeping. Ranking and order are preserved.
     pub(crate) fn apply(&mut self, mut set: OptionSet, now: Instant) -> OptionSet {
+        // Only offers that actually wait are tracked — so a no-wait offer never
+        // arms a dwell timer in `next_deadline` for a pill it already has.
         let mut fresh: HashMap<&'static str, Instant> = HashMap::with_capacity(set.items.len());
-        for a in &set.items {
+        for a in set.items.iter().filter(|a| waits(a)) {
             let since = self.since.get(a.id).copied().unwrap_or(now);
             fresh.insert(a.id, since);
         }
         self.since = fresh;
         let since = &self.since;
         set.items.retain(|a| {
-            // Safety is never made to wait its turn.
-            if a.kind == AffordanceKind::Warning {
+            if !waits(a) {
                 return true;
             }
             since
@@ -94,6 +109,16 @@ mod tests {
             reason: "test",
             source: Layer::Compositor,
             action: AffordanceAction::None,
+            immediate: false,
+            shows_in: crate::mind::ShowsIn::Context,
+        }
+    }
+
+    /// An offer that names itself immediate, for the no-wait cases.
+    fn now_offer(id: &'static str, kind: AffordanceKind) -> Affordance {
+        Affordance {
+            immediate: true,
+            ..offer(id, kind)
         }
     }
 
@@ -133,6 +158,40 @@ mod tests {
             t0 + APPEAR_DWELL,
         );
         assert_eq!(out.items.len(), 1);
+    }
+
+    /// An offer whose trigger is an ACT, not a sample, takes its pill on the
+    /// first decision — and never arms a dwell timer for a pill it already has.
+    /// (`space.empty`: you switched to an empty workspace, and it is empty now.)
+    #[test]
+    fn an_immediate_offer_does_not_wait_and_arms_no_timer() {
+        let mut s = Settle::default();
+        let t0 = Instant::now();
+        let out = s.apply(
+            set(vec![
+                now_offer("space.empty", AffordanceKind::Info),
+                offer("git.commit", AffordanceKind::Control),
+            ]),
+            t0,
+        );
+        assert_eq!(
+            out.items.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec!["space.empty"],
+            "the act shows at once; the sampled control still waits"
+        );
+        // The waiting control owns the only timer — the immediate offer must not
+        // schedule a wake-up for something already on the bar.
+        assert_eq!(s.next_deadline(t0), Some(t0 + APPEAR_DWELL));
+
+        // Alone, it arms nothing at all.
+        let mut s = Settle::default();
+        let out = s.apply(set(vec![now_offer("space.empty", AffordanceKind::Info)]), t0);
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(s.next_deadline(t0), None);
+
+        // And leaving is as immediate as arriving.
+        let gone = s.apply(set(vec![]), t0 + Duration::from_millis(10));
+        assert!(gone.items.is_empty());
     }
 
     /// The pointer-graze case: an offer that keeps coming and going never gets

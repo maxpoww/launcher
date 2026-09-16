@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::collector::{Collector, CollectorFuture};
 use crate::message::{ContextDelta, Update};
-use crate::state::{ContextState, Layer, SystemMetrics};
+use crate::state::{ContextState, Layer, NetworkLink, NetworkState, SystemMetrics};
 
 /// How often to sample. Cheap reads, but slow-changing data — a few seconds is
 /// plenty and keeps this well clear of the high-frequency layers.
@@ -42,6 +42,12 @@ impl Collector for SystemCollector {
         Box::pin(async move {
             // Previous (total, idle) jiffies for the CPU delta.
             let mut prev_cpu: Option<(u64, u64)> = None;
+            // Previous byte counters for the network rate, with the interface
+            // they belong to and when they were taken.
+            let mut prev_net: Option<(String, u64, std::time::Instant)> = None;
+            // The GPU meter holds its open perf counters across ticks: a
+            // percentage is a delta, so the fd has to outlive the sample.
+            let mut gpu = super::gpu::GpuMeter::new();
             loop {
                 let cpu_now = read_cpu_times();
                 let cpu_usage_pct = match (prev_cpu, cpu_now) {
@@ -68,6 +74,7 @@ impl Collector for SystemCollector {
                     is_network_down: network_down(),
                     is_recording: recorder_running(),
                     disk_usage_pct: home_disk_usage_pct(),
+                    gpu_usage_pct: gpu.sample(),
                     trash_has_items: trash_has_items(),
                     trash_bytes: 0, // filled below only when it matters
                 };
@@ -91,6 +98,32 @@ impl Collector for SystemCollector {
                     .is_err()
                 {
                     return Ok(()); // aggregator gone
+                }
+                // The network rides this sampler rather than a collector of its
+                // own: same cadence, same kind of read (`/sys` and `/proc`, no
+                // traffic and no privileges), same failure — if these files
+                // cannot be read the whole Hardware layer is in trouble, not
+                // just this field.
+                let mut network = read_network();
+                // The rate needs two samples of the SAME interface: a difference
+                // taken across two devices is not a rate of anything, so moving
+                // from wifi to a cable re-seeds instead of reporting a spike.
+                if let Some(bytes) = read_net_bytes(&network.interface) {
+                    let now = (bytes, std::time::Instant::now());
+                    network.throughput_bps = prev_net
+                        .as_ref()
+                        .filter(|(iface, _, _)| *iface == network.interface)
+                        .and_then(|(_, prev_bytes, at)| throughput_bps((*prev_bytes, *at), now));
+                    prev_net = Some((network.interface.clone(), now.0, now.1));
+                } else {
+                    prev_net = None;
+                }
+                if tx
+                    .send(Update::Delta(Layer::Hardware, ContextDelta::Network(network)))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
                 }
                 tokio::time::sleep(POLL).await;
             }
@@ -156,9 +189,108 @@ fn ram_used_pct(meminfo: &str) -> Option<f32> {
     Some((used / total as f32 * 100.0).clamp(0.0, 100.0))
 }
 
-/// Whether the machine has a controllable backlight — any entry under
-/// `/sys/class/backlight` (a laptop panel). Desktops with external monitors
-/// have none, so brightness controls would be dead there.
+/// Which link is up and how good it is — `/sys/class/net` for the kind, and
+/// `/proc/net/wireless` for the quality of a wireless one.
+///
+/// Prefers a WIRELESS link when both are up, which is the opposite of what the
+/// routing table would say and the right answer for a readout: the wired link
+/// is the one that has nothing to report, and the wireless one is the only one
+/// that can be quietly degrading.
+fn read_network() -> NetworkState {
+    let Ok(ifs) = std::fs::read_dir("/sys/class/net") else {
+        return NetworkState::default();
+    };
+    let mut wired: Option<String> = None;
+    let mut wireless: Option<String> = None;
+    for e in ifs.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name == "lo" {
+            continue;
+        }
+        let up = std::fs::read_to_string(e.path().join("operstate"))
+            .is_ok_and(|s| s.trim() == "up");
+        if !up {
+            continue;
+        }
+        // The kernel exposes a `wireless/` directory (and `phy80211`) only on
+        // 802.11 interfaces — no name-sniffing for "wl" prefixes, which is
+        // wrong the moment an interface is renamed.
+        if e.path().join("wireless").exists() || e.path().join("phy80211").exists() {
+            wireless.get_or_insert(name);
+        } else {
+            wired.get_or_insert(name);
+        }
+    }
+    match (wireless, wired) {
+        (Some(interface), _) => NetworkState {
+            signal_pct: wifi_quality_pct(&interface),
+            link: NetworkLink::Wireless,
+            // Filled by the caller, which holds the previous sample a rate
+            // needs.
+            throughput_bps: None,
+            interface,
+        },
+        (None, Some(interface)) => NetworkState {
+            link: NetworkLink::Wired,
+            signal_pct: None,
+            throughput_bps: None,
+            interface,
+        },
+        (None, None) => NetworkState::default(),
+    }
+}
+
+/// Total bytes in and out of `interface` since boot, from the kernel's own
+/// counters. The two directions are summed: the readout has room for one
+/// number, and "is the network busy" does not care which way.
+fn read_net_bytes(interface: &str) -> Option<u64> {
+    let base = format!("/sys/class/net/{interface}/statistics");
+    let read = |which: &str| -> Option<u64> {
+        std::fs::read_to_string(format!("{base}/{which}_bytes"))
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+    };
+    Some(read("rx")? + read("tx")?)
+}
+
+/// Bytes per second between two counter samples of the SAME interface.
+///
+/// `saturating_sub` on purpose: these counters wrap and are reset by the driver
+/// on a reconnect, and a wrapped subtraction would print a preposterous burst
+/// exactly when the link came back.
+fn throughput_bps(prev: (u64, std::time::Instant), now: (u64, std::time::Instant)) -> Option<u64> {
+    let secs = now.1.duration_since(prev.1).as_secs_f64();
+    if secs <= 0.0 {
+        return None;
+    }
+    Some((now.0.saturating_sub(prev.0) as f64 / secs).round() as u64)
+}
+
+/// Wireless link quality as a percentage, from `/proc/net/wireless`.
+///
+/// The file's "link" column is a driver-scaled quality, conventionally out of
+/// 70 — the same number `iwconfig` prints as `Link Quality=53/70`. Pure, so the
+/// parse is unit-tested against a real file's shape.
+fn wifi_quality_pct(interface: &str) -> Option<u8> {
+    let text = std::fs::read_to_string("/proc/net/wireless").ok()?;
+    parse_wifi_quality(&text, interface)
+}
+
+/// The quality column for `interface`, scaled to 0-100.
+fn parse_wifi_quality(text: &str, interface: &str) -> Option<u8> {
+    /// The conventional full-scale value of the kernel's link-quality column.
+    const FULL_SCALE: f32 = 70.0;
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with(&format!("{interface}:")))?;
+    // `wlan0: 0000   53.  -57.  -256        0      0      0      0      0`
+    let quality = line.split(':').nth(1)?.split_whitespace().nth(1)?;
+    let quality: f32 = quality.trim_end_matches('.').parse().ok()?;
+    Some(((quality / FULL_SCALE) * 100.0).clamp(0.0, 100.0).round() as u8)
+}
+
 /// Confirmed offline: `/sys/class/net` is readable and NO interface other than
 /// loopback reports operstate `up`. Errs toward "not down" — an unreadable
 /// sysfs (containers, odd kernels) must never raise a false disconnection
@@ -211,6 +343,9 @@ fn recorder_running() -> bool {
     false
 }
 
+/// Whether the machine has a controllable backlight — any entry under
+/// `/sys/class/backlight` (a laptop panel). Desktops with external monitors
+/// have none, so brightness controls would be dead there.
 fn has_backlight() -> bool {
     std::fs::read_dir("/sys/class/backlight")
         .map(|mut d| d.next().is_some())
@@ -391,6 +526,35 @@ fn mains_online() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `/proc/net/wireless` (this machine's, 2026-09-13). The quality
+    /// column is driver-scaled out of 70 — the number `iwconfig` prints as
+    /// `Link Quality=41/70` — and the trailing dots are part of the format.
+    const WIRELESS: &str = "\
+Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+ face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+wlp0s20f3: 0000   41.  -69.  -256        0      0      0      0      0        0
+";
+
+    #[test]
+    fn wifi_quality_scales_the_kernels_column() {
+        // 41/70 ≈ 59%.
+        assert_eq!(parse_wifi_quality(WIRELESS, "wlp0s20f3"), Some(59));
+        // An interface that is not in the file has no quality — not zero, which
+        // would read as "connected, terrible signal".
+        assert_eq!(parse_wifi_quality(WIRELESS, "wlan0"), None);
+        // The header lines must not be mistaken for data.
+        assert_eq!(parse_wifi_quality(WIRELESS, "face"), None);
+        assert_eq!(parse_wifi_quality("", "wlp0s20f3"), None);
+    }
+
+    #[test]
+    fn wifi_quality_never_exceeds_full_scale() {
+        // Some drivers report above the conventional 70; a readout must not
+        // print 114%.
+        let hot = "wlan0: 0000   99.  -30.  -256        0      0      0      0\n";
+        assert_eq!(parse_wifi_quality(hot, "wlan0"), Some(100));
+    }
 
     #[test]
     fn parses_proc_stat_cpu_line() {

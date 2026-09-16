@@ -7,8 +7,9 @@
 //! low-frequency one (battery), and one dead collector can't stall the rest.
 
 use crate::state::{
-    ActiveWindow, AppInternalContext, AudioState, DaylightState, DeployHealth, GitContext, Layer,
-    MediaState, NotificationContext, SystemMetrics, TextSelection,
+    ActiveWindow, AppInternalContext, AudioSink, AudioState, BluetoothState, DaylightState,
+    DeployHealth, GitContext, Layer, NetworkState, NotificationContext, Playing, SystemMetrics,
+    TextSelection, WindowInfo,
 };
 
 /// A partial change to the context. Only the variants the current collectors
@@ -32,8 +33,24 @@ pub enum ContextDelta {
     /// Git context of the focused window's working directory (or cleared
     /// default when it isn't in a repo / nothing is focused).
     Git(GitContext),
-    /// The active media player's state, or `None` when nothing is playing/present.
-    Media(Option<MediaState>),
+    /// **Every** window the compositor holds, focused or not (finding #83).
+    /// The focused one keeps arriving separately as [`Self::Window`], because
+    /// it changes far more often than the inventory does and carries the
+    /// bridges' idea of what is in front of the user.
+    Windows(Vec<WindowInfo>),
+    /// Every MPRIS player on the session bus — what is playing, by name, with
+    /// title/artist/position and the pid that owns the bus name.
+    MprisPlayers(Vec<Playing>),
+    /// Every PipeWire output stream — everything actually making noise,
+    /// including the apps that publish no MPRIS at all, each with its pid,
+    /// its state and the sink it is routed to.
+    ///
+    /// The two arrive separately and are **merged by pid** in the aggregator
+    /// (`engine::merge_playing`): neither source is sufficient alone, and
+    /// whichever lands second must not erase the first.
+    AudioStreams(Vec<Playing>),
+    /// The audio output inventory: every sink with its own volume and mute.
+    Outputs(Vec<AudioSink>),
     /// Merged app-internal context from the shell/editor/browser bridges.
     AppInternal(AppInternalContext),
     /// The current clipboard selection (classified), or cleared default.
@@ -48,6 +65,10 @@ pub enum ContextDelta {
     RecentDownload(Option<std::path::PathBuf>),
     /// Daylight state (sun below the horizon / hyprsunset running).
     Daylight(DaylightState),
+    /// What kind of network link is up, and its quality when wireless.
+    Network(NetworkState),
+    /// Bluetooth adapter + connection state, from BlueZ.
+    Bluetooth(BluetoothState),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

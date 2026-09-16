@@ -97,6 +97,7 @@ fn default_collectors() -> Vec<Box<dyn Collector>> {
         Box::new(crate::collectors::notifications::NotificationCollector::new()),
         Box::new(crate::collectors::downloads::DownloadsCollector::new()),
         Box::new(crate::collectors::daylight::DaylightCollector::new()),
+        Box::new(crate::collectors::bluetooth::BluetoothCollector::new()),
     ]
 }
 
@@ -123,6 +124,49 @@ async fn aggregate(mut rx: mpsc::Receiver<Update>, tx: watch::Sender<ContextStat
     }
 }
 
+/// Marry the two halves of "what is making sound".
+///
+/// Neither source is sufficient and each knows what the other cannot:
+///
+/// * **MPRIS** knows *what* — title, artist, position, and the player's own
+///   declared state. It is blind to every app that does not publish it, and it
+///   has no idea where the sound comes out.
+/// * **PipeWire** knows *that*, and *where to* — every stream actually feeding
+///   a sink, and which sink. It has no titles.
+///
+/// **pid is the marriage.** A player and a stream owned by the same process are
+/// one thing, and the result takes MPRIS's words with PipeWire's routing.
+/// Everything unmatched on either side passes through, which is the point: an
+/// `ffplay` with no MPRIS still appears, and a paused phone player with no
+/// local stream still appears.
+///
+/// The player's own `state` wins over the stream's when both exist. A paused
+/// MPRIS player may still hold an `idle` stream open, and the app's declaration
+/// of what it is doing beats our inference from whether bytes are flowing.
+fn merge_playing(mpris: &[crate::state::Playing], streams: &[crate::state::Playing]) -> Vec<crate::state::Playing> {
+    let mut out: Vec<crate::state::Playing> = Vec::with_capacity(mpris.len() + streams.len());
+    for p in mpris {
+        let mut merged = p.clone();
+        if let Some(s) = p
+            .pid
+            .and_then(|pid| streams.iter().find(|s| s.pid == Some(pid)))
+        {
+            merged.output = s.output.clone();
+        }
+        out.push(merged);
+    }
+    for s in streams {
+        // Already represented by an MPRIS player of the same process.
+        let claimed = s
+            .pid
+            .is_some_and(|pid| mpris.iter().any(|p| p.pid == Some(pid)));
+        if !claimed {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
 /// Fold one delta into the master state.
 fn apply(state: &mut ContextState, delta: ContextDelta) {
     match delta {
@@ -133,7 +177,16 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
         ContextDelta::FocusSwitchVelocity(v) => state.behavior.focus_switch_velocity = v,
         ContextDelta::Metrics(m) => state.metrics = m,
         ContextDelta::Git(g) => state.git = g,
-        ContextDelta::Media(m) => state.media = m,
+        ContextDelta::Windows(w) => state.windows = w,
+        ContextDelta::MprisPlayers(p) => {
+            state.mpris_players = p;
+            state.playing = merge_playing(&state.mpris_players, &state.audio_streams);
+        }
+        ContextDelta::AudioStreams(s) => {
+            state.audio_streams = s;
+            state.playing = merge_playing(&state.mpris_players, &state.audio_streams);
+        }
+        ContextDelta::Outputs(o) => state.outputs = o,
         ContextDelta::AppInternal(a) => state.app_internal = a,
         ContextDelta::Selection(s) => state.selection = s,
         ContextDelta::Audio(a) => state.audio = a,
@@ -141,6 +194,8 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
         ContextDelta::Notifications(n) => state.notifications = n,
         ContextDelta::RecentDownload(d) => state.recent_download = d,
         ContextDelta::Daylight(d) => state.daylight = d,
+        ContextDelta::Network(n) => state.network = n,
+        ContextDelta::Bluetooth(b) => state.bluetooth = b,
     }
 }
 

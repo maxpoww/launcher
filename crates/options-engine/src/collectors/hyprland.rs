@@ -28,7 +28,7 @@ use tokio::sync::watch;
 
 use crate::collector::{Collector, CollectorFuture};
 use crate::message::{ContextDelta, Update};
-use crate::state::{ActiveWindow, ContextState, Layer};
+use crate::state::{ActiveWindow, ContextState, Layer, WindowInfo};
 
 /// Trailing window over which focus switches are counted for velocity.
 const FOCUS_WINDOW: Duration = Duration::from_secs(5);
@@ -180,6 +180,92 @@ async fn refresh_window(tx: &mpsc::Sender<Update>, tracker: &mut FocusTracker) {
             ContextDelta::Window(window),
         ))
         .await;
+    refresh_windows(tx).await;
+}
+
+/// Query `j/clients` and emit the **whole window inventory**.
+///
+/// This query had never been made by the engine before 2026-09-12. The
+/// collector asked only `j/activewindow`, so `ContextState` could describe the
+/// window in front of you and nothing else — which meant every offer anyone
+/// could write was necessarily about the focused app (finding #83). Max:
+/// *"the brain should be aware of the context. different windows IS the
+/// context."*
+///
+/// Everything the reply carries is kept. It is one read either way, and a field
+/// left on the floor is a question some future OPTION cannot ask.
+async fn refresh_windows(tx: &mpsc::Sender<Update>) {
+    let windows = match query("j/clients").await {
+        Ok(reply) => serde_json::from_str::<serde_json::Value>(&reply)
+            .ok()
+            .map(|v| windows_from_json(&v))
+            .unwrap_or_default(),
+        Err(e) => {
+            tracing::debug!("j/clients query failed: {e:#}");
+            return;
+        }
+    };
+    let _ = tx
+        .send(Update::Delta(
+            Layer::Compositor,
+            ContextDelta::Windows(windows),
+        ))
+        .await;
+}
+
+/// Build the window inventory from a `j/clients` reply.
+///
+/// Unmapped entries are skipped: a window that exists to the compositor but is
+/// not on screen is not part of the user's context, and counting it would make
+/// an empty workspace look occupied.
+fn windows_from_json(v: &serde_json::Value) -> Vec<WindowInfo> {
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter(|w| w["mapped"].as_bool().unwrap_or(false))
+        .filter_map(|w| {
+            let address = w["address"].as_str().unwrap_or("");
+            if address.is_empty() || address == "0x0" {
+                return None;
+            }
+            let at = &w["at"];
+            let size = &w["size"];
+            Some(WindowInfo {
+                address: address.to_owned(),
+                // `class` reflects the app now; `initialClass` is the stable
+                // fallback — the same precedence the focused window uses.
+                class: w["class"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| w["initialClass"].as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                title: w["title"].as_str().unwrap_or("").to_owned(),
+                pid: w["pid"].as_i64().unwrap_or(0).max(0) as u32,
+                workspace_id: w["workspace"]["id"].as_i64().unwrap_or(-1) as i32,
+                workspace_name: w["workspace"]["name"].as_str().unwrap_or("").to_owned(),
+                monitor: w["monitor"].as_i64().unwrap_or(-1) as i32,
+                // `fullscreen` is a mode int in recent Hyprland (0 = none) and a
+                // bool in older ones; accept either rather than silently
+                // reading every window as windowed.
+                is_fullscreen: w["fullscreen"]
+                    .as_i64()
+                    .map(|m| m != 0)
+                    .or_else(|| w["fullscreen"].as_bool())
+                    .unwrap_or(false),
+                is_floating: w["floating"].as_bool().unwrap_or(false),
+                at: (
+                    at[0].as_i64().unwrap_or(0) as i32,
+                    at[1].as_i64().unwrap_or(0) as i32,
+                ),
+                size: (
+                    size[0].as_i64().unwrap_or(0) as i32,
+                    size[1].as_i64().unwrap_or(0) as i32,
+                ),
+            })
+        })
+        .collect()
 }
 
 /// Build an [`ActiveWindow`] from a `j/activewindow` reply, returning the
