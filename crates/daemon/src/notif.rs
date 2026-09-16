@@ -34,15 +34,15 @@ use calloop::timer::{TimeoutAction, Timer};
 // (`OptionUXRules.md` §3). This import is the only place the bell's speed is
 // decided; there is deliberately no rate constant below.
 use crate::animation::{
-    ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SCROLL_RATE, SETTLE_PX,
+    ease_toward, lerp, lerp4, settle_t, LEAVE_HOLD, MORPH_RATE, SCROLL_RATE, SETTLE_PX,
 };
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst};
 use crate::notifications::{
     action_pairs, ActiveNotification, NotifCommand, NotifEvent, NotifHandle,
 };
 use crate::options::{
-    hover_grow, push_neumorph, PillId, BOND_GAP, EDGE_PAD, GLYPH_BELL, GLYPH_BELL_SLASH,
-    NERD, OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X,
+    hover_grow, push_neumorph, PillId, BOND_GAP, EDGE_PAD, GLYPH_BELL, GLYPH_BELL_SLASH, NERD,
+    OPTION_GAP, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
 
@@ -164,7 +164,7 @@ impl BoxMetrics {
             ctrl_sz: 18.0 * s,
             ctrl_gap_n: 6.0 * s,
             extended_w: 380.0 * s,
-            expanded_h: 505.0 * s,
+            expanded_h: crate::options::BOX_DRAWER_H * s,
             empty_h: 120.0 * s,
             text_gap: 8.0 * s,
             list_pad: 6.0 * s,
@@ -442,6 +442,11 @@ pub(crate) struct NotifState {
     /// dismiss/act once those gestures land.
     #[allow(dead_code)]
     handle: Option<NotifHandle>,
+    /// Id for the next record Golem files itself (an answered offer — see
+    /// [`crate::action_track`]). Counts DOWN from the top of the range because
+    /// the notify daemon counts up from 1 each boot: the two can never meet, so
+    /// a record can't collide with a real notification's id.
+    next_record_id: u32,
 }
 
 impl NotifState {
@@ -525,6 +530,7 @@ impl NotifState {
             frame_pending: false,
             hold_deadline: None,
             handle,
+            next_record_id: u32::MAX,
         }
     }
 
@@ -588,15 +594,6 @@ fn fmt_relative(ms: u64) -> String {
 /// cheap estimate the clipboard list uses so no renderer is needed at draw time.
 fn rel_time_w(time: &str, m: BoxMetrics) -> f32 {
     time.chars().count() as f32 * m.font_px * 0.55
-}
-
-fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-    [
-        lerp(a[0], b[0], t),
-        lerp(a[1], b[1], t),
-        lerp(a[2], b[2], t),
-        lerp(a[3], b[3], t),
-    ]
 }
 
 impl App {
@@ -725,6 +722,8 @@ impl App {
             // persisted state file — can't grow without limit.
             let live: HashSet<u64> = self.notif.history.iter().map(|h| h.timestamp_ms).collect();
             self.notif.read_ms.retain(|ts| live.contains(ts));
+            // Golem's own records are kept to the same bound, by the same rule.
+            self.prune_action_tracks();
         }
         self.measure_notif();
         // Keep the open box anchored on the same notifications when new ones
@@ -1146,7 +1145,11 @@ impl App {
     /// Shared by both the notif icon resolver and the clipboard thumbnailer.
     pub(crate) fn upload_options_icons(&mut self) {
         if let Some(r) = self.options_renderer.as_mut() {
-            r.set_options_icons(&self.notif_icon_chains, &self.clip.icon_chains);
+            r.set_options_icons(
+                &self.notif_icon_chains,
+                &self.clip.icon_chains,
+                &self.play_art_chains,
+            );
         }
     }
 
@@ -1199,11 +1202,34 @@ impl App {
     }
 
     /// The element's current rect (from anywhere: input region, scroll clamps).
+    ///
+    /// Pinned to the clock's RESTING edge, not its live one: the clock grows
+    /// into the date OVER this element rather than shoving it left (see
+    /// [`App::options_clock_rest_left`]).
     pub(crate) fn notif_rect(&self) -> Rect {
         let ph = self.notif_band_h();
         let y = PILL_MARGIN_Y;
-        let right = self.options_clock_left() - OPTION_GAP;
+        let right = self.options_clock_rest_left() - OPTION_GAP;
         self.notif_geom(right, y, ph)
+    }
+
+    /// Whether the preview has slid far enough out of the bell to stand over
+    /// its neighbours on the bar, so they step out of the layout while it is
+    /// there. The right edge's twin of [`App::clip_covering`] /
+    /// [`App::stats_covering`] — same threshold, same reason (a covered pill's
+    /// glyph draws on top of whatever covers it).
+    pub(crate) fn notif_covering(&self) -> bool {
+        self.notif.peek_t > 0.12
+    }
+
+    /// The left edge this element can EVER reach: the preview slid fully out of
+    /// the bell at its extended width. The right-edge twin of
+    /// [`App::clip_span_full_right`] — the frost sampler treats it as ours open
+    /// or not, so the colour the box wears cannot jump as it opens.
+    pub(crate) fn notif_span_full_left(&self) -> f32 {
+        let ph = self.notif_band_h();
+        let right = self.options_clock_rest_left() - OPTION_GAP - (ph + BOND_GAP);
+        (right - self.nm().extended_w).max(EDGE_PAD)
     }
 
     /// Bottom edge (surface px) the pointer-input region must reach while the
@@ -1219,15 +1245,21 @@ impl App {
         PILL_MARGIN_Y + self.notif_full_h(ph).max(self.notif.box_h)
     }
 
-    /// The box's fully-expanded height: fit to content (cards + pad + footer band,
-    /// capped at the dropdown max) so a short list gives a short box; a compact
-    /// fixed panel when there are no notifications (the centred empty state).
+    /// The box's fully-expanded height: the bar's ONE drawer height
+    /// ([`crate::options::BOX_DRAWER_H`], as `expanded_h`); a compact fixed
+    /// panel when there are no notifications (the centred empty state).
+    ///
+    /// It used to fit itself to its cards, which made this drawer, the
+    /// clipboard's and the settings panel three different sizes for the same
+    /// object (Max, 2026-09-13: *"gear, clipboard and notis should be the same
+    /// height"*). A short list now leaves panel below the last card rather than
+    /// a shorter box.
     fn notif_full_h(&self, ph: f32) -> f32 {
         let nm = self.nm();
         if self.notif.rows.is_empty() {
             return nm.empty_h;
         }
-        (self.cards_total_h() + nm.list_pad + self.notif_footer_h()).clamp(ph, nm.expanded_h)
+        nm.expanded_h.max(ph)
     }
 
     /// Diameter of the footer ✕ pill — noticeably larger than a bar pill so it
@@ -1334,8 +1366,10 @@ impl App {
     pub(crate) fn notif_hit_clickable(&self) -> bool {
         match self.notif.hit {
             NotifHit::None => false,
-            // A card body is clickable only when it can open (has a default action).
-            NotifHit::Card(i) => self.card_has_default(i),
+            // A card body is clickable only when it can open (has a default
+            // action) — or when it is one of Golem's records, which always can:
+            // clicking it runs the offer it remembers again.
+            NotifHit::Card(i) => self.card_has_default(i) || self.card_is_track(i),
             _ => true,
         }
     }
@@ -1917,7 +1951,7 @@ impl App {
         if let Some(layer) = layer {
             // Textured quads clip via a grid scissor, not per-item, so they must
             // ride a grid pinned to the box interior (they scroll with the list).
-            push_notif_icon(scene, content, icon, layer);
+            push_boxed_icon(scene, content, icon, layer);
         } else if !info.initial.is_empty() {
             scene.labels.push(centered_glyph(
                 &info.initial,
@@ -2343,6 +2377,18 @@ impl App {
         let Some(n) = self.notif.history.get(idx) else {
             return;
         };
+        // One of Golem's own records: the card remembers an offer it made and
+        // what you answered, so opening it runs that offer again — there is no
+        // app behind it to route to. See [`crate::action_track`].
+        let at_ms = n.timestamp_ms;
+        if self.action_tracks.contains_key(&at_ms) {
+            self.replay_action_track(at_ms);
+            return;
+        }
+        // Re-borrowed: the track check above needed `&mut self`.
+        let Some(n) = self.notif.history.get(idx) else {
+            return;
+        };
         let id = n.id;
         let has_default = has_default_action(&n.actions);
         // Only a browser web notification carries a site origin in its body; a
@@ -2417,6 +2463,87 @@ impl App {
             .is_some_and(|n| has_default_action(&n.actions))
     }
 
+    /// File one of Golem's own records into the list — an answered offer (see
+    /// [`crate::action_track`]), not something an app sent us.
+    ///
+    /// Deliberately NOT routed through `on_notif_event`: a record is not an
+    /// arrival. It must not pop the preview toast (you answered on the bar a
+    /// moment ago; a toast repeating it back at you is noise) and it must not
+    /// sit unread, so it goes straight into the list already read.
+    pub(crate) fn file_notif_record(&mut self, app: &str, summary: &str, body: &str, at_ms: u64) {
+        // Answering the same way twice replaces the older card instead of
+        // stacking it — the rule `collapse_stacks` applies to a service
+        // re-firing one alert, applied here at the point of insertion because
+        // this card never passes through the arrival path that collapses.
+        let dup: Vec<u64> = self
+            .notif
+            .history
+            .iter()
+            .filter(|h| h.app_name == app && h.summary == summary && h.body == body)
+            .map(|h| h.timestamp_ms)
+            .collect();
+        if !dup.is_empty() {
+            self.notif
+                .history
+                .retain(|h| !(h.app_name == app && h.summary == summary && h.body == body));
+            for ts in dup {
+                self.action_tracks.remove(&ts);
+            }
+        }
+        let id = self.notif.next_record_id;
+        self.notif.next_record_id = self.notif.next_record_id.saturating_sub(1);
+        // Newest-first is the list's one ordering invariant, and `at_ms` is now.
+        self.notif.history.insert(
+            0,
+            ActiveNotification {
+                id,
+                app_name: app.to_owned(),
+                app_icon: String::new(),
+                desktop_entry: String::new(),
+                summary: summary.to_owned(),
+                body: body.to_owned(),
+                actions: Vec::new(),
+                urgency: 0,
+                timestamp_ms: at_ms,
+                image_rgba: Vec::new(),
+                image_width: 0,
+                image_height: 0,
+                transient: Some(false),
+            },
+        );
+        self.notif.history.truncate(HISTORY_CAP);
+        self.notif.read_ms.insert(at_ms);
+        self.save_notif_prefs();
+        self.prune_action_tracks();
+        self.measure_notif();
+        self.save_notif_history();
+        self.schedule_notif_frame();
+    }
+
+    /// Drop tracks whose card is no longer in the history (dismissed, collapsed
+    /// away, or aged past the cap), so the store can't grow without limit — the
+    /// same discipline the read-state set is kept under.
+    pub(crate) fn prune_action_tracks(&mut self) {
+        if self.action_tracks.is_empty() {
+            return;
+        }
+        let live: HashSet<u64> = self.notif.history.iter().map(|h| h.timestamp_ms).collect();
+        let before = self.action_tracks.len();
+        self.action_tracks.retain(|ts, _| live.contains(ts));
+        if self.action_tracks.len() != before {
+            self.save_action_tracks();
+        }
+    }
+
+    /// Whether this card is one of Golem's records, i.e. clicking it re-runs the
+    /// offer it remembers rather than opening an app.
+    fn card_is_track(&self, idx: usize) -> bool {
+        self.notif
+            .history
+            .get(idx)
+            .is_some_and(|n| self.action_tracks.contains_key(&n.timestamp_ms))
+    }
+
     /// Dismiss one notification: drop it from our history, tell the daemon to
     /// close it, persist, and keep the view valid.
     fn notif_dismiss(&mut self, idx: usize) {
@@ -2424,7 +2551,11 @@ impl App {
             return;
         }
         let n = self.notif.history.remove(idx);
-        if let Some(h) = &self.notif.handle {
+        // Golem's own records were never sent by the notify daemon, so there is
+        // nothing there to close — only the track to forget.
+        if self.action_tracks.remove(&n.timestamp_ms).is_some() {
+            self.save_action_tracks();
+        } else if let Some(h) = &self.notif.handle {
             h.send(NotifCommand::Dismiss(n.id));
         }
         self.measure_notif();
@@ -2806,7 +2937,7 @@ fn offset_of(heights: &[f32], idx: usize) -> f32 {
 /// carry a per-item clip the way labels do, so they all ride one grid the
 /// renderer scissors to `content`, keeping icons inside the box as it scrolls.
 /// The options scene has no other grids, so a lazy first-or-create is safe.
-fn push_notif_icon(scene: &mut Scene, content: Rect, icon: Rect, layer: u32) {
+pub(crate) fn push_boxed_icon(scene: &mut Scene, content: Rect, icon: Rect, layer: u32) {
     notif_grid(scene, content).icons.push(IconInst {
         rect: icon,
         layer,
@@ -2899,7 +3030,10 @@ fn store_image(hash: u64, rgba: &[u8]) -> String {
 /// box). Runs on every history save — a read_dir over ≤ a few hundred
 /// entries, trivially cheap next to the JSON write beside it.
 fn sweep_orphan_images(stored: &[StoredNotification]) {
-    let referenced: HashSet<&str> = stored.iter().filter_map(|s| s.image_file.as_deref()).collect();
+    let referenced: HashSet<&str> = stored
+        .iter()
+        .filter_map(|s| s.image_file.as_deref())
+        .collect();
     let dir = crate::persist::data_path(IMAGE_DIR);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return; // no cache dir yet — nothing to sweep

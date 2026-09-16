@@ -134,7 +134,11 @@ impl App {
             .is_some_and(|t| t.elapsed() > WAKE_GAP);
         self.battery_last_snapshot = Some(Instant::now());
 
-        let alarm = alarm_for(ctx.metrics.battery_pct, ctx.metrics.is_charging, ctx.metrics.on_ac);
+        let alarm = alarm_for(
+            ctx.metrics.battery_pct,
+            ctx.metrics.is_charging,
+            ctx.metrics.on_ac,
+        );
         let pct = ctx.metrics.battery_pct.unwrap_or(0);
         let prev = self.battery_alarm;
         self.set_battery_alarm(alarm);
@@ -322,12 +326,20 @@ mod tests {
         assert_eq!(alarm_for(Some(0), false, false), BatteryAlarm::Critical);
         // Charging clears EVERY rung, including the lying-gauge 0%.
         for pct in [0, 3, 5, 7, 10] {
-            assert_eq!(alarm_for(Some(pct), true, false), BatteryAlarm::None, "{pct}%");
+            assert_eq!(
+                alarm_for(Some(pct), true, false),
+                BatteryAlarm::None,
+                "{pct}%"
+            );
         }
         // On AC clears EVERY rung too: a dead battery on wall power reads
         // "Not charging 0%" (the ASUS X550LC, #38) — not a real drain.
         for pct in [0, 3, 5, 7, 10] {
-            assert_eq!(alarm_for(Some(pct), false, true), BatteryAlarm::None, "{pct}% on AC");
+            assert_eq!(
+                alarm_for(Some(pct), false, true),
+                BatteryAlarm::None,
+                "{pct}% on AC"
+            );
         }
     }
 
