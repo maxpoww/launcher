@@ -3,3 +3,6 @@ result
 result-*
 .direnv/
 .dev-profile*
+
+# stray debug screen captures (grim) dumped at the repo root
+/*.png
