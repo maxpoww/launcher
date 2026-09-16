@@ -25,7 +25,7 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_pointer;
 use wayland_client::WEnum;
 
-use crate::animation::{self, ease_toward, lerp};
+use crate::animation::{self, ease_toward, lerp, lerp4};
 use crate::content::{Label, Rect, RectInst, Scene, ShadowInst};
 use crate::{hypr, surface, App, BTN_LEFT, BTN_RIGHT};
 
@@ -43,7 +43,13 @@ const HIDE_GRACE: Duration = Duration::from_millis(500);
 pub(crate) const NERD: &str = "JetBrainsMono Nerd Font Mono";
 /// Text (clock, window name) uses `None` → the default SansSerif, which is
 /// exactly the font the dock uses (fontconfig resolves it to DejaVu Sans).
-const TEXT_FONT: Option<&str> = None;
+pub(crate) const TEXT_FONT: Option<&str> = None;
+/// Colour emoji must be asked for BY NAME. The sans-serif fallback chain
+/// resolves the smiley block (U+1F600…) to **DejaVu Sans**, which carries
+/// monochrome outlines for it and wins before the colour font is ever reached —
+/// so 🎉 (absent from DejaVu) came out in colour while 😀 came out as a black
+/// ring (seen live, 2026-09-13). Naming the family skips the chain.
+pub(crate) const EMOJI_FONT: &str = "Noto Color Emoji";
 pub(crate) const FONT_PX: f32 = 17.0;
 pub(crate) const LINE_PX: f32 = 20.0;
 
@@ -58,6 +64,30 @@ pub(crate) fn pill_scale_for(logical_h: Option<f32>) -> f32 {
     match logical_h {
         Some(h) if h < OPTIONS_FULL_H => (h / OPTIONS_FULL_H).max(OPTIONS_MIN_SCALE),
         _ => 1.0,
+    }
+}
+
+/// Split an `overview-hover` payload into the window it names and the title to
+/// show.
+///
+/// waveview sends `"0x55f3… Some Window Title"`: the pill only ever needed the
+/// words, but the stage needs to know *which* window they belong to, since
+/// entering from the map stages what the pointer is on. An empty payload ends
+/// the hover. A payload with no address is read as a bare title, so an older
+/// plugin still drives the pill rather than putting its own text in the wrong
+/// field.
+pub(crate) fn split_overview_hover(payload: &str) -> (Option<String>, Option<String>) {
+    if payload.is_empty() {
+        return (None, None);
+    }
+    match payload.split_once(' ') {
+        Some((addr, title)) if addr.starts_with("0x") => (
+            Some(addr.to_owned()),
+            (!title.is_empty()).then(|| title.to_owned()),
+        ),
+        // An address and nothing else: a window with no title yet.
+        None if payload.starts_with("0x") => (Some(payload.to_owned()), None),
+        _ => (None, Some(payload.to_owned())),
     }
 }
 
@@ -109,32 +139,38 @@ const SUNSET_TURN_ON_LABEL: &str = "turn on";
 /// What [turn on] asks for (Kelvin) — the evening warmth the offer promises,
 /// and one of the panel's presets so the box agrees with the prompt.
 const SUNSET_TURN_ON_K: u32 = 4000;
+/// How the answered offer is titled on its notification record when there is no
+/// live affordance to read the title from (a debug-forced prompt). Matches the
+/// engine's own `sunset.eye_protection` title, so the record reads the same
+/// either way.
+const SUNSET_OFFER_TITLE: &str = "Turn on eye protection";
 /// Gap between the two nested pills ([turn on] and the settings gear).
 const SUNSET_INNER_GAP: f32 = 4.0;
-/// The settings box's full size (logical px, pre-scale). The module morphs
-/// from its wide message pill to this centred panel — narrowing to a sensible
-/// settings width and dropping to full height, like the notif/clipboard boxes.
-pub(crate) const SUNSET_BOX_H: f32 = 168.0;
-pub(crate) const SUNSET_BOX_W: f32 = 340.0;
+/// The settings box's width (logical px, pre-scale). The module morphs from its
+/// wide message pill to this centred panel — narrowing to a sensible settings
+/// width and dropping to its own height ([`Module::box_size`]), like the
+/// notif/clipboard boxes. Shared by every module: the panels are the same
+/// object seen twice, and a width that varied per module would make them two.
+pub(crate) const MODULE_BOX_W: f32 = 340.0;
 /// The open box's corner radius — a rounded RECTANGLE like the dock's open
 /// card (`BOX_CORNER_RADIUS` = 24), only smaller for this compact panel.
-pub(crate) const SUNSET_PANEL_RADIUS: f32 = 24.0;
+pub(crate) const MODULE_PANEL_RADIUS: f32 = 24.0;
 /// The blister radius (logical px, pre-scale): how far the banner's swell
 /// fillets as it bulges around the module. The blister rect's quad is expanded
 /// by this so the bulge has room; the shader insets the SDF back. Fed to
 /// `Scene::neck`.
-pub(crate) const SUNSET_NECK_K: f32 = 14.0;
+pub(crate) const MODULE_NECK_K: f32 = 14.0;
 /// How far the banner-behind layer extends past the glass pill on each side —
 /// the sliver of banner that shows around the pill, so the pill reads as
 /// sitting ON the banner (the banner is a distinct layer behind it).
-const SUNSET_BANNER_RIM: f32 = 9.0;
+const MODULE_BANNER_RIM: f32 = 9.0;
 /// The `glass` sentinel flagging a rect as the banner blister (solid fill of
 /// the bar colour, smooth-unioned with the bar edge — see `rounded_rect.wgsl`).
-const SUNSET_NECK_GLASS: f32 = 2.0;
+const MODULE_NECK_GLASS: f32 = 2.0;
 /// The engine affordance id the prompt is the surface for.
 pub(crate) const SUNSET_OFFER_ID: &str = "sunset.eye_protection";
 /// Gap between the message text and the nested [turn on] pill.
-const SUNSET_GAP: f32 = 9.0;
+const MODULE_GAP: f32 = 9.0;
 /// The asking module's size step past a normal pill — a REAL step (the +2px
 /// hover lift is a whisper, and this must not read like one), while the
 /// nested [turn on] stays exactly normal-pill sized inside it: the size
@@ -142,15 +178,15 @@ const SUNSET_GAP: f32 = 9.0;
 /// DOWNWARD: the top edge drops a couple of pixels clear of the screen edge
 /// and the bottom reaches a little past the bar line, the way the bell's
 /// preview pill steps out of the bar.
-const SUNSET_GROW_X: f32 = 6.0;
-pub(crate) const SUNSET_GROW_H: f32 = 13.0;
-const SUNSET_DROP_Y: f32 = 2.0;
+const MODULE_GROW_X: f32 = 6.0;
+pub(crate) const MODULE_GROW_H: f32 = 13.0;
+const MODULE_DROP_Y: f32 = 2.0;
 /// Alpha of the nested [turn on] pill's hairline border, in the module's own
 /// ink — a whisper, just enough to seat the button in the shared glass.
 const SUNSET_BORDER_A: f32 = 0.06;
 /// How far the nested [turn on] grows past a normal pill, per side — a little
 /// bigger so it fills the enlarged module rather than looking dwarfed in it.
-const SUNSET_CHILD_GROW: f32 = 1.5;
+const MODULE_CHILD_GROW: f32 = 1.5;
 /// How much more opaque the asking module's RESTING fill reads than an
 /// ordinary pill's wash (Max, 2026-09-08: "rise the pill opacity" — the
 /// message pill was reading almost as transparent as the banner behind it).
@@ -158,7 +194,99 @@ const SUNSET_CHILD_GROW: f32 = 1.5;
 /// pill keeps the shared wash exactly as it was. Capped at the open box's own
 /// alpha so the closed pill never reads MORE solid than the panel it grows
 /// into.
-const SUNSET_REST_ALPHA_BOOST: f32 = 10.0;
+const MODULE_REST_ALPHA_BOOST: f32 = 10.0;
+
+/// A module that takes the current-task pill over: one wide asking pill where
+/// the window title was, on its banner blister, with its own costume riding the
+/// title metamorphosis (`become-more`, one shape growing).
+///
+/// **One at a time** — the pill is one object, so it can only be one thing
+/// (`OptionUXRules.md` §5, one kills the other). [`App::module_wanted`] picks by
+/// precedence rather than stacking two sentences into one pill.
+///
+/// An **empty-space** module lived here on 2026-09-13 — the plain sentence "This
+/// space is empty" on any workspace with no windows, with the gear and a box of
+/// its own — and Max cut it the same day, on sight: *"i meant the whole pill…
+/// all, get rid of it."* The generalisation it forced is what remains: the
+/// costume below is no longer sunset-specific, so the next module is a variant
+/// and a match arm rather than a rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Module {
+    /// The sunset offer: "…turn on eye protection?" + [turn on] + the gear.
+    Sunset,
+}
+
+impl Module {
+    /// Every module, in the order they claim the pill (see
+    /// [`App::module_wanted`]).
+    const ALL: [Module; 1] = [Module::Sunset];
+
+    /// The module's **fixed** sentence: sunset's question, and the empty room's
+    /// fallback line for when it has nothing to report.
+    ///
+    /// What is actually drawn goes through [`App::module_line`], because a
+    /// module's sentence can be live — the empty room says whatever is most
+    /// worth saying. The identity of the drawn text travels beside it in
+    /// [`TitleMeta::shown_module`], not by comparing strings.
+    pub(crate) const fn msg(self) -> &'static str {
+        match self {
+            Module::Sunset => SUNSET_MSG,
+        }
+    }
+
+    /// Whether the module nests an action pill — sunset's `[turn on]`, the
+    /// button that answers its question. A module with nothing to answer has
+    /// none.
+    fn has_turn_on(self) -> bool {
+        matches!(self, Module::Sunset)
+    }
+
+    /// Whether the module carries a settings gear (and therefore a box behind
+    /// it) at its right end.
+    ///
+    /// Asked per module rather than assumed: a gear is a promise that there is
+    /// something to set, and one that opens an empty panel is a toll. Both
+    /// modules answer yes today — Max, 2026-09-13: *"now add a gear pill inside
+    /// as the one on sunset, and make it open a box as sunset does."*
+    fn has_gear(self) -> bool {
+        matches!(self, Module::Sunset)
+    }
+
+    /// Whether anything is nested in the module's right end. When something is,
+    /// the sentence is LEFT-anchored and clipped at the leftmost child's edge;
+    /// a childless module centres its sentence like an ordinary title.
+    fn has_children(self) -> bool {
+        self.has_turn_on() || self.has_gear()
+    }
+
+    /// The settings box's fully-open size (logical px, pre-scale). The width is
+    /// shared so every module's panel is the same object seen twice; the height
+    /// is the module's own, because a panel sized for content it does not have
+    /// reads as broken rather than as room to grow.
+    fn box_size(self) -> (f32, f32) {
+        match self {
+            // Header + the temperature row + the "automatically" toggle.
+            Module::Sunset => (MODULE_BOX_W, 168.0),
+        }
+    }
+
+    /// What the settings panel calls itself in its header band — the module
+    /// named as a thing you can set, where the sentence was. Not the sentence
+    /// itself: "The sun is set, do you want to…?" is a question, and a panel
+    /// header is a place.
+    pub(crate) fn panel_title(self) -> &'static str {
+        match self {
+            Module::Sunset => "Eye protection",
+        }
+    }
+
+    /// The stable lower-case name, for the log line that records a hand-over.
+    fn name(self) -> &'static str {
+        match self {
+            Module::Sunset => "sunset",
+        }
+    }
+}
 
 // Nerd Font glyphs (Font Awesome range, present in JetBrainsMono NF).
 pub(crate) const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
@@ -173,46 +301,19 @@ pub(crate) const GLYPH_COPY_LINK: &str = "\u{f0c1}"; // fa-link (copy the page U
 
 // Dynamic OPTION-pill glyphs (the Mind's context-aware controls). Keyed by
 // affordance id in `glyph_for_option`.
-const GLYPH_PLAY: &str = "\u{f04b}"; // fa-play
-const GLYPH_PAUSE: &str = "\u{f04c}"; // fa-pause
-const GLYPH_VOL_DOWN: &str = "\u{f027}"; // fa-volume-down
-const GLYPH_VOL_UP: &str = "\u{f028}"; // fa-volume-up
-const GLYPH_VOL_MUTE: &str = "\u{f026}"; // fa-volume-off (mute)
 /// The deck's audible-task speaker (with waves, like a browser tab's) — pure
 /// status, no click behaviour.
 pub(crate) const GLYPH_VOL_LIVE: &str = "\u{f028}"; // fa-volume-up
-const GLYPH_BRIGHT_UP: &str = "\u{f185}"; // fa-sun-o
-const GLYPH_BRIGHT_DOWN: &str = "\u{f042}"; // fa-adjust (dim)
-const GLYPH_NEXT: &str = "\u{f051}"; // fa-step-forward
-const GLYPH_PREV: &str = "\u{f048}"; // fa-step-backward
-const GLYPH_SEEK_FWD: &str = "\u{f04e}"; // fa-forward (seek +10s)
-const GLYPH_SEEK_BACK: &str = "\u{f04a}"; // fa-backward (seek -10s)
-const GLYPH_MIC_SLASH: &str = "\u{f131}"; // fa-microphone-slash (mute mic)
-const GLYPH_COMMIT: &str = "\u{f00c}"; // fa-check (commit)
-const GLYPH_PUSH: &str = "\u{f093}"; // fa-upload (push)
-const GLYPH_PULL: &str = "\u{f019}"; // fa-download (pull)
-const GLYPH_REMOTE: &str = "\u{f09b}"; // fa-github (open remote)
-const GLYPH_DIFF: &str = "\u{f440}"; // cod-diff (show diff)
-const GLYPH_SEARCH: &str = "\u{f002}"; // fa-search (search the web)
-const GLYPH_OPEN_FILE: &str = "\u{f07c}"; // fa-folder-open (open copied path)
-const GLYPH_EMAIL: &str = "\u{f0e0}"; // fa-envelope (compose email)
-const GLYPH_MONITOR: &str = "\u{f0e4}"; // fa-tachometer (system monitor)
-const GLYPH_TERMINAL: &str = "\u{f120}"; // fa-terminal (open terminal here)
-const GLYPH_RERUN: &str = "\u{f021}"; // fa-refresh (re-run last command)
-const GLYPH_FORMAT: &str = "\u{f0d0}"; // fa-magic (format the file)
-const GLYPH_WIFI: &str = "\u{f1eb}"; // fa-wifi (network state / settings)
-const GLYPH_RECORD: &str = "\u{f111}"; // fa-circle (start recording)
-const GLYPH_STOP: &str = "\u{f04d}"; // fa-stop (stop recording)
-const GLYPH_CAMERA: &str = "\u{f030}"; // fa-camera (camera live)
-const GLYPH_MIC: &str = "\u{f130}"; // fa-microphone (mic live)
-const GLYPH_SCREENCAST: &str = "\u{f108}"; // fa-desktop (screen sharing)
-const GLYPH_UNDO: &str = "\u{f0e2}"; // fa-undo (creative undo)
-const GLYPH_DEFINE: &str = "\u{f02d}"; // fa-book (define a copied word)
 const GLYPH_OPTION: &str = "\u{f0eb}"; // fa-lightbulb-o (generic OPTION)
-const GLYPH_MUSIC: &str = "\u{f001}"; // fa-music (open the media box)
-const GLYPH_TRASH: &str = "\u{f014}"; // fa-trash-o (empty the trash)
-const GLYPH_DISK: &str = "\u{f0a0}"; // fa-hdd-o (disk almost full)
+                                       // The cava cluster's transport glyphs.
+const GLYPH_PLAY: &str = "\u{f04b}"; // fa-play
+const GLYPH_PAUSE: &str = "\u{f04c}"; // fa-pause
+const GLYPH_PREV: &str = "\u{f048}"; // fa-step-backward
+const GLYPH_NEXT: &str = "\u{f051}"; // fa-step-forward
 const GLYPH_GEAR: &str = "\u{f013}"; // fa-cog (settings — sunset module)
+/// The stage-mode pill's two faces: one task alone, or a whole desk.
+const GLYPH_ONE_TASK: &str = "\u{f2d0}"; // fa-window-maximize
+const GLYPH_WHOLE_DESK: &str = "\u{f009}"; // fa-th-large
 /// Amber wash for a privacy/safety WARNING pill, so it reads as "heads up",
 /// not a button.
 const WARN_COLOR: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
@@ -221,82 +322,87 @@ const WARN_COLOR: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
 /// plus the privacy/safety WARNINGS worth a persistent glance (a live camera,
 /// mic, or screen share). Battery/deploy warnings are excluded — they have
 /// their own dedicated surfaces (battery.rs, and the deploy nudge).
+///
+/// The amber WARNING allow-list that used to sit here named five deleted
+/// affordance ids (`camera.live`, `audio.mic_live`, …) and went with them on
+/// 2026-09-12. It comes back when the first curated Warning does — the rule it
+/// encoded stands: battery and deploy stay excluded because they have their own
+/// dedicated surfaces (`battery.rs`, the deploy nudge).
 pub(crate) fn is_surfaced_affordance(a: &options_engine::Affordance) -> bool {
-    // The sunset offer is excluded like battery/deploy: its surface is the
-    // current-task pill's prompt, not a cluster glyph.
-    (a.action.is_actionable() && a.id != SUNSET_OFFER_ID)
-        || (a.kind == options_engine::AffordanceKind::Warning
-            && matches!(
-                a.id,
-                "camera.live"
-                    | "audio.mic_live"
-                    | "compositor.screencasting"
-                    | "network.down"
-                    | "system.disk_full"
-            ))
+    // A module offer is excluded like battery/deploy: its surface is the
+    // current-task pill, not a cluster glyph. (`space.empty` carries no action
+    // yet, so it would fall out below anyway — named here so that giving it one
+    // cannot silently sprout a second, generic pill for the same offer.)
+    a.action.is_actionable() && a.id != SUNSET_OFFER_ID
 }
 
-/// The Nerd-Font glyph for a dynamic OPTION control, by affordance id. The
-/// play/pause toggle reads its title so it shows the action it WILL perform.
-fn glyph_for_option(id: &str, title: &str) -> &'static str {
-    match id {
-        "media.playpause" => {
-            if title == "Pause" {
-                GLYPH_PAUSE
-            } else {
-                GLYPH_PLAY
-            }
-        }
-        "media.vol_down" => GLYPH_VOL_DOWN,
-        "media.vol_up" => GLYPH_VOL_UP,
-        "media.mute" => GLYPH_VOL_MUTE,
-        "media.bright_up" | "reading.bright_up" => GLYPH_BRIGHT_UP,
-        "media.bright_down" | "reading.bright_down" => GLYPH_BRIGHT_DOWN,
-        "media.next" | "slides.next" | "reading.page_next" => GLYPH_NEXT,
-        "media.prev" | "slides.prev" | "reading.page_prev" => GLYPH_PREV,
-        "media.seek_fwd" => GLYPH_SEEK_FWD,
-        "media.seek_back" => GLYPH_SEEK_BACK,
-        "audio.mic_mute" => GLYPH_MIC_SLASH,
-        "audio.call_dnd" | "window.fullscreen_dnd" => GLYPH_BELL_SLASH,
-        "window.screenshot" => GLYPH_CAMERA,
-        "camera.live" => GLYPH_CAMERA,
-        "audio.mic_live" => GLYPH_MIC,
-        "compositor.screencasting" => GLYPH_SCREENCAST,
-        "git.commit" => GLYPH_COMMIT,
-        "git.push" => GLYPH_PUSH,
-        "git.pull" => GLYPH_PULL,
-        "git.open_remote" => GLYPH_REMOTE,
-        "git.diff" | "git.show_commit" => GLYPH_DIFF,
-        "selection.url" => GLYPH_COPY_LINK,
-        "selection.open_path" => GLYPH_OPEN_FILE,
-        "selection.email" => GLYPH_EMAIL,
-        "selection.search" | "shell.search_error" | "browser.find" | "reading.find"
-        | "text.find" => GLYPH_SEARCH,
-        "selection.define" => GLYPH_DEFINE,
-        "creative.undo" => GLYPH_UNDO,
-        "browser.reopen_tab" => GLYPH_RERUN,
-        "system.high_cpu" | "system.high_mem" => GLYPH_MONITOR,
-        "system.battery_dim" => GLYPH_BRIGHT_DOWN,
-        "downloads.open" | "shell.install_missing" => GLYPH_PULL,
-        "downloads.extract" => GLYPH_OPEN_FILE,
-        "coding.terminal_here" => GLYPH_TERMINAL,
-        "shell.rerun" => GLYPH_RERUN,
-        "editor.run" | "slides.present" => GLYPH_PLAY,
-        "editor.build" => GLYPH_TERMINAL,
-        "editor.format" => GLYPH_FORMAT,
-        "network.down" | "network.settings" => GLYPH_WIFI,
-        "system.disk_full" => GLYPH_DISK,
-        "system.empty_trash" => GLYPH_TRASH,
-        "window.record" => GLYPH_RECORD,
-        "window.record_stop" => GLYPH_STOP,
-        "files.open_here" | "editor.open_folder" | "selection.multi_path" => GLYPH_OPEN_FILE,
-        _ => GLYPH_OPTION,
-    }
+/// The Nerd-Font glyph for a dynamic OPTION control, by affordance id.
+///
+/// **Empty seam.** The 44 id→glyph arms went with the uncurated offers
+/// (2026-09-12) — every one of them named a deleted affordance. Each curated
+/// OPTION adds its own arm back as it is built. The play/pause pattern is the
+/// one worth remembering: it read its `title` so the glyph showed the action it
+/// WOULD perform, not the state it was in.
+fn glyph_for_option(_id: &str, _title: &str) -> &'static str {
+    GLYPH_OPTION
 }
 
 /// How many dynamic OPTION pills the topbar shows at once — a de-cluttered
 /// cluster that stays clear of the centred window pill.
 const OPTION_PILL_CAP: usize = 5;
+
+/// The cava pill's width, in pill-heights. Wider than a glyph circle because
+/// it holds [`crate::spectrum::BANDS`] bars; narrow enough that it reads as a
+/// pill rather than a panel. Widened from 1.9 on 2026-09-12 — at seven bands
+/// the bars were hairlines.
+const CAVA_PILL_W: f32 = 2.6;
+/// Hit-width of one transport symbol inside the now-playing pill. Wider than
+/// the glyph itself so a click does not demand precision the symbol's ink
+/// implies.
+const CAVA_SYM_W: f32 = 17.0;
+/// Space between the three symbols.
+const CAVA_SYM_GAP: f32 = 3.0;
+/// Below this, an axis event is the tail of a flick or the stop that ends one —
+/// not somebody asking for something.
+pub(crate) const SCROLL_DEADZONE: f32 = 0.5;
+/// Space between the track name and the trailing time.
+const CAVA_TIME_GAP: f32 = 10.0;
+/// Extra breathing room in the now-playing pill (Max: "make the pill wider").
+const CAVA_NOW_EXTRA: f32 = 44.0;
+/// Ceiling on the now-playing pill, in pill-heights — so it scales with the bar
+/// exactly like [`CAVA_PILL_W`] rather than being a fixed pixel count that goes
+/// wrong on a small screen.
+///
+/// Without a cap the pill is however long the track name is, and a 90-character
+/// title would push the whole OPTION band off toward the window pill. Set just
+/// above the width a typical track needs (~21 characters at `FONT_PX`), so it
+/// only ever bites on the long ones — which then clip, because the label is
+/// bounded to its own pill.
+const CAVA_NOW_MAX_W: f32 = 13.0;
+
+/// Marquee speed for a track name too long for its pill, in logical px/s. Slow
+/// enough to read at a glance rather than chase.
+///
+/// **This is a rate, and §3 says a module declares no rate of its own** —
+/// flagged like the spectrum's decay envelope rather than hidden. It is not a
+/// morph (`animation.rs` owns those) and not a leave-hold; it is closest to
+/// §3's named exception, the auto-withdraw dwell, in that it answers *"how long
+/// does this need to be readable"* rather than *"is the user still here"*.
+/// Max's call whether it joins the shared vocabulary.
+const CAVA_SCROLL_SPEED: f32 = 34.0;
+/// The empty run between the end of the title and where it begins again.
+///
+/// The marquee is a **loop, not a there-and-back** (Max, 2026-09-12): the text
+/// is drawn twice, a period apart, and the pair slides forever. The gap is what
+/// makes the seam read as "it has come round again" rather than as one endless
+/// sentence — wide enough to be a pause, narrow enough that the pill is never
+/// just blank.
+const CAVA_SCROLL_GAP: f32 = 34.0;
+
+/// How long a track change takes to play out. Short — it is a change of
+/// subject, not a journey — but long enough that the eye registers the old
+/// words leaving rather than finding different ones already there.
+pub(crate) const CAVA_SWAP_SECS: f32 = 0.34;
 
 /// The `/bin/sh -c` command line for a spawn-style [`options_engine::
 /// AffordanceAction`], or `None` when the action isn't a spawn (or is empty).
@@ -339,6 +445,18 @@ const CTRL_N: usize = 3;
 /// compositor's move animation, since a size read mid-flight is worse than a
 /// slightly later one.
 const MODE_SETTLE: Duration = Duration::from_millis(500);
+
+/// How long the solitary-pseudo rule waits after a window opens or closes.
+///
+/// Just long enough for the compositor to have finished updating its own client
+/// list — the rule needs an accurate *count*, not a settled geometry, and the
+/// size it works from is computed rather than measured
+/// ([`hypr::solitary_tile`]). Short enough that the window is still animating
+/// in when the pseudo lands, so it grows straight into Golem's proportions
+/// instead of reaching the tile and then shrinking (Max, 2026-09-13: "it should
+/// be instant"). It also coalesces a burst — an app opening three windows runs
+/// one sweep.
+const LAYOUT_SETTLE: Duration = Duration::from_millis(60);
 
 /// Per-button progress for the reveal animation. Buttons are ordered
 /// [pseudo, fullscreen] (see [`ctrl_index`]); close is not animated — it is
@@ -424,6 +542,10 @@ pub(crate) enum PillGroup {
     /// The Mind's context-aware controls + the media opener — left-anchored,
     /// re-flows as offers are ranked in and out.
     Mind,
+    /// The gear at the bar's left end. Alone, and pinned to the edge: it is the
+    /// one pill whose place never depends on anything else, which is what makes
+    /// it findable without looking.
+    Settings,
     Clipboard,
     Notif,
     Clock,
@@ -438,12 +560,24 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
     match id {
         PillId::Window
         | PillId::SunsetTurnOn
-        | PillId::SunsetSettings
+        | PillId::ModuleSettings
         | PillId::Close
+        | PillId::WindowState
         | PillId::Pseudo
         | PillId::Float
         | PillId::Fullscreen => PillGroup::Window,
-        PillId::Option(_) | PillId::MediaOpen => PillGroup::Mind,
+        PillId::Option(_) => PillGroup::Mind,
+        // The stage's mode switch leads the same band: it is not about the
+        // focused window either, and it arrives and withdraws with the mode
+        // exactly as the Mind's offers do.
+        PillId::StageMode => PillGroup::Mind,
+        PillId::Cava
+        | PillId::CavaPlay
+        | PillId::CavaPrev
+        | PillId::CavaNext
+        | PillId::CavaNow
+        | PillId::CavaOut => PillGroup::Mind,
+        PillId::Settings | PillId::SettingsStats => PillGroup::Settings,
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
         PillId::Notif | PillId::NotifMute => PillGroup::Notif,
         PillId::Clock => PillGroup::Clock,
@@ -460,6 +594,9 @@ pub(crate) fn group_slot(g: PillGroup) -> Option<usize> {
     match g {
         PillGroup::Window => Some(0),
         PillGroup::Mind => Some(1),
+        // The gear never re-flows — it is pinned to the edge, so there is
+        // nothing for the Leader to hold still.
+        PillGroup::Settings => None,
         PillGroup::Clipboard | PillGroup::Notif | PillGroup::Clock => None,
     }
 }
@@ -619,18 +756,29 @@ const STICKY_BLAME: Duration = Duration::from_millis(1200);
 /// `t = OUT_END`, the new one starts at `IN_START` — a slight overlap.
 const TITLE_OUT_END: f32 = 0.55;
 const TITLE_IN_START: f32 = 0.45;
+/// How soon after a title change the SAME window retitling itself again counts
+/// as churn rather than a new task (see [`App::title_churn`]). A window that
+/// rewrites its title faster than this is running a counter, not changing what
+/// you are doing — and a pill that crossfaded at that rate would be a strobe.
+const TITLE_CHURN_GAP: Duration = Duration::from_millis(1200);
 
-/// Whether the date may start collapsing back to the time — "The Still Bar"
-/// (`OptionUXRules.md` §2): the bar does not re-flow while you are on it.
+/// Whether the date may start collapsing back to the time: it is out, no
+/// collapse is already armed, and the pointer has left the clock.
 ///
-/// The clock's width is not its own business: the notification cluster is
-/// pinned a gap to its left, so a collapse slides the bell ~180px sideways.
-/// That re-flow is nobody's request — it fires on a timer — so it is allowed
-/// only once the pointer has left the surface entirely (`ptr_here` covers an
-/// open box below the bar, which is pinned to the clock the same way). Leaving
-/// the *clock* is not enough; leaving the *bar* is.
-fn clock_may_collapse(showing_date: bool, collapse_pending: bool, ptr_here: bool) -> bool {
-    showing_date && !collapse_pending && !ptr_here
+/// **Leaving the PILL is the trigger**, the same as every other element on this
+/// bar (Max, 2026-09-13: *"the clock waits for me to abandon the banner before
+/// it colapse, but the rest go away when i move out the pill"*). It used to
+/// wait for the pointer to leave the whole surface, and that was right at the
+/// time: the notification cluster was pinned to the clock's LIVE edge, so a
+/// collapse on a timer slid the bell ~180px out from under a pointer that was
+/// aiming at it — reaching for an OPTION cost you the OPTION. The cluster now
+/// hangs off the clock's RESTING edge and is merely covered
+/// ([`App::options_clock_rest_left`]), so a collapse moves nothing sideways; it
+/// hands the bell back in the place it never left, and the reason to wait is
+/// gone with it. The shared [`animation::LEAVE_HOLD`] still sits in front of
+/// it, so brushing past the clock does not play the morph twice.
+fn clock_may_collapse(showing_date: bool, collapse_pending: bool, on_clock: bool) -> bool {
+    showing_date && !collapse_pending && !on_clock
 }
 
 /// Progress + endpoints for the window pill's title metamorphosis.
@@ -643,6 +791,17 @@ pub(crate) struct TitleMeta {
     outgoing: String,
     /// The name last measured — the current one; a change starts a morph.
     shown: String,
+    /// Which module (if either) those two texts belong to.
+    ///
+    /// The costume (size step, banner, children, ink) has to know which module
+    /// is on screen at every step of the morph, including the half where the old
+    /// one is still fading out. It used to re-derive that by comparing the text
+    /// against each module's fixed sentence, which only works while every
+    /// sentence is a constant. Carrying the identity WITH the text — assigned in
+    /// the same statement, so the two can never disagree — keeps that guarantee
+    /// and lets a module's line be live.
+    outgoing_module: Option<Module>,
+    shown_module: Option<Module>,
     /// Progress 0 (`from`/`outgoing`) → 1 (measured width / `shown`).
     t: f32,
     last: Option<std::time::Instant>,
@@ -656,6 +815,8 @@ impl Default for TitleMeta {
             from: 0.0,
             outgoing: String::new(),
             shown: String::new(),
+            outgoing_module: None,
+            shown_module: None,
             t: 1.0,
             last: None,
             frame_pending: false,
@@ -685,11 +846,13 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Fullscreen => 1,
         PillId::Float => 2,
         PillId::Pseudo => 3,
-        PillId::Close => 4,
+        // A resting pill like the close, and like it a parent: the tucked mode
+        // toggles emerge from behind it, so it has to draw over them.
+        PillId::Close | PillId::WindowState => 4,
         PillId::Window => 5,
         // Nested inside the window pill, so they must draw over it.
         PillId::SunsetTurnOn => 6,
-        PillId::SunsetSettings => 6,
+        PillId::ModuleSettings => 6,
         PillId::Clock => 6,
         // The preview/box (Notif) draws first; the fixed bell (NotifMute) draws
         // on top of it, capping its right end as it grows out from behind.
@@ -700,10 +863,27 @@ fn draw_z(id: PillId) -> u8 {
         PillId::ClipboardBox => 9,
         PillId::ClipCopyLink => 9,
         PillId::Clipboard => 10,
+        // The readout slides out from BEHIND the gear and over the clipboard
+        // cluster while it is out, so it draws above that cluster and below the
+        // gear itself — the same stacking the clipboard box uses under its own
+        // glyph pill, one edge of the bar mirroring the other.
+        PillId::SettingsStats => 11,
+        // The gear is never covered: it is the one pill that must always be
+        // findable, and its child emerges from under it.
+        PillId::Settings => 12,
         // Dynamic OPTION controls sit in the free left-centre band, overlapping
         // nothing — drawn first (lowest z).
-        PillId::Option(_) => 0,
-        PillId::MediaOpen => 0,
+        PillId::Option(_) | PillId::StageMode => 0,
+        // The cava children emerge from BEHIND the spectrum, so they draw
+        // first and it occludes them — the same stacking the clipboard's box
+        // uses under its glyph pill. The three transport symbols stay at the
+        // children's level and rely on insertion order (the sort is stable) to
+        // land on top of the now-playing pill they live inside.
+        PillId::CavaNow | PillId::CavaOut => 0,
+        PillId::Cava => 1,
+        // The transport is drawn ON the spectrum pill — it is what the bars
+        // turn into — so it sits above it.
+        PillId::CavaPlay | PillId::CavaPrev | PillId::CavaNext => 2,
     }
 }
 
@@ -733,9 +913,19 @@ pub(crate) enum PillId {
     /// The mute-notifications pill: rests directly *behind* the bell and is
     /// uncovered (to the bell's right) as the bell slides left to peek open.
     NotifMute,
-    /// The clipboard OPTION's small fixed pill: a clipboard glyph at the left
-    /// edge. The preview/history box slides out to its right from behind it —
-    /// the left-side mirror of the bell + its box (see [`crate::clipboard`]).
+    /// The settings gear at the bar's very left end (Max, 2026-09-13). The
+    /// first thing on the banner, and the only pill pinned to the edge itself:
+    /// everything else on that side lays out to its right.
+    Settings,
+    /// The gear's hover child: CPU / RAM / DISK / BATTERY, sliding out from
+    /// behind it exactly as the clipboard's preview does (see [`crate::stats`]).
+    /// Listed as a pill so hovering it holds itself open — crossing from the
+    /// gear onto the readout is transit, not departure.
+    SettingsStats,
+    /// The clipboard OPTION's small fixed pill: a clipboard glyph, a gap right
+    /// of the settings gear. The preview/history box slides out to its right
+    /// from behind it — the left-side mirror of the bell + its box (see
+    /// [`crate::clipboard`]).
     Clipboard,
     /// The clipboard OPTION's morphing preview/history box (rests behind the
     /// small pill, slides out rightward). Mirrors `Notif`.
@@ -749,8 +939,18 @@ pub(crate) enum PillId {
     SunsetTurnOn,
     /// The sunset prompt's settings gear, a circular pill at the module's
     /// right end, right of [turn on].
-    SunsetSettings,
+    ModuleSettings,
     Close,
+    /// What the focused window IS — floating, pseudo, fullscreen — as that
+    /// mode's own glyph, right of the close. Nothing at all when the window is
+    /// plainly tiled: the layout is the resting state of the desktop and needs
+    /// no marking, so the bar only speaks up when a window has left it.
+    ///
+    /// It is the control for the mode it names as well as the label: clicking
+    /// it returns the window to the layout, which is what pressing the mode you
+    /// are already in has always done. The other two modes stay tucked behind
+    /// it until the cluster is hovered.
+    WindowState,
     Pseudo,
     /// Out of the layout, free-floating — the fourth window mode.
     Float,
@@ -764,9 +964,53 @@ pub(crate) enum PillId {
     /// its index into [`crate::App::surfaced_options`]. Clicking it runs that
     /// affordance's action.
     Option(u8),
-    /// The media-box opener: a music glyph shown when a player is active; a
-    /// click grows the transport box (see [`crate::mediabox`]).
-    MediaOpen,
+    /// The STAGE's mode switch: one task alone on the stage, or a whole desk.
+    /// Only on the bar while the stage owns the screen — it is a control for the
+    /// mode, and there is nothing to say about it when the mode is down.
+    StageMode,
+    /// The cava pill: a small bar spectrum of whatever is coming out of the
+    /// speakers. Not an affordance — it is the bar SHOWING the sound rather
+    /// than labelling it, which is pillar 5 taken literally.
+    Cava,
+    /// The cava pill's children, revealed to its right on hover. They emerge
+    /// from behind it, so the spectrum is the parent and these are what it
+    /// turns out to have been about all along — the second base flow, options
+    /// begetting options.
+    CavaPlay,
+    CavaPrev,
+    CavaNext,
+    /// What is playing, in words.
+    CavaNow,
+    /// Where it is coming out.
+    CavaOut,
+}
+
+impl PillId {
+    /// Whether this pill belongs to the cava cluster — the parent or any child.
+    /// Hovering ANY of them holds the whole cluster open, so crossing the gap
+    /// between the spectrum and its controls is transit, not departure.
+    /// The transport pill itself, or one of the three symbols drawn on it —
+    /// the one surface the cava gestures answer to. Scrolling the track name or
+    /// the output does nothing: the buttons are unmistakably the controls, so
+    /// the gesture lives where the controls are and nowhere else.
+    pub(crate) fn is_cava_transport(self) -> bool {
+        matches!(
+            self,
+            PillId::Cava | PillId::CavaPlay | PillId::CavaPrev | PillId::CavaNext
+        )
+    }
+
+    pub(crate) fn is_cava(self) -> bool {
+        matches!(
+            self,
+            PillId::Cava
+                | PillId::CavaPlay
+                | PillId::CavaPrev
+                | PillId::CavaNext
+                | PillId::CavaNow
+                | PillId::CavaOut
+        )
+    }
 }
 
 struct Pill {
@@ -798,17 +1042,32 @@ struct Presence {
     desktop: bool,
     /// While the waveview overview owns the screen.
     overview: bool,
+    /// While the STAGE owns it. A near-copy of `desktop` today — the bar keeps
+    /// doing its job over a staged task — but it is its own situation because
+    /// the stage has controls the desktop has no use for, and the day one of
+    /// the desktop's pills stops making sense there, this is the line that says
+    /// so rather than an `if` somewhere downstream.
+    stage: bool,
 }
 
 /// Present everywhere.
 const BOTH: Presence = Presence {
     desktop: true,
     overview: true,
+    stage: true,
 };
-/// Only over the live desktop.
+/// Everywhere a window is being worked in — the desktop and the stage, but not
+/// the overview's map.
 const DESKTOP_ONLY: Presence = Presence {
     desktop: true,
     overview: false,
+    stage: true,
+};
+/// Only while the stage owns the screen.
+const STAGE_ONLY: Presence = Presence {
+    desktop: false,
+    overview: false,
+    stage: true,
 };
 
 /// The theme's own box colour — the neutral OPTIONS slab, used when nothing
@@ -822,6 +1081,19 @@ const BOX_SLAB: [f32; 3] = [0.10, 0.10, 0.12];
 /// translucent panel hides the blur under every other row, which is exactly
 /// how it looked — one band frosted, the next flat.
 pub(crate) const BOX_ALPHA: f32 = 0.80;
+
+/// The height EVERY open box on this bar grows to — the clipboard's history,
+/// the notification drawer, the settings readout's panel. **One drawer, one
+/// height** (Max, 2026-09-13: *"gear, clipboard and notis should be the same
+/// height"*); they used to fit each to its own content, so three boxes that are
+/// the same object in three places opened to three different sizes.
+///
+/// It is also the tallest that FITS: the OPTIONS surface is fixed at
+/// `options.height + OPTIONS_OVERHANG + OPTIONS_DROPDOWN_H`, and a box past that
+/// edge is not drawn taller — it is cut off, which is how the settings panel
+/// lost its bottom corners. Raise [`crate::OPTIONS_DROPDOWN_H`] first if this
+/// ever needs to grow.
+pub(crate) const BOX_DRAWER_H: f32 = 505.0;
 
 /// Zebra striping for a box's history list — alternate rows get a lightness
 /// shift so adjacent lines read as distinct (old-Finder style). Direction is
@@ -880,14 +1152,15 @@ fn box_fill(backdrop: [f32; 4], wash: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-// OPTIONS' ink: never pure black or white, and always a touch WARM (r > g >
-// b) so the text sits in the room's light instead of glaring out of it (Max,
-// 2026-08-31). LINEAR values — the swapchain encodes sRGB on write — so the
-// sRGB the eye gets is in each comment.
-/// Warm off-white ≈ #E8E5DE.
-const INK_LIGHT: [f32; 4] = [0.807, 0.787, 0.728, 1.0];
-/// Warm near-black ≈ #262220.
-const INK_DARK: [f32; 4] = [0.019, 0.016, 0.014, 1.0];
+// OPTIONS' ink: REAL black and white (Max, 2026-09-12). The warm, softened
+// pair it replaces (off-white #E8E5DE / near-black #262220, 2026-08-31) was
+// meant to keep the text in the room's light, but it only ever cost contrast
+// — the pure pair is what reads. LINEAR values, and here they are also the
+// sRGB ones: 0 and 1 are the two points the transfer curve fixes.
+/// Pure white, #FFFFFF.
+const INK_LIGHT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// Pure black, #000000.
+const INK_DARK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// Relative luminance of a LINEAR colour (the space every colour here lives
 /// in — the swapchain encodes sRGB on write).
@@ -962,19 +1235,6 @@ fn ink_on(bg: [f32; 4]) -> [f32; 4] {
         INK_DARK
     } else {
         INK_LIGHT
-    }
-}
-
-/// The DOCK's ink rule: same WCAG flip as [`ink_on`], but the dark-regime
-/// ink is pure white (Max, 2026-09-10: "make the text white") instead of
-/// the warm `INK_LIGHT` — the dock's cool translucent glass wanted the
-/// clean white, while the OPTIONS bar keeps its warm ink (the 2026-08-31
-/// never-pure-white rule still stands there).
-fn dock_ink_on(bg: [f32; 4]) -> [f32; 4] {
-    if luminance(bg) > 0.179 {
-        INK_DARK
-    } else {
-        [1.0, 1.0, 1.0, 1.0]
     }
 }
 
@@ -1060,6 +1320,29 @@ impl Backdrop {
     }
 }
 
+/// Drop every pill an open element's `rect` spans — except the ones `keep`
+/// names, which are that element's own parts (they are drawn BY it, not under
+/// it). Horizontal only: everything here shares the bar's one band.
+///
+/// The one mechanism for "something grew over the bar"; see the call site in
+/// [`App::options_pills`] for why a covered pill has to leave rather than fade.
+///
+/// **The clock is never removed, by anything.** It is the bar's furniture,
+/// pinned at the edge and present in every arrangement: it covers, it is not
+/// covered. Without that, hovering the bell and then sliding right onto the
+/// clock made the clock VANISH (Max, 2026-09-13) — the peeked preview's rule
+/// fired on the growing date, each of the two elements claiming the ground the
+/// other was standing on. Spelled here rather than in every `keep` so the next
+/// element that grows over the bar cannot forget it.
+fn clear_under(pills: &mut Vec<Pill>, rect: Rect, keep: fn(PillId) -> bool) {
+    pills.retain(|p| {
+        p.id == PillId::Clock
+            || keep(p.id)
+            || p.rect.x >= rect.x + rect.w
+            || p.rect.x + p.rect.w <= rect.x
+    });
+}
+
 /// Where each element belongs. Read it top to bottom to know the bar.
 fn presence(id: PillId) -> Presence {
     match id {
@@ -1072,17 +1355,58 @@ fn presence(id: PillId) -> Presence {
         // Window-mode controls act on the FOCUSED window — meaningless while
         // you're above the desktop choosing one.
         PillId::Pseudo | PillId::Float | PillId::Fullscreen => DESKTOP_ONLY,
+        // The state pill says what the window IS — and on the stage every task
+        // is maximized, so it would read "fullscreen" for all of them, all the
+        // time. The stage is the state there; the word would only be noise.
+        PillId::WindowState => Presence {
+            desktop: true,
+            overview: false,
+            stage: false,
+        },
         // The clipboard serves the window you're working in, not the map.
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => DESKTOP_ONLY,
+        // The gear keeps its edge in every arrangement: settings are about the
+        // shell itself, so they are not a thing the overview or the stage
+        // replaces (and its place cannot drift, which is the point of it).
+        PillId::Settings | PillId::SettingsStats => Presence {
+            desktop: true,
+            overview: true,
+            stage: true,
+        },
         // Context controls act on the focused app — meaningless over the map.
         PillId::Option(_) => DESKTOP_ONLY,
-        PillId::MediaOpen => DESKTOP_ONLY,
+        // A control for the mode, present exactly as long as the mode is.
+        PillId::StageMode => STAGE_ONLY,
+        // The overview shows window management, not what you were doing —
+        // and a spectrum is very much what you were doing (Max, 2026-09-12).
+        PillId::Cava
+        | PillId::CavaPlay
+        | PillId::CavaPrev
+        | PillId::CavaNext
+        | PillId::CavaNow
+        | PillId::CavaOut => DESKTOP_ONLY,
         // The sunset question waits for the desktop — above the overview the
         // window pill has its labelling job.
-        PillId::SunsetTurnOn | PillId::SunsetSettings => DESKTOP_ONLY,
+        PillId::SunsetTurnOn | PillId::ModuleSettings => DESKTOP_ONLY,
         // Only ever present while a sticky OPTION is standing, which cannot
         // happen above the overview (it has its own strip and never conceals).
         PillId::Doorway => DESKTOP_ONLY,
+    }
+}
+
+/// The toggle that stands for a mode — the pill the state glyph replaces while
+/// the window is in it, and where that glyph comes from.
+///
+/// `None` for tiled: the desktop's resting state, which every window is in
+/// unless it has been taken out of it, so marking it would put a sign on the bar
+/// that is true almost always and therefore says nothing. The three that are
+/// worth showing are the three a window had to be *put* into.
+fn mode_pill(mode: hypr::WindowMode) -> Option<PillId> {
+    match mode {
+        hypr::WindowMode::Tiled => None,
+        hypr::WindowMode::Floating => Some(PillId::Float),
+        hypr::WindowMode::Pseudo => Some(PillId::Pseudo),
+        hypr::WindowMode::Fullscreen => Some(PillId::Fullscreen),
     }
 }
 
@@ -1177,7 +1501,11 @@ fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         return (0.0, 0.0, l); // achromatic — hue is undefined, 0 is fine
     }
     let d = max - min;
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
     let h = if max == r {
         (g - b) / d + if g < b { 6.0 } else { 0.0 }
     } else if max == g {
@@ -1212,7 +1540,11 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     if s.abs() < 1e-6 {
         return (l, l, l);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     (
         hue_to_rgb(p, q, h + 1.0 / 3.0),
@@ -1376,79 +1708,114 @@ impl App {
         // full date as the pill is hovered; it grows leftward (right edge
         // pinned at the bar edge). The wider rect stays hoverable-as-clock, so
         // the date holds open while the pointer is over it.
-        let mut clock_left = w - EDGE_PAD;
+        let clock_left = self.options_clock_left();
         if !self.options_clock.is_empty() {
-            let content_w = lerp(
-                self.options_clock_w,
-                self.options_date_w,
-                self.options_clock_meta.t,
-            );
-            let cw = (content_w + 2.0 * PILL_PAD_X).max(ph);
-            clock_left = w - EDGE_PAD - cw;
             pills.push(Pill {
                 id: PillId::Clock,
-                rect: Rect::new(clock_left, y, cw, ph),
+                rect: Rect::new(clock_left, y, w - EDGE_PAD - clock_left, ph),
                 text: self.options_clock.clone(),
                 family: TEXT_FONT,
                 glyph_color: None,
             });
         }
 
+        // The notification cluster hangs off the clock's RESTING edge, not its
+        // live one — one anchor, spelled once ([`Self::options_clock_rest_left`])
+        // — so the date growing does not drag this whole end of the bar sideways.
+        // It grows over the bell instead, and the bell steps off while covered
+        // (`clear_under` in `options_pills`). This block used to recompute the
+        // clock's edge inline, which is how the bell stayed pinned to the LIVE
+        // width even after `notif_rect` was moved onto the resting one: two
+        // spellings of one anchor, disagreeing.
+        let notif_right = self.options_clock_rest_left() - OPTION_GAP;
+
         // Notification OPTION: one element (bell → preview pill → history
         // rectangle) just left of the clock; its full drawing + morph is in
         // `crate::notif`. Its rect is the whole morphing shape (it grows *down*
-        // past the bar when expanded), right edge pinned a gap left of the clock.
+        // past the bar when expanded).
         pills.push(Pill {
             id: PillId::Notif,
-            rect: self.notif_geom(clock_left - OPTION_GAP, y, ph),
+            rect: self.notif_geom(notif_right, y, ph),
             text: GLYPH_BELL.to_owned(),
             family: Some(NERD),
             glyph_color: None,
         });
 
-        // Mute pill: a fixed circle in the bell's *original* resting slot (right
-        // edge a gap left of the clock). At rest the bell sits exactly on top of
-        // it; as the bell peeks open it slides left (see `notif_geom`) and
-        // uncovers this pill to its right. Drawn under the bell (see `draw_z`).
+        // Mute pill: a fixed circle in the bell's *original* resting slot. At
+        // rest the bell sits exactly on top of it; as the bell peeks open it
+        // slides left (see `notif_geom`) and uncovers this pill to its right.
+        // Drawn under the bell (see `draw_z`).
         pills.push(Pill {
             id: PillId::NotifMute,
-            rect: Rect::new(clock_left - OPTION_GAP - ph, y, ph, ph),
+            rect: Rect::new(notif_right - ph, y, ph, ph),
             text: GLYPH_BELL_SLASH.to_owned(),
             family: Some(NERD),
             glyph_color: None,
         });
 
-        // Clipboard OPTION: the left-edge mirror of the notification cluster.
-        // A small fixed glyph pill sits at the left edge; the preview/history box
-        // slides out to its RIGHT from behind it (drawn first, capped by the
-        // small pill on top). `crate::clipboard` draws the box.
+        // The settings gear: the very first thing on the banner, pinned to the
+        // left edge (Max, 2026-09-13). Everything else on this side starts from
+        // `left_start` below, so the gear's place is the one that never moves.
+        //
+        // Its stats child goes FIRST so the gear draws over the end it emerges
+        // from; while it rests it is exactly the gear's circle, hidden behind it
+        // (`stats_geom`), and it is only listed while it is actually out so it
+        // cannot eat hovers meant for the gear.
+        if self.stats_out() {
+            pills.push(Pill {
+                id: PillId::SettingsStats,
+                rect: self.stats_geom(),
+                text: String::new(),
+                family: None,
+                glyph_color: None,
+            });
+        }
         pills.push(Pill {
-            id: PillId::ClipboardBox,
-            rect: self.clip_geom(EDGE_PAD, y, ph),
-            text: String::new(),
-            family: None,
-            glyph_color: None,
-        });
-        pills.push(Pill {
-            id: PillId::Clipboard,
+            id: PillId::Settings,
             rect: Rect::new(EDGE_PAD, y, ph, ph),
-            text: GLYPH_CLIPBOARD.to_owned(),
+            text: GLYPH_GEAR.to_owned(),
             family: Some(NERD),
             glyph_color: None,
         });
+        let left_start = self.options_left_start();
 
-        // Copy-link pill: slides out from behind the small clipboard pill to its
-        // right when the focused app is a browser (has a copyable page URL).
-        let lt = self.clip_link_t();
-        if lt > 0.01 {
-            let out_x = EDGE_PAD + ph + crate::clipboard::LINK_GAP;
+        // Clipboard OPTION: the left-edge mirror of the notification cluster.
+        // A small fixed glyph pill sits just right of the gear; the preview/
+        // history box slides out to its RIGHT from behind it (drawn first,
+        // capped by the small pill on top). `crate::clipboard` draws the box.
+        //
+        // Like everything else on this edge it simply leaves while the gear's
+        // readout is over it — decided once, on the finished layout, in
+        // `options_pills`.
+        {
             pills.push(Pill {
-                id: PillId::ClipCopyLink,
-                rect: Rect::new(lerp(EDGE_PAD, out_x, lt), y, ph, ph),
-                text: GLYPH_COPY_LINK.to_owned(),
+                id: PillId::ClipboardBox,
+                rect: self.clip_geom(left_start, y, ph),
+                text: String::new(),
+                family: None,
+                glyph_color: None,
+            });
+            pills.push(Pill {
+                id: PillId::Clipboard,
+                rect: Rect::new(left_start, y, ph, ph),
+                text: GLYPH_CLIPBOARD.to_owned(),
                 family: Some(NERD),
                 glyph_color: None,
             });
+
+            // Copy-link pill: slides out from behind the small clipboard pill to
+            // its right when the focused app is a browser (has a copyable URL).
+            let lt = self.clip_link_t();
+            if lt > 0.01 {
+                let out_x = left_start + ph + crate::clipboard::LINK_GAP;
+                pills.push(Pill {
+                    id: PillId::ClipCopyLink,
+                    rect: Rect::new(lerp(left_start, out_x, lt), y, ph, ph),
+                    text: GLYPH_COPY_LINK.to_owned(),
+                    family: Some(NERD),
+                    glyph_color: None,
+                });
+            }
         }
 
         // Dynamic OPTION pills: the Mind's context-aware controls (media
@@ -1457,8 +1824,24 @@ impl App {
         // cluster, in the mind's ranked order. Each carries its index into
         // `surfaced_options()`, which the click handler dispatches.
         {
-            // Clear the clipboard pill + the copy-link's slide-out slot.
-            let cluster_start = EDGE_PAD + 2.0 * ph + crate::clipboard::LINK_GAP + OPTION_GAP;
+            // Clear the clipboard cluster by exactly the gap the notification
+            // cluster keeps from the clock — `OPTION_GAP`, the bar's one
+            // between-OPTIONS distance (Max, 2026-09-12).
+            //
+            // At REST the cluster is one pill wide: the copy-link lives behind
+            // the clipboard glyph and only slides out for a browser with a
+            // copyable URL. Reserving its slot permanently — which is what this
+            // used to do — pushed the band a whole pill-width further out all
+            // day to make room for something usually not there.
+            //
+            // So the reservation rides the link's own slide factor instead of
+            // being constant. The band travels with the pill that displaces it,
+            // on the animation already happening, rather than jumping when it
+            // appears.
+            let cluster_start = left_start
+                + ph
+                + OPTION_GAP
+                + self.clip_link_t().clamp(0.0, 1.0) * (ph + crate::clipboard::LINK_GAP);
             // (index, glyph, warning?) — a privacy/safety warning pill washes
             // amber and is a passive indicator, not a button.
             let glyphs: Vec<(u8, &'static str, bool)> = self
@@ -1472,6 +1855,156 @@ impl App {
                 })
                 .collect();
             let mut ox = cluster_start;
+            // The stage's mode switch comes before everything else in the band.
+            // While the mode is up it is the biggest thing the bar can say
+            // about the screen — what the screen IS right now — and it is the
+            // only pill here that is about the whole screen rather than about
+            // something on it.
+            if self.stage.is_on() {
+                pills.push(Pill {
+                    id: PillId::StageMode,
+                    rect: Rect::new(ox, y, ph, ph),
+                    // The glyph is the mode you are IN, not the one a click
+                    // would give you: the bar states, and the click changes what
+                    // it states. (A pill showing the other mode reads as a
+                    // label for what you are looking at and gets it backwards.)
+                    text: match self.stage.mode() {
+                        crate::stage::Mode::Task => GLYPH_ONE_TASK,
+                        crate::stage::Mode::Desk => GLYPH_WHOLE_DESK,
+                    }
+                    .to_owned(),
+                    family: Some(NERD),
+                    glyph_color: None,
+                });
+                ox += ph + CTRL_GAP;
+            }
+            // The cava pill leads the band: it is the one thing here that is
+            // not a control, and it is about the sound rather than about any
+            // window, so it sits before whatever the Mind is offering.
+            if self.cava_visible() {
+                let cava_w = ph * CAVA_PILL_W;
+                let cava_rect = Rect::new(ox, y, cava_w, ph);
+                // The bars THEMSELVES become the transport on hover (Max,
+                // 2026-09-12) — one pill metamorphosing in place, the way the
+                // clock becomes the date, rather than three more pills arriving
+                // beside it. The pill does not change size or position doing
+                // it, so nothing on the bar moves: only what it is made of
+                // changes.
+                //
+                // Pushed BEFORE the parent so the hit-test (which walks in
+                // insertion order) finds a symbol rather than the pill it sits
+                // on; `draw_z` puts them back on top for drawing.
+                let sym_a = self.cava_sym_alpha();
+                if sym_a > 0.01 {
+                    let sym_span = 3.0 * CAVA_SYM_W + 2.0 * CAVA_SYM_GAP;
+                    let play = if self.cava_is_playing() {
+                        GLYPH_PAUSE
+                    } else {
+                        GLYPH_PLAY
+                    };
+                    let mut sx = ox + (cava_w - sym_span) / 2.0;
+                    for (id, glyph) in [
+                        (PillId::CavaPrev, GLYPH_PREV),
+                        (PillId::CavaPlay, play),
+                        (PillId::CavaNext, GLYPH_NEXT),
+                    ] {
+                        pills.push(Pill {
+                            id,
+                            rect: Rect::new(sx, y, CAVA_SYM_W, ph),
+                            text: glyph.to_owned(),
+                            family: Some(NERD),
+                            glyph_color: None,
+                        });
+                        sx += CAVA_SYM_W + CAVA_SYM_GAP;
+                    }
+                }
+                pills.push(Pill {
+                    id: PillId::Cava,
+                    rect: cava_rect,
+                    text: String::new(),
+                    family: None,
+                    glyph_color: None,
+                });
+                // The children, revealed to the right on hover. Each emerges
+                // from BEHIND the spectrum — at t=0 every one of them sits
+                // exactly on the parent's rect and is invisible, so the cluster
+                // costs nothing when unused (§4's "stickiness is a grace").
+                //
+                // They are laid out left to right in the order Max asked for:
+                // play/pause, previous, next, what is playing, where it goes.
+                let t = self.cava_reveal;
+                if t > 0.01 {
+                    let mut cx = ox + cava_w + OPTION_GAP;
+                    // The transport lives INSIDE the now-playing pill as bare
+                    // symbols, not as three pills of its own (Max, 2026-09-12).
+                    // One object — "this is playing, and here is how you drive
+                    // it" — rather than four things in a row that happen to be
+                    // adjacent.
+                    // A child is WIDER than the spectrum it comes out of, so no
+                    // x-position can hide it: it has to grow as well as slide.
+                    // At t=0 it is a zero-width sliver sitting exactly on the
+                    // parent's right edge — invisible, and behind it besides —
+                    // and it opens rightward into its slot as t rises. That is
+                    // the second base flow, options begetting options.
+                    let emerge = |t: f32, slot_x: f32, full_w: f32| -> Rect {
+                        let edge = ox + cava_w;
+                        Rect::new(lerp(edge, slot_x, t), y, full_w * t, ph)
+                    };
+                    let now = self.cava_now_text();
+                    if !now.is_empty() {
+                        // Just words now: the transport went home to the bars.
+                        // Sized from the EASED width, so a track change resizes
+                        // the pill smoothly instead of snapping to the new
+                        // song's length.
+                        // Room for the trailing time too, or the title's column
+                        // would be squeezed by something the width never
+                        // accounted for.
+                        let time = if self.cava_time_w > 0.0 {
+                            self.cava_time_w + CAVA_TIME_GAP
+                        } else {
+                            0.0
+                        };
+                        let w =
+                            (2.0 * PILL_PAD_X + self.cava_now_w_eased() + time + CAVA_NOW_EXTRA)
+                                .clamp(ph, ph * CAVA_NOW_MAX_W);
+                        let mut grown = emerge(t, cx, w);
+                        // …and then DOWN into the list, the way the clipboard
+                        // pill grows into its history. One rect: the thing you
+                        // opened is the thing you are looking at.
+                        grown.h = lerp(ph, self.play_box_full_h(), self.play_box_e);
+                        pills.push(Pill {
+                            id: PillId::CavaNow,
+                            rect: grown,
+                            text: now,
+                            family: TEXT_FONT,
+                            glyph_color: None,
+                        });
+                        cx += w + CTRL_GAP;
+                    }
+                    // Where the sound comes out stays its own pill: it is about
+                    // the device, not about the track.
+                    let out = self.cava_out_text();
+                    if !out.is_empty() {
+                        // A circle carrying the volume at rest, opening into
+                        // `[95%][device]` on hover. The volume's slot never
+                        // moves or resizes; only what follows it grows.
+                        let slot = self.cava_vol_slot();
+                        let full = slot + self.cava_out_w + PILL_PAD_X;
+                        let w = lerp(slot, full.max(slot), self.cava_out_t);
+                        pills.push(Pill {
+                            id: PillId::CavaOut,
+                            rect: emerge(t, cx, w),
+                            text: out,
+                            family: TEXT_FONT,
+                            glyph_color: None,
+                        });
+                        cx += w + CTRL_GAP;
+                    }
+                    ox = cx - CTRL_GAP + OPTION_GAP;
+                } else {
+                    ox += cava_w + OPTION_GAP;
+                }
+            }
             for (i, glyph, warn) in glyphs {
                 pills.push(Pill {
                     id: PillId::Option(i),
@@ -1482,25 +2015,17 @@ impl App {
                 });
                 ox += ph + CTRL_GAP;
             }
-            // The media-box opener: a music glyph when a player is active, right
-            // of the control cluster. A click grows the transport box.
-            if self.media_now().is_some() {
-                pills.push(Pill {
-                    id: PillId::MediaOpen,
-                    rect: Rect::new(ox, y, ph, ph),
-                    text: GLYPH_MUSIC.to_owned(),
-                    family: Some(NERD),
-                    glyph_color: None,
-                });
-            }
         }
 
         // The window name pill is centred *alone* (so it doesn't shift when the
         // toggles reveal); close rests beside it, ALWAYS visible; the mode
         // toggles hide until hover, at fixed resting spots right of the close:
         //   [window name] [X] [pseudo] [fullscreen]
-        if self.options_title.is_some() || self.overview_hover.is_some() || self.sunset_prompt_shown
-        {
+        // A module stands the pill up even with no window to name — which is the
+        // whole point on an empty workspace, where the cluster would otherwise be
+        // absent (Max, 2026-09-08, of the sunset offer: "it should pop up even on
+        // empty spaces").
+        if self.options_title.is_some() || self.overview_hover.is_some() || self.module_on_pill() {
             // Title, with the live resize readout appended while active.
             let shown = self.options_window_text().unwrap_or_default();
             // Morphing width, not the raw measurement: the pill eases between
@@ -1508,35 +2033,40 @@ impl App {
             let ww = (self.options_title_content_w() + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
             let wx = ((w - ww) / 2.0).max(EDGE_PAD);
-            // Sunset prompt: the [turn on] pill nests inside the module's right
-            // end. Listed BEFORE the window pill so the overlap hover resolves
-            // to it, and kept through the back-morph (alpha, not presence-flag,
-            // decides) so it can fade out with the question it belongs to.
-            let ta = self.sunset_turnon_alpha();
+            // The module's nested children: sunset's [turn on], and the settings
+            // gear every module carries. Listed BEFORE the window pill so the
+            // overlap hover resolves to them, and kept through the back-morph
+            // (alpha, not presence-flag, decides) so they fade out with the
+            // sentence they belong to.
+            let ta = self.module_child_alpha();
             if ta > 0.01 {
                 // Single source of truth (also read by the message's clip in
-                // the draw pass below — see `sunset_nested_rects`).
-                let (turn_on, gear) = self.sunset_nested_rects();
-                pills.push(Pill {
-                    id: PillId::SunsetTurnOn,
-                    rect: turn_on,
-                    text: SUNSET_TURN_ON_LABEL.to_owned(),
-                    family: TEXT_FONT,
-                    glyph_color: None,
-                });
-                pills.push(Pill {
-                    id: PillId::SunsetSettings,
-                    // Gear when closed; an × once the box is (mostly) open, so
-                    // it reads as the panel's close button.
-                    rect: gear,
-                    text: if self.sunset_box_e > 0.5 {
-                        GLYPH_CLOSE.to_owned()
-                    } else {
-                        GLYPH_GEAR.to_owned()
-                    },
-                    family: Some(NERD),
-                    glyph_color: None,
-                });
+                // the draw pass below — see `module_nested_rects`).
+                let (turn_on, gear) = self.module_nested_rects();
+                if let Some(turn_on) = turn_on {
+                    pills.push(Pill {
+                        id: PillId::SunsetTurnOn,
+                        rect: turn_on,
+                        text: SUNSET_TURN_ON_LABEL.to_owned(),
+                        family: TEXT_FONT,
+                        glyph_color: None,
+                    });
+                }
+                if self.module_drawn().is_some_and(Module::has_gear) {
+                    pills.push(Pill {
+                        id: PillId::ModuleSettings,
+                        // Gear when closed; an × once the box is (mostly) open,
+                        // so it reads as the panel's close button.
+                        rect: gear,
+                        text: if self.module_box_e > 0.5 {
+                            GLYPH_CLOSE.to_owned()
+                        } else {
+                            GLYPH_GEAR.to_owned()
+                        },
+                        family: Some(NERD),
+                        glyph_color: None,
+                    });
+                }
             }
             let circle = |pills: &mut Vec<Pill>, x: f32, id, glyph: &str, color| {
                 pills.push(Pill {
@@ -1550,34 +2080,57 @@ impl App {
             // The asking module's step, riding the morph so it swells and
             // settles with the question and shrinks back with the title. When
             // the gear opens the settings box the SAME rect grows downward into
-            // the panel (see `sunset_box_rect`) — one shape becoming the box,
+            // the panel (see `module_rect`) — one shape becoming the box,
             // like the notif/clipboard OPTIONS.
             pills.push(Pill {
                 id: PillId::Window,
-                rect: self.sunset_box_rect(),
+                rect: self.module_rect(),
                 text: shown,
                 family: TEXT_FONT,
                 glyph_color: None,
             });
-            // While the module is asking the sunset question, the window
-            // controls step aside: [X] beside "do you want…?" reads as an
-            // answer to the question, and the controls act on a task the pill
-            // is no longer showing. They return with the title.
-            if !self.sunset_prompt_shown {
+            // While a module holds the pill, the window controls step aside:
+            // [X] beside "do you want…?" reads as an answer to the question, and
+            // the controls act on a task the pill is no longer showing. They
+            // return with the title. (On an empty workspace there is nothing for
+            // them to act on anyway.)
+            if !self.module_on_pill() {
                 // Close, right of the window name — a resting pill, no reveal.
                 let close_x = wx + ww + GROUP_GAP;
                 circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
-                // Window-mode toggles, right of the close (pseudo nearest,
-                // fullscreen outermost).
                 let mut cx = close_x + d + GROUP_GAP;
+                // What the window IS, right of the close — its mode's own glyph,
+                // and only when it is something: a tiled window is the ordinary
+                // case and gets no marking (Max, 2026-09-12; the word it first
+                // showed became the icon on his next pass).
+                let state = mode_pill(self.options_mode_shown);
+                if let Some(active) = state {
+                    circle(
+                        &mut pills,
+                        cx,
+                        PillId::WindowState,
+                        glyph_for_pill(active),
+                        None,
+                    );
+                    cx += d + CTRL_GAP;
+                }
                 // The window modes, ordered by how far each takes the window
                 // from the layout: pseudo (still tiled, just smaller), float
-                // (out of the layout), fullscreen (over everything).
-                circle(&mut pills, cx, PillId::Pseudo, GLYPH_SQUARE, None);
-                cx += d + CTRL_GAP;
-                circle(&mut pills, cx, PillId::Float, GLYPH_FLOAT, None);
-                cx += d + CTRL_GAP;
-                circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
+                // (out of the layout), fullscreen (over everything). The one the
+                // window is already in is left out — the word above IS its
+                // control, and offering the same mode twice in one row would be
+                // two ways to press the same thing.
+                for (id, glyph) in [
+                    (PillId::Pseudo, GLYPH_SQUARE),
+                    (PillId::Float, GLYPH_FLOAT),
+                    (PillId::Fullscreen, GLYPH_FULL),
+                ] {
+                    if state == Some(id) {
+                        continue;
+                    }
+                    circle(&mut pills, cx, id, glyph, None);
+                    cx += d + CTRL_GAP;
+                }
             }
         }
         // The presence contract, applied once: everything downstream (draw,
@@ -1585,13 +2138,48 @@ impl App {
         // not belong in the current situation simply isn't there.
         pills.retain(|p| {
             let pres = presence(p.id);
+            // One situation at a time, most specific first: the overview draws
+            // over the stage if it ever came up under it, and the stage over the
+            // plain desktop.
             if self.overview_active {
                 pres.overview
+            } else if self.stage.is_on() {
+                pres.stage
             } else {
                 pres.desktop
             }
         });
         pills
+    }
+
+    /// The height every open box grows to, at the live scale — see
+    /// [`BOX_DRAWER_H`]. The one place the boxes agree about their size.
+    pub(crate) fn options_box_drawer_h(&self) -> f32 {
+        BOX_DRAWER_H * self.options_scale()
+    }
+
+    /// How far in from each edge the bar's DRAWERS can reach — the clipboard
+    /// and the settings readout on the left, the notification box on the right
+    /// — at their fullest, regardless of what is open right now.
+    ///
+    /// This is the frost sampler's definition of "ours" (see
+    /// `screencopy::read_sample`): it reads the wallpaper just outside these
+    /// spans, so a box wears the same colour whether it is shut or open.
+    pub(crate) fn options_left_drawer_right(&self) -> f32 {
+        self.clip_span_full_right()
+            .max(self.stats_span_full_right())
+    }
+
+    /// The right edge's twin of [`Self::options_left_drawer_right`].
+    pub(crate) fn options_right_drawer_left(&self) -> f32 {
+        self.notif_span_full_left()
+    }
+
+    /// Where the bar's own pills are, for a sampler that must not read them:
+    /// the frosted backdrop is sampled on a row *through the bar*, which is
+    /// also the row every pill sits on (see `screencopy::read_sample`).
+    pub(crate) fn options_pill_columns(&self) -> Vec<Rect> {
+        self.options_pills().into_iter().map(|p| p.rect).collect()
     }
 
     /// The pills as DRAWN: the resting layout with the Leader's displacement
@@ -1602,13 +2190,65 @@ impl App {
     fn options_pills(&self) -> Vec<Pill> {
         let mut pills = self.options_pills_resting();
         let off = self.lead_offsets(&pills);
-        if off.iter().all(|o| *o == 0.0) {
-            return pills;
-        }
-        for p in pills.iter_mut() {
-            if let Some(s) = group_slot(group_of(p.id)) {
-                p.rect.x += off[s];
+        if !off.iter().all(|o| *o == 0.0) {
+            for p in pills.iter_mut() {
+                if let Some(s) = group_slot(group_of(p.id)) {
+                    p.rect.x += off[s];
+                }
             }
+        }
+        // Whatever an open element is standing over LEAVES the bar for as long
+        // as it is out — decided here, on the finished layout, because it is
+        // the only place that knows where every pill actually ended up.
+        //
+        // It has to be removal rather than a fade: the clipboard, the bell and
+        // the cava cluster all draw themselves and `continue` before the
+        // per-pill fade exists, and glyphs are drawn in one late pass — so a
+        // covered pill's icon lands ON TOP of whatever covers it. Seen three
+        // times now, all on 2026-09-13: the clipboard glyph over the gear's
+        // readout, the media transport symbols straight through that readout
+        // the moment something played, and the same transport symbols through
+        // the CLIPBOARD's own box (Max: *"i can see 'play' under clipboard when
+        // it grows"*). Every element that widens over the bar pays the same
+        // rule now, so the next one cannot reintroduce it.
+        // The clock goes FIRST: it grows leftward into the date and takes the
+        // bell's place while it is out (Max, 2026-09-13). Ordering matters
+        // because the bell's own peek claims ground too — whoever runs first
+        // wins the overlap, and between those two the clock wins. It is read
+        // off the finished layout rather than recomputed, so the pill that
+        // covers and the pill that is drawn are the same rect.
+        if self.clock_covering() {
+            if let Some(clock) = pills
+                .iter()
+                .find(|p| p.id == PillId::Clock)
+                .map(|p| p.rect)
+            {
+                clear_under(&mut pills, clock, |id| id == PillId::Clock);
+            }
+        }
+        if self.stats_covering() {
+            clear_under(&mut pills, self.stats_geom(), |id| {
+                matches!(id, PillId::Settings | PillId::SettingsStats)
+            });
+        }
+        if self.clip_covering() {
+            clear_under(&mut pills, self.clip_rect(), |id| {
+                matches!(
+                    id,
+                    // Its own satellites (the copy-link pill rides OUT of the
+                    // box's right edge), and the gear cluster it grew out from.
+                    PillId::Clipboard
+                        | PillId::ClipboardBox
+                        | PillId::ClipCopyLink
+                        | PillId::Settings
+                        | PillId::SettingsStats
+                )
+            });
+        }
+        if self.notif_covering() {
+            clear_under(&mut pills, self.notif_rect(), |id| {
+                matches!(id, PillId::Notif | PillId::NotifMute)
+            });
         }
         pills
     }
@@ -1711,42 +2351,101 @@ impl App {
         )
     }
 
-    /// The clock pill's current left edge (accounting for its date
-    /// metamorphosis), or the bar's right padding when there's no clock — the
-    /// anchor the notification element pins its right edge a gap left of.
+    /// Where the bar's LEFT side lays out from: past the settings gear, at the
+    /// bar's one between-OPTIONS distance.
+    ///
+    /// The one place that answer lives. The clipboard's box computes its own
+    /// rect for hit-testing and the input region ([`Self::clip_rect`]) rather
+    /// than reading the drawn pill, so an anchor spelled out twice is an
+    /// invisible drift waiting for the next pill on this edge — which is exactly
+    /// what the gear was.
+    pub(crate) fn options_left_start(&self) -> f32 {
+        EDGE_PAD + self.options_pill_h() + OPTION_GAP
+    }
+
+    /// The clock pill's current left edge — where it is RIGHT NOW, mid-date-
+    /// metamorphosis included. What the clock itself is drawn from.
     pub(crate) fn options_clock_left(&self) -> f32 {
-        let w = self.options_size.0 as f32;
-        if self.options_clock.is_empty() {
-            return w - EDGE_PAD;
-        }
-        let bar_h = self.options_bar_h();
-        let ph = (bar_h - 2.0 * PILL_MARGIN_Y).max(1.0);
         let content_w = lerp(
             self.options_clock_w,
             self.options_date_w,
             self.options_clock_meta.t,
         );
-        let cw = (content_w + 2.0 * PILL_PAD_X).max(ph);
+        self.clock_left_for(content_w)
+    }
+
+    /// The clock pill's left edge at its RESTING size — the time, not the date.
+    /// **This is the anchor the notification element pins its right edge a gap
+    /// left of**, so the clock growing no longer drags the bell sideways: it
+    /// grows OVER it, and the bell steps off the bar for as long as it is
+    /// covered (Max, 2026-09-13: *"clock should cover notis when growing"*).
+    /// The old live anchor meant a hover on the clock re-flowed the whole right
+    /// end of the bar — ~180px of it — which is the re-flow `OptionUXRules.md`
+    /// §2 exists to forbid, and is why the date's collapse needed a hold timer
+    /// to keep it from happening under a travelling pointer.
+    pub(crate) fn options_clock_rest_left(&self) -> f32 {
+        self.clock_left_for(self.options_clock_w)
+    }
+
+    /// Shared spine of the two: the left edge of a right-pinned clock pill
+    /// holding `content_w` of text, or the bar's right padding when there is no
+    /// clock at all.
+    fn clock_left_for(&self, content_w: f32) -> f32 {
+        let w = self.options_size.0 as f32;
+        if self.options_clock.is_empty() {
+            return w - EDGE_PAD;
+        }
+        let cw = (content_w + 2.0 * PILL_PAD_X).max(self.options_pill_h());
         w - EDGE_PAD - cw
     }
 
-    /// The window pill's text: the (truncated) title, with the live size
+    /// Whether the clock has grown past its resting edge, so what it now stands
+    /// over leaves the bar (see [`clear_under`]). Measured from the geometry
+    /// rather than the morph progress: `t` restarts for any clock text change —
+    /// a minute ticking over is a morph too — and only the date's extra width
+    /// covers anything.
+    fn clock_covering(&self) -> bool {
+        self.options_clock_left() + 1.0 < self.options_clock_rest_left()
+    }
+
+    /// The window pill's text: the groomed, truncated title, with the live size
     /// appended — `current task (342x343)` — while a resize is in flight.
     /// In the overview the pill follows the POINTER instead of the focused
     /// window, so a hovered thumbnail's title supersedes it.
+    ///
+    /// The title is groomed before it is truncated ([`crate::task_title`]): the
+    /// OPTION is named *current task*, so it says the task, not the app's
+    /// chrome around it — and the truncation budget is then spent on the words
+    /// that matter rather than on a browser's signature.
     fn options_window_text(&self) -> Option<String> {
-        // The sunset prompt takes the pill over (desktop only — above the
-        // overview the pill labels the hovered thumbnail, a job it keeps).
-        // Never truncated, never size-suffixed: the question is its own text.
-        if self.sunset_prompt_shown && !self.overview_active {
-            return Some(SUNSET_MSG.to_string());
+        // A module takes the pill over (desktop only — above the overview the
+        // pill labels the hovered thumbnail, a job it keeps, and the overview
+        // shows window management rather than context OPTIONS anyway). Never
+        // groomed, never truncated, never size-suffixed: the sentence is its own
+        // text.
+        if let Some(module) = self.module_shown.filter(|_| !self.overview_active) {
+            return Some(module.msg().to_string());
         }
-        let title = self
+        // A hovered thumbnail is groomed WITHOUT a class: the one class we hold
+        // belongs to the focused window, and letting it testify about someone
+        // else's title is how a wrong signature gets stripped.
+        let (raw, class) = match self
             .overview_hover
             .as_ref()
             .filter(|_| self.overview_active)
-            .or(self.options_title.as_ref())
-            .map(|t| truncate(t, TITLE_MAX))?;
+        {
+            Some(hover) => (hover, None),
+            None => (self.options_title.as_ref()?, self.options_class.as_deref()),
+        };
+        let title = truncate(
+            &crate::task_title::groom(raw, class, crate::task_title::home()),
+            TITLE_MAX,
+        );
+        // Grooming can only ever leave the pill empty when there was nothing to
+        // say — and an empty pill is no pill (the cluster stands down).
+        if title.is_empty() {
+            return None;
+        }
         Some(match self.options_resize_live {
             Some((w, h)) => format!("{title} ({w}x{h})"),
             None => title,
@@ -1759,6 +2458,13 @@ impl App {
         let clock = self.options_clock.clone();
         let date = self.options_date.clone();
         let title = self.options_window_text();
+        // The cava cluster's two text children. Measured every pass like the
+        // clock: the track changes under us, so a stale width would leave the
+        // pill fitting the previous song.
+        let now_text = self.cava_now_text();
+        let out_text = self.cava_out_text();
+        let vol_text = self.cava_vol_text();
+        let time_text = self.cava_time_text();
         // Pill text scales with the bar (see `options_bar_h`): measure at the
         // same scaled size the draw uses, so pill widths always fit their text.
         let font_px = FONT_PX * self.options_scale();
@@ -1773,17 +2479,52 @@ impl App {
         let mut tw = title
             .as_deref()
             .map_or(0.0, |t| r.measure_text(t, font_px, TEXT_FONT));
-        // The sunset prompt carries its [turn on] pill AND a settings gear
-        // INSIDE the module, so the morph target width must include both — the
-        // expansion is one ease, question and controls arriving as one shape.
-        let is_prompt = title.as_deref() == Some(SUNSET_MSG);
-        if is_prompt {
-            let inner =
-                r.measure_text(SUNSET_TURN_ON_LABEL, font_px, TEXT_FONT) + 2.0 * PILL_PAD_X;
-            self.sunset_text_w = tw;
-            self.sunset_inner_w = inner;
-            tw += SUNSET_GAP + inner + SUNSET_INNER_GAP + gear_w;
+        // A module's nested controls live INSIDE its pill, so the morph target
+        // width must include them — the expansion is one ease, sentence and
+        // controls arriving as one shape. The sunset module carries [turn on] AND
+        // the settings gear; the empty room carries the gear alone.
+        if let Some(module) = self.module_shown.filter(|_| !self.overview_active) {
+            self.module_text_w = tw;
+            if module.has_turn_on() {
+                let inner =
+                    r.measure_text(SUNSET_TURN_ON_LABEL, font_px, TEXT_FONT) + 2.0 * PILL_PAD_X;
+                self.sunset_inner_w = inner;
+                tw += MODULE_GAP + inner + SUNSET_INNER_GAP;
+                if module.has_gear() {
+                    tw += gear_w;
+                }
+            } else if module.has_gear() {
+                tw += MODULE_GAP + gear_w;
+            }
         }
+        self.cava_now_w = if now_text.is_empty() {
+            0.0
+        } else {
+            r.measure_text(&now_text, font_px, TEXT_FONT)
+        };
+        self.cava_out_w = if out_text.is_empty() {
+            0.0
+        } else {
+            r.measure_text(&out_text, font_px, TEXT_FONT)
+        };
+        // Remember WHAT was measured, not just how wide it was. The track
+        // changes under us on its own schedule, and nothing in the old trigger
+        // list (window title, clock tick, resize) fires when it does — so the
+        // pill kept the previous song's width and the text ran out of it.
+        self.cava_vol_w = if vol_text.is_empty() {
+            0.0
+        } else {
+            r.measure_text(&vol_text, font_px, TEXT_FONT)
+        };
+        self.cava_now_measured = now_text;
+        self.cava_out_measured = out_text;
+        self.cava_time_w = if time_text.is_empty() {
+            0.0
+        } else {
+            r.measure_text(&time_text, font_px, TEXT_FONT)
+        };
+        self.cava_vol_measured = vol_text;
+        self.cava_time_measured = time_text;
         self.options_clock_w = cw;
         self.options_date_w = dw;
         // The window pill EASES between title widths instead of jumping (the
@@ -1793,9 +2534,73 @@ impl App {
         let displayed = self.options_title_content_w();
         self.options_title_w = tw;
         if shown != self.options_title_meta.shown {
+            let quiet = self.title_churn(&shown);
+            // The module the incoming text belongs to, swapped in beside it —
+            // see `TitleMeta::shown_module`. `module_shown` is the intent
+            // `options_window_text` just drew from, so the pair is consistent by
+            // construction rather than by comparison.
+            let incoming_module = self.module_shown.filter(|_| !self.overview_active);
+            let outgoing_module =
+                std::mem::replace(&mut self.options_title_meta.shown_module, incoming_module);
+            self.options_title_meta.outgoing_module = outgoing_module;
             let outgoing = std::mem::replace(&mut self.options_title_meta.shown, shown);
-            self.begin_title_morph(displayed, outgoing);
+            // Churn adopts the new words WITHOUT a metamorphosis — the pill
+            // simply shows them, at their own width. Only a real change of task
+            // earns the crossfade.
+            //
+            // It lands the morph rather than leaving one in flight. A morph
+            // that keeps running toward a target that just moved can have its
+            // remaining span cut to nothing, and `animation::settle_t` caps its
+            // tolerance at half the progress — so it would call itself finished
+            // at `t = 0.5` and freeze there, which draws the title at a tenth
+            // of its opacity and never recovers. Quiet must mean settled.
+            if quiet {
+                self.options_title_meta.from = self.options_title_w;
+                self.options_title_meta.t = 1.0;
+                self.options_title_meta.outgoing.clear();
+                self.options_title_meta.outgoing_module = None;
+            } else {
+                self.begin_title_morph(displayed, outgoing);
+            }
+            self.options_title_addr = self.options_active_addr.clone();
+            self.options_title_at = Some(Instant::now());
         }
+    }
+
+    /// Whether this title change is the same window **retitling itself** rather
+    /// than a task you moved to — the backstop against a pill that blinks.
+    ///
+    /// The pill crossfades on a change of text, which is right when the text is
+    /// a different task and wrong when it is the same task wearing a new
+    /// spinner frame, unread count or elapsed timer. Those rewrite the title on
+    /// the app's own schedule, roughly once a second, and each rewrite used to
+    /// restart the fade — the pill strobed while an agent worked.
+    /// [`crate::task_title`] grooms most of that away at the source; this
+    /// catches what grooming cannot see.
+    ///
+    /// The test is `OptionUXRules.md` §2's, applied to time instead of layout:
+    /// a change **you** asked for always plays. So focus moving to another
+    /// window is never churn, a module arriving or leaving is never churn, and an
+    /// overview title is never churn (it follows your pointer, one hover at a
+    /// time). What is left — one window, rewriting itself again within a breath
+    /// — is the app's timer talking, and the bar stays still for it.
+    fn title_churn(&self, _incoming: &str) -> bool {
+        // A module arriving, leaving, or rewording its own line is never churn:
+        // it speaks when it has something to say, on nobody's timer.
+        if self.module_shown.is_some() || self.options_title_meta.shown_module.is_some() {
+            return false;
+        }
+        if self.overview_active {
+            return false;
+        }
+        let Some(addr) = self.options_active_addr.as_deref() else {
+            return false;
+        };
+        if self.options_title_addr.as_deref() != Some(addr) {
+            return false;
+        }
+        self.options_title_at
+            .is_some_and(|at| at.elapsed() < TITLE_CHURN_GAP)
     }
 
     /// The bar's live colour regime — matched window, else sampled frost.
@@ -1937,6 +2742,39 @@ impl App {
         }
     }
 
+    /// The surface a box at `rect` should wear: the same formula every box on
+    /// this bar uses, reading the frost sampled on **its own side of the
+    /// screen**.
+    ///
+    /// The bar takes two frost readings — one beside the notification box on the
+    /// right ([`Slot::BarFrost`](crate::screencopy::Slot::BarFrost)), one beside
+    /// the clipboard on the left (`ClipFrost`) — because a wallpaper that
+    /// changes left-to-right makes a single reading wrong for one end. Which one
+    /// a box reads was, until now, decided PER MODULE: the clipboard asked for
+    /// the left, everybody else took the right by default. So the settings
+    /// readout's box — an inch from the clipboard, on the same edge — wore the
+    /// colour of the far side of the screen, and Max saw it immediately
+    /// (2026-09-13: *"why does the clipboar is bluer than the gear?"*).
+    ///
+    /// Deciding by POSITION instead makes that impossible to get wrong again: a
+    /// box wears its own side, whatever module it belongs to and wherever it
+    /// moves to. The two existing boxes resolve to exactly what they already
+    /// had.
+    pub(crate) fn box_surface_at(&self, rect: Rect) -> ([f32; 4], [f32; 4]) {
+        let mid = self.options_size.0 as f32 / 2.0;
+        let frost = if rect.x + rect.w / 2.0 < mid {
+            self.clip_pill_color
+        } else {
+            self.options_pill_color
+        };
+        let slab = [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
+        Backdrop {
+            matched: self.options_bar_matched,
+            frost,
+        }
+        .surface(slab, ink_on(slab), true)
+    }
+
     /// The clipboard box's twin of `options_box_surface` — identical formula,
     /// its OWN correctly-positioned frost (see `clip_regime`).
     pub(crate) fn clip_box_surface(&self) -> ([f32; 4], [f32; 4]) {
@@ -1996,7 +2834,11 @@ impl App {
     /// luminance read.
     pub(crate) fn dim_ink(&self, ink: [f32; 4]) -> [f32; 4] {
         let is_light_ink = ink[0] + ink[1] + ink[2] < 1.5;
-        let list_dim = if is_light_ink { LIST_DIM_LIGHT } else { LIST_DIM };
+        let list_dim = if is_light_ink {
+            LIST_DIM_LIGHT
+        } else {
+            LIST_DIM
+        };
         [ink[0], ink[1], ink[2], ink[3] * list_dim]
     }
 
@@ -2007,10 +2849,679 @@ impl App {
     /// Discoverability: while a context OPTION pill (an icon-only glyph) is
     /// hovered, show its offer title in a small label just below the bar. Only
     /// the dynamic OPTION pills get this — the fixed pills (clock, bell,
-    /// clipboard) reveal their own labels. Suppressed while the media box is
-    /// open (the pointer is working that surface, not reading tooltips).
+    /// clipboard) reveal their own labels.
+    /// Whether the cava pill is on the bar: something is playing.
+    ///
+    /// Deliberately the same condition that runs the capture, so the pill and
+    /// the subprocess appear and disappear together — a visible pill always has
+    /// live data behind it, and a running capture is always visible. Nothing is
+    /// listening to your speakers while there is no pill saying so.
+    pub(crate) fn cava_visible(&self) -> bool {
+        // A transport needs something to drive. "Anything is making sound" was
+        // the right question while the pill was a spectrum — it could visualise
+        // a game or an `ffplay` perfectly well — but a row of buttons that
+        // presses nothing is worse than an empty band. This also retires the
+        // silence-generator problem: `ffplay` publishes no MPRIS, so it no
+        // longer keeps the pill on screen forever.
+        self.cava_target_player().is_some()
+    }
+
+    /// **The one source the whole cluster speaks for.**
+    ///
+    /// The spectrum shows the *mix* coming out of one sink, which may be two or
+    /// three players at once, so the words and the buttons both have to pick
+    /// one of them — and critically, the SAME one. They used to choose
+    /// independently, which meant the pill could name one player while `[next]`
+    /// drove another.
+    ///
+    /// Scored rather than "first match", because first-match picked wrong on
+    /// the dev box: a phone over kdeconnect reports `Playing` with completely
+    /// empty metadata, so it beat the Chromium tab that was actually making the
+    /// sound, and the pill showed a bare app name.
+    ///
+    /// * **Playing** outweighs everything — it is the thing you can hear.
+    /// * **MPRIS** next. One app shows up twice — once on the bus with its
+    ///   track, once as a raw PipeWire stream — because a browser's MPRIS
+    ///   belongs to the main process while its audio belongs to a child, so
+    ///   the pids never match and the merge cannot fuse them. The MPRIS half is
+    ///   the one that knows what is playing; the stream half only knows that
+    ///   something is. Without this term the two tied, and `max_by_key` takes
+    ///   the LAST match, so the stream won.
+    /// * **Owns a window here** next, and this is the one that matters: a phone
+    ///   over KDE Connect publishes a perfectly good title for whatever the
+    ///   phone is playing, and when it is playing the SAME song it scored
+    ///   identically to the browser — so the tie fell to whichever came last,
+    ///   and `[play]` drove the phone (2026-09-12). "Has a pid" could not tell
+    ///   them apart, because `kdeconnectd` has one; "has a **window**" can,
+    ///   which is exactly what the pid→window join was built for.
+    /// * **Has a title** breaks whatever is left.
+    pub(crate) fn cava_player(&self) -> Option<&options_engine::Playing> {
+        let ctx = self.brain.as_ref()?;
+        let last = self.cava_last_player.as_deref();
+        let score = |p: &options_engine::Playing| -> u8 {
+            // ORDER MATTERS, and it is not the obvious one. "Currently making
+            // sound" used to outrank everything, which meant pausing handed the
+            // whole cluster to `ffplay` — a silence generator that is
+            // permanently Playing, owns no window and has no transport at all.
+            // The pill named it and `[play]` had nothing to press
+            // (Max, 2026-09-12: "i lose the input when i pause").
+            //
+            // So what the cluster IS comes before what is audible: this is a
+            // transport, and a transport belongs to a player you can drive.
+            let mpris = u8::from(matches!(
+                p.source,
+                options_engine::PlayingSource::Mpris { .. }
+            )) * 16;
+            let windowed = u8::from(ctx.window_of(p).is_some()) * 8;
+            let playing = u8::from(p.is_playing()) * 4;
+            // **The one you were just listening to.** Pausing used to drop the
+            // subject: two paused players tie, the tie falls to list order, and
+            // the track you had been playing stops being the one named
+            // (Max, 2026-09-12: "i want the last played to stay on info").
+            //
+            // Ranked BELOW `playing` on purpose — something audible now always
+            // outranks something you paused a minute ago — and above `titled`,
+            // so among things that are all quiet, memory decides.
+            let remembered = u8::from(Self::playing_id(p).as_deref() == last && last.is_some()) * 2;
+            let titled = u8::from(!p.title.trim().is_empty());
+            mpris + windowed + playing + remembered + titled
+        };
+        // Strictly-greater, so the FIRST best wins rather than the last.
+        // `max_by_key` returns the last maximum, which is how a tie handed the
+        // cluster to the phone; the collector's order (MPRIS before streams) is
+        // stable, so first-wins is a defined answer rather than a lucky one.
+        ctx.playing.iter().fold(
+            None,
+            |best: Option<&options_engine::Playing>, p| match best {
+                Some(b) if score(p) <= score(b) => Some(b),
+                _ => Some(p),
+            },
+        )
+    }
+
+    /// A source's stable handle — the MPRIS bus name without its prefix, which
+    /// is also what `playerctl -p` takes. `None` for a raw PipeWire stream,
+    /// which has no name worth remembering.
+    pub(crate) fn playing_id(p: &options_engine::Playing) -> Option<String> {
+        match &p.source {
+            options_engine::PlayingSource::Mpris { bus } => {
+                Some(bus.trim_start_matches("org.mpris.MediaPlayer2.").to_owned())
+            }
+            _ => None,
+        }
+    }
+
+    /// The player the cava cluster's transport acts on — the same source the
+    /// pill names, as the `playerctl -p` handle.
+    ///
+    /// `None` when the chosen source is a raw PipeWire stream: an `ffplay` or a
+    /// game makes sound but exposes no transport, so there is nothing to press.
+    pub(crate) fn cava_target_player(&self) -> Option<String> {
+        Self::playing_id(self.cava_player()?)
+    }
+
+    /// The `[current data]` child's text: what is playing, in its own words.
+    /// Falls back through artist/title to the app's name, because "Firefox" is
+    /// a better answer than an empty pill.
+    pub(crate) fn cava_now_text(&self) -> String {
+        let Some(p) = self.cava_player() else {
+            return String::new();
+        };
+        let (t, a) = (p.title.trim(), p.artist.trim());
+        match (t.is_empty(), a.is_empty()) {
+            (false, false) => format!("{a} — {t}"),
+            (false, true) => t.to_owned(),
+            _ => p.app.trim().to_owned(),
+        }
+    }
+
+    /// The window the current player owns, if it has one — the target for a
+    /// keystroke when MPRIS will not do. `None` for a headless player or a
+    /// phone, which is also exactly when a keystroke would be meaningless.
+    pub(crate) fn cava_player_window(&self) -> Option<String> {
+        let ctx = self.brain.as_ref()?;
+        let p = self.cava_player()?;
+        ctx.window_of(p).map(|w| w.address.clone())
+    }
+
+    /// How far through the track the selected player is, 0…1.
+    ///
+    /// `None` when there is nothing to be a fraction of — a live stream, a radio
+    /// station, anything MPRIS reports with no length. A progress bar that
+    /// invents a length would be the surface asserting something it does not
+    /// know, which is the one thing it may never do.
+    pub(crate) fn cava_progress(&self) -> Option<f32> {
+        let p = self.cava_player()?;
+        (p.length_secs > 0).then(|| (p.position_secs as f32 / p.length_secs as f32).clamp(0.0, 1.0))
+    }
+
+    /// `1:23 / 4:56`, or just the position when nothing knows the length.
+    pub(crate) fn cava_time_text(&self) -> String {
+        let Some(p) = self.cava_player() else {
+            return String::new();
+        };
+        if p.length_secs == 0 && p.position_secs == 0 {
+            return String::new();
+        }
+        let clock = |s: u64| format!("{}:{:02}", s / 60, s % 60);
+        if p.length_secs > 0 {
+            format!("{} / {}", clock(p.position_secs), clock(p.length_secs))
+        } else {
+            clock(p.position_secs)
+        }
+    }
+
+    /// Width the track name may use: what is left after the transport on its
+    /// left and the clock on its right. One definition, so the marquee, the
+    /// overflow test and the pill's own width cannot disagree.
+    pub(crate) fn cava_text_w(&self, rect: Rect) -> f32 {
+        let time = if self.cava_time_w > 0.0 {
+            self.cava_time_w + CAVA_TIME_GAP
+        } else {
+            0.0
+        };
+        (rect.x + rect.w - PILL_PAD_X - time - self.cava_text_x(rect)).max(1.0)
+    }
+
+    /// The volume of the default output, as a percentage.
+    ///
+    /// This is what the output pill shows at rest instead of a speaker glyph
+    /// (Max, 2026-09-12): a symbol only says *there is an output*, which you
+    /// could guess, while a number says something you cannot. The device's
+    /// name is the part worth hiding until asked.
+    pub(crate) fn cava_vol_text(&self) -> String {
+        match self.cava_vol_pct() {
+            Some(pct) => format!("{pct}%"),
+            None => String::new(),
+        }
+    }
+
+    /// The default output's level, as the pill should currently show it.
+    ///
+    /// A scroll's own result wins until the sink is polled, because the audio
+    /// collector runs every 2 s and watching a number you just changed sit
+    /// still for two seconds is the opposite of a live readout. Unlike the
+    /// play/pause loan this one is *computed*, not guessed — we know the step
+    /// we asked for and the range it is clamped to.
+    pub(crate) fn cava_vol_pct(&self) -> Option<u32> {
+        if let Some((pct, until)) = self.cava_vol_assume {
+            if Instant::now() < until {
+                return Some(pct);
+            }
+        }
+        let ctx = self.brain.as_ref()?;
+        // The sink inventory carries the level for the default device; the
+        // older scalar is the fallback for the moment before the first dump.
+        Some(
+            ctx.default_output()
+                .map(|o| o.volume_pct)
+                .filter(|v| *v > 0)
+                .unwrap_or(ctx.audio.default_sink_volume),
+        )
+    }
+
+    /// The width of the volume's own slot — a circle unless the number needs
+    /// more, which `100%` does. One place, so the layout and the draw cannot
+    /// disagree about where the device name starts.
+    pub(crate) fn cava_vol_slot(&self) -> f32 {
+        (self.cava_vol_w + PILL_PAD_X).max(self.options_pill_h())
+    }
+
+    /// The `[output]` child's text: which device the sound is coming out of.
+    /// The human description ("sof-hda-dsp Speaker"), never the node name —
+    /// `alsa_output.pci-0000_00_1f.3-platform-…` is a fact, not an answer.
+    pub(crate) fn cava_out_text(&self) -> String {
+        self.brain
+            .as_ref()
+            .and_then(|c| c.default_output())
+            .map(|o| o.description.clone())
+            .unwrap_or_default()
+    }
+
+    /// The track pill's live rect — which is also the playing box's, since the
+    /// box is the pill grown. An accessor rather than opening `Pill`'s fields
+    /// to the crate.
+    pub(crate) fn cava_now_rect(&self) -> Option<Rect> {
+        self.options_pills()
+            .iter()
+            .find(|p| p.id == PillId::CavaNow)
+            .map(|p| p.rect)
+    }
+
+    /// Where the now-playing text starts inside its pill: past the transport
+    /// cluster it shares the pill with. One definition, used by the layout, the
+    /// draw and the marquee, so they cannot disagree about where the words go.
+    pub(crate) fn cava_text_x(&self, rect: Rect) -> f32 {
+        rect.x + PILL_PAD_X
+    }
+
+    /// Where the cava cluster's reveal is heading.
+    ///
+    /// **`OptionUXRules.md` §2 — "hover growth is reversible only on leave".**
+    /// An OPTION that grew because you looked at it stays grown *for the rest
+    /// of the visit*, and "the visit ends at the surface, not at the pill:
+    /// leaving the clock is not leaving, leaving the bar is."
+    ///
+    /// Aiming this at the hover alone broke that: moving from the spectrum
+    /// toward the clock collapsed the cluster, which un-displaces everything to
+    /// its right under a pointer already travelling across it — precisely the
+    /// friction §2 was written from. So once open it holds while the pointer is
+    /// anywhere on the surface, exactly as the clock's date does.
+    pub(crate) fn cava_reveal_target(&self) -> f32 {
+        let hovering = self.options_hover.is_some_and(|h| h.is_cava());
+        let visiting = self.cava_reveal > 0.01 && self.options_ptr.is_some();
+        // An open box holds its own cluster up, whatever the pointer is doing —
+        // the list cannot outlive the pill it grew out of.
+        f32::from(u8::from(hovering || visiting || self.play_box_open))
+    }
+
+    /// Where the output pill's expansion is heading — §2 again, and for the
+    /// same reason: it is the widest thing in the cluster, so collapsing it
+    /// while the hand is still on the bar drags everything left of it.
+    pub(crate) fn cava_out_target(&self) -> f32 {
+        let hovering = self.options_hover == Some(PillId::CavaOut);
+        let visiting = self.cava_out_t > 0.01 && self.options_ptr.is_some();
+        f32::from(u8::from(hovering || visiting))
+    }
+
+    /// How present the transport symbols are, 0…1 — and inversely, how far the
+    /// bars have faded to make room for them. A crossfade rather than a swap:
+    /// the two states are the same pill, so one has to become the other.
+    pub(crate) fn cava_sym_alpha(&self) -> f32 {
+        // The spectrum is gone (Max, 2026-09-12: "fuck the bars"), and with it
+        // the metamorphosis it existed for. The pill IS the transport now, so
+        // the symbols are simply always there — no crossfade, no paused face,
+        // no reason for the pill to have two states.
+        1.0
+    }
+
+    /// How much room the track name actually has, and how much of it is missing.
+    /// `None` when it fits.
+    pub(crate) fn cava_overflow(&self, rect: Rect) -> Option<f32> {
+        let over = self.cava_now_w - self.cava_text_w(rect);
+        (over > 1.0).then_some(over)
+    }
+
+    /// One full turn of the marquee, in px: the title plus the gap before it
+    /// comes round again.
+    pub(crate) fn cava_scroll_period(&self) -> f32 {
+        (self.cava_now_w + CAVA_SCROLL_GAP).max(1.0)
+    }
+
+    /// The track text's width as the pill should currently be sized for it —
+    /// eased across a change instead of jumping from one song's length to the
+    /// next's.
+    pub(crate) fn cava_now_w_eased(&self) -> f32 {
+        if self.cava_swap <= 0.0 {
+            return self.cava_now_w;
+        }
+        lerp(self.cava_now_w, self.cava_prev_w, self.cava_swap)
+    }
+
+    /// The two halves of a title change: `(outgoing_alpha, incoming_alpha)`.
+    /// The old words clear out over the first half of the swap and the new ones
+    /// arrive over the second, so the pill is never showing two songs at once.
+    pub(crate) fn cava_swap_alphas(&self) -> (f32, f32) {
+        if self.cava_swap <= 0.0 {
+            return (0.0, 1.0);
+        }
+        // `cava_swap` counts DOWN from 1, so the first half of the change is
+        // the top half of the range.
+        if self.cava_swap > 0.5 {
+            (((self.cava_swap - 0.5) / 0.5).clamp(0.0, 1.0), 0.0)
+        } else {
+            (0.0, (1.0 - self.cava_swap / 0.5).clamp(0.0, 1.0))
+        }
+    }
+
+    /// How far the title has slid left, in px.
+    ///
+    /// A continuous loop: it advances forever and wraps at one period, so there
+    /// is no end to arrive at and no journey back. The second copy drawn a
+    /// period to the right is what fills the space the first one vacates — the
+    /// wrap then happens while the two are interchangeable, and is invisible.
+    pub(crate) fn cava_scroll_offset(&self, rect: Rect) -> f32 {
+        if self.cava_overflow(rect).is_none() {
+            return 0.0;
+        }
+        (self.cava_scroll * CAVA_SCROLL_SPEED).rem_euclid(self.cava_scroll_period())
+    }
+
+    /// Whether the track name is currently too long for its pill — asked of
+    /// the LIVE layout rather than of the measured width alone, because the
+    /// pill's width is itself animating as the cluster opens.
+    pub(crate) fn cava_now_overflows(&self) -> bool {
+        self.options_pills()
+            .iter()
+            .find(|p| p.id == PillId::CavaNow)
+            .is_some_and(|p| self.cava_overflow(p.rect).is_some())
+    }
+
+    /// Whether the transport shows a pause glyph rather than a play glyph.
+    ///
+    /// Asked of **the player this cluster speaks for**, not of the machine.
+    /// "Is anything playing" was permanently true on the dev box — a silence
+    /// generator holds a stream open forever — so the glyph never changed
+    /// (Max, 2026-09-12). The button must describe the thing it drives.
+    pub(crate) fn cava_is_playing(&self) -> bool {
+        // What the click just asked for wins over what the last poll saw, until
+        // the bus agrees or the loan expires (see `cava_assume`).
+        if let Some((assumed, until)) = self.cava_assume {
+            if Instant::now() < until {
+                return assumed;
+            }
+        }
+        self.cava_player().is_some_and(|p| p.is_playing())
+    }
+
+    /// The cava pill: [`crate::spectrum::BANDS`] bars of whatever is coming out
+    /// of the speakers.
+    ///
+    /// The same material as every other pill — neumorph base, the shared rest
+    /// wash — because One Material (§3) is about the substance as well as the
+    /// tempo; a visualiser cut from different stuff would read as a widget
+    /// somebody dropped on the bar.
+    pub(crate) fn push_cava_pill(&self, scene: &mut Scene, rect: Rect) {
+        let bright = self.options_bar_is_bright();
+        let radius = rect.h / 2.0;
+        push_neumorph(scene, rect, radius, bright, 1.0);
+        scene.rects.push(RectInst {
+            rect,
+            radius,
+            color: self.options_rest_wash(),
+            glass: 0.0,
+            border: 0.0,
+        });
+    }
+
+    /// One of the cava pill's revealed children — the track name, the output,
+    /// or one of the three transport symbols drawn on the pill itself.
+    ///
+    /// The sliding children fade in a touch *after* the slide starts, the same
+    /// way the clipboard's copy-link does, so they read as coming out from
+    /// under the transport pill rather than blinking on beside it.
+    fn push_cava_child(&self, scene: &mut Scene, pill: &Pill) {
+        let bright = self.options_bar_is_bright();
+        let hovered = self.options_hover == Some(pill.id);
+        let rect = pill.rect;
+        let ink = self.options_text_color();
+        // The three transport symbols live INSIDE the now-playing pill and draw
+        // no ground of their own — no neumorph, no wash capsule. They are marks
+        // on the pill, not pills on the bar (Max, 2026-09-12). Hover is carried
+        // by the ink alone: a symbol you can act on brightens, and the pill
+        // beneath it stays still.
+        let is_symbol = matches!(
+            pill.id,
+            PillId::CavaPlay | PillId::CavaPrev | PillId::CavaNext
+        );
+        // The symbols ride the METAMORPHOSIS, the sliding children ride the
+        // REVEAL. Two different clocks, and they must be chosen before anything
+        // returns: an early exit on the reveal used to kill the symbols of a
+        // PAUSED pill, which is not revealed at all — so a paused player showed
+        // neither bars nor buttons (Max, 2026-09-12).
+        let a = if is_symbol {
+            self.cava_sym_alpha()
+        } else {
+            ((self.cava_reveal - 0.15) / 0.6).clamp(0.0, 1.0)
+        };
+        if a <= 0.01 {
+            return;
+        }
+        if !is_symbol {
+            // The track pill becomes the playing box. Same morph the clipboard
+            // makes: the radius runs from the stadium to the box's corner, and
+            // opacity LEADS the height — without that lead the fill reads as a
+            // translucent ghost inflating instead of a solid panel swelling.
+            let e = if pill.id == PillId::CavaNow {
+                self.play_box_e
+            } else {
+                0.0
+            };
+            let solid = 1.0 - (1.0 - e).powi(3);
+            // From the BAND's radius, not this rect's. `radius` above is
+            // `rect.h / 2`, and `rect.h` is the GROWING height — so the corner
+            // swelled with the box and the thing ballooned into a lozenge
+            // before it opened. The clipboard lerps from the resting band's
+            // `ph / 2`, which is a constant, and that is the whole difference.
+            let radius = lerp(self.options_pill_h() / 2.0, crate::clipboard::BOX_RADIUS, e);
+            push_neumorph(scene, rect, radius, bright, a);
+            let wash = if hovered && e < 0.01 {
+                self.options_hover_wash()
+            } else {
+                self.options_rest_wash()
+            };
+            // The box fill is the pill's wash grown into the panel colour, so a
+            // half-open box is never a colour the bar does not otherwise hold.
+            let (fill, _) = self.clip_box_surface();
+            let color = lerp4(
+                [wash[0], wash[1], wash[2], wash[3] * a],
+                [fill[0], fill[1], fill[2], self.box_panel_alpha() * a],
+                solid,
+            );
+            scene.rects.push(RectInst {
+                rect,
+                radius,
+                color,
+                glass: 0.0,
+                border: 0.0,
+            });
+            if pill.id == PillId::CavaNow {
+                // The pill fills as the track plays. Drawn over the wash and
+                // under the words — rects all precede labels — so it reads as
+                // the pill's own substance rising rather than a bar laid on it.
+                //
+                // Only while it is still a PILL: once it has grown into the
+                // list, a fill climbing across a panel of rows would be
+                // meaningless, and the band it belongs to is no longer the
+                // whole shape.
+                if let Some(prog) = self.cava_progress().filter(|_| e < 0.5) {
+                    let r = self.options_pill_h() / 2.0;
+                    // Never narrower than its own cap, so a track at 0:02 is a
+                    // dot at the left rather than a sliver with no shape.
+                    let fw = (rect.w * prog).max(2.0 * r).min(rect.w);
+                    let ink = self.options_text_color();
+                    scene.rects.push(RectInst {
+                        rect: Rect::new(rect.x, rect.y, fw, self.options_pill_h()),
+                        radius: r,
+                        color: [ink[0], ink[1], ink[2], 0.14 * a],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+                self.push_play_rows(scene, rect, solid * a);
+            }
+        }
+
+        let s = self.options_scale();
+        let (font_px, line_px) = (FONT_PX * s, LINE_PX * s);
+
+        // The volume: always present, always in the same place, whether the
+        // shape around it is a circle or a pill. It is the thing that does NOT
+        // move while the device name grows out beside it — the clock's date
+        // works the same way, and it is what makes the change read as one
+        // object opening rather than two objects swapping.
+        if pill.id == PillId::CavaOut {
+            let slot = self.cava_vol_slot();
+            scene.labels.push(Label {
+                text: self.cava_vol_text(),
+                pos: (rect.x + slot / 2.0, rect.y + (rect.h - line_px) / 2.0),
+                max_w: slot,
+                font_px,
+                line_px,
+                centered: true,
+                dim: false,
+                cache: false,
+                clip: None,
+                family: TEXT_FONT,
+                color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
+            });
+        }
+
+        // A symbol is centred in its own hit-slot; the output's name starts
+        // past its glyph; the now-playing text starts past the transport
+        // cluster it shares a pill with.
+        let centered = is_symbol;
+        let pos_x = if is_symbol {
+            rect.x + rect.w / 2.0
+        } else if pill.id == PillId::CavaNow {
+            // Slid left by the marquee when the title does not fit.
+            self.cava_text_x(rect) - self.cava_scroll_offset(rect)
+        } else if pill.id == PillId::CavaOut {
+            rect.x + self.cava_vol_slot()
+        } else {
+            rect.x + PILL_PAD_X
+        };
+        // The name arrives on the BACK half of the opening, so it appears in a
+        // pill that is already a pill rather than being squeezed through a
+        // circle on the way.
+        let a = if pill.id == PillId::CavaOut {
+            a * ((self.cava_out_t - 0.45) / 0.45).clamp(0.0, 1.0)
+        } else {
+            a
+        };
+        if a <= 0.01 {
+            return;
+        }
+        // A resting symbol sits back; the one under the pointer comes forward.
+        let ink = if is_symbol && !hovered {
+            [ink[0], ink[1], ink[2], ink[3] * 0.72]
+        } else {
+            ink
+        };
+        // The text may only use what is left of the pill AFTER whatever sits to
+        // its left — for the now-playing pill that is the transport cluster.
+        // Measured from where the text actually starts rather than from the
+        // pill's edge, so the two can never disagree.
+        // The trailing time, right-aligned in the band — the same place the
+        // clipboard row puts its relative time.
+        if pill.id == PillId::CavaNow && self.cava_time_w > 0.0 {
+            let band = self.options_pill_h();
+            scene.labels.push(Label {
+                text: self.cava_time_text(),
+                pos: (
+                    rect.x + rect.w - PILL_PAD_X - self.cava_time_w,
+                    rect.y + (band - line_px) / 2.0,
+                ),
+                max_w: self.cava_time_w.max(1.0),
+                font_px,
+                line_px,
+                centered: false,
+                dim: true,
+                cache: false,
+                clip: Some(Rect::new(rect.x, rect.y, rect.w, band)),
+                family: pill.family,
+                color: Some(self.dim_ink(ink)),
+            });
+        }
+        let max_w = (rect.x + rect.w - PILL_PAD_X - pos_x).max(0.0);
+        // Clipped to its own pill. A width can go stale for one frame — a track
+        // changes between a measure and a draw — and when it does the text must
+        // be cut off, never painted across the bar.
+        //
+        // The now-playing text is clipped tighter, to the TEXT column alone,
+        // because it scrolls: bounded by the whole pill it would slide out from
+        // under the transport symbols, and text creeping out from behind the
+        // buttons reads as a glitch rather than as a marquee.
+        let clip = if pill.id == PillId::CavaNow {
+            // The text column alone, and only the BAND's height: the marquee
+            // must not slide under the transport on its left, past the time on
+            // its right, or down into the list below it.
+            Some(Rect::new(
+                self.cava_text_x(rect),
+                rect.y,
+                self.cava_text_w(rect),
+                self.options_pill_h(),
+            ))
+        } else {
+            Some(rect)
+        };
+        // A title being retired: the previous words fading out in place while
+        // the new ones wait their turn. Drawn before everything else so the
+        // arriving title lands over them.
+        let (out_a, in_a) = self.cava_swap_alphas();
+        if pill.id == PillId::CavaNow && out_a > 0.01 && !self.cava_prev_text.is_empty() {
+            scene.labels.push(Label {
+                text: self.cava_prev_text.clone(),
+                pos: (self.cava_text_x(rect), rect.y + (rect.h - line_px) / 2.0),
+                max_w: self.cava_prev_w.max(1.0),
+                font_px,
+                line_px,
+                centered: false,
+                dim: false,
+                cache: false,
+                clip,
+                family: pill.family,
+                color: Some([ink[0], ink[1], ink[2], ink[3] * a * out_a]),
+            });
+        }
+        // While a swap is running the arriving title carries its own fade; the
+        // rest of the time it is simply present.
+        let a = if pill.id == PillId::CavaNow {
+            a * in_a
+        } else {
+            a
+        };
+        if a <= 0.01 {
+            return;
+        }
+        // The loop's second copy, one period to the right, drawn first so the
+        // leading copy overlaps it rather than the other way round. Without it
+        // the pill would go blank for the moment the title has left but has not
+        // yet re-entered — and a marquee that blinks is a marquee that stutters.
+        if pill.id == PillId::CavaNow && self.cava_overflow(rect).is_some() {
+            let ty = rect.y + (rect.h - line_px) / 2.0;
+            scene.labels.push(Label {
+                text: pill.text.clone(),
+                pos: (pos_x + self.cava_scroll_period(), ty),
+                max_w: self.cava_now_w.max(1.0),
+                font_px,
+                line_px,
+                centered: false,
+                dim: false,
+                cache: false,
+                clip,
+                family: pill.family,
+                color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
+            });
+        }
+        scene.labels.push(Label {
+            text: pill.text.clone(),
+            pos: (pos_x, rect.y + (rect.h - line_px) / 2.0),
+            // A scrolling title must be allowed to lay out at its FULL width —
+            // bounding it to the visible column would wrap or truncate it, and
+            // then there would be nothing left to scroll to.
+            max_w: if centered {
+                rect.w
+            } else if pill.id == PillId::CavaNow {
+                self.cava_now_w.max(max_w)
+            } else {
+                max_w
+            },
+            font_px,
+            line_px,
+            centered,
+            dim: false,
+            cache: false,
+            clip,
+            family: pill.family,
+            color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
+        });
+    }
+
     pub(crate) fn push_options_tooltip(&self, scene: &mut Scene) {
-        if self.media_box_open {
+        // The stage's mode switch wears a glyph and no word, so hovering is
+        // where it says what it is — and, since the glyph is the mode you are
+        // in, what a click would do.
+        if self.options_hover == Some(PillId::StageMode) {
+            let label = match self.stage.mode() {
+                crate::stage::Mode::Task => {
+                    crate::i18n::tr("Showing one task — show the whole desk")
+                }
+                crate::stage::Mode::Desk => {
+                    crate::i18n::tr("Showing the whole desk — show one task")
+                }
+            };
+            self.push_tooltip_at(scene, PillId::StageMode, label.to_owned());
             return;
         }
         let Some(PillId::Option(i)) = self.options_hover else {
@@ -2039,12 +3550,15 @@ impl App {
         else {
             return;
         };
+        self.push_tooltip_at(scene, PillId::Option(i), label);
+    }
+
+    /// Draw one tooltip under the named pill. Split out so any pill can have
+    /// one — the box is the same object wherever it hangs, and only the pill it
+    /// points at and the words in it change.
+    fn push_tooltip_at(&self, scene: &mut Scene, id: PillId, label: String) {
         let pills = self.options_pills();
-        let Some(pr) = pills
-            .iter()
-            .find(|p| p.id == PillId::Option(i))
-            .map(|p| p.rect)
-        else {
+        let Some(pr) = pills.iter().find(|p| p.id == id).map(|p| p.rect) else {
             return;
         };
         let bar_h = self.options_bar_h();
@@ -2103,9 +3617,6 @@ impl App {
         let (font_px, line_px) = (FONT_PX * s, LINE_PX * s);
 
         let pills = self.options_pills();
-        // Resting rect of a pill by id, for computing where each control is
-        // tucked (behind its parent) and the edge it emerges past.
-        let home = |id: PillId| pills.iter().find(|p| p.id == id).map(|p| p.rect);
         // Draw parents last so they occlude the buttons emerging behind them.
         let mut order: Vec<&Pill> = pills.iter().collect();
         order.sort_by_key(|p| draw_z(p.id));
@@ -2137,6 +3648,14 @@ impl App {
                 self.push_clip_link(scene, pill.rect, &pill.text);
                 continue;
             }
+            if pill.id == PillId::Cava {
+                self.push_cava_pill(scene, pill.rect);
+                continue;
+            }
+            if pill.id.is_cava() {
+                self.push_cava_child(scene, pill);
+                continue;
+            }
             // The sunset prompt's nested [turn on]: the SAME material as its
             // parent — the module's own flat fill (glass:0.0, no rim/fresnel/
             // iridescence), not the dock's liquid glass — so the button is
@@ -2149,17 +3668,17 @@ impl App {
             // box fill at the same alpha was still reading as a different
             // substance while `glass: 1.0` ran the dock's shader on top of
             // it; flat fill is what the parent itself uses now).
-            if matches!(pill.id, PillId::SunsetTurnOn | PillId::SunsetSettings) {
-                let mut a = self.sunset_turnon_alpha() * self.options_pill_fade(pill.id, pill.rect);
+            if matches!(pill.id, PillId::SunsetTurnOn | PillId::ModuleSettings) {
+                let mut a = self.module_child_alpha() * self.options_pill_fade(pill.id, pill.rect);
                 // [turn on] fades out as the settings box opens; the gear stays
                 // (it is the box's own close/settings affordance, top-right).
                 if pill.id == PillId::SunsetTurnOn {
-                    a *= 1.0 - self.sunset_box_e;
+                    a *= 1.0 - self.module_box_e;
                 }
                 if a > 0.01 {
                     // Ink measured against the module it stands on, not the
                     // bar — same adaptive rule, right surface.
-                    let ink = self.sunset_module_ink();
+                    let ink = self.module_ink();
                     // It holds its size under the pointer — hover speaks with
                     // the wash alone, not a lift, so the button sits steady
                     // inside the module.
@@ -2167,7 +3686,7 @@ impl App {
                     let rect = pill.rect;
                     let radius = rect.h / 2.0;
                     // The parent's material, again: glass fill, in the box's
-                    // own fill colour AND alpha (`sunset_fill_alpha`) — the
+                    // own fill colour AND alpha (`module_fill_alpha`) — the
                     // exact pair the parent pill uses — rather than the
                     // theme's raw background at its own separate opacity
                     // (Max, 2026-09-08: "the child[ren], the same color as
@@ -2175,7 +3694,7 @@ impl App {
                     // more solid than the parent once the parent's own alpha
                     // stopped being 1.0 too).
                     let (bfill, _) = self.options_box_surface();
-                    let fa = self.sunset_fill_alpha();
+                    let fa = self.module_fill_alpha();
                     scene.rects.push(RectInst {
                         rect,
                         radius,
@@ -2188,7 +3707,12 @@ impl App {
                         scene.rects.push(RectInst {
                             rect,
                             radius,
-                            color: [hover_wash[0], hover_wash[1], hover_wash[2], hover_wash[3] * a],
+                            color: [
+                                hover_wash[0],
+                                hover_wash[1],
+                                hover_wash[2],
+                                hover_wash[3] * a,
+                            ],
                             glass: 0.0,
                             border: 0.0,
                         });
@@ -2242,21 +3766,32 @@ impl App {
                     // emerge rightward, each from behind the previous pill's
                     // right edge, starting at the close (which never gets
                     // here — it has no ctrl slot).
-                    let (origin, edge) = match pill.id {
-                        PillId::Pseudo => {
-                            let cr = home(PillId::Close).map_or(pill.rect.x + d, |r| r.x + r.w);
-                            (cr - d, cr)
-                        }
-                        PillId::Float => {
-                            let pr = home(PillId::Pseudo).map_or(pill.rect.x, |r| r.x + r.w);
-                            (pr - d, pr)
-                        }
-                        PillId::Fullscreen => {
-                            let fr = home(PillId::Float).map_or(pill.rect.x, |r| r.x + r.w);
-                            (fr - d, fr)
-                        }
-                        _ => (pill.rect.x, pill.rect.x),
+                    // Read from the LAYOUT rather than from a fixed chain of
+                    // ids: the row's membership changes now (the mode the
+                    // window is in is shown as a word instead of a toggle), so
+                    // "behind the previous pill" has to mean whichever pill is
+                    // actually to the left — the close, the state word, or
+                    // another toggle.
+                    let prev_right = pills
+                        .iter()
+                        .filter(|p| {
+                            matches!(
+                                p.id,
+                                PillId::Close
+                                    | PillId::WindowState
+                                    | PillId::Pseudo
+                                    | PillId::Float
+                                    | PillId::Fullscreen
+                            ) && p.rect.x < pill.rect.x
+                        })
+                        .map(|p| p.rect.x + p.rect.w)
+                        .fold(f32::MIN, f32::max);
+                    let edge = if prev_right > f32::MIN {
+                        prev_right
+                    } else {
+                        pill.rect.x
                     };
+                    let (origin, edge) = (edge - d, edge);
                     let x = lerp(origin, pill.rect.x, t);
                     let rect = Rect::new(x, pill.rect.y, d, pill.rect.h);
                     let clip = Rect::new(edge, 0.0, (full_w - edge).max(0.0), bar_h);
@@ -2288,10 +3823,14 @@ impl App {
             // size step is a statement, not the hover lift, and lifting it
             // would blur the two; only its nested [turn on] answers hover.
             let module_t = if pill.id == PillId::Window {
-                self.sunset_module_t()
+                self.module_t()
             } else {
                 0.0
             };
+            // The gear's readout holds its size under the pointer for the same
+            // reason the asking module does: it is a panel that slid out, and a
+            // panel that also grows on hover reads as two animations arguing.
+            let hovered = hovered && pill.id != PillId::SettingsStats;
             let rect = if hovered && module_t <= 0.001 && self.options_sticky.is_none() {
                 hover_grow(rect)
             } else {
@@ -2304,12 +3843,18 @@ impl App {
             // is measured against the pill BAND height, not the grown box
             // height, so it doesn't balloon as the box drops.
             let radius = if pill.id == PillId::Window && module_t > 0.001 {
-                let band_h = self.options_pill_h() + SUNSET_GROW_H * module_t;
+                let band_h = self.options_pill_h() + MODULE_GROW_H * module_t;
                 lerp(
                     band_h / 2.0,
-                    SUNSET_PANEL_RADIUS * self.options_scale(),
-                    self.sunset_box_e,
+                    MODULE_PANEL_RADIUS * self.options_scale(),
+                    self.module_box_e,
                 )
+            } else if pill.id == PillId::SettingsStats {
+                // The readout's row is a stadium; its panel is a rounded
+                // RECTANGLE, or a tall box measured against its own height comes
+                // out a giant lozenge (the trap the sunset module hit first).
+                // The stadium is measured against the BAND, never the grown box.
+                self.stats_radius()
             } else {
                 rect.h / 2.0 // stadium ⇒ circle when w == h
             };
@@ -2319,10 +3864,22 @@ impl App {
             // time, never stacked.
             push_neumorph(scene, rect, radius, bright, shadow_a * (1.0 - module_t));
             let base = if hovered { hover_wash } else { rest_wash };
+            // A pill's wash is a translucent film — right for a pill, wrong for
+            // a panel, which has to occlude what it grew over. The readout lerps
+            // to the same frosted surface the other boxes use as it opens.
+            let (base, alpha) = if pill.id == PillId::SettingsStats && self.stats_open_t() > 0.001 {
+                let e = self.stats_open_t();
+                // Its own side's frost — the gear lives at the left edge beside
+                // the clipboard, not at the notification's end of the bar.
+                let (fill, _) = self.box_surface_at(rect);
+                (fill, lerp(base[3] * a, self.box_panel_alpha(), e))
+            } else {
+                (base, base[3] * a * (1.0 - module_t))
+            };
             scene.rects.push(RectInst {
                 rect,
                 radius,
-                color: [base[0], base[1], base[2], base[3] * a * (1.0 - module_t)],
+                color: [base[0], base[1], base[2], alpha],
                 glass: 0.0,
                 border: 0.0,
             });
@@ -2340,7 +3897,13 @@ impl App {
                 dim: false,
                 cache: true,
                 family,
-                color: Some([g[0], g[1], g[2], g[3] * alpha]),
+                // `a` is the pill's own presence (the bar's reveal, its slide,
+                // whatever is fading it); `alpha` is this label's part in a
+                // crossfade. A glyph drawn at full opacity on a pill that is
+                // fading out is the pill's body vanishing and its icon staying —
+                // seen live when the gear's readout slid over the clipboard
+                // (2026-09-13). Every text on this bar rides its pill.
+                color: Some([g[0], g[1], g[2], g[3] * alpha * a]),
                 clip,
             };
             // The clock pill crossfades HH:MM ↔ the full date during its
@@ -2354,14 +3917,31 @@ impl App {
             // pill's leader-facing edge is pinned, so this plays out entirely
             // on its far side (`OptionUXRules.md` §1).
             let tt = self.options_title_meta.t;
-            // The window pill while the sunset question is on it (arriving,
-            // standing, or leaving): the message lays out LEFT-anchored — the
-            // nested [turn on] owns the module's right end — while an ordinary
-            // title keeps its centre. Each label keeps its own anchor through
+            // The window pill while a MODULE is on it (arriving, standing, or
+            // leaving). A module with nested controls lays its sentence out
+            // LEFT-anchored, because [turn on] owns the module's right end; a
+            // childless one centres it like an ordinary title, since nothing else
+            // is competing for the width. Each label keeps its own anchor through
             // the crossfade; the scissor clip does the reveal as always.
-            let msg_in = self.options_title_meta.shown == SUNSET_MSG;
-            let msg_out = self.options_title_meta.outgoing == SUNSET_MSG && tt < 0.999;
-            if pill.id == PillId::Window && (msg_in || msg_out) {
+            let module = self.module_drawn();
+            // The sentence being drawn is the one in the metamorphosis, not a
+            // constant: a module's line can change while it stands (the empty
+            // room reports whatever is most worth saying).
+            let meta = &self.options_title_meta;
+            let msg = module.map(|_| {
+                if meta.shown_module.is_some() {
+                    meta.shown.as_str()
+                } else {
+                    meta.outgoing.as_str()
+                }
+            });
+            // Arriving or settled when the module's sentence is what the pill
+            // SHOWS; leaving when it is what the pill is coming FROM (which is
+            // also how one module handing the pill to another reads — the
+            // incoming module's own branch, with the outgoing sentence fading out
+            // as an ordinary title would).
+            let msg_in = msg == Some(self.options_title_meta.shown.as_str());
+            if pill.id == PillId::Window && module.is_some() {
                 // waverunner's own coat — the dock card's material verbatim:
                 // its soft drop shadow, then the theme background over the
                 // liquid-glass pipeline (rim glow, fresnel, iridescence, the
@@ -2369,18 +3949,18 @@ impl App {
                 // compositor's layer blur reads through the tint's alpha
                 // exactly as it does under the dock. Presence animates through
                 // the tint, so the material is whole at every morph step.
-                let mt = self.sunset_module_t();
+                let mt = self.module_t();
                 // LAYER 1 — the BANNER BEHIND, shape-shifting to sit under the
                 // pill. The bar's OWN material (`options_bar_fill`) is
                 // smooth-unioned with the bar edge (shader neck, flagged by
-                // SUNSET_NECK_GLASS), so it bulges DOWN out of the bar to a
+                // MODULE_NECK_GLASS), so it bulges DOWN out of the bar to a
                 // blister a small rim larger than the pill — the pill always
                 // sits ON this banner, and the banner changes shape with it
                 // (grows as the box opens). Quad = pill + rim + neck margin; the
                 // shader insets the SDF back by the neck `k` to (pill + rim).
                 let (banner, _) = self.options_bar_fill();
-                let rim = SUNSET_BANNER_RIM * s;
-                let nk = SUNSET_NECK_K * s;
+                let rim = MODULE_BANNER_RIM * s;
+                let nk = MODULE_NECK_K * s;
                 let brect = Rect::new(
                     rect.x - rim - nk,
                     rect.y - rim - nk,
@@ -2391,7 +3971,7 @@ impl App {
                     rect: brect,
                     radius: radius + rim,
                     color: [banner[0], banner[1], banner[2], banner[3] * mt],
-                    glass: SUNSET_NECK_GLASS,
+                    glass: MODULE_NECK_GLASS,
                     border: 0.0,
                 });
                 // LAYER 2 — the pill/box ON TOP, in the REGULAR OPTIONS pill
@@ -2402,8 +3982,10 @@ impl App {
                 // occludes/frosts instead of being a see-through wash. Sits on
                 // the banner blister behind it.
                 let bright = self.options_bar_is_bright();
-                let (bfill, _) = self.options_box_surface();
-                let fa = self.sunset_fill_alpha();
+                // The module can stand anywhere along the bar, so it reads the
+                // frost of the side it is actually on (`box_surface_at`).
+                let (bfill, _) = self.box_surface_at(rect);
+                let fa = self.module_fill_alpha();
                 push_neumorph(scene, rect, radius, bright, mt);
                 scene.rects.push(RectInst {
                     rect,
@@ -2418,28 +4000,41 @@ impl App {
                     glass: 0.0,
                     border: 0.0,
                 });
-                let ink = self.sunset_module_ink();
-                let msg_cx = rect.x + PILL_PAD_X + self.sunset_text_w / 2.0;
-                let msg_w = self.sunset_text_w + 2.0;
+                let ink = self.module_ink();
+                let msg_text = msg.unwrap_or_default();
+                let msg_w = self.module_text_w + 2.0;
                 let out = (1.0 - tt / TITLE_OUT_END).clamp(0.0, 1.0);
                 let inn = ((tt - TITLE_IN_START) / (1.0 - TITLE_IN_START)).clamp(0.0, 1.0);
                 // As the settings box opens the message fades out and stays
                 // pinned to the top band (it must not slide to the centre of the
                 // growing panel); the settings content fades in below it.
-                let bf = 1.0 - self.sunset_box_e;
-                let band_ty =
-                    rect.y + (self.options_pill_h() + SUNSET_GROW_H * mt - line_px) / 2.0;
-                // The message's own clip stops at `[turn on]`'s left edge, not
-                // the module's outer edge: during the arrival morph the box is
-                // still narrower than its settled width and `[turn on]` sits
-                // well inside it, so clipping to `rect` alone lets the
-                // sentence (drawn at its fixed final width throughout) run
-                // straight through the button until the box nearly catches up
-                // (found live 2026-09-08 — see `sunset_nested_rects`).
-                let (turn_on, _) = self.sunset_nested_rects();
-                let msg_clip_w = (turn_on.x - SUNSET_GAP - rect.x).clamp(0.0, rect.w);
-                let msg_clip = Rect::new(rect.x, rect.y, msg_clip_w, rect.h);
-                // The question in the slab's own ink, so text and surface are
+                let bf = 1.0 - self.module_box_e;
+                let band_ty = rect.y + (self.options_pill_h() + MODULE_GROW_H * mt - line_px) / 2.0;
+                // Where the sentence sits, and how far it may run.
+                //
+                // With children, LEFT-anchored, and its clip stops at `[turn
+                // on]`'s left edge rather than the module's outer edge: during
+                // the arrival morph the box is still narrower than its settled
+                // width and `[turn on]` sits well inside it, so clipping to
+                // `rect` alone lets the sentence (drawn at its fixed final width
+                // throughout) run straight through the button until the box
+                // nearly catches up (found live 2026-09-08 — see
+                // `module_nested_rects`).
+                //
+                // Childless, CENTRED in the pill and clipped to it, exactly like
+                // an ordinary title: there is no right end to keep clear, and a
+                // sentence pushed left in a pill that is only as wide as the
+                // words would read as a layout mistake.
+                let (msg_cx, msg_clip) = if module.is_some_and(Module::has_children) {
+                    let clip_w = (self.module_msg_right() - rect.x).clamp(0.0, rect.w);
+                    (
+                        rect.x + PILL_PAD_X + self.module_text_w / 2.0,
+                        Rect::new(rect.x, rect.y, clip_w, rect.h),
+                    )
+                } else {
+                    (cx, rect)
+                };
+                // The sentence in the slab's own ink, so text and surface are
                 // measured for each other exactly as inside the boxes.
                 let mk_at = |text: String, alpha: f32, at_cx: f32, max_w: f32| Label {
                     pos: (at_cx, band_ty),
@@ -2447,13 +4042,13 @@ impl App {
                     ..mk(text, alpha, max_w, Some(msg_clip))
                 };
                 if tt >= 0.999 {
-                    // Settled on the question.
+                    // Settled on the module's sentence.
                     scene
                         .labels
-                        .push(mk_at(SUNSET_MSG.to_owned(), 1.0, msg_cx, msg_w));
+                        .push(mk_at(msg_text.to_owned(), 1.0, msg_cx, msg_w));
                 } else if msg_in {
-                    // The old title fades out from its centre; the question
-                    // fades in on the left of the widening module.
+                    // The old title (or the module handing over) fades out from
+                    // its centre; the sentence fades in as the module widens.
                     if out > 0.001 {
                         scene.labels.push(mk(
                             self.options_title_meta.outgoing.clone(),
@@ -2465,15 +4060,15 @@ impl App {
                     if inn > 0.001 {
                         scene
                             .labels
-                            .push(mk_at(SUNSET_MSG.to_owned(), inn, msg_cx, msg_w));
+                            .push(mk_at(msg_text.to_owned(), inn, msg_cx, msg_w));
                     }
                 } else {
-                    // The question fades out on the left; the returning task
-                    // title fades in centred.
+                    // The sentence fades out; the returning task title fades in
+                    // centred.
                     if out > 0.001 {
                         scene
                             .labels
-                            .push(mk_at(SUNSET_MSG.to_owned(), out, msg_cx, msg_w));
+                            .push(mk_at(msg_text.to_owned(), out, msg_cx, msg_w));
                     }
                     if inn > 0.001 {
                         scene.labels.push(mk(
@@ -2558,28 +4153,45 @@ impl App {
             }
             return;
         }
-        let (addr, title, class, fullscreen) = match self.brain.as_ref() {
+        // `floating` rides along for the state pill: the engine already watches
+        // it, so the bar can notice a window leaving the layout without asking
+        // the compositor anything. Where it cannot be known (no engine), it is
+        // reported as whatever the bar already believes, so the comparison
+        // below stays quiet rather than triggering a read every tick.
+        let (addr, title, class, fullscreen, floating) = match self.brain.as_ref() {
             Some(ctx) if crate::brain::hypr_alive(ctx) => {
                 let w = &ctx.window;
                 if w.address.is_empty() {
-                    (None, None, None, false)
+                    (None, None, None, false, false)
                 } else {
                     (
                         Some(w.address.clone()),
                         Some(w.title.clone()),
                         Some(w.class.clone()),
                         w.is_fullscreen,
+                        w.is_floating,
                     )
                 }
             }
-            _ => match hypr::active_window_info() {
-                Some((a, t, fs)) => {
-                    let class = hypr::active_window_where().map(|(c, _)| c);
-                    (Some(a), Some(t), class, fs)
+            _ => {
+                let believed = self.options_mode == hypr::WindowMode::Floating;
+                match hypr::active_window_info() {
+                    Some((a, t, fs)) => {
+                        let class = hypr::active_window_where().map(|(c, _)| c);
+                        (Some(a), Some(t), class, fs, believed)
+                    }
+                    None => (None, None, None, false, believed),
                 }
-                None => (None, None, None, false),
-            },
+            }
         };
+        // The class travels with the title: the grooming that turns a title into
+        // a task needs the app's own name to recognise its signature
+        // ([`crate::task_title`]), so it must be as current as the title it
+        // grooms — not only as current as the last focus change. It counts as a
+        // change to the pill in its own right: an app that renames its class
+        // under a standing title changes what the pill is allowed to strip.
+        let class_changed = self.options_class != class;
+        self.options_class = class.clone();
         if self.options_active_addr != addr {
             // Focus moved, so a sticky OPTION's way back is stale: it offers to
             // undo something you are no longer looking at, which is worse than
@@ -2597,7 +4209,25 @@ impl App {
             // back by swipe hands the space over intact.
             self.note_ws_focus();
         }
-        if self.options_active_addr != addr || self.options_title != title {
+        // What the window IS, for the state pill. Re-read only when the answer
+        // can have changed without us doing it: focus moved, or the engine
+        // disagrees with the cached mode about being fullscreen or floating —
+        // which is how a window that leaves the layout by itself announces
+        // itself (a video going full-screen, a dialog floating, a rule). Pseudo
+        // needs no watching: it is our own tag, and the only way in or out is
+        // `set_window_mode`, which refreshes as it goes. So an ordinary context
+        // tick costs no compositor read at all.
+        let stale = match self.options_mode {
+            hypr::WindowMode::Fullscreen => !fullscreen,
+            hypr::WindowMode::Floating => !floating,
+            _ => fullscreen || floating,
+        };
+        if self.options_active_addr != addr || stale {
+            // Which also notices a window joining or leaving the layout, and
+            // asks the solitary-pseudo rule to look — see `refresh_window_mode`.
+            self.refresh_window_mode();
+        }
+        if self.options_active_addr != addr || self.options_title != title || class_changed {
             self.options_active_addr = addr;
             self.options_title = title;
             self.measure_options_text();
@@ -2830,19 +4460,184 @@ impl App {
     /// is a fraction of the window's TILE and the tile is not measurable until
     /// the window is back in the layout. There the first pass returns it to the
     /// layout and this schedules the second, once the move has settled.
-    pub(crate) fn set_window_mode(&mut self, target: hypr::WindowMode) {
-        if !hypr::set_window_mode(target) {
+    /// Ask for a [`Self::sync_solitary_pseudo`] once the layout has settled.
+    ///
+    /// Deferred because the rule needs the tile it is about to take a fraction
+    /// of, and right after a window opens or closes the compositor is still
+    /// reporting the rectangle it is animating *through* — sizing off that
+    /// pseudotiles to a fraction of a shape the desktop was only passing
+    /// through (the same trap `set_window_mode`'s second pass exists for).
+    ///
+    /// Coalesced: closing an app that takes three windows with it fires three
+    /// events and runs one sweep.
+    pub(crate) fn schedule_solitary_pseudo(&mut self) {
+        if self.pseudo_sweep_pending {
             return;
         }
+        self.pseudo_sweep_pending = true;
+        let timer = Timer::from_duration(LAYOUT_SETTLE);
+        let _ = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.pseudo_sweep_pending = false;
+                app.sync_solitary_pseudo();
+                TimeoutAction::Drop
+            });
+    }
+
+    /// Golem's layout rule: **a space showing one tile shows it pseudo.**
+    ///
+    /// A lone window stretched across a whole screen is a shape nobody chose —
+    /// it is just what "one window, tiled" happens to produce. So Golem gives
+    /// it its own proportions instead (Max, 2026-09-13), and takes them back the
+    /// moment the space has to be shared: open a second window and both go plain
+    /// tiled, close back down to one and the survivor becomes pseudo again.
+    ///
+    /// It runs on layout EVENTS — a window opening, closing, moving — never
+    /// continuously, and that is what leaves room for the bar's own controls: a
+    /// mode you set by hand stands until the space changes shape again. The
+    /// stage is skipped entirely; there the mode owns every window's geometry.
+    ///
+    /// Floating and fullscreen windows are not tiles ([`hypr::LayoutWindow::is_tile`]),
+    /// so neither counts toward "how many", and neither is ever moved by this.
+    pub(crate) fn sync_solitary_pseudo(&mut self) {
+        // A tiling rule: skipped while Golem is a FLOATING window manager, where
+        // there are no tiles for it to judge (`settings.rs`), and on the stage,
+        // where the mode owns every window's geometry.
+        if self.stage.is_on() || self.floating_mode() {
+            return;
+        }
+        let windows = hypr::layout_windows();
+        let mut spaces: std::collections::BTreeMap<i64, Vec<&hypr::LayoutWindow>> =
+            std::collections::BTreeMap::new();
+        for w in windows.iter().filter(|w| w.is_tile()) {
+            spaces.entry(w.workspace).or_default().push(w);
+        }
+        for (ws, tiles) in spaces {
+            match tiles.as_slice() {
+                // The one tile on the space: it gets Golem's proportions. The
+                // rectangle it is a fraction of is computed, not measured (see
+                // `hypr::solitary_tile`) — measuring would mean waiting for the
+                // window to finish arriving first.
+                // Re-asserted even when it is ALREADY pseudo, because the size
+                // can be stale: a pseudo window that floats and comes back
+                // keeps whatever shape the round trip left it (measured —
+                // `994×304` where the rule promises `1780×1026`). Golem's
+                // pseudo is a fixed fraction of the tile, so writing it again
+                // is idempotent where it is already right.
+                [only] => {
+                    if only.mode == hypr::WindowMode::Tiled || only.mode == hypr::WindowMode::Pseudo
+                    {
+                        if let Some(tile) = hypr::solitary_tile() {
+                            tracing::debug!("layout: ws{ws} is down to one tile — pseudo");
+                            hypr::pseudo_on(&only.address, tile);
+                        }
+                    }
+                }
+                // Shared: the space is divided, so nothing is pseudo and the
+                // user is left to ask for whatever they want instead.
+                many => {
+                    for w in many.iter().filter(|w| w.mode == hypr::WindowMode::Pseudo) {
+                        tracing::debug!("layout: ws{ws} shares {} tiles — plain", many.len());
+                        hypr::pseudo_off(&w.address);
+                    }
+                }
+            }
+        }
+        // The bar says what the focused window is, and this may have just
+        // changed it.
+        self.refresh_window_mode();
+        // And now the dock may judge the layout: `on_layout_changed` holds off
+        // while a sweep is pending, precisely so it never sees the full-size
+        // tile a window only passes through on its way to being pseudo.
+        self.on_layout_changed();
+    }
+
+    /// Re-read what the focused window IS, for the state pill.
+    ///
+    /// One `j/activewindow` read, and only at the moments the answer can have
+    /// changed: focus moved, or a mode was just set.
+    pub(crate) fn refresh_window_mode(&mut self) {
+        let (addr, mode) = match hypr::active_window_mode() {
+            Some(read) => (Some(read.0), read.1),
+            None => (None, hypr::WindowMode::Tiled),
+        };
+        // Whether this is the same window we last read, which is what makes a
+        // change a *transition* rather than just a different window's shape.
+        let same = addr == self.options_mode_addr;
+        if mode == self.options_mode && same {
+            return;
+        }
+        let was_floating = self.options_mode == hypr::WindowMode::Floating;
+        self.options_mode = mode;
+        self.options_mode_addr = addr;
+        // A window joining or leaving the LAYOUT changes how many tiles its
+        // space is divided between, and no compositor event says so (neither
+        // the socket nor the internal bus carries one — checked both), so this
+        // read is where the solitary-pseudo rule hears about it. Without it,
+        // un-floating onto an otherwise empty space left the window plainly
+        // tiled: the one case the rule promises and could not see.
+        //
+        // Only floating, and only on the same window. Fullscreen is not a
+        // trigger — a window going full-screen and coming back is the same
+        // window on the same space throughout, and sweeping there re-imposed
+        // pseudo on one the user had deliberately set plain (Max, 2026-09-13).
+        if same && (mode == hypr::WindowMode::Floating) != was_floating {
+            self.schedule_solitary_pseudo();
+        }
+        self.sync_window_state();
+    }
+
+    /// Let the state pill catch up with the window — but not under the hand.
+    ///
+    /// "The Still Bar" (`OptionUXRules.md` §2). The mode the cluster is laid out
+    /// from decides which toggle is missing from the row, so adopting a change
+    /// immediately re-flows the buttons **at the moment of the click that caused
+    /// it**: press [float] and float leaves the row, the state pill takes its
+    /// place, and everything right of it slides — so pressing it again to turn
+    /// floating back off means first hunting for where it went (Max,
+    /// 2026-09-12).
+    ///
+    /// So the layout keeps the mode it had while the hand is on the bar, and
+    /// the re-flow waits at the door. The window itself moves at once — the
+    /// feedback is on the desktop, which is where the change actually is — and
+    /// the buttons stay exactly where they were aimed at.
+    ///
+    /// Every button on the frozen row therefore acts on **what it shows**,
+    /// including the state pill: that is what makes it a toggle you can press
+    /// twice without moving.
+    pub(crate) fn sync_window_state(&mut self) {
+        if self.options_mode_shown == self.options_mode || self.options_ptr_on_bar() {
+            return;
+        }
+        self.options_mode_shown = self.options_mode;
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    pub(crate) fn set_window_mode(&mut self, target: hypr::WindowMode) {
+        if !hypr::set_window_mode(target) {
+            // Refused (already in the target, nothing focused): the cached mode
+            // can still be stale — a client may have gone fullscreen by itself.
+            self.refresh_window_mode();
+            return;
+        }
+        self.refresh_window_mode();
         // Long enough for the window to reach its tile: the compositor reports
         // a mid-ANIMATION size until it lands (see `docs/hypr-api.md`), and a
         // size read too early would pseudotile to a fraction of a rectangle the
         // window was only passing through.
         let timer = Timer::from_duration(MODE_SETTLE);
-        let _ = self.loop_handle.insert_source(timer, move |_, _, _app| {
-            hypr::set_window_mode(target);
-            TimeoutAction::Drop
-        });
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                hypr::set_window_mode(target);
+                // The second pass can land somewhere the first did not (pseudo from
+                // fullscreen needs the tile it only has once back in the layout), so
+                // the word is read again rather than assumed.
+                app.refresh_window_mode();
+                TimeoutAction::Drop
+            });
     }
 
     /// Show or conceal the bar. The one door every path goes through — the
@@ -3098,8 +4893,9 @@ impl App {
             REVEAL_PX.ceil() as i32
         } else if self.notif.expanded
             || self.clip.expanded
-            || self.media_box_open
-            || self.sunset_box_open
+            || self.module_box_open
+            || self.play_box_open
+            || self.stats.open
         {
             // Extend the pointer-sensitive region down over whichever box is
             // open so scroll/hover/clicks there reach us instead of passing
@@ -3112,11 +4908,14 @@ impl App {
             if self.clip.expanded {
                 bottom = bottom.max(self.clip_input_bottom());
             }
-            if self.media_box_open {
-                bottom = bottom.max(self.media_input_bottom());
+            if self.play_box_open {
+                bottom = bottom.max(self.play_box_input_bottom());
             }
-            if self.sunset_box_open {
-                bottom = bottom.max(self.sunset_box_input_bottom());
+            if self.module_box_open {
+                bottom = bottom.max(self.module_box_input_bottom());
+            }
+            if self.stats.open {
+                bottom = bottom.max(self.stats_box_input_bottom());
             }
             bottom.ceil() as i32
         } else {
@@ -3200,10 +4999,6 @@ impl App {
                 ..
             } => {
                 self.options_ptr = Some((surface_x as f32, surface_y as f32));
-                // A live drag on a media-box slider tracks the pointer.
-                if self.media_drag_update(surface_x as f32) {
-                    return;
-                }
                 self.options_on_motion(surface_y as f32);
             }
             wl_pointer::Event::Leave { .. } => {
@@ -3225,14 +5020,23 @@ impl App {
                     self.draw_options();
                 }
                 // A sunset prompt that arrived (or resolved) while the hand
-                // was on the bar plays its held morph now (`§2`).
-                self.sync_sunset_prompt();
+                // was on the bar plays its held morph now (`§2`). So does a
+                // window-mode change made from these very buttons: the row
+                // re-flows at the door, never under the hand that pressed it.
+                self.sync_module();
+                self.sync_window_state();
                 if !self.options_hidden {
                     self.options_hover = None;
                     self.update_ctrl_reveal(); // fade the buttons out
                     self.update_clock_meta(); // start the date's hold-then-collapse
                     self.update_notif_reveal(); // collapse the bell's peek/history
                     self.update_clip_reveal(); // collapse the clipboard's peek
+                    self.update_stats_reveal(); // and the gear's stats child
+                                               // The playing box ends with the visit, like every other box
+                                               // on this bar — it stays for as long as the hand is on the
+                                               // surface (§2) and folds away when it leaves.
+                    self.play_box_open = false;
+                    self.update_cava_reveal(); // tuck the cava children back
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
                     self.update_clip_hit(); // drop any clip row hover (ptr gone)
                     self.draw_options();
@@ -3252,19 +5056,12 @@ impl App {
                 // lands on, so the re-flow the click causes happens around it.
                 // On PRESS — the anchor is the layout that was aimed at.
                 self.capture_leader();
-                if let Some((px, py)) = self.options_ptr {
-                    self.media_drag_start(px, py);
-                }
             }
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_LEFT
                     && state == WEnum::Value(wl_pointer::ButtonState::Released)
                     && self.options_interactive() =>
             {
-                // A slider drag commits on release and swallows the click.
-                if self.media_drag_commit() {
-                    return;
-                }
                 self.options_click();
             }
             wl_pointer::Event::Button { button, state, .. }
@@ -3287,6 +5084,21 @@ impl App {
             {
                 self.notif_axis(value as f32);
             }
+            // Scroll over the gear or its readout: down grows the panel, up
+            // folds it back. The same gesture the clipboard and the bell answer
+            // to, at the other end of the same bar.
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } if !self.options_hidden
+                && (matches!(
+                    self.options_hover,
+                    Some(PillId::Settings | PillId::SettingsStats)
+                ) || self.stats.open) =>
+            {
+                self.stats_axis(value as f32);
+            }
             // Scroll over the clipboard OPTION: open / browse the clip history.
             wl_pointer::Event::Axis {
                 axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
@@ -3299,6 +5111,96 @@ impl App {
                 ) || self.clip.expanded) =>
             {
                 self.clip_axis(value as f32);
+            }
+            // Scroll over the track name: open the playing box, or close it.
+            //
+            // The sign matches the volume axis on the transport pill next door,
+            // which was flipped for the same reason — this session's scroll
+            // convention is the opposite of the raw Wayland sign, and two
+            // gestures an inch apart disagreeing about which way is "down"
+            // would be worse than either choice.
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } if !self.options_hidden
+                && (self.options_hover == Some(PillId::CavaNow) || self.play_box_open) =>
+            {
+                // **A scroll's END arrives as an axis event carrying ZERO**, and
+                // a kinetic flick trails a run of ever-smaller ones. Reading the
+                // sign of those closed the box the instant the finger stopped —
+                // it looked like a spring and was really the stop event voting
+                // "up". Only a real push counts.
+                let v = value as f32;
+                if v.abs() < SCROLL_DEADZONE {
+                    return;
+                }
+                let open = v < 0.0;
+                if open != self.play_box_open {
+                    self.play_box_open = open;
+                    if open {
+                        // Only decode art for a panel someone is opening.
+                        self.request_play_art();
+                    }
+                    self.schedule_cava_frame();
+                    self.sync_options_input();
+                    self.draw_options();
+                }
+            }
+            // Scroll over the transport pill: volume on the vertical axis,
+            // tracks on the horizontal one. The pill and its three symbols
+            // only — the track name and the output do not take gestures.
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(axis),
+                value,
+                ..
+            } if !self.options_hidden
+                && self.options_hover.is_some_and(|h| h.is_cava_transport()) =>
+            {
+                self.cava_axis(axis, value as f32);
+            }
+            _ => {}
+        }
+    }
+
+    /// A scroll over the cava cluster.
+    ///
+    /// Both axes accumulate rather than acting per event: a wheel notch arrives
+    /// as several small deltas and a touchpad as a stream of tiny ones, so
+    /// acting on each would skip six tracks for one flick. The accumulator is
+    /// reset when the direction reverses, so a change of mind is immediate
+    /// rather than having to pay off the distance already travelled.
+    ///
+    /// The two thresholds differ on purpose. Volume is cheap and continuous —
+    /// overshooting costs a nudge back. Skipping a track is discrete and
+    /// expensive: the thing you were listening to is gone, and `[prev]` on many
+    /// players restarts rather than returns. So tracks demand a deliberate
+    /// push, roughly one firm notch.
+    fn cava_axis(&mut self, axis: wl_pointer::Axis, value: f32) {
+        const VOL_STEP: f32 = 6.0;
+        const TRACK_STEP: f32 = 14.0;
+        match axis {
+            wl_pointer::Axis::VerticalScroll => {
+                if self.cava_scroll_accum_v * value < 0.0 {
+                    self.cava_scroll_accum_v = 0.0;
+                }
+                self.cava_scroll_accum_v += value;
+                while self.cava_scroll_accum_v.abs() >= VOL_STEP {
+                    let up = self.cava_scroll_accum_v > 0.0;
+                    self.cava_scroll_accum_v -= VOL_STEP * self.cava_scroll_accum_v.signum();
+                    self.cava_volume_step(up);
+                }
+            }
+            wl_pointer::Axis::HorizontalScroll => {
+                if self.cava_scroll_accum_h * value < 0.0 {
+                    self.cava_scroll_accum_h = 0.0;
+                }
+                self.cava_scroll_accum_h += value;
+                while self.cava_scroll_accum_h.abs() >= TRACK_STEP {
+                    let forward = self.cava_scroll_accum_h > 0.0;
+                    self.cava_scroll_accum_h -= TRACK_STEP * self.cava_scroll_accum_h.signum();
+                    self.cava_transport(if forward { "next" } else { "previous" });
+                }
             }
             _ => {}
         }
@@ -3339,7 +5241,22 @@ impl App {
                     // below-the-bar) rect so hover holds while its history is
                     // open; every other pill gets the full-bar-height hit (up to
                     // the top screen edge) so slamming to the edge still lands.
-                    let hit = if matches!(pill.id, PillId::Notif | PillId::ClipboardBox) {
+                    // The elements that own a rect BELOW the bar keep hover for
+                    // its whole height, so the pointer inside an open box still
+                    // counts as being on the thing it came out of. The track
+                    // pill joined them when it learned to grow into the playing
+                    // list, and the gear's readout when it grew a panel —
+                    // without that, moving into its own box reads as LEAVING it
+                    // and the box folds under the hand (Max, 2026-09-13: *"the
+                    // box closes even when im hovering it"*). Anything here that
+                    // grows downward belongs on this list.
+                    let hit = if matches!(
+                        pill.id,
+                        PillId::Notif
+                            | PillId::ClipboardBox
+                            | PillId::CavaNow
+                            | PillId::SettingsStats
+                    ) {
                         Rect::new(pill.rect.x, 0.0, pill.rect.w, pill.rect.y + pill.rect.h)
                     } else {
                         Rect::new(pill.rect.x, 0.0, pill.rect.w, bar_h)
@@ -3373,6 +5290,8 @@ impl App {
         self.update_clock_meta();
         self.update_notif_reveal();
         self.update_clip_reveal();
+        self.update_stats_reveal();
+        self.update_cava_reveal();
         // The hit target (card / control / footer) moves within the same box, so
         // redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
@@ -3448,7 +5367,9 @@ impl App {
         }
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for p in &self.options_pills() {
-            if p.id == PillId::Window || p.id == PillId::Close || ctrl_index(p.id).is_some() {
+            if matches!(p.id, PillId::Window | PillId::Close | PillId::WindowState)
+                || ctrl_index(p.id).is_some()
+            {
                 lo = lo.min(p.rect.x);
                 hi = hi.max(p.rect.x + p.rect.w);
             }
@@ -3480,7 +5401,15 @@ impl App {
             // the pointer like the window-title cluster (§1). Clicking its gear
             // pinned the Window group as leader and shifted the glass panel off
             // its own content. Exclude it from leading entirely.
-            .filter(|id| !(self.sunset_prompt_shown && group_of(*id) == PillGroup::Window))
+            .filter(|id| !(self.module_on_pill() && group_of(*id) == PillGroup::Window))
+            // The cava cluster shares the Mind group but is nothing like the
+            // Mind's ranked row: it is anchored to the clipboard, never
+            // re-ranks, and does not re-lay-out when used. §1 exists for groups
+            // that move under your hand as you act on them; pinning one that
+            // does not can only DISPLACE it — which is exactly what pressing a
+            // transport symbol did, shifting the cluster out from under the
+            // click between press and release (2026-09-12).
+            .filter(|id| !id.is_cava())
         else {
             return;
         };
@@ -3674,6 +5603,7 @@ impl App {
         } else {
             self.options_title_meta.last = None;
             self.options_title_meta.outgoing.clear();
+            self.options_title_meta.outgoing_module = None;
         }
     }
 
@@ -3692,7 +5622,7 @@ impl App {
         } else {
             matches!(
                 self.options_hover,
-                Some(PillId::Window) | Some(PillId::Close)
+                Some(PillId::Window) | Some(PillId::Close) | Some(PillId::WindowState)
             )
         };
         if want != self.options_ctrl.reveal {
@@ -3776,14 +5706,30 @@ impl App {
     /// backwards).
     ///
     /// The collapse waits for the pointer to leave rather than firing when the
-    /// clock itself is left, because the clock's width is not its own business:
-    /// the notification cluster is pinned a gap to its left
-    /// ([`Self::options_pills_resting`]), so the date's ~180px shrink drags the
-    /// bell sideways. Firing that while the pointer is still here would move a
-    /// pill the user is travelling to click, on a timer, for a reason they did
-    /// not ask for — and a re-flow nobody requested waits until the visit is
-    /// over (`OptionUXRules.md` §2, "The Still Bar").
+    /// clock itself is left, because the date's ~180px shrink hands the bell
+    /// back ([`clear_under`]): a pill the user may be travelling toward would
+    /// otherwise reappear under them, on a timer, for a reason they did not ask
+    /// for — and a change nobody requested waits until the visit is over
+    /// (`OptionUXRules.md` §2, "The Still Bar"). It used to be worse: the
+    /// notification cluster was pinned to the clock's LIVE edge, so growing the
+    /// date shoved the whole right end of the bar sideways. It now grows over
+    /// it instead (see [`Self::options_clock_rest_left`]), and this hold
+    /// guards only the hand-back.
     fn update_clock_meta(&mut self) {
+        // An OPEN notification drawer owns this corner: the clock may take the
+        // bell's place, but not a box's. Without this the date would grow ~180px
+        // across the drawer's top band — and the drawer, which draws itself and
+        // `continue`s, would print its first card's time straight back through
+        // the date. The clock is never removed for it (nothing may take the
+        // clock away); it simply stays the time until the box closes.
+        if self.notif.occludes_below_bar() {
+            if self.options_clock_meta.reveal {
+                self.options_clock_meta.reveal = false;
+                self.options_clock_meta.last = None;
+                self.schedule_options_clock_frame();
+            }
+            return;
+        }
         if self.options_hover == Some(PillId::Clock) {
             // Hovering the clock: reveal, and cancel any pending collapse.
             self.options_clock_meta.hold_deadline = None;
@@ -3795,20 +5741,20 @@ impl App {
         } else if clock_may_collapse(
             self.options_clock_meta.reveal,
             self.options_clock_meta.hold_deadline.is_some(),
-            self.options_ptr.is_some(),
+            self.options_hover == Some(PillId::Clock),
         ) {
-            // Left the surface while showing the date: hold, then collapse.
+            // Left the PILL while showing the date: hold, then collapse.
             self.schedule_clock_collapse();
         }
     }
 
-    /// After the pointer leaves, keep the date up for the shared
-    /// [`animation::LEAVE_HOLD`], then play
-    /// the metamorphosis backwards — unless the pointer came back inside the
-    /// hold, in which case the collapse is abandoned rather than played under
-    /// them (it is re-armed by the next leave). Shrinking the clock moves the
-    /// notification cluster, and that must not happen while anyone is aiming at
-    /// it; see [`Self::update_clock_meta`].
+    /// After the pointer leaves THE CLOCK, keep the date up for the shared
+    /// [`animation::LEAVE_HOLD`], then play the metamorphosis backwards —
+    /// unless the pointer came back onto the pill inside the hold, in which
+    /// case the collapse is abandoned rather than played under them (it is
+    /// re-armed by the next leave). The hold is what keeps a pointer merely
+    /// crossing the clock from playing the whole morph out and back; see
+    /// [`clock_may_collapse`] for why leaving the pill is now enough.
     fn schedule_clock_collapse(&mut self) {
         let deadline = Instant::now() + animation::LEAVE_HOLD;
         self.options_clock_meta.hold_deadline = Some(deadline);
@@ -3818,7 +5764,7 @@ impl App {
             .insert_source(timer, move |_, _, app: &mut App| {
                 if app.options_clock_meta.hold_deadline == Some(deadline) {
                     app.options_clock_meta.hold_deadline = None;
-                    if app.options_ptr.is_none() {
+                    if app.options_hover != Some(PillId::Clock) {
                         app.options_clock_meta.reveal = false;
                         app.options_clock_meta.last = None;
                         app.schedule_options_clock_frame();
@@ -3890,34 +5836,129 @@ impl App {
     /// Whether the prompt WANTS the pill: offered (or debug-forced) and not
     /// already answered by the user within this offer-cycle.
     fn sunset_prompt_wanted(&self) -> bool {
-        !self.sunset_acted && (self.sunset_debug || self.sunset_offer().is_some())
+        !self.sunset_acted
+            && (self.module_debug == Some(Module::Sunset)
+                || self.sunset_recalled
+                || self.sunset_offer().is_some())
     }
 
-    /// Reconcile the drawn prompt with the want — called on every Mind
-    /// republish, on the debug toggle, and when the pointer leaves the bar.
-    ///
-    /// The Still Bar (`OptionUXRules.md` §2): the prompt arriving or
-    /// withdrawing is nobody's request, so while the pointer is on the bar
-    /// strip it WAITS — the morph plays once you leave. The user's own answer
-    /// goes through [`Self::resolve_sunset_prompt`] instead, which reflows at
-    /// once. A spent answer is forgotten once the Mind stops offering
-    /// (hyprsunset runs / the sun comes back), so the next sunset asks fresh.
-    pub(crate) fn sync_sunset_prompt(&mut self) {
-        if self.sunset_acted && !self.sunset_debug && self.sunset_offer().is_none() {
+    /// Force a module onto the pill (or drop the force if it is already the one
+    /// being forced) — the `debug-*` verbs' shared body. Toggling, so one verb
+    /// both raises and dismisses it.
+    pub(crate) fn force_module(&mut self, module: Module) {
+        self.module_debug = (self.module_debug != Some(module)).then_some(module);
+        // A fresh force is a fresh offer: forget that the last one was answered.
+        if self.module_debug.is_some() {
             self.sunset_acted = false;
         }
-        // The module stays present as long as its settings box is open (or
-        // still animating): the box IS the module expanded, so the offer
-        // withdrawing under it (e.g. picking a temperature starts hyprsunset,
-        // which pulls the offer) must NOT drop the module and bring the window
-        // controls back while the box is still on screen. Once the box is fully
-        // closed, `tick_sunset_box` re-syncs and the module withdraws if the
-        // offer is gone.
-        let want = self.sunset_prompt_wanted() || self.sunset_box_open || self.sunset_box_e > 0.001;
-        if want == self.sunset_prompt_shown || self.options_ptr_on_bar() {
+        info!(
+            "options: module force {}",
+            self.module_debug.map_or("OFF", Module::name)
+        );
+        self.sync_module();
+    }
+
+    /// Which module the current-task pill should be wearing — the first in
+    /// [`Module::ALL`] that wants it.
+    ///
+    /// The order is the precedence, and it is not arbitrary: a module that
+    /// **asks something that expires** outranks one that will still be there in
+    /// a minute. With a single module today it decides nothing, and it is kept
+    /// because the pill is one object: the moment there are two, one of them has
+    /// to lose (`OptionUXRules.md` §5).
+    fn module_wanted(&self) -> Option<Module> {
+        // A debug-forced module outranks the order: it exists to be looked at,
+        // and a demo that loses the pill to a real offer is no demo.
+        if let Some(m) = self.module_debug.filter(|m| self.module_live(*m)) {
+            return Some(m);
+        }
+        Module::ALL.into_iter().find(|m| self.module_live(*m))
+    }
+
+    /// Whether this module has something to say right now.
+    fn module_live(&self, module: Module) -> bool {
+        match module {
+            Module::Sunset => self.sunset_prompt_wanted(),
+        }
+    }
+
+    /// Whether a module is on the pill at all (the window title has stepped
+    /// aside for it). The generic gate — the controls that must stand down, the
+    /// Leader that must not capture, the click that is neither answer.
+    pub(crate) fn module_on_pill(&self) -> bool {
+        self.module_shown.is_some()
+    }
+
+    /// Whether the pill is wearing the sunset question specifically.
+    pub(crate) fn sunset_prompt_shown(&self) -> bool {
+        self.module_shown == Some(Module::Sunset)
+    }
+
+    /// Bring an answered offer back to the bar: the user clicked its record in
+    /// the notifications ([`crate::action_track`]) and wants to be asked again.
+    /// Returns whether this offer has a surface to come back to — a caller with
+    /// `false` falls back to running the action outright.
+    ///
+    /// The sunset prompt is the only offer with a surface of its own today, so
+    /// this is a one-arm match; as ACTIONS lands, each offer's surface answers
+    /// here.
+    pub(crate) fn recall_offer(&mut self, id: &str) -> bool {
+        if id != SUNSET_OFFER_ID {
+            return false;
+        }
+        // A recall is a fresh asking: forget that this offer-cycle was already
+        // answered, and hold the prompt up even though the Mind has long since
+        // withdrawn the offer — it withdraws the moment hyprsunset runs, which
+        // is exactly the state you are in when you go looking for the record.
+        self.sunset_acted = false;
+        self.sunset_recalled = true;
+        // Straight to shown, not through `sync_module`: §2 Still Bar defers the
+        // *unrequested* arrival until the pointer leaves the bar, and this
+        // arrival is the user's own request (the same reason
+        // `resolve_sunset_prompt` reflows at once).
+        self.module_shown = Some(Module::Sunset);
+        self.measure_options_text();
+        self.draw_options();
+        true
+    }
+
+    /// Reconcile the module the pill is DRAWING with the one that is wanted —
+    /// called on every Mind republish, on the debug toggle, and when the pointer
+    /// leaves the bar.
+    ///
+    /// The Still Bar (`OptionUXRules.md` §2): a module arriving, withdrawing or
+    /// *handing over* is nobody's request, so while the pointer is on the bar
+    /// strip it WAITS — the morph plays once you leave. The user's own answer
+    /// goes through [`Self::resolve_sunset_prompt`] instead, which reflows at
+    /// once. A spent sunset answer is forgotten once the Mind stops offering
+    /// (hyprsunset runs / the sun comes back), so the next sunset asks fresh.
+    pub(crate) fn sync_module(&mut self) {
+        if self.sunset_acted && self.module_debug.is_none() && self.sunset_offer().is_none() {
+            self.sunset_acted = false;
+        }
+        let mut want = self.module_wanted();
+        // A module with its box open (or still animating) stays put: the box IS
+        // that module expanded, so an offer withdrawing under it (picking a
+        // temperature starts hyprsunset, which pulls the sunset offer; putting a
+        // window on the space ends the empty room) must NOT drop the module and
+        // bring the window controls back while the panel is still on screen —
+        // nor hand the pill to another module underneath it. Once the box has
+        // fully closed, `tick_module_box` re-syncs and the module withdraws if
+        // its offer is gone.
+        if self.module_box_open || self.module_box_e > 0.001 {
+            want = self.module_shown.or(want);
+        }
+        if want == self.module_shown || self.options_ptr_on_bar() {
             return;
         }
-        self.sunset_prompt_shown = want;
+        // The one line that records a module taking or leaving the pill — the
+        // only way to tell, after the fact, whether a late arrival was the Mind
+        // deciding late or the surface drawing late.
+        info!(
+            "options: module → {}",
+            want.map_or("none", |m: Module| m.name())
+        );
+        self.module_shown = want;
         self.measure_options_text();
         self.draw_options();
     }
@@ -3926,15 +5967,22 @@ impl App {
     /// module returns to its task NOW — this reflow is their own request.
     fn resolve_sunset_prompt(&mut self) {
         self.sunset_acted = true;
-        self.sunset_debug = false;
+        self.module_debug = None;
+        // A recalled prompt is spent by the same answer that spends a real one.
+        self.sunset_recalled = false;
         // The settings box belongs to the prompt — snap it fully shut BEFORE
         // withdrawing the module, so there is never a frame with the module
         // gone but a half-open box still on screen (the window controls behind
         // a stray panel). A resolve is an abrupt answer; the box vanishes with
         // it rather than easing.
-        self.sunset_box_open = false;
-        self.sunset_box_e = 0.0;
-        self.sunset_prompt_shown = false;
+        self.module_box_open = false;
+        self.module_box_e = 0.0;
+        // Not simply `None`: answering hands the pill to whatever module wanted
+        // it next, and the empty room may well be underneath (turning on eye
+        // protection on a bare workspace is exactly that case). Re-asking rather
+        // than clearing keeps the answer's reflow to ONE motion (§6) instead of
+        // a withdrawal now and an arrival a republish later.
+        self.module_shown = self.module_wanted();
         self.sync_options_input();
         self.measure_options_text();
         self.draw_options();
@@ -3948,7 +5996,26 @@ impl App {
             Some(a) => self.run_affordance_action(&a),
             None => self.eye_protection_on(),
         }
+        // Before the resolve, while the offer is still on the bar to be read.
+        self.track_sunset_answer("Turned on", true);
         self.resolve_sunset_prompt();
+    }
+
+    /// File this answer as a record in the notifications (see
+    /// `action_track.rs`): what was offered, what you said, when — and the
+    /// offer's own action kept whole, so clicking the card runs it again.
+    /// Falls back to the module's own words when the prompt is debug-forced and
+    /// there is no live affordance behind it.
+    fn track_sunset_answer(&mut self, answer: &str, taken: bool) {
+        let (id, offered, action) = match self.sunset_offer() {
+            Some(a) => (a.id.to_owned(), a.title.clone(), a.action.clone()),
+            None => (
+                SUNSET_OFFER_ID.to_owned(),
+                SUNSET_OFFER_TITLE.to_owned(),
+                options_engine::AffordanceAction::Daemon("eye_protection_on".into()),
+            ),
+        };
+        self.track_action(&id, &offered, answer, taken, action);
     }
 
     /// Warm the screen. 4000K is a gentle evening warmth (hyprsunset's identity
@@ -3958,96 +6025,132 @@ impl App {
         self.set_screen_temperature(SUNSET_TURN_ON_K);
     }
 
+    /// The module actually on the pill as far as the DRAWING is concerned —
+    /// read from the title metamorphosis, so it stays true through the whole
+    /// morph in both directions (a module that is leaving is still the module
+    /// being drawn). `None` for an ordinary title.
+    ///
+    /// This is the reason the costume can never disagree with the words: intent
+    /// lives in `module_shown`, but every size, colour and clip below is keyed
+    /// off the text on screen.
+    fn module_drawn(&self) -> Option<Module> {
+        let m = &self.options_title_meta;
+        m.shown_module
+            .or_else(|| m.outgoing_module.filter(|_| m.t < 0.999))
+    }
+
     /// How present the asking module is, riding the title morph both ways:
-    /// 0 = an ordinary window pill, 1 = the question fully standing. Drives
+    /// 0 = an ordinary window pill, 1 = the module fully standing. Drives
     /// the parent's size step and its opaque box surface, so the module's
     /// whole costume arrives and leaves as one movement.
-    fn sunset_module_t(&self) -> f32 {
+    fn module_t(&self) -> f32 {
         let m = &self.options_title_meta;
-        if m.shown == SUNSET_MSG {
+        if m.shown_module.is_some() {
             m.t
-        } else if m.outgoing == SUNSET_MSG && m.t < 0.999 {
+        } else if m.outgoing_module.is_some() && m.t < 0.999 {
             1.0 - m.t
         } else {
             0.0
         }
     }
 
-    /// The sunset module's nested `[turn on]` and settings-gear rects — the
-    /// module's right end. The SINGLE source of truth for where those two
-    /// pills sit, read both by the pill layout above and by the message
-    /// draw path below (which must clip the sentence to stop here, not at
-    /// the module's outer edge): during the arrival morph the box is still
+    /// The module's nested children — the optional `[turn on]` (sunset alone
+    /// has one) and the settings gear — at the module's right end. The SINGLE
+    /// source of truth for where they sit, read both by the pill layout above
+    /// and by the message draw path below.
+    ///
+    /// The sentence must be clipped to stop at the LEFTMOST of these, not at
+    /// the module's outer edge: during the arrival morph the box is still
     /// narrower than its settled width, so the box's own edge is not a tight
-    /// enough bound — for most of that ease, `[turn on]` sits well INSIDE
-    /// the box, and a naive box-edge clip lets the (fixed-width, unresized)
-    /// message run straight through it. Found live 2026-09-08: the sentence
-    /// visibly overlapped `[turn on]` for the whole arrival morph, only
-    /// snapping clear in its last few percent.
-    fn sunset_nested_rects(&self) -> (Rect, Rect) {
-        let mt = self.sunset_module_t();
+    /// enough bound — for most of that ease the children sit well INSIDE it, and
+    /// a naive box-edge clip lets the (fixed-width, unresized) message run
+    /// straight through them. Found live 2026-09-08: the sentence visibly
+    /// overlapped `[turn on]` for the whole arrival morph, only snapping clear
+    /// in its last few percent.
+    fn module_nested_rects(&self) -> (Option<Rect>, Rect) {
+        let module = self.module_drawn();
+        let mt = self.module_t();
         let ph = self.options_pill_h();
         let y = PILL_MARGIN_Y;
-        let cg = SUNSET_CHILD_GROW * mt;
+        let cg = MODULE_CHILD_GROW * mt;
         let ih = ph + 2.0 * cg;
         let iw = self.sunset_inner_w.max(ph) + 2.0 * cg; // [turn on]
         let gw = ih; // the settings gear is a circle
-        let iy = y + (SUNSET_DROP_Y + SUNSET_GROW_H / 2.0) * mt - cg;
+        let iy = y + (MODULE_DROP_Y + MODULE_GROW_H / 2.0) * mt - cg;
         // The gear sits at the module/box's right end; [turn on] a gap to its
         // left. Anchored to the LIVE box rect, so as the box narrows into the
         // settings panel the gear rides in with it and stays the panel's
         // top-right corner.
-        let br = self.sunset_box_rect();
+        let br = self.module_rect();
         let gx = (br.x + br.w - PILL_PAD_X - gw).max(br.x);
-        let ix = (gx - SUNSET_INNER_GAP - iw).max(br.x);
-        (Rect::new(ix, iy, iw, ih), Rect::new(gx, iy, gw, ih))
+        let turn_on = module.is_some_and(Module::has_turn_on).then(|| {
+            let ix = (gx - SUNSET_INNER_GAP - iw).max(br.x);
+            Rect::new(ix, iy, iw, ih)
+        });
+        (turn_on, Rect::new(gx, iy, gw, ih))
     }
 
-    /// The banner-blister parameters (bar-edge line + fillet radius `k`) when
-    /// the sunset module is on the bar, else `None` — set into `Scene::neck`.
+    /// Where the module's sentence has to stop: a gap left of its leftmost
+    /// child, or the pill's own right edge when it has none.
+    fn module_msg_right(&self) -> f32 {
+        let (turn_on, gear) = self.module_nested_rects();
+        turn_on.unwrap_or(gear).x - MODULE_GAP
+    }
+
+    /// The banner-blister parameters (bar-edge line + fillet radius `k`) when a
+    /// module is on the bar, else `None` — set into `Scene::neck`.
     /// Returned only while the blister rect is actually drawn (module
     /// shown/morphing), so the flag and the params can't disagree.
-    pub(crate) fn sunset_neck(&self) -> Option<[f32; 4]> {
-        let m = &self.options_title_meta;
-        let active = m.shown == SUNSET_MSG || (m.outgoing == SUNSET_MSG && m.t < 0.999);
-        active.then(|| {
+    pub(crate) fn module_neck(&self) -> Option<[f32; 4]> {
+        self.module_drawn().map(|_| {
             [
                 self.options_bar_h(),
-                SUNSET_NECK_K * self.options_scale(),
+                MODULE_NECK_K * self.options_scale(),
                 0.0,
                 0.0,
             ]
         })
     }
 
-    /// The module/settings-box rect: the centred prompt pill, grown by its size
-    /// step (`sunset_module_t`) and then downward by the box progress
-    /// (`sunset_box_e`) into the full settings panel. The one place the shape
-    /// is defined — the layout draws the glass here, and [`crate::sunset`]
-    /// lays its content out against the same rect. With both progresses 0 it is
-    /// exactly the ordinary window pill.
-    pub(crate) fn sunset_box_rect(&self) -> Rect {
+    /// The module's box size when fully open, in scaled px — the drawn module's
+    /// own ([`Module::box_size`]), sized to the readout it holds. Falls back to
+    /// the sunset panel's when no module is on the pill, which is a value
+    /// nothing can read: with no module there is no box, and `module_box_e` is
+    /// 0.
+    pub(crate) fn module_box_size(&self) -> (f32, f32) {
+        let s = self.options_scale();
+        let (w, h) = self.module_drawn().unwrap_or(Module::Sunset).box_size();
+        (w * s, h * s)
+    }
+
+    /// The module rect: the centred module pill, grown by its size step
+    /// ([`Self::module_t`]) and then downward by `module_box_e` into the full
+    /// settings panel. The one place the shape is defined: the layout draws the
+    /// surface here, and [`crate::module_box`] lays each panel's content out
+    /// against the same rect. With both progresses 0 it is exactly the ordinary
+    /// window pill, which is what makes the arrival a morph rather than a swap.
+    pub(crate) fn module_rect(&self) -> Rect {
         let sw = self.options_size.0 as f32;
         let ph = self.options_pill_h();
-        let s = self.options_scale();
         let y = PILL_MARGIN_Y;
         let ww = (self.options_title_content_w() + 2.0 * PILL_PAD_X).max(ph);
         let wx = ((sw - ww) / 2.0).max(EDGE_PAD);
-        let mt = self.sunset_module_t();
-        let mgx = SUNSET_GROW_X * mt;
+        let mt = self.module_t();
+        let mgx = MODULE_GROW_X * mt;
         let module_w = ww + 2.0 * mgx;
-        let module_h = ph + SUNSET_GROW_H * mt;
+        let module_h = ph + MODULE_GROW_H * mt;
         // The CENTRE stays fixed through the morph: the box narrows inward from
         // both sides and drops downward, staying centred on the bar whatever
         // the pointer did. (The gear/× rides in with the right edge — it is
         // anchored to this rect, not to the pointer that opened it.)
         let cx = wx - mgx + module_w / 2.0;
-        let e = self.sunset_box_e;
-        let panel_w = (SUNSET_BOX_W * s).min(module_w);
-        let box_h = (SUNSET_BOX_H * s).max(module_h);
+        let e = self.module_box_e;
+        let (bw, bh) = self.module_box_size();
+        let panel_w = bw.min(module_w);
+        let box_h = bh.max(module_h);
         let w = lerp(module_w, panel_w, e);
         let h = lerp(module_h, box_h, e);
-        Rect::new(cx - w / 2.0, y + SUNSET_DROP_Y * mt, w, h)
+        Rect::new(cx - w / 2.0, y + MODULE_DROP_Y * mt, w, h)
     }
 
     /// The module's ink: the BAR's own adaptive ink (`options_text_color`).
@@ -4055,7 +6158,7 @@ impl App {
     /// banner), so its text must read on the banner exactly like the clock and
     /// window-title do — measured against the same backdrop. It "changes" only
     /// when the whole bar's ink does (matched vs frosted), not per-module.
-    pub(crate) fn sunset_module_ink(&self) -> [f32; 4] {
+    pub(crate) fn module_ink(&self) -> [f32; 4] {
         self.options_text_color()
     }
 
@@ -4067,26 +6170,27 @@ impl App {
     /// BOOST`) at rest, easing to the open panel's own alpha as the settings
     /// box opens — each caller still applies its OWN presence multiplier
     /// (`mt` for the parent, the turn-on/gear fade for the children) on top.
-    pub(crate) fn sunset_fill_alpha(&self) -> f32 {
+    pub(crate) fn module_fill_alpha(&self) -> f32 {
         let rest_a =
-            (self.options_rest_wash()[3] * SUNSET_REST_ALPHA_BOOST).min(self.box_panel_alpha());
-        lerp(rest_a, self.box_panel_alpha(), self.sunset_box_e)
+            (self.options_rest_wash()[3] * MODULE_REST_ALPHA_BOOST).min(self.box_panel_alpha());
+        lerp(rest_a, self.box_panel_alpha(), self.module_box_e)
     }
 
-    /// The nested [turn on] pill's presence, riding the title metamorphosis:
-    /// it fades in on the question's own incoming ramp and back out on its
-    /// outgoing one, so the module reads as ONE morph — never a pill popping
-    /// onto a pill. Keyed on the morph's actual endpoints (the message text),
-    /// not on intent flags, so it can't desynchronise from what's drawn.
-    fn sunset_turnon_alpha(&self) -> f32 {
+    /// The nested children's presence ([turn on], the gear), riding the title
+    /// metamorphosis: they fade in on the sentence's own incoming ramp and back
+    /// out on its outgoing one, so the module reads as ONE morph — never a pill
+    /// popping onto a pill. Keyed on the morph's actual endpoints (the sentence
+    /// on screen), not on intent flags, so it can't desynchronise from what is
+    /// drawn.
+    fn module_child_alpha(&self) -> f32 {
         let m = &self.options_title_meta;
-        if m.shown == SUNSET_MSG {
+        if m.shown_module.is_some() {
             if m.t >= 0.999 {
                 1.0
             } else {
                 ((m.t - TITLE_IN_START) / (1.0 - TITLE_IN_START)).clamp(0.0, 1.0)
             }
-        } else if m.outgoing == SUNSET_MSG && m.t < 0.999 {
+        } else if m.outgoing_module.is_some() && m.t < 0.999 {
             (1.0 - m.t / TITLE_OUT_END).clamp(0.0, 1.0)
         } else {
             0.0
@@ -4097,16 +6201,16 @@ impl App {
         // The open sunset settings box: the gear (top-right) closes it; a click
         // on a control acts; a click anywhere else closes it. Checked before
         // everything else so an open box owns the surface.
-        if self.sunset_box_e > 0.5 {
-            if self.options_hover == Some(PillId::SunsetSettings) {
-                self.toggle_sunset_box();
+        if self.module_box_e > 0.5 {
+            if self.options_hover == Some(PillId::ModuleSettings) {
+                self.toggle_module_box();
                 return;
             }
             if let Some((px, py)) = self.options_ptr {
-                if self.sunset_box_click(px, py) {
+                if self.module_box_click(px, py) {
                     return;
                 }
-                self.close_sunset_box();
+                self.close_module_box();
                 return;
             }
         }
@@ -4121,21 +6225,6 @@ impl App {
             self.clip_box_click();
             return;
         }
-        // The open media transport box handles its own hits (transport / seek /
-        // volume) at the pointer position.
-        if self.media_box_open {
-            if let Some((px, py)) = self.options_ptr {
-                if self.media_box_click(px, py) {
-                    self.draw_options();
-                    return;
-                }
-                // A click outside the box closes it.
-                self.media_box_open = false;
-                self.sync_options_input();
-                self.draw_options();
-                // Fall through so the click can still hit a pill.
-            }
-        }
         // Remember what was acted on and where it was drawn, so that a
         // concealment arriving right behind this click can be blamed on it and
         // leave the control standing (`OptionUXRules.md` §4).
@@ -4145,15 +6234,50 @@ impl App {
             }
         }
         match self.options_hover {
+            // The gear opens PAGE 1; each reading in the readout opens its own
+            // (Max, 2026-09-13: *"make each a button, everyone have a page on
+            // the box"*). Pressing the button of the page already showing puts
+            // the panel away — the gear's original toggle, now the rule for all
+            // of them.
+            Some(PillId::Settings) => self.stats_open_page(1),
+            Some(PillId::SettingsStats) => {
+                // The open PAGE gets the click first — it may have controls of
+                // its own (page 1's floating switch). Only then the button row.
+                //
+                // Which reading was hit decides the page. A press on the panel
+                // BELOW the row is not a button press at all — it is a press on
+                // the page you are already reading, and it does nothing rather
+                // than turning to whatever happens to be above it.
+                if let Some((px, py)) = self.options_ptr {
+                    if self.stats_panel_click(px, py) {
+                        return;
+                    }
+                    if let Some(page) = self.stats_page_at(px, py) {
+                        self.stats_open_page(page);
+                    }
+                }
+            }
             // An empty doorway is not an action — a click on it does what
             // hovering it already did: bring the bar back (§4).
             Some(PillId::Doorway) => self.open_doorway(),
-            // The media glyph pill toggles the transport box.
-            Some(PillId::MediaOpen) => {
-                self.media_box_open = !self.media_box_open;
-                self.sync_options_input();
-                self.draw_options();
+            // The cava cluster's transport. The spectrum itself is not a
+            // button: clicking it does nothing, because it is information, and
+            // a click that does nothing is better than a click that guesses.
+            Some(PillId::CavaPlay) => {
+                // Flip the face NOW — the user just told us what it should be,
+                // and waiting a poll to agree is a delay with no information in
+                // it. The deadline is the loan's term.
+                let now_playing = self.cava_is_playing();
+                self.cava_assume = Some((
+                    !now_playing,
+                    Instant::now() + std::time::Duration::from_millis(2500),
+                ));
+                self.schedule_cava_frame();
+                self.cava_play_pause();
             }
+            Some(PillId::CavaPrev) => self.cava_transport("previous"),
+            Some(PillId::CavaNext) => self.cava_transport("next"),
+            // The media glyph pill toggles the transport box.
             // While the overview owns the screen the X closes the OVERVIEW,
             // not the window under it — the bar is the overview's only
             // on-screen exit affordance (Esc/Super+R being the others).
@@ -4167,17 +6291,30 @@ impl App {
             Some(PillId::SunsetTurnOn) => self.sunset_turn_on(),
             // The settings gear: expand the module into the settings box (or
             // collapse it if already open).
-            Some(PillId::SunsetSettings) => self.toggle_sunset_box(),
-            // While the module is asking the sunset question a click on the
-            // message is neither answer — the button answers yes, a
-            // right-click answers "not now".
-            Some(PillId::Window) if self.sunset_prompt_shown => {}
+            Some(PillId::ModuleSettings) => self.toggle_module_box(),
+            // While a module holds the pill, a click on the sentence itself does
+            // nothing: for the sunset question it is neither answer (the button
+            // answers yes, a right-click answers "not now"), and for the empty
+            // room there is no task to cycle focus to. The sentence is text, not
+            // a button.
+            Some(PillId::Window) if self.module_on_pill() => {}
             // The current-task pill cycles focus through this workspace's
             // windows, most-used first (see `crate::focus_cycle`).
             Some(PillId::Window) => self.cycle_focus(true),
             // The window-mode controls. One mode at a time: entering one leaves
             // whatever was on, and pressing the mode you are already in returns
             // the window to the layout (see [`hypr::set_window_mode`]).
+            // The state pill is the control for the mode it SHOWS — the one
+            // whose glyph is under the finger, never the live mode.
+            //
+            // The difference is the whole toggle. Press it once and the window
+            // leaves that mode, but the pill stays put (§2, the row is frozen
+            // while the hand is on the bar), so the obvious second press means
+            // "put it back". Acting on the live mode instead asked for the mode
+            // the window had *just* reached — tiled — which is where it already
+            // was, so nothing happened and the button read as stuck until you
+            // walked away and came back (Max, 2026-09-13).
+            Some(PillId::WindowState) => self.set_window_mode(self.options_mode_shown),
             Some(PillId::Pseudo) => self.set_window_mode(hypr::WindowMode::Pseudo),
             Some(PillId::Float) => self.set_window_mode(hypr::WindowMode::Floating),
             Some(PillId::Fullscreen) => self.set_window_mode(hypr::WindowMode::Fullscreen),
@@ -4191,6 +6328,8 @@ impl App {
             Some(PillId::ClipCopyLink) => self.copy_active_link(),
             // A dynamic OPTION control from the Mind — run its action.
             Some(PillId::Option(i)) => self.trigger_option(i as usize),
+            // The stage's mode switch: one task alone, or the whole desk.
+            Some(PillId::StageMode) => self.toggle_stage_mode(),
             _ => {}
         }
     }
@@ -4242,11 +6381,15 @@ impl App {
     ///
     /// The `Daemon(tag)` vocabulary is stringly-typed across two crates: keep
     /// the match arms in `run_affordance_action` and [`daemon_tag_known`] in
-    /// lockstep — the `engine_daemon_tags_are_all_dispatchable` test walks the
-    /// ENGINE's actual emissions against `daemon_tag_known`, so a tag added on
-    /// the engine side without a dispatch arm fails the daemon's tests instead
-    /// of shipping a dead pill.
-    fn run_affordance_action(&mut self, action: &options_engine::AffordanceAction) {
+    /// lockstep, or a tag added on the engine side without a dispatch arm
+    /// ships as a pill that logs a warn and does nothing.
+    ///
+    /// The cross-crate test that walked the ENGINE's actual emissions against
+    /// `daemon_tag_known` was removed with the providers (2026-09-12) — it
+    /// asserted specific tags were emitted, and no provider emits anything
+    /// now. **Restore it alongside the first curated OPTION that carries a
+    /// `Daemon(tag)`**, or this seam goes back to being unguarded.
+    pub(crate) fn run_affordance_action(&mut self, action: &options_engine::AffordanceAction) {
         use options_engine::AffordanceAction as A;
         match action {
             A::None => {}
@@ -4334,12 +6477,13 @@ impl App {
         }
         // The sunset prompt's "not now": a right-click anywhere on the asking
         // module resolves it for this offer (the Mind re-offers next sunset).
-        if self.sunset_prompt_shown
+        if self.sunset_prompt_shown()
             && matches!(
                 self.options_hover,
-                Some(PillId::Window | PillId::SunsetTurnOn | PillId::SunsetSettings)
+                Some(PillId::Window | PillId::SunsetTurnOn | PillId::ModuleSettings)
             )
         {
+            self.track_sunset_answer("Not now", false);
             self.resolve_sunset_prompt();
             return;
         }
@@ -4385,6 +6529,17 @@ impl App {
                     Shape::Default
                 }
             }
+            // The gear and every reading in its readout open a page now, so
+            // they may claim to be buttons — which they could not while they
+            // did nothing (a pointer cursor over a dead pill is the surface
+            // saying something untrue). The panel BELOW the row is not a button
+            // though: it is the page you are reading, and it says so by leaving
+            // the cursor alone.
+            Some(PillId::Settings) => Shape::Pointer,
+            Some(PillId::SettingsStats) => match self.options_ptr {
+                Some((px, py)) if self.stats_page_at(px, py).is_some() => Shape::Pointer,
+                _ => Shape::Default,
+            },
             // The small clipboard pill is clickable (paste) → pointer.
             Some(PillId::Clock) | None => Shape::Default,
             Some(_) => Shape::Pointer, // control circle / small clipboard pill
@@ -4527,7 +6682,12 @@ impl crate::App {
         self.border_pushed = Some(stops);
         let hex = |c: [f32; 4]| {
             let byte = |v: f32| (linear_to_srgb(v).clamp(0.0, 1.0) * 255.0).round() as u8;
-            format!("rgba({:02x}{:02x}{:02x}ff)", byte(c[0]), byte(c[1]), byte(c[2]))
+            format!(
+                "rgba({:02x}{:02x}{:02x}ff)",
+                byte(c[0]),
+                byte(c[1]),
+                byte(c[2])
+            )
         };
         crate::hypr::eval(&format!(
             "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ '{}', '{}', '{}' }}, angle = 90 }} }} }} }})",
@@ -4609,11 +6769,13 @@ impl crate::App {
             DOCK_FILL_RATE,
             hidden,
         );
-        // Ink decision from the eased fill while a sample drives it (the
-        // dock's white-in-the-dark rule, see `dock_ink_on`); the theme's
-        // own ink for the (brief) sampleless fallback.
+        // Ink decision from the eased fill while a sample drives it — the
+        // same rule the bar uses (the dock used to need its own because it
+        // wanted pure white where the bar wanted warm off-white; now that
+        // OPTIONS' ink is real black and white there is one rule); the
+        // theme's own ink for the (brief) sampleless fallback.
         let ink_target = if self.dock_regime().get().is_some() {
-            dock_ink_on(fill)
+            ink_on(fill)
         } else {
             fallback_ink
         };
@@ -4711,17 +6873,129 @@ mod tests {
     use super::*;
     use options_engine::AffordanceAction;
 
+    fn pill_at(id: PillId, x: f32, w: f32) -> Pill {
+        Pill {
+            id,
+            rect: Rect::new(x, 2.5, w, 25.0),
+            text: String::new(),
+            family: None,
+            glyph_color: None,
+        }
+    }
+
+    /// An open box takes the bar it stands on: every pill under it leaves, its
+    /// own parts stay, and the pills clear of it are untouched — including
+    /// their POSITIONS, since a re-flow under the pointer is exactly what
+    /// `OptionUXRules.md` §2 forbids.
     #[test]
-    fn option_glyphs_map_by_id_and_playpause_by_title() {
-        assert_eq!(glyph_for_option("media.playpause", "Pause"), GLYPH_PAUSE);
-        assert_eq!(glyph_for_option("media.playpause", "Play"), GLYPH_PLAY);
-        assert_eq!(glyph_for_option("media.vol_up", ""), GLYPH_VOL_UP);
-        assert_eq!(glyph_for_option("git.commit", ""), GLYPH_COMMIT);
-        assert_eq!(glyph_for_option("git.push", ""), GLYPH_PUSH);
-        assert_eq!(glyph_for_option("audio.mic_mute", ""), GLYPH_MIC_SLASH);
-        assert_eq!(glyph_for_option("selection.url", ""), GLYPH_COPY_LINK);
-        // An unknown id still gets a (generic) glyph, never a crash.
+    fn an_open_box_clears_the_pills_it_covers() {
+        let mut pills = vec![
+            pill_at(PillId::Settings, 6.0, 28.0),   // left of the box
+            pill_at(PillId::Clipboard, 40.0, 28.0), // the box's own pill
+            pill_at(PillId::Cava, 120.0, 60.0),     // fully under it
+            pill_at(PillId::CavaPlay, 150.0, 12.0), // its glyph, ditto
+            pill_at(PillId::Clock, 500.0, 60.0),    // clear to the right
+        ];
+        let before_clock = pills[4].rect.x;
+        clear_under(&mut pills, Rect::new(40.0, 2.5, 380.0, 500.0), |id| {
+            matches!(id, PillId::Clipboard | PillId::Settings)
+        });
+        let left: Vec<PillId> = pills.iter().map(|p| p.id).collect();
+        assert_eq!(
+            left,
+            vec![PillId::Settings, PillId::Clipboard, PillId::Clock],
+            "the covered pills should have left the bar, and only those"
+        );
+        assert_eq!(pills[2].rect.x, before_clock, "the survivors must not move");
+    }
+
+    /// Touching is not covering: a pill that only abuts the box's edge stays.
+    #[test]
+    fn a_pill_beside_an_open_box_survives() {
+        let mut pills = vec![pill_at(PillId::Cava, 420.0, 60.0)];
+        clear_under(&mut pills, Rect::new(40.0, 2.5, 380.0, 500.0), |_| false);
+        assert_eq!(pills.len(), 1, "x = box right edge is not under the box");
+    }
+
+    /// The clock is furniture: it covers, it is never covered. The bell's peek
+    /// used to take it away the moment the date grew into the preview's span —
+    /// hover the bell, slide right, and the clock disappeared.
+    #[test]
+    fn nothing_takes_the_clock_away() {
+        let mut pills = vec![
+            pill_at(PillId::Notif, 1500.0, 380.0),
+            pill_at(PillId::Clock, 1744.0, 250.0),
+        ];
+        clear_under(&mut pills, Rect::new(1500.0, 2.5, 380.0, 28.0), |id| {
+            matches!(id, PillId::Notif | PillId::NotifMute)
+        });
+        assert!(
+            pills.iter().any(|p| p.id == PillId::Clock),
+            "the clock must survive whatever stands on it"
+        );
+    }
+
+    /// Everything a module owes the pill it takes over, checked for every one
+    /// there is: a sentence to wear (an empty one leaves a blank pill standing
+    /// on the bar), a panel header that names it as a place rather than
+    /// repeating its sentence, and a box big enough to be a panel.
+    ///
+    /// `has_children` is what decides whether the sentence is left-anchored and
+    /// clipped at its leftmost child or centred like an ordinary title, so it
+    /// must follow from the children actually being laid out, never be set by
+    /// hand. The gear is universal; only a module that ASKS something carries an
+    /// action pill to answer with.
+    #[test]
+    fn every_module_can_wear_the_pill() {
+        assert!(
+            Module::Sunset.has_turn_on(),
+            "it asks, so it can be answered"
+        );
+        for m in Module::ALL {
+            assert!(!m.msg().is_empty(), "{m:?} would stand there blank");
+            assert!(m.has_gear(), "{m:?} has a settings box to reach");
+            assert_eq!(
+                m.has_children(),
+                m.has_gear() || m.has_turn_on(),
+                "{m:?}'s anchoring must follow from what it actually nests"
+            );
+            assert!(!m.panel_title().is_empty(), "{m:?} panel has no header");
+            assert_ne!(m.panel_title(), m.msg());
+            let (w, h) = m.box_size();
+            assert!(w > 0.0 && h > 0.0, "{m:?} has no box");
+        }
+    }
+
+    /// The module offers have their own surface (this pill), so they must never
+    /// also appear as a generic cluster glyph — the rule battery and deploy
+    /// already follow.
+    #[test]
+    fn a_module_offer_is_never_also_a_cluster_pill() {
+        let offer = |id: &'static str| options_engine::Affordance {
+            id,
+            kind: options_engine::AffordanceKind::Control,
+            title: "t".into(),
+            detail: String::new(),
+            relevance: 0.9,
+            reason: "test",
+            source: options_engine::Layer::Compositor,
+            // Actionable, i.e. it WOULD be surfaced if it were not a module.
+            action: AffordanceAction::Daemon("noop".into()),
+            immediate: false,
+            shows_in: options_engine::ShowsIn::Context,
+        };
+        assert!(!is_surfaced_affordance(&offer(SUNSET_OFFER_ID)));
+        assert!(is_surfaced_affordance(&offer("something.else")));
+    }
+
+    #[test]
+    fn every_id_gets_the_generic_glyph_while_the_table_is_empty() {
+        // The per-id arms went with the uncurated offers (2026-09-12). What
+        // must survive is the fallback: an id with no arm gets a glyph, never
+        // a crash — so a curated OPTION renders from the day it is added,
+        // before anyone has chosen its icon.
         assert_eq!(glyph_for_option("something.new", ""), GLYPH_OPTION);
+        assert_eq!(glyph_for_option("", ""), GLYPH_OPTION);
     }
 
     #[test]
@@ -4756,109 +7030,23 @@ mod tests {
         );
     }
 
-    /// The cross-crate tag seam (hardening pass F): every `Daemon(tag)` the
-    /// ENGINE can actually emit must be one this daemon dispatches. The tags
-    /// are stringly-typed across two crates, so a typo (or a new engine tag
-    /// without a dispatch arm) would otherwise ship as a pill that logs a warn
-    /// and does nothing. Each scenario below drives the real `decide` over a
-    /// synthetic context built to fire one tag-emitting provider; the test
-    /// asserts BOTH directions: every emitted tag is known, and every expected
-    /// tag was actually emitted (so a dead scenario can't silently pass).
     #[test]
-    fn engine_daemon_tags_are_all_dispatchable() {
-        use options_engine::{decide, ContextState, Tuning};
-
-        fn live(class: &str) -> ContextState {
-            let mut ctx = ContextState::default();
-            ctx.health.compositor.alive = true;
-            ctx.health.hardware.alive = true;
-            ctx.health.behavior.alive = true;
-            ctx.health.app_bridge.alive = true;
-            ctx.health.selection.alive = true;
-            ctx.health.system.alive = true;
-            ctx.health.notifications.alive = true;
-            ctx.window.class = class.into();
-            ctx.window.pid = 1;
-            ctx
-        }
-        let roomy = Tuning {
-            max_items: 16,
-            ..Default::default()
-        };
-
-        let mut scenarios: Vec<ContextState> = vec![
-            // Browser → find_in_page + reopen_tab.
-            live("firefox"),
-            // Reader → page_next/page_prev (and find_in_page again).
-            live("zathura"),
-            // Word processor → find_in_page via text.find.
-            live("abiword"),
-            // Creative editor → undo.
-            live("gimp"),
-            // Slides app windowed → present; fullscreen → slide_next/slide_prev.
-            live("libreoffice-impress"),
-        ];
-        let mut presenting = live("libreoffice-impress");
-        presenting.window.is_fullscreen = true;
-        scenarios.push(presenting);
-        // Any fullscreen window → toggle_dnd.
-        let mut fullscreen = live("mpv");
-        fullscreen.window.is_fullscreen = true;
-        scenarios.push(fullscreen);
-        // Command-not-found in a terminal → pkgsearch:<name>.
-        let mut missing = live("foot");
-        missing.app_internal.shell_last_cmd = Some("cowsay hi".into());
-        missing.app_internal.shell_exit_code = Some(127);
-        scenarios.push(missing);
-        // A copied single word → define:<word>.
-        let mut word = live("firefox");
-        word.selection = options_engine::TextSelection {
-            highlighted_text: Some("serendipity".into()),
-            char_count: 11,
-            ..Default::default()
-        };
-        scenarios.push(word);
-        // A nearly-full home disk with trash to reclaim → empty_trash.
-        let mut full_disk = live("foot");
-        full_disk.metrics.disk_usage_pct = Some(95.0);
-        full_disk.metrics.trash_has_items = true;
-        scenarios.push(full_disk);
-
-        let mut emitted: std::collections::BTreeSet<String> = Default::default();
-        for ctx in &scenarios {
-            for a in decide(ctx, &roomy).items {
-                if let AffordanceAction::Daemon(tag) = &a.action {
-                    assert!(
-                        daemon_tag_known(tag),
-                        "engine emits Daemon tag {tag:?} (offer {}) that the daemon does not dispatch",
-                        a.id
-                    );
-                    emitted.insert(tag.clone());
-                }
-            }
-        }
-        // The scenarios must have exercised the WHOLE tag vocabulary — a
-        // scenario that stops firing (provider gating changed) fails here
-        // rather than hollowing the test out.
-        for expected in [
-            "toggle_dnd",
-            "find_in_page",
-            "reopen_tab",
-            "slide_next",
-            "slide_prev",
-            "present",
-            "page_next",
-            "page_prev",
-            "undo",
-            "pkgsearch:cowsay",
-            "define:serendipity",
-            "empty_trash",
-        ] {
-            assert!(
-                emitted.contains(expected),
-                "no scenario made the engine emit {expected:?} (emitted: {emitted:?})"
-            );
-        }
+    fn an_overview_hover_carries_the_window_and_the_words() {
+        let (addr, title) = split_overview_hover("0x55f3abc Firefox — the web");
+        assert_eq!(addr.as_deref(), Some("0x55f3abc"));
+        assert_eq!(title.as_deref(), Some("Firefox — the web"));
+        // Leaving a thumbnail ends both.
+        assert_eq!(split_overview_hover(""), (None, None));
+        // A window with no title yet is still a window.
+        assert_eq!(
+            split_overview_hover("0x55f3abc"),
+            (Some("0x55f3abc".to_owned()), None)
+        );
+        // An older plugin sends the title alone — it must land as a title, not
+        // as an address the stage would then try to focus.
+        let (addr, title) = split_overview_hover("Firefox — the web");
+        assert_eq!(addr, None);
+        assert_eq!(title.as_deref(), Some("Firefox — the web"));
     }
 
     #[test]
@@ -5026,7 +7214,6 @@ mod tests {
             assert_eq!(group_of(id), PillGroup::Window);
         }
         assert_eq!(group_of(PillId::Option(0)), PillGroup::Mind);
-        assert_eq!(group_of(PillId::MediaOpen), PillGroup::Mind);
         assert_eq!(group_of(PillId::NotifMute), PillGroup::Notif);
         assert_eq!(group_of(PillId::ClipCopyLink), PillGroup::Clipboard);
         // Leadable = the two that re-flow, on distinct slots; the edge-pinned
@@ -5063,23 +7250,19 @@ mod tests {
     }
 
     #[test]
-    fn the_date_never_collapses_while_the_pointer_is_still_here() {
-        // "The Still Bar" (`OptionUXRules.md` §2). The live friction
-        // (2026-09-04): look at the clock, then head for the
-        // bell to read the last notification. The bell is pinned a gap left of
-        // the clock, so the date's collapse — on a 3s timer, nothing the user
-        // asked for — drags the bell out from under a pointer that was aiming
-        // at it. Reaching for an OPTION cost the OPTION.
-        //
-        // So leaving the CLOCK is not the trigger; leaving the SURFACE is.
+    fn the_date_collapses_when_you_leave_the_pill() {
+        // Every element on this bar retracts when you step off IT; the clock
+        // used to be the exception, waiting for the pointer to leave the whole
+        // banner (Max, 2026-09-13: *"i want the clock to colapse when i leave
+        // the pill too"*). That exception existed for a real reason — the bell
+        // was pinned to the clock's live edge, so collapsing dragged it out
+        // from under a pointer aiming at it — and it went away when the bell
+        // stopped moving (`options_clock_rest_left`).
         assert!(
-            !clock_may_collapse(true, false, true),
-            "collapsed under a pointer that was still on the bar"
+            clock_may_collapse(true, false, false),
+            "off the clock and still showing the date: this must collapse"
         );
-        // Pointer gone: this is the only case that may collapse.
-        assert!(clock_may_collapse(true, false, false));
-        // An open box below the bar counts as still here (it is pinned to the
-        // clock too, so a collapse would slide the box the user is reading).
+        // Still on the pill: nothing to do, the date is being read.
         assert!(!clock_may_collapse(true, false, true));
         // Nothing to collapse, or a collapse already armed: no second timer.
         assert!(!clock_may_collapse(false, false, false));
@@ -5217,17 +7400,12 @@ mod tests {
     }
 
     #[test]
-    fn ink_is_softened_and_warm() {
-        for ink in [INK_LIGHT, INK_DARK] {
-            // Never pure black or white...
-            assert!(ink[0] > 0.0 && ink[0] < 1.0);
-            // ...and warm: red leads, blue trails.
-            assert!(
-                ink[0] > ink[1] && ink[1] > ink[2],
-                "ink {ink:?} is not warm"
-            );
-        }
-        // Still separated far enough to carry contrast on either surface.
+    fn ink_is_real_black_and_white() {
+        // Pure, and neutral: no channel leads (the old ink was warmed, r > g
+        // > b — Max, 2026-09-12, wants the real pair).
+        assert_eq!(INK_LIGHT, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(INK_DARK, [0.0, 0.0, 0.0, 1.0]);
+        // Which is the widest separation there is, on either surface.
         assert!(luminance(INK_LIGHT) > 0.6 && luminance(INK_DARK) < 0.05);
     }
 
