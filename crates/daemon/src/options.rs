@@ -1355,13 +1355,18 @@ fn presence(id: PillId) -> Presence {
         // Window-mode controls act on the FOCUSED window — meaningless while
         // you're above the desktop choosing one.
         PillId::Pseudo | PillId::Float | PillId::Fullscreen => DESKTOP_ONLY,
-        // The state pill says what the window IS — and on the stage every task
-        // is maximized, so it would read "fullscreen" for all of them, all the
-        // time. The stage is the state there; the word would only be noise.
+        // The state pill says what the window IS. On the stage that is NOT the
+        // mode's own maximize — every task there is maximized, so marking it
+        // would be a sign that is true always and therefore says nothing — but
+        // TRUE fullscreen on top of the stage is a state the user chose, and the
+        // stage cluster only ever emits this pill in that one case (see
+        // `window_pills`). Stripping it here was why [fullscreen] vanished from
+        // beside the [X] once the bar had been concealed and called back (Max,
+        // 2026-09-17).
         PillId::WindowState => Presence {
             desktop: true,
             overview: false,
-            stage: false,
+            stage: true,
         },
         // The clipboard serves the window you're working in, not the map.
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => DESKTOP_ONLY,
@@ -2099,37 +2104,68 @@ impl App {
                 let close_x = wx + ww + GROUP_GAP;
                 circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
                 let mut cx = close_x + d + GROUP_GAP;
-                // What the window IS, right of the close — its mode's own glyph,
-                // and only when it is something: a tiled window is the ordinary
-                // case and gets no marking (Max, 2026-09-12; the word it first
-                // showed became the icon on his next pass).
-                let state = mode_pill(self.options_mode_shown);
-                if let Some(active) = state {
-                    circle(
-                        &mut pills,
-                        cx,
-                        PillId::WindowState,
-                        glyph_for_pill(active),
-                        None,
-                    );
-                    cx += d + CTRL_GAP;
-                }
-                // The window modes, ordered by how far each takes the window
-                // from the layout: pseudo (still tiled, just smaller), float
-                // (out of the layout), fullscreen (over everything). The one the
-                // window is already in is left out — the word above IS its
-                // control, and offering the same mode twice in one row would be
-                // two ways to press the same thing.
-                for (id, glyph) in [
-                    (PillId::Pseudo, GLYPH_SQUARE),
-                    (PillId::Float, GLYPH_FLOAT),
-                    (PillId::Fullscreen, GLYPH_FULL),
-                ] {
-                    if state == Some(id) {
-                        continue;
+                if self.stage.is_on() {
+                    // ON THE STAGE the cluster is just [X] and [fullscreen]
+                    // (Max, 2026-09-16). Float and pseudo have no meaning on a
+                    // staged task — floating or pseudo'ing it takes it OFF the
+                    // stage — so they are not offered; and the stage's own
+                    // maximize is a mechanism, not a mode the user chose, so it
+                    // is not marked as one.
+                    //
+                    // TRUE fullscreen (internal 2), set from this same
+                    // [fullscreen] control, IS worth marking: shown as a resting
+                    // `WindowState` pill — the fullscreen glyph standing on the
+                    // bar, exactly the "FS on" indicator normal mode uses for a
+                    // fullscreen window (Max, 2026-09-16). Off it (the plain
+                    // stage maximize), [fullscreen] is the reveal control that
+                    // turns it on. Both click through to `stage_toggle_fullscreen`
+                    // (see the pointer handler).
+                    //
+                    // Read from `options_fullscreen`, which already means exactly
+                    // "the focused window is at internal >= 2, not merely
+                    // maximized" (`hypr::active_window_info`) and is re-derived on
+                    // every context tick. A flag of our own writing was the same
+                    // answer only until something else moved the window — a deck
+                    // switch to a merely-maximized task would have left the bar
+                    // claiming FS was still on.
+                    if self.options_fullscreen {
+                        circle(&mut pills, cx, PillId::WindowState, GLYPH_FULL, None);
+                    } else {
+                        circle(&mut pills, cx, PillId::Fullscreen, GLYPH_FULL, None);
                     }
-                    circle(&mut pills, cx, id, glyph, None);
-                    cx += d + CTRL_GAP;
+                } else {
+                    // What the window IS, right of the close — its mode's own
+                    // glyph, and only when it is something: a tiled window is the
+                    // ordinary case and gets no marking (Max, 2026-09-12; the
+                    // word it first showed became the icon on his next pass).
+                    let state = mode_pill(self.options_mode_shown);
+                    if let Some(active) = state {
+                        circle(
+                            &mut pills,
+                            cx,
+                            PillId::WindowState,
+                            glyph_for_pill(active),
+                            None,
+                        );
+                        cx += d + CTRL_GAP;
+                    }
+                    // The window modes, ordered by how far each takes the window
+                    // from the layout: pseudo (still tiled, just smaller), float
+                    // (out of the layout), fullscreen (over everything). The one
+                    // the window is already in is left out — the word above IS
+                    // its control, and offering the same mode twice in one row
+                    // would be two ways to press the same thing.
+                    for (id, glyph) in [
+                        (PillId::Pseudo, GLYPH_SQUARE),
+                        (PillId::Float, GLYPH_FLOAT),
+                        (PillId::Fullscreen, GLYPH_FULL),
+                    ] {
+                        if state == Some(id) {
+                            continue;
+                        }
+                        circle(&mut pills, cx, id, glyph, None);
+                        cx += d + CTRL_GAP;
+                    }
                 }
             }
         }
@@ -4615,6 +4651,33 @@ impl App {
         self.draw_options();
     }
 
+    /// The stage's [fullscreen] control (see the cluster in `window_pills`):
+    /// pop the staged window to TRUE fullscreen (internal 2) over the bar and
+    /// deck, and back to the stage's resting shape — a maximize (1) in
+    /// [`Mode::Task`], a plain tiled window (0) in [`Mode::Desk`]. Never to
+    /// windowed, which would drop the stage out from under the window.
+    ///
+    /// It names the staged window rather than trusting "focused" for the same
+    /// reason the stage itself does (see [`hypr::set_fullscreen_of`]).
+    fn stage_toggle_fullscreen(&mut self) {
+        use crate::stage::Mode;
+        let rest = match self.stage.mode() {
+            Mode::Task => 1,
+            Mode::Desk => 0,
+        };
+        let target = if hypr::active_fullscreen_internal() >= 2 { rest } else { 2 };
+        match self.stage.staged().map(str::to_owned) {
+            Some(addr) => hypr::set_fullscreen_of(&addr, target),
+            None => hypr::set_fullscreen_focused(target),
+        }
+        // Nothing to write here: the compositor's `fullscreen` event lands within
+        // ~20ms and carries the change through the same path a fullscreen window
+        // takes anywhere else — `refresh_options_content` → `set_options_fullscreen`,
+        // which conceals or restores the bar, arms the §4 sticky pair when our own
+        // click is what took the bar away, and redraws. The cluster reads
+        // `options_fullscreen` for its "FS on" pill, so it follows for free.
+    }
+
     pub(crate) fn set_window_mode(&mut self, target: hypr::WindowMode) {
         if !hypr::set_window_mode(target) {
             // Refused (already in the target, nothing focused): the cached mode
@@ -6314,9 +6377,19 @@ impl App {
             // the window had *just* reached — tiled — which is where it already
             // was, so nothing happened and the button read as stuck until you
             // walked away and came back (Max, 2026-09-13).
+            // On the stage the state pill can only be the "FS on" indicator, and
+            // pressing it turns true fullscreen back off (to the stage), not
+            // through `set_window_mode` — which would toggle the maximize off and
+            // drop the stage.
+            Some(PillId::WindowState) if self.stage.is_on() => self.stage_toggle_fullscreen(),
             Some(PillId::WindowState) => self.set_window_mode(self.options_mode_shown),
             Some(PillId::Pseudo) => self.set_window_mode(hypr::WindowMode::Pseudo),
             Some(PillId::Float) => self.set_window_mode(hypr::WindowMode::Floating),
+            // On the stage [fullscreen] does not enter/leave the fullscreen
+            // *mode* (the staged window is already maximized) — it toggles TRUE
+            // fullscreen on top of the stage. Off the stage it is the ordinary
+            // mode control.
+            Some(PillId::Fullscreen) if self.stage.is_on() => self.stage_toggle_fullscreen(),
             Some(PillId::Fullscreen) => self.set_window_mode(hypr::WindowMode::Fullscreen),
             Some(PillId::NotifMute) => self.toggle_notif_mute(),
             // Clicking the clipboard element pastes the current clip into the

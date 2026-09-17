@@ -34,8 +34,14 @@ pub fn create_layer_surface(
         None, // let the compositor pick the active output
     );
 
-    layer.set_anchor(Anchor::BOTTOM);
-    layer.set_size(width, height);
+    // Full output width (anchored left+right, width 0 → compositor fills it),
+    // like the deck and topbar: the dock PLATE is drawn centered within and
+    // grows to wrap minimized tiles, so the surface must give it the whole
+    // width to grow into. Input is pinned to the plate (see sync_input_region),
+    // so the transparent sides stay click-through. `width` is ignored now.
+    let _ = width;
+    layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+    layer.set_size(0, height);
     // Integer supersampling: the buffer we attach is `logical × render_scale`
     // physical pixels, so declare the scale up front — it must be active
     // before the renderer commits its first (`logical × render_scale`)

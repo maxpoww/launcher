@@ -538,6 +538,8 @@ fn main() -> anyhow::Result<()> {
         focus_launched: None,
         interactive: false,
         input_extent: None,
+        input_inset: None,
+        dock_basin_w: 0.0,
         entries: Vec::new(),
         kinds: Vec::new(),
         icon_layers: Vec::new(),
@@ -1344,6 +1346,14 @@ pub struct App {
     interactive: bool,
     /// Last input-region extent sent to the compositor.
     input_extent: Option<u32>,
+    /// Last input-region horizontal inset sent (the transparent margin each
+    /// side of the plate). Tracked alongside `input_extent` so the region
+    /// re-syncs when the plate widens for minimized tiles, not just when its
+    /// height changes.
+    input_inset: Option<u32>,
+    /// The dock plate's current width (basin), cached from the last layout so
+    /// the input region can hug the centered plate on the full-width surface.
+    dock_basin_w: f32,
 
     /// Discovered applications and home folders (icon texture layers
     /// are aligned with this order), plus transient file-search result
@@ -2071,6 +2081,21 @@ impl App {
         options::preferred_output_height(entered, first)
     }
 
+    /// The output's logical width, for the full-width dock surface (its plate
+    /// grows within this). Mirrors [`output_logical_height`].
+    fn output_logical_width(&self) -> Option<f32> {
+        let width_of = |o: &wl_output::WlOutput| {
+            self.output_state
+                .info(o)
+                .and_then(|i| i.logical_size)
+                .map(|(w, _)| w as f32)
+        };
+        self.shell_output
+            .as_ref()
+            .and_then(width_of)
+            .or_else(|| self.output_state.outputs().next().and_then(|o| width_of(&o)))
+    }
+
     /// The one surface whose output placement drives the shell's small-screen
     /// scale: the topbar when it exists (its exclusive zone is what must match
     /// the panel), else the dock (which still drives `icon_scale`).
@@ -2116,8 +2141,15 @@ impl App {
     /// DRAG_MARGIN_X/TOP are fixed; only the card area scales.
     fn scaled_surface_size(&self) -> (u32, u32) {
         let s = self.icon_scale();
-        let w = (self.config.window.width as f32 * s).round() as u32
-            + 2 * content::DRAG_MARGIN_X as u32;
+        // The dock surface is full output width so the plate can grow within
+        // it; this width is only the fallback when the compositor's configure
+        // hasn't arrived (it drives the real width via the left+right anchor).
+        let w = self
+            .output_logical_width()
+            .map(|w| w.round() as u32)
+            .unwrap_or_else(|| {
+                (self.config.window.width as f32 * s).round() as u32 + 2 * content::DRAG_MARGIN_X as u32
+            });
         let h = ((self.config.window.height + self.config.window.bottom_margin) as f32 * s).round()
             as u32
             + content::MAGNIFY_HEADROOM as u32
@@ -2149,8 +2181,8 @@ impl App {
             return; // scale unchanged — don't churn the surface
         }
         self.ui.set_extents(dock_extent, full_extent);
-        let (w, h) = self.scaled_surface_size();
-        self.layer.set_size(w, h);
+        let (_, h) = self.scaled_surface_size();
+        self.layer.set_size(0, h); // full width (compositor fills via left+right anchor)
         self.layer.wl_surface().commit();
     }
 
@@ -2158,8 +2190,8 @@ impl App {
     fn apply_icon_size_change(&mut self) {
         let (dock_extent, full_extent) = self.scaled_extents();
         self.ui.set_extents(dock_extent, full_extent);
-        let (w, h) = self.scaled_surface_size();
-        self.layer.set_size(w, h);
+        let (_, h) = self.scaled_surface_size();
+        self.layer.set_size(0, h); // full width (compositor fills via left+right anchor)
         self.layer.wl_surface().commit();
         save_icon_size(self.icon_size);
     }
@@ -2385,6 +2417,50 @@ impl App {
             }
             Command::MinDel(addr) => {
                 self.on_min_del(&addr);
+                return;
+            }
+            // The map has STARTED closing over a live stage: put the stage shape
+            // back now, while the overlay still covers the screen, so the close
+            // lands ON the stage (Max, 2026-09-17: "i want it to go from overview
+            // direct to stage"). Told only at the disengage, the desktop was bare
+            // for the whole landing and the stage snapped in afterwards.
+            //
+            // The pick's focus is already applied when this arrives (the plugin
+            // sends it after `fullWindowFocus`), so the ordinary "whatever the map
+            // left focused is the answer" rule still holds. A no-op unless the
+            // map actually suspended the stage — `Stage::resume_from_overview`.
+            Command::StageResume => {
+                let focused = hypr::active_window();
+                if self.stage.resume_from_overview(focused.as_deref()) {
+                    self.rebuild_deck();
+                    // Give the staged client its frames to come back at the new
+                    // size before the map photographs it — see
+                    // [`stage::CLOSE_SETTLE`]. The map is holding its close, so
+                    // this is the one moment where waiting costs nothing and
+                    // photographing early costs the whole landing.
+                    let timer = calloop::timer::Timer::from_duration(stage::CLOSE_SETTLE);
+                    let _ = self
+                        .loop_handle
+                        .insert_source(timer, |_, _, _app: &mut App| {
+                            hypr::stage_ready_for_close();
+                            calloop::timer::TimeoutAction::Drop
+                        });
+                    return;
+                }
+                // Nothing to rebuild (no stage, or the map never suspended it):
+                // answer at once. ALWAYS answer — the map is holding its close
+                // for this, and a silent branch would cost that path the
+                // plugin's 400ms fallback instead of a millisecond.
+                hypr::stage_ready_for_close();
+                return;
+            }
+            // The map's last frames: put the stage's dim back while the overlay
+            // still covers the screen, so the change is never seen. See
+            // `hypr::set_dim_around` and the plugin's linger branch.
+            Command::StageDim => {
+                if self.stage.is_on() && self.stage.mode() == stage::Mode::Task {
+                    hypr::set_dim_around(hypr::STAGE_DIM);
+                }
                 return;
             }
             // Super+N while staged: the numbered tile takes the stage.
@@ -3005,13 +3081,59 @@ impl App {
         // while it is up — it is the stage's furniture, and the overview is now
         // the thing on screen — and rises again, pictures intact, when it shuts.
         self.sync_deck_overview();
+        // And the stage stops hiding the workspace it is staging: a maximized
+        // task blanks its tiled siblings and its floating ones are parked
+        // elsewhere, so the map would offer one window out of three to pick from
+        // (Max, 2026-09-17). See `Stage::suspend_for_overview`.
+        if active && self.stage.is_on() {
+            self.stage.suspend_for_overview();
+            // …and have the map photograph the desktop it just uncovered, while
+            // it is still opening. The settle is the same one the close uses: the
+            // windows have to have COMMITTED their new sizes, or the picture
+            // catches them mid-resize (`stage::CLOSE_SETTLE`).
+            let timer = calloop::timer::Timer::from_duration(stage::CLOSE_SETTLE);
+            let _ = self
+                .loop_handle
+                .insert_source(timer, |_, _, _app: &mut App| {
+                    hypr::recapture_overview();
+                    calloop::timer::TimeoutAction::Drop
+                });
+        }
         // Landing on a workspace from the map, with the stage still up, means
         // "put that on the stage": the overview is the picker, and whatever it
         // leaves focused is the answer. Task mode stages that window, desk mode
         // shows its desk, and landing back where you started is a no-op.
         if !active && self.stage.is_on() {
-            if let Some(addr) = hypr::active_window() {
-                self.stage_switch_to(&addr);
+            let focused = hypr::active_window();
+            if self.stage.mode() == stage::Mode::Desk {
+                // A desk was never taken apart — showing one is just a focus —
+                // so the ordinary picker path still applies.
+                if let Some(addr) = focused.as_deref() {
+                    self.stage_switch_to(addr);
+                }
+            } else {
+                // Task mode: the shape was lifted on the way in, so it has to be
+                // REBUILT, not switched — landing back on the task you started
+                // from is the common case, and `stage_switch_to` would read it as
+                // "already staged" and leave the desktop un-maximized with its
+                // floats still out. The deck's current tile is re-derived by the
+                // rebuild below, so nothing is lost by skipping the animated swap.
+                //
+                // Usually a no-op by now: the map asks for the rebuild the moment
+                // it starts closing (`Command::StageResume`) so it can fly home
+                // into a picture of the stage. This is the backstop for a close
+                // that never sent it.
+                self.stage.resume_from_overview(focused.as_deref());
+            }
+            // ⭐ The dim comes back HERE — after the map is off the screen, never
+            // with the shape. It is baked into whatever the map photographs (the
+            // plugin's captures are not snapshot renders, so `dim_around` lands in
+            // them), and a dark tile growing over the bright wallpaper backdrop is
+            // a screen that darkens across the entire zoom — the "flicker" Max
+            // reported on 2026-09-17. Restored now, it costs one frame at the end
+            // instead of riding the whole arrival.
+            if self.stage.is_on() && self.stage.mode() == stage::Mode::Task {
+                hypr::set_dim_around(hypr::STAGE_DIM);
             }
             // The map is also where the desktop gets REARRANGED — windows
             // dragged between workspaces, resized, closed. The deck has to be
@@ -4662,15 +4784,27 @@ impl App {
         if self.stack_open() {
             extent = extent.max(self.buffer_size.1);
         }
-        if self.input_extent != Some(extent) {
-            match surface::set_input_extent(
-                &self.compositor,
-                &self.layer,
-                self.buffer_size,
-                extent,
-                content::DRAG_MARGIN_X as u32,
-            ) {
-                Ok(()) => self.input_extent = Some(extent),
+        // The surface is full output width, but the plate is centered and only
+        // as wide as its content (grown for minimized tiles). Inset the region
+        // to the plate's own bounds so the transparent sides stay click-through
+        // to windows behind the dock — the plate width is cached from the last
+        // layout. While a box is open the plate gathers to the box; fall back
+        // to the box width then. A DRAG_MARGIN_X floor keeps the resting bar's
+        // grab margins.
+        let plate_w = if self.stack_open() || self.dock_basin_w < 1.0 {
+            self.config.window.width as f32 * self.icon_scale()
+        } else {
+            self.dock_basin_w
+        };
+        let surface_w = self.buffer_size.0 as f32;
+        let inset = (((surface_w - plate_w) / 2.0).max(0.0).round() as u32)
+            .min((self.buffer_size.0 / 2).saturating_sub(1)); // keep a positive-width region
+        if self.input_extent != Some(extent) || self.input_inset != Some(inset) {
+            match surface::set_input_extent(&self.compositor, &self.layer, self.buffer_size, extent, inset) {
+                Ok(()) => {
+                    self.input_extent = Some(extent);
+                    self.input_inset = Some(inset);
+                }
                 Err(e) => warn!("failed to set input region: {e:#}"),
             }
         }

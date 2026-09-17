@@ -86,6 +86,22 @@ pub const GAP_TOP: i32 = 10;
 /// is the thing this exists to stop.
 pub const ANIM_SETTLE: std::time::Duration = std::time::Duration::from_millis(520);
 
+/// How long the closing map waits after the stage is rebuilt before it
+/// re-photographs the tile it is about to fly into (`Command::StageResume` →
+/// `hypr::stage_ready_for_close`).
+///
+/// The compositor moves the window the instant it is asked — animations are
+/// silenced while staged — but the CLIENT still has to draw itself at the new
+/// size, and until it commits that buffer the compositor has only the old one to
+/// show, stretched across the new box. A tile photographed in that gap catches
+/// exactly that, and then the landing swaps it for the real thing: the "weird,
+/// like a resizing" at the end of the close (Max, 2026-09-17).
+///
+/// So this is not an animation settle — there is no animation — it is time for
+/// one client to answer a configure. Three frames at 60Hz, and the whole of it
+/// is spent with the map still up, where nothing is moving anyway.
+pub const CLOSE_SETTLE: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// What the stage puts in the rect — one task, or one whole desk.
 ///
 /// The mechanism is the same either way (the inset is a workspace rule, and
@@ -136,6 +152,17 @@ pub fn remembered_mode() -> Mode {
 #[derive(Default)]
 pub struct Stage {
     on: bool,
+    /// Whether the overview is holding the concealment open — see
+    /// [`Stage::suspend_for_overview`]. Not in the breadcrumb on purpose: while
+    /// it is set the desktop genuinely IS un-maximized and unparked, which is
+    /// exactly what the breadcrumb already records, so a daemon that dies here
+    /// recovers from the truth rather than from a promise.
+    ///
+    /// It is also what makes the resume idempotent, and it has to be: the map
+    /// now asks for it TWICE — once the moment it starts closing (`stage-resume`,
+    /// which is what lands the close on the stage) and again at the disengage
+    /// that follows. The first wins; the second finds nothing to do.
+    suspended: bool,
     /// One task, or one whole desk. Survives the mode being off — it is the
     /// mode the stage will open in next time.
     mode: Mode,
@@ -174,8 +201,9 @@ pub struct Stage {
     ///
     /// Moving them to another workspace does preserve both, exactly (verified),
     /// so that is what this is: out of sight while the stage owns the screen,
-    /// back on the way out. See [`hypr::PARK_WS`] for why it is an ordinary
-    /// workspace rather than a special one.
+    /// back on the way out. See [`hypr::PARK_SPECIAL`] for why the park is a
+    /// SPECIAL workspace (a numbered one un-maximizes a floating staged task).
+    /// The value is the workspace each parked window came FROM, for the restore.
     parked: std::collections::BTreeMap<String, i64>,
     /// The animation leaves as they were before the stage silenced them, so
     /// leaving restores exactly what it found.
@@ -571,6 +599,10 @@ impl Stage {
         if !self.on {
             return;
         }
+        // Leaving while the map holds the concealment open (Super+Enter from
+        // inside the overview) must not leave the flag standing for the next
+        // stage session — the shape it describes is gone either way.
+        self.suspended = false;
         // The animation comes back BEFORE anything moves, so the way out is the
         // way in played backwards: the task settles out of the stage rect
         // instead of snapping there. Everything below this line is a resize the
@@ -642,6 +674,19 @@ impl Stage {
         if self.staged.as_deref() == Some(addr) {
             return true;
         }
+        self.shape_to(addr)
+    }
+
+    /// Give `addr` the stage shape — park its floating siblings, evict whatever
+    /// holds its workspace's fullscreen slot, maximize it, tag it — with no
+    /// "it is already staged" shortcut.
+    ///
+    /// [`Stage::show`] is the one that takes that shortcut. This is the whole of
+    /// it underneath, and it is what [`Stage::resume_from_overview`] needs: the
+    /// task coming back from the map is very often the one that was already
+    /// staged, and it still has to be rebuilt around, because
+    /// [`Stage::suspend_for_overview`] took the shape apart on the way in.
+    fn shape_to(&mut self, addr: &str) -> bool {
         // ONE compositor read for the whole switch: whether both windows are
         // still there, and what state the incoming one was in. Asking these
         // separately cost three round-trips between the click and the first
@@ -692,8 +737,8 @@ impl Stage {
         // so every move it makes is on the record.
         if !park.is_empty() || !unpark.is_empty() {
             debug!(
-                "stage: park {park:?} -> ws{}, unpark {unpark:?}",
-                hypr::PARK_WS
+                "stage: park {park:?} -> {}, unpark {unpark:?}",
+                hypr::PARK_SPECIAL
             );
         }
 
@@ -772,6 +817,89 @@ impl Stage {
             neighbor: neighbor.as_deref(),
         });
         true
+    }
+
+    /// **The map must show the truth.** Lift the stage's concealment while the
+    /// overview owns the screen (Max, 2026-09-17: *"i have 3 windows on WS1, but
+    /// when i call overview being on stage, i see only one"*).
+    ///
+    /// The mode hides a workspace in two ways, and both are exactly wrong for the
+    /// map — which is the stage's own PICKER, so it has to show what is really
+    /// there to pick from:
+    /// * the staged task is **maximized**, and Hyprland zeroes the alpha of every
+    ///   other window on a workspace that holds a fullscreen one, so the tiled
+    ///   siblings render as nothing at all;
+    /// * the staged task's rule carries **`dim_around`** at [`hypr::STAGE_DIM`],
+    ///   which would paint the siblings this is uncovering at a fifth of their
+    ///   brightness — visible, and still unreadable as a thing to pick. That one
+    ///   is turned DOWN, not tagged off ([`hypr::set_dim_around`]): the tag must
+    ///   not move, or the titlebars come back and resize the window.
+    ///
+    /// Task mode only: a desk maximizes nothing and parks nothing, so there is
+    /// nothing there to lift.
+    ///
+    /// Nobody has to be told to redraw. The plugin re-captures every tile on its
+    /// own ~150ms live timer while the map is open (and these very moves mark
+    /// tiles dirty), so the map catches up by itself once its open animation
+    /// settles — which is also why this does not have to win any race with the
+    /// snapshot `toggle()` takes synchronously as it opens.
+    pub fn suspend_for_overview(&mut self) {
+        if !self.on || self.mode != Mode::Task || self.suspended {
+            return;
+        }
+        self.suspended = true;
+        if let Some(addr) = self.staged.clone() {
+            hypr::set_fullscreen_of(&addr, 0);
+        }
+        // The dim goes out by TURNING IT DOWN, never by dropping the tag — see
+        // [`hypr::set_dim_around`] for why the tag must not move (it also drives
+        // the titlebars, and a bar arriving resizes the window).
+        hypr::set_dim_around(0.0);
+        // Home, every one of them. `parked` is emptied rather than remembered:
+        // the shape is rebuilt from the live desktop on the way out
+        // ([`Stage::resume_from_overview`] → [`Stage::shape_to`]), and the map is
+        // where the user is most likely to move a window to another workspace —
+        // a remembered "where it came from" would fight that.
+        for (addr, ws) in std::mem::take(&mut self.parked) {
+            hypr::unpark_window(&addr, ws);
+        }
+        // The fullscreen debt (`shaped`) is deliberately untouched: it is still
+        // owed at exit. The breadcrumb is rewritten because `parked` really is
+        // empty now — a daemon that dies with the map open must not leave a
+        // recovery that goes looking for windows nobody parked.
+        write_breadcrumb(&self.anim_snapshot, &self.shaped, &self.parked, &self.gaps);
+        debug!("stage: concealment lifted for the overview");
+    }
+
+    /// Put the stage back together as the map closes, on `focused` — whatever the
+    /// overview left focused, which IS the pick — falling back to the task that
+    /// was already staged.
+    ///
+    /// Deliberately not [`Stage::show`]: landing back on the same task is a no-op
+    /// there, and here it is the common case and still has to re-maximize and
+    /// re-park everything [`Stage::suspend_for_overview`] took apart.
+    pub fn resume_from_overview(&mut self, focused: Option<&str>) -> bool {
+        if !self.on || self.mode != Mode::Task || !self.suspended {
+            return false;
+        }
+        self.suspended = false;
+        // ⛔ The real dim stays OFF through the whole flight, and the plugin
+        // PAINTS one over the map instead (`g_stageDimPaint`) so it can land as a
+        // step, on the same frame as the morph. Turning the real one on here
+        // would put it into everything the map re-photographs and double it under
+        // the painted one — two different darknesses meeting at the hand-off.
+        // It comes back under the closing overlay, on `Command::StageDim`.
+        // The pick first; whatever was staged if it gives nothing usable (the
+        // window the map was pointing at can have been closed inside the map).
+        if let Some(addr) = focused {
+            if self.shape_to(addr) {
+                return true;
+            }
+        }
+        let Some(addr) = self.staged.clone() else {
+            return false;
+        };
+        self.shape_to(&addr)
     }
 
     /// Put workspace `ws` on the stage — the desk-mode switch.
@@ -923,11 +1051,11 @@ fn deck_order(
 fn desk_order(tasks: &[hypr::StageTask]) -> Vec<i64> {
     let mut out: Vec<i64> = tasks
         .iter()
-        // The park workspace is machinery, not a desk: it only ever holds
-        // windows the mode itself moved out of the way, and it is dissolved on
-        // exit. (It cannot hold any in desk mode, but a mode switch mid-session
-        // can leave one there for as long as it takes to bring it home.)
-        .filter(|t| t.workspace != hypr::PARK_WS)
+        // Only real, numbered workspaces are desks. Special workspaces (negative
+        // ids) are machinery — the stage's own park ([`hypr::PARK_SPECIAL`], where
+        // floating siblings wait out a task stage) and minimize's shelf — never a
+        // place the user made and can travel back to.
+        .filter(|t| t.workspace > 0)
         .map(|t| t.workspace)
         .collect();
     out.sort_unstable();
@@ -1093,14 +1221,14 @@ mod tests {
 
     #[test]
     fn a_parked_task_keeps_its_slot() {
-        // A parked floating window physically sits on the park workspace, which
-        // sorts after everything. Ordering by where it *belongs* is what keeps
-        // its tile from being flung to the end of the row the moment the stage
-        // moves it aside.
+        // A parked floating window physically sits on the special park workspace
+        // (a negative id), which would sort to the FRONT. Ordering by where it
+        // *belongs* is what keeps its tile in place the moment the stage moves it
+        // aside.
         let tasks = vec![task("a", 1), task("floater", 2), task("c", 3)];
         let mut parked = std::collections::BTreeMap::new();
         parked.insert("floater".to_owned(), 2);
-        let moved = vec![task("a", 1), task("floater", hypr::PARK_WS), task("c", 3)];
+        let moved = vec![task("a", 1), task("floater", -98), task("c", 3)];
         assert_eq!(
             deck_order(&moved, &parked),
             deck_order(&tasks, &Default::default())
@@ -1196,7 +1324,8 @@ mod tests {
     fn the_park_workspace_is_not_a_desk() {
         // Windows the mode itself moved aside must not grow a tile of their
         // own — it would be a desk the user never made and cannot get back to.
-        let tasks = vec![task("a", 1), task("floater", hypr::PARK_WS)];
+        // Parked windows sit on the special park workspace (a negative id).
+        let tasks = vec![task("a", 1), task("floater", -98)];
         assert_eq!(desk_order(&tasks), vec![1]);
     }
 

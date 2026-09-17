@@ -324,6 +324,18 @@ pub fn active_window_mode() -> Option<(String, WindowMode)> {
     Some((addr, mode_of(&json)))
 }
 
+/// The focused window's **internal** fullscreen level: `0` none, `1` maximized,
+/// `2` true fullscreen. [`mode_of`] collapses 1 and 2 into one `Fullscreen`, but
+/// the stage's [fullscreen] control has to tell its own maximize (1) from a real
+/// fullscreen (2) to toggle between them, so it reads the raw number here.
+pub fn active_fullscreen_internal() -> i64 {
+    request("j/activewindow")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .map(|json| json["fullscreen"].as_i64().unwrap_or(0))
+        .unwrap_or(0)
+}
+
 /// Put the focused window into `target`, leaving whatever mode it was in.
 ///
 /// Asking for the mode it is already in returns it to [`WindowMode::Tiled`], so
@@ -1321,11 +1333,34 @@ const SMART_GAP_SELECTORS: [&str; 2] = ["w[tv1]", "f[1]"];
 /// rule's `dim_around = true` ever engages it — nothing else in the config
 /// does — so setting it without restoring is safe.
 pub fn assert_stage_frame() {
-    eval(
-        "hl.window_rule({ name = \"golem-stage-frame\", match = { tag = \"golem-stage\" }, \
-         border_size = 0, rounding = 12, no_shadow = false, dim_around = true }) \
-         hl.config({ [\"decoration.dim_around\"] = 0.8 })",
-    );
+    eval(&format!(
+        "hl.window_rule({{ name = \"golem-stage-frame\", match = {{ tag = \"golem-stage\" }}, \
+         border_size = 0, rounding = 12, no_shadow = false, dim_around = true }}) \
+         hl.config({{ [\"decoration.dim_around\"] = {STAGE_DIM} }})"
+    ));
+}
+
+/// How hard the stage dims the desktop around the staged task.
+pub const STAGE_DIM: f32 = 0.8;
+
+/// Turn the stage's dim up or down **without touching the tag**.
+///
+/// The map needs the dim gone (it would paint the very siblings it is uncovering
+/// at a fifth brightness), and this is the way to do that which costs nothing
+/// else: one global config value, one eval, no window rule re-applied and above
+/// all **no tag flip**.
+///
+/// ⛔ Do NOT reach for `set_stage_tag(addr, false)` instead. The `golem-stage`
+/// tag is also what tells the waveview titlebars to stand down ([[golem-titlebars]]),
+/// so dropping it hands a floating staged window a 26px titlebar — which RESERVES
+/// its strip, schedules a layout recalc and **resizes the window**. Doing that on
+/// the way into the map and undoing it on the way out is the "weird jump before
+/// resting" and the "like a resizing" Max reported on 2026-09-17; it also made
+/// opening the map visibly slower for the decoration churn.
+pub fn set_dim_around(amount: f32) {
+    eval(&format!(
+        "hl.config({{ [\"decoration.dim_around\"] = {amount} }})"
+    ));
 }
 
 /// A workspace rule can be overridden but never *removed*, so
@@ -1662,26 +1697,41 @@ pub fn capture_desks(workspaces: &[i64], size: u32, tile_aspect: f32, dir: &std:
 
 /// The workspace floating windows are parked on while the stage is up.
 ///
-/// An ordinary workspace, deliberately, not a **special** one: moving a window
-/// to a special workspace *shows* that workspace as an overlay, so the window
-/// stayed on screen — parked and still in the way. A plain move to a numbered
-/// workspace changes nothing about what is displayed, leaves the active
-/// workspace alone, and returns the window with its position and size intact.
-/// Chosen high to stay clear of the workspaces anyone binds keys to.
-pub const PARK_WS: i64 = 99;
+/// A **special** workspace: invisible unless deliberately shown, and no key the
+/// user has reaches it — a numbered park (the old ws99) was one `Super+9`-ish
+/// stroke away from being a place, and this is machinery, not a place.
+///
+/// ⚠️ Every move in and out MUST carry **`follow = false`** — see
+/// [`park_window`]. Without it, `hl.dsp.window.move` is `movetoworkspace`, not
+/// `movetoworkspacesilent`: `Actions::moveToWorkspace` (ConfigActions.cpp) then
+/// runs `setSpecialWorkspace(ws)` — the park pops up ON SCREEN as an overlay —
+/// plus `changeWorkspace` + `fullWindowFocus(parked)` + a cursor warp. With the
+/// old numbered park that same follow machinery was the 2026-09-17 bug: the
+/// workspace churn it caused (and the focus_cycle snap-back answering it)
+/// dropped a **floating** staged window's maximize, so the task entered the
+/// stage at float size in front of its tiled sibling. `follow = false` takes
+/// the silent branch: the window just changes workspace, nothing else moves.
+/// (`follow` is real but undocumented in `docs/hypr-api.md` — read out of
+/// `hlWindowMove` in the fork's LuaBindingsDispatchers.cpp, verified live.)
+pub const PARK_SPECIAL: &str = "special:stagepark";
 
-/// Move one floating window out of sight, and bring one home again.
+/// Move one floating window out of sight (to [`PARK_SPECIAL`]), and bring one
+/// home again ([`unpark_window`], to its original numbered workspace).
 ///
 /// Used on entering and leaving the mode, where a single eval buys nothing —
 /// one dispatch per window means a window that closed in between costs only
 /// itself, rather than aborting the rest (an eval stops at its first failure).
 pub fn park_window(addr: &str) {
-    unpark_window(addr, PARK_WS);
+    dispatch(&format!(
+        "hl.dsp.window.move({{ workspace = \"{PARK_SPECIAL}\", follow = false, \
+         window = \"address:{addr}\" }})"
+    ));
 }
 
 pub fn unpark_window(addr: &str, workspace: i64) {
     dispatch(&format!(
-        "hl.dsp.window.move({{ workspace = {workspace}, window = \"address:{addr}\" }})"
+        "hl.dsp.window.move({{ workspace = {workspace}, follow = false, \
+         window = \"address:{addr}\" }})"
     ));
 }
 
@@ -1748,15 +1798,18 @@ pub fn swap_stage_no_warp(h: Handover) {
         ));
     }
     // Bring parked tasks home before anything else — one of them may be the task
-    // arriving, and it cannot take a stage it is not on.
+    // arriving, and it cannot take a stage it is not on. `follow = false` on
+    // every park-family move, or the dispatcher shows the park / steals focus /
+    // churns workspaces — see [`PARK_SPECIAL`].
     for (a, ws) in unpark {
         lua.push_str(&format!(
-            "hl.dispatch(hl.dsp.window.move({{ workspace = {ws}, window = \"address:{a}\" }})) "
+            "hl.dispatch(hl.dsp.window.move({{ workspace = {ws}, follow = false, \
+             window = \"address:{a}\" }})) "
         ));
     }
     for a in park {
         lua.push_str(&format!(
-            "hl.dispatch(hl.dsp.window.move({{ workspace = {PARK_WS}, \
+            "hl.dispatch(hl.dsp.window.move({{ workspace = \"{PARK_SPECIAL}\", follow = false, \
              window = \"address:{a}\" }})) "
         ));
     }
@@ -1796,7 +1849,7 @@ pub struct WindowState {
     /// another can take it.
     pub workspace: i64,
     /// Floating windows render **above** tiled ones, so a maximized stage does
-    /// not cover them — they have to be moved aside instead. See [`PARK_WS`].
+    /// not cover them — they have to be moved aside instead. See [`PARK_SPECIAL`].
     pub floating: bool,
 }
 
@@ -1884,6 +1937,30 @@ const STAGE_TAG: &str = "golem-stage";
 
 /// Tag or untag a window as the staged one. `rounding`/`border_size` are dynamic
 /// rule props, so the frame appears and disappears as the tag flips.
+/// Tell the waveview plugin the stage is rebuilt, so it may run the close it is
+/// holding — the second beat of the map's "no workspace step" close (see
+/// `Command::StageResume`).
+///
+/// **Always answer**, even when there was no stage to rebuild: the plugin holds
+/// its close until this arrives and otherwise waits out a 400ms fallback, which
+/// the ordinary paths (the daemon shutting the map as the stage opens) would pay
+/// for nothing.
+pub fn stage_ready_for_close() {
+    eval("hl.plugin.waveview.stage_ready()");
+}
+
+/// Ask the waveview map to re-photograph the desktop RIGHT NOW, while it is open.
+///
+/// Used the instant the stage lets go of its concealment for the overview: the
+/// plugin's live timer will not capture mid-animation, so without this the map
+/// spends its whole opening zoom showing the STAGE — one window — and only pops
+/// to the real workspace after it settles. The windows appearing to "move out of
+/// the way" therefore happened AFTER the open, which is what reads as slow
+/// however fast the zoom is made.
+pub fn recapture_overview() {
+    eval("hl.plugin.waveview.recapture()");
+}
+
 pub fn set_stage_tag(addr: &str, on: bool) {
     let sign = if on { '+' } else { '-' };
     dispatch(&format!(

@@ -187,6 +187,8 @@ impl UiState {
             // STAGE mode drives compositor state, not the launcher's rest
             // states — handled in `handle_command` before it reaches here.
             | Command::StageToggle
+            | Command::StageResume
+            | Command::StageDim
             | Command::StageShow(_)
             | Command::StageMode
             | Command::StageSwipe(_)

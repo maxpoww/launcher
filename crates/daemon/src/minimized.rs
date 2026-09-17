@@ -74,11 +74,24 @@ fn norm_addr(addr: &str) -> String {
 /// bottom scrim (unlike `deck_thumbs`): a dock tile draws no title strip over
 /// the picture, so there is nothing to keep readable.
 fn to_dock_layer(raw: Vec<u8>) -> Vec<u8> {
+    // A gentle contrast lift so the thumbnails read punchier against the dark
+    // dock — without a border, plate, or any change to the dock itself (Max,
+    // 2026-09-16: "a little more contrast on those thumbnails, but subtle, i
+    // like the dock as it is"). A mild S-curve about mid-grey plus a hair of
+    // brightness, on the STRAIGHT colour before premultiply — the picture
+    // only. Kept small on purpose.
+    const CONTRAST: f32 = 1.38;
+    const BRIGHTEN: f32 = 0.03;
+    let curve = |c: u8| -> u32 {
+        let v = c as f32 / 255.0;
+        let v = ((v - 0.5) * CONTRAST + 0.5 + BRIGHTEN).clamp(0.0, 1.0);
+        (v * 255.0 + 0.5) as u32
+    };
     let mut out = vec![0u8; raw.len()];
     for (i, px) in raw.chunks_exact(4).enumerate() {
         let a = px[3] as u32;
         let at = i * 4;
-        let ch = |c: u8| ((c as u32 * a) / 255) as u8;
+        let ch = |c: u8| ((curve(c) * a) / 255) as u8;
         out[at] = ch(px[0]);
         out[at + 1] = ch(px[1]);
         out[at + 2] = ch(px[2]);

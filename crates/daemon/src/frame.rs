@@ -348,6 +348,17 @@ impl App {
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
+        // The dock plate grows to wrap minimized tiles; the surface is full
+        // width, so the pointer input region must follow the plate's width
+        // (else clicks on a newly-grown part fall through, or the whole
+        // bottom strip swallows clicks when the plate is small). This changes
+        // only when a tile is added/removed — discrete, not per-frame — so
+        // re-syncing on change (the region setter no-ops when unchanged)
+        // costs nothing during animation.
+        if (layout.dock_basin_w - self.dock_basin_w).abs() > 0.5 {
+            self.dock_basin_w = layout.dock_basin_w;
+            self.sync_input_region();
+        }
 
         // The search caret anchors to the query's shaped width.
         let query_px = self
@@ -946,6 +957,9 @@ impl App {
         // Corner app-icon badge per minimized tile (dock-tail order); already
         // resolved to a texture layer in `recompute_dock_order`.
         let min_badges: Vec<Option<u32>> = self.minimized.iter().map(|w| w.badge_layer).collect();
+        // Aspect per minimized tile, so the draw box-fits each tile exactly
+        // as layout() sized its slot (a wide window shrinks in height).
+        let min_aspects_draw: Vec<f32> = self.minimized.iter().map(|w| w.aspect).collect();
         // Eased fill/ink/wash/plate: a fresh colour sample fades in instead
         // of repainting in one frame — the ink's black↔white flip and the
         // icon plates' polarity crossfade too. Keep frames coming while
@@ -998,6 +1012,7 @@ impl App {
                 dock_running: &dock_running,
                 dock_divider: self.dock_divider,
                 min_badges: &min_badges,
+                min_aspects: &min_aspects_draw,
                 drag: drag_frame,
                 trash_react: self.trash_react,
                 trash_hover: self.trash_hover,

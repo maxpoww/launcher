@@ -129,6 +129,21 @@ pub enum Command {
     /// the stage rect, the deck of every other task below it. Toggling off puts
     /// the desktop back exactly as it was, focus included.
     StageToggle,
+    /// The overview has STARTED closing and the stage is up: rebuild the stage
+    /// shape now, behind the map, so the close lands on the stage instead of on
+    /// the bare desktop (Max, 2026-09-17). Sent by the waveview plugin from its
+    /// close paths, once the pick's focus is in place.
+    ///
+    /// Deliberately its own word rather than an earlier `overview-off`: that one
+    /// waits for touchdown on purpose, because the dock popping back
+    /// mid-animation reads as aggressive. This says only "the stage may come
+    /// back", and is a no-op unless the map actually suspended it.
+    StageResume,
+    /// The map is on its LAST frames (still covering the screen) and the stage may
+    /// have its dim back. Sent by the plugin from the close's linger, so the
+    /// change happens under the overlay instead of two or three frames after it,
+    /// which is Max seeing "the brighter bg settle on the stage" (2026-09-17).
+    StageDim,
     /// While staged: put this window on the stage, by address (`0x…`). Empty
     /// payload is a no-op. The deck's click will call this; it is a verb so the
     /// mode can be driven and verified before the deck exists.
@@ -214,6 +229,8 @@ impl fmt::Display for Command {
             Command::OverviewHover(t) => write!(f, "overview-hover {t}"),
             Command::OverviewResize(s) => write!(f, "overview-resize {s}"),
             Command::StageToggle => f.write_str("stage-toggle"),
+            Command::StageResume => f.write_str("stage-resume"),
+            Command::StageDim => f.write_str("stage-dim"),
             Command::StageShow(a) => write!(f, "stage-show {a}"),
             Command::StageMode => f.write_str("stage-mode"),
             Command::StageSwipe(dx) => write!(f, "stage-swipe {dx}"),
@@ -309,6 +326,8 @@ impl FromStr for Command {
             "focus-next" => Ok(Command::FocusNext),
             "focus-other" => Ok(Command::FocusOther),
             "stage-toggle" => Ok(Command::StageToggle),
+            "stage-resume" => Ok(Command::StageResume),
+            "stage-dim" => Ok(Command::StageDim),
             "stage-mode" => Ok(Command::StageMode),
             other => Err(ParseError::UnknownCommand(other.to_owned())),
         }
@@ -352,6 +371,8 @@ pub const USAGE_VERBS: &[&str] = &[
     "overview-hover [title]",
     "overview-resize [WxH]",
     "stage-toggle",
+    "stage-resume",
+    "stage-dim",
     "stage-show <address>",
     "stage-mode",
     "stage-swipe <dx>",
@@ -458,6 +479,8 @@ mod tests {
                 | Command::OverviewHover(_)
                 | Command::OverviewResize(_)
                 | Command::StageToggle
+                | Command::StageResume
+                | Command::StageDim
                 | Command::StageShow(_)
                 | Command::StageMode
                 | Command::StageSwipe(_)

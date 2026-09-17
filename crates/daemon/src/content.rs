@@ -400,10 +400,31 @@ const DOCK_MIN_GAP: f32 = MIN_TILE_PAD * 1.5;
 /// or a hairline sliver. Aspect 1.0 lands exactly on the square dock slot.
 const MIN_TILE_ASPECT: f32 = 0.4;
 const MAX_TILE_ASPECT: f32 = 3.0;
+/// A minimized tile is fit into a box at most this many times its full
+/// height wide. A WIDE window (a wide-short terminal, aspect ~4) would
+/// otherwise make a big wide tile at full icon height; capping the width
+/// and letting the HEIGHT shrink instead keeps it a small tile (Max,
+/// 2026-09-16: "it is a small window but the shape makes it bigger on the
+/// dock… the window dont need to respect the height").
+const MAX_TILE_W_FRAC: f32 = 1.7;
+
+/// A minimized tile's drawn (width, height) for its window `aspect`, fit into
+/// a `MAX_TILE_W_FRAC × full_h` box: full height for portrait/near-square
+/// windows, width-capped with a shrunk height for wide ones. Used by both the
+/// layout (slot width) and the draw so they always agree on the shape.
+fn min_tile_dims(aspect: f32, full_h: f32) -> (f32, f32) {
+    let a = aspect.clamp(MIN_TILE_ASPECT, MAX_TILE_ASPECT);
+    let w_max = full_h * MAX_TILE_W_FRAC;
+    if full_h * a > w_max {
+        (w_max, w_max / a) // wide: cap the width, shrink the height
+    } else {
+        (full_h * a, full_h) // full height
+    }
+}
 /// The thumbnail PICTURE is drawn smaller than a pinned dock icon (Max,
 /// 2026-09-16: "make the thumbnails smaller") — this fraction of the dock
 /// icon height, centered in the band. Its width follows the window aspect.
-const MIN_TILE_SCALE: f32 = 0.85;
+const MIN_TILE_SCALE: f32 = 0.90;
 /// Horizontal air a minimized tile keeps beside its (smaller) picture, base
 /// px scaled by `icon_scale`. Deliberately generous so the dock CARD grows
 /// into a roomy shelf around the thumbnails (Max: "make the dock card grow")
@@ -534,6 +555,11 @@ pub struct Layout {
     pub dock_min_start: usize,
     /// That gap in scaled px (0 when no minimized tiles are shown).
     pub dock_min_gap: f32,
+    /// The docked plate's resting width (the basin) — what the dock card
+    /// spans while docked, grown to wrap the minimized tiles. The dock
+    /// surface is full output width, so the input region is pinned to this
+    /// centered width rather than the whole surface (see sync_input_region).
+    pub dock_basin_w: f32,
     /// The popup sections, top to bottom (Apps, Install, Files).
     pub sections: [SectionLayout; N_SECTIONS],
     /// Fully expanded search box (centered, fixed width).
@@ -599,10 +625,12 @@ pub fn layout(
     let grid_cell_h = GRID_CELL_H * icon_scale;
 
     let (w, h) = surface;
-    // The card is centered in the surface with transparent drag margin
-    // around it; all card content lays out within these bounds, not
-    // the full surface.
-    let card_w = w - 2.0 * DRAG_MARGIN_X;
+    // The OPEN box width is fixed (the launcher grid is always this wide),
+    // DECOUPLED from the surface: the dock surface is now full output width
+    // so the dock plate can grow to fit minimized tiles, but the grid must
+    // not balloon with it. This equals the old `w - 2·DRAG_MARGIN_X` back
+    // when the surface hugged the box, so nothing about the open box moves.
+    let card_w = config.window.width as f32 * icon_scale;
     // Dock slot budget. Two zones with different ceilings so a burst of
     // minimized windows can never be clamped off a half-empty bar (Max,
     // verified live: only ~2 thumbnails showed, the rest dropped — the old
@@ -644,15 +672,16 @@ pub fn layout(
     // gap (the row and card grow to hold it — see the basin below).
     let dock_min_start = if n_min_shown > 0 { n_normal_shown } else { usize::MAX };
     let dock_min_gap = if n_min_shown > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
-    // A minimized tile's WIDTH follows its window's aspect over a SMALLER
-    // picture height (`dock_icon × MIN_TILE_SCALE`), plus a generous
-    // `MIN_TILE_PAD` of side air so the card grows into a roomy shelf. The
-    // tail is therefore VARIABLE-width, unlike the uniform normal zone.
+    // A minimized tile is fit into a box (`min_tile_dims`): its width follows
+    // the window aspect over a SMALLER picture height (`dock_icon ×
+    // MIN_TILE_SCALE`), but a wide window is width-capped (its height shrinks)
+    // so it never makes a big wide tile. Plus a generous `MIN_TILE_PAD` of
+    // side air so the card grows into a roomy shelf. Variable-width tail.
     let min_tile_h = dock_icon * MIN_TILE_SCALE;
     let min_tile_pad = MIN_TILE_PAD * icon_scale;
     let min_slot_w = |k: usize| {
         let aspect = min_aspects.get(k).copied().unwrap_or(1.0);
-        min_tile_h * aspect.clamp(MIN_TILE_ASPECT, MAX_TILE_ASPECT) + min_tile_pad
+        min_tile_dims(aspect, min_tile_h).0 + min_tile_pad
     };
     // Total base (unmagnified) width of the honored row: the uniform normal
     // slots, the variable minimized tail, and the group gap before the tail.
@@ -677,10 +706,15 @@ pub fn layout(
     // aside) and never below the default. Docked-only in practice: the
     // launcher hides the tiles as it opens (main.rs gate), so this wide
     // basin has gathered back to the box width by the time the card is up.
-    let default_basin = w - 2.0 * BASIN_MARGIN_X;
-    let max_basin = (w - 2.0 * dock_pad_x).max(default_basin);
+    // The RESTING dock width (its comfortable basin with no minimized tiles)
+    // — the old `w - 2·BASIN_MARGIN_X` from when the surface hugged the box,
+    // so the resting bar looks exactly as before. The card grows from here
+    // up to the full surface as minimized tiles widen the row (Max,
+    // 2026-09-16: "the dock plate should grow so more minimized apps fit").
+    let resting_basin = card_w + 2.0 * (DRAG_MARGIN_X - BASIN_MARGIN_X);
+    let max_basin = (w - 2.0 * dock_pad_x).max(resting_basin);
     let dock_row_w = row_base_w + 2.0 * dock_pad_x;
-    let basin_w = dock_row_w.clamp(default_basin, max_basin);
+    let basin_w = dock_row_w.clamp(resting_basin, max_basin);
     let gathered = basin_w + (card_w - basin_w) * rise;
     let card_w_now = (gathered * (1.0 - (stretch.0 - 1.0) * SPILL)).min(w);
     let card_x = (w - card_w_now) / 2.0;
@@ -855,6 +889,7 @@ pub fn layout(
         dock_slots,
         dock_min_start,
         dock_min_gap,
+        dock_basin_w: basin_w,
         sections,
         search_box,
         search_btn,
@@ -1051,6 +1086,9 @@ pub struct FrameInput<'a> {
     /// of the app matching the window's class, or `None` for no badge. Short/
     /// empty slice ⇒ no badges.
     pub min_badges: &'a [Option<u32>],
+    /// Aspect ratio per minimized tile (same order as `min_badges`), so the
+    /// draw fits each tile into its box exactly as `layout()` sized its slot.
+    pub min_aspects: &'a [f32],
     /// Active drag for ghost icon and insertion indicator; `None` at rest.
     pub drag: Option<DragFrame>,
     /// Recycle-bin reaction (0 = shut/grey at rest, 1 = open/red while an app
@@ -1267,6 +1305,7 @@ pub fn scene(
         dock_running,
         dock_divider,
         min_badges,
+        min_aspects,
         drag,
         trash_react,
         trash_hover,
@@ -1609,13 +1648,13 @@ pub fn scene(
         // draw and hit-test on the one shape.
         let is_min = slot >= layout.dock_min_start;
         if is_min && !placeholders.get(entry_idx).copied().unwrap_or(false) {
-            // Smaller than a pinned icon (MIN_TILE_SCALE) and vertically
-            // CENTERED in the icon band, so the shrunken thumbnail sits
-            // balanced in its roomy slot rather than sinking to the baseline.
-            let pic_h_rest = dock_icon * MIN_TILE_SCALE;
-            let content_w = (slot_rect.w - min_tile_pad).max(1.0); // rest picture width
-            let tile_h = size * MIN_TILE_SCALE;
-            let tile_w = tile_h * content_w / pic_h_rest; // hold the aspect at any scale
+            // Fit into the same box `layout()` sized the slot to: full height
+            // (× MIN_TILE_SCALE) for portrait/near-square windows, but a WIDE
+            // window is width-capped and its HEIGHT shrinks so it stays a
+            // small tile. Vertically CENTERED in the icon band.
+            let aspect = min_aspects.get(slot - layout.dock_min_start).copied().unwrap_or(1.0);
+            let full_h = size * MIN_TILE_SCALE; // magnifies with `size`
+            let (tile_w, tile_h) = min_tile_dims(aspect, full_h);
             let icon_cy = baseline - (size + lift(entry_idx)) * drop / 2.0; // the pinned icon's vertical mid
             let thumb = Rect::new(
                 vcx - tile_w / 2.0,
@@ -3077,7 +3116,7 @@ mod tests {
                 &cfg, 1.0, SURFACE, docked, total, n_min, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
             )
         };
-        let stretched = lay_wide(15, 5);
+        let stretched = lay_wide(19, 9); // wide tiles are width-capped now, so more are needed to overflow
         let small = lay(8, 0);
         assert!(
             stretched.card_w > small.card_w,
@@ -3148,6 +3187,7 @@ mod tests {
                 stretch: 1.0, // rest: the default 0.0 collapses tile heights
                 dock_order: &order,
                 min_badges: &[Some(7), None],
+                min_aspects: &aspects,
                 ..Default::default()
             },
         );
