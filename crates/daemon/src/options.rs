@@ -5127,13 +5127,54 @@ impl App {
             {
                 self.options_click();
             }
+            // Right PRESS on the [current task] pill (unless a module — the
+            // sunset prompt, an asking pill — has taken it over): begin a "nub
+            // drag" — pin the cursor and move the focused window with relative
+            // touchpad motion (Max, experimental, 2026-09-17). The matching
+            // release ends it below. This replaces the pill's old right-click
+            // (cycle-focus-backward) with the drag + quick-click-centre.
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_RIGHT
-                    && state == WEnum::Value(wl_pointer::ButtonState::Released)
-                    && self.options_interactive() =>
+                    && state == WEnum::Value(wl_pointer::ButtonState::Pressed) =>
             {
-                self.options_right_click();
+                // HOLD to drag: press starts it (cursor locks in place), the
+                // release below drops it (see nub_drag.rs). Only on the [current
+                // task] pill, and not while a module has taken the pill over.
+                if self.options_interactive()
+                    && self.options_hover == Some(PillId::Window)
+                    && !self.sunset_prompt_shown()
+                    && !self.module_on_pill()
+                {
+                    self.nub_start();
+                }
             }
+            wl_pointer::Event::Button { button, state, .. }
+                if button == BTN_RIGHT
+                    && state == WEnum::Value(wl_pointer::ButtonState::Released) =>
+            {
+                // End the hold-drag; a right-click that never started one runs its
+                // normal action (cycle focus, sunset "not now", clip-box).
+                if self.nub_drag.is_some() {
+                    self.nub_end();
+                } else if self.options_interactive() {
+                    self.options_right_click();
+                }
+            }
+            // Two-finger scroll over the [current task] pill DRAGS the focused
+            // window — the touchpad path for the nub drag (Max, 2026-09-18): on a
+            // touchpad the "right-click-hold-and-move" gesture is physically a
+            // two-finger scroll, and the cursor stays still because scroll doesn't
+            // move it. Must precede the notif/gear scroll arms so a scroll on THIS
+            // pill moves the window instead of browsing a box.
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(a),
+                value,
+                ..
+            } if self.options_hover == Some(PillId::Window) => match a {
+                wl_pointer::Axis::VerticalScroll => self.nub_scroll(0.0, value),
+                wl_pointer::Axis::HorizontalScroll => self.nub_scroll(value, 0.0),
+                _ => {}
+            },
             // Scroll over the notification OPTION: browse history / expand the
             // list. Works over the bell *or* the mute pill it reveals (both are
             // the one OPTION), or whenever its history is already open.

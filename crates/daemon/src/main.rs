@@ -39,6 +39,7 @@ mod managed;
 mod managed_webapps;
 mod minimized;
 mod nix;
+mod nub_drag;
 // Notification OPTION data plane: a D-Bus worker that mirrors the options-notify
 // daemon's active list into the UI and sends back dismiss/act/reply. The render
 // surface (the vertical-list box + entry/exit springs) consumes this next; the
@@ -125,6 +126,19 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
+use wayland_protocols::wp::pointer_constraints::zv1::client::{
+    zwp_locked_pointer_v1::{self, ZwpLockedPointerV1},
+    zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
+};
+use wayland_protocols::wp::relative_pointer::zv1::client::{
+    zwp_relative_pointer_manager_v1::{self, ZwpRelativePointerManagerV1},
+    zwp_relative_pointer_v1::{self, ZwpRelativePointerV1},
+};
+use wayland_protocols::wp::pointer_gestures::zv1::client::{
+    zwp_pointer_gesture_pinch_v1::{self, ZwpPointerGesturePinchV1},
+    zwp_pointer_gesture_swipe_v1::{self, ZwpPointerGestureSwipeV1},
+    zwp_pointer_gestures_v1::{self, ZwpPointerGesturesV1},
+};
 
 use crate::content::Hit;
 use crate::renderer::Renderer;
@@ -388,6 +402,18 @@ fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Pointer-lock + relative-pointer for the nub drag (optional; the daemon
+    // works fine without them — the gesture just won't arm).
+    let pointer_constraints = globals
+        .bind::<ZwpPointerConstraintsV1, App, _>(&qh, 1..=1, ())
+        .ok();
+    let relative_pointer_manager = globals
+        .bind::<ZwpRelativePointerManagerV1, App, _>(&qh, 1..=1, ())
+        .ok();
+    let pointer_gestures = globals
+        .bind::<ZwpPointerGesturesV1, App, _>(&qh, 1..=3, ())
+        .ok();
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -419,6 +445,14 @@ fn main() -> anyhow::Result<()> {
         screencopy,
         shm,
         shm_pool: None,
+        pointer_constraints,
+        relative_pointer_manager,
+        pointer_gestures,
+        swipe_gesture: None,
+        pinch_gesture: None,
+        nub_drag: None,
+        scroll_drag: None,
+        pinch_drag: None,
         pointer_surface: options::PointerSurface::Dock,
         options_ptr: None,
         options_hover: None,
@@ -1052,6 +1086,26 @@ pub struct App {
     screencopy: Option<ZwlrScreencopyManagerV1>,
     shm: Option<Shm>,
     shm_pool: Option<RawPool>,
+    /// Pointer-lock + relative-motion managers (both optional — absent on a
+    /// compositor without the protocols). Used only by the [current task] pill's
+    /// right-click "nub drag" (see nub_drag.rs).
+    pointer_constraints: Option<ZwpPointerConstraintsV1>,
+    relative_pointer_manager: Option<ZwpRelativePointerManagerV1>,
+    /// An in-flight nub drag: the cursor is locked and touchpad motion is moving
+    /// the focused window. `None` when not dragging. (Hardware-mouse path.)
+    nub_drag: Option<nub_drag::NubDrag>,
+    /// An in-flight scroll drag: two-finger scroll over the current-task pill is
+    /// moving the focused window (the touchpad path). `None` when not dragging.
+    scroll_drag: Option<nub_drag::ScrollDrag>,
+    /// An in-flight pinch resize: a two-finger pinch over the current-task pill is
+    /// resizing the focused window. `None` when not pinching.
+    pinch_drag: Option<nub_drag::PinchResize>,
+    /// Touchpad multi-finger gesture protocol + the swipe/pinch objects (kept
+    /// alive so their events flow). Used to resize the window from a gesture on
+    /// the current-task pill; None if the compositor lacks the protocol.
+    pointer_gestures: Option<ZwpPointerGesturesV1>,
+    swipe_gesture: Option<ZwpPointerGestureSwipeV1>,
+    pinch_gesture: Option<ZwpPointerGesturePinchV1>,
     /// OPTIONS content (pills): which surface the pointer is on, its position,
     /// the hovered pill, and the data the pills show.
     pointer_surface: options::PointerSurface,
@@ -5431,6 +5485,11 @@ impl SeatHandler for App {
                 .cursor_shape
                 .as_ref()
                 .map(|mgr| mgr.get_shape_device(&pointer, qh));
+            // Touchpad swipe + pinch gesture feeds (kept alive on `self`).
+            if let Some(g) = &self.pointer_gestures {
+                self.swipe_gesture = Some(g.get_swipe_gesture(&pointer, qh, ()));
+                self.pinch_gesture = Some(g.get_pinch_gesture(&pointer, qh, ()));
+            }
             self.pointer = Some(pointer);
         }
     }
@@ -5565,6 +5624,102 @@ impl KeyboardHandler for App {
 
 /// Raw `wl_pointer` dispatch — deliberately *not* sctk's `PointerHandler`.
 ///
+// The nub-drag protocols. The two managers and the locked-pointer object emit
+// nothing we act on; only the relative pointer's motion drives the drag.
+impl Dispatch<ZwpPointerConstraintsV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ZwpPointerConstraintsV1,
+        _: zwp_pointer_constraints_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ZwpLockedPointerV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ZwpLockedPointerV1,
+        _: zwp_locked_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ZwpRelativePointerManagerV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ZwpRelativePointerManagerV1,
+        _: zwp_relative_pointer_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ZwpRelativePointerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ZwpRelativePointerV1,
+        event: zwp_relative_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwp_relative_pointer_v1::Event::RelativeMotion { dx, dy, .. } = event {
+            app.nub_motion(dx, dy);
+        }
+    }
+}
+// Touchpad swipe + pinch gestures. Swipe is unused (Max chose pinch for resize);
+// pinch over the [current task] pill resizes the focused window.
+impl Dispatch<ZwpPointerGesturesV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ZwpPointerGesturesV1,
+        _: zwp_pointer_gestures_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ZwpPointerGestureSwipeV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ZwpPointerGestureSwipeV1,
+        _: zwp_pointer_gesture_swipe_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ZwpPointerGesturePinchV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ZwpPointerGesturePinchV1,
+        event: zwp_pointer_gesture_pinch_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            // Arm only when the pinch starts on the current-task pill.
+            zwp_pointer_gesture_pinch_v1::Event::Begin { .. } => {
+                if app.options_hover == Some(options::PillId::Window) {
+                    app.pinch_begin();
+                }
+            }
+            zwp_pointer_gesture_pinch_v1::Event::Update { scale, .. } => app.pinch_scale(scale),
+            zwp_pointer_gesture_pinch_v1::Event::End { .. } => app.pinch_end(),
+            _ => {}
+        }
+    }
+}
+
 /// sctk batches pointer events and only delivers them when a
 /// `wl_pointer.frame` event arrives, but this compositor (Hyprland) only
 /// sends `frame` alongside enter/leave/button: plain motion arrives
