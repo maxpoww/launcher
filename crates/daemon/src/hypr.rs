@@ -766,12 +766,6 @@ pub fn active_workspace_is_empty() -> Option<bool> {
     Some(ws["windows"].as_i64()? == 0)
 }
 
-/// Switch to a workspace by id (`hl.dsp.focus` with a `workspace` field —
-/// verified in the fork's example config, mainMod+[0-9] binds).
-pub fn focus_workspace(id: i64) {
-    dispatch(&format!("hl.dsp.focus({{ workspace = {id} }})"));
-}
-
 /// Focus the window whose class **exactly** matches `class` (case-insensitive on
 /// `class`/`initialClass`), preferring the most-recently-focused. Returns whether
 /// one was found and focused. This is how the notification OPTION raises a
@@ -1300,6 +1294,90 @@ pub fn eval(lua: &str) {
         Ok(reply) => debug!("Hyprland eval {lua:?} replied: {}", reply.trim()),
         Err(e) => debug!("Hyprland eval {lua:?} failed: {e:#}"),
     }
+}
+
+/// [`eval`], reporting whether the chunk ran (`ok`) — for callers with a
+/// fallback when it did not (e.g. a plugin function that is not loaded).
+pub fn eval_ok(lua: &str) -> bool {
+    match request(&format!("eval {lua}")) {
+        Ok(reply) if reply.trim() == "ok" => true,
+        Ok(reply) => {
+            debug!("Hyprland eval {lua:?} replied: {}", reply.trim());
+            false
+        }
+        Err(e) => {
+            debug!("Hyprland eval {lua:?} failed: {e:#}");
+            false
+        }
+    }
+}
+
+/// Where the keyboard belongs on the workspace the user is on NOW: that
+/// workspace's last focused window. A special workspace shown on the focused
+/// monitor (a scratchpad) is where they are; our minimized park never is.
+/// A workspace whose remembered window has left it (minimized, moved) still
+/// has a last-focused window: the most recently focused one on it. `None` on an
+/// empty workspace.
+///
+/// Read at CLOSE time, never remembered from the open: while one of our layers
+/// holds the keyboard the compositor refuses every window focus, so anything
+/// remembered then — the "active window" included — still points at the
+/// workspace the box was opened on, and focusing it drags the user back there
+/// (Max, 2026-09-26: *"i open the box, move to another WS, close it and it
+/// used to take me back to where i opened it"*).
+pub fn current_last_window() -> Option<String> {
+    let special = request("j/monitors")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|mons| {
+            let m = mons
+                .as_array()?
+                .iter()
+                .find(|m| m["focused"].as_bool() == Some(true))?;
+            let sid = m["specialWorkspace"]["id"].as_i64().unwrap_or(0);
+            let name = m["specialWorkspace"]["name"].as_str().unwrap_or("");
+            (sid != 0 && name != "special:minimized").then_some(sid)
+        });
+    let (ws, last) = match special {
+        Some(sid) => {
+            let wss: serde_json::Value =
+                serde_json::from_str(&request("j/workspaces").ok()?).ok()?;
+            let last = wss
+                .as_array()?
+                .iter()
+                .find(|w| w["id"].as_i64() == Some(sid))
+                .and_then(|w| w["lastwindow"].as_str())
+                .filter(|a| !a.is_empty() && *a != "0x0")
+                .map(str::to_owned);
+            (sid, last)
+        }
+        None => active_workspace()?,
+    };
+    last.filter(|a| window_is_on(a, ws))
+        .or_else(|| last_focused_on(ws))
+}
+
+/// Give the keyboard to window `addr` once one of our layers has let go of it.
+///
+/// Through the waveview plugin's `kb_focus` — the one call that survives the
+/// state Hyprland 0.55.4 leaves behind: the keyboard on NOTHING while it still
+/// remembers `addr` as focused, where a `focus` dispatch of `addr` is a no-op
+/// (see the plugin's `luaKbFocus`; fixed upstream in 0.56). No pointer warp, no
+/// neighbour bounce. Falls back to [`focus_window_no_warp`] if the plugin is not
+/// loaded.
+pub fn give_keyboard(addr: &str) {
+    if !eval_ok(&format!("hl.plugin.waveview.kb_focus(\"{addr}\")")) {
+        focus_window_no_warp(addr);
+    }
+}
+
+/// Nothing to give the keyboard to (an empty workspace): have the compositor
+/// forget the window it still remembers as focused — left in place, it throws
+/// away the next plain focus of that window too, and going back to its
+/// workspace would leave the keyboard on nothing again (the plugin's
+/// `kb_focus("")`; nothing to do without the plugin).
+pub fn clear_keyboard() {
+    let _ = eval_ok("hl.plugin.waveview.kb_focus(\"\")");
 }
 
 /// The two workspace selectors that must be re-pointed for the stage inset.

@@ -2754,6 +2754,13 @@ impl App {
         if want == self.clip.keyboard_held {
             return;
         }
+        if want {
+            self.cancel_keyboard_handback(crate::KbSurface::Options);
+        } else if !self.keyboard_handback_armed(crate::KbSurface::Options) {
+            // Every release hands the keyboard back — to the window the user is
+            // on now, unless the caller already chose one (a paste).
+            self.begin_keyboard_handback(crate::KbSurface::Options, None);
+        }
         self.clip.keyboard_held = want;
         debug!("clip: keyboard grab {}", if want { "on" } else { "off" });
         if let Some(layer) = &self.options_layer {
@@ -2780,39 +2787,36 @@ impl App {
             self.after_ms(PASTE_SETTLE_MS, |_| crate::hypr::paste_active());
             return;
         }
-        // Whose paste this is, read BEFORE anything moves — the window stays
-        // `activewindow` throughout, which is exactly why it needs re-focusing
-        // by hand (see `hypr::focus_window`: dropping the grab leaves the
-        // keyboard seat stranded on the layer, so the window would get its keys
-        // but never its clipboard offer).
-        let Some(addr) = crate::hypr::active_window() else {
+        // Whose paste this is: the last focused window of the workspace the
+        // user is on now — the one the box sits over — read BEFORE the grab
+        // is released. It gets the keyboard back first (the hand-back), or it
+        // would get the keystroke but never its clipboard offer.
+        let Some(addr) = crate::hypr::current_last_window() else {
             return;
         };
-        self.yield_clip_keyboard(&addr);
+        self.yield_clip_keyboard(addr.clone());
         self.after_ms(PASTE_FOCUS_MS, move |_| {
             crate::hypr::send_key_to(&addr, "CTRL", "v");
         });
     }
 
-    /// Give the keyboard back to window `addr` and LEAVE it there.
+    /// Give the keyboard back to window `to` and LEAVE it there.
     ///
-    /// Releasing the grab is not enough on its own: the window never stopped
-    /// being `activewindow`, so the compositor leaves the seat stranded on the
-    /// layer and the window gets neither keys nor a clipboard offer (verified
-    /// live 2026-09-13 — with the cursor inside the window, too). It takes an
-    /// explicit focus, and it must be the NON-WARPING one: focusing by
-    /// dispatcher normally drags the pointer into the window, which pulls it off
-    /// the box mid-pick (Max: "the window where it gets pasted takes my
-    /// pointer"). The interactivity commit is flushed first, or the compositor
-    /// answers the focus while we still claim exclusivity.
+    /// Releasing the grab is not enough on its own: Hyprland 0.55.4 leaves the
+    /// keyboard on nothing and the window gets neither keys nor a clipboard
+    /// offer (verified live 2026-09-13). The hand-back (`begin_keyboard_handback`)
+    /// focuses it once the compositor confirms the release — without a pointer
+    /// warp, which pulled the pointer off the box mid-pick (Max: "the window
+    /// where it gets pasted takes my pointer"). The interactivity commit is
+    /// flushed at once so that confirmation comes quickly.
     ///
     /// The box does not take the keyboard back by itself afterwards — you asked
     /// for your window, you keep it (Max: "i can't really keep writing on the
     /// window"). `rearm_clip_keyboard` is the way back in.
-    fn yield_clip_keyboard(&mut self, addr: &str) {
+    fn yield_clip_keyboard(&mut self, to: String) {
+        self.begin_keyboard_handback(crate::KbSurface::Options, Some(to));
         self.set_clip_keyboard(false);
         let _ = self.conn.flush();
-        crate::hypr::focus_window_no_warp(addr);
         self.clip.keyboard_yielded = true;
     }
 
@@ -2916,13 +2920,9 @@ impl App {
             self.refilter_clips();
             self.clip.dict_open = false;
             self.emoji.open = false;
-            // Hand the keyboard back to the window under us as the box goes —
-            // by focus, not just by dropping the grab, or the seat stays
-            // stranded on the layer and the window can't be typed in at all.
-            match crate::hypr::active_window() {
-                Some(addr) if self.clip.keyboard_held => self.yield_clip_keyboard(&addr),
-                _ => self.sync_clip_keyboard(),
-            }
+            // The keyboard goes with the box, handed back to the window the
+            // user is on NOW (`set_clip_keyboard`) — or it can't be typed in.
+            self.sync_clip_keyboard();
             self.clip.keyboard_yielded = false;
             // The detail view (and scroll) are NOT reset here: the box collapses
             // showing whatever was on screen (the detail shrinks + fades away with

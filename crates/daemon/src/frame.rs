@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::shell::wlr_layer::LayerSurfaceConfigure;
 use smithay_client_toolkit::shell::WaylandSurface;
-use tracing::{debug, error};
+use tracing::error;
 
 use crate::install::FAIL_FLASH;
 use crate::state::Target;
-use crate::{animation, apps, content, groups, hypr, pager, pages};
+use crate::{animation, apps, content, groups, pager, pages};
 use crate::{App, BOUNCE_DURATION, BOUNCE_HEIGHT, DOCK_REST_AFTER_CLOSE};
 
 /// Exponential make-room glide rate (per second) for the grid and dock
@@ -271,31 +271,8 @@ impl App {
             // dock stays stuck visible (no dodge / no auto-hide) until the
             // mouse moves.
             self.reconcile_stale_pointer();
-            // The layer just shrank off the cursor and stopped committing
-            // frames. Force focus back now: this is the quiet moment where a
-            // forced re-bind of the keyboard seat won't be clobbered by
-            // follow_mouse or an in-flight surface commit. Rofi behavior
-            // (SH): if the user travelled to another workspace while we were
-            // open, they STAY there — seat the keyboard on that workspace's
-            // window instead of yanking them back to the origin.
-            if let Some(addr) = self.pending_refocus.take() {
-                match self.close_site.take() {
-                    Some((ws, last)) if Some(ws) != self.restore_workspace => {
-                        debug!(
-                            "settled ({:?}); staying on travelled ws {ws}",
-                            self.ui.target()
-                        );
-                        hypr::focus_workspace(ws);
-                        if let Some(last) = last {
-                            hypr::focus_window(&last);
-                        }
-                    }
-                    _ => {
-                        debug!("settled ({:?}); forcing focus to {addr}", self.ui.target());
-                        hypr::focus_window(&addr);
-                    }
-                }
-            }
+            // (The keyboard is handed back at the release itself, not here —
+            // see `App::begin_keyboard_handback`.)
             // The card just came to rest: re-evaluate the dock colour
             // sample now rather than waiting ≤700 ms for the poll — the
             // card's footprint (whose columns sampling excludes while the

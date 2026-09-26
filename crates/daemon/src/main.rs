@@ -533,8 +533,8 @@ fn main() -> anyhow::Result<()> {
         soft_frame_timer: false,
         last_input: Instant::now(),
         rest_hide_pending: false,
-        restore_window: None,
-        pending_refocus: None,
+        kb_handback: None,
+        kb_left_to_user: false,
         focus_launched: None,
         interactive: false,
         input_extent: None,
@@ -668,8 +668,6 @@ fn main() -> anyhow::Result<()> {
         battery_last_snapshot: None,
         battery_started: Instant::now(),
         battery_critical_streak: 0,
-        restore_workspace: None,
-        close_site: None,
         hover: None,
         pointer_pos: None,
         pointer_inside_card: false,
@@ -1328,16 +1326,13 @@ pub struct App {
     /// A box close is settling to the dock and should rest a beat, then
     /// hide, once the collapse animation finishes.
     rest_hide_pending: bool,
-    /// Window that had focus when the box grabbed the keyboard — focus
-    /// returns here on a plain close. Cleared on launch (the app takes
-    /// focus) and on external focus loss (the user chose another window).
-    restore_window: Option<String>,
-    /// Refocus deferred until the box settles. Under `follow_mouse` the
-    /// compositor won't route the keyboard to a window while our layer
-    /// still covers the pointer, and it only re-evaluates on real pointer
-    /// motion — so we dispatch the focus only once the card has shrunk out
-    /// from under the cursor and stopped committing frames.
-    pending_refocus: Option<String>,
+    /// A keyboard hand-back in flight: one of our layers let go of the
+    /// keyboard and the compositor is about to confirm it; then it goes to the
+    /// window chosen at close time (see [`App::begin_keyboard_handback`]).
+    kb_handback: Option<KbHandback>,
+    /// The launcher lost the keyboard to a window the user chose while it was
+    /// still open: the collapse that follows must not hand it anywhere else.
+    kb_left_to_user: bool,
     /// Set when we just launched an app: the next window to map (within a
     /// grace window) is focused, since focus-follows-mouse won't hand
     /// keyboard focus to an app whose window opens away from the cursor.
@@ -1762,15 +1757,6 @@ pub struct App {
     /// Consecutive snapshots at Critical — one flaky ACPI read must not
     /// sleep the machine (see `battery::CRITICAL_STREAK`).
     battery_critical_streak: u8,
-    /// Workspace the user was on when the keyboard grab began, paired with
-    /// [`Self::restore_window`] — so a close can tell "still where they
-    /// opened us" from "travelled while we were open" (rofi behavior).
-    restore_workspace: Option<i64>,
-    /// Where the user actually was at close-initiation: `(workspace,
-    /// last window)` captured *before* the grab release, because the
-    /// compositor's own release-refocus yanks back to the origin workspace
-    /// within the same tick — anything read later already sees the yank.
-    close_site: Option<(i64, Option<String>)>,
     /// Item currently under the pointer.
     hover: Option<Hit>,
     /// Pointer position in surface coordinates, while inside.
@@ -4224,9 +4210,14 @@ impl App {
     /// Whether `pos` is outside the popup card entirely — the drop zone
     /// for a "try it" launch (a package dragged clear of the box).
     fn outside_card(&self, layout: &content::Layout, pos: (f32, f32)) -> bool {
-        let right = self.buffer_size.0 as f32 - content::DRAG_MARGIN_X;
-        pos.0 < content::DRAG_MARGIN_X
-            || pos.0 > right
+        // The CARD's own edges, not the surface's. The two used to coincide
+        // (the surface was the card plus its drag margins), until the surface
+        // went full output width for the growing dock plate (2026-09-16):
+        // from then on "outside" only fired within a margin of the SCREEN
+        // edge, so a click beside the open box was read as inside it and
+        // never dismissed it — only a click above did (Max, 2026-09-26).
+        pos.0 < layout.card_x
+            || pos.0 > layout.card_x + layout.card_w
             || pos.1 < layout.card_top
             || pos.1 > layout.card_top + layout.card_h
     }
@@ -4666,12 +4657,16 @@ impl App {
             if let Some(addr) = self.running.get(&index).and_then(|w| w.first()).cloned() {
                 info!("activating running app {id} -> window {addr}");
                 self.usage.increment(&id);
-                self.restore_window = None;
                 if self.interactive {
+                    // The keyboard follows the pick, handed over once our
+                    // layer has let go of it (a focus now is refused under
+                    // our grab).
+                    self.begin_keyboard_handback(KbSurface::Launcher, Some(addr.clone()));
                     surface::set_interactive(&self.layer, false);
                     self.interactive = false;
+                } else {
+                    hypr::focus_window(&addr);
                 }
-                hypr::focus_window(&addr);
                 self.dismiss();
                 return;
             }
@@ -4680,15 +4675,13 @@ impl App {
             error!("launch failed for {id}: {e:#}");
         }
         self.usage.increment(&id);
-        // Hand keyboard focus to the launched app. Drop our exclusive
-        // grab now (before its window maps) and clear the return-focus
-        // target so we don't pull focus back to the window we came from;
-        // then focus the app's window the moment it opens — the
-        // compositor won't with focus-follows-mouse if the cursor is
-        // parked off it (Chrome and other slow starters especially).
-        self.restore_window = None;
+        // Hand keyboard focus to the launched app: drop our exclusive grab
+        // now (before its window maps) — the keyboard goes back where the
+        // user is until then — and focus the app's window the moment it
+        // opens (`on_window_opened`; slow starters especially).
         self.focus_launched = Some(Instant::now());
         if self.interactive {
+            self.begin_keyboard_handback(KbSurface::Launcher, None);
             surface::set_interactive(&self.layer, false);
             self.interactive = false;
         }
@@ -4732,33 +4725,94 @@ impl App {
         let interactive = self.ui.wants_keyboard();
         if interactive != self.interactive {
             if interactive {
-                // Grabbing the keyboard for type-to-search steals focus
-                // from whatever window has it — remember it (and the
-                // workspace) so a plain close can hand focus back.
-                self.restore_window = hypr::active_window();
-                self.restore_workspace = hypr::active_workspace().map(|(id, _)| id);
-                debug!("grab keyboard; restore target = {:?}", self.restore_window);
+                // Grabbing the keyboard for type-to-search steals it from
+                // whatever window has it; the close hands it back — to the
+                // window the user is on at CLOSE time (begin_keyboard_handback).
+                self.cancel_keyboard_handback(KbSurface::Launcher);
+                self.kb_left_to_user = false;
+                debug!("grab keyboard");
                 surface::set_interactive(&self.layer, true);
             } else {
-                // We-initiated close (a click-elsewhere close cleared
-                // restore_window in `leave` before getting here): capture
-                // where the user IS — workspace and its last window — before
-                // the release, while it still reflects their travel. The
-                // settle-time refocus in frame.rs uses it to stay on a
-                // travelled workspace instead of yanking back to the origin.
-                if self.restore_window.is_some() {
-                    self.close_site = hypr::active_workspace();
+                // We-initiated close: arm the hand-back, THEN release. An
+                // explicit target armed by the caller (an app activation)
+                // stands; a window the user already chose while we were open
+                // keeps the keyboard.
+                let armed = self.keyboard_handback_armed(KbSurface::Launcher);
+                if !armed && !std::mem::take(&mut self.kb_left_to_user) {
+                    self.begin_keyboard_handback(KbSurface::Launcher, None);
                 }
-                // Release the grab. The hand-back itself happens at the
-                // settle (frame.rs), once the compositor has actually taken
-                // our keyboard away — dispatching a focus before that races
-                // the release and Hyprland drops it.
                 surface::set_interactive(&self.layer, false);
             }
             self.interactive = interactive;
         }
 
         self.sync_input_region();
+    }
+
+    /// Hand the keyboard back when `surface` lets go of it. Call right BEFORE
+    /// releasing the grab: to `to`, or — `None` — to the last focused window of
+    /// the workspace the user is on NOW, read here, at close time.
+    ///
+    /// Why a hand-back at all (Max, 2026-09-26: *"when i close it, it does not
+    /// return KB focus. i have to move to another workspace and come back"*):
+    /// Hyprland 0.55.4 leaves the keyboard on NOTHING when a layer lets go of
+    /// it, and drops a plain focus of the window it still remembers (upstream
+    /// fix 271b0d1eb4, in 0.56). The old answer — re-focus the window we opened
+    /// over, bounced through a neighbour — failed on every one-window workspace
+    /// and yanked back to the origin after a workspace switch. The compositor
+    /// confirms the release with a keyboard `leave` on our surface, which
+    /// completes the hand-back ([`Self::complete_keyboard_handback`]); a grace
+    /// timer completes it if no leave ever comes.
+    pub(crate) fn begin_keyboard_handback(&mut self, surface: KbSurface, to: Option<String>) {
+        let to = to.or_else(hypr::current_last_window);
+        debug!("keyboard hand-back armed ({surface:?}) → {to:?}");
+        let since = Instant::now();
+        self.kb_handback = Some(KbHandback { surface, to, since });
+        let timer = Timer::from_duration(KB_HANDBACK_GRACE);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if app.kb_handback.as_ref().is_some_and(|h| h.since == since) {
+                debug!("keyboard hand-back ({surface:?}): no leave within {KB_HANDBACK_GRACE:?}, completing");
+                app.complete_keyboard_handback(surface);
+            }
+            TimeoutAction::Drop
+        });
+    }
+
+    /// The compositor took the keyboard off `surface`: give it to the window
+    /// the close chose (on an empty workspace, nowhere — correct there).
+    pub(crate) fn complete_keyboard_handback(&mut self, surface: KbSurface) {
+        if !self.keyboard_handback_armed(surface) {
+            return;
+        }
+        let Some(h) = self.kb_handback.take() else {
+            return;
+        };
+        match h.to {
+            Some(addr) => {
+                debug!("keyboard hand-back ({surface:?}) → {addr}");
+                hypr::give_keyboard(&addr);
+            }
+            None => {
+                debug!(
+                    "keyboard hand-back ({surface:?}): empty workspace, the keyboard stays free"
+                );
+                hypr::clear_keyboard();
+            }
+        }
+    }
+
+    /// Whether a hand-back from `surface` is already on its way.
+    pub(crate) fn keyboard_handback_armed(&self, surface: KbSurface) -> bool {
+        self.kb_handback
+            .as_ref()
+            .is_some_and(|h| h.surface == surface)
+    }
+
+    /// `surface` took the keyboard (again): nothing is owed to a window.
+    pub(crate) fn cancel_keyboard_handback(&mut self, surface: KbSurface) {
+        if self.keyboard_handback_armed(surface) {
+            self.kb_handback = None;
+        }
     }
 
     /// Size the pointer input region to whatever is currently visible,
@@ -5407,6 +5461,25 @@ impl SeatHandler for App {
     }
 }
 
+/// Which of our surfaces held the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KbSurface {
+    Launcher,
+    Options,
+}
+
+/// A keyboard hand-back in flight (see [`App::begin_keyboard_handback`]).
+pub(crate) struct KbHandback {
+    surface: KbSurface,
+    /// The window it goes to; `None` = an empty workspace (nowhere).
+    to: Option<String>,
+    since: Instant,
+}
+
+/// How long a hand-back waits for the compositor's keyboard `leave` before
+/// completing anyway (our layer may already have lost the keyboard).
+const KB_HANDBACK_GRACE: Duration = Duration::from_millis(300);
+
 impl KeyboardHandler for App {
     fn enter(
         &mut self,
@@ -5436,26 +5509,22 @@ impl KeyboardHandler for App {
         // launcher or drop the window it means to hand focus back to.
         if surface != self.layer.wl_surface() {
             debug!("keyboard focus left the OPTIONS surface");
+            // The box's release, confirmed: the keyboard goes where it chose.
+            self.complete_keyboard_handback(KbSurface::Options);
             return;
         }
-        debug!(
-            "keyboard focus lost; target={:?}, restore={:?}",
-            self.ui.target(),
-            self.restore_window
-        );
+        debug!("keyboard focus lost; target={:?}", self.ui.target());
         if self.ui.target() == Target::Open {
             // Still open when the keyboard left us: the user focused
-            // another window (alt-tab, click elsewhere). Respect their
-            // choice — drop the return target and collapse to the dock.
-            self.restore_window = None;
+            // another window. Respect their choice — no hand-back — and
+            // collapse to the dock.
+            self.cancel_keyboard_handback(KbSurface::Launcher);
+            self.kb_left_to_user = true;
             self.handle_command(Command::Collapse);
         } else {
-            // We initiated the close. Don't refocus yet: the card is
-            // still a full-size layer over the cursor and mid-animation,
-            // so a focus now gets clobbered by follow_mouse. Defer it to
-            // the settle, when the layer has shrunk out from under the
-            // pointer and gone quiet.
-            self.pending_refocus = self.restore_window.take();
+            // We released it (the close), and the compositor has now taken
+            // it off our layer: hand it to the window the close chose.
+            self.complete_keyboard_handback(KbSurface::Launcher);
         }
     }
 
