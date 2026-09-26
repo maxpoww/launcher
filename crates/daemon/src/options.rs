@@ -6811,6 +6811,22 @@ impl crate::App {
         ));
     }
 
+    /// Push the border gradient again although nothing moved — for the
+    /// moments the COMPOSITOR forgets it. `hl.config(...)` sets a runtime
+    /// value, and Hyprland re-reads `hyprland.lua` on every config reload:
+    /// `hyprctl reload`, and — less obviously — every plugin load AND unload,
+    /// each of which schedules one. `general:col.active_border` then snaps
+    /// back to the file's own peach, while the de-dupe in
+    /// [`Self::push_window_border`], still remembering the gradient it last
+    /// sent, keeps answering "nothing to do" until a screen sample drifts
+    /// past its threshold. That was "the bars go pink every time the plugin
+    /// is reloaded" (Max, 2026-09-26). Same shape as `reassert_screen_state`:
+    /// the compositor's memory is not ours to trust across a reload.
+    pub(crate) fn reassert_window_border(&mut self) {
+        self.border_pushed = None;
+        self.push_window_border();
+    }
+
     /// The dock card's fill, and the ink that reads on it — one call, same
     /// "the surface is the pill grown" formula as `options_box_surface`
     /// (backdrop plus the resting wash, ink measured against that same

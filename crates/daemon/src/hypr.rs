@@ -1030,11 +1030,16 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         // rebuilds the output's DRM state, which silently drops
                         // the colour matrix hyprsunset set (Hyprland pushes a
                         // CTM only when it *changes*, so nothing puts it back).
-                        // Re-assert the remembered screen look — see `screen.rs`.
+                        // A config reload also resets every runtime `hl.config`
+                        // value to the file's own — the window-border gradient
+                        // among them. Re-assert everything the shell owns in
+                        // the compositor: the screen look (`screen.rs`), the
+                        // float rule, the border colour.
                         if SCREEN_DRIFT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {} — re-asserting screen", name.trim());
                             app.reassert_screen_state();
                             app.reassert_floating_mode();
+                            app.reassert_window_border();
                         }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());
