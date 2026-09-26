@@ -5,6 +5,7 @@
 //! immediately so the daemon never accumulates zombies.
 
 use std::ffi::CString;
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context};
 use tracing::info;
@@ -24,6 +25,7 @@ pub fn launch(exec: &str, needs_terminal: bool, terminal: &str) -> anyhow::Resul
     };
     info!("launching: {line}");
     warn_if_unresolvable(&line);
+    let line = scoped(&line, exec, scopes_available());
     let sh = CString::new("/bin/sh").context("sh path")?;
     let dash_c = CString::new("-c").context("-c arg")?;
     let cmd = CString::new(line).context("exec line contains a NUL byte")?;
@@ -64,6 +66,66 @@ pub fn launch(exec: &str, needs_terminal: bool, terminal: &str) -> anyhow::Resul
             }
         }
     }
+}
+
+/// Run the launch in its own systemd user scope (2026-09-26). Every app the
+/// dock started used to inherit the compositor's cgroup, which has no CPU
+/// controller — so nothing in the session could weigh one process against
+/// another (Beam wanted its background tabs below the foreground one). A
+/// scope per app, under app-graphical.slice (uwsm's convention, so the session
+/// tears them down with it), with `CPUWeight=` set so systemd enables the cpu
+/// controller on the path and `Delegate=yes` so the app owns its subtree.
+/// `systemd-run --scope` execs the command in-process, so the double-fork and
+/// the PID the compositor sees are unchanged. Plain launch when scopes aren't
+/// available (probed once, see `scopes_available`).
+fn scoped(line: &str, exec: &str, available: bool) -> String {
+    if !available {
+        return line.to_owned();
+    }
+    let slug: String = exec
+        .split_whitespace()
+        .find(|t| !t.contains('='))
+        .unwrap_or("app")
+        .rsplit('/')
+        .next()
+        .unwrap_or("app")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(24)
+        .collect();
+    let slug = if slug.is_empty() { "app".to_owned() } else { slug.to_ascii_lowercase() };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!(
+        "systemd-run --user --scope --quiet --collect --slice=app-graphical.slice \
+         -p CPUWeight=100 -p Delegate=yes --unit=golem-app-{slug}-{nonce} -- /bin/sh -c {}",
+        shell_quote(line)
+    )
+}
+
+/// Whether a transient user scope can be created here — probed ONCE (a ~20ms
+/// `systemd-run … true`), so a session without a reachable user manager (no
+/// session bus, a bare test harness) keeps launching apps the plain way instead
+/// of failing every launch.
+fn scopes_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        if !on_path("systemd-run") {
+            return false;
+        }
+        let ok = std::process::Command::new("systemd-run")
+            .args(["--user", "--scope", "--quiet", "--collect", "-p", "CPUWeight=100", "--", "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        info!("app scopes (systemd-run --user --scope): {}", if ok { "available" } else { "unavailable, plain launches" });
+        ok
+    })
 }
 
 /// Single-quote `s` for a POSIX shell (embedded quotes become `'\''`).
@@ -142,6 +204,20 @@ mod tests {
     fn shell_quote_wraps_and_escapes() {
         assert_eq!(shell_quote("nvim"), "'nvim'");
         assert_eq!(shell_quote("echo 'hi'"), r"'echo '\''hi'\'''");
+    }
+
+    #[test]
+    fn scoped_wraps_in_a_named_user_scope() {
+        let s = scoped("firefox -P golem", "firefox -P golem", true);
+        assert!(s.starts_with("systemd-run --user --scope --quiet --collect --slice=app-graphical.slice"));
+        assert!(s.contains("-p CPUWeight=100 -p Delegate=yes --unit=golem-app-firefox-"));
+        assert!(s.ends_with("-- /bin/sh -c 'firefox -P golem'"));
+        // env assignments and paths don't leak into the unit name; quotes survive
+        let s = scoped("FOO=1 /usr/bin/x-term -e 'a b'", "FOO=1 /usr/bin/x-term -e 'a b'", true);
+        assert!(s.contains("--unit=golem-app-xterm-"));
+        assert!(s.ends_with(&format!("-- /bin/sh -c {}", shell_quote("FOO=1 /usr/bin/x-term -e 'a b'"))));
+        // unavailable → untouched
+        assert_eq!(scoped("firefox", "firefox", false), "firefox");
     }
 
     #[test]
