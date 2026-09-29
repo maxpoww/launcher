@@ -100,10 +100,10 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     /// Sustained ambient animation must be frame-throttled: true for a
-    /// software adapter (llvmpipe — every frame costs real cores) OR the GL
-    /// backend (its blocking Wayland present starves the single-threaded
-    /// loop). See [`Renderer::needs_frame_throttle`] and the constructor's
-    /// note (F12 / Golem #40).
+    /// software adapter (llvmpipe — every frame costs real cores). The GL
+    /// backend no longer is: its present doesn't block since `NoVblankWait`.
+    /// See [`Renderer::needs_frame_throttle`] and the constructor's note
+    /// (F12 / Golem #40).
     frame_throttle: bool,
     /// Integer supersampling factor. `config.width/height` are physical
     /// (`logical × scale`); geometry is authored in logical px and scaled
@@ -323,18 +323,16 @@ impl Renderer {
             anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
         })?;
         let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
-        // The GL backend (old Intel iGPUs with no Vulkan — e.g. Haswell HD
-        // 4400) presents through Mesa's EGL/Wayland path, which does its own
-        // blocking wayland I/O on the display fd inside each swap. On the
-        // single-threaded loop a sustained animation there renders flat out
-        // and starves calloop's other sources — IPC, input, timers, the
-        // install-completion channel — exactly as a software adapter does
-        // (Golem changes.md #40, the ASUS X550LC 2026-09-09: one perpetual
-        // install ring took the whole desktop down). So it wants the same
-        // ambient-frame throttle. A modern Vulkan/Metal GPU (the dev box)
-        // does not — its present does not block the event thread.
-        let gl_backend = adapter.get_info().backend == wgpu::Backend::Gl;
-        let frame_throttle = software || gl_backend;
+        // Only a software adapter is throttled: every frame there costs real
+        // cores. The GL backend used to be throttled too, because Mesa's
+        // EGL/Wayland swap blocked the single-threaded loop until the
+        // compositor's frame callback (Golem #40, the ASUS 2026-09-09: one
+        // perpetual install ring took the desktop down). `NoVblankWait` has
+        // removed that wait, and the throttle had become the problem: at 10
+        // fps, every animation the pointer didn't start (Super+Space, F4, the
+        // install ring) crawled on GL machines only (Max, 2026-09-29: "on the
+        // thinkpad it works amazingly… on the macbook, it is not the same").
+        let frame_throttle = software;
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -1027,7 +1025,7 @@ impl Renderer {
     /// exactly after the glyphs instead of guessing from char counts.
     /// Whether sustained ambient animation must be frame-throttled to keep
     /// the single-threaded event loop responsive — true on a software
-    /// adapter and on the GL backend (see the `frame_throttle` field).
+    /// adapter (see the `frame_throttle` field).
     pub fn needs_frame_throttle(&self) -> bool {
         self.frame_throttle
     }

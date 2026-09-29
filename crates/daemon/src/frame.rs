@@ -167,13 +167,10 @@ impl App {
 
         // F12: on a software (CPU) adapter every frame costs real cores —
         // a minutes-long install animation ran the daemon at 450% CPU in
-        // the 8-core VM and throttled its own install's download ~35x. The
-        // GL backend (old Intel iGPUs, no Vulkan) has the same failure by a
-        // different route: its blocking Wayland present starves the
-        // single-threaded loop, so one perpetual install ring froze the
-        // whole desktop — IPC, input, timers all dead (Golem #40, ASUS
-        // 2026-09-09). Both want the same throttle (renderer.needs_frame_
-        // throttle()). While the user is actively interacting it stands down
+        // the 8-core VM and throttled its own install's download ~35x. (The
+        // GL backend was throttled too while its present blocked the loop,
+        // Golem #40, until `NoVblankWait` removed that wait; see
+        // renderer.needs_frame_throttle().) While the user is actively interacting it stands down
         // (scrolls/drags stay smooth); ambient animation streams get spaced
         // to SOFTWARE_FRAME_MIN with a timer, and — crucially — that timer
         // rides calloop, so the loop services IPC/input between frames. dt
