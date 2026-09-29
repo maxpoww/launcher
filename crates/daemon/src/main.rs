@@ -5127,6 +5127,17 @@ impl App {
             return;
         }
         match keysym {
+            // The Mac's Launchpad key (F4 → XF86LaunchB) opens the box through
+            // a Hyprland bind, but while the box is open it holds the keyboard
+            // exclusively and Hyprland fires no binds — the same key lands HERE.
+            // It must close what it opened (Max, 2026-09-29: "should open and
+            // close the box"), wherever the box is: no step-out like Escape.
+            Keysym::XF86_LaunchB => {
+                self.search.query.clear();
+                self.search.open = false;
+                self.refilter();
+                self.dismiss();
+            }
             Keysym::Escape => {
                 // Step out of an open box first; dismiss on the next.
                 if self.stack_open() && self.search.query.is_empty() {
