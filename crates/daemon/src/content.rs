@@ -1158,10 +1158,8 @@ pub struct FrameInput<'a> {
     /// The card is the configuration panel: draw its sections and search
     /// empty (the dock band stays).
     pub panel: bool,
-    /// The panel's bubbles, placed for this frame: (rect, label).
-    pub panel_bubbles: &'a [(Rect, &'static str)],
-    /// The OPTIONS bar's scale, which the bubbles are cloned at.
-    pub panel_scale: f32,
+    /// The settings panel's field this frame (see `panel.rs`).
+    pub panel_draw: Option<&'a crate::panel::PanelDraw>,
     /// Animated display slot of each member (`page * OPEN_BOX_CAP +
     /// within`, parallel to `open_box_members`): box pages may be
     /// under-full, so slots — not list positions — decide where a member
@@ -1338,8 +1336,7 @@ pub fn scene(
         group_origin,
         open_box_members,
         panel,
-        panel_bubbles,
-        panel_scale,
+        panel_draw,
         open_box_disp,
         open_box_hidden,
         open_box_pages,
@@ -2428,44 +2425,27 @@ pub fn scene(
         scene.grids.push(g);
     }
 
-    // The settings panel's bubbles: OPTIONS pills on the card — the dock's
-    // own wash, its ink, and the bar's soft neumorphic lift — clipped to the
-    // card like the sections they replace.
-    if !panel_bubbles.is_empty() {
-        let (font_px, line_px) = crate::panel::bubble_font(panel_scale);
-        // Dark ink = a bright surface under it (the neumorph's polarity).
-        let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
-        let mut bubbles = GridContent {
+    // The settings panel's field (see `panel.rs`): its pills and open
+    // setting clipped to the card like the sections they replace; their
+    // glows arrive with the card, not before it (overlay shadows are not
+    // clipped).
+    if let Some(pd) = panel_draw {
+        let arrive = card_open * card_open;
+        for g in &pd.glows {
+            let mut g = *g;
+            g.color[3] *= arrive;
+            scene.overlay_shadows.push(g);
+        }
+        let mut field = GridContent {
             clip: reveal_rect,
             ..Default::default()
         };
-        for &(rect, text) in panel_bubbles {
-            let radius = rect.h / 2.0;
-            // The lift is unclipped: let it arrive with the card, not
-            // before it.
-            crate::options::push_neumorph(&mut scene, rect, radius, bright, card_open * card_open);
-            bubbles.rects.push(RectInst {
-                rect,
-                radius,
-                color: dock_highlight,
-                glass: 0.0,
-                border: 0.0,
-            });
-            bubbles.labels.push(Label {
-                text: text.to_owned(),
-                pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - line_px) / 2.0),
-                max_w: rect.w,
-                font_px,
-                line_px,
-                centered: true,
-                dim: false,
-                cache: true,
-                family: crate::options::TEXT_FONT,
-                color: Some(dock_ink),
-                clip: Some(reveal_rect),
-            });
-        }
-        scene.grids.push(bubbles);
+        field.rects.extend(pd.rects.iter().copied());
+        field.labels.extend(pd.labels.iter().map(|l| Label {
+            clip: Some(reveal_rect),
+            ..l.clone()
+        }));
+        scene.grids.push(field);
     }
 
     // Magnified open box: a rounded panel that grows from the clicked tile

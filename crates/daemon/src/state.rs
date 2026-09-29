@@ -173,6 +173,7 @@ impl UiState {
             | Command::DebugModuleBox
             | Command::DebugStats(_)
             | Command::FloatMode(_)
+            | Command::Settings
             | Command::OptionsTrigger(_)
             | Command::OverviewOn
             | Command::OverviewOff

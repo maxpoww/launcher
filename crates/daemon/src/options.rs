@@ -1476,7 +1476,7 @@ fn date_now() -> String {
     }
 }
 
-fn srgb_to_linear(c: f32) -> f32 {
+pub(crate) fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
     } else {

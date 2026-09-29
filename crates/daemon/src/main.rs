@@ -627,8 +627,7 @@ fn main() -> anyhow::Result<()> {
         dir_stack: None,
         settings_panel: false,
         settings_opening: false,
-        panel_scatter: None,
-        panel_clock: 0.0,
+        panel: panel::Panel::default(),
         box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
@@ -1539,10 +1538,8 @@ pub struct App {
     /// The open in flight was asked for by the gear (read once, as the card
     /// crosses into Open).
     settings_opening: bool,
-    /// Where the panel's bubbles sit (computed once per field size).
-    panel_scatter: Option<panel::Scatter>,
-    /// Seconds the panel has been drifting: the clock of its bubbles' float.
-    panel_clock: f32,
+    /// The settings panel's field: its pills, layers and open setting.
+    panel: panel::Panel,
     /// Whether the currently open box was opened *from the dock* (a dock
     /// folder or pinned directory), as opposed to a grid folder tile. Arms
     /// the dock hover-switch even when the box opened into the grid.
@@ -2464,6 +2461,10 @@ impl App {
             // matches the current mode is a REPAIR — rule re-asserted, windows
             // swept — so `waverunner-ctl floating on` is also the hand lever
             // for a desk where the compositor lost the rule.
+            Command::Settings => {
+                self.toggle_settings_panel();
+                return;
+            }
             Command::FloatMode(mode) => {
                 match mode.trim() {
                     "on" => self.set_floating_mode(true),
@@ -5122,7 +5123,9 @@ impl App {
                 }
                 // Page the section under the pointer (each scrolls
                 // independently). An open box was already handled above.
+                // The settings panel: the wheel moves through its layers.
                 if self.settings_panel {
+                    self.panel_wheel(value);
                     return;
                 }
                 if let Some(section) = self
@@ -5240,6 +5243,10 @@ impl App {
                 // Step out of an open box first; dismiss on the next.
                 if self.stack_open() && self.search.query.is_empty() {
                     self.close_group();
+                    return;
+                }
+                // Likewise an open setting on the panel folds back first.
+                if self.settings_panel && self.panel_escape() {
                     return;
                 }
                 self.search.query.clear();
@@ -6112,6 +6119,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 // A box is open: a click off it closes the box,
                                 // not the launcher.
                                 app.close_group();
+                            } else if let Some(pos) = app.pointer_pos.filter(|&p| {
+                                app.settings_panel
+                                    && app.ui.target() == Target::Open
+                                    && !app.outside_card(&app.current_layout(), p)
+                            }) {
+                                // The settings panel's field: a pill opens
+                                // its setting; an open setting's empty space
+                                // folds it back.
+                                app.panel_click(pos);
                             } else if app.ui.target() == Target::Open {
                                 // Dismiss only if the click landed outside the
                                 // card bounds (transparent surface margin).

@@ -348,17 +348,6 @@ impl App {
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
-        // The settings panel's bubbles float: its clock runs, and frames keep
-        // coming, only while the card is up as the panel.
-        let panel_bubbles = if self.settings_panel && self.ui.target() == Target::Open {
-            self.panel_clock += dt;
-            self.dirty = true;
-            self.panel_bubbles(&layout)
-        } else if self.settings_panel {
-            self.panel_bubbles(&layout) // sinking with the card, still
-        } else {
-            Vec::new()
-        };
         // The dock plate grows to wrap minimized tiles; the surface is full
         // width, so the pointer input region must follow the plate's width
         // (else clicks on a newly-grown part fall through, or the whole
@@ -977,6 +966,20 @@ impl App {
         // anything settles.
         let paint = self.dock_surface_eased(dt);
         let (dock_bg, dock_ink, dock_highlight) = (paint.fill, paint.ink, paint.wash);
+        // The settings panel's field moves (orbits, layer moves, the open
+        // setting), so frames keep coming while the card is up as the panel;
+        // sinking with the card, it is drawn still.
+        let panel_draw = if self.settings_panel {
+            let open = self.ui.target() == Target::Open;
+            if open {
+                self.dirty = true;
+            }
+            let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+            let paint = crate::panel::PanelPaint { ink: dock_ink, bright };
+            Some(self.panel_frame(&layout, if open { dt } else { 0.0 }, paint))
+        } else {
+            None
+        };
         if paint.moving {
             self.dirty = true;
         }
@@ -1044,8 +1047,7 @@ impl App {
                 group_origin: self.group_origin,
                 open_box_members: &open_box_members,
                 panel: self.settings_panel,
-                panel_bubbles: &panel_bubbles,
-                panel_scale: self.options_scale(),
+                panel_draw: panel_draw.as_ref(),
                 open_box_disp: &open_box_disp,
                 open_box_hidden,
                 open_box_pages,
