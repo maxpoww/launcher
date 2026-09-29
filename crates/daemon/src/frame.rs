@@ -1061,6 +1061,7 @@ impl App {
                 open_box_members: &open_box_members,
                 panel: self.panel_mix >= 0.999,
                 panel_mix: self.panel_mix,
+                bar_scale: self.options_scale(),
                 panel_draw: panel_draw.as_ref(),
                 open_box_disp: &open_box_disp,
                 open_box_hidden,

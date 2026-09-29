@@ -79,8 +79,42 @@ const HOVER_WASH_DARK: f32 = 0.27;
 const HOVER_WASH_BRIGHT: f32 = 0.30;
 /// Ink strength per layer.
 const LAYER_INK: [f32; 3] = [1.0, 0.84, 0.62];
-/// Soft glow per layer: (blur px, alpha). The far layer has none.
-const LAYER_GLOW: [(f32, f32); 3] = [(7.0, 0.17), (3.5, 0.08), (0.0, 0.0)];
+/// Soft glow per layer, the pill's edge: (blur px, alpha). Smaller and
+/// fainter further back, but never gone — without it the far pills lost
+/// their edge (Max, 2026-09-29).
+const LAYER_GLOW: [(f32, f32); 3] = [(7.0, 0.17), (3.5, 0.08), (2.0, 0.05)];
+
+/// The middle layer: the OPTIONS bar's own pill, and the look any other
+/// pill on the card borrows (the search pill).
+pub(crate) const MIDDLE: usize = 1;
+
+/// A pill's fill on `layer`, `hover` 0 → 1 easing to the hover wash.
+pub(crate) fn pill_wash(layer: usize, bright: bool, hover: f32) -> [f32; 4] {
+    let (rest, hov) = if bright {
+        (LAYER_WASH_BRIGHT[layer], HOVER_WASH_BRIGHT)
+    } else {
+        (LAYER_WASH_DARK[layer], HOVER_WASH_DARK)
+    };
+    crate::options::wash(!bright, lerp(rest, hov, hover))
+}
+
+/// A pill's soft edge on `layer`, at `alpha` presence.
+pub(crate) fn pill_glow(layer: usize, bright: bool, rect: Rect, scale: f32, alpha: f32) -> ShadowInst {
+    let (blur, a) = LAYER_GLOW[layer];
+    let v = if bright { 0.0 } else { 1.0 };
+    ShadowInst {
+        rect,
+        radius: rect.h / 2.0,
+        blur: blur * scale,
+        color: [v, v, v, a * alpha],
+        edges: [1.0, 1.0, 1.0, 1.0],
+    }
+}
+
+/// A pill's text colour on `layer`, at `alpha` presence.
+pub(crate) fn pill_ink(layer: usize, ink: [f32; 4], alpha: f32) -> [f32; 4] {
+    [ink[0], ink[1], ink[2], ink[3] * LAYER_INK[layer] * alpha]
+}
 /// How "near" each layer is: sets the orbit radius.
 const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 
@@ -466,10 +500,6 @@ impl Panel {
         let mut out = PanelDraw::default();
         let s = self.scale;
         let f = self.field;
-        let wash = |a: f32| crate::options::wash(!paint.bright, a);
-        let layer_wash = if paint.bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
-        let hover_a = if paint.bright { HOVER_WASH_BRIGHT } else { HOVER_WASH_DARK };
-        let glow_rgb = if paint.bright { [0.0, 0.0, 0.0] } else { [1.0, 1.0, 1.0] };
         let open_k = self.open.as_ref().map_or(0.0, |o| o.k);
         let open_pill = self.open.as_ref().map(|o| o.pill);
         let open_from = self.open.as_ref().map(|o| o.from);
@@ -524,18 +554,8 @@ impl Panel {
             let (w, h) = (p.w[d] * k, p.h[d] * k);
             let rect = Rect::new(f.x + p.pos.0 + dx - w / 2.0, f.y + p.pos.1 + dy - h / 2.0, w, h);
             let radius = h / 2.0;
-            let (blur, glow_a) = LAYER_GLOW[d];
-            if glow_a > 0.0 {
-                out.glows.push(ShadowInst {
-                    rect,
-                    radius,
-                    blur: blur * s,
-                    color: [glow_rgb[0], glow_rgb[1], glow_rgb[2], glow_a * a],
-                    edges: [1.0, 1.0, 1.0, 1.0],
-                });
-            }
-            let wa = lerp(layer_wash[d], hover_a, p.lift);
-            let c = wash(wa);
+            out.glows.push(pill_glow(d, paint.bright, rect, s, a));
+            let c = pill_wash(d, paint.bright, p.lift);
             out.rects.push(RectInst {
                 rect,
                 radius,
@@ -558,7 +578,7 @@ impl Panel {
                 dim: false,
                 cache: resting,
                 family: TEXT_FONT,
-                color: Some([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * LAYER_INK[d] * a]),
+                color: Some(pill_ink(d, paint.ink, a)),
                 clip: None,
             });
         }

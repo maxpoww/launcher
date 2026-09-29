@@ -1171,6 +1171,9 @@ pub struct FrameInput<'a> {
     pub panel: bool,
     /// The settings panel's field this frame (see `panel.rs`).
     pub panel_draw: Option<&'a crate::panel::PanelDraw>,
+    /// The OPTIONS bar's scale: pills on the card borrowing the bar's pill
+    /// (the search pill) take its text size at this scale.
+    pub bar_scale: f32,
     /// Apps ↔ settings: 0 = the apps, 1 = the panel. Between, the settings
     /// field rises in from the card's bottom edge pushing the apps up and
     /// out under the dock (and back down the other way).
@@ -1353,6 +1356,7 @@ pub fn scene(
         panel,
         panel_draw,
         panel_mix,
+        bar_scale,
         open_box_disp,
         open_box_hidden,
         open_box_pages,
@@ -1970,16 +1974,17 @@ pub fn scene(
         let boxx = layout.search_box;
         let cx = w / 2.0;
         let is_btn_hover = hover == Some(Hit::SearchButton) && search_expand < 0.5;
-        // One more pill: the OPTIONS pill's own material — its resting wash
-        // (hover: the hover wash) and soft neumorphic lift, polarity from
-        // the card's ink — so it reads as a sibling of the settings pills.
+        // One more pill: the settings panel's middle-layer pill exactly (the
+        // OPTIONS bar's own) — its wash (hover: the hover wash), its soft
+        // edge, its text size and ink — so the two are one family.
         let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
-        let box_color = match (bright, is_btn_hover) {
-            (false, false) => crate::options::wash(true, 0.11),
-            (false, true) => crate::options::wash(true, 0.27),
-            (true, false) => crate::options::wash(false, 0.10),
-            (true, true) => crate::options::wash(false, 0.30),
-        };
+        let mid = crate::panel::MIDDLE;
+        let box_color = crate::panel::pill_wash(mid, bright, if is_btn_hover { 1.0 } else { 0.0 });
+        let pill_ink = crate::panel::pill_ink(mid, dock_ink, 1.0);
+        let (pill_font, pill_line) = (
+            crate::options::FONT_PX * bar_scale,
+            crate::options::LINE_PX * bar_scale,
+        );
         // Expanded width: the resting SEARCH_W_MIN, growing snugly with
         // the shaped query (measured, not estimated) plus caret room.
         let content_w = (query_px + 2.0 * SEARCH_PAD_X + 8.0)
@@ -1987,7 +1992,13 @@ pub fn scene(
             .min(card_w - 2.0 * GRID_PAD_X);
         let sw = lerp(btn.w, content_w, search_expand);
         let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
-        crate::options::push_neumorph(&mut scene, draw_rect, SEARCH_H / 2.0, bright, card_open * card_open);
+        scene.overlay_shadows.push(crate::panel::pill_glow(
+            mid,
+            bright,
+            draw_rect,
+            bar_scale,
+            card_open * card_open,
+        ));
         sgrid.rects.push(RectInst {
             rect: draw_rect,
             radius: SEARCH_H / 2.0,
@@ -2000,15 +2011,15 @@ pub fn scene(
             // Compact button: "Search" label.
             sgrid.labels.push(Label {
                 text: crate::i18n::tr("Search").to_string(),
-                pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
+                pos: (cx, boxx.y + (SEARCH_H - pill_line) / 2.0),
                 max_w: btn.w,
-                font_px: SEARCH_FONT_PX,
-                line_px: SEARCH_LINE_PX,
+                font_px: pill_font,
+                line_px: pill_line,
                 centered: true,
                 dim: false,
                 cache: true,
-                family: None,
-                color: None,
+                family: crate::options::TEXT_FONT,
+                color: Some(pill_ink),
                 clip: Some(reveal_clip(draw_rect)),
             });
         } else {
