@@ -26,6 +26,9 @@ const SOFTWARE_FRAME_MIN: Duration = Duration::from_millis(100);
 /// down. Covers smooth-scroll ease tails; a minutes-long install ring
 /// with nobody at the wheel throttles after this.
 const INPUT_ACTIVE_WINDOW: Duration = Duration::from_secs(2);
+/// How soon to look again when the GPU is still on the previous frame (GL
+/// pacing, see `Renderer::gpu_ready`).
+const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
 
 impl App {
     /// Layout for an arbitrary card extent at the current scroll offsets.
@@ -176,6 +179,29 @@ impl App {
         // rides calloop, so the loop services IPC/input between frames. dt
         // keeps accumulating across skipped frames, so animations advance by
         // real time.
+        // GPU pacing (the GL backend, see `Renderer::gpu_ready`): the previous
+        // frame is still on the GPU, so starting another would only queue in
+        // the driver and stall the loop. Look again shortly, on a timer, so
+        // IPC and input keep flowing, and draw as soon as the GPU is free.
+        if self.renderer.as_ref().is_some_and(|r| !r.gpu_ready()) {
+            if self.soft_frame_timer {
+                return;
+            }
+            let timer = calloop::timer::Timer::from_duration(GPU_BUSY_RETRY);
+            let armed = self
+                .loop_handle
+                .insert_source(timer, |_, _, app: &mut App| {
+                    app.soft_frame_timer = false;
+                    app.draw();
+                    calloop::timer::TimeoutAction::Drop
+                })
+                .is_ok();
+            if armed {
+                self.soft_frame_timer = true;
+                return;
+            }
+            error!("gpu-pace timer failed to arm; drawing without pacing");
+        }
         if self.renderer.as_ref().is_some_and(|r| r.needs_frame_throttle())
             && self.last_input.elapsed() > INPUT_ACTIVE_WINDOW
         {

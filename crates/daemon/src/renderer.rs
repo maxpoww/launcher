@@ -105,6 +105,11 @@ pub struct Renderer {
     /// See [`Renderer::needs_frame_throttle`] and the constructor's note
     /// (F12 / Golem #40).
     frame_throttle: bool,
+    /// Pace frames by the GPU (see [`Renderer::gpu_ready`]): true on the GL
+    /// backend. `gpu_busy` is set at submit and cleared when the GPU reports
+    /// the frame's work done.
+    pace_by_gpu: bool,
+    gpu_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Integer supersampling factor. `config.width/height` are physical
     /// (`logical × scale`); geometry is authored in logical px and scaled
     /// up automatically (see [`Renderer::render`]).
@@ -323,16 +328,22 @@ impl Renderer {
             anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
         })?;
         let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
-        // Only a software adapter is throttled: every frame there costs real
-        // cores. The GL backend used to be throttled too, because Mesa's
-        // EGL/Wayland swap blocked the single-threaded loop until the
-        // compositor's frame callback (Golem #40, the ASUS 2026-09-09: one
-        // perpetual install ring took the desktop down). `NoVblankWait` has
-        // removed that wait, and the throttle had become the problem: at 10
-        // fps, every animation the pointer didn't start (Super+Space, F4, the
-        // install ring) crawled on GL machines only (Max, 2026-09-29: "on the
-        // thinkpad it works amazingly… on the macbook, it is not the same").
+        // Only a software adapter gets the fixed throttle: every frame there
+        // costs real cores. The GL backend used to be throttled too (100 ms a
+        // frame), because Mesa's EGL/Wayland swap blocked the loop until the
+        // compositor's frame callback (Golem #40, the ASUS 2026-09-09).
+        // `NoVblankWait` removed that wait, and the fixed 10 fps had become the
+        // problem: every animation the pointer didn't start (Super+Space, F4,
+        // the install ring) crawled on GL machines only (Max, 2026-09-29: "on
+        // the thinkpad it works amazingly… on the macbook, it is not the
+        // same"). But unthrottled, an old iGPU saturates (the MacBook's HD 5000
+        // sat at 97-100% busy through an open), frames queue in the driver, and
+        // the loop stalls up to 1.8 s again. So GL is paced by the GPU itself:
+        // a new frame starts only when the previous one's GPU work is done
+        // (`gpu_ready`), the smoothest rate the machine can actually deliver,
+        // and the loop never waits on it.
         let frame_throttle = software;
+        let pace_by_gpu = adapter.get_info().backend == wgpu::Backend::Gl;
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -842,6 +853,8 @@ impl Renderer {
             queue,
             config,
             frame_throttle,
+            pace_by_gpu,
+            gpu_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scale: scale.max(1),
             globals_buf,
             globals_bind,
@@ -1028,6 +1041,17 @@ impl Renderer {
     /// adapter (see the `frame_throttle` field).
     pub fn needs_frame_throttle(&self) -> bool {
         self.frame_throttle
+    }
+
+    /// Whether the GPU has finished the last frame, so a new one can start
+    /// without queueing behind it. Always true off the GL backend. Never
+    /// blocks: a non-blocking poll delivers the completion, if it happened.
+    pub fn gpu_ready(&self) -> bool {
+        if !self.pace_by_gpu {
+            return true;
+        }
+        let _ = self.device.poll(wgpu::Maintain::Poll);
+        !self.gpu_busy.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn measure_text(&mut self, text: &str, font_px: f32, family: Option<&str>) -> f32 {
@@ -1581,6 +1605,13 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        if self.pace_by_gpu {
+            use std::sync::atomic::Ordering;
+            self.gpu_busy.store(true, Ordering::Release);
+            let busy = self.gpu_busy.clone();
+            self.queue
+                .on_submitted_work_done(move || busy.store(false, Ordering::Release));
+        }
         frame.present();
         self.text_atlas.trim();
         Ok(())
