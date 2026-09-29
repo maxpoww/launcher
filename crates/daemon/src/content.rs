@@ -631,17 +631,14 @@ pub fn layout(
     // not balloon with it. This equals the old `w - 2·DRAG_MARGIN_X` back
     // when the surface hugged the box, so nothing about the open box moves.
     let card_w = config.window.width as f32 * icon_scale;
-    // Dock slot budget. Two zones with different ceilings so a burst of
-    // minimized windows can never be clamped off a half-empty bar (Max,
-    // verified live: only ~2 thumbnails showed, the rest dropped — the old
-    // single clamp was the *open* card width even while docked, wasting the
-    // wide resting basin):
-    //
-    //   • Normal (pinned/running) icons keep the base clamp to the card
-    //     width — nobody pins more than fit, so their layout is untouched.
-    //   • Minimized-window tiles (`n_min`, the tail of `dock_order`) are
-    //     NEVER clamped by the card width: they WIDEN the dock to the right
-    //     instead. Max: "build them to the right; when they reach the edge,
+    // Dock slot budget. Nothing is clamped by the card width: the icons
+    // WIDEN the dock instead, up to the whole screen. Normal (pinned/running)
+    // icons used to stop at the open card's width, which silently dropped the
+    // tail of the dock — the Recycle Bin first, as the dock filled up (Max,
+    // 2026-09-29: "the dock should get as big as the full screen if needed").
+    // Minimized-window tiles (`n_min`, the tail of `dock_order`) had already
+    // lost that clamp for the same reason (Max, verified live: only ~2
+    // thumbnails showed, the rest dropped): Max: "build them to the right; when they reach the edge,
     //     push the icons to the left; when there is no more room, the dock
     //     stretches." The row is centered on the surface, so honoring more
     //     tiles pushes the left content leftward on its own, and the basin
@@ -650,15 +647,14 @@ pub fn layout(
     // The one ceiling is the physical surface: the whole row may not exceed
     // it less a dock-padding margin a side, or the rounded corners run off
     // the fixed-size surface. Past that hard cap the excess is held back — a
-    // last resort that needs ~a monitor width of minimized windows. Because
+    // last resort that needs ~a monitor width of icons. Because
     // `dock_order` ends newest-last and the drawn row is its prefix, the very
     // newest minimize is the first held back; the count is logged on add.
     let n_normal = n_entries.saturating_sub(n_min);
-    let base_slots = (((card_w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
     let hard_cap = (((w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
-    let n_normal_shown = n_normal.min(base_slots);
+    let n_normal_shown = n_normal.min(hard_cap);
     // Minimized tiles earn their honored slots only once every normal icon is
-    // shown: if the pins alone overflow the base width, the tail of
+    // shown: if the pins alone overflow the screen, the tail of
     // `dock_order` past `n_normal_shown` is a pinned icon, not a minimized
     // one, and the prefix slot→entry mapping must not shift under it.
     let n_min_shown = if n_normal_shown == n_normal {
@@ -701,11 +697,11 @@ pub fn layout(
     let full_extent = (config.window.height + config.window.bottom_margin) as f32 * icon_scale;
     let dock_extent = dock_h + float_gap;
     let rise = ((extent - dock_extent) / (full_extent - dock_extent).max(1.0)).clamp(0.0, 1.0);
-    // The dock stretches to wrap its row when the minimized tiles push it
-    // past the default basin, never past the surface (a dock-padding margin
-    // aside) and never below the default. Docked-only in practice: the
-    // launcher hides the tiles as it opens (main.rs gate), so this wide
-    // basin has gathered back to the box width by the time the card is up.
+    // The dock stretches to wrap its row when its icons or the minimized
+    // tiles push it past the default basin, never past the surface (a
+    // dock-padding margin aside) and never below the default. The launcher
+    // hides the tiles as it opens (main.rs gate); a row of pinned icons wider
+    // than the box stays, and the open card keeps its width (`open_w`).
     // The RESTING dock width (its comfortable basin with no minimized tiles)
     // — the old `w - 2·BASIN_MARGIN_X` from when the surface hugged the box,
     // so the resting bar looks exactly as before. The card grows from here
@@ -715,7 +711,14 @@ pub fn layout(
     let max_basin = (w - 2.0 * dock_pad_x).max(resting_basin);
     let dock_row_w = row_base_w + 2.0 * dock_pad_x;
     let basin_w = dock_row_w.clamp(resting_basin, max_basin);
-    let gathered = basin_w + (card_w - basin_w) * rise;
+    // Risen, the card gathers to the box width — but never narrower than the
+    // dock row it carries on top, or a full dock would hang off its sides.
+    // Only the normal icons count: the minimized tiles hide as the card
+    // opens, and the grid's columns (below) — hence the stored page
+    // capacity — must not come and go with every minimized window.
+    let open_row_w = n_normal_shown as f32 * dock_slot + 2.0 * dock_pad_x;
+    let open_w = card_w.max(open_row_w.min(max_basin));
+    let gathered = basin_w + (open_w - basin_w) * rise;
     let card_w_now = (gathered * (1.0 - (stretch.0 - 1.0) * SPILL)).min(w);
     let card_x = (w - card_w_now) / 2.0;
     // Content is SHAPED at its fully-open geometry (`content_top` is
@@ -786,7 +789,9 @@ pub fn layout(
 
     let grid_top = content_top + dock_h + GRID_TOP_GAP;
     let grid_bottom = (search_box.y - SEARCH_GAP).min(h);
-    let inner_w = (card_w - 2.0 * GRID_PAD_X).max(grid_cell_w);
+    // The grid spreads to the sides with the card: a dock wider than the box
+    // widens the card, and the sections gain the columns it made room for.
+    let inner_w = (open_w - 2.0 * GRID_PAD_X).max(grid_cell_w);
     let cols = ((inner_w / grid_cell_w).floor() as usize).max(1);
 
     // Apps takes whatever rows fit after the fixed single-row sections
@@ -1153,6 +1158,10 @@ pub struct FrameInput<'a> {
     /// The card is the configuration panel: draw its sections and search
     /// empty (the dock band stays).
     pub panel: bool,
+    /// The panel's bubbles, placed for this frame: (rect, label).
+    pub panel_bubbles: &'a [(Rect, &'static str)],
+    /// The OPTIONS bar's scale, which the bubbles are cloned at.
+    pub panel_scale: f32,
     /// Animated display slot of each member (`page * OPEN_BOX_CAP +
     /// within`, parallel to `open_box_members`): box pages may be
     /// under-full, so slots — not list positions — decide where a member
@@ -1329,6 +1338,8 @@ pub fn scene(
         group_origin,
         open_box_members,
         panel,
+        panel_bubbles,
+        panel_scale,
         open_box_disp,
         open_box_hidden,
         open_box_pages,
@@ -2417,6 +2428,46 @@ pub fn scene(
         scene.grids.push(g);
     }
 
+    // The settings panel's bubbles: OPTIONS pills on the card — the dock's
+    // own wash, its ink, and the bar's soft neumorphic lift — clipped to the
+    // card like the sections they replace.
+    if !panel_bubbles.is_empty() {
+        let (font_px, line_px) = crate::panel::bubble_font(panel_scale);
+        // Dark ink = a bright surface under it (the neumorph's polarity).
+        let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+        let mut bubbles = GridContent {
+            clip: reveal_rect,
+            ..Default::default()
+        };
+        for &(rect, text) in panel_bubbles {
+            let radius = rect.h / 2.0;
+            // The lift is unclipped: let it arrive with the card, not
+            // before it.
+            crate::options::push_neumorph(&mut scene, rect, radius, bright, card_open * card_open);
+            bubbles.rects.push(RectInst {
+                rect,
+                radius,
+                color: dock_highlight,
+                glass: 0.0,
+                border: 0.0,
+            });
+            bubbles.labels.push(Label {
+                text: text.to_owned(),
+                pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - line_px) / 2.0),
+                max_w: rect.w,
+                font_px,
+                line_px,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: crate::options::TEXT_FONT,
+                color: Some(dock_ink),
+                clip: Some(reveal_rect),
+            });
+        }
+        scene.grids.push(bubbles);
+    }
+
     // Magnified open box: a rounded panel that grows from the clicked tile
     // (`group_origin`) to fill the Apps grid, with the member icons in a
     // big centered 3×3 and the box name as a title. Drawn last so it sits
@@ -2676,13 +2727,15 @@ mod tests {
     /// independent of the drag margins.
     const OPEN: f32 = 692.0;
 
+    /// The open card with `n` apps in the grid, under a dock that fits the
+    /// box (a wider dock widens the card and its grid — tested on its own).
     fn open_layout(cfg: &Config, n: usize, scroll: f32) -> Layout {
         layout(
             cfg,
             1.0,
             SURFACE,
             OPEN,
-            n,
+            n.min(10),
             0,
             &[],
             [n, 0, 0],
@@ -3108,17 +3161,57 @@ mod tests {
             17,
             "minimized tiles are never clamped away while the surface has room"
         );
-        // The SAME count as plain pins still hits the base-width clamp —
-        // proof it is the minimized zone that escapes it; normal icons keep
-        // their slots and their behaviour.
+        // The SAME count as plain pins widens the dock the same way: pinned
+        // icons are no longer clamped to the card width either — the tail of
+        // the dock (the Recycle Bin) used to vanish as it filled (2026-09-29).
         let all_normal = lay(17, 0);
+        assert_eq!(
+            all_normal.dock_slots.len(),
+            17,
+            "pinned/running icons widen the dock instead of being dropped"
+        );
+        // Risen, the card carries that row on top: it may never gather
+        // narrower than the row, or the outer icons hang off its sides.
+        let open = layout(
+            &cfg,
+            1.0,
+            SURFACE,
+            (cfg.window.height + cfg.window.bottom_margin) as f32,
+            17,
+            0,
+            &[],
+            [17, 0, 0],
+            [0.0; N_SECTIONS],
+            false,
+            (1.0, 1.0),
+        );
+        let row = open.dock_slots.last().unwrap().x + open.dock_slots.last().unwrap().w
+            - open.dock_slots[0].x;
         assert!(
-            all_normal.dock_slots.len() < 17,
-            "normal (pinned/running) icons keep the base-width clamp"
+            open.card_w >= row,
+            "open card ({}) narrower than its dock row ({row})",
+            open.card_w
+        );
+        // …and the grid inside spreads to the sides with it: more columns
+        // than a card whose dock fits the box.
+        let narrow = layout(
+            &cfg,
+            1.0,
+            SURFACE,
+            (cfg.window.height + cfg.window.bottom_margin) as f32,
+            3,
+            0,
+            &[],
+            [17, 0, 0],
+            [0.0; N_SECTIONS],
+            false,
+            (1.0, 1.0),
         );
         assert!(
-            with_min.dock_slots.len() > all_normal.dock_slots.len(),
-            "the minimized zone widens the row past the normal clamp"
+            open.sections[SECTION_APPS].cols > narrow.sections[SECTION_APPS].cols,
+            "a wide dock widens the grid: {} cols vs {}",
+            open.sections[SECTION_APPS].cols,
+            narrow.sections[SECTION_APPS].cols
         );
 
         // Enough minimized WIDTH to push the row past the default resting

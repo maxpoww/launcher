@@ -230,6 +230,8 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 entries.extend(cli);
                 entries.push(settings_tile());
                 kinds.push(EntryKind::App);
+                entries.push(apps_grid_tile());
+                kinds.push(EntryKind::App);
                 let folders = home_folders();
                 kinds.extend(std::iter::repeat_n(EntryKind::File, folders.len()));
                 entries.extend(folders);
@@ -362,6 +364,25 @@ fn settings_tile() -> AppEntry {
         description: Some(crate::i18n::tr("Configure Golem").to_owned()),
         exec: String::new(),
         icon: Some("org.gnome.Settings".to_owned()),
+        startup_wm_class: None,
+        needs_terminal: false,
+        path: None,
+    }
+}
+
+/// Entry id of the Apps button (macOS's Launchpad): a click opens the card on
+/// the apps grid, or closes it (see `App::toggle_apps_grid`).
+pub(crate) const APPS_GRID_ID: &str = "golem-apps";
+
+/// The Apps button's tile. Synthesized like [`settings_tile`]; it lives in the
+/// grid too, so an unpinned button can always be dragged back to the dock.
+fn apps_grid_tile() -> AppEntry {
+    AppEntry {
+        id: APPS_GRID_ID.to_owned(),
+        name: crate::i18n::tr("Apps").to_owned(),
+        description: Some(crate::i18n::tr("Show all apps").to_owned()),
+        exec: String::new(),
+        icon: Some("app-launcher".to_owned()),
         startup_wm_class: None,
         needs_terminal: false,
         path: None,

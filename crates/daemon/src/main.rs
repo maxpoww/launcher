@@ -627,6 +627,8 @@ fn main() -> anyhow::Result<()> {
         dir_stack: None,
         settings_panel: false,
         settings_opening: false,
+        panel_scatter: None,
+        panel_clock: 0.0,
         box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
@@ -1015,6 +1017,8 @@ fn main() -> anyhow::Result<()> {
     app.pin_trash_once();
     // …and the Settings gear, just before it (same one-shot rule).
     app.pin_settings_once();
+    // …and the Apps button, first on the dock (Launchpad's place).
+    app.pin_apps_grid_once();
     // If a previous daemon died while STAGE mode was up, its gap rules and its
     // maximized window outlived it. Put them back before the user sees them.
     stage::recover_if_stranded();
@@ -1535,6 +1539,10 @@ pub struct App {
     /// The open in flight was asked for by the gear (read once, as the card
     /// crosses into Open).
     settings_opening: bool,
+    /// Where the panel's bubbles sit (computed once per field size).
+    panel_scatter: Option<panel::Scatter>,
+    /// Seconds the panel has been drifting: the clock of its bubbles' float.
+    panel_clock: f32,
     /// Whether the currently open box was opened *from the dock* (a dock
     /// folder or pinned directory), as opposed to a grid folder tile. Arms
     /// the dock hover-switch even when the box opened into the grid.
@@ -4755,6 +4763,11 @@ impl App {
             self.toggle_settings_panel();
             return;
         }
+        // Nor does the Apps button: it opens (or closes) the apps grid.
+        if entry.id == apps::APPS_GRID_ID {
+            self.toggle_apps_grid();
+            return;
+        }
         // Catalog webapps aren't launched by a click either — like packages,
         // "try" is a drag out of the box and install is a drag to the grid.
         if self.is_catalog_webapp(index) {
@@ -4956,8 +4969,11 @@ impl App {
         // layout. While a box is open the plate gathers to the box; fall back
         // to the box width then. A DRAG_MARGIN_X floor keeps the resting bar's
         // grab margins.
-        let plate_w = if self.stack_open() || self.dock_basin_w < 1.0 {
+        let plate_w = if self.dock_basin_w < 1.0 {
             self.config.window.width as f32 * self.icon_scale()
+        } else if self.stack_open() {
+            // The box, or a dock wider than it (it grows to fit its icons).
+            (self.config.window.width as f32 * self.icon_scale()).max(self.dock_basin_w)
         } else {
             self.dock_basin_w
         };

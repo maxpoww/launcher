@@ -1635,7 +1635,7 @@ pub(crate) fn daemon_tag_known(tag: &str) -> bool {
 /// so an UNDERestimate silently truncates the text while an overestimate
 /// only widens the pill a little. Classes are em-fractions for a humanist
 /// sans; +8% margin on top.
-fn est_text_w(text: &str, font_px: f32) -> f32 {
+pub(crate) fn est_text_w(text: &str, font_px: f32) -> f32 {
     let units: f32 = text
         .chars()
         .map(|c| match c {

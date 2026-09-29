@@ -348,6 +348,17 @@ impl App {
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
+        // The settings panel's bubbles float: its clock runs, and frames keep
+        // coming, only while the card is up as the panel.
+        let panel_bubbles = if self.settings_panel && self.ui.target() == Target::Open {
+            self.panel_clock += dt;
+            self.dirty = true;
+            self.panel_bubbles(&layout)
+        } else if self.settings_panel {
+            self.panel_bubbles(&layout) // sinking with the card, still
+        } else {
+            Vec::new()
+        };
         // The dock plate grows to wrap minimized tiles; the surface is full
         // width, so the pointer input region must follow the plate's width
         // (else clicks on a newly-grown part fall through, or the whole
@@ -1033,6 +1044,8 @@ impl App {
                 group_origin: self.group_origin,
                 open_box_members: &open_box_members,
                 panel: self.settings_panel,
+                panel_bubbles: &panel_bubbles,
+                panel_scale: self.options_scale(),
                 open_box_disp: &open_box_disp,
                 open_box_hidden,
                 open_box_pages,
