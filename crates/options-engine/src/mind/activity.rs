@@ -12,7 +12,7 @@
 //!
 //! # The seventeen
 //!
-//! This enum **is** the curated context list in `~/Golem/OPTIONS/contexts.md`,
+//! This enum **is** the curated context list in `~/Golem/docs/shell/options/contexts.md`,
 //! approved by Max 2026-09-12 — it replaced eight coarse values that had no
 //! drawing, no video editing, no gaming and no music production. Every OPTION's
 //! `Shows in:` line names one of these.

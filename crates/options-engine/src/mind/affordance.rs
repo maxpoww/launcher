@@ -40,7 +40,7 @@ pub enum AffordanceKind {
 /// What triggering an affordance *does*. The engine describes the action
 /// declaratively; the surface (the waverunner daemon) executes it. Kept to a
 /// small, safe vocabulary that covers the overwhelming majority of desktop
-/// offers — see `/home/max/Golem/OPTIONS/catalog.md`.
+/// offers — see `/home/max/Golem/docs/shell/options/catalog.md`.
 ///
 /// `Deserialize` too (unlike the rest of the affordance): a surface may want to
 /// round-trip an action, and the payloads are owned `String`s, not the

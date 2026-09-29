@@ -2,7 +2,7 @@
 
 > **Historical record (P1–P4.7, accepted 2026-07).** This file documented the
 > dock/launcher build-out and is kept for its verification notes. The living
-> map is **`~/Golem/roadmap.md`** (Golem 26 "Uprise", sections S1–S11 + W-A);
+> map is **`~/Golem/docs/vision/roadmap.md`** (Golem 26 "Uprise", sections S1–S11 + W-A);
 > new work is planned there, not here.
 
 Derived from CLAUDE.md. Phases are strictly ordered; a phase starts only

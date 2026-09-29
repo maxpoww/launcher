@@ -23,7 +23,7 @@
 //!
 //! # Not yet modelled
 //!
-//! `~/GolemOne/Estructure.md` also lists **Stage 2** and **zoomout** modes.
+//! `~/Golem/docs/STRUCTURE-sketch.md` also lists **Stage 2** and **zoomout** modes.
 //! They are real and deliberately absent here: Max named five states, these are
 //! those five, and a mode earns a variant when an OPTION needs to tell it apart
 //! (the census growth rule). Adding one is a variant and a match arm.

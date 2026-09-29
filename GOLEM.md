@@ -26,7 +26,7 @@ you're doing and offers exactly what helps, then gets out of the way.
 It is not a launcher, a menu, or a widget board. It's an ambient layer of
 affordances (window controls, clipboard, notifications, and more to come) that
 appear where they belong, move with intent, and never yank you out of flow. The
-canonical definition lives in the manifesto (`~/Golem/Golem.md`, published at
+canonical definition lives in the manifesto (`~/Golem/docs/vision/Golem.md`, published at
 golem-os.com); the motion/feel language lives in the `animation` skill.
 
 ## The Brain — `options-engine`
@@ -67,7 +67,7 @@ One layer-shell surface, one event loop, idle at rest. This repo *is* the body.
 - `proto` / `client` — the `waverunner-ctl` socket protocol + CLI.
 
 See `CLAUDE.md` "where things live" for the per-file map. Phased status:
-**`~/Golem/roadmap.md`** (the living plan, S1–S11 + W-A);
+**`~/Golem/docs/vision/roadmap.md`** (the living plan, S1–S11 + W-A);
 `IMPLEMENTATION_PLAN.md` is the P1–P4 historical record.
 
 ---

@@ -24,7 +24,7 @@
 //! [`temporal_affordances`].
 //!
 //! They get filled one at a time, from the curated CONTEXT list and the
-//! curated OPTIONS list in `~/Golem/OPTIONS/`. The deleted providers are
+//! curated OPTIONS list in `~/Golem/docs/shell/options/`. The deleted providers are
 //! recoverable from git (`9ed17b1`) if a curated OPTION wants the same
 //! plumbing — the plumbing, not the offer, is what may be worth reusing.
 //!
