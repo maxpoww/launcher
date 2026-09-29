@@ -969,7 +969,20 @@ impl App {
         // The settings panel's field moves (orbits, layer moves, the open
         // setting), so frames keep coming while the card is up as the panel;
         // sinking with the card, it is drawn still.
-        let panel_draw = if self.settings_panel {
+        // Apps ↔ settings inside the open card: a snappy ease-out swap. With
+        // the card not up there is nothing to swap, so it snaps.
+        let want = if self.settings_panel { 1.0 } else { 0.0 };
+        if self.ui.target() == Target::Open {
+            self.panel_mix += (want - self.panel_mix) * (1.0 - (-dt * 14.0).exp());
+            if (want - self.panel_mix).abs() < 0.002 {
+                self.panel_mix = want;
+            } else {
+                self.dirty = true;
+            }
+        } else {
+            self.panel_mix = want;
+        }
+        let panel_draw = if self.settings_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
             if open {
                 self.dirty = true;
@@ -1046,7 +1059,8 @@ impl App {
                 group_expand,
                 group_origin: self.group_origin,
                 open_box_members: &open_box_members,
-                panel: self.settings_panel,
+                panel: self.panel_mix >= 0.999,
+                panel_mix: self.panel_mix,
                 panel_draw: panel_draw.as_ref(),
                 open_box_disp: &open_box_disp,
                 open_box_hidden,

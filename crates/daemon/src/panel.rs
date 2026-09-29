@@ -900,6 +900,7 @@ impl App {
             if self.settings_panel {
                 info!("apps: in place of the settings panel");
                 self.settings_panel = false;
+                self.settings_from_apps = false;
                 self.schedule_frame();
             } else {
                 info!("apps: closing the grid");
@@ -918,12 +919,19 @@ impl App {
         self.close_group();
         self.panel.reset();
         if self.ui.target() == Target::Open {
-            if self.settings_panel {
+            if self.settings_panel && self.settings_from_apps {
+                // Entered from the apps: the gear goes back to them.
+                info!("settings: back to the apps");
+                self.settings_panel = false;
+                self.settings_from_apps = false;
+                self.schedule_frame();
+            } else if self.settings_panel {
                 info!("settings: closing the panel");
                 self.handle_command(Command::Collapse);
             } else {
                 info!("settings: panel in place of the apps");
                 self.settings_panel = true;
+                self.settings_from_apps = true;
                 self.search.open = false;
                 self.schedule_frame();
             }

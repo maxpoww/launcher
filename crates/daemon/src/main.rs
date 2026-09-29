@@ -628,6 +628,8 @@ fn main() -> anyhow::Result<()> {
         settings_panel: false,
         settings_opening: false,
         panel: panel::Panel::default(),
+        panel_mix: 0.0,
+        settings_from_apps: false,
         box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
@@ -1540,6 +1542,13 @@ pub struct App {
     settings_opening: bool,
     /// The settings panel's field: its pills, layers and open setting.
     panel: panel::Panel,
+    /// Apps ↔ settings, eased: 0 = the apps grid, 1 = the panel. Only the
+    /// swap inside an open card animates; a card opening straight into
+    /// either view starts there.
+    panel_mix: f32,
+    /// The panel was entered from the open apps grid: the gear goes back to
+    /// the apps instead of closing the card.
+    settings_from_apps: bool,
     /// Whether the currently open box was opened *from the dock* (a dock
     /// folder or pinned directory), as opposed to a grid folder tile. Arms
     /// the dock hover-switch even when the box opened into the grid.
@@ -2722,6 +2731,10 @@ impl App {
                     self.rest_hide_pending = false;
                     self.hide_deadline = None;
                     self.settings_panel = self.settings_opening;
+                    self.settings_from_apps = false;
+                    // The card rises straight into its view: no apps↔panel
+                    // swap to animate.
+                    self.panel_mix = if self.settings_panel { 1.0 } else { 0.0 };
                 }
                 _ => {}
             }

@@ -1160,6 +1160,10 @@ pub struct FrameInput<'a> {
     pub panel: bool,
     /// The settings panel's field this frame (see `panel.rs`).
     pub panel_draw: Option<&'a crate::panel::PanelDraw>,
+    /// Apps ↔ settings: 0 = the apps, 1 = the panel. Between, the apps roll
+    /// up under the dock (their clip's bottom rises) while the panel fades
+    /// in and rises into place.
+    pub panel_mix: f32,
     /// Animated display slot of each member (`page * OPEN_BOX_CAP +
     /// within`, parallel to `open_box_members`): box pages may be
     /// under-full, so slots — not list positions — decide where a member
@@ -1337,6 +1341,7 @@ pub fn scene(
         open_box_members,
         panel,
         panel_draw,
+        panel_mix,
         open_box_disp,
         open_box_hidden,
         open_box_pages,
@@ -1403,11 +1408,6 @@ pub fn scene(
         layout.card_w,
         (reveal_bottom - reveal_top).max(0.0),
     );
-    let reveal_clip = |r: Rect| -> Rect {
-        let top = r.y.max(reveal_top);
-        let bottom = (r.y + r.h).min(reveal_bottom);
-        Rect::new(r.x, top, r.w, (bottom - top).max(0.0))
-    };
     let mut scene = Scene {
         alpha,
         ..Default::default()
@@ -1938,6 +1938,25 @@ pub fn scene(
     // so it sinks into the card's bottom edge while closing.
     // (Built here, pushed after the section grids so `scene.grids[s]`
     // keeps indexing the sections.)
+    // The apps content (search + sections) rolls up under the dock as the
+    // settings panel comes in: its reveal region's bottom rises with the mix.
+    let full_reveal = reveal_rect;
+    let roll = {
+        let m = panel_mix.clamp(0.0, 1.0);
+        m * m * (3.0 - 2.0 * m)
+    };
+    let apps_bottom = reveal_bottom - (reveal_bottom - reveal_top) * roll;
+    let reveal_rect = Rect::new(
+        full_reveal.x,
+        full_reveal.y,
+        full_reveal.w,
+        (apps_bottom - reveal_top).max(0.0),
+    );
+    let reveal_clip = |r: Rect| -> Rect {
+        let top = r.y.max(reveal_top);
+        let bottom = (r.y + r.h).min(apps_bottom);
+        Rect::new(r.x, top, r.w, (bottom - top).max(0.0))
+    };
     let mut search_grid: Option<GridContent> = None;
     if !panel
         && layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale
@@ -2405,7 +2424,7 @@ pub fn scene(
             let dot_cx = sec.viewport.x + sec.viewport.w / 2.0;
             let page_frac = sec.scroll / page_w;
             let hl = dock_highlight;
-            for p in 0..sec.n_pages {
+            for p in (0..sec.n_pages).filter(|_| dot_y + dot_r <= apps_bottom) {
                 let x = dot_cx - total_dots_w / 2.0 + p as f32 * dot_spacing + dot_r;
                 // Cyclic distance: the highlight wraps with the pages.
                 let raw = (p as f32 - page_frac).abs();
@@ -2425,25 +2444,41 @@ pub fn scene(
         scene.grids.push(g);
     }
 
+    // Past the apps content: back to the card's whole reveal region.
+    let reveal_rect = full_reveal;
+
     // The settings panel's field (see `panel.rs`): its pills and open
     // setting clipped to the card like the sections they replace; their
     // glows arrive with the card, not before it (overlay shadows are not
-    // clipped).
-    if let Some(pd) = panel_draw {
-        let arrive = card_open * card_open;
+    // clipped). Coming in from the apps it fades in and rises into place.
+    if let Some(pd) = panel_draw.filter(|_| panel_mix > 0.001) {
+        let m = panel_mix.clamp(0.0, 1.0);
+        let rise = (1.0 - m) * 14.0 * icon_scale;
+        let arrive = card_open * card_open * m;
         for g in &pd.glows {
             let mut g = *g;
             g.color[3] *= arrive;
+            g.rect.y += rise;
             scene.overlay_shadows.push(g);
         }
         let mut field = GridContent {
             clip: reveal_rect,
             ..Default::default()
         };
-        field.rects.extend(pd.rects.iter().copied());
-        field.labels.extend(pd.labels.iter().map(|l| Label {
-            clip: Some(reveal_rect),
-            ..l.clone()
+        field.rects.extend(pd.rects.iter().map(|r| {
+            let mut r = *r;
+            r.color[3] *= m;
+            r.rect.y += rise;
+            r
+        }));
+        field.labels.extend(pd.labels.iter().map(|l| {
+            let mut l = l.clone();
+            l.clip = Some(reveal_rect);
+            l.pos.1 += rise;
+            if let Some(c) = l.color.as_mut() {
+                c[3] *= m;
+            }
+            l
         }));
         scene.grids.push(field);
     }
