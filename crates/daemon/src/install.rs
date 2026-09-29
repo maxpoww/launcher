@@ -1429,7 +1429,15 @@ impl App {
             // The package is present and already in the app grid; just drop the
             // stale tile. `is_installed` is synchronous, so this holds even
             // when the loop would otherwise be starved.
-            if !t.failed && applier::is_installed(&t.attr) {
+            //
+            // This holds for a tile saved as FAILED too: a failed attempt
+            // whose package a later apply did install (brave on the thinkpad,
+            // 2026-09-29: failed while the helper was missing, installed
+            // after) is done, not failed. `is_installed` stays strict (in
+            // the list AND applied since), and a failed install is reverted
+            // out of the list, so a genuinely failed tile is still restored
+            // failed.
+            if applier::is_installed(&t.attr) {
                 info!(
                     "pending install {} already installed; dropping stale tile (no re-animate)",
                     t.attr
