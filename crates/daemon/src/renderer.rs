@@ -223,6 +223,9 @@ impl Renderer {
         height: u32,
         scale: u32,
     ) -> anyhow::Result<Self> {
+        // Held for the whole setup: the GL path initializes its EGL display
+        // in create_surface, not Instance::new. See `NoVblankWait`.
+        let _no_vblank_wait = NoVblankWait::arm();
         let display = NonNull::new(conn.backend().display_ptr().cast())
             .ok_or_else(|| anyhow!("null wl_display"))?;
         let window = NonNull::new(wl_surface.id().as_ptr().cast())
@@ -1682,4 +1685,40 @@ fn label_key(label: &crate::content::Label) -> String {
         label.font_px,
         label.family.unwrap_or("")
     )
+}
+
+/// Never wait on the compositor inside present.
+///
+/// The GL path (the MacBook's crocus, and any machine the ladder drops to GL)
+/// presents with eglSwapBuffers. At EGL's default swap interval of 1, Mesa
+/// blocks there until the compositor's frame callback for the previous frame
+/// arrives. Every frame is already paced by frame callbacks (`frame()` only
+/// draws on one), so this second wait only stalls the event loop. During the
+/// box's open/close the loop sat in present for 0.5-1.7 s at a time,
+/// Super+Space presses queued behind it and replayed for seconds (Max,
+/// 2026-09-29: "the dock gets stuck").
+///
+/// Mesa takes its default interval from `vblank_mode` when the EGL display
+/// initializes, which happens while `Renderer::new` builds the surface. So it
+/// is set for exactly that span and removed on drop, on every path: apps the
+/// dock launches must never inherit it. Vulkan ignores it, and a value the
+/// user set is left alone.
+struct NoVblankWait(bool);
+
+impl NoVblankWait {
+    fn arm() -> Self {
+        let armed = std::env::var_os("vblank_mode").is_none();
+        if armed {
+            std::env::set_var("vblank_mode", "0");
+        }
+        Self(armed)
+    }
+}
+
+impl Drop for NoVblankWait {
+    fn drop(&mut self) {
+        if self.0 {
+            std::env::remove_var("vblank_mode");
+        }
+    }
 }

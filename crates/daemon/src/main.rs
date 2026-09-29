@@ -570,6 +570,7 @@ fn main() -> anyhow::Result<()> {
         last_input: Instant::now(),
         rest_hide_pending: false,
         kb_handback: None,
+        kb_worker: hypr::KbWorker::spawn(),
         kb_left_to_user: false,
         focus_launched: None,
         interactive: false,
@@ -1390,6 +1391,8 @@ pub struct App {
     /// keyboard and the compositor is about to confirm it; then it goes to the
     /// window chosen at close time (see [`App::begin_keyboard_handback`]).
     kb_handback: Option<KbHandback>,
+    /// Runs the hand-back's compositor calls off the event loop.
+    kb_worker: hypr::KbWorker,
     /// The launcher lost the keyboard to a window the user chose while it was
     /// still open: the collapse that follows must not hand it anywhere else.
     kb_left_to_user: bool,
@@ -2559,6 +2562,19 @@ impl App {
             // signal restores things); Hide stays allowed.
             Command::Show | Command::Toggle | Command::Expand if self.dock_suppressed() => {
                 debug!("dock suppressed: ignoring {command}");
+                return;
+            }
+            // ONE close path (Max, 2026-09-29: "there is two types of closing,
+            // one is closing all the way and the other is closing to dock").
+            // Toggle from the open box used to drop straight to Hidden, while
+            // Escape, focus loss, a launch and the autohide went Open → Dock →
+            // a rest → hide, and park visible when nothing covers the dock
+            // (intellihide). The two then raced the zone poll and the pointer
+            // reveal, so the card flipped between both endings. Every close
+            // now goes through `dismiss`, so Super+Space, the Mac's F4 and
+            // Escape all end the same way.
+            Command::Toggle if self.ui.target() == Target::Open => {
+                self.dismiss();
                 return;
             }
             Command::DebugDict => {
@@ -4842,7 +4858,9 @@ impl App {
     /// completes the hand-back ([`Self::complete_keyboard_handback`]); a grace
     /// timer completes it if no leave ever comes.
     pub(crate) fn begin_keyboard_handback(&mut self, surface: KbSurface, to: Option<String>) {
-        let to = to.or_else(hypr::current_last_window);
+        // `None` = "the window the user is on at close time": read by the
+        // worker when it runs the job (see `hypr::KbWorker`), not here on the
+        // event loop.
         debug!("keyboard hand-back armed ({surface:?}) → {to:?}");
         let since = Instant::now();
         self.kb_handback = Some(KbHandback { surface, to, since });
@@ -4865,18 +4883,8 @@ impl App {
         let Some(h) = self.kb_handback.take() else {
             return;
         };
-        match h.to {
-            Some(addr) => {
-                debug!("keyboard hand-back ({surface:?}) → {addr}");
-                hypr::give_keyboard(&addr);
-            }
-            None => {
-                debug!(
-                    "keyboard hand-back ({surface:?}): empty workspace, the keyboard stays free"
-                );
-                hypr::clear_keyboard();
-            }
-        }
+        debug!("keyboard hand-back ({surface:?}) queued → {:?}", h.to);
+        self.kb_worker.hand_back(h.to);
     }
 
     /// Whether a hand-back from `surface` is already on its way.
@@ -4888,6 +4896,9 @@ impl App {
 
     /// `surface` took the keyboard (again): nothing is owed to a window.
     pub(crate) fn cancel_keyboard_handback(&mut self, surface: KbSurface) {
+        // Whatever is still queued for a window is stale now: a surface of
+        // ours has the keyboard again.
+        self.kb_worker.invalidate();
         if self.keyboard_handback_armed(surface) {
             self.kb_handback = None;
         }

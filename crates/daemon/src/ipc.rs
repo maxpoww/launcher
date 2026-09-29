@@ -115,9 +115,13 @@ pub fn listen(handle: &LoopHandle<'static, App>, path: &Path) -> anyhow::Result<
         .insert_source(
             Generic::new(listener, Interest::READ, Mode::Level),
             |_, listener, app| {
+                // Take EVERY waiting client first, then handle them as one
+                // batch, so presses that queued up can be read as intent (see
+                // `handle_batch`) instead of replayed one by one.
+                let mut clients = Vec::new();
                 loop {
                     match listener.accept() {
-                        Ok((stream, _)) => handle_client(stream, app),
+                        Ok((stream, _)) => clients.push(stream),
                         Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                         Err(e) => {
                             warn!("accept failed on control socket: {e}");
@@ -125,6 +129,7 @@ pub fn listen(handle: &LoopHandle<'static, App>, path: &Path) -> anyhow::Result<
                         }
                     }
                 }
+                handle_batch(clients, app);
                 Ok(PostAction::Continue)
             },
         )
@@ -135,8 +140,47 @@ pub fn listen(handle: &LoopHandle<'static, App>, path: &Path) -> anyhow::Result<
     })
 }
 
-fn handle_client(stream: UnixStream, app: &mut App) {
-    let response = match read_command(&stream) {
+/// Handle every client that was waiting, in arrival order, with one rule: a
+/// run of consecutive `toggle`s is its NET effect. An odd count is one toggle,
+/// an even count is none. Pressing Super+Space fast while the dock was busy
+/// used to queue the presses and replay them one per animation, so the box
+/// kept flipping for seconds after the hand stopped (Max, 2026-09-29: "the box
+/// and dock go crazy"). Every client still gets its answer.
+fn handle_batch(clients: Vec<UnixStream>, app: &mut App) {
+    let mut batch: Vec<(UnixStream, anyhow::Result<Command>)> = clients
+        .into_iter()
+        .map(|stream| {
+            let command = read_command(&stream);
+            (stream, command)
+        })
+        .collect();
+    // Always the front: every branch takes what it handled off the batch.
+    while !batch.is_empty() {
+        if matches!(batch[0].1, Ok(Command::Toggle)) {
+            let run = batch
+                .iter()
+                .take_while(|(_, c)| matches!(c, Ok(Command::Toggle)))
+                .count();
+            if run > 1 {
+                debug!("ipc: {run} queued toggles coalesced to {}", run % 2);
+            }
+            let start = Instant::now();
+            if run % 2 == 1 {
+                app.handle_command(Command::Toggle);
+            }
+            debug!("ipc command toggle x{run} handled in {:?}", start.elapsed());
+            for (stream, _) in batch.drain(..run) {
+                respond(stream, Response::Ok);
+            }
+            continue;
+        }
+        let (stream, command) = batch.remove(0);
+        respond(stream, run_command(command, app));
+    }
+}
+
+fn run_command(command: anyhow::Result<Command>, app: &mut App) -> Response {
+    match command {
         Ok(command) => {
             // handle_command draws and commits the first frame before
             // returning, so this covers command-to-first-frame-submitted.
@@ -150,8 +194,10 @@ fn handle_client(stream: UnixStream, app: &mut App) {
             warn!("bad ipc request: {e}");
             Response::Err(e.to_string())
         }
-    };
-    let mut stream = stream;
+    }
+}
+
+fn respond(mut stream: UnixStream, response: Response) {
     if let Err(e) = writeln!(stream, "{response}") {
         debug!("client went away before response: {e}");
     }

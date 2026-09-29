@@ -1370,6 +1370,80 @@ pub fn current_last_window() -> Option<String> {
 /// (see the plugin's `luaKbFocus`; fixed upstream in 0.56). No pointer warp, no
 /// neighbour bounce. Falls back to [`focus_window_no_warp`] if the plugin is not
 /// loaded.
+/// The keyboard hand-back's compositor calls, OFF the event loop.
+///
+/// Every close of a keyboard-holding surface asks Hyprland which window
+/// should get the keyboard (`current_last_window`: one or two socket requests)
+/// and then gives it (`give_keyboard`: an eval). Done inline, each close
+/// stalled the dock's loop on Hyprland's replies, on top of the present
+/// stall, while Super+Space presses piled up (Max, 2026-09-29). They now run
+/// here, one job at a time, in order.
+///
+/// A late job must never take the keyboard back from a surface that has
+/// grabbed it since (reopen the box fast, then type). So every job carries
+/// the generation it was issued in. [`KbWorker::invalidate`] bumps it on
+/// every grab, and a job whose generation is stale is dropped before either
+/// call.
+pub struct KbWorker {
+    tx: std::sync::mpsc::Sender<KbJob>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+struct KbJob {
+    /// The window chosen by the caller; `None` = read it now, at close time.
+    to: Option<String>,
+    generation: u64,
+}
+
+impl KbWorker {
+    pub fn spawn() -> Self {
+        use std::sync::atomic::Ordering;
+        let (tx, rx) = std::sync::mpsc::channel::<KbJob>();
+        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let current = generation.clone();
+        let spawned = std::thread::Builder::new()
+            .name("waverunner-kb".into())
+            .spawn(move || {
+                for job in rx {
+                    let stale = || current.load(Ordering::SeqCst) != job.generation;
+                    if stale() {
+                        continue;
+                    }
+                    let to = job.to.clone().or_else(current_last_window);
+                    if stale() {
+                        continue;
+                    }
+                    match to {
+                        Some(addr) => {
+                            debug!("keyboard hand-back → {addr}");
+                            give_keyboard(&addr);
+                        }
+                        None => {
+                            debug!("keyboard hand-back: empty workspace, the keyboard stays free");
+                            clear_keyboard();
+                        }
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            warn!("keyboard hand-back worker failed to start: {e}");
+        }
+        Self { tx, generation }
+    }
+
+    /// Queue a hand-back to `to` (or, `None`, to the last window of the
+    /// workspace the user is on when the worker runs it).
+    pub fn hand_back(&self, to: Option<String>) {
+        let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let _ = self.tx.send(KbJob { to, generation });
+    }
+
+    /// One of our surfaces took the keyboard: nothing queued may move it.
+    pub fn invalidate(&self) {
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub fn give_keyboard(addr: &str) {
     if !eval_ok(&format!("hl.plugin.waveview.kb_focus(\"{addr}\")")) {
         focus_window_no_warp(addr);
