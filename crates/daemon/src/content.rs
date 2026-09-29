@@ -239,6 +239,11 @@ pub const OPEN_BOX_CAP: usize = OPEN_BOX_COLS * OPEN_BOX_COLS;
 const GRID_PAD_X: f32 = 14.0;
 const GRID_TOP_GAP: f32 = 5.0;
 const GRID_BOTTOM_PAD: f32 = 6.0;
+/// How far the search pill lifts off the card's floor into spare room above
+/// it — never closer than [`SEARCH_LIFT_AIR`] to the Files row, so it never
+/// costs the grid a row (Max, 2026-09-29: "move the search up a little").
+const SEARCH_LIFT: f32 = 8.0;
+const SEARCH_LIFT_AIR: f32 = 4.0;
 /// Text metrics for the app-name labels.
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
@@ -884,6 +889,12 @@ pub fn layout(
         let side = (OPEN_BOX_COLS as f32 * grid_cell_h).min(vp.h).min(vp.w);
         Rect::new(vp.x + (vp.w - side) / 2.0, vp.y, side, side)
     });
+
+    // Lift the search pill into whatever room the sections left above it.
+    let files_bottom = sections[SECTION_FILES].viewport.y + sections[SECTION_FILES].viewport.h;
+    let lift = (SEARCH_LIFT * icon_scale).min((search_box.y - files_bottom - SEARCH_LIFT_AIR).max(0.0));
+    let search_box = Rect::new(search_box.x, search_box.y - lift, search_box.w, search_box.h);
+    let search_btn = Rect::new(search_btn.x, search_btn.y - lift, search_btn.w, search_btn.h);
 
     Layout {
         card_x,
@@ -1959,14 +1970,15 @@ pub fn scene(
         let boxx = layout.search_box;
         let cx = w / 2.0;
         let is_btn_hover = hover == Some(Hit::SearchButton) && search_expand < 0.5;
-        let box_color = {
-            let hl = dock_highlight;
-            let a = if is_btn_hover {
-                (hl[3] * 1.0).min(1.0)
-            } else {
-                (hl[3] * 0.6).min(1.0)
-            };
-            [hl[0], hl[1], hl[2], a]
+        // One more pill: the OPTIONS pill's own material — its resting wash
+        // (hover: the hover wash) and soft neumorphic lift, polarity from
+        // the card's ink — so it reads as a sibling of the settings pills.
+        let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+        let box_color = match (bright, is_btn_hover) {
+            (false, false) => crate::options::wash(true, 0.11),
+            (false, true) => crate::options::wash(true, 0.27),
+            (true, false) => crate::options::wash(false, 0.10),
+            (true, true) => crate::options::wash(false, 0.30),
         };
         // Expanded width: the resting SEARCH_W_MIN, growing snugly with
         // the shaped query (measured, not estimated) plus caret room.
@@ -1975,6 +1987,7 @@ pub fn scene(
             .min(card_w - 2.0 * GRID_PAD_X);
         let sw = lerp(btn.w, content_w, search_expand);
         let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
+        crate::options::push_neumorph(&mut scene, draw_rect, SEARCH_H / 2.0, bright, card_open * card_open);
         sgrid.rects.push(RectInst {
             rect: draw_rect,
             radius: SEARCH_H / 2.0,
