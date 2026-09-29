@@ -4383,8 +4383,9 @@ impl App {
                     &self.apps_slots,
                 )
             })
-            // The panel shows only the dock band: nothing under it is live.
-            .filter(|h| !self.settings_panel || matches!(h, Hit::DockIcon(_)))
+            // On the panel only the dock band and the search pill are live
+            // (the panel's own field takes clicks through `panel_click`).
+            .filter(|h| !self.settings_panel || matches!(h, Hit::DockIcon(_) | Hit::SearchButton))
     }
 
     /// Recompute which item the pointer is over; redraw on change.
@@ -4676,6 +4677,11 @@ impl App {
                 }
             }
             Hit::SearchButton => {
+                // On the settings panel, search means the apps: back to them.
+                if self.settings_panel {
+                    self.settings_panel = false;
+                    self.settings_from_apps = false;
+                }
                 self.search.open = !self.search.open;
                 if !self.search.open {
                     self.search.query.clear();

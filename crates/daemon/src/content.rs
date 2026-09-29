@@ -1948,8 +1948,8 @@ pub fn scene(
     // note where it starts.
     let apps_from = (scene.labels.len(), scene.rects.len(), scene.grids.len());
     let mut search_grid: Option<GridContent> = None;
-    if !panel
-        && layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale
+    // The search pill belongs to both views: it stays through the push.
+    if layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale
     {
         let mut sgrid = GridContent {
             clip: reveal_rect,
@@ -2430,10 +2430,6 @@ pub fn scene(
             }
         }
     }
-    if let Some(g) = search_grid {
-        scene.grids.push(g);
-    }
-
     // The push: the settings field rises in from the card's bottom edge
     // and shoves the apps up and out under the dock; going back, the apps
     // come down from the top and push the field out through the bottom.
@@ -2468,6 +2464,11 @@ pub fn scene(
                 l.clip = l.clip.map(within);
             }
         }
+    }
+
+    // The search pill, after the push so it stays where it is in both views.
+    if let Some(g) = search_grid {
+        scene.grids.push(g);
     }
 
     // The settings panel's field (see `panel.rs`): its pills and open

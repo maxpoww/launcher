@@ -973,7 +973,7 @@ impl App {
         // the card not up there is nothing to swap, so it snaps.
         let want = if self.settings_panel { 1.0 } else { 0.0 };
         if self.ui.target() == Target::Open {
-            self.panel_mix += (want - self.panel_mix) * (1.0 - (-dt * 14.0).exp());
+            self.panel_mix += (want - self.panel_mix) * (1.0 - (-dt * 22.0).exp());
             if (want - self.panel_mix).abs() < 0.002 {
                 self.panel_mix = want;
             } else {
