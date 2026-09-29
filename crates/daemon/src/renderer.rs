@@ -1077,7 +1077,23 @@ impl Renderer {
     ) -> anyhow::Result<()> {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            // Timeout is recovered the same way as Lost/Outdated: a fresh
+            // swapchain. On AMD (RADV) under Hyprland's explicit sync, the
+            // compositor can drop our buffers without signalling their release
+            // (seen when a system switch finished, thinkpad 2026-09-29). The
+            // first acquire then times out, and every later acquire on that
+            // swapchain spins inside Mesa's release wait forever: the main
+            // loop is wedged at ~70% of a core, IPC stops answering, install
+            // tiles freeze on "Installing…". Reconfiguring drops the stranded
+            // images, so the next acquire gets a new one.
+            Err(
+                e @ (wgpu::SurfaceError::Lost
+                | wgpu::SurfaceError::Outdated
+                | wgpu::SurfaceError::Timeout),
+            ) => {
+                if matches!(e, wgpu::SurfaceError::Timeout) {
+                    tracing::warn!("swapchain acquire timed out; recreating it");
+                }
                 self.surface.configure(&self.device, &self.config);
                 self.surface
                     .get_current_texture()
