@@ -228,6 +228,8 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let cli_ids: Vec<String> = cli.iter().map(|e| e.id.clone()).collect();
                 kinds.extend(std::iter::repeat_n(EntryKind::App, cli.len()));
                 entries.extend(cli);
+                entries.push(settings_tile());
+                kinds.push(EntryKind::App);
                 let folders = home_folders();
                 kinds.extend(std::iter::repeat_n(EntryKind::File, folders.len()));
                 entries.extend(folders);
@@ -346,6 +348,26 @@ pub fn drain_inotify(fd: std::os::fd::BorrowedFd<'_>) {
 /// Every visible top-level folder in the home directory, alphabetical,
 /// as entries opened with `xdg-open` — the unfiltered Files strip.
 /// (The daemon's usage sort then puts the most-opened ones first.)
+/// Entry id of Golem's configuration panel tile (the gear). It is one of
+/// the apps — gridded, pinnable, searchable — but a click opens the panel in
+/// the open box instead of launching anything (see `App::activate`).
+pub(crate) const SETTINGS_ID: &str = "golem-settings";
+
+/// The configuration panel's tile. Synthesized, like the home folders: the
+/// panel is part of waverunner, so no `.desktop` file stands behind it.
+fn settings_tile() -> AppEntry {
+    AppEntry {
+        id: SETTINGS_ID.to_owned(),
+        name: crate::i18n::tr("Settings").to_owned(),
+        description: Some(crate::i18n::tr("Configure Golem").to_owned()),
+        exec: String::new(),
+        icon: Some("org.gnome.Settings".to_owned()),
+        startup_wm_class: None,
+        needs_terminal: false,
+        path: None,
+    }
+}
+
 fn home_folders() -> Vec<AppEntry> {
     let Ok(home) = std::env::var("HOME") else {
         return Vec::new();

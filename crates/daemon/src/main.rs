@@ -52,6 +52,8 @@ mod notif;
 mod notif_icons;
 mod options;
 mod order;
+// Golem's configuration panel: the main card, opened empty.
+mod panel;
 mod pager;
 mod pages;
 mod persist;
@@ -605,6 +607,8 @@ fn main() -> anyhow::Result<()> {
         app_group: None,
         dock_stack: None,
         dir_stack: None,
+        settings_panel: false,
+        settings_opening: false,
         box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
@@ -991,6 +995,8 @@ fn main() -> anyhow::Result<()> {
     // Surface the Recycle Bin on the dock the first time (a one-shot pin; the
     // user can move or unpin it freely afterwards — we never re-pin it).
     app.pin_trash_once();
+    // …and the Settings gear, just before it (same one-shot rule).
+    app.pin_settings_once();
     // If a previous daemon died while STAGE mode was up, its gap rules and its
     // maximized window outlived it. Put them back before the user sees them.
     stage::recover_if_stranded();
@@ -1496,6 +1502,14 @@ pub struct App {
     dock_stack: Option<usize>,
     /// A pinned directory whose content stack is open above the dock.
     dir_stack: Option<boxes::DirStack>,
+    /// The open card is the configuration panel: sections and search are
+    /// cleared away (see `panel.rs`). Set as the card opens from the gear,
+    /// cleared by any other open — so it holds through the close animation
+    /// and the card sinks empty.
+    settings_panel: bool,
+    /// The open in flight was asked for by the gear (read once, as the card
+    /// crosses into Open).
+    settings_opening: bool,
     /// Whether the currently open box was opened *from the dock* (a dock
     /// folder or pinned directory), as opposed to a grid folder tile. Arms
     /// the dock hover-switch even when the box opened into the grid.
@@ -2660,6 +2674,7 @@ impl App {
                 Target::Open => {
                     self.rest_hide_pending = false;
                     self.hide_deadline = None;
+                    self.settings_panel = self.settings_opening;
                 }
                 _ => {}
             }
@@ -4299,14 +4314,17 @@ impl App {
 
     /// What the pointer is over right now (`None` when outside).
     fn hover_at_pointer(&self) -> Option<Hit> {
-        self.pointer_pos.and_then(|pos| {
-            content::hit_test(
-                &self.current_layout(),
-                pos,
-                self.search.open,
-                &self.apps_slots,
-            )
-        })
+        self.pointer_pos
+            .and_then(|pos| {
+                content::hit_test(
+                    &self.current_layout(),
+                    pos,
+                    self.search.open,
+                    &self.apps_slots,
+                )
+            })
+            // The panel shows only the dock band: nothing under it is live.
+            .filter(|h| !self.settings_panel || matches!(h, Hit::DockIcon(_)))
     }
 
     /// Recompute which item the pointer is over; redraw on change.
@@ -4693,6 +4711,12 @@ impl App {
             }
             return;
         }
+        // The Settings gear launches nothing: it opens the configuration
+        // panel — the main card, emptied (see `panel.rs`).
+        if entry.id == apps::SETTINGS_ID {
+            self.toggle_settings_panel();
+            return;
+        }
         // Catalog webapps aren't launched by a click either — like packages,
         // "try" is a drag out of the box and install is a drag to the grid.
         if self.is_catalog_webapp(index) {
@@ -5000,6 +5024,9 @@ impl App {
                 }
                 // Page the section under the pointer (each scrolls
                 // independently). An open box was already handled above.
+                if self.settings_panel {
+                    return;
+                }
                 if let Some(section) = self
                     .pointer_pos
                     .and_then(|pos| content::section_at(&self.current_layout(), pos))
@@ -5028,7 +5055,7 @@ impl App {
         if self.gesture.dragging.is_some() || self.box_drag.is_some() {
             return;
         }
-        if self.ui.target() == Target::Open {
+        if self.ui.target() == Target::Open && !self.settings_panel {
             if self.stack_open() {
                 self.box_page_scroll(value);
             } else if let Some(section) = self
@@ -5164,6 +5191,9 @@ impl App {
                 if let Some(text) = utf8 {
                     let printable: String = text.chars().filter(|c| !c.is_control()).collect();
                     if !printable.is_empty() {
+                        // Typing on the panel means looking for something:
+                        // the apps come back with the search.
+                        self.settings_panel = false;
                         self.search.open = true;
                         // Typing means the user is searching again — release
                         // the drag-from-Install grid hold.

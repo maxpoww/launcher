@@ -1009,6 +1009,7 @@ impl App {
                 group_expand,
                 group_origin: self.group_origin,
                 open_box_members: &open_box_members,
+                panel: self.settings_panel,
                 open_box_disp: &open_box_disp,
                 open_box_hidden,
                 open_box_pages,

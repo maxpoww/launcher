@@ -1150,6 +1150,9 @@ pub struct FrameInput<'a> {
     /// While a box is open: entry indices of its members for the
     /// magnified 3×3 app grid. Empty when no box is open.
     pub open_box_members: &'a [usize],
+    /// The card is the configuration panel: draw its sections and search
+    /// empty (the dock band stays).
+    pub panel: bool,
     /// Animated display slot of each member (`page * OPEN_BOX_CAP +
     /// within`, parallel to `open_box_members`): box pages may be
     /// under-full, so slots — not list positions — decide where a member
@@ -1325,6 +1328,7 @@ pub fn scene(
         group_expand,
         group_origin,
         open_box_members,
+        panel,
         open_box_disp,
         open_box_hidden,
         open_box_pages,
@@ -1927,7 +1931,9 @@ pub fn scene(
     // (Built here, pushed after the section grids so `scene.grids[s]`
     // keeps indexing the sections.)
     let mut search_grid: Option<GridContent> = None;
-    if layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale {
+    if !panel
+        && layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale
+    {
         let mut sgrid = GridContent {
             clip: reveal_rect,
             ..Default::default()
@@ -2019,6 +2025,15 @@ pub fn scene(
     // The three sections: title, grid cells with per-section horizontal
     // paging, page dots, and per-section empty states.
     for (s, sec) in layout.sections.iter().enumerate() {
+        // The panel clears the sections away; an empty grid per section
+        // keeps `scene.grids[s]` indexing them.
+        if panel {
+            scene.grids.push(GridContent {
+                clip: reveal_clip(sec.viewport),
+                ..Default::default()
+            });
+            continue;
+        }
         let title = if s == SECTION_APPS && !apps_group.is_empty() {
             format!("{} — {}", crate::i18n::tr(SECTION_TITLES[s]), apps_group)
         } else {
