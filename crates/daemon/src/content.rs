@@ -1160,9 +1160,9 @@ pub struct FrameInput<'a> {
     pub panel: bool,
     /// The settings panel's field this frame (see `panel.rs`).
     pub panel_draw: Option<&'a crate::panel::PanelDraw>,
-    /// Apps ↔ settings: 0 = the apps, 1 = the panel. Between, the apps roll
-    /// up under the dock (their clip's bottom rises) while the panel fades
-    /// in and rises into place.
+    /// Apps ↔ settings: 0 = the apps, 1 = the panel. Between, the settings
+    /// field rises in from the card's bottom edge pushing the apps up and
+    /// out under the dock (and back down the other way).
     pub panel_mix: f32,
     /// Animated display slot of each member (`page * OPEN_BOX_CAP +
     /// within`, parallel to `open_box_members`): box pages may be
@@ -1408,6 +1408,11 @@ pub fn scene(
         layout.card_w,
         (reveal_bottom - reveal_top).max(0.0),
     );
+    let reveal_clip = |r: Rect| -> Rect {
+        let top = r.y.max(reveal_top);
+        let bottom = (r.y + r.h).min(reveal_bottom);
+        Rect::new(r.x, top, r.w, (bottom - top).max(0.0))
+    };
     let mut scene = Scene {
         alpha,
         ..Default::default()
@@ -1938,25 +1943,10 @@ pub fn scene(
     // so it sinks into the card's bottom edge while closing.
     // (Built here, pushed after the section grids so `scene.grids[s]`
     // keeps indexing the sections.)
-    // The apps content (search + sections) rolls up under the dock as the
-    // settings panel comes in: its reveal region's bottom rises with the mix.
-    let full_reveal = reveal_rect;
-    let roll = {
-        let m = panel_mix.clamp(0.0, 1.0);
-        m * m * (3.0 - 2.0 * m)
-    };
-    let apps_bottom = reveal_bottom - (reveal_bottom - reveal_top) * roll;
-    let reveal_rect = Rect::new(
-        full_reveal.x,
-        full_reveal.y,
-        full_reveal.w,
-        (apps_bottom - reveal_top).max(0.0),
-    );
-    let reveal_clip = |r: Rect| -> Rect {
-        let top = r.y.max(reveal_top);
-        let bottom = (r.y + r.h).min(apps_bottom);
-        Rect::new(r.x, top, r.w, (bottom - top).max(0.0))
-    };
+    // Apps ↔ settings is a push (see `FrameInput::panel_mix`): everything
+    // the apps content adds from here on is shifted up together below, so
+    // note where it starts.
+    let apps_from = (scene.labels.len(), scene.rects.len(), scene.grids.len());
     let mut search_grid: Option<GridContent> = None;
     if !panel
         && layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale
@@ -2424,7 +2414,7 @@ pub fn scene(
             let dot_cx = sec.viewport.x + sec.viewport.w / 2.0;
             let page_frac = sec.scroll / page_w;
             let hl = dock_highlight;
-            for p in (0..sec.n_pages).filter(|_| dot_y + dot_r <= apps_bottom) {
+            for p in 0..sec.n_pages {
                 let x = dot_cx - total_dots_w / 2.0 + p as f32 * dot_spacing + dot_r;
                 // Cyclic distance: the highlight wraps with the pages.
                 let raw = (p as f32 - page_frac).abs();
@@ -2444,17 +2434,49 @@ pub fn scene(
         scene.grids.push(g);
     }
 
-    // Past the apps content: back to the card's whole reveal region.
-    let reveal_rect = full_reveal;
+    // The push: the settings field rises in from the card's bottom edge
+    // and shoves the apps up and out under the dock; going back, the apps
+    // come down from the top and push the field out through the bottom.
+    // One travel for both, the card's own height, so they move as one.
+    let m = panel_mix.clamp(0.0, 1.0);
+    let travel = reveal_rect.h;
+    if m > 0.0005 {
+        let dy = -m * travel;
+        // Clip each piece where it is now, but never past the card.
+        let within = |c: Rect| -> Rect {
+            let c = Rect::new(c.x, c.y + dy, c.w, c.h);
+            let top = c.y.max(reveal_top);
+            let bottom = (c.y + c.h).min(reveal_bottom);
+            Rect::new(c.x, top, c.w, (bottom - top).max(0.0))
+        };
+        for l in &mut scene.labels[apps_from.0..] {
+            l.pos.1 += dy;
+            l.clip = l.clip.map(within);
+        }
+        // Unclipped page dots would slide out over the dock: they go.
+        scene.rects.truncate(apps_from.1);
+        for g in &mut scene.grids[apps_from.2..] {
+            g.clip = within(g.clip);
+            for r in &mut g.rects {
+                r.rect.y += dy;
+            }
+            for i in &mut g.icons {
+                i.rect.y += dy;
+            }
+            for l in &mut g.labels {
+                l.pos.1 += dy;
+                l.clip = l.clip.map(within);
+            }
+        }
+    }
 
     // The settings panel's field (see `panel.rs`): its pills and open
     // setting clipped to the card like the sections they replace; their
     // glows arrive with the card, not before it (overlay shadows are not
-    // clipped). Coming in from the apps it fades in and rises into place.
-    if let Some(pd) = panel_draw.filter(|_| panel_mix > 0.001) {
-        let m = panel_mix.clamp(0.0, 1.0);
-        let rise = (1.0 - m) * 14.0 * icon_scale;
-        let arrive = card_open * card_open * m;
+    // clipped, so they also wait for the field to be in).
+    if let Some(pd) = panel_draw.filter(|_| m > 0.0005) {
+        let rise = (1.0 - m) * travel;
+        let arrive = card_open * card_open * m * m;
         for g in &pd.glows {
             let mut g = *g;
             g.color[3] *= arrive;
@@ -2467,7 +2489,6 @@ pub fn scene(
         };
         field.rects.extend(pd.rects.iter().map(|r| {
             let mut r = *r;
-            r.color[3] *= m;
             r.rect.y += rise;
             r
         }));
@@ -2475,9 +2496,6 @@ pub fn scene(
             let mut l = l.clone();
             l.clip = Some(reveal_rect);
             l.pos.1 += rise;
-            if let Some(c) = l.color.as_mut() {
-                c[3] *= m;
-            }
             l
         }));
         scene.grids.push(field);
