@@ -29,6 +29,7 @@ use tracing::{info, warn};
 const CURATED: &[(&str, &[&str])] = &[
     ("brave", &["BraveSoftware"]),
     ("firefox", &[".mozilla"]),
+    ("seam", &[".local/share/seam"]),
     ("thunderbird", &[".thunderbird"]),
     ("vscode", &["Code", ".vscode"]),
     ("vscodium", &["VSCodium", ".vscode-oss"]),

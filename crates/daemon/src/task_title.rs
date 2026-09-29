@@ -35,7 +35,8 @@ const SEPARATORS: [&str; 6] = [" — ", " – ", " - ", " | ", " · ", " :: "];
 /// exists for the windows whose class cannot testify — a Chrome PWA reports
 /// `chrome-open.spotify.com__-Default` and still signs its title
 /// `" - Google Chrome"`, and nothing in that class string says so.
-const WELL_KNOWN_APPS: [&str; 12] = [
+const WELL_KNOWN_APPS: [&str; 13] = [
+    "seam",
     "mozilla firefox",
     "firefox",
     "google chrome",
