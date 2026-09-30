@@ -1981,10 +1981,8 @@ pub fn scene(
         let mid = crate::panel::MIDDLE;
         let box_color = crate::panel::pill_wash(mid, bright, if is_btn_hover { 1.0 } else { 0.0 });
         let pill_ink = crate::panel::pill_ink(mid, dock_ink, 1.0);
-        let (pill_font, pill_line) = (
-            crate::options::FONT_PX * bar_scale,
-            crate::options::LINE_PX * bar_scale,
-        );
+        let k = bar_scale * crate::panel::pill_scale(mid);
+        let (pill_font, pill_line) = (crate::options::FONT_PX * k, crate::options::LINE_PX * k);
         // Expanded width: the resting SEARCH_W_MIN, growing snugly with
         // the shaped query (measured, not estimated) plus caret room.
         let content_w = (query_px + 2.0 * SEARCH_PAD_X + 8.0)

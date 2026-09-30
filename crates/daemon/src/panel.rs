@@ -67,9 +67,10 @@ const SETTINGS: [(&str, u8); 20] = [
 ];
 
 // ---- The layers --------------------------------------------------------
-/// Size of each layer against the OPTIONS bar's own pill (the middle layer
-/// IS the bar's pill).
-const LAYER_SCALE: [f32; 3] = [1.53, 1.0, 0.8];
+/// Size of each layer against the OPTIONS bar's own pill: the middle and far
+/// layers a touch larger than the bar's (Max, 2026-09-30), the near one
+/// well above.
+const LAYER_SCALE: [f32; 3] = [1.53, 1.1, 0.9];
 /// Resting wash alpha per layer, on a dark card (white wash) and a bright
 /// one (black wash, which reads stronger at equal alpha).
 const LAYER_WASH_DARK: [f32; 3] = [0.19, 0.10, 0.055];
@@ -109,6 +110,11 @@ pub(crate) fn pill_glow(layer: usize, bright: bool, rect: Rect, scale: f32, alph
         color: [v, v, v, a * alpha],
         edges: [1.0, 1.0, 1.0, 1.0],
     }
+}
+
+/// A pill's size on `layer` against the OPTIONS bar's pill.
+pub(crate) fn pill_scale(layer: usize) -> f32 {
+    LAYER_SCALE[layer]
 }
 
 /// A pill's text colour on `layer`, at `alpha` presence.
