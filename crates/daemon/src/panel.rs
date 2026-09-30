@@ -129,6 +129,9 @@ const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 /// from them ("the middle side pills almost touch the sides", Max
 /// 2026-09-30).
 const EDGE: f32 = 6.0;
+/// How close together the pills sit: the share of the field's width and
+/// band height the rows use (Max: "tidy all closer together").
+const TIGHT: f32 = 0.85;
 /// How much wider than the card's own width the field may grow as a longer
 /// dock widens the card; past it the field stays centred (Max: "no more
 /// than a third, then it stays locked on the middle").
@@ -996,7 +999,10 @@ fn centre_weight(pills: &mut [Pill], w: f32, edge: f32) {
     }
     let left_room = pills.iter().map(|p| p.home.0 - p.slot().0 / 2.0 - edge).fold(f32::MAX, f32::min).max(0.0);
     let right_room = pills.iter().map(|p| w - edge - p.home.0 - p.slot().0 / 2.0).fold(f32::MAX, f32::min).max(0.0);
-    let dx = (w / 2.0 - mx / m).clamp(-left_room, right_room);
+    // A nudge, not a slide: capped so a layer step never drags the whole
+    // heap sideways as one block (that drowned the pills' own motion).
+    let cap = 3.0 * edge;
+    let dx = (w / 2.0 - mx / m).clamp(-left_room, right_room).clamp(-cap, cap);
     for p in pills.iter_mut() {
         p.home.0 += dx;
         p.ideal.0 += dx;
@@ -1049,8 +1055,10 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
     let swing = if phase.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
     let (top, bottom) = (gaps.0, size.1 - gaps.1);
     let counts = row_counts(order.len());
-    let row_h = (bottom - top).max(1.0) / ROWS.len() as f32;
-    let full = (w - 2.0 * edge).max(1.0);
+    // Tidied closer together: the rows use this share of the band (from the
+    // top down, so the air under the dock stays put) and of the width.
+    let row_h = (bottom - top).max(1.0) * TIGHT / ROWS.len() as f32;
+    let full = (w - 2.0 * edge).max(1.0) * TIGHT;
     let mut next = 0;
     for (r, (&frac, &n)) in ROWS.iter().zip(&counts).enumerate() {
         let row: Vec<usize> = order[next..(next + n).min(order.len())].to_vec();
