@@ -125,6 +125,15 @@ const MARGIN: f32 = 22.0;
 /// the heap sits up under the dock with more room below.
 const GAP_TOP: f32 = 16.0;
 const GAP_BOTTOM_FRAC: f32 = 0.30;
+/// The whole heap sits this much lower than those gaps alone would put it:
+/// the top gap grows by it and the bottom one shrinks by it (Max: "a little
+/// lower").
+const DROP: f32 = 20.0;
+
+/// The field's (top, bottom) air for a field `h` tall at bar scale `s`.
+fn gaps(h: f32, s: f32) -> (f32, f32) {
+    ((GAP_TOP + DROP) * s, (GAP_BOTTOM_FRAC * h - DROP * s).max(GAP_TOP * s))
+}
 
 // ---- Motion (rates are 1/s for exponential approach) --------------------
 const GLIDE_RATE: f32 = 16.0;
@@ -327,7 +336,7 @@ impl Panel {
         let s = self.scale.max(0.01);
         let (w, h) = size;
         let margin = MARGIN * s;
-        let (top, bottom) = (GAP_TOP * s, GAP_BOTTOM_FRAC * h);
+        let (top, bottom) = gaps(h, s);
         balanced(&mut self.pills, (w, h), margin, (top, bottom));
         for p in &mut self.pills {
             p.home = p.ideal;
@@ -1040,8 +1049,8 @@ mod tests {
             assert!(
                 a.home.0 - aw / 2.0 >= MARGIN - 0.5
                     && a.home.0 + aw / 2.0 <= w - MARGIN + 0.5
-                    && a.home.1 - ah / 2.0 >= GAP_TOP - 0.5
-                    && a.home.1 + ah / 2.0 <= h - GAP_BOTTOM_FRAC * h + 0.5,
+                    && a.home.1 - ah / 2.0 >= gaps(h, 1.0).0 - 0.5
+                    && a.home.1 + ah / 2.0 <= h - gaps(h, 1.0).1 + 0.5,
                 "{what}: {} leaves the field at {:?}",
                 a.label,
                 a.home
@@ -1061,7 +1070,7 @@ mod tests {
         assert_clean(&p, "at rest");
         // Up under the dock: the heap starts at the top gap.
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
-        assert!((top - GAP_TOP).abs() < 3.0, "heap top at {top}");
+        assert!((top - gaps(p.key.1, 1.0).0).abs() < 3.0, "heap top at {top}");
     }
 
     #[test]
