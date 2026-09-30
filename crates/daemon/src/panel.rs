@@ -82,7 +82,7 @@ const LAYERS: usize = 4;
 /// Size of each layer against the OPTIONS bar's own pill: the middle and far
 /// layers a touch larger than the bar's (Max, 2026-09-30), the near one
 /// well above.
-const LAYER_SCALE: [f32; LAYERS] = [1.65, 1.25, 1.1, 0.95];
+const LAYER_SCALE: [f32; LAYERS] = [1.53, 1.25, 1.1, 0.95];
 /// Resting wash alpha per layer, on a dark card (white wash) and a bright
 /// one (black wash, which reads stronger at equal alpha).
 const LAYER_WASH_DARK: [f32; LAYERS] = [0.19, 0.12, 0.08, 0.055];
