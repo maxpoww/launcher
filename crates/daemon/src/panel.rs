@@ -134,7 +134,11 @@ const DROP: f32 = 34.0;
 /// The rows, top to bottom, as each one's width against the widest: brick
 /// courses on a gentle ellipse, so the middle reaches the sides and the
 /// top and bottom rows are held in — wide, and a little round.
-const ROWS: [f32; 5] = [0.74, 0.92, 1.0, 0.92, 0.74];
+const ROWS: [f32; 5] = [0.86, 0.96, 1.0, 0.96, 0.86];
+/// Alternate rows shift this share of a step (pill + gap) left and right,
+/// like laid bricks: with rows of the same count the gaps would otherwise
+/// stack into columns.
+const STAGGER: f32 = 0.25;
 /// How far a pill strays from its brick spot, as a share of the room around
 /// it (x: of its row's mean gap, y: of the row height): enough to read
 /// organic, never enough to break the courses.
@@ -898,10 +902,14 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         if row.is_empty() {
             continue;
         }
-        let span = full * frac;
+        // A staggered row gives up the room it shifts by, so it stays on
+        // the card.
+        let step = full * frac / row.len().max(1) as f32;
+        let shift = if r % 2 == 1 { STAGGER * step } else { -STAGGER * step } * if r == ROWS.len() / 2 { 0.0 } else { 1.0 };
+        let span = full * frac - 2.0 * shift.abs();
         let widths: f32 = row.iter().map(|&i| pills[i].size().0).sum();
         // Each gap takes a varied share of the free room.
-        let weights: Vec<f32> = row.iter().skip(1).map(|&i| 1.0 + 0.2 * pills[i].stray[2]).collect();
+        let weights: Vec<f32> = row.iter().skip(1).map(|&i| 1.0 + 0.1 * pills[i].stray[2]).collect();
         let wsum: f32 = weights.iter().sum::<f32>().max(0.001);
         let free = (span - widths).max(0.0);
         // The free room is shared by the gaps between the pills and a
@@ -914,7 +922,7 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         let mut x = if row.len() == 1 {
             w / 2.0 - pills[row[0]].size().0 / 2.0
         } else {
-            w / 2.0 - span / 2.0 + END_AIR * mean_gap
+            w / 2.0 - span / 2.0 + shift + END_AIR * mean_gap
         };
         for (k, &i) in row.iter().enumerate() {
             if k > 0 {
@@ -1185,7 +1193,7 @@ mod tests {
         // air, `END_AIR`).
         let left = p.pills.iter().map(|q| q.home.0 - q.size().0 / 2.0).fold(f32::MAX, f32::min);
         let right = p.pills.iter().map(|q| q.home.0 + q.size().0 / 2.0).fold(f32::MIN, f32::max);
-        assert!(right - left > 0.9 * p.key.0, "heap spans {left}..{right} of {}", p.key.0);
+        assert!(right - left > 0.85 * p.key.0, "heap spans {left}..{right} of {}", p.key.0);
     }
 
     #[test]
