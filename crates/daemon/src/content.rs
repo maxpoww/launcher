@@ -564,6 +564,37 @@ pub struct SectionLayout {
     /// lots of pages"). Under-full pages never re-merge, so a capacity
     /// collapse is permanent — this field is why it can't happen again.
     pub cap: usize,
+    /// Search results: a row that isn't full splits about the title's
+    /// centre like the Controls row (see [`SectionLayout::row_shift`]).
+    /// Off for the resting grid, which keeps the order Max arranged.
+    pub centre_rows: bool,
+}
+
+impl SectionLayout {
+    /// How far right the row holding display cell `i` is drawn: a row that
+    /// isn't full, while searching, splits about the viewport's centre (the
+    /// title's) — one cell centres on it; otherwise the first half (the
+    /// larger, for an odd count) ends at it and the rest starts there:
+    /// 1 | 2, 1 2 | 3, 1 2 | 3 4 (Max, 2026-09-30). Full rows don't move.
+    pub fn row_shift(&self, i: usize) -> f32 {
+        let cols = self.cols.max(1);
+        if !self.centre_rows {
+            return 0.0;
+        }
+        let per_page = cols * self.rows.max(1);
+        let start = i / per_page * per_page + (i % per_page) / cols * cols;
+        let k = self.cells.saturating_sub(start).min(cols);
+        if k == 0 || k >= cols {
+            return 0.0;
+        }
+        let cell_w = self.viewport.w / cols as f32;
+        let centre = self.viewport.w / 2.0;
+        if k == 1 {
+            centre - cell_w / 2.0
+        } else {
+            centre - k.div_ceil(2) as f32 * cell_w
+        }
+    }
 }
 
 /// Geometry shared by scene assembly and hit-testing.
@@ -936,6 +967,7 @@ pub fn layout(
                 } else {
                     rows
                 },
+            centre_rows: false,
         }
     });
 
@@ -1111,8 +1143,9 @@ pub fn hit_test(
             // Derive scaled cell dimensions from the already-scaled layout geometry.
             let cell_w = sec.viewport.w / sec.cols.max(1) as f32;
             let cell_h = sec.viewport.h / sec.rows.max(1) as f32;
-            let col_f = (adjusted_x - page as f32 * page_w) / cell_w;
             let row = ((pos.1 - sec.viewport.y) / cell_h).floor() as usize;
+            let row_start = page * sec.cols * sec.rows + row * sec.cols;
+            let col_f = (adjusted_x - page as f32 * page_w - sec.row_shift(row_start)) / cell_w;
             let col = col_f.floor() as usize;
             if col_f >= 0.0 && col < sec.cols && row < sec.rows {
                 let cells_per_page = sec.cols * sec.rows;
@@ -2260,7 +2293,7 @@ pub fn scene(
                 let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
                 let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
                 (
-                    sec.viewport.x + rel + col as f32 * grid_cell_w,
+                    sec.viewport.x + rel + col as f32 * grid_cell_w + sec.row_shift(i),
                     sec.viewport.y + row as f32 * grid_cell_h,
                 )
             };
@@ -3045,6 +3078,26 @@ mod tests {
             with.sections[SECTION_APPS].cap, plain.sections[SECTION_APPS].cap,
             "page capacity never moves with the row"
         );
+    }
+
+    #[test]
+    fn search_rows_split_about_the_title() {
+        let cfg = config();
+        let mut l = open_layout(&cfg, 3, 0.0);
+        let sec = &mut l.sections[SECTION_APPS];
+        let (w, cell) = (sec.viewport.w, sec.viewport.w / sec.cols as f32);
+        assert_eq!(sec.row_shift(0), 0.0, "the resting grid never moves");
+        sec.centre_rows = true;
+        for (n, split) in [(2usize, 1usize), (3, 2), (4, 2), (5, 3)] {
+            sec.cells = n;
+            let edge = split as f32 * cell + sec.row_shift(0);
+            assert!((edge - w / 2.0).abs() < 0.01, "{n}: the gap after {split} is under the title");
+        }
+        sec.cells = 1;
+        assert!((sec.row_shift(0) + cell / 2.0 - w / 2.0).abs() < 0.01, "one result under the title");
+        sec.cells = sec.cols + 1;
+        assert_eq!(sec.row_shift(0), 0.0, "a full row stays");
+        assert!(sec.row_shift(sec.cols) > 0.0, "the partial row after it splits");
     }
 
     #[test]

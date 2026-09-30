@@ -94,6 +94,11 @@ impl App {
             stretch,
             (!self.search.controls.is_empty()).then(|| self.options_pill_h() * crate::panel::LAYER_SCALE[0]),
         );
+        // Search results split their partial rows about the titles.
+        let centre_rows = !self.grid_resting();
+        for sec in &mut layout.sections {
+            sec.centre_rows = centre_rows;
+        }
         // The Controls row: the matching settings as near-layer pills,
         // split about the title's centre (see `content::controls_rects`).
         if let Some(row) = layout.controls_row {
