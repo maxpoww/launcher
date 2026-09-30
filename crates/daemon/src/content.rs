@@ -521,7 +521,8 @@ fn truncate_label(text: &str, max_w: f32, font_px: f32) -> String {
 /// own cyclic horizontal paging.
 #[derive(Debug)]
 pub struct SectionLayout {
-    /// Title anchor: (left, top).
+    /// Title anchor: (centre, top) — the titles sit centred over their
+    /// grids (Max, 2026-09-30).
     pub title_pos: (f32, f32),
     /// Grid viewport (exactly `rows` × GRID_CELL_H tall).
     pub viewport: Rect,
@@ -877,7 +878,7 @@ pub fn layout(
         // Apps stays full-width even with a box open (the magnified box
         // fills the whole grid, drawn as an overlay in `scene`).
         let grid_x0 = (w - cols as f32 * grid_cell_w) / 2.0;
-        let title_pos = (grid_x0 + 8.0, agua(y + y_off));
+        let title_pos = (grid_x0 + cols as f32 * grid_cell_w / 2.0, agua(y + y_off));
         y += SECTION_TITLE_H;
         let viewport = Rect::new(
             grid_x0,
@@ -937,7 +938,7 @@ pub fn layout(
             let vp = sections[SECTION_FILES].viewport;
             let title_y = files_bottom + SECTION_GAP;
             (
-                Some((vp.x + 8.0, title_y)),
+                Some((vp.x + vp.w / 2.0, title_y)),
                 Some(Rect::new(vp.x, title_y + SECTION_TITLE_H, vp.w, ph)),
             )
         }
@@ -2139,7 +2140,7 @@ pub fn scene(
             max_w: sec.viewport.w,
             font_px: LABEL_FONT_PX,
             line_px: LABEL_LINE_PX,
-            centered: false,
+            centered: true,
             dim: true,
             cache: true,
             family: None,
@@ -2517,7 +2518,7 @@ pub fn scene(
             max_w: 200.0,
             font_px: LABEL_FONT_PX,
             line_px: LABEL_LINE_PX,
-            centered: false,
+            centered: true,
             dim: true,
             cache: true,
             family: None,
