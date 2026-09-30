@@ -122,8 +122,8 @@ const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 /// Air kept off the card's sides — per pill, somewhere between these two,
 /// so the pills at the edges stop at different distances and the heap's
 /// sides read uneven instead of ruled (Max, 2026-09-30).
-const MARGIN_MIN: f32 = 6.0;
-const MARGIN_MAX: f32 = 46.0;
+const MARGIN_MIN: f32 = 4.0;
+const MARGIN_MAX: f32 = 36.0;
 /// Air under the dock, and above the card's floor as a share of the field:
 /// the heap sits up under the dock with more room below.
 const GAP_TOP: f32 = 16.0;
@@ -799,7 +799,7 @@ fn air(a: &Pill, b: &Pill) -> f32 {
 /// half, since pills are wide. Writes each pill's `ideal`.
 fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32)) {
     // Counting x at under half is what spreads the heap out to the sides.
-    const SX: f32 = 0.45;
+    const SX: f32 = 0.35;
     let (w, h) = size;
     let n = pills.len().max(1) as f32;
     let area = ((w - 2.0 * margin) * SX * (h - gaps.0 - gaps.1)).max(1.0);
