@@ -48,6 +48,17 @@ impl App {
     }
 
     pub(crate) fn layout_at(&self, extent: f32) -> content::Layout {
+        self.layout_stretched(extent, (self.agua_card.pos, self.agua_content.pos))
+    }
+
+    /// The layout at `extent` with the card at rest: no AGUA squash or
+    /// stretch. For anything that must not wobble with the card's spring
+    /// (the settings panel lays its field out against this).
+    pub(crate) fn layout_at_rest(&self, extent: f32) -> content::Layout {
+        self.layout_stretched(extent, (1.0, 1.0))
+    }
+
+    fn layout_stretched(&self, extent: f32, stretch: (f32, f32)) -> content::Layout {
         // The Apps section is paged by display *span* (tail gaps count
         // toward their page), not item count; a qualifying drag adds one
         // ghost page to drag onto.
@@ -78,7 +89,7 @@ impl App {
             ],
             std::array::from_fn(|s| self.scroll.per[s].pos),
             self.stack_open() || self.closing_members.is_some(),
-            (self.agua_card.pos, self.agua_content.pos),
+            stretch,
         );
         // Position the open box's rest square. A grid box anchors to the
         // side of the grid it sits on (pinned preview icon lands on its

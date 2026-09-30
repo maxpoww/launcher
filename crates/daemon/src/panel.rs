@@ -444,6 +444,10 @@ impl Panel {
         {
             return;
         }
+        tracing::debug!(
+            "settings: field laid out for {:.0}x{:.0} at scale {:.2} (was {:.0}x{:.0}, fresh {fresh})",
+            key.0, key.1, key.2, self.key.0, self.key.1
+        );
         self.key = key;
         self.scale = scale;
         if fresh {
@@ -1355,7 +1359,11 @@ impl App {
     /// below the dock band at its settled open size, riding with the card
     /// as it rises and sinks.
     fn panel_field(&self, layout: &Layout) -> (Rect, Rect) {
-        let settled = self.layout_at(self.ui.extent_of(Target::Open));
+        // At rest: the card's AGUA spring wobbles its width every frame of
+        // an open or close, and laying the field out against that re-laid
+        // it (and could flip its row count) on every frame — the panel
+        // seemed to open on one arrangement and switch to another.
+        let settled = self.layout_at_rest(self.ui.extent_of(Target::Open));
         let dock_h = self.config.window.input_bar_height as f32 * self.icon_scale();
         let ride = layout.sections[content::SECTION_APPS].title_pos.1
             - settled.sections[content::SECTION_APPS].title_pos.1;
