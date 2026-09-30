@@ -140,6 +140,10 @@ const ROWS: [f32; 5] = [0.74, 0.92, 1.0, 0.92, 0.74];
 /// organic, never enough to break the courses.
 const JITTER_X: f32 = 0.35;
 const JITTER_Y: f32 = 0.22;
+/// A row's end pills sit this share of a gap in from the row's ends, so
+/// the spacing across a row is even instead of the ends pinned out wide
+/// (Max: "move the ones on the sides a little inside").
+const END_AIR: f32 = 0.4;
 
 /// The field's (top, bottom) air for a field `h` tall at bar scale `s`.
 fn gaps(h: f32, s: f32) -> (f32, f32) {
@@ -900,13 +904,21 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         let weights: Vec<f32> = row.iter().skip(1).map(|&i| 1.0 + 0.2 * pills[i].stray[2]).collect();
         let wsum: f32 = weights.iter().sum::<f32>().max(0.001);
         let free = (span - widths).max(0.0);
-        let mean_gap = if row.len() > 1 { free / (row.len() - 1) as f32 } else { 0.0 };
+        // The free room is shared by the gaps between the pills and a
+        // little air at each end.
+        let shares = (row.len() - 1) as f32 + 2.0 * END_AIR;
+        let mean_gap = if row.len() > 1 { free / shares } else { 0.0 };
+        let gaps_room = free - 2.0 * END_AIR * mean_gap;
         let cy = top + (r as f32 + 0.5) * row_h;
         // A lone pill sits in the middle; a row starts at its left end.
-        let mut x = if row.len() == 1 { w / 2.0 - pills[row[0]].size().0 / 2.0 } else { w / 2.0 - span / 2.0 };
+        let mut x = if row.len() == 1 {
+            w / 2.0 - pills[row[0]].size().0 / 2.0
+        } else {
+            w / 2.0 - span / 2.0 + END_AIR * mean_gap
+        };
         for (k, &i) in row.iter().enumerate() {
             if k > 0 {
-                x += free * weights[k - 1] / wsum;
+                x += gaps_room * weights[k - 1] / wsum;
             }
             let pw = pills[i].size().0;
             let p = &mut pills[i];
@@ -1169,10 +1181,11 @@ mod tests {
         let course = (p.key.1 - g_top - g_bottom) / ROWS.len() as f32;
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
         assert!(top >= g_top - 0.5 && top <= g_top + course, "heap top at {top}");
-        // Wide: the widest row reaches nearly to both sides.
+        // Wide: the heap spans most of the card (its row ends keep a little
+        // air, `END_AIR`).
         let left = p.pills.iter().map(|q| q.home.0 - q.size().0 / 2.0).fold(f32::MAX, f32::min);
         let right = p.pills.iter().map(|q| q.home.0 + q.size().0 / 2.0).fold(f32::MIN, f32::max);
-        assert!(left < EDGE + 20.0 && right > p.key.0 - EDGE - 20.0, "heap spans {left}..{right}");
+        assert!(right - left > 0.9 * p.key.0, "heap spans {left}..{right} of {}", p.key.0);
     }
 
     #[test]
