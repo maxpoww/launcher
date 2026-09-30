@@ -70,6 +70,12 @@ impl App {
         }
         let layout = self.layout_at_rest(self.ui.extent_of(Target::Open));
         let sec = &layout.sections[content::SECTION_APPS];
+        // With more than one page every page keeps the full page's rows
+        // (Max: "the lines on both pages have to be the same"); pages fill
+        // before the next one exists, so only a lone page can be short.
+        if sec.n_pages > 1 {
+            return 0.0;
+        }
         let (cols, rows) = (sec.cols.max(1), sec.rows.max(1));
         let per_page = cols * rows;
         // (Pages wrap cyclically, so the pager's target can run past them.)
