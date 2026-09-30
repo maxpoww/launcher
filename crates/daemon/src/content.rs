@@ -217,6 +217,9 @@ const SECTION_TITLE_H: f32 = 7.0;
 /// 20 -> 24; then 3 px more: 7 and 27.)
 const SECTION_GAP: f32 = 27.0;
 const DOT_ROOM: f32 = 6.0;
+/// The page dots sit this much above the middle of their room (Max: "the
+/// dots slightly higher").
+const DOTS_RAISE: f32 = 1.5;
 const LAST_SECTION_AIR: f32 = 6.0;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
@@ -262,7 +265,7 @@ pub const LABEL_LINE_PX: f32 = 16.0;
 const TITLE_FONT_PX: f32 = 13.0;
 const TITLE_LINE_PX: f32 = 16.0;
 const TITLE_ALPHA: f32 = 0.3;
-const TITLE_DROP: f32 = -2.0;
+const TITLE_DROP: f32 = -1.0;
 /// Search box: height, inner padding, text metrics.
 const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
@@ -2498,7 +2501,7 @@ pub fn scene(
         // Page indicator dots in the gap beneath the section — gated by
         // the reveal edge (they ride the same fixed layout as the grid,
         // so unclipped they would linger as a ghost once the box hides).
-        let dot_y = sec.viewport.y + sec.viewport.h + DOT_ROOM / 2.0;
+        let dot_y = sec.viewport.y + sec.viewport.h + DOT_ROOM / 2.0 - DOTS_RAISE;
         if sec.n_pages > 1 && (reveal_top..=reveal_bottom).contains(&dot_y) {
             let dot_r = 3.0;
             let dot_spacing = 10.0;
