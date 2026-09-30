@@ -123,6 +123,10 @@ const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 /// from them ("the middle side pills almost touch the sides", Max
 /// 2026-09-30).
 const EDGE: f32 = 6.0;
+/// How much wider than the card's own width the field may grow as a longer
+/// dock widens the card; past it the field stays centred (Max: "no more
+/// than a third, then it stays locked on the middle").
+const FIELD_MAX_GROW: f32 = 4.0 / 3.0;
 /// Air under the dock, and above the card's floor as a share of the field:
 /// the heap sits up under the dock with more room below.
 const GAP_TOP: f32 = 16.0;
@@ -326,8 +330,11 @@ pub(crate) struct Panel {
     pills: Vec<Pill>,
     /// Field size and bar scale the pills were measured and laid out for.
     key: (f32, f32, f32),
-    /// The field this frame, in surface coordinates.
+    /// The field this frame, in surface coordinates, and the card interior
+    /// below the dock it sits centred in (the field is capped in width; an
+    /// opened setting still grows into the whole card).
     field: Rect,
+    card: Rect,
     scale: f32,
     /// Layer steps taken (the cycle's position).
     shift: i32,
@@ -498,7 +505,7 @@ impl Panel {
         if let Some(open) = &mut self.open {
             // Open, the setting is the whole card: a click on its floating
             // controls is theirs; anywhere else folds it back.
-            if open.want > 0.5 && !content_hit(self.key, self.scale, pos, self.field) {
+            if open.want > 0.5 && !content_hit(self.scale, pos, self.field, self.card) {
                 open.want = 0.0;
                 info!("settings: closing {}", self.pills[open.pill].label);
             }
@@ -713,13 +720,15 @@ impl Panel {
         let k = open.k;
         let p = &self.pills[open.pill];
         let d = p.drawn as usize;
-        let (fw, fh) = (f.w, f.h);
-        // The box: the pill's rect easing to the whole field, its stadium
+        let fh = f.h;
+        // The whole card below the dock, relative to the field.
+        let (bx, bw) = (self.card.x - f.x, self.card.w.max(1.0));
+        // The box: the pill's rect easing to the whole card, its stadium
         // easing to the card's corner.
         let r = Rect::new(
-            f.x + lerp(open.from.x, 0.0, k),
+            f.x + lerp(open.from.x, bx, k),
             f.y + lerp(open.from.y, 0.0, k),
-            lerp(open.from.w, fw, k),
+            lerp(open.from.w, bw, k),
             lerp(open.from.h, fh, k),
         );
         // Its fill is cleared by halfway, so it is gone before the content
@@ -765,7 +774,12 @@ impl Panel {
         if ca < 0.004 {
             return;
         }
-        let fx = open.from.x * fw / (fw - open.from.w).max(1.0);
+        // The point the rect lerp leaves fixed: x + t·w is the same at both
+        // ends, t = (bx − from.x) / (from.w − bw).
+        let fx = {
+            let t = (bx - open.from.x) / (open.from.w - bw).min(-1.0);
+            open.from.x + t * open.from.w
+        };
         let fy = open.from.y * fh / (fh - open.from.h).max(1.0);
         let cs = lerp(0.08, 1.0, k);
         let map = |x: f32, y: f32| (f.x + fx + (x - fx) * cs, f.y + fy + (y - fy) * cs);
@@ -776,7 +790,7 @@ impl Panel {
             out.labels.push(Label {
                 text: t,
                 pos: (mx, my),
-                max_w: fw * cs,
+                max_w: bw * cs,
                 font_px: px * s * cs,
                 line_px: lpx * s * cs,
                 centered: true,
@@ -797,7 +811,7 @@ impl Panel {
                 border: 0.0,
             });
         };
-        let cx = fw / 2.0;
+        let cx = bx + bw / 2.0;
         let mut y = 30.0 * s;
         text(out, p.label.to_owned(), cx, y, 30.0, 36.0, 1.0);
         y += 44.0 * s;
@@ -850,10 +864,10 @@ impl Panel {
 
 /// Whether `pos` (surface) lands on one of an open setting's floating
 /// controls — the rows laid out by [`Panel::draw_open`] at rest.
-fn content_hit(key: (f32, f32, f32), scale: f32, pos: (f32, f32), field: Rect) -> bool {
+fn content_hit(scale: f32, pos: (f32, f32), field: Rect, card: Rect) -> bool {
     let s = scale;
     let (rw, rh) = (440.0 * s, 46.0 * s);
-    let x0 = field.x + key.0 / 2.0 - rw / 2.0;
+    let x0 = card.x + card.w / 2.0 - rw / 2.0;
     let mut y = field.y + 30.0 * s + 44.0 * s + 40.0 * s;
     for _ in 0..3 {
         if Rect::new(x0, y, rw, rh).contains(pos) {
@@ -1202,17 +1216,22 @@ impl App {
     /// The field the panel lives in, in surface coordinates: the whole card
     /// below the dock band at its settled open size, riding with the card
     /// as it rises and sinks.
-    fn panel_field(&self, layout: &Layout) -> Rect {
+    fn panel_field(&self, layout: &Layout) -> (Rect, Rect) {
         let settled = self.layout_at(self.ui.extent_of(Target::Open));
         let dock_h = self.config.window.input_bar_height as f32 * self.icon_scale();
         let ride = layout.sections[content::SECTION_APPS].title_pos.1
             - settled.sections[content::SECTION_APPS].title_pos.1;
-        Rect::new(
+        let card = Rect::new(
             settled.card_x,
             settled.card_top + dock_h + ride,
             settled.card_w,
             (settled.card_h - dock_h).max(1.0),
-        )
+        );
+        // The field grows with the card (a longer dock widens it) up to a
+        // third past the card's own width, then stays centred in it.
+        let base = self.config.window.width as f32 * self.icon_scale();
+        let w = card.w.min(base * FIELD_MAX_GROW);
+        (Rect::new(card.x + (card.w - w) / 2.0, card.y, w, card.h), card)
     }
 
     /// Advance the panel (on its own clock while `live`, frozen otherwise)
@@ -1226,7 +1245,7 @@ impl App {
             _ => 0.0,
         };
         self.panel.last_step = live.then_some(now);
-        let field = self.panel_field(layout);
+        let (field, card) = self.panel_field(layout);
         let scale = self.options_scale();
         let pill_h = self.options_pill_h();
         if let Some(r) = self.renderer.as_mut() {
@@ -1234,6 +1253,7 @@ impl App {
             self.panel.ensure((field.w, field.h), scale, pill_h, &mut measure);
         }
         self.panel.field = field;
+        self.panel.card = card;
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
         (self.panel.draw(paint), self.panel.is_moving())
@@ -1492,6 +1512,7 @@ mod tests {
     fn a_click_opens_the_pill_and_escape_folds_it_back() {
         let mut p = panel();
         p.field = Rect::new(0.0, 0.0, 960.0, 560.0);
+        p.card = p.field;
         p.step(0.0, None);
         let target = p.pills[0].pos;
         assert!(p.click(target), "a click on a pill opens it");
