@@ -209,18 +209,13 @@ const SECTION_TITLES: [&str; N_SECTIONS] = ["Apps", "Install", "Files"];
 const SECTION_ROWS: [usize; N_SECTIONS] = [4, 1, 1];
 /// Height of a section's title line above its grid.
 const SECTION_TITLE_H: f32 = 14.0;
-/// Vertical gap between one section's frame and the next.
+/// The spacing of Max's framed-sections mockup (2026-09-30), kept without
+/// the frames ("only the positions"): the gap between one section and the
+/// next, the room under a grid where its page dots sit, and the air kept
+/// under the last section's dots.
 const SECTION_GAP: f32 = 20.0;
-/// Room under a section's grid, inside its frame, where its page dots sit.
 const DOT_ROOM: f32 = 6.0;
-/// The hairline frame round each section, its title and its dots (Max's
-/// mockup, 2026-09-30): room beyond the grid at the sides and beyond the
-/// title / dots above and below, its corners, and its strength (the card's
-/// ink at this alpha).
-const FRAME_X: f32 = 24.0;
-const FRAME_Y: f32 = 6.0;
-const FRAME_RADIUS: f32 = 23.0;
-const FRAME_ALPHA: f32 = 0.09;
+const LAST_SECTION_AIR: f32 = 6.0;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
@@ -958,8 +953,8 @@ pub fn layout(
         }
         None => (None, None),
     };
-    // The last frame's bottom edge.
-    let above_search = controls_row.map_or(files_bottom, |r| r.y + r.h) + DOT_ROOM + FRAME_Y;
+    // Under the last section's dots.
+    let above_search = controls_row.map_or(files_bottom, |r| r.y + r.h) + DOT_ROOM + LAST_SECTION_AIR;
     // Lift the search pill into whatever room the sections left above it.
     let lift = (SEARCH_LIFT * icon_scale).min((search_box.y - above_search - SEARCH_LIFT_AIR).max(0.0));
     let search_box = Rect::new(search_box.x, search_box.y - lift, search_box.w, search_box.h);
@@ -992,24 +987,6 @@ pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
     let page = cell / cells_per_page;
     let max_page = section.n_pages.saturating_sub(1);
     (page.min(max_page) as f32 * section.viewport.w).max(0.0)
-}
-
-/// The hairline frame round a section: its grid's width (`vp`) plus the
-/// side room, from its title band's `top` to its dots' `bottom` plus the
-/// room above and below.
-fn section_frame(vp: Rect, top: f32, bottom: f32, ink: [f32; 4]) -> RectInst {
-    RectInst {
-        rect: Rect::new(
-            vp.x - FRAME_X,
-            top - FRAME_Y,
-            vp.w + 2.0 * FRAME_X,
-            bottom - top + 2.0 * FRAME_Y,
-        ),
-        radius: FRAME_RADIUS,
-        color: [ink[0], ink[1], ink[2], ink[3] * FRAME_ALPHA],
-        glass: 0.0,
-        border: 1.0,
-    }
 }
 
 /// Which section's scroll band contains `pos`: the viewport plus its
@@ -2150,13 +2127,8 @@ pub fn scene(
         search_grid = Some(sgrid);
     }
 
-    // The section titles' ink, and the frames round the sections (one grid,
-    // pushed after the sections so `scene.grids[s]` keeps indexing them).
+    // The section titles' ink.
     let title_ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * TITLE_ALPHA];
-    let mut frames = GridContent {
-        clip: reveal_rect,
-        ..Default::default()
-    };
     // The three sections: title, grid cells with per-section horizontal
     // paging, page dots, and per-section empty states.
     for (s, sec) in layout.sections.iter().enumerate() {
@@ -2187,13 +2159,6 @@ pub fn scene(
             color: Some(title_ink),
             clip: Some(reveal_rect),
         });
-        // Every section is framed, an empty one too.
-        frames.rects.push(section_frame(
-            sec.viewport,
-            sec.title_pos.1,
-            sec.viewport.y + sec.viewport.h + DOT_ROOM,
-            dock_ink,
-        ));
 
         let mut grid = GridContent {
             clip: reveal_clip(sec.viewport),
@@ -2555,7 +2520,6 @@ pub fn scene(
             }
         }
     }
-    scene.grids.push(frames);
     // The Controls row: the settings the search matches, as the control
     // panel's near-layer pills under a section title. Apps content: it
     // rides the push with the rest.
@@ -2591,9 +2555,6 @@ pub fn scene(
             clip: reveal_rect,
             ..Default::default()
         };
-        if let Some(row) = layout.controls_row {
-            cgrid.rects.push(section_frame(row, title.1, row.y + row.h + DOT_ROOM, dock_ink));
-        }
         for (i, (r, &(label, _))) in layout.controls.iter().zip(controls).enumerate() {
             let lift = control_lift.get(i).copied().unwrap_or(0.0);
             let k = 1.0 + LIFT * lift;
@@ -3043,7 +3004,7 @@ mod tests {
         let l = open_layout(&cfg, 40, 1e9);
         let apps = &l.sections[SECTION_APPS];
         assert_eq!(apps.cols, 6, "720px card fits exactly 6 columns");
-        assert_eq!(apps.rows, 3, "the framed sections leave the default card 6×3");
+        assert_eq!(apps.rows, 3, "the mockup spacing leaves the default card 6×3");
         assert_eq!(l.sections[SECTION_INSTALL].rows, 1);
         assert_eq!(l.sections[SECTION_FILES].rows, 1);
         // Sections stack without overlap and fit above the search box.
