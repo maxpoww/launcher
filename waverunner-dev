@@ -51,13 +51,13 @@ if [ -n "$DICTS" ]; then
   export WAVERUNNER_DICT_ES="$DICTS/share/waverunner/dictionary-es.json"
 fi
 
-# Which build to run. Debug stays the default so the dev loop (and verify-ui,
-# which matches the daemon by `target/debug/waverunner`) is unchanged; set
-# WAVERUNNER_PROFILE=release for the daily driver. It is not a micro-optimisation:
-# the engine's collectors parse a ~290 KB `pw-dump` per read, and unoptimised
-# serde makes that cost roughly an order of magnitude more CPU — which on a
-# laptop is battery.
-PROFILE="${WAVERUNNER_PROFILE:-debug}"
+# Which build to run: release by default — Hyprland runs this at login, and a
+# debug default once brought the desk up on a stale debug binary after a
+# reboot (2026-09-30). Set WAVERUNNER_PROFILE=debug for the dev loop (verify-ui
+# does). It is not a micro-optimisation: the engine's collectors parse a
+# ~290 KB `pw-dump` per read, and unoptimised serde makes that cost roughly an
+# order of magnitude more CPU — which on a laptop is battery.
+PROFILE="${WAVERUNNER_PROFILE:-release}"
 BIN="/home/max/launcher/target/$PROFILE/waverunner"
 if [ ! -x "$BIN" ]; then
   [ "$PROFILE" = release ] && FLAG=" --release" || FLAG=""

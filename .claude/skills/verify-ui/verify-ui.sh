@@ -72,7 +72,7 @@ if [ "$do_restart" = 1 ]; then
   # Relaunch detached, exactly as Hyprland does (waverunner-dev sets LD paths).
   # Keep the daemon's stdout/stderr in a log so runtime errors — notably wgpu
   # validating WGSL shaders at pipeline creation — are inspectable after a crash.
-  setsid "$DEV_LAUNCHER" >"$SHOT_DIR/daemon.log" 2>&1 < /dev/null &
+  WAVERUNNER_PROFILE=debug setsid "$DEV_LAUNCHER" >"$SHOT_DIR/daemon.log" 2>&1 < /dev/null &
   # Give the layer surface time to map. Poll instead of a flat sleep — GPU/
   # shader pipeline setup (wgpu adapter probe, WGSL compile) has been seen to
   # take past 1.5s on this machine, which made a live daemon look dead.
