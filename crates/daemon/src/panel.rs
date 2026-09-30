@@ -655,7 +655,7 @@ impl Panel {
             if let Some(e) = p.exit {
                 let ease = 1.0 - (1.0 - e.k) * (1.0 - e.k);
                 if e.dir > 0 {
-                    dy = -90.0 * s * ease; // leaves upward, with the scroll, past the viewer
+                    dy = 90.0 * s * ease; // falls away downward, past the viewer (Max's call)
                     grow = 1.0 + 0.4 * ease;
                 } else {
                     dy = 8.0 * s * e.k; // recedes, drifting down with the scroll
