@@ -654,15 +654,27 @@ impl Panel {
         self.query = query.trim().to_lowercase();
     }
 
-    /// Open the best match of the search: the first matching pill, nearest
-    /// layer first. Returns whether there was one.
+    /// Open the best match of the search: a name that starts with it, then
+    /// a name that contains it, then a keyword match; nearest layer first
+    /// among equals. Returns whether there was one.
     fn open_best(&mut self) -> bool {
         if self.query.is_empty() || self.open.is_some() {
             return false;
         }
+        let q = &self.query;
+        let rank = |p: &Pill| -> u8 {
+            let name = p.label.to_lowercase();
+            if name.starts_with(q.as_str()) {
+                0
+            } else if name.contains(q.as_str()) {
+                1
+            } else {
+                2
+            }
+        };
         let best = (0..self.pills.len())
-            .filter(|&i| self.pills[i].exit.is_none() && self.pills[i].matches(&self.query))
-            .min_by_key(|&i| self.pills[i].layer);
+            .filter(|&i| self.pills[i].exit.is_none() && self.pills[i].matches(q))
+            .min_by_key(|&i| (rank(&self.pills[i]), self.pills[i].layer));
         match best {
             Some(i) => {
                 self.open_pill(i);
