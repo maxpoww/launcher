@@ -630,8 +630,6 @@ fn main() -> anyhow::Result<()> {
         panel: panel::Panel::default(),
         panel_mix: 0.0,
         settings_from_apps: false,
-        panel_tick_armed: false,
-        panel_reset_due: false,
         box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
@@ -1551,11 +1549,6 @@ pub struct App {
     /// The panel was entered from the open apps grid: the gear goes back to
     /// the apps instead of closing the card.
     settings_from_apps: bool,
-    /// The panel's idle-cadence timer is pending (see `panel_idle_tick`).
-    panel_tick_armed: bool,
-    /// The panel should start afresh once it is out of sight (see
-    /// `panel::Panel::reset`).
-    panel_reset_due: bool,
     /// Whether the currently open box was opened *from the dock* (a dock
     /// folder or pinned directory), as opposed to a grid folder tile. Arms
     /// the dock hover-switch even when the box opened into the grid.
@@ -2739,31 +2732,11 @@ impl App {
                     self.hide_deadline = None;
                     self.settings_panel = self.settings_opening;
                     self.settings_from_apps = false;
-                    // A reset still owed from the last visit: do it now,
-                    // before the card has risen (the panel is not yet seen).
-                    if self.panel_reset_due {
-                        self.panel.reset();
-                        self.panel_reset_due = false;
-                    }
-                    // The scroll that summoned the card must not turn a layer,
-                    // and the panel opens unsearched.
-                    if self.settings_panel {
-                        self.panel.hold_wheel();
-                        self.search.open = false;
-                        self.search.query.clear();
-                        self.panel.set_query("");
-                    }
                     // The card rises straight into its view: no apps↔panel
                     // swap to animate.
                     self.panel_mix = if self.settings_panel { 1.0 } else { 0.0 };
                 }
                 _ => {}
-            }
-            // Leaving the open card: the panel starts afresh next time — reset
-            // once it is out of sight (the frame loop does it), never while it
-            // is still visibly sinking.
-            if prev == Target::Open && next != Target::Open {
-                self.panel_reset_due = true;
             }
             // Minimized dock tiles hide while the launcher is open and return
             // when it closes (`minimized_entries` gate) — rebuild the dock
@@ -4712,14 +4685,10 @@ impl App {
                 }
             }
             Hit::SearchButton => {
-                // On the settings panel the search searches the settings.
+                // On the settings panel, search means the apps: back to them.
                 if self.settings_panel {
-                    self.search.open = !self.search.open;
-                    if !self.search.open {
-                        self.search.query.clear();
-                    }
-                    self.panel_search();
-                    return;
+                    self.settings_panel = false;
+                    self.settings_from_apps = false;
                 }
                 self.search.open = !self.search.open;
                 if !self.search.open {
@@ -5308,15 +5277,8 @@ impl App {
                     self.close_group();
                     return;
                 }
-                // Likewise an open setting on the panel folds back first,
-                // then its search clears.
+                // Likewise an open setting on the panel folds back first.
                 if self.settings_panel && self.panel_escape() {
-                    return;
-                }
-                if self.settings_panel && (self.search.open || !self.search.query.is_empty()) {
-                    self.search.query.clear();
-                    self.search.open = false;
-                    self.panel_search();
                     return;
                 }
                 self.search.query.clear();
@@ -5325,25 +5287,11 @@ impl App {
                 self.dismiss();
             }
             Keysym::Return | Keysym::KP_Enter => {
-                // On the panel, Enter opens the best match of the search.
-                if self.settings_panel {
-                    self.panel_open_best();
-                    return;
-                }
                 if let Some((s, i)) = self.search.selected.and_then(|i| self.flat_to_pos(i)) {
                     self.activate_hit(Hit::GridCell(s, i));
                 }
             }
             Keysym::BackSpace => {
-                if self.settings_panel {
-                    if self.search.query.pop().is_some() {
-                        if self.search.query.is_empty() {
-                            self.search.open = false;
-                        }
-                        self.panel_search();
-                    }
-                    return;
-                }
                 if self.search.query.pop().is_some() {
                     // Editing the query means the user is searching again —
                     // release the drag-from-Install grid hold.
@@ -5391,14 +5339,9 @@ impl App {
                 if let Some(text) = utf8 {
                     let printable: String = text.chars().filter(|c| !c.is_control()).collect();
                     if !printable.is_empty() {
-                        // On the settings panel, typing searches the
-                        // settings: matches rise, the rest sink back.
-                        if self.settings_panel {
-                            self.search.open = true;
-                            self.search.query.push_str(&printable);
-                            self.panel_search();
-                            return;
-                        }
+                        // Typing on the panel means looking for something:
+                        // the apps come back with the search.
+                        self.settings_panel = false;
                         self.search.open = true;
                         // Typing means the user is searching again — release
                         // the drag-from-Install grid hold.
@@ -5459,13 +5402,8 @@ impl App {
             return;
         }
         self.search.open = true;
-        self.search.query.push_str(&printable);
-        // On the settings panel a paste searches the settings.
-        if self.settings_panel {
-            self.panel_search();
-            return;
-        }
         self.install_drag_reset = false;
+        self.search.query.push_str(&printable);
         self.refilter();
     }
 

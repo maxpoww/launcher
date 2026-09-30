@@ -48,17 +48,6 @@ impl App {
     }
 
     pub(crate) fn layout_at(&self, extent: f32) -> content::Layout {
-        self.layout_stretched(extent, (self.agua_card.pos, self.agua_content.pos))
-    }
-
-    /// The layout at `extent` with the card at rest: no AGUA squash or
-    /// stretch. For anything that must not wobble with the card's spring
-    /// (the settings panel lays its field out against this).
-    pub(crate) fn layout_at_rest(&self, extent: f32) -> content::Layout {
-        self.layout_stretched(extent, (1.0, 1.0))
-    }
-
-    fn layout_stretched(&self, extent: f32, stretch: (f32, f32)) -> content::Layout {
         // The Apps section is paged by display *span* (tail gaps count
         // toward their page), not item count; a qualifying drag adds one
         // ghost page to drag onto.
@@ -89,7 +78,7 @@ impl App {
             ],
             std::array::from_fn(|s| self.scroll.per[s].pos),
             self.stack_open() || self.closing_members.is_some(),
-            stretch,
+            (self.agua_card.pos, self.agua_content.pos),
         );
         // Position the open box's rest square. A grid box anchors to the
         // side of the grid it sits on (pinned preview icon lands on its
@@ -993,27 +982,14 @@ impl App {
         } else {
             self.panel_mix = want;
         }
-        // The panel starts afresh on each entry, reset while it is out of
-        // sight: pushed out behind the apps, or the card fully closed.
-        if self.panel_reset_due
-            && (self.panel_mix <= 0.001 || (self.ui.target() != Target::Open && !self.ui.is_animating()))
-        {
-            self.panel.reset();
-            self.panel_reset_due = false;
-        }
         let panel_draw = if self.settings_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
+            if open {
+                self.dirty = true;
+            }
             let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
             let paint = crate::panel::PanelPaint { ink: dock_ink, bright };
-            let (draw, moving) = self.panel_frame(&layout, open, paint);
-            // Full rate only while something moves; at rest the orbits
-            // ride the slow idle cadence (see `panel::IDLE_TICK`).
-            if open && moving {
-                self.dirty = true;
-            } else if open {
-                self.panel_idle_tick();
-            }
-            Some(draw)
+            Some(self.panel_frame(&layout, if open { dt } else { 0.0 }, paint))
         } else {
             None
         };
@@ -1085,7 +1061,6 @@ impl App {
                 open_box_members: &open_box_members,
                 panel: self.panel_mix >= 0.999,
                 panel_mix: self.panel_mix,
-                bar_scale: self.options_scale(),
                 panel_draw: panel_draw.as_ref(),
                 open_box_disp: &open_box_disp,
                 open_box_hidden,
