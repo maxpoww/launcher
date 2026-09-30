@@ -93,6 +93,10 @@ const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 // ---- Layout (px at bar scale 1) -----------------------------------------
 /// Air kept off the card's sides.
 const MARGIN: f32 = 22.0;
+/// The field's largest size (px at bar scale 1): the size it had on Max's
+/// card when he set it as the maximum (2026-09-30: "i dont want it wider or
+/// taller no matter how big the box gets"). Smaller cards shrink it.
+const FIELD_MAX: (f32, f32) = (960.0, 845.0);
 /// Air under the dock, and above the card's floor as a share of the field:
 /// the heap sits up under the dock with more room below.
 const GAP_TOP: f32 = 32.0;
@@ -1070,11 +1074,18 @@ impl App {
         let dock_h = self.config.window.input_bar_height as f32 * self.icon_scale();
         let ride = layout.sections[content::SECTION_APPS].title_pos.1
             - settled.sections[content::SECTION_APPS].title_pos.1;
+        // Never larger than the size Max settled on (at the bar's scale):
+        // a bigger card (a longer dock) keeps it centred under the dock; a
+        // smaller card shrinks it with the card.
+        let s = self.options_scale();
+        let card_h = (settled.card_h - dock_h).max(1.0);
+        let w = settled.card_w.min(FIELD_MAX.0 * s);
+        let h = card_h.min(FIELD_MAX.1 * s);
         Rect::new(
-            settled.card_x,
+            settled.card_x + (settled.card_w - w) / 2.0,
             settled.card_top + dock_h + ride,
-            settled.card_w,
-            (settled.card_h - dock_h).max(1.0),
+            w,
+            h,
         )
     }
 
