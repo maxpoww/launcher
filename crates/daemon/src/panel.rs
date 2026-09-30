@@ -173,7 +173,10 @@ fn row_counts(n: usize) -> Vec<usize> {
 
 // ---- Motion (rates are 1/s for exponential approach) --------------------
 const GLIDE_RATE: f32 = 16.0;
-const SIZE_RATE: f32 = 17.0;
+const SIZE_RATE: f32 = 12.0;
+/// The leading part of a size change (outline growing, text shrinking)
+/// eases this much faster than the following one.
+const LEAD_RATE: f32 = 30.0;
 const FADE_IN_RATE: f32 = 15.0;
 /// Seconds for a layer to leave from its end.
 const EXIT_SECS: f32 = 0.15;
@@ -251,8 +254,12 @@ struct Pill {
     anchor: (f32, f32),
     /// Drawn centre this frame.
     pos: (f32, f32),
-    /// Size multiplier easing home after a layer change, and presence.
+    /// Size multipliers easing home after a layer change — the outline
+    /// (`sc`) and the text (`tsc`) separately, so the outline can lead: a
+    /// growing pill's border opens outward first and the text grows into
+    /// it; shrinking, the text goes first (Max, 2026-09-30) — and presence.
     sc: f32,
+    tsc: f32,
     op: f32,
     exit: Option<Exit>,
     /// Orbit clock and its rate (eases to a stop under the pointer).
@@ -362,6 +369,7 @@ impl Panel {
                     anchor: (0.0, 0.0),
                     pos: (0.0, 0.0),
                     sc: 1.0,
+                    tsc: 1.0,
                     op: 1.0,
                     exit: None,
                     clock: rng.next() * 20.0,
@@ -428,7 +436,9 @@ impl Panel {
             } else if p.exit.is_none() {
                 // Hold the old size by scale; it eases to the new one while
                 // the pill glides to its new spot.
-                p.sc *= p.h[p.drawn as usize] / p.h[p.layer as usize];
+                let ratio = p.h[p.drawn as usize] / p.h[p.layer as usize];
+                p.sc *= ratio;
+                p.tsc *= ratio;
                 p.drawn = p.layer;
             }
         }
@@ -514,6 +524,7 @@ impl Panel {
             let (lift_to, rate_to) = if hot { (1.0, 0.0) } else { (0.0, 1.0) };
             p.exit.is_some()
                 || (p.sc - 1.0).abs() > 0.002
+                || (p.tsc - 1.0).abs() > 0.002
                 || p.op < 0.995
                 || (p.lift - lift_to).abs() > 0.002
                 || (p.rate - rate_to).abs() > 0.01
@@ -559,7 +570,10 @@ impl Panel {
             p.rate = approach(p.rate, if hot { 0.0 } else { 1.0 }, SETTLE_RATE, dt);
             p.clock += dt * p.rate;
             p.lift = approach(p.lift, if hot { 1.0 } else { 0.0 }, LIFT_RATE, dt);
-            p.sc = approach(p.sc, 1.0, SIZE_RATE, dt);
+            // The outline leads when growing, the text when shrinking.
+            let (box_rate, text_rate) = if p.sc < 1.0 { (LEAD_RATE, SIZE_RATE) } else { (SIZE_RATE, LEAD_RATE) };
+            p.sc = approach(p.sc, 1.0, box_rate, dt);
+            p.tsc = approach(p.tsc, 1.0, text_rate, dt);
             if let Some(exit) = &mut p.exit {
                 exit.k = (exit.k + dt / EXIT_SECS).min(1.0);
                 p.op = 1.0 - smoothstep(exit.k);
@@ -571,6 +585,7 @@ impl Panel {
                     p.drawn = p.layer;
                     p.anchor = (p.home.0, p.home.1 + if back { 70.0 * s } else { 0.0 });
                     p.sc = if back { 1.25 } else { 0.6 };
+                    p.tsc = p.sc;
                     p.op = 0.0;
                 }
             } else {
@@ -653,11 +668,13 @@ impl Panel {
                 glass: 0.0,
                 border: 0.0,
             });
-            let font = FONT_PX * s * LAYER_SCALE[d] * k;
-            let line = LINE_PX * s * LAYER_SCALE[d] * k;
+            // The text rides its own size (see `Pill::tsc`).
+            let kt = p.tsc * grow * shrink * (1.0 + LIFT * p.lift);
+            let font = FONT_PX * s * LAYER_SCALE[d] * kt;
+            let line = LINE_PX * s * LAYER_SCALE[d] * kt;
             // Glyphs are cached only at rest: an easing size would fill the
             // cache with one entry per frame.
-            let resting = (k - 1.0).abs() < 0.001 && p.exit.is_none();
+            let resting = (kt - 1.0).abs() < 0.001 && p.exit.is_none();
             out.labels.push(Label {
                 text: p.label.to_owned(),
                 pos: (rect.x + w / 2.0, rect.y + (h - line) / 2.0),
@@ -1347,6 +1364,26 @@ mod tests {
             for _ in 0..60 {
                 p.step(1.0 / 60.0, None);
             }
+        }
+    }
+
+    #[test]
+    fn the_outline_leads_a_growing_pill_and_the_text_a_shrinking_one() {
+        let mut p = panel();
+        p.shift_layers(1);
+        for _ in 0..3 {
+            p.step(1.0 / 60.0, None);
+        }
+        // Middle → near grows (its old size held as sc < 1), near-bound
+        // pills of the far group shrink the other way.
+        let growing: Vec<&Pill> = p.pills.iter().filter(|q| q.exit.is_none() && q.sc < 0.99).collect();
+        let shrinking: Vec<&Pill> = p.pills.iter().filter(|q| q.exit.is_none() && q.sc > 1.01).collect();
+        assert!(!growing.is_empty(), "a step grows some pills");
+        for q in &growing {
+            assert!(q.sc > q.tsc, "{}: outline {} must lead text {} when growing", q.label, q.sc, q.tsc);
+        }
+        for q in &shrinking {
+            assert!(q.tsc < q.sc, "{}: text {} must lead outline {} when shrinking", q.label, q.tsc, q.sc);
         }
     }
 
