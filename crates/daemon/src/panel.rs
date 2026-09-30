@@ -128,7 +128,7 @@ const GAP_BOTTOM_FRAC: f32 = 0.30;
 /// The whole heap sits this much lower than those gaps alone would put it:
 /// the top gap grows by it and the bottom one shrinks by it (Max: "a little
 /// lower").
-const DROP: f32 = 20.0;
+const DROP: f32 = 34.0;
 
 /// The field's (top, bottom) air for a field `h` tall at bar scale `s`.
 fn gaps(h: f32, s: f32) -> (f32, f32) {
