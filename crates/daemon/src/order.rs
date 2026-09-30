@@ -70,12 +70,12 @@ impl OrderDb {
         }
     }
 
-    /// Cascade over-full pages by the display capacity, counting only
-    /// visible ids; hidden-only pages are preserved (see
-    /// [`PagedList::normalize`] — folding them on a classification
-    /// flicker used to shred user-made pages).
+    /// Pack the pages full by the display capacity, counting only visible
+    /// ids (see [`PagedList::pack`]): the Apps grid's pages are made and
+    /// dropped automatically — a page exists only once the one before it
+    /// is full.
     pub fn normalize(&mut self, cap: usize, visible: impl Fn(&str) -> bool) {
-        if self.list.normalize(cap, visible) {
+        if self.list.pack(cap, visible) {
             self.save();
         }
     }

@@ -206,6 +206,35 @@ impl PagedList {
         changed
     }
 
+    /// Pack the list into full pages: every page shows exactly `cap`
+    /// visible ids but the last (hidden ids ride with the id before them),
+    /// so pages come and go on their own — the Apps grid's model since
+    /// 2026-09-30 (Max: "a second page happens only when the first one is
+    /// full"). Order is all there is; nothing is lost when a visibility
+    /// flickers, only page boundaries move. Returns whether anything moved.
+    pub fn pack(&mut self, cap: usize, visible: impl Fn(&str) -> bool) -> bool {
+        let cap = cap.max(1);
+        let mut pages: Vec<Vec<String>> = Vec::new();
+        let mut page: Vec<String> = Vec::new();
+        let mut seen = 0usize;
+        for id in self.pages.iter().flatten() {
+            if visible(id) {
+                if seen == cap {
+                    pages.push(std::mem::take(&mut page));
+                    seen = 0;
+                }
+                seen += 1;
+            }
+            page.push(id.clone());
+        }
+        if !page.is_empty() {
+            pages.push(page);
+        }
+        let changed = pages != self.pages;
+        self.pages = pages;
+        changed
+    }
+
     fn drop_empty_pages(&mut self) -> bool {
         let before = self.pages.len();
         self.pages.retain(|p| !p.is_empty());
@@ -300,6 +329,22 @@ mod tests {
         l.move_to_page_end("b", 1);
         assert_eq!(l.pages(), &[vec!["a"], vec!["c", "b"]]);
         assert!(!l.normalize(3, |_| true)); // gaps persist
+    }
+
+    #[test]
+    fn pack_fills_every_page_but_the_last() {
+        let mut l = list(&[&["a", "b"], &["c"], &["d", "e", "f", "g"]]);
+        assert!(l.pack(3, |_| true));
+        assert_eq!(l.pages(), &[vec!["a", "b", "c"], vec!["d", "e", "f"], vec!["g"]]);
+        // A drop at the end of a full page overflows its last id onward.
+        l.move_to_page_end("g", 0);
+        assert!(l.pack(3, |_| true));
+        assert_eq!(l.pages(), &[vec!["a", "b", "c"], vec!["g", "d", "e"], vec!["f"]]);
+        // Hidden ids take no cell and ride along.
+        let mut h = list(&[&["a", "h", "b", "c", "d"]]);
+        h.pack(2, |id| id != "h");
+        assert_eq!(h.pages(), &[vec!["a", "h", "b"], vec!["c", "d"]]);
+        assert!(!h.pack(2, |id| id != "h"), "packed stays packed");
     }
 
     #[test]

@@ -39,8 +39,14 @@ impl App {
     /// Whether a drag that can land on the Apps grid is in flight — the
     /// grid then offers one extra empty page at its end (the Launchpad
     /// gesture: drag to the edge to park an app on a fresh page).
+    ///
+    /// Retired 2026-09-30 (Max: pages are created only automatically, when
+    /// one overflows — see `PagedList::pack`), so never; kept as the one
+    /// switch the drag code reads.
     pub(crate) fn ghost_page_active(&self) -> bool {
-        self.grid_resting()
+        const GHOST_PAGE: bool = false;
+        GHOST_PAGE
+            && self.grid_resting()
             && self.gesture.dragging.as_ref().is_some_and(|d| {
                 matches!(
                     self.kinds.get(d.entry_idx),
