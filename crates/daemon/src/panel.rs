@@ -279,6 +279,14 @@ impl Pill {
         let l = self.layer as usize;
         (self.w[l], self.h[l])
     }
+
+    /// The room it is laid out in: its size on the near layer, the largest.
+    /// The layout never depends on the layer a pill is on, so cycling the
+    /// layers moves no pill — each only grows or shrinks about its own
+    /// centre (Max, 2026-09-30: they seemed to move inward as they grew).
+    fn slot(&self) -> (f32, f32) {
+        (self.w[0], self.h[0])
+    }
 }
 
 /// The pill that became the whole card.
@@ -857,7 +865,7 @@ fn content_hit(key: (f32, f32, f32), scale: f32, pos: (f32, f32), field: Rect) -
 /// Keep a pill inside the field: `edge` off the sides, `gaps` (top, bottom)
 /// off the dock and the floor.
 fn clamp_pill(p: &mut Pill, size: (f32, f32), edge: f32, gaps: (f32, f32)) {
-    let (w, h) = p.size();
+    let (w, h) = p.slot();
     p.home.0 = p.home.0.clamp(edge + w / 2.0, (size.0 - edge - w / 2.0).max(edge + w / 2.0));
     p.home.1 = p.home.1.clamp(gaps.0 + h / 2.0, (size.1 - gaps.1 - h / 2.0).max(gaps.0 + h / 2.0));
 }
@@ -870,8 +878,8 @@ fn clamp_all(pills: &mut [Pill], size: (f32, f32), edge: f32, gaps: (f32, f32)) 
 
 /// Signed air between two pills at their homes: positive = gap.
 fn air(a: &Pill, b: &Pill) -> f32 {
-    let (aw, ah) = a.size();
-    let (bw, bh) = b.size();
+    let (aw, ah) = a.slot();
+    let (bw, bh) = b.slot();
     ((a.home.0 - b.home.0).abs() - (aw + bw) / 2.0).max((a.home.1 - b.home.1).abs() - (ah + bh) / 2.0)
 }
 
@@ -938,21 +946,23 @@ fn imbalance(pills: &[Pill], order: &[usize], w: f32) -> f32 {
     2.0 * pull(order) + rows / counts.len() as f32
 }
 
-/// Slide the whole heap sideways so its visual weight sits on the centre
-/// line, as far as the room at its sides allows (never past `edge`).
+/// Slide the whole heap sideways so its weight (by the room each pill is
+/// laid out in) sits on the centre line, as far as the room at its sides
+/// allows (never past `edge`).
 fn centre_weight(pills: &mut [Pill], w: f32, edge: f32) {
     let (mut m, mut mx) = (0.0f32, 0.0f32);
     for p in pills.iter() {
-        let (pw, ph) = p.size();
-        let mass = pw * ph * LAYER_WEIGHT[p.layer as usize];
+        // Layer-independent, so a layer step never slides the heap.
+        let (pw, ph) = p.slot();
+        let mass = pw * ph;
         m += mass;
         mx += mass * p.home.0;
     }
     if m <= 0.0 {
         return;
     }
-    let left_room = pills.iter().map(|p| p.home.0 - p.size().0 / 2.0 - edge).fold(f32::MAX, f32::min).max(0.0);
-    let right_room = pills.iter().map(|p| w - edge - p.home.0 - p.size().0 / 2.0).fold(f32::MAX, f32::min).max(0.0);
+    let left_room = pills.iter().map(|p| p.home.0 - p.slot().0 / 2.0 - edge).fold(f32::MAX, f32::min).max(0.0);
+    let right_room = pills.iter().map(|p| w - edge - p.home.0 - p.slot().0 / 2.0).fold(f32::MAX, f32::min).max(0.0);
     let dx = (w / 2.0 - mx / m).clamp(-left_room, right_room);
     for p in pills.iter_mut() {
         p.home.0 += dx;
@@ -970,15 +980,21 @@ fn balanced_order(pills: &[Pill], size: (f32, f32), s: f32) -> Vec<usize> {
     for c in 0..CANDIDATES {
         let mut rng = Rng(0x9E37_79B9 ^ c.wrapping_mul(0x85EB_CA6B).wrapping_add(1));
         let order = brick_order(pills, &mut rng);
-        let mut score = 0.0;
+        // Judged by its worst layer arrangement (plus a little of the rest),
+        // so no step of the cycle looks lopsided.
+        let (mut worst, mut sum) = (0.0f32, 0.0f32);
         for shift in 0..3 {
             let mut trial = pills.to_vec();
             for p in &mut trial {
                 p.layer = (p.group as i32 - shift).rem_euclid(3) as u8;
             }
             bricks(&mut trial, &order, size, edge, g);
-            score += imbalance(&trial, &order, size.0);
+            centre_weight(&mut trial, size.0, edge);
+            let m = imbalance(&trial, &order, size.0);
+            worst = worst.max(m);
+            sum += m;
         }
+        let score = worst + 0.25 * sum;
         if best.as_ref().is_none_or(|(b, _)| score < *b) {
             best = Some((score, order));
         }
@@ -1009,7 +1025,7 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         let step = full * frac / row.len().max(1) as f32;
         let shift = if r % 2 == 1 { STAGGER * step } else { -STAGGER * step } * if r == ROWS.len() / 2 { 0.0 } else { 1.0 };
         let span = full * frac - 2.0 * shift.abs();
-        let widths: f32 = row.iter().map(|&i| pills[i].size().0).sum();
+        let widths: f32 = row.iter().map(|&i| pills[i].slot().0).sum();
         // Each gap takes a varied share of the free room.
         let weights: Vec<f32> = row.iter().skip(1).map(|&i| 1.0 + 0.1 * pills[i].stray[2]).collect();
         let wsum: f32 = weights.iter().sum::<f32>().max(0.001);
@@ -1022,7 +1038,7 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         let cy = top + (r as f32 + 0.5) * row_h;
         // A lone pill sits in the middle; a row starts at its left end.
         let mut x = if row.len() == 1 {
-            w / 2.0 - pills[row[0]].size().0 / 2.0
+            w / 2.0 - pills[row[0]].slot().0 / 2.0
         } else {
             w / 2.0 - span / 2.0 + shift + END_AIR * mean_gap
         };
@@ -1030,7 +1046,7 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
             if k > 0 {
                 x += gaps_room * weights[k - 1] / wsum;
             }
-            let pw = pills[i].size().0;
+            let pw = pills[i].slot().0;
             let p = &mut pills[i];
             // Ends stray inward only, so the widest row still nearly
             // touches the sides.
@@ -1363,6 +1379,24 @@ mod tests {
             p.shift_layers(1);
             for _ in 0..60 {
                 p.step(1.0 / 60.0, None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_layer_step_moves_no_pill_only_their_sizes_change() {
+        let mut p = panel();
+        let before: Vec<(f32, f32)> = p.pills.iter().map(|q| q.home).collect();
+        for _ in 0..3 {
+            p.shift_layers(1);
+            for (q, b) in p.pills.iter().zip(&before) {
+                assert!(
+                    (q.home.0 - b.0).abs() < 0.5 && (q.home.1 - b.1).abs() < 0.5,
+                    "{} moved from {:?} to {:?}",
+                    q.label,
+                    b,
+                    q.home
+                );
             }
         }
     }
