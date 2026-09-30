@@ -27,21 +27,31 @@ impl PinDb {
         let pins = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| parse_file(&s))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            // The fixed tail lives outside the list (older files carry it).
+            .filter(|p| !crate::apps::is_dock_fixed(p))
+            .collect();
         Self { pins, path }
     }
 
-    /// Ordered slice of pinned app IDs.
+    /// Ordered slice of the user's pinned app IDs — the dock's fixed tail
+    /// ([`crate::apps::DOCK_FIXED`]) is not among them; it is always pinned
+    /// and always last.
     pub fn pins(&self) -> &[String] {
         &self.pins
     }
 
     pub fn is_pinned(&self, id: &str) -> bool {
-        self.pins.iter().any(|p| p == id)
+        crate::apps::is_dock_fixed(id) || self.pins.iter().any(|p| p == id)
     }
 
     /// Insert `app_id` before dock slot `slot`, moving it if already pinned.
+    /// The fixed tail never moves: pinning one of it is a no-op.
     pub fn pin_at(&mut self, app_id: &str, slot: usize) {
+        if crate::apps::is_dock_fixed(app_id) {
+            return;
+        }
         self.pins.retain(|p| p != app_id);
         let slot = slot.min(self.pins.len());
         self.pins.insert(slot, app_id.to_owned());
@@ -52,6 +62,9 @@ impl PinDb {
     /// Remove `app_id` from the pins (drag-off-dock, or a dead pin whose
     /// app was uninstalled) — it returns to the Apps grid.
     pub fn unpin(&mut self, app_id: &str) {
+        if crate::apps::is_dock_fixed(app_id) {
+            return;
+        }
         let before = self.pins.len();
         self.pins.retain(|p| p != app_id);
         if self.pins.len() != before {
@@ -100,6 +113,18 @@ mod tests {
             pins: pins.iter().map(|s| s.to_string()).collect(),
             path: std::env::temp_dir().join("waverunner-test-pins.json"),
         }
+    }
+
+    #[test]
+    fn the_fixed_tail_never_unpins_or_moves() {
+        let mut d = db(&["a", "b"]);
+        for id in crate::apps::DOCK_FIXED {
+            assert!(d.is_pinned(id), "{id} is always pinned");
+            d.unpin(id);
+            d.pin_at(id, 0);
+            assert!(d.is_pinned(id));
+        }
+        assert_eq!(d.pins(), &["a", "b"], "and never enters the user's list");
     }
 
     #[test]

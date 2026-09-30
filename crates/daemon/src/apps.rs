@@ -351,6 +351,17 @@ pub fn drain_inotify(fd: std::os::fd::BorrowedFd<'_>) {
 /// apps — gridded, pinnable, searchable — but a click opens the control
 /// panel instead of launching anything (see `App::activate`). The id keeps
 /// its first name: it is stored in the dock's pins.
+/// The dock's fixed tail, left to right (Max, 2026-09-30): the Apps button,
+/// the Recycle Bin and the control panel's gear, always at the right end,
+/// after the running apps and minimized windows. They can't be unpinned or
+/// moved (`PinDb` ignores both).
+pub const DOCK_FIXED: [&str; 3] = [APPS_GRID_ID, "group:trash", CONTROL_PANEL_ID];
+
+/// Whether `id` is one of the dock's fixed tail ([`DOCK_FIXED`]).
+pub fn is_dock_fixed(id: &str) -> bool {
+    DOCK_FIXED.contains(&id)
+}
+
 pub(crate) const CONTROL_PANEL_ID: &str = "golem-settings";
 
 /// The control panel's tile. Synthesized, like the home folders: the

@@ -624,6 +624,10 @@ pub struct Layout {
     /// (Max, 2026-09-16: "a little more space between the separator and the
     /// thumbnail"). `scene()` must apply the same gap to the drawn centers.
     pub dock_min_start: usize,
+    /// One past the last minimized-window tile (`usize::MAX` when none):
+    /// the fixed tail (Apps, Bin, Control panel) follows, set off by the
+    /// same gap.
+    pub dock_min_end: usize,
     /// That gap in scaled px (0 when no minimized tiles are shown).
     pub dock_min_gap: f32,
     /// The docked plate's resting width (the basin) — what the dock card
@@ -688,6 +692,9 @@ pub fn layout(
     extent: f32,
     n_entries: usize,
     n_min: usize,
+    // The fixed tail after the minimized tiles: the Apps button, the Recycle
+    // Bin and the control panel's gear, always last, in that order.
+    n_fixed: usize,
     // Window aspects of the minimized tiles, in dock-tail order (`n_min`
     // long); each shapes its tile's width. Short/empty ⇒ square fallback.
     min_aspects: &[f32],
@@ -746,7 +753,7 @@ pub fn layout(
     // last resort that needs ~a monitor width of icons. Because
     // `dock_order` ends newest-last and the drawn row is its prefix, the very
     // newest minimize is the first held back; the count is logged on add.
-    let n_normal = n_entries.saturating_sub(n_min);
+    let n_normal = n_entries.saturating_sub(n_min + n_fixed);
     let hard_cap = (((w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
     let n_normal_shown = n_normal.min(hard_cap);
     // Minimized tiles earn their honored slots only once every normal icon is
@@ -758,12 +765,22 @@ pub fn layout(
     } else {
         0
     };
-    let n_dock = n_normal_shown + n_min_shown;
+    // The fixed tail shows once everything before it does (the drawn row is
+    // a prefix of `dock_order`; overflow is handled by the caller's order).
+    let n_fixed_shown = if n_normal_shown == n_normal && n_min_shown == n_min {
+        n_fixed.min(hard_cap.saturating_sub(n_normal_shown + n_min_shown))
+    } else {
+        0
+    };
+    let n_dock = n_normal_shown + n_min_shown + n_fixed_shown;
     // The minimized zone is set off by DOCK_MIN_GAP: the tiles begin at
     // `dock_min_start`, and everything from there is shifted right by the
     // gap (the row and card grow to hold it — see the basin below).
     let dock_min_start = if n_min_shown > 0 { n_normal_shown } else { usize::MAX };
     let dock_min_gap = if n_min_shown > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
+    let dock_min_end = if n_min_shown > 0 && n_fixed_shown > 0 { n_normal_shown + n_min_shown } else { usize::MAX };
+    // One gap before the tiles, and one after them when the fixed tail follows.
+    let dock_gaps = dock_min_gap * if dock_min_end != usize::MAX { 2.0 } else { 1.0 };
     // A minimized tile is fit into a box (`min_tile_dims`): its width follows
     // the window aspect over a SMALLER picture height (`dock_icon ×
     // MIN_TILE_SCALE`), but a wide window is width-capped (its height shrinks)
@@ -778,7 +795,7 @@ pub fn layout(
     // Total base (unmagnified) width of the honored row: the uniform normal
     // slots, the variable minimized tail, and the group gap before the tail.
     let min_zone_w: f32 = (0..n_min_shown).map(min_slot_w).sum();
-    let row_base_w = n_normal_shown as f32 * dock_slot + min_zone_w + dock_min_gap;
+    let row_base_w = (n_normal_shown + n_fixed_shown) as f32 * dock_slot + min_zone_w + dock_gaps;
     let card_top = h - extent;
     let dock_h = config.window.input_bar_height as f32 * icon_scale;
     let float_gap = config.window.bottom_margin as f32 * icon_scale;
@@ -856,10 +873,10 @@ pub fn layout(
     let mut dock_slots = Vec::with_capacity(n_dock);
     let mut slot_x = start_x;
     for i in 0..n_dock {
-        if i == dock_min_start {
+        if i == dock_min_start || i == dock_min_end {
             slot_x += dock_min_gap;
         }
-        let sw = if i >= dock_min_start {
+        let sw = if (dock_min_start..dock_min_end).contains(&i) {
             min_slot_w(i - dock_min_start)
         } else {
             dock_slot
@@ -1012,6 +1029,7 @@ pub fn layout(
         dock_hit_bottom,
         dock_slots,
         dock_min_start,
+        dock_min_end,
         dock_min_gap,
         dock_basin_w: basin_w,
         sections,
@@ -1629,7 +1647,7 @@ pub fn scene(
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let grow = if i >= layout.dock_min_start {
+            let grow = if (layout.dock_min_start..layout.dock_min_end).contains(&i) {
                 (r.w - min_tile_pad).max(0.0)
             } else {
                 dock_icon
@@ -1644,10 +1662,11 @@ pub fn scene(
         // The minimized-tile gap is part of the row's visual width and sits
         // before `dock_min_start` — same offset layout() baked into the
         // hit-test slots, so drawn centers and hit-boxes stay aligned.
-        let mut x = (w - (total_vw + layout.dock_min_gap)) / 2.0;
+        let gaps = layout.dock_min_gap * if layout.dock_min_end != usize::MAX { 2.0 } else { 1.0 };
+        let mut x = (w - (total_vw + gaps)) / 2.0;
         let mut centers = Vec::with_capacity(dock_vw.len());
         for (i, &vw) in dock_vw.iter().enumerate() {
-            if i == layout.dock_min_start {
+            if i == layout.dock_min_start || i == layout.dock_min_end {
                 x += layout.dock_min_gap;
             }
             centers.push(x + vw / 2.0);
@@ -1840,7 +1859,7 @@ pub fn scene(
         // load falls through to the letter-tile path below. Recovering the
         // tile width from the slot (rather than re-reading the aspect) keeps
         // draw and hit-test on the one shape.
-        let is_min = slot >= layout.dock_min_start;
+        let is_min = (layout.dock_min_start..layout.dock_min_end).contains(&slot);
         if is_min && !placeholders.get(entry_idx).copied().unwrap_or(false) {
             // Fit into the same box `layout()` sized the slot to: full height
             // (× MIN_TILE_SCALE) for portrait/near-square windows, but a WIDE
@@ -3021,7 +3040,7 @@ mod tests {
             SURFACE,
             OPEN,
             n.min(10),
-            0,
+            0, 0,
             &[],
             [n, 0, 0],
             [scroll, 0.0, 0.0],
@@ -3041,7 +3060,7 @@ mod tests {
             SURFACE,
             48.0,
             20,
-            0,
+            0, 0,
             &[],
             [20, 0, 6],
             [0.0; N_SECTIONS],
@@ -3073,7 +3092,7 @@ mod tests {
     fn a_controls_row_takes_shown_rows_not_page_capacity() {
         let cfg = config();
         let args = |c: Option<f32>| {
-            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, c.map_or(0.0, |ph| controls_band_h(1.0, ph)), 0.0)
+            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, c.map_or(0.0, |ph| controls_band_h(1.0, ph)), 0.0)
         };
         let (plain, with) = (args(None), args(Some(23.0)));
         assert!(plain.controls_row.is_none());
@@ -3091,7 +3110,7 @@ mod tests {
     fn a_trimmed_card_drops_its_top_and_keeps_its_bottom() {
         let cfg = config();
         let at = |trim: f32| {
-            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, trim)
+            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, trim)
         };
         let (full, short) = (at(0.0), at(GRID_CELL_H));
         let (a, b) = (&full.sections[SECTION_APPS], &short.sections[SECTION_APPS]);
@@ -3186,7 +3205,7 @@ mod tests {
             SURFACE,
             OPEN,
             10,
-            0,
+            0, 0,
             &[],
             [4, 0, 6],
             [0.0; N_SECTIONS],
@@ -3244,7 +3263,7 @@ mod tests {
             SURFACE,
             OPEN,
             10,
-            0,
+            0, 0,
             &[],
             [10, 0, 6],
             [0.0; N_SECTIONS],
@@ -3297,7 +3316,7 @@ mod tests {
             SURFACE,
             OPEN,
             10,
-            0,
+            0, 0,
             &[],
             [10, 0, 6],
             [0.0; N_SECTIONS],
@@ -3416,7 +3435,7 @@ mod tests {
             SURFACE,
             48.0,
             n,
-            0,
+            0, 0,
             &[],
             [n, 0, 0],
             [0.0; N_SECTIONS],
@@ -3512,7 +3531,7 @@ mod tests {
                 SURFACE,
                 docked,
                 total,
-                n_min,
+                n_min, 0,
                 &aspects,
                 [total, 0, 0],
                 [0.0; N_SECTIONS],
@@ -3550,7 +3569,7 @@ mod tests {
             SURFACE,
             (cfg.window.height + cfg.window.bottom_margin) as f32,
             17,
-            0,
+            0, 0,
             &[],
             [17, 0, 0],
             [0.0; N_SECTIONS],
@@ -3574,7 +3593,7 @@ mod tests {
             SURFACE,
             (cfg.window.height + cfg.window.bottom_margin) as f32,
             3,
-            0,
+            0, 0,
             &[],
             [17, 0, 0],
             [0.0; N_SECTIONS],
@@ -3597,7 +3616,7 @@ mod tests {
         let lay_wide = |total: usize, n_min: usize| {
             let aspects = vec![MAX_TILE_ASPECT; n_min];
             layout(
-                &cfg, 1.0, SURFACE, docked, total, n_min, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
+                &cfg, 1.0, SURFACE, docked, total, n_min, 0, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
                 None, 0.0,
                 0.0,
             )
@@ -3632,7 +3651,7 @@ mod tests {
             SURFACE,
             48.0,
             5,
-            2,
+            2, 0,
             &aspects,
             [5, 0, 0],
             [0.0; N_SECTIONS],

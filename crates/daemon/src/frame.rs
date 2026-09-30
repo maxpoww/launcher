@@ -147,6 +147,7 @@ impl App {
             // How many of those are minimized-window tiles (the tail of the
             // order): the zone the dock widens to fit rather than clamp.
             self.dock_min_count,
+            self.dock_fixed_count,
             &min_aspects,
             [
                 apps_cells,

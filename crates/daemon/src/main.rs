@@ -740,6 +740,7 @@ fn main() -> anyhow::Result<()> {
         pins: pins::PinDb::load(),
         dock_order: Vec::new(),
         dock_min_count: 0,
+        dock_fixed_count: 0,
         running: HashMap::new(),
         dock_divider: None,
         minimized: Vec::new(),
@@ -1900,6 +1901,9 @@ pub struct App {
     /// instead of clamping it off. Zero while the launcher is open (the
     /// tiles hide then — `minimized_entries`).
     dock_min_count: usize,
+    /// How many of the dock's fixed tail (`apps::DOCK_FIXED`) closed
+    /// `dock_order` — it follows the minimized tiles.
+    dock_fixed_count: usize,
     /// Running apps (macOS dock model): entry index → its live window
     /// addresses, most-recently-used first. Presence ⇒ the app is
     /// running (shows the indicator dot; a click activates instead of
@@ -4402,6 +4406,17 @@ impl App {
         self.dock_min_count = min_count;
         self.dock_divider = (!zone.is_empty()).then_some(pinned_count);
         self.dock_order.extend(zone);
+        // The fixed tail, always last: Apps, Bin, Control panel.
+        let before = self.dock_order.len();
+        for id in apps::DOCK_FIXED {
+            let idx = self.entries.iter().zip(&self.kinds).position(|(e, k)| {
+                e.id == id && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
+            });
+            if let Some(idx) = idx.filter(|i| !self.dock_order.contains(i)) {
+                self.dock_order.push(idx);
+            }
+        }
+        self.dock_fixed_count = self.dock_order.len() - before;
         // No truncation here — layout() honors the minimized tail (widening
         // the dock) and clamps only normal icons / the surface-width cap.
         // The tiles' corner badges depend on the app set + icon layers, both
@@ -6141,7 +6156,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 // pins, and the plugin owns their lifetime.
                                 let undraggable = entry_idx.is_some_and(|i| {
                                     app.entries.get(i).is_some_and(|e| {
-                                        app.busy_ids.contains(&e.id) || e.id.starts_with("min:")
+                                        app.busy_ids.contains(&e.id)
+                                            || e.id.starts_with("min:")
+                                            || apps::is_dock_fixed(&e.id)
                                     })
                                 });
                                 if let (Some(entry_idx), false) = (entry_idx, undraggable) {
