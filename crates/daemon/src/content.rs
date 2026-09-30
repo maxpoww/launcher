@@ -859,7 +859,10 @@ pub fn layout(
     // The Controls row (a search matching settings) takes its room out of
     // the Apps rows SHOWN — display only, like the shrink below: page
     // capacity stays at `fits`.
-    let controls_h = controls_pill_h.map_or(0.0, |ph| SECTION_GAP + SECTION_TITLE_H + ph + DOT_ROOM);
+    // The pills sit as far under their title as the icons do under theirs.
+    let controls_drop = GRID_ICON_TOP * icon_scale;
+    let controls_h =
+        controls_pill_h.map_or(0.0, |ph| SECTION_GAP + SECTION_TITLE_H + controls_drop + ph + DOT_ROOM);
     let fits_shown = (((avail - controls_h) / grid_cell_h) as usize).clamp(1, fits);
     // …but never TALLER than the apps actually need. Sizing Apps to whatever
     // fits meant a machine with fewer apps than the screen could hold got the
@@ -953,7 +956,7 @@ pub fn layout(
             let title_y = files_bottom + DOT_ROOM + SECTION_GAP;
             (
                 Some((vp.x + vp.w / 2.0, title_y)),
-                Some(Rect::new(vp.x, title_y + SECTION_TITLE_H, vp.w, ph)),
+                Some(Rect::new(vp.x, title_y + SECTION_TITLE_H + controls_drop, vp.w, ph)),
             )
         }
         None => (None, None),
