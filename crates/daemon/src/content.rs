@@ -218,7 +218,7 @@ const SECTION_TITLE_H: f32 = 5.0;
 const SECTION_GAP: f32 = 29.0;
 const DOT_ROOM: f32 = 6.0;
 /// How much further below its title the Controls row sits than icons do.
-const CONTROLS_EXTRA_DROP: f32 = 4.0;
+const CONTROLS_EXTRA_DROP: f32 = 8.0;
 /// The page dots sit this much above the middle of their room (Max: "the
 /// dots slightly higher").
 const DOTS_RAISE: f32 = 1.5;
