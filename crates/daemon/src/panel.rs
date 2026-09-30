@@ -270,8 +270,10 @@ struct Pill {
     period: f32,
     spin: f32,
     /// Where it strays from its brick spot (x, y) and how much room it
-    /// takes after it in its row, each a random -1..1.
-    stray: [f32; 3],
+    /// takes after it in its row, each a random -1..1 — a different set for
+    /// each of the three layer arrangements, so every layer step moves the
+    /// pills a little, some inward, some outward, like scrolling.
+    stray: [[f32; 3]; 3],
 }
 
 impl Pill {
@@ -386,7 +388,7 @@ impl Panel {
                     phase: [rng.next() * TAU, rng.next() * TAU],
                     period: 12.0 + rng.next() * 6.0,
                     spin: if rng.next() < 0.5 { -1.0 } else { 1.0 },
-                    stray: [rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0],
+                    stray: [(); 3].map(|_| [rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0]),
                 })
                 .collect();
         }
@@ -411,14 +413,14 @@ impl Panel {
         let s = self.scale.max(0.01);
         let (w, h) = size;
         let (top, bottom) = gaps(h, s);
-        bricks(&mut self.pills, &self.order, (w, h), EDGE * s, (top, bottom));
+        bricks(&mut self.pills, &self.order, (w, h), EDGE * s, (top, bottom), self.shift);
         for p in &mut self.pills {
             p.home = p.ideal;
         }
         clamp_all(&mut self.pills, (w, h), EDGE * s, (top, bottom));
         // Only where a stray pushed two too close: nudge apart, held near
         // the brick spots.
-        settle(&mut self.pills, (w, h), EDGE * s, (top, bottom), 12.0 * s, 0.12, 160);
+        settle(&mut self.pills, (w, h), EDGE * s, (top, bottom), 12.0 * s, 0.05, 320);
         centre_weight(&mut self.pills, w, EDGE * s);
         if snap {
             for p in &mut self.pills {
@@ -946,15 +948,16 @@ fn imbalance(pills: &[Pill], order: &[usize], w: f32) -> f32 {
     2.0 * pull(order) + rows / counts.len() as f32
 }
 
-/// Slide the whole heap sideways so its weight (by the room each pill is
-/// laid out in) sits on the centre line, as far as the room at its sides
-/// allows (never past `edge`).
+/// Slide the whole heap sideways so its visual weight sits on the centre
+/// line, as far as the room at its sides allows (never past `edge`).
 fn centre_weight(pills: &mut [Pill], w: f32, edge: f32) {
     let (mut m, mut mx) = (0.0f32, 0.0f32);
     for p in pills.iter() {
-        // Layer-independent, so a layer step never slides the heap.
-        let (pw, ph) = p.slot();
-        let mass = pw * ph;
+        // By its look on the layer it is on: each arrangement is balanced
+        // as it looks (a step may slide the heap a little — part of the
+        // step's motion).
+        let (pw, ph) = p.size();
+        let mass = pw * ph * LAYER_WEIGHT[p.layer as usize];
         m += mass;
         mx += mass * p.home.0;
     }
@@ -983,12 +986,12 @@ fn balanced_order(pills: &[Pill], size: (f32, f32), s: f32) -> Vec<usize> {
         // Judged by its worst layer arrangement (plus a little of the rest),
         // so no step of the cycle looks lopsided.
         let (mut worst, mut sum) = (0.0f32, 0.0f32);
-        for shift in 0..3 {
+        for shift in 0..6 {
             let mut trial = pills.to_vec();
             for p in &mut trial {
                 p.layer = (p.group as i32 - shift).rem_euclid(3) as u8;
             }
-            bricks(&mut trial, &order, size, edge, g);
+            bricks(&mut trial, &order, size, edge, g, shift);
             centre_weight(&mut trial, size.0, edge);
             let m = imbalance(&trial, &order, size.0);
             worst = worst.max(m);
@@ -1007,8 +1010,13 @@ fn balanced_order(pills: &[Pill], size: (f32, f32), s: f32) -> Vec<usize> {
 /// off the card's sides), its gaps varied a little per pill, and every pill
 /// strays a touch off its spot. Neighbouring rows hold different counts, so
 /// the gaps cross like bricks; the strays keep it organic. Writes `ideal`.
-fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps: (f32, f32)) {
+fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps: (f32, f32), phase: i32) {
     let (w, _) = size;
+    // Which layer arrangement this is: picks the strays, and flips which
+    // way the staggered rows swing, so each step slides them one side and
+    // the next the other.
+    let arrangement = phase.rem_euclid(3) as usize;
+    let swing = if phase.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
     let (top, bottom) = (gaps.0, size.1 - gaps.1);
     let counts = row_counts(order.len());
     let row_h = (bottom - top).max(1.0) / ROWS.len() as f32;
@@ -1022,12 +1030,22 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         }
         // A staggered row gives up the room it shifts by, so it stays on
         // the card.
-        let step = full * frac / row.len().max(1) as f32;
-        let shift = if r % 2 == 1 { STAGGER * step } else { -STAGGER * step } * if r == ROWS.len() / 2 { 0.0 } else { 1.0 };
-        let span = full * frac - 2.0 * shift.abs();
         let widths: f32 = row.iter().map(|&i| pills[i].slot().0).sum();
+        // A row too full for its width grows toward the whole card (a
+        // narrow card, long labels), and swings only by the room left.
+        let min_gap = 12.0 * (edge / EDGE).max(0.01);
+        let base = (full * frac).max(widths + min_gap * (row.len() as f32 - 1.0)).min(full);
+        let step = base / row.len().max(1) as f32;
+        // The swing gives up the room it shifts by (the row stays inside
+        // its own width), never more than the row can spare.
+        let room = ((base - widths - min_gap * (row.len() as f32 - 1.0)) / 2.0).max(0.0);
+        let shift = (swing
+            * if r % 2 == 1 { STAGGER * step } else { -STAGGER * step }
+            * if r == ROWS.len() / 2 { 0.0 } else { 1.0 })
+            .clamp(-room, room);
+        let span = base - 2.0 * shift.abs();
         // Each gap takes a varied share of the free room.
-        let weights: Vec<f32> = row.iter().skip(1).map(|&i| 1.0 + 0.1 * pills[i].stray[2]).collect();
+        let weights: Vec<f32> = row.iter().skip(1).map(|&i| 1.0 + 0.1 * pills[i].stray[arrangement][2]).collect();
         let wsum: f32 = weights.iter().sum::<f32>().max(0.001);
         let free = (span - widths).max(0.0);
         // The free room is shared by the gaps between the pills and a
@@ -1050,13 +1068,14 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
             let p = &mut pills[i];
             // Ends stray inward only, so the widest row still nearly
             // touches the sides.
-            let mut sx = p.stray[0] * JITTER_X * mean_gap;
+            let st = p.stray[arrangement];
+            let mut sx = st[0] * JITTER_X * mean_gap;
             if k == 0 {
                 sx = sx.abs();
             } else if k == row.len() - 1 {
                 sx = -sx.abs();
             }
-            p.ideal = (x + pw / 2.0 + sx, cy + p.stray[1] * JITTER_Y * row_h);
+            p.ideal = (x + pw / 2.0 + sx, cy + st[1] * JITTER_Y * row_h);
             x += pw;
         }
     }
@@ -1269,9 +1288,13 @@ mod tests {
     /// A panel laid out at bar scale 1 over a typical card field, with
     /// estimated label widths (no text shaper in tests).
     fn panel() -> Panel {
+        panel_sized((960.0, 560.0))
+    }
+
+    fn panel_sized(size: (f32, f32)) -> Panel {
         let mut p = Panel::default();
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        p.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
+        p.ensure(size, 1.0, 25.0, &mut est);
         p
     }
 
@@ -1356,6 +1379,30 @@ mod tests {
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
         p.ensure(size, 1.0, 25.0, &mut est);
         println!("FIELD {} {}", size.0, size.1);
+        // MID=<ms>: a frame that far into a forward layer step, as drawn.
+        if let Some(ms) = std::env::var("MID").ok().and_then(|v| v.parse::<f32>().ok()) {
+            p.field = Rect::new(0.0, 0.0, size.0, size.1);
+            p.step(0.0, None);
+            p.shift_layers(1);
+            for _ in 0..(ms / 1000.0 * 240.0).round() as usize {
+                p.step(1.0 / 240.0, None);
+            }
+            let d = p.draw(PanelPaint { ink: [1.0; 4], bright: false });
+            for (r, l) in d.rects.iter().zip(&d.labels) {
+                let layer = if r.rect.h > 33.0 { 0 } else if r.rect.h > 22.0 { 1 } else { 2 };
+                println!(
+                    "PILL {}|{}|{:.1}|{:.1}|{:.1}|{:.1}|{:.2}",
+                    l.text,
+                    layer,
+                    r.rect.x + r.rect.w / 2.0,
+                    r.rect.y + r.rect.h / 2.0,
+                    r.rect.w,
+                    r.rect.h,
+                    r.color[3] / 0.19
+                );
+            }
+            return;
+        }
         for q in &p.pills {
             let (w, h) = q.size();
             println!("PILL {}|{}|{:.1}|{:.1}|{:.1}|{:.1}", q.label, q.layer, q.home.0, q.home.1, w, h);
@@ -1364,8 +1411,15 @@ mod tests {
 
     #[test]
     fn the_field_is_balanced_left_to_right_in_every_layer_order() {
-        let mut p = panel();
-        for step in 0..3 {
+        // A wide card (Max's, a long dock) has room to balance well; a
+        // narrow one's full rows leave less.
+        for (size, limit) in [((1900.0, 846.0), 0.08), ((960.0, 560.0), 0.10)] {
+            balanced_within(panel_sized(size), limit);
+        }
+    }
+
+    fn balanced_within(mut p: Panel, limit: f32) {
+        for step in 0..6 {
             // The heap's visual weight sits near the centre line.
             let (mut m, mut mx) = (0.0f32, 0.0f32);
             for q in &p.pills {
@@ -1375,7 +1429,11 @@ mod tests {
                 mx += mass * (q.home.0 - p.key.0 / 2.0);
             }
             let pull = (mx / m).abs() / (p.key.0 / 2.0);
-            assert!(pull < 0.08, "layer order {step}: weight pulled {pull:.3} of the half-width off centre");
+            assert!(
+                pull < limit,
+                "{}px card, step {step}: weight pulled {pull:.3} of the half-width off centre",
+                p.key.0
+            );
             p.shift_layers(1);
             for _ in 0..60 {
                 p.step(1.0 / 60.0, None);
@@ -1384,21 +1442,15 @@ mod tests {
     }
 
     #[test]
-    fn a_layer_step_moves_no_pill_only_their_sizes_change() {
+    fn a_layer_step_moves_the_pills_both_ways_a_little() {
         let mut p = panel();
         let before: Vec<(f32, f32)> = p.pills.iter().map(|q| q.home).collect();
-        for _ in 0..3 {
-            p.shift_layers(1);
-            for (q, b) in p.pills.iter().zip(&before) {
-                assert!(
-                    (q.home.0 - b.0).abs() < 0.5 && (q.home.1 - b.1).abs() < 0.5,
-                    "{} moved from {:?} to {:?}",
-                    q.label,
-                    b,
-                    q.home
-                );
-            }
-        }
+        p.shift_layers(1);
+        let dx: Vec<f32> = p.pills.iter().zip(&before).map(|(q, b)| q.home.0 - b.0).collect();
+        assert!(dx.iter().any(|&d| d > 2.0) && dx.iter().any(|&d| d < -2.0), "some move each way: {dx:?}");
+        // A little, not across the card.
+        let far = dx.iter().fold(0.0f32, |m, d| m.max(d.abs()));
+        assert!(far < p.key.0 * 0.25, "a pill jumped {far} px");
     }
 
     #[test]
