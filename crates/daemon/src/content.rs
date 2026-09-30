@@ -208,12 +208,14 @@ const SECTION_TITLES: [&str; N_SECTIONS] = ["Apps", "Install", "Files"];
 /// Grid rows per section (Apps is a cap; it shrinks on short cards).
 const SECTION_ROWS: [usize; N_SECTIONS] = [4, 1, 1];
 /// Height of a section's title line above its grid.
-const SECTION_TITLE_H: f32 = 14.0;
+const SECTION_TITLE_H: f32 = 10.0;
 /// The spacing of Max's framed-sections mockup (2026-09-30), kept without
 /// the frames ("only the positions"): the gap between one section and the
 /// next, the room under a grid where its page dots sit, and the air kept
-/// under the last section's dots.
-const SECTION_GAP: f32 = 20.0;
+/// under the last section's dots. (Then the grids and dots 4 px closer to
+/// their titles, the titles staying put: the band 14 -> 10, the gap
+/// 20 -> 24.)
+const SECTION_GAP: f32 = 24.0;
 const DOT_ROOM: f32 = 6.0;
 const LAST_SECTION_AIR: f32 = 6.0;
 
