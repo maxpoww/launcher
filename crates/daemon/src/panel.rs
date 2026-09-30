@@ -111,7 +111,7 @@ const LIFT: f32 = 0.07;
 /// miss shrinks, and how far it dims.
 const SEARCH_RATE: f32 = 14.0;
 const SEARCH_SHRINK: f32 = 0.15;
-const SEARCH_DIM: f32 = 0.7;
+const SEARCH_DIM: f32 = 0.85;
 /// The open-box morph's rate.
 const OPEN_RATE: f32 = 14.0;
 
