@@ -255,6 +255,9 @@ const EXIT_SECS: f32 = 0.15;
 /// Wheel travel for one layer step, and the shortest gap between steps.
 const WHEEL_STEP: f64 = 10.0;
 const SHIFT_COOLDOWN: Duration = Duration::from_millis(200);
+/// How long scroll input must pause after the panel opens before a gesture
+/// turns a layer (see `Panel::wheel_hold`).
+const WHEEL_QUIET: Duration = Duration::from_millis(300);
 /// Hover: how fast a pill settles, and comes closer (and by how much).
 const SETTLE_RATE: f32 = 6.0;
 const LIFT_RATE: f32 = 12.0;
@@ -410,6 +413,11 @@ pub(crate) struct Panel {
     clock: f32,
     wheel: f64,
     wheel_at: Option<Instant>,
+    /// Scroll input is ignored until this: set as the panel opens and pushed
+    /// on by every event that still arrives, so the scroll that summoned
+    /// the dock (and a touchpad's momentum after it) never turns a layer —
+    /// only a fresh gesture does.
+    wheel_hold: Option<Instant>,
     last_shift: Option<Instant>,
     hot: Option<usize>,
     open: Option<OpenBox>,
@@ -512,6 +520,7 @@ impl Panel {
             return;
         }
         self.shift += dir as i32;
+        info!("settings: layer step {dir:+} (now {})", self.shift);
         for p in &mut self.pills {
             let old = p.layer;
             p.layer = (p.group as i32 - self.shift).rem_euclid(LAYERS as i32) as u8;
@@ -539,6 +548,17 @@ impl Panel {
     /// faster than the move itself.
     fn wheel(&mut self, value: f64) {
         let now = Instant::now();
+        if let Some(until) = self.wheel_hold {
+            if now < until {
+                // Still the old scroll (or its momentum): swallow it and
+                // wait for a pause.
+                self.wheel_hold = Some(now + WHEEL_QUIET);
+                self.wheel = 0.0;
+                tracing::debug!("settings: scroll {value:+.1} swallowed (still the opening scroll)");
+                return;
+            }
+            self.wheel_hold = None;
+        }
         if self.wheel_at.is_none_or(|t| now - t > Duration::from_millis(250)) {
             self.wheel = 0.0;
         }
@@ -632,6 +652,14 @@ impl Panel {
         }
     }
 
+    /// The panel is being entered: hold scroll input until the scroll that
+    /// may still be running (the one that summoned the dock, a touchpad's
+    /// momentum) has paused.
+    pub(crate) fn hold_wheel(&mut self) {
+        self.wheel_hold = Some(Instant::now() + WHEEL_QUIET);
+        self.wheel = 0.0;
+    }
+
     /// Start the panel afresh (it is being entered).
     ///
     /// Every entry starts from the beginning (Max, 2026-09-30): the layers
@@ -655,6 +683,7 @@ impl Panel {
         }
         let size = (self.key.0, self.key.1);
         self.compose(size, true);
+        info!("settings: panel reset to its first layer order");
     }
 
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
@@ -1306,6 +1335,7 @@ impl App {
                 self.handle_command(Command::Collapse);
             } else {
                 info!("settings: panel in place of the apps");
+                self.panel.hold_wheel();
                 self.settings_panel = true;
                 self.settings_from_apps = true;
                 self.search.open = false;
@@ -1622,6 +1652,21 @@ mod tests {
             assert!(q.exit.is_none() && (q.sc - 1.0).abs() < 1e-6);
         }
         assert_eq!(p.shift, 0);
+    }
+
+    #[test]
+    fn the_scroll_that_opened_the_panel_never_turns_a_layer() {
+        let mut p = panel();
+        p.hold_wheel();
+        // Momentum keeps coming right after the open: swallowed.
+        for _ in 0..10 {
+            p.wheel(-15.0);
+        }
+        assert_eq!(p.shift, 0, "the summoning scroll turned a layer");
+        // After a pause, a fresh gesture does.
+        p.wheel_hold = Some(Instant::now() - Duration::from_millis(1));
+        p.wheel(-15.0);
+        assert_eq!(p.shift, 1, "a fresh scroll after the pause turns one layer");
     }
 
     #[test]

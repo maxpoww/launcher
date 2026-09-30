@@ -2745,6 +2745,10 @@ impl App {
                         self.panel.reset();
                         self.panel_reset_due = false;
                     }
+                    // The scroll that summoned the card must not turn a layer.
+                    if self.settings_panel {
+                        self.panel.hold_wheel();
+                    }
                     // The card rises straight into its view: no apps↔panel
                     // swap to animate.
                     self.panel_mix = if self.settings_panel { 1.0 } else { 0.0 };
