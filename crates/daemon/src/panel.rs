@@ -447,7 +447,9 @@ impl Panel {
         self.wheel_at = Some(now);
         self.wheel += value;
         if self.wheel.abs() >= WHEEL_STEP && self.last_shift.is_none_or(|t| now - t > SHIFT_COOLDOWN) {
-            self.shift_layers(if self.wheel > 0.0 { 1 } else { -1 });
+            // Inverted (Max, 2026-09-30): scrolling up brings the next layer
+            // forward, the near one falling away; down goes back.
+            self.shift_layers(if self.wheel > 0.0 { -1 } else { 1 });
             self.last_shift = Some(now);
             self.wheel = 0.0;
         }
