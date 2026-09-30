@@ -29,9 +29,21 @@
 //!   others open away from it and fade; the setting's content expands out of
 //!   the pill and floats in the air. Escape or a click on the empty space
 //!   folds it back.
+//! - **The game: use brings a setting closer** (Max, 2026-09-30). Every use
+//!   of a setting (a click, or Enter on a search) scores it, and old uses fade
+//!   (a two-week half-life). When a pill outscores the weakest pill one layer
+//!   nearer, the two swap: it steps one layer closer, the other steps back.
+//!   The layers keep their sizes (5 · 8 · 11). The swap happens while the
+//!   setting is open, so the field is rearranged when it folds back — nothing
+//!   re-flows under the eye. The arrangement and the scores are saved
+//!   (`control-panel.json`), starting from [`SETTINGS`]' order.
 
+use std::collections::BTreeMap;
 use std::f32::consts::TAU;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
 
 use tracing::info;
 
@@ -124,6 +136,59 @@ const SEARCH_DIM: f32 = 0.85;
 /// The open-box morph's rate.
 const OPEN_RATE: f32 = 14.0;
 
+// ---- The game ------------------------------------------------------------
+/// Uses fade: one counts half after this many days.
+const USE_HALF_LIFE_DAYS: f64 = 14.0;
+/// The score each layer starts with, so the first order has a little
+/// weight: a far setting needs two uses to pass a middle one that is never
+/// used, and three to reach the front. It fades like any use.
+const SEED_SCORE: [f64; 3] = [2.0, 1.0, 0.0];
+
+/// A setting's place in the game: its layer and its fading score.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+struct Standing {
+    layer: u8,
+    score: f64,
+    /// When `score` was last brought up to date (unix seconds).
+    at: u64,
+}
+
+impl Standing {
+    /// The score as of `now`, faded.
+    fn score_at(&self, now: u64) -> f64 {
+        let days = now.saturating_sub(self.at) as f64 / 86_400.0;
+        self.score * 0.5f64.powf(days / USE_HALF_LIFE_DAYS)
+    }
+}
+
+/// Every setting's standing, by name: the saved arrangement.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Usage {
+    settings: BTreeMap<String, Standing>,
+}
+
+impl Usage {
+    /// The saved layer of every setting in [`SETTINGS`] order, if the save
+    /// covers them all and keeps the layers' sizes; otherwise (first run, or
+    /// the settings changed) `None`.
+    fn arrangement(&self) -> Option<Vec<u8>> {
+        let layers: Vec<u8> = SETTINGS
+            .iter()
+            .map(|(name, ..)| self.settings.get(*name).map(|st| st.layer).filter(|&l| l < 3))
+            .collect::<Option<_>>()?;
+        let count = |ls: &mut dyn Iterator<Item = u8>, l: u8| ls.filter(|&x| x == l).count();
+        (0..3u8)
+            .all(|l| count(&mut layers.iter().copied(), l) == count(&mut SETTINGS.iter().map(|s| s.1), l))
+            .then_some(layers)
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// A tiny deterministic generator: the field looks the same every time it
 /// opens (and across restarts) instead of reshuffling under the eye.
 struct Rng(u32);
@@ -171,7 +236,8 @@ struct Pill {
     /// layer's size and light), -1 a miss (it sinks back and dims), 0 no
     /// search.
     focus: f32,
-    /// Which settings travel together (the layer it started on).
+    /// Its layer in the arrangement (the game moves it); scrolling cycles
+    /// the layers from here.
     group: u8,
     /// The layer it is on now, and the one it is drawn as (they differ only
     /// while it leaves one end for the other).
@@ -273,9 +339,23 @@ pub(crate) struct Panel {
     last_shift: Option<Instant>,
     hot: Option<usize>,
     open: Option<OpenBox>,
+    /// The game's standings, and where they are saved (`None`: not saved,
+    /// as in tests).
+    usage: Usage,
+    store: Option<PathBuf>,
 }
 
 impl Panel {
+    /// The panel with its saved arrangement (`control-panel.json`).
+    pub(crate) fn load() -> Self {
+        let path = crate::persist::data_path("control-panel.json");
+        Self {
+            usage: crate::persist::read_json(&path).unwrap_or_default(),
+            store: Some(path),
+            ..Self::default()
+        }
+    }
+
     /// Build (or rebuild for a new field size or bar scale) the pills:
     /// measure every label at every layer's size, then lay them out.
     fn ensure(&mut self, size: (f32, f32), scale: f32, pill_h: f32, measure: &mut dyn FnMut(&str, f32) -> f32) {
@@ -295,10 +375,23 @@ impl Panel {
         self.key = key;
         self.scale = scale;
         if fresh {
+            // The saved arrangement, or (first run, or the settings changed)
+            // the first order, each setting seeded with its layer's score
+            // (scores already earned are kept).
+            let groups = self.usage.arrangement().unwrap_or_else(|| {
+                let now = now_secs();
+                for &(name, layer, _) in &SETTINGS {
+                    let st = self.usage.settings.entry(name.to_owned()).or_default();
+                    let earned = st.score_at(now);
+                    *st = Standing { layer, score: earned.max(SEED_SCORE[layer as usize]), at: now };
+                }
+                SETTINGS.iter().map(|s| s.1).collect()
+            });
             let mut rng = Rng(0x85EB_CA6B);
             self.pills = SETTINGS
                 .iter()
-                .map(|&(label, group, keywords)| Pill {
+                .zip(groups)
+                .map(|(&(label, _, keywords), group)| Pill {
                     label,
                     keywords,
                     focus: 0.0,
@@ -452,6 +545,59 @@ impl Panel {
             from: Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h),
         });
         self.hot = None;
+        // The swap happens now, behind the setting growing over the field.
+        self.record_use(i, now_secs());
+    }
+
+    /// The game: score a use of pill `i`, and if it now outscores the
+    /// weakest pill one layer nearer, swap the two. Saves the standings.
+    fn record_use(&mut self, i: usize, now: u64) {
+        let st = self.usage.settings.entry(self.pills[i].label.to_owned()).or_default();
+        *st = Standing { layer: st.layer, score: st.score_at(now) + 1.0, at: now };
+        let score = st.score;
+        let group = self.pills[i].group;
+        if group > 0 {
+            let score_of = |p: &Pill| self.usage.settings.get(p.label).map_or(0.0, |st| st.score_at(now));
+            let weakest = (0..self.pills.len())
+                .filter(|&j| self.pills[j].group == group - 1)
+                .map(|j| (j, score_of(&self.pills[j])))
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((j, weakest_score)) = weakest.filter(|&(_, sc)| score > sc) {
+                self.pills[i].group = group - 1;
+                self.pills[j].group = group;
+                info!(
+                    "control panel: {} ({score:.2}) steps nearer, {} ({weakest_score:.2}) steps back",
+                    self.pills[i].label, self.pills[j].label
+                );
+                self.regroup();
+            }
+        }
+        for p in &self.pills {
+            if let Some(st) = self.usage.settings.get_mut(p.label) {
+                st.layer = p.group;
+            }
+        }
+        if let Some(path) = &self.store {
+            crate::persist::write_json("control panel", path, &self.usage);
+        }
+    }
+
+    /// Put every pill on its group's layer at the current scroll, and let
+    /// them glide there.
+    fn regroup(&mut self) {
+        for p in &mut self.pills {
+            let layer = (p.group as i32 - self.shift).rem_euclid(3) as u8;
+            if layer == p.layer {
+                continue;
+            }
+            p.layer = layer;
+            if p.exit.is_none() {
+                p.sc *= p.h[p.drawn as usize] / p.h[layer as usize];
+                p.drawn = layer;
+            }
+        }
+        let size = (self.key.0, self.key.1);
+        self.compose(size, false);
     }
 
     /// Set the search (from the card's search pill): matches rise to the
@@ -544,6 +690,15 @@ impl Panel {
     fn step(&mut self, dt: f32, pointer: Option<(f32, f32)>) {
         self.clock += dt;
         if let Some(open) = &mut self.open {
+            if open.want == 0.0 {
+                // Fold back into where the pill is now: the game may have
+                // moved it to another layer while it was open.
+                let p = &self.pills[open.pill];
+                let d = p.drawn as usize;
+                let k = p.sc * p.focus_scale();
+                let (w, h) = (p.w[d] * k, p.h[d] * k);
+                open.from = Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h);
+            }
             open.k = approach(open.k, open.want, OPEN_RATE, dt);
             if open.want == 0.0 && open.k < 0.01 {
                 self.open = None;
@@ -1283,6 +1438,58 @@ mod tests {
             assert!((q.home.0 - home.0).abs() < 0.5 && (q.home.1 - home.1).abs() < 0.5, "{} back home", q.label);
             assert!(q.exit.is_none() && q.focus == 0.0);
         }
+    }
+
+    fn layer_sizes(p: &Panel) -> [usize; 3] {
+        let mut n = [0; 3];
+        for q in &p.pills {
+            n[q.group as usize] += 1;
+        }
+        n
+    }
+
+    #[test]
+    fn use_brings_a_setting_closer_one_layer_at_a_time() {
+        let mut p = panel();
+        let now = 1_000_000;
+        let far = p.pills.iter().position(|q| q.group == 2).unwrap();
+        // Seeded: a never-used middle setting holds 1, a near one 2.
+        p.record_use(far, now);
+        assert_eq!(p.pills[far].group, 2, "one use does not yet pass a middle setting");
+        p.record_use(far, now);
+        assert_eq!(p.pills[far].group, 1, "two uses step it to the middle");
+        assert_eq!(layer_sizes(&p), [5, 8, 11], "the layers keep their sizes");
+        p.record_use(far, now);
+        assert_eq!(p.pills[far].group, 0, "a third steps it to the front");
+        assert_eq!(layer_sizes(&p), [5, 8, 11]);
+        // Whoever it passed stepped back exactly one layer.
+        let back: Vec<(&str, u8, u8)> = p
+            .pills
+            .iter()
+            .zip(SETTINGS)
+            .filter(|(q, s)| q.group != s.1 && q.label != p.pills[far].label)
+            .map(|(q, s)| (q.label, s.1, q.group))
+            .collect();
+        assert_eq!(back.len(), 2, "two settings stepped back: {back:?}");
+        assert!(back.iter().all(|&(_, from, to)| to == from + 1), "{back:?}");
+    }
+
+    #[test]
+    fn old_uses_fade_and_the_arrangement_is_kept() {
+        let st = Standing { layer: 1, score: 4.0, at: 0 };
+        let two_weeks = (USE_HALF_LIFE_DAYS * 86_400.0) as u64;
+        assert!((st.score_at(two_weeks) - 2.0).abs() < 1e-9, "a use counts half after the half-life");
+
+        let mut p = panel();
+        let far = p.pills.iter().position(|q| q.group == 2).unwrap();
+        p.record_use(far, 1_000);
+        p.record_use(far, 1_000);
+        let json = serde_json::to_string(&p.usage).unwrap();
+        let mut again = Panel { usage: serde_json::from_str(&json).unwrap(), ..Panel::default() };
+        let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
+        again.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
+        let groups = |p: &Panel| p.pills.iter().map(|q| q.group).collect::<Vec<_>>();
+        assert_eq!(groups(&again), groups(&p), "the saved arrangement comes back");
     }
 
     #[test]

@@ -627,7 +627,7 @@ fn main() -> anyhow::Result<()> {
         dir_stack: None,
         control_panel: false,
         control_panel_opening: false,
-        panel: panel::Panel::default(),
+        panel: panel::Panel::load(),
         panel_mix: 0.0,
         panel_reset_due: false,
         control_panel_from_apps: false,
