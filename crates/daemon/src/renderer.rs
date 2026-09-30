@@ -1053,8 +1053,16 @@ impl Renderer {
     /// The output's scale changed (fractional scaling): physical pixels per
     /// logical pixel from now on. Pair with [`Renderer::resize`].
     pub fn set_scale(&mut self, scale: f32) {
-        if scale > 0.0 {
+        if scale > 0.0 && scale != self.scale {
             self.scale = scale;
+            // Cached labels were shaped at the OLD physical size (metrics x
+            // scale), and their key has no scale in it. Kept, they draw at the
+            // wrong size and off-centre. On the MacBook (1.0) the renderer came
+            // up at the 2x fallback before the compositor's scale arrived, and
+            // the top bar's icon glyphs stayed at 2x, spilling out of their
+            // pills while the uncached clock was right (Max, 2026-09-30: "the
+            // macbook options are oversized").
+            self.label_cache.clear();
         }
     }
 
