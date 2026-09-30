@@ -26,6 +26,8 @@ const SOFTWARE_FRAME_MIN: Duration = Duration::from_millis(100);
 /// down. Covers smooth-scroll ease tails; a minutes-long install ring
 /// with nobody at the wheel throttles after this.
 const INPUT_ACTIVE_WINDOW: Duration = Duration::from_secs(2);
+/// Space between the pills of the Controls row (px at bar scale 1).
+const CONTROLS_GAP: f32 = 10.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
 /// pacing, see `Renderer::gpu_ready`).
 const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
@@ -90,7 +92,30 @@ impl App {
             std::array::from_fn(|s| self.scroll.per[s].pos),
             self.stack_open() || self.closing_members.is_some(),
             stretch,
+            (!self.search.controls.is_empty()).then(|| self.options_pill_h()),
         );
+        // The Controls row: the matching settings as middle-layer pills,
+        // centred in their band; what doesn't fit its width is left out.
+        if let Some(row) = layout.controls_row {
+            let s = self.options_scale();
+            let gap = CONTROLS_GAP * s;
+            let mut widths: Vec<f32> = Vec::new();
+            let mut total = 0.0;
+            for &(_, label_w) in &self.search.controls {
+                let w = (label_w + 2.0 * crate::options::PILL_PAD_X * s).max(row.h);
+                let next = total + if widths.is_empty() { 0.0 } else { gap } + w;
+                if next > row.w {
+                    break;
+                }
+                total = next;
+                widths.push(w);
+            }
+            let mut x = row.x + (row.w - total) / 2.0;
+            for w in widths {
+                layout.controls.push(content::Rect::new(x, row.y, w, row.h));
+                x += w + gap;
+            }
+        }
         // Position the open box's rest square. A grid box anchors to the
         // side of the grid it sits on (pinned preview icon lands on its
         // closed spot); a dock stack floats the same-size square above its
@@ -341,7 +366,18 @@ impl App {
         } else {
             0.0
         };
-        let lift_animating = (self.search.lift - lift_target).abs() > 0.002;
+        let mut lift_animating = (self.search.lift - lift_target).abs() > 0.002;
+        // The Controls row's pills hover the same way.
+        let rate = 1.0 - (-dt * crate::panel::LIFT_RATE).exp();
+        for (i, l) in self.search.control_lift.iter_mut().enumerate() {
+            let want = if self.hover == Some(content::Hit::Control(i)) { 1.0 } else { 0.0 };
+            if (*l - want).abs() > 0.002 {
+                *l += (want - *l) * rate;
+                lift_animating = true;
+            } else {
+                *l = want;
+            }
+        }
         self.search.lift = if lift_animating {
             self.search.lift + (lift_target - self.search.lift) * (1.0 - (-dt * crate::panel::LIFT_RATE).exp())
         } else {
@@ -1066,6 +1102,8 @@ impl App {
                 },
                 query_px,
                 search_pill,
+                controls: &self.search.controls,
+                control_lift: &self.search.control_lift,
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()

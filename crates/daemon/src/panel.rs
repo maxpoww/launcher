@@ -183,6 +183,24 @@ impl Usage {
     }
 }
 
+/// How well a setting matches a (lowercased, trimmed) search: 0 its name
+/// starts with it, 1 its name contains it, 2 a keyword does; `None` no match.
+fn match_rank(label: &str, keywords: &str, q: &str) -> Option<u8> {
+    let name = label.to_lowercase();
+    if name.starts_with(q) {
+        Some(0)
+    } else if name.contains(q) {
+        Some(1)
+    } else if keywords.contains(q) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// The most controls the apps grid's search shows in its row.
+pub(crate) const MAX_SEARCH_CONTROLS: usize = 6;
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -343,6 +361,9 @@ pub(crate) struct Panel {
     /// as in tests).
     usage: Usage,
     store: Option<PathBuf>,
+    /// A setting to open as soon as the pills exist (asked for from the
+    /// apps grid's search before the panel was ever laid out).
+    pending_open: Option<&'static str>,
 }
 
 impl Panel {
@@ -424,6 +445,45 @@ impl Panel {
             }
         }
         self.compose(size, true);
+        if let Some(label) = self.pending_open.take() {
+            self.open_named(label);
+        }
+    }
+
+    /// The settings matching `query` (the apps grid's search), best first:
+    /// name prefix, name, keyword; then nearest layer; at most
+    /// [`MAX_SEARCH_CONTROLS`].
+    pub(crate) fn matching_controls(&self, query: &str) -> Vec<&'static str> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let groups: Vec<u8> = if self.pills.len() == SETTINGS.len() {
+            self.pills.iter().map(|p| p.group).collect()
+        } else {
+            self.usage.arrangement().unwrap_or_else(|| SETTINGS.iter().map(|s| s.1).collect())
+        };
+        let mut hits: Vec<(u8, u8, usize)> = SETTINGS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &(label, _, keywords))| Some((match_rank(label, keywords, &q)?, groups[i], i)))
+            .collect();
+        hits.sort();
+        hits.into_iter().take(MAX_SEARCH_CONTROLS).map(|(.., i)| SETTINGS[i].0).collect()
+    }
+
+    /// Open the setting named `label` (from the apps grid's search): now if
+    /// the pills exist, else as soon as they do.
+    pub(crate) fn open_named(&mut self, label: &'static str) {
+        if self.pills.is_empty() {
+            self.pending_open = Some(label);
+            return;
+        }
+        if let Some(i) = self.pills.iter().position(|p| p.label == label) {
+            if self.open.is_none() {
+                self.open_pill(i);
+            }
+        }
     }
 
     /// Lay the field out for the current layer order: balanced, fitted up
@@ -625,19 +685,11 @@ impl Panel {
             return false;
         }
         let q = &self.query;
-        let rank = |p: &Pill| -> u8 {
-            let name = p.label.to_lowercase();
-            if name.starts_with(q.as_str()) {
-                0
-            } else if name.contains(q.as_str()) {
-                1
-            } else {
-                2
-            }
-        };
         let best = (0..self.pills.len())
-            .filter(|&i| self.pills[i].exit.is_none() && self.pills[i].matches(q))
-            .min_by_key(|&i| (rank(&self.pills[i]), self.pills[i].layer));
+            .filter(|&i| self.pills[i].exit.is_none())
+            .filter_map(|i| Some((match_rank(self.pills[i].label, self.pills[i].keywords, q)?, self.pills[i].layer, i)))
+            .min()
+            .map(|(.., i)| i);
         match best {
             Some(i) => {
                 self.open_pill(i);
@@ -1286,6 +1338,26 @@ impl App {
     }
 
     /// A click on the panel (below the dock band, inside the card).
+    /// A control from the apps grid's search: the card becomes the control
+    /// panel with that setting opening out of its pill (a use in the game).
+    pub(crate) fn open_control(&mut self, label: &'static str) {
+        info!("control panel: {label} from the apps search");
+        self.close_group();
+        if self.panel_reset_due {
+            // Out of sight until now: start it fresh before opening.
+            self.panel.reset();
+            self.panel_reset_due = false;
+        }
+        self.control_panel = true;
+        self.control_panel_from_apps = true;
+        self.search.open = false;
+        self.search.query.clear();
+        self.refilter();
+        self.panel_search();
+        self.panel.open_named(label);
+        self.schedule_frame();
+    }
+
     pub(crate) fn panel_click(&mut self, pos: (f32, f32)) {
         if self.panel.click(pos) {
             self.schedule_frame();
@@ -1446,6 +1518,18 @@ mod tests {
             n[q.group as usize] += 1;
         }
         n
+    }
+
+    #[test]
+    fn the_apps_search_finds_controls_best_first() {
+        let p = Panel::default();
+        let audio = p.matching_controls("audio");
+        for want in ["Sound output", "Volume", "Microphone"] {
+            assert!(audio.contains(&want), "{want} in {audio:?}");
+        }
+        assert_eq!(p.matching_controls("res").first(), Some(&"Resolution"), "a name prefix first");
+        assert!(p.matching_controls("  ").is_empty());
+        assert!(p.matching_controls("e").len() <= MAX_SEARCH_CONTROLS);
     }
 
     #[test]

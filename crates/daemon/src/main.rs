@@ -1989,6 +1989,11 @@ struct SearchState {
     /// Eased pointer hover on the compact pill (0..1), the settings pills'
     /// own settle-and-lift.
     lift: f32,
+    /// The control panel's settings matching the query (the Controls row
+    /// under Files), with each label's shaped width at the pill font.
+    controls: Vec<(&'static str, f32)>,
+    /// Eased pointer hover per control pill, as `lift`.
+    control_lift: Vec<f32>,
 }
 
 impl Default for SearchState {
@@ -2001,6 +2006,8 @@ impl Default for SearchState {
             open: false,
             expand: 0.0,
             lift: 0.0,
+            controls: Vec::new(),
+            control_lift: Vec::new(),
         }
     }
 }
@@ -3923,6 +3930,25 @@ impl App {
         // `recompute_dock_order` below. See `minimized.rs`.
         self.minimized_entries();
         self.search.visible = visible;
+        // The settings that match, for the Controls row (not on the panel
+        // itself, which searches its own field).
+        let controls = if self.control_panel {
+            Vec::new()
+        } else {
+            self.panel.matching_controls(&self.search.query)
+        };
+        let font = options::FONT_PX * self.options_scale();
+        self.search.controls = controls
+            .into_iter()
+            .map(|label| {
+                let w = match self.renderer.as_mut() {
+                    Some(r) => r.measure_text(label, font, options::TEXT_FONT),
+                    None => options::est_text_w(label, font),
+                };
+                (label, w)
+            })
+            .collect();
+        self.search.control_lift = vec![0.0; self.search.controls.len()];
         // Search results are a flat ranked list: dense identity slots. (A
         // resting grid keeps the paged slots built just above.)
         if !resting_grid {
@@ -4708,6 +4734,11 @@ impl App {
                         return;
                     }
                     self.activate(entry_idx, LaunchFrom::Box);
+                }
+            }
+            Hit::Control(i) => {
+                if let Some(&(label, _)) = self.search.controls.get(i) {
+                    self.open_control(label);
                 }
             }
             Hit::SearchButton => {
@@ -6089,7 +6120,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     Hit::GridCell(s, cell) => {
                                         app.search.visible[s].get(cell).copied()
                                     }
-                                    Hit::SearchButton | Hit::OpenBoxCell(_) => None,
+                                    Hit::SearchButton | Hit::OpenBoxCell(_) | Hit::Control(_) => None,
                                 };
                                 // Busy cells (a profile mutation in
                                 // flight) never start a drag; neither do

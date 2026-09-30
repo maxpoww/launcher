@@ -193,6 +193,9 @@ pub enum Hit {
     /// only a click *outside* the box closes it. Also used for a dock
     /// folder's stack (the same box, anchored above the dock).
     OpenBoxCell(usize),
+    /// A pill in the Controls row (index into `SearchState::controls`):
+    /// opens that setting on the control panel.
+    Control(usize),
 }
 
 /// Popup sections, top to bottom: the app grid, the (future) install
@@ -244,6 +247,8 @@ const GRID_BOTTOM_PAD: f32 = 6.0;
 /// costs the grid a row (Max, 2026-09-29: "move the search up a little").
 const SEARCH_LIFT: f32 = 8.0;
 const SEARCH_LIFT_AIR: f32 = 4.0;
+/// Air the Controls row keeps below its pills (above the search pill).
+const CONTROLS_AIR: f32 = 6.0;
 /// Text metrics for the app-name labels.
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
@@ -593,6 +598,14 @@ pub struct Layout {
     /// or a square above the dock for a dock folder's stack. Present only
     /// while a box is open. A click inside is inert (only outside closes).
     pub open_box: Option<Rect>,
+    /// The Controls row under Files while a search matches settings: its
+    /// title's position, and the band its pills sit in (pill height, grid
+    /// width).
+    pub controls_title: Option<(f32, f32)>,
+    pub controls_row: Option<Rect>,
+    /// The control pills' rects in that band (filled in by the App, which
+    /// measures their labels), in `SearchState::controls` order.
+    pub controls: Vec<Rect>,
 }
 
 /// Compute the layout for the current animation state.
@@ -635,6 +648,9 @@ pub fn layout(
     box_open: bool,
     // AGUA deformation, (card silhouette, content ride) — 1.0 = rest.
     stretch: (f32, f32),
+    // The Controls row's pill height while a search matches settings
+    // (`None`: no row).
+    controls_pill_h: Option<f32>,
 ) -> Layout {
     // NOTE: icon_scale is already capped to fit the screen at its source,
     // App::icon_scale() (main.rs) — every extent and surface size derives from
@@ -825,6 +841,11 @@ pub fn layout(
         + (N_SECTIONS - 1) as f32 * SECTION_GAP;
     let avail = grid_bottom - grid_top - fixed;
     let fits = ((avail / grid_cell_h) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
+    // The Controls row (a search matching settings) takes its room out of
+    // the Apps rows SHOWN — display only, like the shrink below: page
+    // capacity stays at `fits`.
+    let controls_h = controls_pill_h.map_or(0.0, |ph| SECTION_TITLE_H + ph + CONTROLS_AIR);
+    let fits_shown = (((avail - controls_h) / grid_cell_h) as usize).clamp(1, fits);
     // …but never TALLER than the apps actually need. Sizing Apps to whatever
     // fits meant a machine with fewer apps than the screen could hold got the
     // slack as dead space INSIDE the Apps viewport — a visible void between
@@ -843,7 +864,7 @@ pub fn layout(
     // sized against this viewport, so a short grid would shrink the box too.
     let needed = n_visible[SECTION_APPS].div_ceil(cols.max(1)).max(1);
     let row_floor = if box_open { OPEN_BOX_COLS } else { 1 };
-    let apps_rows = fits.min(needed.max(row_floor)).max(1);
+    let apps_rows = fits_shown.min(needed.max(row_floor)).max(1);
     let apps_cap_rows = fits;
 
     let mut y = grid_top;
@@ -908,9 +929,23 @@ pub fn layout(
         Rect::new(vp.x + (vp.w - side) / 2.0, vp.y, side, side)
     });
 
-    // Lift the search pill into whatever room the sections left above it.
+    // The Controls row: titled like a section, its pills in a band under
+    // the title.
     let files_bottom = sections[SECTION_FILES].viewport.y + sections[SECTION_FILES].viewport.h;
-    let lift = (SEARCH_LIFT * icon_scale).min((search_box.y - files_bottom - SEARCH_LIFT_AIR).max(0.0));
+    let (controls_title, controls_row) = match controls_pill_h {
+        Some(ph) => {
+            let vp = sections[SECTION_FILES].viewport;
+            let title_y = files_bottom + SECTION_GAP;
+            (
+                Some((vp.x + 8.0, title_y)),
+                Some(Rect::new(vp.x, title_y + SECTION_TITLE_H, vp.w, ph)),
+            )
+        }
+        None => (None, None),
+    };
+    let above_search = controls_row.map_or(files_bottom, |r| r.y + r.h);
+    // Lift the search pill into whatever room the sections left above it.
+    let lift = (SEARCH_LIFT * icon_scale).min((search_box.y - above_search - SEARCH_LIFT_AIR).max(0.0));
     let search_box = Rect::new(search_box.x, search_box.y - lift, search_box.w, search_box.h);
     let search_btn = Rect::new(search_btn.x, search_btn.y - lift, search_btn.w, search_btn.h);
 
@@ -928,6 +963,9 @@ pub fn layout(
         search_box,
         search_btn,
         open_box,
+        controls_title,
+        controls_row,
+        controls: Vec::new(),
     }
 }
 
@@ -990,6 +1028,9 @@ pub fn hit_test(
     }
     if !search_open && layout.search_btn.contains(pos) {
         return Some(Hit::SearchButton);
+    }
+    if let Some(i) = layout.controls.iter().position(|r| r.contains(pos)) {
+        return Some(Hit::Control(i));
     }
     // The magnified open box: resolve the 3×3 member slot under the
     // pointer (clicks inside are inert/launch; only outside closes).
@@ -1064,6 +1105,10 @@ pub struct FrameInput<'a> {
     pub query_px: f32,
     /// The search pill's size, type and hover.
     pub search_pill: SearchPill,
+    /// The Controls row's settings (label, shaped width), in
+    /// `Layout::controls` order, and each pill's eased hover.
+    pub controls: &'a [(&'static str, f32)],
+    pub control_lift: &'a [f32],
     /// AGUA stretch factor (1.0 at rest): dock icons slosh vertically
     /// about their baseline with the card's motion — on the dock
     /// reveal, and at the top of the card as an open lands.
@@ -1334,6 +1379,8 @@ pub fn scene(
         hover,
         query_px,
         search_pill,
+        controls,
+        control_lift,
         stretch,
         dock_tooltip,
         alpha,
@@ -2460,6 +2507,77 @@ pub fn scene(
             }
         }
     }
+    // The Controls row: the settings the search matches, as the control
+    // panel's middle-layer pills under a section title. Apps content: it
+    // rides the push with the rest.
+    if let (Some(title), false) = (layout.controls_title, layout.controls.is_empty() || panel) {
+        scene.labels.push(Label {
+            text: crate::i18n::tr("Controls").to_string(),
+            pos: (title.0, title.1 + 2.0),
+            max_w: 200.0,
+            font_px: LABEL_FONT_PX,
+            line_px: LABEL_LINE_PX,
+            centered: false,
+            dim: true,
+            cache: true,
+            family: None,
+            color: None,
+            clip: Some(reveal_rect),
+        });
+        use crate::panel::{HOVER_WASH_BRIGHT, HOVER_WASH_DARK, LAYER_GLOW, LAYER_INK, LAYER_WASH_BRIGHT, LAYER_WASH_DARK, LIFT};
+        let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+        let (rest_a, hover_a) = if bright {
+            (LAYER_WASH_BRIGHT[1], HOVER_WASH_BRIGHT)
+        } else {
+            (LAYER_WASH_DARK[1], HOVER_WASH_DARK)
+        };
+        let sc = search_pill.scale;
+        let (font, line) = (crate::options::FONT_PX * sc, crate::options::LINE_PX * sc);
+        let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * LAYER_INK[1]];
+        let glow = if bright { 0.0 } else { 1.0 };
+        let mut cgrid = GridContent {
+            clip: reveal_rect,
+            ..Default::default()
+        };
+        for (i, (r, &(label, _))) in layout.controls.iter().zip(controls).enumerate() {
+            let lift = control_lift.get(i).copied().unwrap_or(0.0);
+            let k = 1.0 + LIFT * lift;
+            let (pw, ph) = (r.w * k, r.h * k);
+            let rect = Rect::new(r.x + r.w / 2.0 - pw / 2.0, r.y + r.h / 2.0 - ph / 2.0, pw, ph);
+            if panel_mix <= 0.0005 {
+                let (blur, glow_a) = LAYER_GLOW[1];
+                scene.overlay_shadows.push(ShadowInst {
+                    rect,
+                    radius: ph / 2.0,
+                    blur: blur * sc,
+                    color: [glow, glow, glow, glow_a * card_open * card_open],
+                    edges: [1.0, 1.0, 1.0, 1.0],
+                });
+            }
+            cgrid.rects.push(RectInst {
+                rect,
+                radius: ph / 2.0,
+                color: crate::options::wash(!bright, lerp(rest_a, hover_a, lift)),
+                glass: 0.0,
+                border: 0.0,
+            });
+            cgrid.labels.push(Label {
+                text: label.to_string(),
+                pos: (rect.x + pw / 2.0, rect.y + (ph - line * k) / 2.0),
+                max_w: pw,
+                font_px: font * k,
+                line_px: line * k,
+                centered: true,
+                dim: false,
+                cache: (k - 1.0).abs() < 0.001,
+                family: crate::options::TEXT_FONT,
+                color: Some(ink),
+                clip: Some(reveal_clip(rect)),
+            });
+        }
+        scene.grids.push(cgrid);
+    }
+
     // The push: the settings field rises in from the card's bottom edge
     // and shoves the apps up and out under the dock; going back, the apps
     // come down from the top and push the field out through the bottom.
@@ -2806,6 +2924,7 @@ mod tests {
             [scroll, 0.0, 0.0],
             false,
             (1.0, 1.0),
+            None,
         )
     }
 
@@ -2824,6 +2943,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
+            None,
         );
         assert!(!l.dock_slots.is_empty());
         // Content sits at its fixed open position; while docked the
@@ -2842,6 +2962,24 @@ mod tests {
             },
         );
         assert!(s.grids.iter().all(|g| g.clip.h <= 0.0));
+    }
+
+    #[test]
+    fn a_controls_row_takes_shown_rows_not_page_capacity() {
+        let cfg = config();
+        let args = |c: Option<f32>| {
+            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c)
+        };
+        let (plain, with) = (args(None), args(Some(23.0)));
+        assert!(plain.controls_row.is_none());
+        let row = with.controls_row.expect("a row while controls match");
+        let files = &with.sections[SECTION_FILES].viewport;
+        assert!(row.y >= files.y + files.h, "the row sits under Files");
+        assert!(row.y + row.h <= with.search_box.y, "and above the search pill");
+        assert_eq!(
+            with.sections[SECTION_APPS].cap, plain.sections[SECTION_APPS].cap,
+            "page capacity never moves with the row"
+        );
     }
 
     #[test]
@@ -2894,6 +3032,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
+            None,
         );
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
         let s = scene(
@@ -2950,6 +3089,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
+            None,
         );
         let slot = l.dock_slots[0];
         assert_eq!(
@@ -3001,6 +3141,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
+            None,
         );
         let apps = &l.sections[SECTION_APPS];
         let mid = (
@@ -3118,6 +3259,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
+            None,
         );
         assert_eq!(l.dock_slots.len(), n, "every entry gets a slot");
         let es = entries(n);
@@ -3212,6 +3354,7 @@ mod tests {
                 [0.0; N_SECTIONS],
                 false,
                 (1.0, 1.0),
+                None,
             )
         };
 
@@ -3248,6 +3391,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
+            None,
         );
         let row = open.dock_slots.last().unwrap().x + open.dock_slots.last().unwrap().w
             - open.dock_slots[0].x;
@@ -3270,6 +3414,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
+            None,
         );
         assert!(
             open.sections[SECTION_APPS].cols > narrow.sections[SECTION_APPS].cols,
@@ -3286,6 +3431,7 @@ mod tests {
             let aspects = vec![MAX_TILE_ASPECT; n_min];
             layout(
                 &cfg, 1.0, SURFACE, docked, total, n_min, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
+                None,
             )
         };
         let stretched = lay_wide(19, 9); // wide tiles are width-capped now, so more are needed to overflow
@@ -3324,6 +3470,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
+            None,
         );
         let n = l.dock_slots.len();
         assert_eq!(n, 5, "all five tiles are shown");
