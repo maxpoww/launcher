@@ -2328,6 +2328,14 @@ impl App {
                 self.open_clip_search_with(&query);
                 return;
             }
+            Command::DebugQuery(query) => {
+                self.search.open = !query.is_empty();
+                self.install_drag_reset = false;
+                self.search.query = query;
+                self.refilter();
+                self.schedule_frame();
+                return;
+            }
             Command::DebugEmoji(query) => {
                 // A trailing "!" also TYPES the first match, so the whole path
                 // (serve → hand the keyboard back → paste → re-grab) can be

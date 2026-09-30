@@ -341,12 +341,15 @@ impl App {
         // The Controls band eases in and out at the same rate, so the
         // sections make way as one smooth move (no row jump when the row
         // appears).
+        // (`fit_animating` keeps frames coming: set after the render, where
+        // the frame's `dirty` reset can't swallow it.)
+        let mut fit_animating = false;
         let band_want = self.controls_band_target();
         let k = 1.0 - (-dt.min(0.1) * TRIM_RATE).exp();
         let out_of_sight = self.ui.target() != Target::Open && !self.ui.is_animating();
         if !out_of_sight && (band_want - self.controls_band).abs() > 0.25 {
             self.controls_band += (band_want - self.controls_band) * k;
-            self.dirty = true;
+            fit_animating = true;
         } else {
             self.controls_band = band_want;
         }
@@ -359,10 +362,10 @@ impl App {
         } else if (trim_want - trim).abs() > 0.25 {
             let k = 1.0 - (-dt.min(0.1) * TRIM_RATE).exp();
             self.ui.set_open_trim(trim + (trim_want - trim) * k);
-            self.dirty = true;
+            fit_animating = true;
         } else if trim != trim_want {
             self.ui.set_open_trim(trim_want);
-            self.dirty = true;
+            fit_animating = true;
         }
         let was_animating = self.ui.is_animating();
         let animating = self.ui.tick(dt);
@@ -1273,7 +1276,7 @@ impl App {
         ) {
             error!("render failed: {e:#}");
         }
-        if (search_animating && self.search.expand != search_target) || lift_animating {
+        if (search_animating && self.search.expand != search_target) || lift_animating || fit_animating {
             self.dirty = true;
         }
         if scroll_animating

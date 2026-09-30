@@ -52,6 +52,10 @@ pub enum Command {
     /// field out and this query typed into it (empty = the bare field), so the
     /// filtered list can be screenshotted without a keyboard.
     DebugClipSearch(String),
+    /// Debug/verification: set the app grid's search to the query (empty
+    /// clears it) as if typed, so the card's search motion can be measured
+    /// without a keyboard.
+    DebugQuery(String),
     /// Debug/verification: force-open the clipboard box on the emoji picker,
     /// optionally with this search query typed into the box's field.
     DebugEmoji(String),
@@ -210,6 +214,7 @@ impl fmt::Display for Command {
             Command::DebugClip => f.write_str("debug-clip"),
             Command::DebugClipDetail => f.write_str("debug-clip-detail"),
             Command::DebugClipSearch(q) => write!(f, "debug-clip-search {q}"),
+            Command::DebugQuery(q) => write!(f, "debug-query {q}"),
             Command::DebugEmoji(q) => write!(f, "debug-emoji {q}"),
             Command::DebugNotif => f.write_str("debug-notif"),
             Command::DebugSticky => f.write_str("debug-sticky"),
@@ -273,6 +278,7 @@ impl FromStr for Command {
                 "debug-clip-search",
                 Command::DebugClipSearch as fn(String) -> Command,
             ),
+            ("debug-query", Command::DebugQuery as fn(String) -> Command),
             ("debug-emoji", Command::DebugEmoji as fn(String) -> Command),
             ("stage-show", Command::StageShow as fn(String) -> Command),
             // Before its own prefix: `stage-swipe` would otherwise be tried
@@ -356,6 +362,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-clip",
     "debug-clip-detail",
     "debug-clip-search [query]",
+    "debug-query [query]",
     "debug-emoji [query]",
     "debug-notif",
     "debug-sticky",
@@ -464,6 +471,7 @@ mod tests {
                 | Command::DebugClip
                 | Command::DebugClipDetail
                 | Command::DebugClipSearch(_)
+                | Command::DebugQuery(_)
                 | Command::DebugEmoji(_)
                 | Command::DebugNotif
                 | Command::DebugSticky
@@ -508,6 +516,7 @@ mod tests {
             Command::DebugClip,
             Command::DebugClipDetail,
             Command::DebugClipSearch("shot".into()),
+            Command::DebugQuery("audio".into()),
             Command::DebugEmoji("happy".into()),
             Command::DebugNotif,
             Command::DebugSticky,

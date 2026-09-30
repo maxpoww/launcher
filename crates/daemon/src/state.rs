@@ -188,6 +188,7 @@ impl UiState {
             Command::DebugClip
             | Command::DebugClipDetail
             | Command::DebugClipSearch(_)
+            | Command::DebugQuery(_)
             | Command::DebugEmoji(_)
             | Command::DebugNotif
             | Command::DebugSticky
