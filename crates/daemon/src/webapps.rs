@@ -373,7 +373,9 @@ mod tests {
         assert_eq!(e.wm_class(), "webapp-netflix");
         assert_eq!(e.wm_class(), e.desktop_id()); // the tile pairs with its window by class
         assert!(e.desktop_contents().contains("Icon=netflix"));
-        assert!(e.desktop_contents().contains("StartupWMClass=webapp-netflix"));
+        assert!(e
+            .desktop_contents()
+            .contains("StartupWMClass=webapp-netflix"));
         assert_eq!(
             app_open_exec("youtube", "https://www.youtube.com/watch?v=x&t=1"),
             "seam -golem-app youtube 'https://www.youtube.com/watch?v=x&t=1'"

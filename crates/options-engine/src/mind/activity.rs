@@ -686,7 +686,7 @@ mod tests {
             ("zoom", Activity::Call),
             ("Code", Activity::Coding),
             ("firefox", Activity::Browsing),
-            ("seam", Activity::Browsing),                 // Golem's browser
+            ("seam", Activity::Browsing), // Golem's browser
             ("webapp-youtube-music", Activity::Browsing), // one of its webapp windows
             ("foot", Activity::Terminal),
             ("somerandomapp", Activity::Unknown),

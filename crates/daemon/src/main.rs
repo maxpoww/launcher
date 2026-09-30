@@ -4051,8 +4051,16 @@ impl App {
             push(tail);
         }
         // First shell token of Exec, minus any path, minus a trailing
-        // extension (`/usr/bin/foo.sh` → `foo`).
-        if let Some(prog) = entry.exec.split_whitespace().next() {
+        // extension (`/usr/bin/foo.sh` → `foo`). Not for a webapp: its Exec
+        // starts with `seam`, and the key would hand every Seam browser window
+        // to whichever webapp tile claimed it first. A webapp window carries
+        // its own class (`webapp-<slug>` = its StartupWMClass and id).
+        if let Some(prog) = entry
+            .exec
+            .split_whitespace()
+            .next()
+            .filter(|_| webapps::slug_of_id(&entry.id).is_none())
+        {
             let base = prog.rsplit('/').next().unwrap_or(prog);
             push(base.split('.').next().unwrap_or(base));
         }
@@ -4768,7 +4776,12 @@ impl App {
         // / New Window), falling through to the launch path below — as do
         // the right/middle-click arms, and *every* launch out of the box:
         // you went looking for an app there, so you get one.
-        let force_new = self.modifiers.ctrl || self.force_new_instance || from == LaunchFrom::Box;
+        // A webapp has exactly one window (Seam focuses it on a relaunch, but
+        // a focus from Seam cannot raise a window on Wayland): activating it is
+        // the dock's job wherever it was launched from.
+        let one_window = webapps::slug_of_id(&id).is_some();
+        let force_new = !one_window
+            && (self.modifiers.ctrl || self.force_new_instance || from == LaunchFrom::Box);
         if !force_new {
             if let Some(addr) = self.running.get(&index).and_then(|w| w.first()).cloned() {
                 info!("activating running app {id} -> window {addr}");
@@ -6429,3 +6442,41 @@ fn save_icon_size(size: usize) {
 }
 
 smithay_client_toolkit::delegate_data_device!(App);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, exec: &str, wm: Option<&str>) -> AppEntry {
+        AppEntry {
+            id: id.into(),
+            name: id.into(),
+            description: None,
+            exec: exec.into(),
+            icon: None,
+            startup_wm_class: wm.map(Into::into),
+            needs_terminal: false,
+            path: None,
+        }
+    }
+
+    /// A webapp's tile matches its own window class only. Its Exec starts
+    /// with `seam`, and the Exec key once made every Seam browser window count
+    /// as whichever webapp sorted first (the index is sorted by name).
+    #[test]
+    fn a_webapp_matches_its_own_class_not_seams() {
+        let wa = entry(
+            "webapp-claude",
+            "seam -golem-app claude https://claude.ai",
+            Some("webapp-claude"),
+        );
+        let keys = App::app_match_keys(&wa, apps::EntryKind::App);
+        assert!(keys.contains(&"webapp-claude".to_owned()));
+        assert!(!keys.contains(&"seam".to_owned()));
+        // An ordinary app still gets its Exec program as a key.
+        let seam = entry("seam", "seam %U", Some("seam"));
+        assert!(App::app_match_keys(&seam, apps::EntryKind::App).contains(&"seam".to_owned()));
+        let foot = entry("org.codeberg.dnkl.foot", "/usr/bin/foot", None);
+        assert!(App::app_match_keys(&foot, apps::EntryKind::App).contains(&"foot".to_owned()));
+    }
+}
