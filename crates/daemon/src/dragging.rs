@@ -86,7 +86,10 @@ impl App {
             .iter()
             .position(|s| x < s.x + s.w / 2.0)
             .unwrap_or(slots.len());
-        Some(insert)
+        // Never into or past the fixed tail (Apps, Bin, Control panel): a
+        // drop there lands just before it.
+        let first_fixed = self.dock_order.len().saturating_sub(self.dock_fixed_count);
+        Some(insert.min(first_fixed))
     }
 
     /// The dock slot whose icon the pointer is centered over — a fold
@@ -101,10 +104,16 @@ impl App {
         if y < layout.card_top || y > layout.dock_hit_bottom {
             return None;
         }
-        layout.dock_slots.iter().position(|s| {
+        let slot = layout.dock_slots.iter().position(|s| {
             let fx = (x - s.x) / s.w;
             (0.25..0.75).contains(&fx)
-        })
+        })?;
+        // The fixed tail takes no folds — only the Bin takes drops (delete).
+        let id = self.dock_order.get(slot).and_then(|&e| self.entries.get(e)).map(|e| e.id.as_str());
+        if id.is_some_and(|id| crate::apps::is_dock_fixed(id) && !groups::is_trash(id)) {
+            return None;
+        }
+        Some(slot)
     }
 
     /// Drop an app centered on a dock icon: add it to a folder there, or
