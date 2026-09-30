@@ -126,7 +126,7 @@ const EDGE: f32 = 6.0;
 /// Air under the dock, and above the card's floor as a share of the field:
 /// the heap sits up under the dock with more room below.
 const GAP_TOP: f32 = 16.0;
-const GAP_BOTTOM_FRAC: f32 = 0.30;
+const GAP_BOTTOM_FRAC: f32 = 0.24;
 /// The whole heap sits this much lower than those gaps alone would put it:
 /// the top gap grows by it and the bottom one shrinks by it (Max: "a little
 /// lower").
