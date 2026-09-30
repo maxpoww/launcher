@@ -228,7 +228,7 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let cli_ids: Vec<String> = cli.iter().map(|e| e.id.clone()).collect();
                 kinds.extend(std::iter::repeat_n(EntryKind::App, cli.len()));
                 entries.extend(cli);
-                entries.push(settings_tile());
+                entries.push(control_panel_tile());
                 kinds.push(EntryKind::App);
                 entries.push(apps_grid_tile());
                 kinds.push(EntryKind::App);
@@ -347,20 +347,18 @@ pub fn drain_inotify(fd: std::os::fd::BorrowedFd<'_>) {
     while unsafe { libc::read(raw, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) } > 0 {}
 }
 
-/// Every visible top-level folder in the home directory, alphabetical,
-/// as entries opened with `xdg-open` — the unfiltered Files strip.
-/// (The daemon's usage sort then puts the most-opened ones first.)
-/// Entry id of Golem's configuration panel tile (the gear). It is one of
-/// the apps — gridded, pinnable, searchable — but a click opens the panel in
-/// the open box instead of launching anything (see `App::activate`).
-pub(crate) const SETTINGS_ID: &str = "golem-settings";
+/// Entry id of Golem's control panel tile (the gear). It is one of the
+/// apps — gridded, pinnable, searchable — but a click opens the control
+/// panel instead of launching anything (see `App::activate`). The id keeps
+/// its first name: it is stored in the dock's pins.
+pub(crate) const CONTROL_PANEL_ID: &str = "golem-settings";
 
-/// The configuration panel's tile. Synthesized, like the home folders: the
+/// The control panel's tile. Synthesized, like the home folders: the
 /// panel is part of waverunner, so no `.desktop` file stands behind it.
-fn settings_tile() -> AppEntry {
+fn control_panel_tile() -> AppEntry {
     AppEntry {
-        id: SETTINGS_ID.to_owned(),
-        name: crate::i18n::tr("Settings").to_owned(),
+        id: CONTROL_PANEL_ID.to_owned(),
+        name: crate::i18n::tr("Control panel").to_owned(),
         description: Some(crate::i18n::tr("Configure Golem").to_owned()),
         exec: String::new(),
         icon: Some("org.gnome.Settings".to_owned()),
@@ -374,7 +372,7 @@ fn settings_tile() -> AppEntry {
 /// the apps grid, or closes it (see `App::toggle_apps_grid`).
 pub(crate) const APPS_GRID_ID: &str = "golem-apps";
 
-/// The Apps button's tile. Synthesized like [`settings_tile`]; it lives in the
+/// The Apps button's tile. Synthesized like [`control_panel_tile`]; it lives in the
 /// grid too, so an unpinned button can always be dragged back to the dock.
 fn apps_grid_tile() -> AppEntry {
     AppEntry {
@@ -389,6 +387,9 @@ fn apps_grid_tile() -> AppEntry {
     }
 }
 
+/// Every visible top-level folder in the home directory, alphabetical,
+/// as entries opened with `xdg-open` — the unfiltered Files strip.
+/// (The daemon's usage sort then puts the most-opened ones first.)
 fn home_folders() -> Vec<AppEntry> {
     let Ok(home) = std::env::var("HOME") else {
         return Vec::new();

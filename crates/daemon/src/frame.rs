@@ -53,7 +53,7 @@ impl App {
 
     /// The layout at `extent` with the card at rest: no AGUA squash or
     /// stretch. For anything that must not wobble with the card's spring
-    /// (the settings panel lays its field out against this).
+    /// (the control panel lays its field out against this).
     pub(crate) fn layout_at_rest(&self, extent: f32) -> content::Layout {
         self.layout_stretched(extent, (1.0, 1.0))
     }
@@ -977,12 +977,12 @@ impl App {
         // anything settles.
         let paint = self.dock_surface_eased(dt);
         let (dock_bg, dock_ink, dock_highlight) = (paint.fill, paint.ink, paint.wash);
-        // The settings panel's field moves (orbits, layer moves, the open
+        // The control panel's field moves (orbits, layer moves, the open
         // setting), so frames keep coming while the card is up as the panel;
         // sinking with the card, it is drawn still.
         // Apps ↔ settings inside the open card: a snappy ease-out swap. With
         // the card not up there is nothing to swap, so it snaps.
-        let want = if self.settings_panel { 1.0 } else { 0.0 };
+        let want = if self.control_panel { 1.0 } else { 0.0 };
         if self.ui.target() == Target::Open {
             self.panel_mix += (want - self.panel_mix) * (1.0 - (-dt * 22.0).exp());
             if (want - self.panel_mix).abs() < 0.002 {
@@ -1001,7 +1001,7 @@ impl App {
             self.panel.reset();
             self.panel_reset_due = false;
         }
-        let panel_draw = if self.settings_panel || self.panel_mix > 0.001 {
+        let panel_draw = if self.control_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
             if open {
                 self.dirty = true;

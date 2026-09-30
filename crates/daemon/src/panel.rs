@@ -1,10 +1,11 @@
 //! The main card's two doors on the dock: the Apps button, which opens it on
-//! the apps grid (macOS's Launchpad), and Golem's configuration panel, which
-//! opens it as a field of settings.
+//! the apps grid (macOS's Launchpad), and Golem's **control panel** (its
+//! name since 2026-09-30), which opens it as a field of settings — also on
+//! Super+Ctrl (`waverunner-ctl control-panel`).
 //!
 //! OPTIONS offers the right control at the right moment, but it can't guess
 //! every one (a screen resolution, a scale). The panel is the place to go for
-//! the rest: a gear among the apps ([`crate::apps::SETTINGS_ID`]) that opens
+//! the rest: a gear among the apps ([`crate::apps::CONTROL_PANEL_ID`]) that opens
 //! the same card the apps live in, with the sections and search cleared away
 //! so the card itself is the surface. The dock band stays, so the gear that
 //! opened the panel is the one that closes it.
@@ -288,7 +289,7 @@ impl Panel {
             return;
         }
         tracing::debug!(
-            "settings: field laid out for {:.0}x{:.0} at scale {:.2} (fresh {fresh})",
+            "control panel: field laid out for {:.0}x{:.0} at scale {:.2} (fresh {fresh})",
             key.0, key.1, key.2
         );
         self.key = key;
@@ -426,7 +427,7 @@ impl Panel {
             // controls is theirs; anywhere else folds it back.
             if open.want > 0.5 && !content_hit(self.key, self.scale, pos, self.field) {
                 open.want = 0.0;
-                info!("settings: closing {}", self.pills[open.pill].label);
+                info!("control panel: closing {}", self.pills[open.pill].label);
             }
             return true;
         }
@@ -443,7 +444,7 @@ impl Panel {
         let d = p.drawn as usize;
         let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
         let (w, h) = (p.w[d] * k, p.h[d] * k);
-        info!("settings: opening {}", p.label);
+        info!("control panel: opening {}", p.label);
         self.open = Some(OpenBox {
             pill: i,
             k: 0.0,
@@ -536,7 +537,7 @@ impl Panel {
         }
         let size = (self.key.0, self.key.1);
         self.compose(size, true);
-        info!("settings: panel reset to its first layer order");
+        info!("control panel: panel reset to its first layer order");
     }
 
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
@@ -996,7 +997,7 @@ impl App {
     /// One-shot: pin the Settings gear to the dock, just before the Recycle
     /// Bin so the bin keeps its place. Same marker rule as `pin_trash_once`: a
     /// user who later unpins or moves it isn't overruled on the next start.
-    pub(crate) fn pin_settings_once(&mut self) {
+    pub(crate) fn pin_control_panel_once(&mut self) {
         let trash = format!("group:{}", groups::TRASH_ID);
         let slot = self
             .pins
@@ -1004,11 +1005,11 @@ impl App {
             .iter()
             .position(|p| *p == trash)
             .unwrap_or(self.pins.pins().len());
-        self.pin_once(apps::SETTINGS_ID, "settings-pinned", slot);
+        self.pin_once(apps::CONTROL_PANEL_ID, "settings-pinned", slot);
     }
 
     /// One-shot: pin the Apps button first on the dock, where Launchpad sits
-    /// on a Mac. Same marker rule as [`Self::pin_settings_once`].
+    /// on a Mac. Same marker rule as [`Self::pin_control_panel_once`].
     pub(crate) fn pin_apps_grid_once(&mut self) {
         self.pin_once(apps::APPS_GRID_ID, "apps-grid-pinned", 0);
     }
@@ -1026,15 +1027,15 @@ impl App {
     }
 
     /// The Apps button was clicked: open the card on the apps grid, or close
-    /// it if the apps are what's showing. Over the settings panel the apps
+    /// it if the apps are what's showing. Over the control panel the apps
     /// come back in place.
     pub(crate) fn toggle_apps_grid(&mut self) {
         self.close_group();
         if self.ui.target() == Target::Open {
-            if self.settings_panel {
-                info!("apps: in place of the settings panel");
-                self.settings_panel = false;
-                self.settings_from_apps = false;
+            if self.control_panel {
+                info!("apps: in place of the control panel");
+                self.control_panel = false;
+                self.control_panel_from_apps = false;
                 self.panel_reset_due = true;
                 self.schedule_frame();
             } else {
@@ -1050,23 +1051,23 @@ impl App {
     /// The gear was clicked: open the card as the panel, or close it if the
     /// panel is what's showing. With the card already open on the apps, the
     /// sections clear in place.
-    pub(crate) fn toggle_settings_panel(&mut self) {
+    pub(crate) fn toggle_control_panel(&mut self) {
         self.close_group();
         if self.ui.target() == Target::Open {
-            if self.settings_panel && self.settings_from_apps {
+            if self.control_panel && self.control_panel_from_apps {
                 // Entered from the apps: the gear goes back to them.
-                info!("settings: back to the apps");
-                self.settings_panel = false;
-                self.settings_from_apps = false;
+                info!("control panel: back to the apps");
+                self.control_panel = false;
+                self.control_panel_from_apps = false;
                 self.panel_reset_due = true;
                 self.schedule_frame();
-            } else if self.settings_panel {
-                info!("settings: closing the panel");
+            } else if self.control_panel {
+                info!("control panel: closing the panel");
                 self.handle_command(Command::Collapse);
             } else {
-                info!("settings: panel in place of the apps");
-                self.settings_panel = true;
-                self.settings_from_apps = true;
+                info!("control panel: panel in place of the apps");
+                self.control_panel = true;
+                self.control_panel_from_apps = true;
                 self.search.open = false;
                 self.search.query.clear();
                 self.panel_search();
@@ -1074,12 +1075,12 @@ impl App {
             }
             return;
         }
-        info!("settings: opening the panel");
-        self.settings_opening = true;
+        info!("control panel: opening the panel");
+        self.control_panel_opening = true;
         self.handle_command(Command::Toggle);
         // Refused (e.g. the dock is suppressed): don't let a later open
         // come up as the panel.
-        self.settings_opening = false;
+        self.control_panel_opening = false;
     }
 
     /// The field the panel lives in, in surface coordinates: the whole card

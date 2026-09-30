@@ -89,9 +89,10 @@ pub enum Command {
     /// or `toggle` (empty = toggle). The gear's page-1 switch sends the same
     /// thing; a verb so it can be bound to a key and driven without a pointer.
     FloatMode(String),
-    /// Open (or close) Golem's settings panel, as a click on the dock's gear
-    /// does: a key binding's way in, and the pointer-free way to look at it.
-    Settings,
+    /// Open (or close) Golem's control panel, as a click on the dock's gear
+    /// does: a key binding's way in (Super+Ctrl), and the pointer-free way
+    /// to look at it. `settings` is accepted as its old name.
+    ControlPanel,
     /// Trigger the dynamic OPTION offer with this affordance id (e.g.
     /// `media.playpause`, `git.commit`) — the same action a click on its pill
     /// runs. Exposed for scripting and for verifying the action end to end.
@@ -220,7 +221,7 @@ impl fmt::Display for Command {
             Command::DebugStats(None) => f.write_str("debug-stats"),
             Command::DebugStats(Some(p)) => write!(f, "debug-stats {p}"),
             Command::FloatMode(m) => write!(f, "float-mode {m}"),
-            Command::Settings => f.write_str("settings"),
+            Command::ControlPanel => f.write_str("control-panel"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
@@ -321,7 +322,7 @@ impl FromStr for Command {
             s if s.starts_with("debug-stats ") => Ok(Command::DebugStats(
                 s.trim_start_matches("debug-stats ").trim().parse().ok(),
             )),
-            "settings" => Ok(Command::Settings),
+            "control-panel" | "settings" => Ok(Command::ControlPanel),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
@@ -365,7 +366,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-module-box",
     "debug-stats",
     "options-trigger <id>",
-    "settings",
+    "control-panel",
     "overview-on",
     "overview-off",
     "resize-drag-on",
@@ -473,7 +474,7 @@ mod tests {
                 | Command::DebugModuleBox
                 | Command::DebugStats(_)
                 | Command::FloatMode(_)
-                | Command::Settings
+                | Command::ControlPanel
                 | Command::OptionsTrigger(_)
                 | Command::OverviewOn
                 | Command::OverviewOff
@@ -517,7 +518,7 @@ mod tests {
         Command::DebugModuleBox,
         Command::DebugStats(None),
         Command::FloatMode(String::new()),
-        Command::Settings,
+        Command::ControlPanel,
             Command::OptionsTrigger("media.playpause".into()),
             Command::OverviewOn,
             Command::OverviewOff,

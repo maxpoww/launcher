@@ -1166,10 +1166,10 @@ pub struct FrameInput<'a> {
     /// While a box is open: entry indices of its members for the
     /// magnified 3×3 app grid. Empty when no box is open.
     pub open_box_members: &'a [usize],
-    /// The card is the configuration panel: draw its sections and search
+    /// The card is the control panel: draw its sections and search
     /// empty (the dock band stays).
     pub panel: bool,
-    /// The settings panel's field this frame (see `panel.rs`).
+    /// The control panel's field this frame (see `panel.rs`).
     pub panel_draw: Option<&'a crate::panel::PanelDraw>,
     /// Apps ↔ settings: 0 = the apps, 1 = the panel. Between, the settings
     /// field rises in from the card's bottom edge pushing the apps up and
@@ -2484,7 +2484,7 @@ pub fn scene(
         scene.grids.push(g);
     }
 
-    // The settings panel's field (see `panel.rs`): its pills and open
+    // The control panel's field (see `panel.rs`): its pills and open
     // setting clipped to the card like the sections they replace; their
     // glows arrive with the card, not before it (overlay shadows are not
     // clipped, so they also wait for the field to be in).

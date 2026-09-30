@@ -53,7 +53,7 @@ mod notif;
 mod notif_icons;
 mod options;
 mod order;
-// Golem's configuration panel: the main card, opened empty.
+// Golem's control panel: the main card, opened empty.
 mod panel;
 mod pager;
 mod pages;
@@ -625,12 +625,12 @@ fn main() -> anyhow::Result<()> {
         app_group: None,
         dock_stack: None,
         dir_stack: None,
-        settings_panel: false,
-        settings_opening: false,
+        control_panel: false,
+        control_panel_opening: false,
         panel: panel::Panel::default(),
         panel_mix: 0.0,
         panel_reset_due: false,
-        settings_from_apps: false,
+        control_panel_from_apps: false,
         box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
@@ -1018,7 +1018,7 @@ fn main() -> anyhow::Result<()> {
     // user can move or unpin it freely afterwards — we never re-pin it).
     app.pin_trash_once();
     // …and the Settings gear, just before it (same one-shot rule).
-    app.pin_settings_once();
+    app.pin_control_panel_once();
     // …and the Apps button, first on the dock (Launchpad's place).
     app.pin_apps_grid_once();
     // If a previous daemon died while STAGE mode was up, its gap rules and its
@@ -1533,15 +1533,15 @@ pub struct App {
     dock_stack: Option<usize>,
     /// A pinned directory whose content stack is open above the dock.
     dir_stack: Option<boxes::DirStack>,
-    /// The open card is the configuration panel: sections and search are
+    /// The open card is the control panel: sections and search are
     /// cleared away (see `panel.rs`). Set as the card opens from the gear,
     /// cleared by any other open — so it holds through the close animation
     /// and the card sinks empty.
-    settings_panel: bool,
+    control_panel: bool,
     /// The open in flight was asked for by the gear (read once, as the card
     /// crosses into Open).
-    settings_opening: bool,
-    /// The settings panel's field: its pills, layers and open setting.
+    control_panel_opening: bool,
+    /// The control panel's field: its pills, layers and open setting.
     panel: panel::Panel,
     /// Apps ↔ settings, eased: 0 = the apps grid, 1 = the panel. Only the
     /// swap inside an open card animates; a card opening straight into
@@ -1552,7 +1552,7 @@ pub struct App {
     panel_reset_due: bool,
     /// The panel was entered from the open apps grid: the gear goes back to
     /// the apps instead of closing the card.
-    settings_from_apps: bool,
+    control_panel_from_apps: bool,
     /// Whether the currently open box was opened *from the dock* (a dock
     /// folder or pinned directory), as opposed to a grid folder tile. Arms
     /// the dock hover-switch even when the box opened into the grid.
@@ -2474,8 +2474,8 @@ impl App {
             // matches the current mode is a REPAIR — rule re-asserted, windows
             // swept — so `waverunner-ctl floating on` is also the hand lever
             // for a desk where the compositor lost the rule.
-            Command::Settings => {
-                self.toggle_settings_panel();
+            Command::ControlPanel => {
+                self.toggle_control_panel();
                 return;
             }
             Command::FloatMode(mode) => {
@@ -2734,7 +2734,7 @@ impl App {
                 Target::Open => {
                     self.rest_hide_pending = false;
                     self.hide_deadline = None;
-                    self.settings_panel = self.settings_opening;
+                    self.control_panel = self.control_panel_opening;
                     // A reset still owed from the last visit: do it now,
                     // before the card has risen (the panel is not yet seen).
                     if self.panel_reset_due {
@@ -2742,15 +2742,15 @@ impl App {
                         self.panel_reset_due = false;
                     }
                     // The panel opens unsearched.
-                    if self.settings_panel {
+                    if self.control_panel {
                         self.search.open = false;
                         self.search.query.clear();
                         self.panel.set_query("");
                     }
-                    self.settings_from_apps = false;
+                    self.control_panel_from_apps = false;
                     // The card rises straight into its view: no apps↔panel
                     // swap to animate.
-                    self.panel_mix = if self.settings_panel { 1.0 } else { 0.0 };
+                    self.panel_mix = if self.control_panel { 1.0 } else { 0.0 };
                 }
                 _ => {}
             }
@@ -4415,7 +4415,7 @@ impl App {
             })
             // On the panel only the dock band and the search pill are live
             // (the panel's own field takes clicks through `panel_click`).
-            .filter(|h| !self.settings_panel || matches!(h, Hit::DockIcon(_) | Hit::SearchButton))
+            .filter(|h| !self.control_panel || matches!(h, Hit::DockIcon(_) | Hit::SearchButton))
     }
 
     /// Recompute which item the pointer is over; redraw on change.
@@ -4707,8 +4707,8 @@ impl App {
                 }
             }
             Hit::SearchButton => {
-                // On the settings panel the search searches the settings.
-                if self.settings_panel {
+                // On the control panel the search searches the settings.
+                if self.control_panel {
                     self.search.open = !self.search.open;
                     if !self.search.open {
                         self.search.query.clear();
@@ -4813,8 +4813,8 @@ impl App {
         }
         // The Settings gear launches nothing: it opens the configuration
         // panel — the main card, emptied (see `panel.rs`).
-        if entry.id == apps::SETTINGS_ID {
-            self.toggle_settings_panel();
+        if entry.id == apps::CONTROL_PANEL_ID {
+            self.toggle_control_panel();
             return;
         }
         // Nor does the Apps button: it opens (or closes) the apps grid.
@@ -5181,8 +5181,8 @@ impl App {
                 }
                 // Page the section under the pointer (each scrolls
                 // independently). An open box was already handled above.
-                // The settings panel: the wheel moves through its layers.
-                if self.settings_panel {
+                // The control panel: the wheel moves through its layers.
+                if self.control_panel {
                     self.panel_wheel(value);
                     return;
                 }
@@ -5214,7 +5214,7 @@ impl App {
         if self.gesture.dragging.is_some() || self.box_drag.is_some() {
             return;
         }
-        if self.ui.target() == Target::Open && !self.settings_panel {
+        if self.ui.target() == Target::Open && !self.control_panel {
             if self.stack_open() {
                 self.box_page_scroll(value);
             } else if let Some(section) = self
@@ -5304,11 +5304,11 @@ impl App {
                     return;
                 }
                 // Likewise an open setting on the panel folds back first.
-                if self.settings_panel && self.panel_escape() {
+                if self.control_panel && self.panel_escape() {
                     return;
                 }
                 // …then its search clears, before the card closes.
-                if self.settings_panel && (self.search.open || !self.search.query.is_empty()) {
+                if self.control_panel && (self.search.open || !self.search.query.is_empty()) {
                     self.search.query.clear();
                     self.search.open = false;
                     self.panel_search();
@@ -5321,7 +5321,7 @@ impl App {
             }
             Keysym::Return | Keysym::KP_Enter => {
                 // On the panel, Enter opens the best match of the search.
-                if self.settings_panel {
+                if self.control_panel {
                     self.panel_open_best();
                     return;
                 }
@@ -5330,7 +5330,7 @@ impl App {
                 }
             }
             Keysym::BackSpace => {
-                if self.settings_panel {
+                if self.control_panel {
                     if self.search.query.pop().is_some() {
                         if self.search.query.is_empty() {
                             self.search.open = false;
@@ -5386,9 +5386,9 @@ impl App {
                 if let Some(text) = utf8 {
                     let printable: String = text.chars().filter(|c| !c.is_control()).collect();
                     if !printable.is_empty() {
-                        // On the settings panel, typing searches the
+                        // On the control panel, typing searches the
                         // settings: matches rise, the rest sink back.
-                        if self.settings_panel {
+                        if self.control_panel {
                             self.search.open = true;
                             self.search.query.push_str(&printable);
                             self.panel_search();
@@ -5455,8 +5455,8 @@ impl App {
         }
         self.search.open = true;
         self.search.query.push_str(&printable);
-        // On the settings panel a paste searches the settings.
-        if self.settings_panel {
+        // On the control panel a paste searches the settings.
+        if self.control_panel {
             self.panel_search();
             return;
         }
@@ -6209,11 +6209,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 // not the launcher.
                                 app.close_group();
                             } else if let Some(pos) = app.pointer_pos.filter(|&p| {
-                                app.settings_panel
+                                app.control_panel
                                     && app.ui.target() == Target::Open
                                     && !app.outside_card(&app.current_layout(), p)
                             }) {
-                                // The settings panel's field: a pill opens
+                                // The control panel's field: a pill opens
                                 // its setting; an open setting's empty space
                                 // folds it back.
                                 app.panel_click(pos);
