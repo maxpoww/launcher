@@ -43,38 +43,39 @@ use waverunner_proto::Command;
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [(&str, u8); 29] = [
-    // Near: the five people reach for most.
-    ("Resolution", 0),
-    ("Scale", 0),
-    ("Wi-Fi", 0),
-    ("Sound output", 0),
-    ("Dark mode", 0),
-    ("Brightness", 1),
-    ("Bluetooth", 1),
-    ("Volume", 1),
-    ("Wallpaper", 1),
-    ("Night light", 1),
-    ("Notifications", 1),
-    ("Accent colour", 2),
-    ("Keyboard layout", 2),
-    ("Power mode", 2),
-    ("Touchpad speed", 2),
-    ("Language", 2),
-    ("Microphone", 2),
-    ("Battery", 2),
-    ("Time zone", 2),
+const SETTINGS: [(&str, u8, &str); 29] = [
+    // (name, first layer, search keywords: what else people call it or
+    // look for it by). Near: the five people reach for most.
+    ("Resolution", 0, "display screen monitor size pixels"),
+    ("Scale", 0, "display screen zoom size hidpi text bigger smaller"),
+    ("Wi-Fi", 0, "wifi wireless network internet connection"),
+    ("Sound output", 0, "audio speakers speaker headphones output"),
+    ("Dark mode", 0, "theme appearance light night colours colors"),
+    ("Brightness", 1, "display screen backlight dim"),
+    ("Bluetooth", 1, "wireless devices headphones pairing"),
+    ("Volume", 1, "audio sound loud quiet mute"),
+    ("Wallpaper", 1, "background desktop picture image appearance"),
+    ("Night light", 1, "display screen warm blue light sunset eyes"),
+    ("Notifications", 1, "alerts do not disturb dnd messages"),
+    ("Accent colour", 2, "color theme appearance highlight"),
+    ("Keyboard layout", 2, "input language typing keys"),
+    ("Power mode", 2, "battery performance energy saver"),
+    ("Touchpad speed", 2, "trackpad mouse pointer cursor gestures"),
+    ("Language", 2, "region locale translation input"),
+    ("Microphone", 2, "audio input mic recording sound"),
+    ("Battery", 2, "power charge energy"),
+    ("Time zone", 2, "clock date time region"),
     // Far: the set-once settings, the largest group.
-    ("Natural scrolling", 3),
-    ("Default apps", 3),
-    ("Mouse speed", 3),
-    ("Printers", 3),
-    ("Privacy", 3),
-    ("Updates", 3),
-    ("About Golem", 3),
-    ("Users", 3),
-    ("Storage", 3),
-    ("Accessibility", 3),
+    ("Natural scrolling", 3, "touchpad trackpad mouse scroll direction"),
+    ("Default apps", 3, "applications browser open with"),
+    ("Mouse speed", 3, "pointer cursor sensitivity"),
+    ("Printers", 3, "print scanner"),
+    ("Privacy", 3, "security permissions camera location"),
+    ("Updates", 3, "upgrade system software version"),
+    ("About Golem", 3, "system version info hardware computer"),
+    ("Users", 3, "accounts password login people"),
+    ("Storage", 3, "disk space files drive"),
+    ("Accessibility", 3, "a11y vision hearing zoom contrast"),
 ];
 
 /// How many depth layers the field has (0 near … LAYERS-1 far).
@@ -320,6 +321,8 @@ struct Exit {
 #[derive(Clone)]
 struct Pill {
     label: &'static str,
+    /// What else people call it or look for it by (search).
+    keywords: &'static str,
     /// Which settings travel together (the layer it started on).
     group: u8,
     /// The layer it is on now, and the one it is drawn as (they differ only
@@ -387,9 +390,10 @@ impl Pill {
         }
     }
 
-    /// Whether it matches a (lowercased) search.
+    /// Whether it matches a (lowercased) search: in its name or any of its
+    /// keywords.
     fn matches(&self, query: &str) -> bool {
-        self.label.to_lowercase().contains(query)
+        self.label.to_lowercase().contains(query) || self.keywords.contains(query)
     }
 }
 
@@ -483,8 +487,9 @@ impl Panel {
             let mut rng = Rng(0x85EB_CA6B);
             self.pills = SETTINGS
                 .iter()
-                .map(|&(label, group)| Pill {
+                .map(|&(label, group, keywords)| Pill {
                     label,
+                    keywords,
                     group,
                     layer: group,
                     drawn: group,
@@ -1805,7 +1810,7 @@ mod tests {
             p.step(1.0 / 60.0, None);
         }
         for q in &p.pills {
-            let hit = q.label.to_lowercase().contains("sc");
+            let hit = q.matches("sc");
             if hit {
                 assert!(q.focus > 0.95, "{} matches 'sc' and should rise", q.label);
                 assert!(q.focus_scale() >= 1.0, "{} rises to the near size", q.label);
@@ -1824,6 +1829,18 @@ mod tests {
             p.step(1.0 / 60.0, None);
         }
         assert!(p.pills.iter().all(|q| q.focus.abs() < 0.01));
+    }
+
+    #[test]
+    fn keywords_find_settings_by_what_they_are_about() {
+        let p = panel();
+        let found = |q: &str| -> Vec<&str> {
+            p.pills.iter().filter(|x| x.matches(q)).map(|x| x.label).collect()
+        };
+        let display = found("display");
+        assert!(display.contains(&"Resolution") && display.contains(&"Scale"), "display → {display:?}");
+        assert!(found("wifi").contains(&"Wi-Fi"));
+        assert!(found("audio").contains(&"Volume"));
     }
 
     #[test]
