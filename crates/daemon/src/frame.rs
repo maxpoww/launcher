@@ -993,6 +993,14 @@ impl App {
         } else {
             self.panel_mix = want;
         }
+        // The panel starts afresh on each visit, reset while it is out of
+        // sight: pushed out behind the apps, or the card fully closed.
+        if self.panel_reset_due
+            && (self.panel_mix <= 0.001 || (self.ui.target() != Target::Open && !self.ui.is_animating()))
+        {
+            self.panel.reset();
+            self.panel_reset_due = false;
+        }
         let panel_draw = if self.settings_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
             if open {

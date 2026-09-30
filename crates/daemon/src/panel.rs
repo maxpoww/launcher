@@ -512,13 +512,31 @@ impl Panel {
     }
 
     /// Forget any open setting (the panel is opening afresh).
+    ///
+    /// Every visit starts from the beginning (Max, 2026-09-30): the layers
+    /// back in their first order, every pill home and at rest, no search,
+    /// nothing open. Run out of sight (see `App::panel_reset_due`).
     pub(crate) fn reset(&mut self) {
         self.open = None;
         self.hot = None;
         self.query.clear();
+        if self.pills.is_empty() {
+            return;
+        }
+        self.shift = 0;
         for p in &mut self.pills {
             p.focus = 0.0;
+            p.layer = p.group;
+            p.drawn = p.group;
+            p.exit = None;
+            p.sc = 1.0;
+            p.op = 1.0;
+            p.lift = 0.0;
+            p.rate = 1.0;
         }
+        let size = (self.key.0, self.key.1);
+        self.compose(size, true);
+        info!("settings: panel reset to its first layer order");
     }
 
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
@@ -1017,6 +1035,7 @@ impl App {
                 info!("apps: in place of the settings panel");
                 self.settings_panel = false;
                 self.settings_from_apps = false;
+                self.panel_reset_due = true;
                 self.schedule_frame();
             } else {
                 info!("apps: closing the grid");
@@ -1033,13 +1052,13 @@ impl App {
     /// sections clear in place.
     pub(crate) fn toggle_settings_panel(&mut self) {
         self.close_group();
-        self.panel.reset();
         if self.ui.target() == Target::Open {
             if self.settings_panel && self.settings_from_apps {
                 // Entered from the apps: the gear goes back to them.
                 info!("settings: back to the apps");
                 self.settings_panel = false;
                 self.settings_from_apps = false;
+                self.panel_reset_due = true;
                 self.schedule_frame();
             } else if self.settings_panel {
                 info!("settings: closing the panel");
@@ -1248,6 +1267,21 @@ mod tests {
         p.set_query("sc");
         assert!(p.open_best());
         assert_eq!(p.pills[p.open.as_ref().unwrap().pill].label, "Scale");
+    }
+
+    #[test]
+    fn a_reset_brings_back_the_first_layer_order() {
+        let mut p = panel();
+        let first: Vec<(u8, (f32, f32))> = p.pills.iter().map(|q| (q.layer, q.home)).collect();
+        p.shift_layers(1);
+        p.set_query("wifi");
+        p.reset();
+        assert_eq!(p.shift, 0);
+        for (q, (layer, home)) in p.pills.iter().zip(&first) {
+            assert_eq!(q.layer, *layer, "{} back on its first layer", q.label);
+            assert!((q.home.0 - home.0).abs() < 0.5 && (q.home.1 - home.1).abs() < 0.5, "{} back home", q.label);
+            assert!(q.exit.is_none() && q.focus == 0.0);
+        }
     }
 
     #[test]

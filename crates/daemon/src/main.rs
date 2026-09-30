@@ -629,6 +629,7 @@ fn main() -> anyhow::Result<()> {
         settings_opening: false,
         panel: panel::Panel::default(),
         panel_mix: 0.0,
+        panel_reset_due: false,
         settings_from_apps: false,
         box_from_dock: false,
         box_drag: None,
@@ -1546,6 +1547,9 @@ pub struct App {
     /// swap inside an open card animates; a card opening straight into
     /// either view starts there.
     panel_mix: f32,
+    /// The panel should start afresh once it is out of sight (see
+    /// `panel::Panel::reset`).
+    panel_reset_due: bool,
     /// The panel was entered from the open apps grid: the gear goes back to
     /// the apps instead of closing the card.
     settings_from_apps: bool,
@@ -2731,6 +2735,12 @@ impl App {
                     self.rest_hide_pending = false;
                     self.hide_deadline = None;
                     self.settings_panel = self.settings_opening;
+                    // A reset still owed from the last visit: do it now,
+                    // before the card has risen (the panel is not yet seen).
+                    if self.panel_reset_due {
+                        self.panel.reset();
+                        self.panel_reset_due = false;
+                    }
                     // The panel opens unsearched.
                     if self.settings_panel {
                         self.search.open = false;
@@ -2743,6 +2753,12 @@ impl App {
                     self.panel_mix = if self.settings_panel { 1.0 } else { 0.0 };
                 }
                 _ => {}
+            }
+            // Leaving the open card: the panel starts afresh next time — reset
+            // once it is out of sight (the frame loop does it), never while it
+            // is still visibly sinking.
+            if prev == Target::Open && next != Target::Open {
+                self.panel_reset_due = true;
             }
             // Minimized dock tiles hide while the launcher is open and return
             // when it closes (`minimized_entries` gate) — rebuild the dock
