@@ -77,9 +77,7 @@ impl App {
         } else {
             slots.iter().filter(|&&d| d / per_page == page).map(|&d| d % per_page).max()
         };
-        // At least two rows once there is anything (a one-row page keeps an
-        // empty row under it); an empty page keeps one (Max, 2026-09-30).
-        let needed = last.map_or(1, |l| (l / cols + 1).max(2));
+        let needed = last.map_or(1, |l| l / cols + 1);
         let floor = if self.stack_open() { content::OPEN_BOX_COLS } else { 1 };
         let keep = needed.max(floor).min(rows);
         (rows - keep) as f32 * content::GRID_CELL_H * self.icon_scale()
