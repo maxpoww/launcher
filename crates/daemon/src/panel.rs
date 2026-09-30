@@ -134,7 +134,7 @@ const DROP: f32 = 34.0;
 /// The rows, top to bottom, as each one's width against the widest: brick
 /// courses on a gentle ellipse, so the middle reaches the sides and the
 /// top and bottom rows are held in — wide, and a little round.
-const ROWS: [f32; 5] = [0.64, 0.88, 1.0, 0.88, 0.64];
+const ROWS: [f32; 5] = [0.74, 0.92, 1.0, 0.92, 0.74];
 /// How far a pill strays from its brick spot, as a share of the room around
 /// it (x: of its row's mean gap, y: of the row height): enough to read
 /// organic, never enough to break the courses.
@@ -146,15 +146,20 @@ fn gaps(h: f32, s: f32) -> (f32, f32) {
     ((GAP_TOP + DROP) * s, (GAP_BOTTOM_FRAC * h - DROP * s).max(GAP_TOP * s))
 }
 
-/// How many of `n` pills each row holds: in proportion to its width, the
-/// remainder to the middle. Neighbouring rows then hold different counts,
-/// so their gaps never line up — the pills cross like bricks.
+/// How many of `n` pills each row holds: in proportion to its width
+/// (largest remainders get the leftovers, so no row is crowded — every row
+/// ends up about as dense as the others). Rows of different widths and
+/// counts put their gaps in different places: the pills cross like bricks.
 fn row_counts(n: usize) -> Vec<usize> {
     let total: f32 = ROWS.iter().sum();
-    let mut counts: Vec<usize> = ROWS.iter().map(|f| ((n as f32) * f / total).round() as usize).collect();
+    let exact: Vec<f32> = ROWS.iter().map(|f| n as f32 * f / total).collect();
+    let mut counts: Vec<usize> = exact.iter().map(|e| e.floor() as usize).collect();
+    let mut rest: Vec<usize> = (0..ROWS.len()).collect();
+    rest.sort_by(|&a, &b| (exact[b] - exact[b].floor()).total_cmp(&(exact[a] - exact[a].floor())));
     let placed: usize = counts.iter().sum();
-    let mid = ROWS.len() / 2;
-    counts[mid] = (counts[mid] + n).saturating_sub(placed);
+    for &r in rest.iter().cycle().take(n.saturating_sub(placed)) {
+        counts[r] += 1;
+    }
     counts
 }
 
