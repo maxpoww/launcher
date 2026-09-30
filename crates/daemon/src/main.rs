@@ -2745,9 +2745,13 @@ impl App {
                         self.panel.reset();
                         self.panel_reset_due = false;
                     }
-                    // The scroll that summoned the card must not turn a layer.
+                    // The scroll that summoned the card must not turn a layer,
+                    // and the panel opens unsearched.
                     if self.settings_panel {
                         self.panel.hold_wheel();
+                        self.search.open = false;
+                        self.search.query.clear();
+                        self.panel.set_query("");
                     }
                     // The card rises straight into its view: no apps↔panel
                     // swap to animate.
@@ -4700,10 +4704,14 @@ impl App {
                 }
             }
             Hit::SearchButton => {
-                // On the settings panel, search means the apps: back to them.
+                // On the settings panel the search searches the settings.
                 if self.settings_panel {
-                    self.settings_panel = false;
-                    self.settings_from_apps = false;
+                    self.search.open = !self.search.open;
+                    if !self.search.open {
+                        self.search.query.clear();
+                    }
+                    self.panel_search();
+                    return;
                 }
                 self.search.open = !self.search.open;
                 if !self.search.open {
@@ -5287,8 +5295,15 @@ impl App {
                     self.close_group();
                     return;
                 }
-                // Likewise an open setting on the panel folds back first.
+                // Likewise an open setting on the panel folds back first,
+                // then its search clears.
                 if self.settings_panel && self.panel_escape() {
+                    return;
+                }
+                if self.settings_panel && (self.search.open || !self.search.query.is_empty()) {
+                    self.search.query.clear();
+                    self.search.open = false;
+                    self.panel_search();
                     return;
                 }
                 self.search.query.clear();
@@ -5297,11 +5312,25 @@ impl App {
                 self.dismiss();
             }
             Keysym::Return | Keysym::KP_Enter => {
+                // On the panel, Enter opens the best match of the search.
+                if self.settings_panel {
+                    self.panel_open_best();
+                    return;
+                }
                 if let Some((s, i)) = self.search.selected.and_then(|i| self.flat_to_pos(i)) {
                     self.activate_hit(Hit::GridCell(s, i));
                 }
             }
             Keysym::BackSpace => {
+                if self.settings_panel {
+                    if self.search.query.pop().is_some() {
+                        if self.search.query.is_empty() {
+                            self.search.open = false;
+                        }
+                        self.panel_search();
+                    }
+                    return;
+                }
                 if self.search.query.pop().is_some() {
                     // Editing the query means the user is searching again —
                     // release the drag-from-Install grid hold.
@@ -5349,9 +5378,14 @@ impl App {
                 if let Some(text) = utf8 {
                     let printable: String = text.chars().filter(|c| !c.is_control()).collect();
                     if !printable.is_empty() {
-                        // Typing on the panel means looking for something:
-                        // the apps come back with the search.
-                        self.settings_panel = false;
+                        // On the settings panel, typing searches the
+                        // settings: matches rise, the rest sink back.
+                        if self.settings_panel {
+                            self.search.open = true;
+                            self.search.query.push_str(&printable);
+                            self.panel_search();
+                            return;
+                        }
                         self.search.open = true;
                         // Typing means the user is searching again — release
                         // the drag-from-Install grid hold.
@@ -5412,8 +5446,13 @@ impl App {
             return;
         }
         self.search.open = true;
-        self.install_drag_reset = false;
         self.search.query.push_str(&printable);
+        // On the settings panel a paste searches the settings.
+        if self.settings_panel {
+            self.panel_search();
+            return;
+        }
+        self.install_drag_reset = false;
         self.refilter();
     }
 

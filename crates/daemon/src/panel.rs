@@ -264,6 +264,11 @@ const WHEEL_QUIET: Duration = Duration::from_millis(300);
 const SETTLE_RATE: f32 = 6.0;
 const LIFT_RATE: f32 = 12.0;
 const LIFT: f32 = 0.07;
+/// Search: how fast pills rise or sink as the query changes, how much a
+/// miss shrinks, and how far it dims.
+const SEARCH_RATE: f32 = 14.0;
+const SEARCH_SHRINK: f32 = 0.15;
+const SEARCH_DIM: f32 = 0.7;
 /// The open-box morph's rate.
 const OPEN_RATE: f32 = 14.0;
 /// At rest the only motion is the tiny orbits (well under a pixel a second),
@@ -331,6 +336,10 @@ struct Pill {
     anchor: (f32, f32),
     /// Drawn centre this frame.
     pos: (f32, f32),
+    /// Search focus, easing: +1 a match (it rises to the front: the near
+    /// layer's size and light), -1 a miss (it sinks back and dims), 0 no
+    /// search.
+    focus: f32,
     /// Size multipliers easing home after a layer change — the outline
     /// (`sc`) and the text (`tsc`) separately, so the outline can lead: a
     /// growing pill's border opens outward first and the text grows into
@@ -365,6 +374,22 @@ impl Pill {
     /// centre (Max, 2026-09-30: they seemed to move inward as they grew).
     fn slot(&self) -> (f32, f32) {
         (self.w[0], self.h[0])
+    }
+
+    /// The extra size its search focus gives it: a match eases up to the
+    /// near layer's size, a miss shrinks a little.
+    fn focus_scale(&self) -> f32 {
+        let d = self.drawn as usize;
+        if self.focus >= 0.0 {
+            lerp(1.0, LAYER_SCALE[0] / LAYER_SCALE[d], self.focus)
+        } else {
+            1.0 - SEARCH_SHRINK * -self.focus
+        }
+    }
+
+    /// Whether it matches a (lowercased) search.
+    fn matches(&self, query: &str) -> bool {
+        self.label.to_lowercase().contains(query)
     }
 }
 
@@ -415,6 +440,8 @@ pub(crate) struct Panel {
     clock: f32,
     wheel: f64,
     wheel_at: Option<Instant>,
+    /// The search, lowercased (empty: none).
+    query: String,
     /// Scroll input is ignored until this: set as the panel opens and pushed
     /// on by every event that still arrives, so the scroll that summoned
     /// the dock (and a touchpad's momentum after it) never turns a layer —
@@ -467,6 +494,7 @@ impl Panel {
                     home: (0.0, 0.0),
                     anchor: (0.0, 0.0),
                     pos: (0.0, 0.0),
+                    focus: 0.0,
                     sc: 1.0,
                     tsc: 1.0,
                     op: 1.0,
@@ -588,7 +616,7 @@ impl Panel {
                 continue;
             }
             let d = p.drawn as usize;
-            let k = p.sc * (1.0 + LIFT * p.lift);
+            let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
             let (hw, hh) = (p.w[d] * k / 2.0, p.h[d] * k / 2.0);
             if (fx - p.pos.0).abs() <= hw && (fy - p.pos.1).abs() <= hh && best.is_none_or(|(_, l)| p.drawn < l) {
                 best = Some((i, p.drawn));
@@ -611,9 +639,39 @@ impl Panel {
         let Some(i) = self.pill_at(pos) else {
             return false;
         };
+        self.open_pill(i);
+        true
+    }
+
+    /// Set the search (from the card's search pill): matches rise to the
+    /// front, the rest sink back and dim.
+    pub(crate) fn set_query(&mut self, query: &str) {
+        self.query = query.trim().to_lowercase();
+    }
+
+    /// Open the best match of the search: the first matching pill, nearest
+    /// layer first. Returns whether there was one.
+    fn open_best(&mut self) -> bool {
+        if self.query.is_empty() || self.open.is_some() {
+            return false;
+        }
+        let best = (0..self.pills.len())
+            .filter(|&i| self.pills[i].exit.is_none() && self.pills[i].matches(&self.query))
+            .min_by_key(|&i| self.pills[i].layer);
+        match best {
+            Some(i) => {
+                self.open_pill(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Grow pill `i` into its setting.
+    fn open_pill(&mut self, i: usize) {
         let p = &self.pills[i];
         let d = p.drawn as usize;
-        let k = p.sc * (1.0 + LIFT * p.lift);
+        let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
         let (w, h) = (p.w[d] * k, p.h[d] * k);
         info!("settings: opening {}", p.label);
         self.open = Some(OpenBox {
@@ -623,7 +681,17 @@ impl Panel {
             from: Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h),
         });
         self.hot = None;
-        true
+    }
+
+    /// Where a pill's search focus is heading: see [`Pill::focus`].
+    fn focus_target(&self, p: &Pill) -> f32 {
+        if self.query.is_empty() {
+            0.0
+        } else if p.matches(&self.query) {
+            1.0
+        } else {
+            -1.0
+        }
     }
 
     /// Whether anything is moving beyond the idle orbits: a layer leaving or
@@ -639,6 +707,7 @@ impl Panel {
             p.exit.is_some()
                 || (p.sc - 1.0).abs() > 0.002
                 || (p.tsc - 1.0).abs() > 0.002
+                || (p.focus - self.focus_target(p)).abs() > 0.002
                 || p.op < 0.995
                 || (p.lift - lift_to).abs() > 0.002
                 || (p.rate - rate_to).abs() > 0.01
@@ -673,6 +742,10 @@ impl Panel {
     pub(crate) fn reset(&mut self) {
         self.open = None;
         self.hot = None;
+        self.query.clear();
+        for p in &mut self.pills {
+            p.focus = 0.0;
+        }
         if self.pills.is_empty() {
             return;
         }
@@ -703,6 +776,7 @@ impl Panel {
         }
         self.hot = if self.open.is_none() { pointer.and_then(|p| self.pill_at(p)) } else { None };
         let s = self.scale;
+        let focus_to: Vec<f32> = self.pills.iter().map(|p| self.focus_target(p)).collect();
         for (i, p) in self.pills.iter_mut().enumerate() {
             let hot = self.hot == Some(i);
             if p.exit.is_none() {
@@ -715,6 +789,7 @@ impl Panel {
             // The outline leads when growing, the text when shrinking.
             let (box_rate, text_rate) = if p.sc < 1.0 { (LEAD_RATE, SIZE_RATE) } else { (SIZE_RATE, LEAD_RATE) };
             p.sc = approach(p.sc, 1.0, box_rate, dt);
+            p.focus = approach(p.focus, focus_to[i], SEARCH_RATE, dt);
             p.tsc = approach(p.tsc, 1.0, text_rate, dt);
             if let Some(exit) = &mut p.exit {
                 exit.k = (exit.k + dt / EXIT_SECS).min(1.0);
@@ -761,6 +836,8 @@ impl Panel {
                 Some(e) if e.dir > 0 => 10,
                 Some(_) => -1,
                 None if p.lift > 0.02 => 9,
+                // A search match rises over everything at rest.
+                None if p.focus > 0.5 => 8,
                 None => 3 - p.drawn as i32,
             }
         };
@@ -800,12 +877,24 @@ impl Panel {
             if a < 0.004 {
                 continue;
             }
-            let k = p.sc * grow * shrink * (1.0 + LIFT * p.lift);
+            // Search: a match rises to the near layer's size and light, a
+            // miss sinks back and dims.
+            let fs = p.focus_scale();
+            let rise = p.focus.max(0.0);
+            let a = a * (1.0 - SEARCH_DIM * (-p.focus).max(0.0));
+            let k = p.sc * grow * shrink * fs * (1.0 + LIFT * p.lift);
             let (w, h) = (p.w[d] * k, p.h[d] * k);
             let rect = Rect::new(f.x + p.pos.0 + dx - w / 2.0, f.y + p.pos.1 + dy - h / 2.0, w, h);
             let radius = h / 2.0;
-            out.glows.push(pill_glow(d, paint.bright, rect, s, a));
-            let c = pill_wash(d, paint.bright, p.lift);
+            let glow = pill_glow(d, paint.bright, rect, s, a);
+            let near_glow = pill_glow(0, paint.bright, rect, s, a);
+            out.glows.push(ShadowInst {
+                blur: lerp(glow.blur, near_glow.blur, rise),
+                color: [glow.color[0], glow.color[1], glow.color[2], lerp(glow.color[3], near_glow.color[3], rise)],
+                ..glow
+            });
+            let (c0, c1) = (pill_wash(d, paint.bright, p.lift), pill_wash(0, paint.bright, p.lift));
+            let c = [lerp(c0[0], c1[0], rise), lerp(c0[1], c1[1], rise), lerp(c0[2], c1[2], rise), lerp(c0[3], c1[3], rise)];
             out.rects.push(RectInst {
                 rect,
                 radius,
@@ -814,7 +903,7 @@ impl Panel {
                 border: 0.0,
             });
             // The text rides its own size (see `Pill::tsc`).
-            let kt = p.tsc * grow * shrink * (1.0 + LIFT * p.lift);
+            let kt = p.tsc * grow * shrink * fs * (1.0 + LIFT * p.lift);
             let font = FONT_PX * s * LAYER_SCALE[d] * kt;
             let line = LINE_PX * s * LAYER_SCALE[d] * kt;
             // Glyphs are cached only at rest: an easing size would fill the
@@ -830,7 +919,10 @@ impl Panel {
                 dim: false,
                 cache: resting,
                 family: TEXT_FONT,
-                color: Some(pill_ink(d, paint.ink, a)),
+                color: Some({
+                    let (i0, i1) = (pill_ink(d, paint.ink, a), pill_ink(0, paint.ink, a));
+                    [i0[0], i0[1], i0[2], lerp(i0[3], i1[3], rise)]
+                }),
                 clip: None,
             });
         }
@@ -1345,6 +1437,8 @@ impl App {
                 self.settings_panel = true;
                 self.settings_from_apps = true;
                 self.search.open = false;
+                self.search.query.clear();
+                self.panel_search();
                 self.schedule_frame();
             }
             return;
@@ -1436,6 +1530,24 @@ impl App {
         if self.panel.click(pos) {
             self.schedule_frame();
         }
+    }
+
+    /// The card's search query changed while the panel is up: the panel
+    /// searches its settings.
+    pub(crate) fn panel_search(&mut self) {
+        let q = self.search.query.clone();
+        self.panel.set_query(&q);
+        self.schedule_frame();
+    }
+
+    /// Enter on the panel: open the best match of the search. Returns
+    /// whether one opened.
+    pub(crate) fn panel_open_best(&mut self) -> bool {
+        let opened = self.panel.open_best();
+        if opened {
+            self.schedule_frame();
+        }
+        opened
     }
 
     /// Escape on the panel: fold an open setting back first. Returns whether
@@ -1553,11 +1665,17 @@ mod tests {
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
         p.ensure(size, 1.0, 25.0, &mut est);
         println!("FIELD {} {}", size.0, size.1);
-        // MID=<ms>: a frame that far into a forward layer step, as drawn.
-        if let Some(ms) = std::env::var("MID").ok().and_then(|v| v.parse::<f32>().ok()) {
+        // MID=<ms>: a frame that far into a forward layer step, as drawn;
+        // QUERY=<text>: the field searched for it, settled.
+        let query = std::env::var("QUERY").ok();
+        if let Some(ms) = std::env::var("MID").ok().and_then(|v| v.parse::<f32>().ok()).or(query.as_ref().map(|_| 600.0)) {
             p.field = Rect::new(0.0, 0.0, size.0, size.1);
+            p.card = p.field;
             p.step(0.0, None);
-            p.shift_layers(1);
+            match &query {
+                Some(q) => p.set_query(q),
+                None => p.shift_layers(1),
+            }
             for _ in 0..(ms / 1000.0 * 240.0).round() as usize {
                 p.step(1.0 / 240.0, None);
             }
@@ -1677,6 +1795,35 @@ mod tests {
         p.wheel_hold = Some(Instant::now() - Duration::from_millis(1));
         p.wheel(-15.0);
         assert_eq!(p.shift, 1, "a fresh scroll after the pause turns one layer");
+    }
+
+    #[test]
+    fn search_raises_the_matches_and_sinks_the_rest() {
+        let mut p = panel();
+        p.set_query("sc");
+        for _ in 0..60 {
+            p.step(1.0 / 60.0, None);
+        }
+        for q in &p.pills {
+            let hit = q.label.to_lowercase().contains("sc");
+            if hit {
+                assert!(q.focus > 0.95, "{} matches 'sc' and should rise", q.label);
+                assert!(q.focus_scale() >= 1.0, "{} rises to the near size", q.label);
+            } else {
+                assert!(q.focus < -0.95, "{} misses 'sc' and should sink", q.label);
+                assert!(q.focus_scale() < 1.0, "{} sinks back", q.label);
+            }
+        }
+        // Enter opens the best match: nearest layer first (Scale, near).
+        assert!(p.open_best());
+        assert_eq!(p.pills[p.open.as_ref().unwrap().pill].label, "Scale");
+        // Clearing the search settles every pill back.
+        p.open = None;
+        p.set_query("");
+        for _ in 0..60 {
+            p.step(1.0 / 60.0, None);
+        }
+        assert!(p.pills.iter().all(|q| q.focus.abs() < 0.01));
     }
 
     #[test]
