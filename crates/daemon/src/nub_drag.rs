@@ -360,9 +360,7 @@ impl App {
         pd.last_resize = Instant::now();
         let nw = (pd.start_w * scale).clamp(PINCH_MIN_W, PINCH_MAX_W);
         let nh = (pd.start_h * scale).clamp(PINCH_MIN_H, PINCH_MAX_H);
-        let nx = (pd.cx - nw / 2.0).round() as i32;
-        let ny = (pd.cy - nh / 2.0).round() as i32;
-        resize_move_window(&pd.addr, nw.round() as i32, nh.round() as i32, nx, ny);
+        resize_about_centre(&pd.addr, nw.round() as i32, nh.round() as i32, pd.cx, pd.cy);
     }
 
     /// Pinch ended: drop the state.
@@ -371,14 +369,22 @@ impl App {
     }
 }
 
-/// Resize a window to `w`×`h` AND place its top-left at `x,y` in one socket
-/// round-trip — resize then move (resize grows from the centre, so move after
-/// pins the centre exactly where we want it).
-fn resize_move_window(addr: &str, w: i32, h: i32, x: i32, y: i32) {
+/// Resize a window toward `w`×`h` and keep its centre at `cx,cy`, in one socket
+/// round-trip: resize, read the size the window actually GOT, then move so that
+/// size sits on the centre. The window may refuse the size — a floating
+/// window keeps its own min/max (Golem's hyprland-floating-resize-limits patch;
+/// YouTube in Seam wants >= 856 px wide) — and centring the ASKED size then
+/// shoved it sideways every step (Max, 2026-09-30: "they shake, move to other
+/// sides"; unpatched, the compositor threw it off-screen).
+fn resize_about_centre(addr: &str, w: i32, h: i32, cx: f64, cy: f64) {
     hypr::dispatch(&format!(
         "(function() \
-           hl.dispatch(hl.dsp.window.resize({{ x = {w}, y = {h}, window = \"address:{addr}\" }})) \
-           hl.dispatch(hl.dsp.window.move({{ x = {x}, y = {y}, window = \"address:{addr}\" }})) \
+           local a = \"address:{addr}\" \
+           hl.dispatch(hl.dsp.window.resize({{ x = {w}, y = {h}, window = a }})) \
+           local win = hl.get_window(a) \
+           local sw, sh = {w}, {h} \
+           if win and win.size then sw, sh = win.size.x, win.size.y end \
+           hl.dispatch(hl.dsp.window.move({{ x = math.floor({cx} - sw / 2 + 0.5), y = math.floor({cy} - sh / 2 + 0.5), window = a }})) \
            return hl.dsp.no_op() end)()"
     ));
 }
