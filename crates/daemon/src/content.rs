@@ -256,6 +256,9 @@ pub const LABEL_LINE_PX: f32 = 16.0;
 /// the icon labels (Max, 2026-09-30).
 const TITLE_FONT_PX: f32 = 16.0;
 const TITLE_LINE_PX: f32 = 20.0;
+/// How far a title sits down its band: off the page dots of the section
+/// above, closer to its own items (Max, 2026-09-30).
+const TITLE_DROP: f32 = 5.0;
 /// Search box: height, inner padding, text metrics.
 const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
@@ -2140,7 +2143,7 @@ pub fn scene(
         };
         scene.labels.push(Label {
             text: title,
-            pos: (sec.title_pos.0, sec.title_pos.1 + 1.0),
+            pos: (sec.title_pos.0, sec.title_pos.1 + TITLE_DROP),
             max_w: sec.viewport.w,
             font_px: TITLE_FONT_PX,
             line_px: TITLE_LINE_PX,
@@ -2518,7 +2521,7 @@ pub fn scene(
     if let (Some(title), false) = (layout.controls_title, layout.controls.is_empty() || panel) {
         scene.labels.push(Label {
             text: crate::i18n::tr("Controls").to_string(),
-            pos: (title.0, title.1 + 1.0),
+            pos: (title.0, title.1 + TITLE_DROP),
             max_w: 200.0,
             font_px: TITLE_FONT_PX,
             line_px: TITLE_LINE_PX,
