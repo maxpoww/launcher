@@ -319,8 +319,15 @@ impl App {
         // The open card fits the Apps page in view: its trim eases toward
         // the rows that page leaves empty; out of sight it just snaps, so an
         // open rises straight to the right height.
-        let trim_want = self.apps_trim_target();
+        let mut trim_want = self.apps_trim_target();
         let trim = self.ui.open_trim();
+        // While a search is live the card may grow but never shrinks, so
+        // typing doesn't bounce it with every result count (Max: "the only
+        // choppiness is when I search and the window has to resize back and
+        // forth"); clearing the search fits it to the page again.
+        if !self.search.query.is_empty() && self.ui.target() == Target::Open {
+            trim_want = trim_want.min(trim);
+        }
         if self.ui.target() != Target::Open && !self.ui.is_animating() {
             if trim != trim_want {
                 self.ui.set_open_trim(trim_want);
