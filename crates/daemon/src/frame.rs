@@ -27,7 +27,7 @@ const SOFTWARE_FRAME_MIN: Duration = Duration::from_millis(100);
 /// with nobody at the wheel throttles after this.
 const INPUT_ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 /// How fast the open card eases to a new page's height (1/s).
-const TRIM_RATE: f32 = 16.0;
+const TRIM_RATE: f32 = 22.0;
 /// Space between the pills of the Controls row (px at bar scale 1).
 const CONTROLS_GAP: f32 = 10.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
