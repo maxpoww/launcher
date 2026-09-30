@@ -217,6 +217,8 @@ const SECTION_TITLE_H: f32 = 5.0;
 /// 20 -> 24; then 3 px more: 7 and 27; then 2 more: 5 and 29.)
 const SECTION_GAP: f32 = 29.0;
 const DOT_ROOM: f32 = 6.0;
+/// How much further below its title the Controls row sits than icons do.
+const CONTROLS_EXTRA_DROP: f32 = 4.0;
 /// The page dots sit this much above the middle of their room (Max: "the
 /// dots slightly higher").
 const DOTS_RAISE: f32 = 1.5;
@@ -859,8 +861,9 @@ pub fn layout(
     // The Controls row (a search matching settings) takes its room out of
     // the Apps rows SHOWN — display only, like the shrink below: page
     // capacity stays at `fits`.
-    // The pills sit as far under their title as the icons do under theirs.
-    let controls_drop = GRID_ICON_TOP * icon_scale;
+    // The pills sit as far under their title as the icons do under theirs,
+    // and a little more (Max: "move only the pills a little lower").
+    let controls_drop = GRID_ICON_TOP * icon_scale + CONTROLS_EXTRA_DROP;
     let controls_h =
         controls_pill_h.map_or(0.0, |ph| SECTION_GAP + SECTION_TITLE_H + controls_drop + ph + DOT_ROOM);
     let fits_shown = (((avail - controls_h) / grid_cell_h) as usize).clamp(1, fits);
