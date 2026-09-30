@@ -179,7 +179,7 @@ impl App {
         // rides calloop, so the loop services IPC/input between frames. dt
         // keeps accumulating across skipped frames, so animations advance by
         // real time.
-        // GPU pacing (the GL backend, see `Renderer::gpu_ready`): the previous
+        // GPU pacing (every hardware adapter, see `Renderer::gpu_ready`): the previous
         // frame is still on the GPU, so starting another would only queue in
         // the driver and stall the loop. Look again shortly, on a timer, so
         // IPC and input keep flowing, and draw as soon as the GPU is free.

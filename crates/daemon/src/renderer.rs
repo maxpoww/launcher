@@ -105,8 +105,8 @@ pub struct Renderer {
     /// See [`Renderer::needs_frame_throttle`] and the constructor's note
     /// (F12 / Golem #40).
     frame_throttle: bool,
-    /// Pace frames by the GPU (see [`Renderer::gpu_ready`]): true on the GL
-    /// backend. `gpu_busy` is set at submit and cleared when the GPU reports
+    /// Pace frames by the GPU (see [`Renderer::gpu_ready`]): true on every
+    /// hardware adapter (the software one has the fixed throttle instead). `gpu_busy` is set at submit and cleared when the GPU reports
     /// the frame's work done.
     pace_by_gpu: bool,
     gpu_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -345,7 +345,16 @@ impl Renderer {
         // (`gpu_ready`), the smoothest rate the machine can actually deliver,
         // and the loop never waits on it.
         let frame_throttle = software;
-        let pace_by_gpu = adapter.get_info().backend == wgpu::Backend::Gl;
+        //
+        // Vulkan needs the same pacing (2026-09-30): when the GPU saturates,
+        // `get_current_texture` waits for a free image, again on the event
+        // loop. On Max's Lenovo (Iris Xe, 3200x2000 at 165 Hz) the loop
+        // went silent for 11.9 s while the settings panel animated, and every
+        // Super+Space queued behind it ("my dock still gets stuck/confused").
+        // The ThinkPad's GPU has headroom, so it never showed there. So every
+        // hardware adapter is paced by the GPU; a fast GPU finishes each frame
+        // long before the next, so pacing costs it nothing.
+        let pace_by_gpu = !software;
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -1054,7 +1063,7 @@ impl Renderer {
     }
 
     /// Whether the GPU has finished the last frame, so a new one can start
-    /// without queueing behind it. Always true off the GL backend. Never
+    /// without queueing behind it. Always true on a software adapter. Never
     /// blocks: a non-blocking poll delivers the completion, if it happened.
     pub fn gpu_ready(&self) -> bool {
         if !self.pace_by_gpu {
