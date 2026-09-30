@@ -44,30 +44,32 @@ use waverunner_proto::Command;
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
 const SETTINGS: [(&str, u8); 29] = [
+    // Near: the five people reach for most.
     ("Resolution", 0),
     ("Scale", 0),
     ("Wi-Fi", 0),
     ("Sound output", 0),
     ("Dark mode", 0),
-    ("Brightness", 0),
-    ("Bluetooth", 0),
-    ("Volume", 0),
-    ("Wallpaper", 0),
-    ("Night light", 0),
-    ("Accent colour", 1),
-    ("Keyboard layout", 1),
-    ("Power mode", 1),
+    ("Brightness", 1),
+    ("Bluetooth", 1),
+    ("Volume", 1),
+    ("Wallpaper", 1),
+    ("Night light", 1),
     ("Notifications", 1),
-    ("Touchpad speed", 1),
-    ("Language", 1),
-    ("Microphone", 1),
-    ("Battery", 1),
+    ("Accent colour", 2),
+    ("Keyboard layout", 2),
+    ("Power mode", 2),
+    ("Touchpad speed", 2),
+    ("Language", 2),
+    ("Microphone", 2),
+    ("Battery", 2),
     ("Time zone", 2),
-    ("Natural scrolling", 2),
-    ("Default apps", 2),
-    ("Mouse speed", 2),
-    ("Printers", 2),
-    ("Privacy", 2),
+    // Far: the set-once settings, the largest group.
+    ("Natural scrolling", 3),
+    ("Default apps", 3),
+    ("Mouse speed", 3),
+    ("Printers", 3),
+    ("Privacy", 3),
     ("Updates", 3),
     ("About Golem", 3),
     ("Users", 3),
@@ -1490,7 +1492,7 @@ mod tests {
         let p = panel();
         assert_eq!(p.pills.len(), 29);
         let per_layer = [0, 1, 2, 3].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        assert_eq!(per_layer, [10, 8, 6, 5]);
+        assert_eq!(per_layer, [5, 6, 8, 10]);
         assert_clean(&p, "at rest");
         // Up under the dock: the top row sits in the first course below the
         // top gap.
@@ -1510,18 +1512,18 @@ mod tests {
         let mut p = panel();
         let counts = |p: &Panel| [0, 1, 2, 3].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
         p.shift_layers(1);
-        assert_eq!(counts(&p), [8, 6, 5, 10], "forward: the near group goes to the back");
+        assert_eq!(counts(&p), [6, 8, 10, 5], "forward: the near group goes to the back");
         assert_clean(&p, "one step");
         p.shift_layers(1);
-        assert_eq!(counts(&p), [6, 5, 10, 8]);
+        assert_eq!(counts(&p), [8, 10, 5, 6]);
         assert_clean(&p, "two steps");
         p.shift_layers(1);
-        assert_eq!(counts(&p), [5, 10, 8, 6]);
+        assert_eq!(counts(&p), [10, 5, 6, 8]);
         assert_clean(&p, "three steps");
         p.shift_layers(-1);
         p.shift_layers(-1);
         p.shift_layers(-1);
-        assert_eq!(counts(&p), [10, 8, 6, 5], "back undoes it");
+        assert_eq!(counts(&p), [5, 6, 8, 10], "back undoes it");
         // The near group left from the front, so it is leaving now.
         assert!(p.pills.iter().any(|q| q.exit.is_some()));
     }
