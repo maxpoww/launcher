@@ -144,7 +144,7 @@ const EDGE: f32 = 6.0;
 /// How close together the pills sit: the share of the field's width
 /// (`TIGHT_X`) and band height (`TIGHT`) the rows use (Max: "tidy all closer
 /// together", then "spread them out a little to the sides").
-const TIGHT: f32 = 0.76;
+const TIGHT: f32 = 0.88;
 const TIGHT_X: f32 = 0.86;
 /// How much wider than the card's own width the field may grow as a longer
 /// dock widens the card; past it the field stays centred (Max: "no more
