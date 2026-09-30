@@ -99,14 +99,14 @@ const GAP_TOP: f32 = 32.0;
 const GAP_BOTTOM_FRAC: f32 = 0.21;
 
 // ---- Motion (rates are 1/s for exponential approach) --------------------
-const GLIDE_RATE: f32 = 16.0;
-const SIZE_RATE: f32 = 17.0;
-const FADE_IN_RATE: f32 = 15.0;
+const GLIDE_RATE: f32 = 24.0;
+const SIZE_RATE: f32 = 26.0;
+const FADE_IN_RATE: f32 = 22.0;
 /// Seconds for a layer to leave from its end.
-const EXIT_SECS: f32 = 0.15;
+const EXIT_SECS: f32 = 0.10;
 /// Wheel travel for one layer step, and the shortest gap between steps.
 const WHEEL_STEP: f64 = 10.0;
-const SHIFT_COOLDOWN: Duration = Duration::from_millis(200);
+const SHIFT_COOLDOWN: Duration = Duration::from_millis(150);
 /// Hover: how fast a pill settles, and comes closer (and by how much).
 const SETTLE_RATE: f32 = 6.0;
 const LIFT_RATE: f32 = 12.0;
