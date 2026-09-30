@@ -182,6 +182,10 @@ const SIZE_RATE: f32 = 12.0;
 /// eases this much faster than the following one.
 const LEAD_RATE: f32 = 30.0;
 const FADE_IN_RATE: f32 = 15.0;
+/// How far (px at bar scale 1) the field travels with the scroll on a step:
+/// the pills start this far behind their new spots and glide into them in
+/// the scroll's direction, so a step reads as the field scrolling.
+const SCROLL_TRAVEL: f32 = 56.0;
 /// Seconds for a layer to leave from its end.
 const EXIT_SECS: f32 = 0.15;
 /// Wheel travel for one layer step, and the shortest gap between steps.
@@ -457,6 +461,9 @@ impl Panel {
                 p.sc *= ratio;
                 p.tsc *= ratio;
                 p.drawn = p.layer;
+                // …and the glide runs the way the scroll went: forward (the
+                // wheel up) the field travels up, back it travels down.
+                p.anchor.1 += dir as f32 * SCROLL_TRAVEL * self.scale;
             }
         }
         self.hot = None;
@@ -596,11 +603,14 @@ impl Panel {
                 p.op = 1.0 - smoothstep(exit.k);
                 if exit.k >= 1.0 {
                     // Arrive at the other end: the back, small and faint, or
-                    // (going back) the front, rising from below.
+                    // (going back) the front.
                     let back = exit.dir < 0;
                     p.exit = None;
                     p.drawn = p.layer;
-                    p.anchor = (p.home.0, p.home.1 + if back { 70.0 * s } else { 0.0 });
+                    // Arriving with the scroll: forward, the new back layer
+                    // rises in from below; back, the new near layer drops in
+                    // from above.
+                    p.anchor = (p.home.0, p.home.1 + if back { -70.0 * s } else { SCROLL_TRAVEL * 1.5 * s });
                     p.sc = if back { 1.25 } else { 0.6 };
                     p.tsc = p.sc;
                     p.op = 0.0;
@@ -645,10 +655,10 @@ impl Panel {
             if let Some(e) = p.exit {
                 let ease = 1.0 - (1.0 - e.k) * (1.0 - e.k);
                 if e.dir > 0 {
-                    dy = 90.0 * s * ease; // falls past the viewer
+                    dy = -90.0 * s * ease; // leaves upward, with the scroll, past the viewer
                     grow = 1.0 + 0.4 * ease;
                 } else {
-                    dy = -8.0 * s * e.k; // recedes
+                    dy = 8.0 * s * e.k; // recedes, drifting down with the scroll
                     grow = 1.0 - 0.5 * e.k;
                 }
             }
