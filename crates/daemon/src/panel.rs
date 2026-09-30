@@ -119,8 +119,11 @@ pub(crate) fn pill_ink(layer: usize, ink: [f32; 4], alpha: f32) -> [f32; 4] {
 const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 
 // ---- Layout (px at bar scale 1) -----------------------------------------
-/// Air kept off the card's sides.
-const MARGIN: f32 = 22.0;
+/// Air kept off the card's sides — per pill, somewhere between these two,
+/// so the pills at the edges stop at different distances and the heap's
+/// sides read uneven instead of ruled (Max, 2026-09-30).
+const MARGIN_MIN: f32 = 6.0;
+const MARGIN_MAX: f32 = 46.0;
 /// Air under the dock, and above the card's floor as a share of the field:
 /// the heap sits up under the dock with more room below.
 const GAP_TOP: f32 = 16.0;
@@ -219,6 +222,11 @@ struct Pill {
     phase: [f32; 2],
     period: f32,
     spin: f32,
+    /// This pill's own side air (left, right): drawn from `edge`, a random
+    /// 0–1 per side, at the current scale.
+    edge: [f32; 2],
+    ml: f32,
+    mr: f32,
 }
 
 impl Pill {
@@ -316,6 +324,9 @@ impl Panel {
                     phase: [rng.next() * TAU, rng.next() * TAU],
                     period: 12.0 + rng.next() * 6.0,
                     spin: if rng.next() < 0.5 { -1.0 } else { 1.0 },
+                    edge: [rng.next(), rng.next()],
+                    ml: 0.0,
+                    mr: 0.0,
                 })
                 .collect();
         }
@@ -335,16 +346,20 @@ impl Panel {
     fn compose(&mut self, size: (f32, f32), snap: bool) {
         let s = self.scale.max(0.01);
         let (w, h) = size;
-        let margin = MARGIN * s;
+        let margin = MARGIN_MIN * s;
+        for p in &mut self.pills {
+            p.ml = (MARGIN_MIN + p.edge[0] * (MARGIN_MAX - MARGIN_MIN)) * s;
+            p.mr = (MARGIN_MIN + p.edge[1] * (MARGIN_MAX - MARGIN_MIN)) * s;
+        }
         let (top, bottom) = gaps(h, s);
         balanced(&mut self.pills, (w, h), margin, (top, bottom));
         for p in &mut self.pills {
             p.home = p.ideal;
         }
-        clamp_all(&mut self.pills, (w, h), margin, (top, bottom));
-        settle(&mut self.pills, (w, h), margin, (top, bottom), 18.0 * s, 0.0, 220);
+        clamp_all(&mut self.pills, (w, h), (top, bottom));
+        settle(&mut self.pills, (w, h), (top, bottom), 18.0 * s, 0.0, 220);
         fit_vertical(&mut self.pills, h, top, bottom);
-        settle(&mut self.pills, (w, h), margin, (top, bottom), 12.0 * s, 0.08, 120);
+        settle(&mut self.pills, (w, h), (top, bottom), 12.0 * s, 0.08, 120);
         if snap {
             for p in &mut self.pills {
                 p.anchor = p.home;
@@ -756,17 +771,17 @@ fn content_hit(key: (f32, f32, f32), scale: f32, pos: (f32, f32), field: Rect) -
     false
 }
 
-/// Keep a pill inside the field: `margin` off the sides, `gaps` (top,
+/// Keep a pill inside the field: its own side air off the sides, `gaps` (top,
 /// bottom) off the dock and the floor.
-fn clamp_pill(p: &mut Pill, size: (f32, f32), margin: f32, gaps: (f32, f32)) {
+fn clamp_pill(p: &mut Pill, size: (f32, f32), gaps: (f32, f32)) {
     let (w, h) = p.size();
-    p.home.0 = p.home.0.clamp(margin + w / 2.0, (size.0 - margin - w / 2.0).max(margin + w / 2.0));
+    p.home.0 = p.home.0.clamp(p.ml + w / 2.0, (size.0 - p.mr - w / 2.0).max(p.ml + w / 2.0));
     p.home.1 = p.home.1.clamp(gaps.0 + h / 2.0, (size.1 - gaps.1 - h / 2.0).max(gaps.0 + h / 2.0));
 }
 
-fn clamp_all(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32)) {
+fn clamp_all(pills: &mut [Pill], size: (f32, f32), gaps: (f32, f32)) {
     for p in pills {
-        clamp_pill(p, size, margin, gaps);
+        clamp_pill(p, size, gaps);
     }
 }
 
@@ -783,7 +798,8 @@ fn air(a: &Pill, b: &Pill) -> f32 {
 /// repulsion would press everything against the rim. Distances count x at
 /// half, since pills are wide. Writes each pill's `ideal`.
 fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32)) {
-    const SX: f32 = 0.55;
+    // Counting x at under half is what spreads the heap out to the sides.
+    const SX: f32 = 0.45;
     let (w, h) = size;
     let n = pills.len().max(1) as f32;
     let area = ((w - 2.0 * margin) * SX * (h - gaps.0 - gaps.1)).max(1.0);
@@ -818,8 +834,8 @@ fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32))
             // The edges push like a neighbour at half the reach.
             let (aw, ah) = a.size();
             let edge = reach / 2.0;
-            let l = (a.home.0 - aw / 2.0 - margin) * SX;
-            let r = (w - margin - a.home.0 - aw / 2.0) * SX;
+            let l = (a.home.0 - aw / 2.0 - a.ml) * SX;
+            let r = (w - a.mr - a.home.0 - aw / 2.0) * SX;
             let t = a.home.1 - ah / 2.0 - gaps.0;
             let bt = h - gaps.1 - a.home.1 - ah / 2.0;
             if l < edge {
@@ -838,7 +854,7 @@ fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32))
         }
         for (p, &n) in pills.iter_mut().zip(&next) {
             p.home = n;
-            clamp_pill(p, size, margin, gaps);
+            clamp_pill(p, size, gaps);
         }
     }
     for p in pills {
@@ -848,7 +864,7 @@ fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32))
 
 /// Settle: pills closer than `gap` push apart, each is pulled back toward
 /// its `ideal` by `pull`, and all stay inside the field.
-fn settle(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32), gap: f32, pull: f32, iters: usize) {
+fn settle(pills: &mut [Pill], size: (f32, f32), gaps: (f32, f32), gap: f32, pull: f32, iters: usize) {
     for _ in 0..iters {
         for i in 0..pills.len() {
             for j in i + 1..pills.len() {
@@ -869,7 +885,7 @@ fn settle(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32), g
         for p in pills.iter_mut() {
             p.home.0 += (p.ideal.0 - p.home.0) * pull;
             p.home.1 += (p.ideal.1 - p.home.1) * pull;
-            clamp_pill(p, size, margin, gaps);
+            clamp_pill(p, size, gaps);
         }
     }
 }
@@ -1047,8 +1063,8 @@ mod tests {
         for (i, a) in p.pills.iter().enumerate() {
             let (aw, ah) = a.size();
             assert!(
-                a.home.0 - aw / 2.0 >= MARGIN - 0.5
-                    && a.home.0 + aw / 2.0 <= w - MARGIN + 0.5
+                a.home.0 - aw / 2.0 >= MARGIN_MIN - 0.5
+                    && a.home.0 + aw / 2.0 <= w - MARGIN_MIN + 0.5
                     && a.home.1 - ah / 2.0 >= gaps(h, 1.0).0 - 0.5
                     && a.home.1 + ah / 2.0 <= h - gaps(h, 1.0).1 + 0.5,
                 "{what}: {} leaves the field at {:?}",
