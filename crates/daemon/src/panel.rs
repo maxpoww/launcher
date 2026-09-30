@@ -133,6 +133,22 @@ const GAP_BOTTOM_FRAC: f32 = 0.30;
 /// lower").
 const DROP: f32 = 34.0;
 
+/// How round the heap's silhouette is: 0 = straight sides; at this value
+/// the rows at the very top and bottom are held in by about a third of the
+/// half-width while the middle ones reach out to the sides ("a little
+/// circular", Max 2026-09-30).
+const ROUND: f32 = 0.55;
+
+/// Extra side air at height `y` (field-relative) for the rounded heap: none
+/// across the middle, growing toward the top and bottom of the band the
+/// pills live in (`gaps` off the dock and the floor), on an ellipse.
+fn round_inset(y: f32, size: (f32, f32), gaps: (f32, f32)) -> f32 {
+    let (top, bottom) = (gaps.0, size.1 - gaps.1);
+    let half = ((bottom - top) / 2.0).max(1.0);
+    let t = ((y - (top + half)) / half).clamp(-1.0, 1.0);
+    (size.0 / 2.0) * (1.0 - (1.0 - ROUND * t * t).max(0.0).sqrt())
+}
+
 /// The field's (top, bottom) air for a field `h` tall at bar scale `s`.
 fn gaps(h: f32, s: f32) -> (f32, f32) {
     ((GAP_TOP + DROP) * s, (GAP_BOTTOM_FRAC * h - DROP * s).max(GAP_TOP * s))
@@ -805,8 +821,11 @@ fn content_hit(key: (f32, f32, f32), scale: f32, pos: (f32, f32), field: Rect) -
 /// bottom) off the dock and the floor.
 fn clamp_pill(p: &mut Pill, size: (f32, f32), gaps: (f32, f32)) {
     let (w, h) = p.size();
-    p.home.0 = p.home.0.clamp(p.ml + w / 2.0, (size.0 - p.mr - w / 2.0).max(p.ml + w / 2.0));
     p.home.1 = p.home.1.clamp(gaps.0 + h / 2.0, (size.1 - gaps.1 - h / 2.0).max(gaps.0 + h / 2.0));
+    // Its own uneven side air, plus the round silhouette's at its height.
+    let inset = round_inset(p.home.1, size, gaps);
+    let (l, r) = (p.ml + inset, p.mr + inset);
+    p.home.0 = p.home.0.clamp(l + w / 2.0, (size.0 - r - w / 2.0).max(l + w / 2.0));
 }
 
 fn clamp_all(pills: &mut [Pill], size: (f32, f32), gaps: (f32, f32)) {
@@ -829,7 +848,7 @@ fn air(a: &Pill, b: &Pill) -> f32 {
 /// half, since pills are wide. Writes each pill's `ideal`.
 fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32)) {
     // Counting x at under half is what spreads the heap out to the sides.
-    const SX: f32 = 0.35;
+    const SX: f32 = 0.28;
     let (w, h) = size;
     let n = pills.len().max(1) as f32;
     let area = ((w - 2.0 * margin) * SX * (h - gaps.0 - gaps.1)).max(1.0);
@@ -864,8 +883,9 @@ fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32))
             // The edges push like a neighbour at half the reach.
             let (aw, ah) = a.size();
             let edge = reach / 2.0;
-            let l = (a.home.0 - aw / 2.0 - a.ml) * SX;
-            let r = (w - a.mr - a.home.0 - aw / 2.0) * SX;
+            let inset = round_inset(a.home.1, size, gaps);
+            let l = (a.home.0 - aw / 2.0 - a.ml - inset) * SX;
+            let r = (w - a.mr - inset - a.home.0 - aw / 2.0) * SX;
             let t = a.home.1 - ah / 2.0 - gaps.0;
             let bt = h - gaps.1 - a.home.1 - ah / 2.0;
             if l < edge {
