@@ -43,7 +43,7 @@ use waverunner_proto::Command;
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [(&str, u8); 20] = [
+const SETTINGS: [(&str, u8); 29] = [
     ("Resolution", 0),
     ("Scale", 0),
     ("Wi-Fi", 0),
@@ -53,37 +53,49 @@ const SETTINGS: [(&str, u8); 20] = [
     ("Bluetooth", 0),
     ("Volume", 0),
     ("Wallpaper", 0),
-    ("Night light", 1),
+    ("Night light", 0),
     ("Accent colour", 1),
     ("Keyboard layout", 1),
     ("Power mode", 1),
     ("Notifications", 1),
     ("Touchpad speed", 1),
     ("Language", 1),
+    ("Microphone", 1),
+    ("Battery", 1),
     ("Time zone", 2),
     ("Natural scrolling", 2),
-    ("Updates", 2),
-    ("About Golem", 2),
+    ("Default apps", 2),
+    ("Mouse speed", 2),
+    ("Printers", 2),
+    ("Privacy", 2),
+    ("Updates", 3),
+    ("About Golem", 3),
+    ("Users", 3),
+    ("Storage", 3),
+    ("Accessibility", 3),
 ];
+
+/// How many depth layers the field has (0 near … LAYERS-1 far).
+const LAYERS: usize = 4;
 
 // ---- The layers --------------------------------------------------------
 /// Size of each layer against the OPTIONS bar's own pill: the middle and far
 /// layers a touch larger than the bar's (Max, 2026-09-30), the near one
 /// well above.
-const LAYER_SCALE: [f32; 3] = [1.53, 1.2, 1.0];
+const LAYER_SCALE: [f32; LAYERS] = [1.53, 1.25, 1.1, 0.95];
 /// Resting wash alpha per layer, on a dark card (white wash) and a bright
 /// one (black wash, which reads stronger at equal alpha).
-const LAYER_WASH_DARK: [f32; 3] = [0.19, 0.10, 0.055];
-const LAYER_WASH_BRIGHT: [f32; 3] = [0.16, 0.085, 0.045];
+const LAYER_WASH_DARK: [f32; LAYERS] = [0.19, 0.12, 0.08, 0.055];
+const LAYER_WASH_BRIGHT: [f32; LAYERS] = [0.16, 0.10, 0.07, 0.045];
 /// The OPTIONS hover wash, the same on every layer.
 const HOVER_WASH_DARK: f32 = 0.27;
 const HOVER_WASH_BRIGHT: f32 = 0.30;
 /// Ink strength per layer.
-const LAYER_INK: [f32; 3] = [1.0, 0.84, 0.62];
+const LAYER_INK: [f32; LAYERS] = [1.0, 0.88, 0.74, 0.62];
 /// Soft glow per layer, the pill's edge: (blur px, alpha). Smaller and
 /// fainter further back, but never gone — without it the far pills lost
 /// their edge (Max, 2026-09-29).
-const LAYER_GLOW: [(f32, f32); 3] = [(7.0, 0.17), (3.5, 0.08), (2.0, 0.05)];
+const LAYER_GLOW: [(f32, f32); LAYERS] = [(7.0, 0.17), (4.5, 0.10), (3.0, 0.07), (2.0, 0.05)];
 
 /// The middle layer: the OPTIONS bar's own pill, and the look any other
 /// pill on the card borrows (the search pill).
@@ -122,7 +134,7 @@ pub(crate) fn pill_ink(layer: usize, ink: [f32; 4], alpha: f32) -> [f32; 4] {
     [ink[0], ink[1], ink[2], ink[3] * LAYER_INK[layer] * alpha]
 }
 /// How "near" each layer is: sets the orbit radius.
-const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
+const LAYER_Z: [f32; LAYERS] = [1.0, 0.72, 0.5, 0.35];
 
 // ---- Layout (px at bar scale 1) -----------------------------------------
 /// Air kept off the card's sides: the ends of the widest row stop this far
@@ -144,10 +156,19 @@ const GAP_BOTTOM_FRAC: f32 = 0.24;
 /// the top gap grows by it and the bottom one shrinks by it (Max: "a little
 /// lower").
 const DROP: f32 = 60.0;
-/// The rows, top to bottom, as each one's width against the widest: brick
-/// courses on a gentle ellipse, so the middle reaches the sides and the
-/// top and bottom rows are held in — wide, and a little round.
-const ROWS: [f32; 5] = [0.86, 0.96, 1.0, 0.96, 0.86];
+/// The brick courses: at least this many rows, more (up to the max) when a
+/// narrow card cannot fit its pills in fewer.
+const MIN_ROWS: usize = 6;
+const MAX_ROWS: usize = 10;
+
+/// The rows, top to bottom, as each one's width against the widest: a
+/// gentle curve (86% at the ends, the middle rows full) — squarish, a little
+/// round.
+fn row_fracs(n: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| 0.86 + 0.14 * (std::f32::consts::PI * (i as f32 + 0.5) / n as f32).sin())
+        .collect()
+}
 /// Alternate rows shift this share of a step (pill + gap) left and right,
 /// like laid bricks: with rows of the same count the gaps would otherwise
 /// stack into columns.
@@ -171,17 +192,44 @@ fn gaps(h: f32, s: f32) -> (f32, f32) {
 /// (largest remainders get the leftovers, so no row is crowded — every row
 /// ends up about as dense as the others). Rows of different widths and
 /// counts put their gaps in different places: the pills cross like bricks.
-fn row_counts(n: usize) -> Vec<usize> {
-    let total: f32 = ROWS.iter().sum();
-    let exact: Vec<f32> = ROWS.iter().map(|f| n as f32 * f / total).collect();
+fn row_counts(n: usize, fracs: &[f32]) -> Vec<usize> {
+    let total: f32 = fracs.iter().sum();
+    let exact: Vec<f32> = fracs.iter().map(|f| n as f32 * f / total).collect();
     let mut counts: Vec<usize> = exact.iter().map(|e| e.floor() as usize).collect();
-    let mut rest: Vec<usize> = (0..ROWS.len()).collect();
+    let mut rest: Vec<usize> = (0..fracs.len()).collect();
     rest.sort_by(|&a, &b| (exact[b] - exact[b].floor()).total_cmp(&(exact[a] - exact[a].floor())));
     let placed: usize = counts.iter().sum();
     for &r in rest.iter().cycle().take(n.saturating_sub(placed)) {
         counts[r] += 1;
     }
     counts
+}
+
+/// How many rows the pills in `order` need to fit a `whole`-wide field (each
+/// row's slots plus `min_gap` between them): the fewest from [`MIN_ROWS`]
+/// that fit, as their widths.
+fn plan_rows(pills: &[Pill], order: &[usize], whole: f32, min_gap: f32) -> Vec<f32> {
+    for n in MIN_ROWS..=MAX_ROWS {
+        let fracs = row_fracs(n);
+        let counts = row_counts(order.len(), &fracs);
+        let mut next = 0;
+        let fits = counts.iter().all(|&k| {
+            let row = &order[next..(next + k).min(order.len())];
+            next += k;
+            let widths: f32 = row.iter().map(|&i| pills[i].slot().0).sum();
+            widths + min_gap * (row.len() as f32 - 1.0).max(0.0) <= whole
+        });
+        if fits {
+            return fracs;
+        }
+    }
+    row_fracs(MAX_ROWS)
+}
+
+/// The gap a row never packs its pills closer than, for a field whose edge
+/// air is `edge` (both scale with the bar).
+fn min_gap(edge: f32) -> f32 {
+    12.0 * (edge / EDGE).max(0.01)
 }
 
 // ---- Motion (rates are 1/s for exponential approach) --------------------
@@ -262,8 +310,8 @@ struct Pill {
     layer: u8,
     drawn: u8,
     /// Measured size at each layer.
-    w: [f32; 3],
-    h: [f32; 3],
+    w: [f32; LAYERS],
+    h: [f32; LAYERS],
     /// Where the layout wants it (`ideal` before settling, `home` after).
     ideal: (f32, f32),
     home: (f32, f32),
@@ -290,7 +338,7 @@ struct Pill {
     /// takes after it in its row, each a random -1..1 — a different set for
     /// each of the three layer arrangements, so every layer step moves the
     /// pills a little, some inward, some outward, like scrolling.
-    stray: [[f32; 3]; 3],
+    stray: [[f32; 3]; LAYERS],
 }
 
 impl Pill {
@@ -392,8 +440,8 @@ impl Panel {
                     group,
                     layer: group,
                     drawn: group,
-                    w: [0.0; 3],
-                    h: [0.0; 3],
+                    w: [0.0; LAYERS],
+                    h: [0.0; LAYERS],
                     ideal: (0.0, 0.0),
                     home: (0.0, 0.0),
                     anchor: (0.0, 0.0),
@@ -408,7 +456,7 @@ impl Panel {
                     phase: [rng.next() * TAU, rng.next() * TAU],
                     period: 12.0 + rng.next() * 6.0,
                     spin: if rng.next() < 0.5 { -1.0 } else { 1.0 },
-                    stray: [(); 3].map(|_| [rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0]),
+                    stray: [(); LAYERS].map(|_| [rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0]),
                 })
                 .collect();
         }
@@ -459,8 +507,8 @@ impl Panel {
         self.shift += dir as i32;
         for p in &mut self.pills {
             let old = p.layer;
-            p.layer = (p.group as i32 - self.shift).rem_euclid(3) as u8;
-            let wraps = if dir > 0 { old == 0 } else { old == 2 };
+            p.layer = (p.group as i32 - self.shift).rem_euclid(LAYERS as i32) as u8;
+            let wraps = if dir > 0 { old == 0 } else { old as usize == LAYERS - 1 };
             if wraps {
                 p.exit = Some(Exit { dir, k: 0.0 });
             } else if p.exit.is_none() {
@@ -923,9 +971,9 @@ fn air(a: &Pill, b: &Pill) -> f32 {
 /// share goes next — so near, middle and far alternate across every row
 /// instead of bunching; which pill of a group comes next is random.
 fn brick_order(pills: &[Pill], rng: &mut Rng) -> Vec<usize> {
-    let mut groups: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut groups: Vec<Vec<usize>> = vec![Vec::new(); LAYERS];
     for (i, p) in pills.iter().enumerate() {
-        groups[(p.group as usize).min(2)].push(i);
+        groups[(p.group as usize).min(LAYERS - 1)].push(i);
     }
     for g in &mut groups {
         for i in (1..g.len()).rev() {
@@ -935,11 +983,11 @@ fn brick_order(pills: &[Pill], rng: &mut Rng) -> Vec<usize> {
     }
     let n = pills.len().max(1) as f32;
     let share: Vec<f32> = groups.iter().map(|g| g.len() as f32 / n).collect();
-    let mut used = [0usize; 3];
+    let mut used = [0usize; LAYERS];
     let mut order = Vec::with_capacity(pills.len());
     for step in 0..pills.len() {
         let due = |k: usize| share[k] * (step + 1) as f32 - used[k] as f32;
-        let Some(k) = (0..3)
+        let Some(k) = (0..LAYERS)
             .filter(|&k| used[k] < groups[k].len())
             .max_by(|&a, &b| due(a).total_cmp(&due(b)))
         else {
@@ -953,12 +1001,12 @@ fn brick_order(pills: &[Pill], rng: &mut Rng) -> Vec<usize> {
 
 /// How much a pill weighs to the eye on each layer: its area times this
 /// (the near layer is lit and large, the far one faint).
-const LAYER_WEIGHT: [f32; 3] = [1.0, 0.7, 0.45];
+const LAYER_WEIGHT: [f32; LAYERS] = [1.0, 0.75, 0.55, 0.45];
 
 /// How lopsided a laid-out field looks: the visual weight's pull off the
 /// vertical centre line, for the whole heap (counted double) and row by
 /// row, each as a share of the half-width. 0 = perfectly balanced.
-fn imbalance(pills: &[Pill], order: &[usize], w: f32) -> f32 {
+fn imbalance(pills: &[Pill], order: &[usize], w: f32, counts: &[usize]) -> f32 {
     let pull = |idx: &[usize]| -> f32 {
         let (mut m, mut mx) = (0.0f32, 0.0f32);
         for &i in idx {
@@ -972,8 +1020,7 @@ fn imbalance(pills: &[Pill], order: &[usize], w: f32) -> f32 {
     };
     let mut rows = 0.0;
     let mut next = 0;
-    let counts = row_counts(order.len());
-    for &n in &counts {
+    for &n in counts {
         let end = (next + n).min(order.len());
         rows += pull(&order[next..end]);
         next = end;
@@ -1022,14 +1069,17 @@ fn balanced_order(pills: &[Pill], size: (f32, f32), s: f32) -> Vec<usize> {
         // Judged by its worst layer arrangement (plus a little of the rest),
         // so no step of the cycle looks lopsided.
         let (mut worst, mut sum) = (0.0f32, 0.0f32);
-        for shift in 0..6 {
+        // Every arrangement the cycle reaches: the layer rotations times the
+        // rows' two swing directions.
+        for shift in 0..(2 * LAYERS as i32) {
             let mut trial = pills.to_vec();
             for p in &mut trial {
-                p.layer = (p.group as i32 - shift).rem_euclid(3) as u8;
+                p.layer = (p.group as i32 - shift).rem_euclid(LAYERS as i32) as u8;
             }
             bricks(&mut trial, &order, size, edge, g, shift);
             centre_weight(&mut trial, size.0, edge);
-            let m = imbalance(&trial, &order, size.0);
+            let counts = row_counts(order.len(), &plan_rows(&trial, &order, (size.0 - 2.0 * edge).max(1.0), min_gap(edge)));
+            let m = imbalance(&trial, &order, size.0, &counts);
             worst = worst.max(m);
             sum += m;
         }
@@ -1041,7 +1091,8 @@ fn balanced_order(pills: &[Pill], size: (f32, f32), s: f32) -> Vec<usize> {
     best.map(|(_, o)| o).unwrap_or_default()
 }
 
-/// Brick courses: the pills, in `order`, fill [`ROWS`] top to bottom. Each
+/// Brick courses: the pills, in `order`, fill the rows ([`plan_rows`]) top
+/// to bottom. Each
 /// row is centred and justified across its width (the widest reaching `edge`
 /// off the card's sides), its gaps varied a little per pill, and every pill
 /// strays a touch off its spot. Neighbouring rows hold different counts, so
@@ -1051,17 +1102,18 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
     // Which layer arrangement this is: picks the strays, and flips which
     // way the staggered rows swing, so each step slides them one side and
     // the next the other.
-    let arrangement = phase.rem_euclid(3) as usize;
+    let arrangement = phase.rem_euclid(LAYERS as i32) as usize;
     let swing = if phase.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
     let (top, bottom) = (gaps.0, size.1 - gaps.1);
-    let counts = row_counts(order.len());
-    // Tidied closer together: the rows use this share of the band (from the
-    // top down, so the air under the dock stays put) and of the width.
-    let row_h = (bottom - top).max(1.0) * TIGHT / ROWS.len() as f32;
     let whole = (w - 2.0 * edge).max(1.0);
     let full = whole * TIGHT;
+    let fracs = plan_rows(pills, order, whole, min_gap(edge));
+    let counts = row_counts(order.len(), &fracs);
+    // Tidied closer together: the rows use this share of the band (from the
+    // top down, so the air under the dock stays put) and of the width.
+    let row_h = (bottom - top).max(1.0) * TIGHT / fracs.len() as f32;
     let mut next = 0;
-    for (r, (&frac, &n)) in ROWS.iter().zip(&counts).enumerate() {
+    for (r, (&frac, &n)) in fracs.iter().zip(&counts).enumerate() {
         let row: Vec<usize> = order[next..(next + n).min(order.len())].to_vec();
         next += n;
         if row.is_empty() {
@@ -1072,7 +1124,7 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         let widths: f32 = row.iter().map(|&i| pills[i].slot().0).sum();
         // A row too full for its width grows toward the whole card (a
         // narrow card, long labels), and swings only by the room left.
-        let min_gap = 12.0 * (edge / EDGE).max(0.01);
+        let min_gap = min_gap(edge);
         // Tight, but never tighter than the row's pills allow: a full row
         // grows back toward the whole card (a narrow card, long labels).
         let base = (full * frac).max(widths + min_gap * (row.len() as f32 - 1.0)).min(whole);
@@ -1082,7 +1134,7 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         let room = ((base - widths - min_gap * (row.len() as f32 - 1.0)) / 2.0).max(0.0);
         let shift = (swing
             * if r % 2 == 1 { STAGGER * step } else { -STAGGER * step }
-            * if r == ROWS.len() / 2 { 0.0 } else { 1.0 })
+            * if r == fracs.len() / 2 { 0.0 } else { 1.0 })
             .clamp(-room, room);
         let span = base - 2.0 * shift.abs();
         // Each gap takes a varied share of the free room.
@@ -1336,8 +1388,10 @@ mod tests {
 
     /// A panel laid out at bar scale 1 over a typical card field, with
     /// estimated label widths (no text shaper in tests).
+    /// A real narrow card's field: the card's own width (720 px × the icon
+    /// scale 1.33) with a short dock, and its height.
     fn panel() -> Panel {
-        panel_sized((960.0, 560.0))
+        panel_sized((960.0, 846.0))
     }
 
     fn panel_sized(size: (f32, f32)) -> Panel {
@@ -1369,14 +1423,14 @@ mod tests {
     #[test]
     fn the_field_is_wide_bricks_inside_its_gaps_without_overlaps() {
         let p = panel();
-        assert_eq!(p.pills.len(), 20);
-        let per_layer = [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        assert_eq!(per_layer, [9, 7, 4]);
+        assert_eq!(p.pills.len(), 29);
+        let per_layer = [0, 1, 2, 3].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
+        assert_eq!(per_layer, [10, 8, 6, 5]);
         assert_clean(&p, "at rest");
         // Up under the dock: the top row sits in the first course below the
         // top gap.
         let (g_top, g_bottom) = gaps(p.key.1, 1.0);
-        let course = (p.key.1 - g_top - g_bottom) / ROWS.len() as f32;
+        let course = (p.key.1 - g_top - g_bottom) / MIN_ROWS as f32;
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
         assert!(top >= g_top - 0.5 && top <= g_top + course, "heap top at {top}");
         // Wide: the heap spans most of the card (its row ends keep a little
@@ -1389,16 +1443,20 @@ mod tests {
     #[test]
     fn scrolling_cycles_the_layers_and_every_order_lays_out_clean() {
         let mut p = panel();
-        let counts = |p: &Panel| [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
+        let counts = |p: &Panel| [0, 1, 2, 3].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
         p.shift_layers(1);
-        assert_eq!(counts(&p), [7, 4, 9], "down: the near group goes to the back");
-        assert_clean(&p, "one step down");
+        assert_eq!(counts(&p), [8, 6, 5, 10], "forward: the near group goes to the back");
+        assert_clean(&p, "one step");
         p.shift_layers(1);
-        assert_eq!(counts(&p), [4, 9, 7]);
-        assert_clean(&p, "two steps down");
+        assert_eq!(counts(&p), [6, 5, 10, 8]);
+        assert_clean(&p, "two steps");
+        p.shift_layers(1);
+        assert_eq!(counts(&p), [5, 10, 8, 6]);
+        assert_clean(&p, "three steps");
         p.shift_layers(-1);
         p.shift_layers(-1);
-        assert_eq!(counts(&p), [9, 7, 4], "up undoes it");
+        p.shift_layers(-1);
+        assert_eq!(counts(&p), [10, 8, 6, 5], "back undoes it");
         // The near group left from the front, so it is leaving now.
         assert!(p.pills.iter().any(|q| q.exit.is_some()));
     }
@@ -1438,7 +1496,7 @@ mod tests {
             }
             let d = p.draw(PanelPaint { ink: [1.0; 4], bright: false });
             for (r, l) in d.rects.iter().zip(&d.labels) {
-                let layer = if r.rect.h > 33.0 { 0 } else if r.rect.h > 22.0 { 1 } else { 2 };
+                let layer = if r.rect.h > 36.0 { 0 } else if r.rect.h > 29.5 { 1 } else if r.rect.h > 25.5 { 2 } else { 3 };
                 println!(
                     "PILL {}|{}|{:.1}|{:.1}|{:.1}|{:.1}|{:.2}",
                     l.text,
@@ -1462,13 +1520,13 @@ mod tests {
     fn the_field_is_balanced_left_to_right_in_every_layer_order() {
         // A wide card (Max's, a long dock) has room to balance well; a
         // narrow one's full rows leave less.
-        for (size, limit) in [((1900.0, 846.0), 0.08), ((960.0, 560.0), 0.10)] {
+        for (size, limit) in [((1280.0, 846.0), 0.08), ((960.0, 846.0), 0.10)] {
             balanced_within(panel_sized(size), limit);
         }
     }
 
     fn balanced_within(mut p: Panel, limit: f32) {
-        for step in 0..6 {
+        for step in 0..(2 * LAYERS) {
             // The heap's visual weight sits near the centre line.
             let (mut m, mut mx) = (0.0f32, 0.0f32);
             for q in &p.pills {
