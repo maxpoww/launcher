@@ -627,10 +627,29 @@ impl Panel {
         }
     }
 
-    /// Forget any open setting (the panel is opening afresh).
+    /// Start the panel afresh (it is being entered).
+    ///
+    /// Every entry starts from the beginning (Max, 2026-09-30): the layers
+    /// back in their first order, every pill home and at rest, nothing open.
     pub(crate) fn reset(&mut self) {
         self.open = None;
         self.hot = None;
+        if self.pills.is_empty() {
+            return;
+        }
+        self.shift = 0;
+        for p in &mut self.pills {
+            p.layer = p.group;
+            p.drawn = p.group;
+            p.exit = None;
+            p.sc = 1.0;
+            p.tsc = 1.0;
+            p.op = 1.0;
+            p.lift = 0.0;
+            p.rate = 1.0;
+        }
+        let size = (self.key.0, self.key.1);
+        self.compose(size, true);
     }
 
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
@@ -1582,6 +1601,21 @@ mod tests {
         for q in &shrinking {
             assert!(q.tsc < q.sc, "{}: text {} must lead outline {} when shrinking", q.label, q.tsc, q.sc);
         }
+    }
+
+    #[test]
+    fn entering_resets_the_layers_and_the_arrangement() {
+        let mut p = panel();
+        let first: Vec<(u8, (f32, f32))> = p.pills.iter().map(|q| (q.layer, q.home)).collect();
+        p.shift_layers(1);
+        p.shift_layers(1);
+        p.reset();
+        for (q, (layer, home)) in p.pills.iter().zip(&first) {
+            assert_eq!(q.layer, *layer, "{} back on its first layer", q.label);
+            assert!((q.home.0 - home.0).abs() < 0.5 && (q.home.1 - home.1).abs() < 0.5, "{} back home", q.label);
+            assert!(q.exit.is_none() && (q.sc - 1.0).abs() < 1e-6);
+        }
+        assert_eq!(p.shift, 0);
     }
 
     #[test]
