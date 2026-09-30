@@ -184,10 +184,6 @@ const SHIFT_COOLDOWN: Duration = Duration::from_millis(200);
 const SETTLE_RATE: f32 = 6.0;
 const LIFT_RATE: f32 = 12.0;
 const LIFT: f32 = 0.07;
-/// A layer step's zoom: how fast its pulse fades, and how far (px at bar
-/// scale 1) the outermost pills swell out at its peak.
-const ZOOM_RATE: f32 = 7.0;
-const ZOOM_SWELL: f32 = 28.0;
 /// The open-box morph's rate.
 const OPEN_RATE: f32 = 14.0;
 /// At rest the only motion is the tiny orbits (well under a pixel a second),
@@ -325,11 +321,6 @@ pub(crate) struct Panel {
     last_shift: Option<Instant>,
     hot: Option<usize>,
     open: Option<OpenBox>,
-    /// A layer step's zoom pulse: 1 at the step, easing to 0; its sign is the
-    /// step's direction (+1 forward: the field swells outward past the
-    /// viewer; -1 back: it draws inward).
-    zoom: f32,
-    zoom_dir: f32,
     /// The order the pills fill the rows in: shuffled once, so near, middle
     /// and far mix through every row, and fixed, so a layer change keeps the
     /// arrangement and only the sizes change.
@@ -428,8 +419,6 @@ impl Panel {
             return;
         }
         self.shift += dir as i32;
-        self.zoom = 1.0;
-        self.zoom_dir = dir as f32;
         for p in &mut self.pills {
             let old = p.layer;
             p.layer = (p.group as i32 - self.shift).rem_euclid(3) as u8;
@@ -513,18 +502,11 @@ impl Panel {
         true
     }
 
-    /// The middle of the band the heap lives in (field-relative): what a
-    /// layer step zooms about.
-    fn heap_centre(&self) -> (f32, f32) {
-        let (top, bottom) = gaps(self.key.1, self.scale.max(0.01));
-        (self.key.0 / 2.0, (top + self.key.1 - bottom) / 2.0)
-    }
-
     /// Whether anything is moving beyond the idle orbits: a layer leaving or
     /// arriving, a pill gliding, easing in size or presence, settling or
     /// lifting under the pointer, or the open setting growing or folding.
     fn is_moving(&self) -> bool {
-        if self.open.as_ref().is_some_and(|o| (o.k - o.want).abs() > 0.002) || self.zoom > 0.002 {
+        if self.open.as_ref().is_some_and(|o| (o.k - o.want).abs() > 0.002) {
             return true;
         }
         self.pills.iter().enumerate().any(|(i, p)| {
@@ -560,8 +542,6 @@ impl Panel {
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
     fn step(&mut self, dt: f32, pointer: Option<(f32, f32)>) {
         self.clock += dt;
-        self.zoom = approach(self.zoom, 0.0, ZOOM_RATE, dt);
-        let centre = self.heap_centre();
         if let Some(open) = &mut self.open {
             open.k = approach(open.k, open.want, OPEN_RATE, dt);
             if open.want == 0.0 && open.k < 0.01 {
@@ -584,18 +564,12 @@ impl Panel {
                 exit.k = (exit.k + dt / EXIT_SECS).min(1.0);
                 p.op = 1.0 - smoothstep(exit.k);
                 if exit.k >= 1.0 {
-                    // Arrive at the other end: going forward, the new back
-                    // layer emerges from deep in the field (near the centre)
-                    // and drifts out to its spot; going back, the new near
-                    // layer comes in from outside.
+                    // Arrive at the other end: the back, small and faint, or
+                    // (going back) the front, rising from below.
                     let back = exit.dir < 0;
                     p.exit = None;
                     p.drawn = p.layer;
-                    let from = if back { 1.35 } else { 0.55 };
-                    p.anchor = (
-                        centre.0 + (p.home.0 - centre.0) * from,
-                        centre.1 + (p.home.1 - centre.1) * from,
-                    );
+                    p.anchor = (p.home.0, p.home.1 + if back { 70.0 * s } else { 0.0 });
                     p.sc = if back { 1.25 } else { 0.6 };
                     p.op = 0.0;
                 }
@@ -620,8 +594,6 @@ impl Panel {
         let open_pill = self.open.as_ref().map(|o| o.pill);
         let open_from = self.open.as_ref().map(|o| o.from);
 
-        let centre = self.heap_centre();
-        let half_diag = (self.key.0 / 2.0).hypot(self.key.1 / 2.0).max(1.0);
         // Far first, near last; a leaving near layer and a lifted pill on top.
         let mut order: Vec<usize> = (0..self.pills.len()).collect();
         let rank = |p: &Pill| -> i32 {
@@ -637,36 +609,16 @@ impl Panel {
         for i in order {
             let p = &self.pills[i];
             let d = p.drawn as usize;
-            let (mut dx, mut dy, mut grow, mut fade, mut shrink): (f32, f32, f32, f32, f32) = (0.0, 0.0, 1.0, 1.0, 1.0);
-            // Radial, from the heap's centre: a layer step is a zoom through
-            // the field.
-            let (ux, uy, reach) = {
-                let (ox, oy) = (p.pos.0 - centre.0, p.pos.1 - centre.1);
-                let d = ox.hypot(oy).max(1.0);
-                (ox / d, oy / d, (d / half_diag).min(1.0))
-            };
+            let (mut dx, mut dy, mut grow, mut fade, mut shrink) = (0.0, 0.0, 1.0, 1.0, 1.0);
             if let Some(e) = p.exit {
                 let ease = 1.0 - (1.0 - e.k) * (1.0 - e.k);
                 if e.dir > 0 {
-                    // Flies outward past the viewer, growing.
-                    let fly = 220.0 * s * ease * (0.4 + 0.6 * reach);
-                    dx = ux * fly;
-                    dy = uy * fly;
-                    grow = 1.0 + 0.45 * ease;
+                    dy = 90.0 * s * ease; // falls past the viewer
+                    grow = 1.0 + 0.4 * ease;
                 } else {
-                    // Recedes into the depth, toward the centre.
-                    let sink = e.k * 0.45;
-                    dx = -(p.pos.0 - centre.0) * sink;
-                    dy = -(p.pos.1 - centre.1) * sink;
+                    dy = -8.0 * s * e.k; // recedes
                     grow = 1.0 - 0.5 * e.k;
                 }
-            } else if self.zoom > 0.001 {
-                // The rest swell outward (forward) or draw in (back) for a
-                // beat as they change layer, the further out the more.
-                let bulge = 4.0 * self.zoom * (1.0 - self.zoom);
-                let push = ZOOM_SWELL * s * bulge * self.zoom_dir * reach;
-                dx = ux * push;
-                dy = uy * push;
             }
             if let (Some(op), Some(from)) = (open_pill, open_from) {
                 if op == i {
@@ -1371,32 +1323,6 @@ mod tests {
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
         p.ensure(size, 1.0, 25.0, &mut est);
         println!("FIELD {} {}", size.0, size.1);
-        // MID=<ms>: a frame that far into a forward layer step, as drawn.
-        if let Some(ms) = std::env::var("MID").ok().and_then(|v| v.parse::<f32>().ok()) {
-            p.field = Rect::new(0.0, 0.0, size.0, size.1);
-            p.step(0.0, None);
-            p.shift_layers(1);
-            let n = (ms / 1000.0 * 240.0).round() as usize;
-            for _ in 0..n {
-                p.step(1.0 / 240.0, None);
-            }
-            let paint = PanelPaint { ink: [1.0; 4], bright: false };
-            let d = p.draw(paint);
-            for (r, l) in d.rects.iter().zip(&d.labels) {
-                let layer = if r.rect.h > 33.0 { 0 } else if r.rect.h > 22.0 { 1 } else { 2 };
-                println!(
-                    "PILL {}|{}|{:.1}|{:.1}|{:.1}|{:.1}|{:.2}",
-                    l.text,
-                    layer,
-                    r.rect.x + r.rect.w / 2.0,
-                    r.rect.y + r.rect.h / 2.0,
-                    r.rect.w,
-                    r.rect.h,
-                    r.color[3] / 0.19
-                );
-            }
-            return;
-        }
         for q in &p.pills {
             let (w, h) = q.size();
             println!("PILL {}|{}|{:.1}|{:.1}|{:.1}|{:.1}", q.label, q.layer, q.home.0, q.home.1, w, h);
