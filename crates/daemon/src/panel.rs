@@ -143,7 +143,7 @@ const GAP_BOTTOM_FRAC: f32 = 0.24;
 /// The whole heap sits this much lower than those gaps alone would put it:
 /// the top gap grows by it and the bottom one shrinks by it (Max: "a little
 /// lower").
-const DROP: f32 = 34.0;
+const DROP: f32 = 60.0;
 /// The rows, top to bottom, as each one's width against the widest: brick
 /// courses on a gentle ellipse, so the middle reaches the sides and the
 /// top and bottom rows are held in — wide, and a little round.
