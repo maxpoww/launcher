@@ -631,6 +631,7 @@ fn main() -> anyhow::Result<()> {
         panel_mix: 0.0,
         settings_from_apps: false,
         panel_tick_armed: false,
+        panel_reset_due: false,
         box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
@@ -1552,6 +1553,9 @@ pub struct App {
     settings_from_apps: bool,
     /// The panel's idle-cadence timer is pending (see `panel_idle_tick`).
     panel_tick_armed: bool,
+    /// The panel should start afresh once it is out of sight (see
+    /// `panel::Panel::reset`).
+    panel_reset_due: bool,
     /// Whether the currently open box was opened *from the dock* (a dock
     /// folder or pinned directory), as opposed to a grid folder tile. Arms
     /// the dock hover-switch even when the box opened into the grid.
@@ -2735,11 +2739,23 @@ impl App {
                     self.hide_deadline = None;
                     self.settings_panel = self.settings_opening;
                     self.settings_from_apps = false;
+                    // A reset still owed from the last visit: do it now,
+                    // before the card has risen (the panel is not yet seen).
+                    if self.panel_reset_due {
+                        self.panel.reset();
+                        self.panel_reset_due = false;
+                    }
                     // The card rises straight into its view: no apps↔panel
                     // swap to animate.
                     self.panel_mix = if self.settings_panel { 1.0 } else { 0.0 };
                 }
                 _ => {}
+            }
+            // Leaving the open card: the panel starts afresh next time — reset
+            // once it is out of sight (the frame loop does it), never while it
+            // is still visibly sinking.
+            if prev == Target::Open && next != Target::Open {
+                self.panel_reset_due = true;
             }
             // Minimized dock tiles hide while the launcher is open and return
             // when it closes (`minimized_entries` gate) — rebuild the dock

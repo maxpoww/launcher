@@ -1276,6 +1276,7 @@ impl App {
                 info!("apps: in place of the settings panel");
                 self.settings_panel = false;
                 self.settings_from_apps = false;
+                self.panel_reset_due = true;
                 self.schedule_frame();
             } else {
                 info!("apps: closing the grid");
@@ -1292,13 +1293,13 @@ impl App {
     /// sections clear in place.
     pub(crate) fn toggle_settings_panel(&mut self) {
         self.close_group();
-        self.panel.reset();
         if self.ui.target() == Target::Open {
             if self.settings_panel && self.settings_from_apps {
                 // Entered from the apps: the gear goes back to them.
                 info!("settings: back to the apps");
                 self.settings_panel = false;
                 self.settings_from_apps = false;
+                self.panel_reset_due = true;
                 self.schedule_frame();
             } else if self.settings_panel {
                 info!("settings: closing the panel");
