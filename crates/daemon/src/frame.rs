@@ -95,26 +95,17 @@ impl App {
             (!self.search.controls.is_empty()).then(|| self.options_pill_h() * crate::panel::LAYER_SCALE[0]),
         );
         // The Controls row: the matching settings as near-layer pills,
-        // centred in their band; what doesn't fit its width is left out.
+        // split about the title's centre (see `content::controls_rects`).
         if let Some(row) = layout.controls_row {
             let s = self.options_scale() * crate::panel::LAYER_SCALE[0];
             let gap = CONTROLS_GAP * self.options_scale();
-            let mut widths: Vec<f32> = Vec::new();
-            let mut total = 0.0;
-            for &(_, label_w) in &self.search.controls {
-                let w = (label_w + 2.0 * crate::options::PILL_PAD_X * s).max(row.h);
-                let next = total + if widths.is_empty() { 0.0 } else { gap } + w;
-                if next > row.w {
-                    break;
-                }
-                total = next;
-                widths.push(w);
-            }
-            let mut x = row.x + (row.w - total) / 2.0;
-            for w in widths {
-                layout.controls.push(content::Rect::new(x, row.y, w, row.h));
-                x += w + gap;
-            }
+            let widths: Vec<f32> = self
+                .search
+                .controls
+                .iter()
+                .map(|&(_, label_w)| (label_w + 2.0 * crate::options::PILL_PAD_X * s).max(row.h))
+                .collect();
+            layout.controls = content::controls_rects(row, &widths, gap);
         }
         // Position the open box's rest square. A grid box anchors to the
         // side of the grid it sits on (pinned preview icon lands on its
