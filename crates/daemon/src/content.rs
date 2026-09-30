@@ -254,8 +254,8 @@ pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
 /// Section titles (Apps, Install, Files, Controls): a little bigger than
 /// the icon labels (Max, 2026-09-30).
-const TITLE_FONT_PX: f32 = 14.0;
-const TITLE_LINE_PX: f32 = 18.0;
+const TITLE_FONT_PX: f32 = 16.0;
+const TITLE_LINE_PX: f32 = 20.0;
 /// Search box: height, inner padding, text metrics.
 const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
