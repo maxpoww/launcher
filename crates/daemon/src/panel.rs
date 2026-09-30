@@ -141,9 +141,11 @@ const LAYER_Z: [f32; LAYERS] = [1.0, 0.72, 0.5, 0.35];
 /// from them ("the middle side pills almost touch the sides", Max
 /// 2026-09-30).
 const EDGE: f32 = 6.0;
-/// How close together the pills sit: the share of the field's width and
-/// band height the rows use (Max: "tidy all closer together").
+/// How close together the pills sit: the share of the field's width
+/// (`TIGHT_X`) and band height (`TIGHT`) the rows use (Max: "tidy all closer
+/// together", then "spread them out a little to the sides").
 const TIGHT: f32 = 0.76;
+const TIGHT_X: f32 = 0.86;
 /// How much wider than the card's own width the field may grow as a longer
 /// dock widens the card; past it the field stays centred (Max: "no more
 /// than a third, then it stays locked on the middle").
@@ -1106,7 +1108,7 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
     let swing = if phase.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
     let (top, bottom) = (gaps.0, size.1 - gaps.1);
     let whole = (w - 2.0 * edge).max(1.0);
-    let full = whole * TIGHT;
+    let full = whole * TIGHT_X;
     let fracs = plan_rows(pills, order, whole, min_gap(edge));
     let counts = row_counts(order.len(), &fracs);
     // Tidied closer together: the rows use this share of the band (from the
@@ -1437,7 +1439,7 @@ mod tests {
         // air, `END_AIR`).
         let left = p.pills.iter().map(|q| q.home.0 - q.size().0 / 2.0).fold(f32::MAX, f32::min);
         let right = p.pills.iter().map(|q| q.home.0 + q.size().0 / 2.0).fold(f32::MIN, f32::max);
-        assert!(right - left > 0.8 * TIGHT * p.key.0, "heap spans {left}..{right} of {}", p.key.0);
+        assert!(right - left > 0.8 * TIGHT_X * p.key.0, "heap spans {left}..{right} of {}", p.key.0);
     }
 
     #[test]
