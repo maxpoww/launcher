@@ -232,6 +232,7 @@ struct Exit {
 }
 
 /// One setting's pill. Positions are field-relative centres.
+#[derive(Clone)]
 struct Pill {
     label: &'static str,
     /// Which settings travel together (the layer it started on).
@@ -372,7 +373,6 @@ impl Panel {
                     stray: [rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0],
                 })
                 .collect();
-            self.order = brick_order(&self.pills, &mut rng);
         }
         for p in &mut self.pills {
             for (l, &f) in LAYER_SCALE.iter().enumerate() {
@@ -380,6 +380,10 @@ impl Panel {
                 p.h[l] = h;
                 p.w[l] = (measure(p.label, FONT_PX * scale * f) + 2.0 * PILL_PAD_X * scale * f).max(h);
             }
+        }
+        // The fill order is chosen once, on the real sizes, for balance.
+        if fresh {
+            self.order = balanced_order(&self.pills, size, scale);
         }
         self.compose(size, true);
     }
@@ -399,6 +403,7 @@ impl Panel {
         // Only where a stray pushed two too close: nudge apart, held near
         // the brick spots.
         settle(&mut self.pills, (w, h), EDGE * s, (top, bottom), 12.0 * s, 0.12, 160);
+        centre_weight(&mut self.pills, w, EDGE * s);
         if snap {
             for p in &mut self.pills {
                 p.anchor = p.home;
@@ -884,6 +889,84 @@ fn brick_order(pills: &[Pill], rng: &mut Rng) -> Vec<usize> {
     order
 }
 
+/// How much a pill weighs to the eye on each layer: its area times this
+/// (the near layer is lit and large, the far one faint).
+const LAYER_WEIGHT: [f32; 3] = [1.0, 0.7, 0.45];
+
+/// How lopsided a laid-out field looks: the visual weight's pull off the
+/// vertical centre line, for the whole heap (counted double) and row by
+/// row, each as a share of the half-width. 0 = perfectly balanced.
+fn imbalance(pills: &[Pill], order: &[usize], w: f32) -> f32 {
+    let pull = |idx: &[usize]| -> f32 {
+        let (mut m, mut mx) = (0.0f32, 0.0f32);
+        for &i in idx {
+            let p = &pills[i];
+            let (pw, ph) = p.size();
+            let mass = pw * ph * LAYER_WEIGHT[p.layer as usize];
+            m += mass;
+            mx += mass * (p.ideal.0 - w / 2.0);
+        }
+        if m > 0.0 { (mx / m).abs() / (w / 2.0) } else { 0.0 }
+    };
+    let mut rows = 0.0;
+    let mut next = 0;
+    let counts = row_counts(order.len());
+    for &n in &counts {
+        let end = (next + n).min(order.len());
+        rows += pull(&order[next..end]);
+        next = end;
+    }
+    2.0 * pull(order) + rows / counts.len() as f32
+}
+
+/// Slide the whole heap sideways so its visual weight sits on the centre
+/// line, as far as the room at its sides allows (never past `edge`).
+fn centre_weight(pills: &mut [Pill], w: f32, edge: f32) {
+    let (mut m, mut mx) = (0.0f32, 0.0f32);
+    for p in pills.iter() {
+        let (pw, ph) = p.size();
+        let mass = pw * ph * LAYER_WEIGHT[p.layer as usize];
+        m += mass;
+        mx += mass * p.home.0;
+    }
+    if m <= 0.0 {
+        return;
+    }
+    let left_room = pills.iter().map(|p| p.home.0 - p.size().0 / 2.0 - edge).fold(f32::MAX, f32::min).max(0.0);
+    let right_room = pills.iter().map(|p| w - edge - p.home.0 - p.size().0 / 2.0).fold(f32::MAX, f32::min).max(0.0);
+    let dx = (w / 2.0 - mx / m).clamp(-left_room, right_room);
+    for p in pills.iter_mut() {
+        p.home.0 += dx;
+        p.ideal.0 += dx;
+    }
+}
+
+/// The fill order that looks most balanced left to right: the best of many
+/// candidate orders, each laid out and scored in all three layer
+/// arrangements (so it stays balanced as the layers cycle).
+fn balanced_order(pills: &[Pill], size: (f32, f32), s: f32) -> Vec<usize> {
+    const CANDIDATES: u32 = 256;
+    let (edge, g) = (EDGE * s, gaps(size.1, s));
+    let mut best: Option<(f32, Vec<usize>)> = None;
+    for c in 0..CANDIDATES {
+        let mut rng = Rng(0x9E37_79B9 ^ c.wrapping_mul(0x85EB_CA6B).wrapping_add(1));
+        let order = brick_order(pills, &mut rng);
+        let mut score = 0.0;
+        for shift in 0..3 {
+            let mut trial = pills.to_vec();
+            for p in &mut trial {
+                p.layer = (p.group as i32 - shift).rem_euclid(3) as u8;
+            }
+            bricks(&mut trial, &order, size, edge, g);
+            score += imbalance(&trial, &order, size.0);
+        }
+        if best.as_ref().is_none_or(|(b, _)| score < *b) {
+            best = Some((score, order));
+        }
+    }
+    best.map(|(_, o)| o).unwrap_or_default()
+}
+
 /// Brick courses: the pills, in `order`, fill [`ROWS`] top to bottom. Each
 /// row is centred and justified across its width (the widest reaching `edge`
 /// off the card's sides), its gaps varied a little per pill, and every pill
@@ -1241,6 +1324,27 @@ mod tests {
         for q in &p.pills {
             let (w, h) = q.size();
             println!("PILL {}|{}|{:.1}|{:.1}|{:.1}|{:.1}", q.label, q.layer, q.home.0, q.home.1, w, h);
+        }
+    }
+
+    #[test]
+    fn the_field_is_balanced_left_to_right_in_every_layer_order() {
+        let mut p = panel();
+        for step in 0..3 {
+            // The heap's visual weight sits near the centre line.
+            let (mut m, mut mx) = (0.0f32, 0.0f32);
+            for q in &p.pills {
+                let (w, h) = q.size();
+                let mass = w * h * LAYER_WEIGHT[q.layer as usize];
+                m += mass;
+                mx += mass * (q.home.0 - p.key.0 / 2.0);
+            }
+            let pull = (mx / m).abs() / (p.key.0 / 2.0);
+            assert!(pull < 0.08, "layer order {step}: weight pulled {pull:.3} of the half-width off centre");
+            p.shift_layers(1);
+            for _ in 0..60 {
+                p.step(1.0 / 60.0, None);
+            }
         }
     }
 
