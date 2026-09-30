@@ -1986,6 +1986,9 @@ struct SearchState {
     open: bool,
     /// Animated expansion of the search widget: 0.0 = button, 1.0 = pill.
     expand: f32,
+    /// Eased pointer hover on the compact pill (0..1), the settings pills'
+    /// own settle-and-lift.
+    lift: f32,
 }
 
 impl Default for SearchState {
@@ -1997,6 +2000,7 @@ impl Default for SearchState {
             selected: None,
             open: false,
             expand: 0.0,
+            lift: 0.0,
         }
     }
 }

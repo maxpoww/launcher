@@ -79,15 +79,15 @@ const SETTINGS: [(&str, u8, &str); 24] = [
 const LAYER_SCALE: [f32; 3] = [1.53, 1.0, 0.8];
 /// Resting wash alpha per layer, on a dark card (white wash) and a bright
 /// one (black wash, which reads stronger at equal alpha).
-const LAYER_WASH_DARK: [f32; 3] = [0.19, 0.10, 0.055];
-const LAYER_WASH_BRIGHT: [f32; 3] = [0.16, 0.085, 0.045];
+pub(crate) const LAYER_WASH_DARK: [f32; 3] = [0.19, 0.10, 0.055];
+pub(crate) const LAYER_WASH_BRIGHT: [f32; 3] = [0.16, 0.085, 0.045];
 /// The OPTIONS hover wash, the same on every layer.
-const HOVER_WASH_DARK: f32 = 0.27;
-const HOVER_WASH_BRIGHT: f32 = 0.30;
+pub(crate) const HOVER_WASH_DARK: f32 = 0.27;
+pub(crate) const HOVER_WASH_BRIGHT: f32 = 0.30;
 /// Ink strength per layer.
-const LAYER_INK: [f32; 3] = [1.0, 0.84, 0.62];
+pub(crate) const LAYER_INK: [f32; 3] = [1.0, 0.84, 0.62];
 /// Soft glow per layer: (blur px, alpha). The far layer has none.
-const LAYER_GLOW: [(f32, f32); 3] = [(7.0, 0.17), (3.5, 0.08), (0.0, 0.0)];
+pub(crate) const LAYER_GLOW: [(f32, f32); 3] = [(7.0, 0.17), (3.5, 0.08), (0.0, 0.0)];
 /// How "near" each layer is: sets the orbit radius.
 const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 
@@ -114,8 +114,8 @@ const WHEEL_STEP: f64 = 10.0;
 const SHIFT_COOLDOWN: Duration = Duration::from_millis(150);
 /// Hover: how fast a pill settles, and comes closer (and by how much).
 const SETTLE_RATE: f32 = 6.0;
-const LIFT_RATE: f32 = 12.0;
-const LIFT: f32 = 0.07;
+pub(crate) const LIFT_RATE: f32 = 12.0;
+pub(crate) const LIFT: f32 = 0.07;
 /// Search: how fast pills rise or sink as the query changes, how much a
 /// miss shrinks, and how far it dims.
 const SEARCH_RATE: f32 = 14.0;

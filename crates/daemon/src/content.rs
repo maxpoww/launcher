@@ -254,10 +254,28 @@ const SEARCH_BTN_W: f32 = 80.0;
 /// Minimum expanded width — the resting size; the pill grows from here
 /// with the shaped query.
 const SEARCH_W_MIN: f32 = 160.0;
-const SEARCH_PAD_X: f32 = 14.0;
 const SEARCH_GAP: f32 = 7.0;
-pub(crate) const SEARCH_FONT_PX: f32 = 15.0;
-const SEARCH_LINE_PX: f32 = 20.0;
+
+/// The search pill as one more OPTIONS pill (Max, 2026-09-30: "make the
+/// search pill look and feel like the other pills"): the bar pill's height
+/// and type — the control panel's middle layer — at the bar's scale.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchPill {
+    /// The OPTIONS scale (`App::options_scale`).
+    pub scale: f32,
+    /// The bar pill's height (`App::options_pill_h`).
+    pub h: f32,
+    /// Shaped width of the "Search" label at the pill's font.
+    pub label_px: f32,
+    /// Eased pointer hover, 0..1.
+    pub lift: f32,
+}
+
+impl Default for SearchPill {
+    fn default() -> Self {
+        Self { scale: 1.0, h: 23.0, label_px: 52.0, lift: 0.0 }
+    }
+}
 
 /// How much the content ride trails the opening card (1.0 = glued to
 /// it): the parallax depth of the rise-from-the-bottom-edge animation.
@@ -1044,6 +1062,8 @@ pub struct FrameInput<'a> {
     pub hover: Option<Hit>,
     /// Shaped pixel width of the live query (the caret anchor).
     pub query_px: f32,
+    /// The search pill's size, type and hover.
+    pub search_pill: SearchPill,
     /// AGUA stretch factor (1.0 at rest): dock icons slosh vertically
     /// about their baseline with the card's motion — on the dock
     /// reveal, and at the top of the card as an open lands.
@@ -1313,6 +1333,7 @@ pub fn scene(
     let FrameInput {
         hover,
         query_px,
+        search_pill,
         stretch,
         dock_tooltip,
         alpha,
@@ -1966,88 +1987,84 @@ pub fn scene(
             clip: reveal_rect,
             ..Default::default()
         };
-        let btn = layout.search_btn;
         let boxx = layout.search_box;
         let cx = w / 2.0;
-        let is_btn_hover = hover == Some(Hit::SearchButton) && search_expand < 0.5;
-        // One more pill: the OPTIONS pill's own material — its resting wash
-        // (hover: the hover wash) and soft neumorphic lift, polarity from
-        // the card's ink — so it reads as a sibling of the settings pills.
+        // One more pill: the control panel's middle layer (the OPTIONS bar
+        // pill) — its wash, soft light and ink, its type, and its hover
+        // (settles in, lifts 7%, the OPTIONS hover wash).
+        let sp = search_pill;
         let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
-        let box_color = match (bright, is_btn_hover) {
-            (false, false) => crate::options::wash(true, 0.11),
-            (false, true) => crate::options::wash(true, 0.27),
-            (true, false) => crate::options::wash(false, 0.10),
-            (true, true) => crate::options::wash(false, 0.30),
+        use crate::panel::{HOVER_WASH_BRIGHT, HOVER_WASH_DARK, LAYER_GLOW, LAYER_INK, LAYER_WASH_BRIGHT, LAYER_WASH_DARK, LIFT};
+        let (rest_a, hover_a) = if bright {
+            (LAYER_WASH_BRIGHT[1], HOVER_WASH_BRIGHT)
+        } else {
+            (LAYER_WASH_DARK[1], HOVER_WASH_DARK)
         };
-        // Expanded width: the resting SEARCH_W_MIN, growing snugly with
-        // the shaped query (measured, not estimated) plus caret room.
-        let content_w = (query_px + 2.0 * SEARCH_PAD_X + 8.0)
+        let box_color = crate::options::wash(!bright, lerp(rest_a, hover_a, sp.lift));
+        let font = crate::options::FONT_PX * sp.scale;
+        let line = crate::options::LINE_PX * sp.scale;
+        let pad = crate::options::PILL_PAD_X * sp.scale;
+        // Compact: hugs "Search" like any pill. Expanded: at least
+        // SEARCH_W_MIN, growing snugly with the shaped query (measured, not
+        // estimated) plus caret room.
+        let compact_w = (sp.label_px + 2.0 * pad).max(sp.h);
+        let content_w = (query_px + 2.0 * pad + 8.0)
             .max(SEARCH_W_MIN)
             .min(card_w - 2.0 * GRID_PAD_X);
-        let sw = lerp(btn.w, content_w, search_expand);
-        let draw_rect = Rect::new(cx - sw / 2.0, boxx.y, sw, SEARCH_H);
-        crate::options::push_neumorph(&mut scene, draw_rect, SEARCH_H / 2.0, bright, card_open * card_open);
+        let k = 1.0 + LIFT * sp.lift;
+        let (sw, sh) = (lerp(compact_w, content_w, search_expand) * k, sp.h * k);
+        let cy = boxx.y + SEARCH_H / 2.0;
+        let draw_rect = Rect::new(cx - sw / 2.0, cy - sh / 2.0, sw, sh);
+        let (blur, glow_a) = LAYER_GLOW[1];
+        let glow = if bright { 0.0 } else { 1.0 };
+        scene.overlay_shadows.push(ShadowInst {
+            rect: draw_rect,
+            radius: sh / 2.0,
+            blur: blur * sp.scale,
+            color: [glow, glow, glow, glow_a * card_open * card_open],
+            edges: [1.0, 1.0, 1.0, 1.0],
+        });
         sgrid.rects.push(RectInst {
             rect: draw_rect,
-            radius: SEARCH_H / 2.0,
+            radius: sh / 2.0,
             color: box_color,
             glass: 0.0,
             border: 0.0,
         });
-
-        if search_expand < 0.5 {
-            // Compact button: "Search" label.
-            sgrid.labels.push(Label {
-                text: crate::i18n::tr("Search").to_string(),
-                pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
-                max_w: btn.w,
-                font_px: SEARCH_FONT_PX,
-                line_px: SEARCH_LINE_PX,
-                centered: true,
-                dim: false,
-                cache: true,
-                family: None,
-                color: None,
-                clip: Some(reveal_clip(draw_rect)),
-            });
+        let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * LAYER_INK[1]];
+        let (text, dim) = if search_expand >= 0.5 && !query.is_empty() {
+            (query.to_string(), false)
         } else {
-            // Expanded: centered query (or dim placeholder) with a real
-            // caret — a thin bar sitting exactly after the shaped text
-            // (`query_px`, measured by the renderer, not estimated), so
-            // it hugs the last glyph as the pill grows around them.
-            let (text, dim) = if query.is_empty() {
-                (crate::i18n::tr("Search").to_string(), true)
-            } else {
-                (query.to_string(), false)
-            };
-            sgrid.labels.push(Label {
-                text,
-                pos: (cx, boxx.y + (SEARCH_H - SEARCH_LINE_PX) / 2.0),
-                max_w: sw - 2.0 * SEARCH_PAD_X,
-                font_px: SEARCH_FONT_PX,
-                line_px: SEARCH_LINE_PX,
-                centered: true,
-                dim,
-                cache: query.is_empty(),
-                family: None,
-                color: None,
-                clip: Some(reveal_clip(draw_rect)),
+            // The label, then the placeholder once open.
+            (crate::i18n::tr("Search").to_string(), search_expand >= 0.5)
+        };
+        sgrid.labels.push(Label {
+            text,
+            pos: (cx, cy - line * k / 2.0),
+            max_w: sw - 2.0 * pad,
+            font_px: font * k,
+            line_px: line * k,
+            centered: true,
+            dim,
+            // Glyphs cache only at rest (an easing size would fill it).
+            cache: (query.is_empty() || search_expand < 0.5) && (k - 1.0).abs() < 0.001,
+            family: crate::options::TEXT_FONT,
+            color: if dim { None } else { Some(ink) },
+            clip: Some(reveal_clip(draw_rect)),
+        });
+        // A real caret sitting exactly after the shaped text, only once
+        // the morph has (nearly) landed, so it can't drift during the
+        // stretch.
+        if search_expand >= 0.5 && !query.is_empty() && search_expand > 0.9 {
+            let caret_x = (cx + query_px / 2.0 + 3.0).min(draw_rect.x + sw - 8.0);
+            let t = dock_ink;
+            sgrid.rects.push(RectInst {
+                rect: Rect::new(caret_x, cy - line / 2.0 + 1.0, 1.5, line - 2.0),
+                radius: 0.75,
+                color: [t[0], t[1], t[2], 0.9],
+                glass: 0.0,
+                border: 0.0,
             });
-            // The caret rides the centered text's right edge while
-            // typing — only once the morph has (nearly) landed, so it
-            // can't drift during the stretch.
-            if !query.is_empty() && search_expand > 0.9 {
-                let caret_x = (cx + query_px / 2.0 + 3.0).min(draw_rect.x + sw - 8.0);
-                let t = dock_ink;
-                sgrid.rects.push(RectInst {
-                    rect: Rect::new(caret_x, boxx.y + 6.0, 1.5, SEARCH_H - 12.0),
-                    radius: 0.75,
-                    color: [t[0], t[1], t[2], 0.9],
-                    glass: 0.0,
-                    border: 0.0,
-                });
-            }
         }
         search_grid = Some(sgrid);
     }

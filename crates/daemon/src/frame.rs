@@ -334,6 +334,19 @@ impl App {
                 (self.search.expand - delta).max(0.0)
             };
         }
+        // The compact search pill's hover eases in and out like a settings
+        // pill's (panel::LIFT_RATE).
+        let lift_target = if self.hover == Some(content::Hit::SearchButton) && self.search.expand < 0.5 {
+            1.0f32
+        } else {
+            0.0
+        };
+        let lift_animating = (self.search.lift - lift_target).abs() > 0.002;
+        self.search.lift = if lift_animating {
+            self.search.lift + (lift_target - self.search.lift) * (1.0 - (-dt * crate::panel::LIFT_RATE).exp())
+        } else {
+            lift_target
+        };
 
         // Smooth-scroll each section and the open box — one Pager slide.
         let mut scroll_animating = false;
@@ -372,11 +385,26 @@ impl App {
         }
 
         // The search caret anchors to the query's shaped width.
-        let query_px = self
+        // The search pill is one more OPTIONS pill: the bar pill's size and
+        // type at the bar's scale.
+        let pill_scale = self.options_scale();
+        let search_font = crate::options::FONT_PX * pill_scale;
+        let (query_px, search_label_px) = self
             .renderer
             .as_mut()
-            .map(|r| r.measure_text(&self.search.query, content::SEARCH_FONT_PX, None))
-            .unwrap_or(0.0);
+            .map(|r| {
+                (
+                    r.measure_text(&self.search.query, search_font, crate::options::TEXT_FONT),
+                    r.measure_text(crate::i18n::tr("Search"), search_font, crate::options::TEXT_FONT),
+                )
+            })
+            .unwrap_or((0.0, 0.0));
+        let search_pill = content::SearchPill {
+            scale: pill_scale,
+            h: self.options_pill_h(),
+            label_px: search_label_px,
+            lift: self.search.lift,
+        };
         // (layout.scroll is the cyclic-wrapped image of list_scroll; the
         // raw value is what animates, so never sync it back from layout.)
         // Grid drag: track the make-room gap under the pointer and the
@@ -1037,6 +1065,7 @@ impl App {
                     None
                 },
                 query_px,
+                search_pill,
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()
@@ -1115,7 +1144,7 @@ impl App {
         ) {
             error!("render failed: {e:#}");
         }
-        if search_animating && self.search.expand != search_target {
+        if (search_animating && self.search.expand != search_target) || lift_animating {
             self.dirty = true;
         }
         if scroll_animating
