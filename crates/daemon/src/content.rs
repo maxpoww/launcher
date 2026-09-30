@@ -829,7 +829,7 @@ pub fn layout(
     // Only the normal icons count: the minimized tiles hide as the card
     // opens, and the grid's columns (below) — hence the stored page
     // capacity — must not come and go with every minimized window.
-    let open_row_w = n_normal_shown as f32 * dock_slot + 2.0 * dock_pad_x;
+    let open_row_w = (n_normal_shown + n_fixed_shown) as f32 * dock_slot + 2.0 * dock_pad_x;
     let open_w = card_w.max(open_row_w.min(max_basin));
     let gathered = basin_w + (open_w - basin_w) * rise;
     let card_w_now = (gathered * (1.0 - (stretch.0 - 1.0) * SPILL)).min(w);
