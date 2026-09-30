@@ -808,6 +808,7 @@ pub fn focus_exact_class(class: &str) -> bool {
 /// Known browser window classes (lowercased substrings) for [`focus_browser`]
 /// and [`is_browser_class`].
 const BROWSER_CLASSES: &[&str] = &[
+    "seam", // Golem's browser (its webapp windows are not "the browser" here)
     "firefox",
     "chrome",
     "chromium",

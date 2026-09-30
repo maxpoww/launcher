@@ -226,17 +226,6 @@
                 nixpkgs eval; never do that on small machines.
               '';
             };
-
-            webappExtension = lib.mkOption {
-              type = lib.types.nullOr lib.types.path;
-              default = null;
-              description = ''
-                Unpacked Chrome extension dir appended to every webapp
-                launch as --load-extension (WAVERUNNER_WEBAPP_EXTENSION).
-                Chromium honours it; branded Chrome >=137 ignores the flag,
-                where the extension needs a one-time manual "Load unpacked".
-              '';
-            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -268,9 +257,7 @@
               } // (let
                 env =
                   lib.optional (cfg.packageIndex != null)
-                    "WAVERUNNER_PKG_INDEX=${cfg.packageIndex}/share/waverunner/nixpkgs-index.tsv"
-                  ++ lib.optional (cfg.webappExtension != null)
-                    "WAVERUNNER_WEBAPP_EXTENSION=${cfg.webappExtension}";
+                    "WAVERUNNER_PKG_INDEX=${cfg.packageIndex}/share/waverunner/nixpkgs-index.tsv";
               in lib.optionalAttrs (env != [ ]) { Environment = env; });
               Install.WantedBy = [ "graphical-session.target" ];
             };

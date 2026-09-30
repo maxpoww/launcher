@@ -37,7 +37,12 @@ what to check rather than claiming it's verified.
   root-owned `/etc/nixos/waverunner-packages.nix` and `nixos-rebuild switch`es. See `applier.rs`.
 
 ## Webapp catalog (installable, like packages)
-Curated Chrome webapps from `~/.config/webapps.list` (`Name | URL | icon`). Every entry is
+Curated webapps from `~/.config/webapps.list` (`Name | URL | icon`), run by **Seam**
+(Golem's browser): `Exec=seam -golem-app <slug> <url>` opens a webapp window of the
+running Seam (no tabs/toolbar, window class `webapp-<slug>` = `StartupWMClass` = the
+desktop id, one process + one sign-in with the browser; Seam side = Golem's
+`seam/golem-chrome.js` WEBAPPS). Copy-link reads Seam's `$XDG_RUNTIME_DIR/seam/apps.json`
+(was Chrome's CDP port; Chrome `--app` until 2026-09-30). Every entry is
 materialized as `webapp-<slug>.desktop` (`webapps::materialize_catalog`) so the indexer
 rasterizes its icon. Classified at runtime by id-prefix + `managed_webapps` membership:
 `webapp-*` not in `managed_webapps` → Install section (catalog); installed → grid. Click/

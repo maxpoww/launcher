@@ -1,126 +1,42 @@
-//! The webapp catalog: curated Chrome web-apps that live in the Install
-//! search section (like nixpkgs packages) rather than on the Apps grid.
+//! The webapp catalog: curated web-apps that live in the Install search
+//! section (like nixpkgs packages) rather than on the Apps grid.
 //!
 //! The catalog is read from `~/.config/webapps.list` (`Name | URL | icon`,
-//! `#` comments) — the same declarative, nix-managed file the reactive
-//! `webapps-gen` uses. A catalog entry is *tried* by launching Chrome in
-//! app mode, and *installed* by materializing a `webapp-<slug>.desktop`
-//! launcher (so it becomes an ordinary grid app); the installed set is
-//! recorded declaratively by [`crate::managed_webapps`].
+//! `#` comments). A catalog entry is *tried* by launching it, and *installed*
+//! by materializing a `webapp-<slug>.desktop` launcher (so it becomes an
+//! ordinary grid app); the installed set is recorded declaratively by
+//! [`crate::managed_webapps`].
 //!
-//! Frameless app mode = `google-chrome-stable --app=<URL>
-//! --disable-client-side-decorations` (the `--app-id` form Chrome installs
-//! keeps a title bar; only `--app=<URL>` honours the flag).
+//! A webapp runs in **Seam**, Golem's browser: `seam -golem-app <slug> <url>`
+//! opens `<url>` as a webapp window of the running Seam: no tabs, no toolbar,
+//! its own window class `webapp-<slug>`, one process and one sign-in with the
+//! browser. The Seam half is Golem's `seam/golem-chrome.js` (WEBAPPS). Until
+//! 2026-09-30 a webapp was a Chrome `--app` window on a shared Chrome profile,
+//! and Golem ships no Chrome.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
-use tracing::{debug, info, warn};
+use tracing::debug;
 
-/// App-mode browsers in preference order: Chrome (the reference for our CDP +
-/// CSD flags), then Chromium (flag-compatible, and the free one a Golem install
-/// can actually ship). Resolved against PATH once per process — on a machine
-/// with neither, webapp launches used to no-op silently (SH audit F2).
-const BROWSERS: [&str; 3] = ["google-chrome-stable", "chromium", "chromium-browser"];
-const FLAG: &str = "--disable-client-side-decorations";
+/// The browser that runs webapps: Seam, on PATH on every Golem machine.
+const SEAM: &str = "seam";
+/// Seam's command-line flag for a webapp window (golem-chrome.js WEBAPPS).
+const FLAG: &str = "-golem-app";
+/// The window-class prefix Seam gives a webapp window (`webapp-<slug>`), and
+/// the desktop-id prefix of its launcher: the two match, so the dock pairs a
+/// running webapp with its tile by `StartupWMClass`.
+const PREFIX: &str = "webapp-";
 
-/// The first [`BROWSERS`] entry present on PATH (falls back to the first and
-/// warns when none are — the launch will then fail visibly in the log).
-fn browser() -> &'static str {
-    static RESOLVED: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    RESOLVED.get_or_init(|| {
-        if let Some(b) = BROWSERS.into_iter().find(|b| crate::launch::on_path(b)) {
-            debug!("webapps: using {b}");
-            return b;
-        }
-        warn!("webapps: none of {BROWSERS:?} on PATH; webapp launches will fail");
-        BROWSERS[0]
-    })
-}
-/// Fixed CDP port the shared webapp Chrome instance listens on, so the clipboard
-/// "copy link" pill can read an app-mode window's current URL (no address bar to
-/// `Ctrl+L`). See [`crate::clipboard`]'s `copy_active_link`.
-pub const CDP_PORT: u16 = 9333;
-
-/// Absolute path of the dedicated Chrome profile all webapps share — separate
-/// from the user's main browser so this one instance can own the debug port
-/// (`--remote-debugging-port`). Keeps the profile dir named `Default`, so the
-/// window `StartupWMClass` (`chrome-<host>__-Default`) is unchanged.
-fn profile_dir() -> PathBuf {
-    crate::persist::data_path("webapp-chrome")
-}
-
-/// Clear a *stale* Chrome `SingletonLock` from the shared webapp profile before
-/// a webapp launch, so webapps still open after an unclean Chrome exit or a
-/// machine rename. Called from [`crate::launch::launch`] for every launch; a
-/// no-op unless `exec` targets our profile dir, so ordinary app launches pay
-/// nothing.
-///
-/// Chrome encodes the lock as a `SingletonLock -> <hostname>-<pid>` symlink and
-/// refuses to start while it looks live. It only reclaims a lock that names a
-/// *dead* PID *on this host* — if the hostname differs it assumes the profile is
-/// open "on another computer" and never clears it, so a single rename (this box
-/// went `Golum` → `Golem`) permanently breaks every webapp launch. Because this
-/// profile is waverunner-owned and single-purpose, we can safely clear a lock
-/// that names a dead PID *or* a foreign host. A genuinely live instance (our
-/// hostname + a live PID) is left intact, so a second webapp window still
-/// attaches to it instead of spawning a rival process.
-pub fn clear_stale_profile_lock_for(exec: &str) {
-    let profile = profile_dir();
-    let Some(profile_str) = profile.to_str() else {
-        return;
-    };
-    if !exec.contains(profile_str) {
-        return; // not a webapp launch
-    }
-    let lock = profile.join("SingletonLock");
-    let Ok(target) = std::fs::read_link(&lock) else {
-        return;
-    }; // no lock → nothing to clear
-    let target = target.to_string_lossy();
-    if lock_is_live(&target, &hostname()) {
-        return;
-    }
-    match std::fs::remove_file(&lock) {
-        Ok(()) => info!("cleared stale Chrome webapp SingletonLock ({target})"),
-        Err(e) => warn!("could not clear stale webapp SingletonLock: {e}"),
-    }
-}
-
-/// Whether a `SingletonLock` target (`<hostname>-<pid>`) names a live instance
-/// on this host: our hostname AND a live PID. A foreign hostname is never live
-/// for us (the machine-rename bug), so we may reclaim it. Split on the LAST '-'
-/// since hostnames may contain '-' but a PID never does.
-fn lock_is_live(target: &str, this_host: &str) -> bool {
-    target
-        .rsplit_once('-')
-        .is_some_and(|(host, pid)| host == this_host && pid.parse::<i32>().is_ok_and(pid_alive))
-}
-
-/// This machine's hostname (Linux: `/proc/sys/kernel/hostname`).
-fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default()
-}
-
-/// Whether `pid` is a live process.
-fn pid_alive(pid: i32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
-}
-
-/// Whether a window class is an app-mode Chrome webapp (`--app=` window), whose
-/// URL must be read via CDP — as opposed to a full browser (`google-chrome` /
-/// `firefox`), where the address bar (`Ctrl+L`) works. The `--app` WM_CLASS is
-/// always `chrome-<host>__-<profile>`.
+/// Whether a window class is a webapp window (`webapp-<slug>`), whose page is
+/// read from Seam's report, as opposed to a full browser, where the address
+/// bar (`Ctrl+L`) works.
 pub fn is_app_window(class: &str) -> bool {
-    class.starts_with("chrome-") && class.contains("__")
+    class_slug(class).is_some()
 }
 
-/// The host encoded in an app window's class (`chrome-www.youtube.com__-Default`
-/// → `www.youtube.com`).
-fn class_host(class: &str) -> Option<&str> {
-    class.strip_prefix("chrome-")?.split("__").next()
+/// The slug in a webapp window's class (`webapp-youtube-music` → `youtube-music`).
+fn class_slug(class: &str) -> Option<&str> {
+    class.strip_prefix(PREFIX).filter(|s| !s.is_empty())
 }
 
 /// The host of an http(s) URL.
@@ -131,93 +47,64 @@ pub fn url_host(url: &str) -> Option<&str> {
     Some(rest.split(['/', '?', '#']).next().unwrap_or(""))
 }
 
-/// The host of the `--app=<url>` in a webapp launcher's `Exec` line, for
-/// matching a copied link against an installed webapp.
+/// The `(slug, url)` of a webapp launcher's `Exec` line
+/// (`seam -golem-app <slug> <url>`).
+fn exec_app(exec: &str) -> Option<(&str, &str)> {
+    let mut it = exec.split_whitespace();
+    it.find(|t| *t == FLAG)?;
+    Some((it.next()?, it.next()?))
+}
+
+/// The slug a webapp launcher opens (`webapp-<slug>.desktop`'s `Exec`).
+pub fn exec_app_slug(exec: &str) -> Option<&str> {
+    exec_app(exec).map(|(slug, _)| slug)
+}
+
+/// The host of a webapp launcher's start URL, for matching a copied link
+/// against an installed webapp.
 pub fn exec_app_host(exec: &str) -> Option<&str> {
-    let url = exec.split("--app=").nth(1)?.split_whitespace().next()?;
-    url_host(url)
+    url_host(exec_app(exec)?.1)
 }
 
-/// Build the frameless app-mode launch command for `url_token` (already a single
-/// shell token) in the shared webapp profile + debug port — the one place the
-/// browser flags live, used by installed webapps and by opening a link "as a
-/// webapp".
-fn app_exec_with(url_token: &str) -> String {
-    format!(
-        "{} --app={} {FLAG} --user-data-dir={} --remote-debugging-port={CDP_PORT}{}",
-        browser(),
-        url_token,
-        profile_dir().display(),
-        extension_flag(std::env::var("WAVERUNNER_WEBAPP_EXTENSION").ok()),
-    )
+/// The launch command for webapp `slug` at `url_token` (already a single
+/// shell token): the one place the Seam flags live, used by installed webapps
+/// and by opening a link in a webapp.
+fn app_exec_with(slug: &str, url_token: &str) -> String {
+    format!("{SEAM} {FLAG} {slug} {url_token}")
 }
 
-/// ` --load-extension=<dir>` for the shared webapp profile when the
-/// distribution ships an unpacked extension (WAVERUNNER_WEBAPP_EXTENSION,
-/// set by the home-manager module — Golem points it at its vendored
-/// notification-fix, which un-breaks FB/Messenger notifications on Wayland).
-/// Chromium honours the flag; branded Chrome removed it in 137 (verified
-/// ignored on 152), so on Chrome the extension still needs a one-time manual
-/// "Load unpacked" — the flag is harmless there. Env unset/empty = no flag.
-fn extension_flag(ext: Option<String>) -> String {
-    match ext {
-        Some(dir) if !dir.is_empty() => format!(" --load-extension={dir}"),
-        _ => String::new(),
-    }
+/// Open an arbitrary link in the webapp `slug`: the clipboard "Open" pill's
+/// route for a link that belongs to an installed webapp. Seam loads it in that
+/// webapp's window (a launch at the webapp's own start URL only focuses it).
+/// Shell-quoted: links carry `&`/`?`, and `launch` runs via `sh -c`.
+pub fn app_open_exec(slug: &str, url: &str) -> String {
+    app_exec_with(slug, &crate::launch::shell_quote(url))
 }
 
-/// Open an arbitrary link as a webapp (app-mode, shared profile) — the clipboard
-/// "Open" pill's route for links that belong to a webapp. Shell-quoted because
-/// link URLs carry `&`/`?` query strings and `launch` runs via `sh -c`.
-pub fn app_open_exec(url: &str) -> String {
-    app_exec_with(&crate::launch::shell_quote(url))
+/// Where Seam reports every open webapp window's page:
+/// `$XDG_RUNTIME_DIR/seam/apps.json` = `{ "<slug>": { "url", "title" } }`.
+fn apps_report_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("seam/apps.json"))
 }
 
-/// The live URL of the focused app-mode webapp window, read from the shared
-/// Chrome instance's DevTools endpoint (`/json/list`). Best-effort: `None` if
-/// the instance isn't up (webapp launched before this landed, so no debug port),
-/// `curl` is missing, or no page matches. Matches the focused window by its host
-/// (from the class) then its title, so the right one is picked when several
-/// webapp windows are open. Blocking (localhost `curl`) — worker-thread only.
-pub fn active_app_url(class: &str, title: &str) -> Option<String> {
-    let host = class_host(class)?;
-    let out = Command::new("curl")
-        .args([
-            "-s",
-            "--max-time",
-            "2",
-            &format!("http://127.0.0.1:{CDP_PORT}/json/list"),
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let targets: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).ok()?;
-    let url = pick_page_url(&targets, host, title)?;
-    debug!("webapp copy-link: {host} -> {url}");
+/// The live URL of a webapp window, from Seam's report (the window has no
+/// address bar to copy from). `None` when Seam has not reported that slug.
+pub fn active_app_url(class: &str) -> Option<String> {
+    let slug = class_slug(class)?;
+    let text = std::fs::read_to_string(apps_report_path()?).ok()?;
+    let url = report_url(&text, slug)?;
+    debug!("webapp copy-link: {slug} -> {url}");
     Some(url)
 }
 
-/// Pick the focused webapp window's URL from CDP `/json/list` targets: among
-/// `page` targets on `host` with an http(s) URL (the webapp's own windows),
-/// prefer the one whose title matches the focused window, else the first.
-fn pick_page_url(targets: &[serde_json::Value], host: &str, title: &str) -> Option<String> {
-    let pages: Vec<&serde_json::Value> = targets
-        .iter()
-        .filter(|t| t["type"] == "page")
-        .filter(|t| {
-            t["url"]
-                .as_str()
-                .and_then(url_host)
-                .is_some_and(|h| h == host)
-        })
-        .collect();
-    let pick = pages
-        .iter()
-        .find(|t| t["title"].as_str() == Some(title))
-        .or_else(|| pages.first());
-    pick?.get("url")?.as_str().map(str::to_owned)
+/// `slug`'s URL in Seam's report.
+fn report_url(text: &str, slug: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v.get(slug)?
+        .get("url")?
+        .as_str()
+        .filter(|u| !u.is_empty())
+        .map(str::to_owned)
 }
 
 /// One curated web-app from the catalog.
@@ -225,7 +112,7 @@ fn pick_page_url(targets: &[serde_json::Value], host: &str, title: &str) -> Opti
 pub struct WebappEntry {
     /// Display name (`Netflix`).
     pub name: String,
-    /// Start URL opened in app mode.
+    /// Start URL the webapp window opens at.
     pub url: String,
     /// Freedesktop icon name (or path) for the tile and the launcher.
     pub icon: String,
@@ -243,25 +130,16 @@ impl WebappEntry {
         id_for_slug(&self.slug)
     }
 
-    /// The frameless `Exec=` command — also used for a "try it" launch. Runs in
-    /// the shared webapp profile with the CDP port so the "copy link" pill can
-    /// read the window's live URL. Catalog URLs are clean (no query string), so
-    /// they need no quoting.
+    /// The `Exec=` command, also used for a "try it" launch. Catalog URLs are
+    /// clean (no query string) and slugs are `[a-z0-9-]`, so neither needs
+    /// quoting.
     pub fn exec(&self) -> String {
-        app_exec_with(&self.url)
+        app_exec_with(&self.slug, &self.url)
     }
 
-    /// `StartupWMClass` Chrome reports for an `--app=<URL>` window.
+    /// `StartupWMClass`: the class Seam gives this webapp's window.
     fn wm_class(&self) -> String {
-        let host = self
-            .url
-            .split_once("://")
-            .map(|(_, rest)| rest)
-            .unwrap_or(&self.url)
-            .split('/')
-            .next()
-            .unwrap_or("");
-        format!("chrome-{host}__-Default")
+        format!("{PREFIX}{}", self.slug)
     }
 
     /// The `.desktop` contents for the installed launcher.
@@ -397,13 +275,13 @@ pub fn materialize_catalog() {
 /// The slug of a webapp desktop id (`webapp-netflix` -> `netflix`), or
 /// `None` for a non-webapp id.
 pub fn slug_of_id(id: &str) -> Option<&str> {
-    id.strip_prefix("webapp-")
+    id.strip_prefix(PREFIX)
 }
 
 /// The desktop id a slug installs as (`netflix` -> `webapp-netflix`) —
 /// the inverse of [`slug_of_id`], matching [`WebappEntry::desktop_id`].
 pub fn id_for_slug(slug: &str) -> String {
-    format!("webapp-{slug}")
+    format!("{PREFIX}{slug}")
 }
 
 /// Slugs of the catalog entries marked as storefront recommendations
@@ -430,13 +308,11 @@ mod tests {
 
     #[test]
     fn app_window_detection_and_host_parse() {
-        assert!(is_app_window("chrome-www.youtube.com__-Default"));
-        assert!(!is_app_window("google-chrome"));
-        assert!(!is_app_window("firefox"));
-        assert_eq!(
-            class_host("chrome-www.youtube.com__-Default"),
-            Some("www.youtube.com")
-        );
+        assert!(is_app_window("webapp-youtube-music"));
+        assert!(!is_app_window("webapp-"));
+        assert!(!is_app_window("seam"));
+        assert!(!is_app_window("chrome-www.youtube.com__-Default"));
+        assert_eq!(class_slug("webapp-youtube-music"), Some("youtube-music"));
         assert_eq!(
             url_host("https://www.youtube.com/watch?v=x"),
             Some("www.youtube.com")
@@ -444,42 +320,24 @@ mod tests {
     }
 
     #[test]
-    fn singleton_lock_liveness() {
-        let host = "Golem";
-        let me = std::process::id();
-        // Our host + our own (live) PID → live, keep it.
-        assert!(lock_is_live(&format!("{host}-{me}"), host));
-        // Foreign host, even with a live PID → stale (the machine-rename bug).
-        assert!(!lock_is_live(&format!("Golum-{me}"), host));
-        // Our host but a dead PID → stale.
-        assert!(!lock_is_live(&format!("{host}-2147483647"), host));
-        // Hostname with a '-' is parsed correctly (split on the last '-').
-        assert!(lock_is_live(&format!("my-box-{me}"), "my-box"));
-        // Garbage → not live (don't leave a lock we can't understand).
-        assert!(!lock_is_live("garbage", host));
+    fn reads_the_webapp_page_from_seams_report() {
+        let report = r#"{"youtube-music":{"url":"https://music.youtube.com/watch?v=abc","title":"Song"},"empty":{"url":""}}"#;
+        assert_eq!(
+            report_url(report, "youtube-music").as_deref(),
+            Some("https://music.youtube.com/watch?v=abc")
+        );
+        assert_eq!(report_url(report, "empty"), None);
+        assert_eq!(report_url(report, "absent"), None);
+        assert_eq!(report_url("not json", "youtube-music"), None);
     }
 
     #[test]
-    fn picks_the_focused_webapp_page_by_host_then_title() {
-        let targets = serde_json::json!([
-            { "type": "service_worker", "title": "sw", "url": "chrome-extension://x/sw.js" },
-            { "type": "page", "title": "Home - YouTube", "url": "https://www.youtube.com/" },
-            { "type": "page", "title": "Cool Video - YouTube", "url": "https://www.youtube.com/watch?v=abc" },
-            { "type": "page", "title": "Spotify", "url": "https://open.spotify.com/" }
-        ]);
-        let targets = targets.as_array().unwrap();
-        // Title match wins among same-host pages.
-        assert_eq!(
-            pick_page_url(targets, "www.youtube.com", "Cool Video - YouTube").as_deref(),
-            Some("https://www.youtube.com/watch?v=abc")
-        );
-        // No title match → first page on the host.
-        assert_eq!(
-            pick_page_url(targets, "www.youtube.com", "nonexistent").as_deref(),
-            Some("https://www.youtube.com/")
-        );
-        // Host with no page → None.
-        assert_eq!(pick_page_url(targets, "example.com", "x"), None);
+    fn parses_a_launcher_exec() {
+        let exec = "seam -golem-app youtube-music https://music.youtube.com";
+        assert_eq!(exec_app_slug(exec), Some("youtube-music"));
+        assert_eq!(exec_app_host(exec), Some("music.youtube.com"));
+        assert_eq!(exec_app_slug("firefox https://x.org"), None);
+        assert_eq!(exec_app_host("seam -golem-app lonely"), None);
     }
 
     #[test]
@@ -511,23 +369,14 @@ mod tests {
             recommended: false,
         };
         assert_eq!(e.desktop_id(), "webapp-netflix");
-        let exec = e.exec();
-        assert!(exec.starts_with(
-            "google-chrome-stable --app=https://www.netflix.com --disable-client-side-decorations"
-        ));
-        assert!(exec.contains(&format!("--remote-debugging-port={CDP_PORT}")));
-        assert!(exec.contains("--user-data-dir="));
-        assert_eq!(e.wm_class(), "chrome-www.netflix.com__-Default");
+        assert_eq!(e.exec(), "seam -golem-app netflix https://www.netflix.com");
+        assert_eq!(e.wm_class(), "webapp-netflix");
+        assert_eq!(e.wm_class(), e.desktop_id()); // the tile pairs with its window by class
         assert!(e.desktop_contents().contains("Icon=netflix"));
-    }
-
-    #[test]
-    fn extension_flag_only_when_set() {
-        assert_eq!(extension_flag(None), "");
-        assert_eq!(extension_flag(Some(String::new())), "");
+        assert!(e.desktop_contents().contains("StartupWMClass=webapp-netflix"));
         assert_eq!(
-            extension_flag(Some("/nix/store/abc-notification-fix".into())),
-            " --load-extension=/nix/store/abc-notification-fix"
+            app_open_exec("youtube", "https://www.youtube.com/watch?v=x&t=1"),
+            "seam -golem-app youtube 'https://www.youtube.com/watch?v=x&t=1'"
         );
     }
 }
