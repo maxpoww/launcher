@@ -252,6 +252,10 @@ const CONTROLS_AIR: f32 = 6.0;
 /// Text metrics for the app-name labels.
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
+/// Section titles (Apps, Install, Files, Controls): a little bigger than
+/// the icon labels (Max, 2026-09-30).
+const TITLE_FONT_PX: f32 = 14.0;
+const TITLE_LINE_PX: f32 = 18.0;
 /// Search box: height, inner padding, text metrics.
 const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
@@ -2136,10 +2140,10 @@ pub fn scene(
         };
         scene.labels.push(Label {
             text: title,
-            pos: (sec.title_pos.0, sec.title_pos.1 + 2.0),
+            pos: (sec.title_pos.0, sec.title_pos.1 + 1.0),
             max_w: sec.viewport.w,
-            font_px: LABEL_FONT_PX,
-            line_px: LABEL_LINE_PX,
+            font_px: TITLE_FONT_PX,
+            line_px: TITLE_LINE_PX,
             centered: true,
             dim: true,
             cache: true,
@@ -2514,10 +2518,10 @@ pub fn scene(
     if let (Some(title), false) = (layout.controls_title, layout.controls.is_empty() || panel) {
         scene.labels.push(Label {
             text: crate::i18n::tr("Controls").to_string(),
-            pos: (title.0, title.1 + 2.0),
+            pos: (title.0, title.1 + 1.0),
             max_w: 200.0,
-            font_px: LABEL_FONT_PX,
-            line_px: LABEL_LINE_PX,
+            font_px: TITLE_FONT_PX,
+            line_px: TITLE_LINE_PX,
             centered: true,
             dim: true,
             cache: true,
