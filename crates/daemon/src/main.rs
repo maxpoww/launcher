@@ -630,6 +630,7 @@ fn main() -> anyhow::Result<()> {
         panel: panel::Panel::load(),
         panel_mix: 0.0,
         panel_reset_due: false,
+        controls_band: 0.0,
         control_panel_from_apps: false,
         box_from_dock: false,
         box_drag: None,
@@ -1550,6 +1551,9 @@ pub struct App {
     /// The panel should start afresh once it is out of sight (see
     /// `panel::Panel::reset`).
     panel_reset_due: bool,
+    /// The room the Controls row has under Files right now, eased toward
+    /// `controls_band_target` (see `content::layout`).
+    controls_band: f32,
     /// The panel was entered from the open apps grid: the gear goes back to
     /// the apps instead of closing the card.
     control_panel_from_apps: bool,

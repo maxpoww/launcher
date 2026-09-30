@@ -649,6 +649,12 @@ pub struct Layout {
     /// The control pills' rects in that band (filled in by the App, which
     /// measures their labels), in `SearchState::controls` order.
     pub controls: Vec<Rect>,
+    /// The Apps rows' full room (every row that fits) and the room above
+    /// the fixed sections: the App aims the trim with them.
+    pub apps_full_h: f32,
+    pub apps_avail: f32,
+    /// How far the Controls band has opened (0..1): its row fades in with it.
+    pub controls_k: f32,
 }
 
 /// Compute the layout for the current animation state.
@@ -692,8 +698,11 @@ pub fn layout(
     // AGUA deformation, (card silhouette, content ride) — 1.0 = rest.
     stretch: (f32, f32),
     // The Controls row's pill height while a search matches settings
-    // (`None`: no row).
+    // (`None`: no row), and the room it has now — eased by the App toward
+    // [`controls_band_h`] (0 without a row), so the sections make way
+    // smoothly instead of jumping a row.
     controls_pill_h: Option<f32>,
+    controls_band: f32,
     // How much shorter the open card is than its full height: the Apps
     // rows the page in view leaves empty (`App::apps_trim_target`, eased).
     // The card's bottom stays put; its top, the dock row and the Apps title
@@ -896,8 +905,7 @@ pub fn layout(
     // The pills sit as far under their title as the icons do under theirs,
     // and a little more (Max: "move only the pills a little lower").
     let controls_drop = GRID_ICON_TOP * icon_scale + CONTROLS_EXTRA_DROP;
-    let controls_h =
-        controls_pill_h.map_or(0.0, |ph| SECTION_GAP + SECTION_TITLE_H + controls_drop + ph + DOT_ROOM);
+    let controls_h = controls_pill_h.map_or(0.0, |ph| controls_band_h(icon_scale, ph));
     let fits_shown = (((avail - controls_h) / grid_cell_h) as usize).clamp(1, fits);
     // Apps shows every row that fits; a page that doesn't fill them
     // shortens the card instead (`trim`, Max 2026-09-30: "card shrinks to
@@ -905,6 +913,11 @@ pub fn layout(
     // rows as air above Search. Page capacity stays at `fits` either way
     // (`SectionLayout::cap`): the stored order never re-pages.
     let apps_rows = fits_shown;
+    // The Apps viewport's height, continuous: every row that fits, less the
+    // room the Controls band has now (from the spare air first), less the
+    // trim. The App aims the trim so it shows exactly the rows it needs.
+    let apps_room = (fits as f32 * grid_cell_h).min(avail - controls_band);
+    let apps_h = (apps_room - trim).max(0.0);
     let apps_cap_rows = fits;
 
     let mut y = grid_top;
@@ -923,7 +936,7 @@ pub fn layout(
             grid_x0,
             agua(y + y_off),
             cols as f32 * grid_cell_w,
-            (rows as f32 * grid_cell_h - if s == SECTION_APPS { trim } else { 0.0 }).max(0.0),
+            if s == SECTION_APPS { apps_h } else { rows as f32 * grid_cell_h },
         );
         y += viewport.h + DOT_ROOM + SECTION_GAP;
         // Horizontal paging: each page is viewport.w wide. Pages wrap
@@ -1008,6 +1021,9 @@ pub fn layout(
         controls_title,
         controls_row,
         controls: Vec::new(),
+        apps_full_h: fits as f32 * grid_cell_h,
+        apps_avail: avail,
+        controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
     }
 }
 
@@ -1018,6 +1034,12 @@ pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
     let page = cell / cells_per_page;
     let max_page = section.n_pages.saturating_sub(1);
     (page.min(max_page) as f32 * section.viewport.w).max(0.0)
+}
+
+/// The room a Controls row takes under Files: the gap, its title, the drop
+/// to the pills, the pills and their dots' room.
+pub fn controls_band_h(icon_scale: f32, pill_h: f32) -> f32 {
+    SECTION_GAP + SECTION_TITLE_H + GRID_ICON_TOP * icon_scale + CONTROLS_EXTRA_DROP + pill_h + DOT_ROOM
 }
 
 /// Lay the Controls row's pills (`widths`, best match first) in `row`
@@ -2599,7 +2621,7 @@ pub fn scene(
             dim: false,
             cache: true,
             family: Some(FONT_BOLD),
-            color: Some(title_ink),
+            color: Some([title_ink[0], title_ink[1], title_ink[2], title_ink[3] * layout.controls_k]),
             clip: Some(reveal_rect),
         });
         use crate::panel::{
@@ -2631,14 +2653,14 @@ pub fn scene(
                     rect,
                     radius: ph / 2.0,
                     blur: blur * sc,
-                    color: [glow, glow, glow, glow_a * card_open * card_open],
+                    color: [glow, glow, glow, glow_a * card_open * card_open * layout.controls_k],
                     edges: [1.0, 1.0, 1.0, 1.0],
                 });
             }
             cgrid.rects.push(RectInst {
                 rect,
                 radius: ph / 2.0,
-                color: crate::options::wash(!bright, lerp(rest_a, hover_a, lift)),
+                color: crate::options::wash(!bright, lerp(rest_a, hover_a, lift) * layout.controls_k),
                 glass: 0.0,
                 border: 0.0,
             });
@@ -2652,7 +2674,7 @@ pub fn scene(
                 dim: false,
                 cache: (k - 1.0).abs() < 0.001,
                 family: crate::options::TEXT_FONT,
-                color: Some(ink),
+                color: Some([ink[0], ink[1], ink[2], ink[3] * layout.controls_k]),
                 clip: Some(reveal_clip(rect)),
             });
         }
@@ -3005,7 +3027,7 @@ mod tests {
             [scroll, 0.0, 0.0],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         )
     }
@@ -3025,7 +3047,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         );
         assert!(!l.dock_slots.is_empty());
@@ -3051,7 +3073,7 @@ mod tests {
     fn a_controls_row_takes_shown_rows_not_page_capacity() {
         let cfg = config();
         let args = |c: Option<f32>| {
-            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, 0.0)
+            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, c.map_or(0.0, |ph| controls_band_h(1.0, ph)), 0.0)
         };
         let (plain, with) = (args(None), args(Some(23.0)));
         assert!(plain.controls_row.is_none());
@@ -3069,7 +3091,7 @@ mod tests {
     fn a_trimmed_card_drops_its_top_and_keeps_its_bottom() {
         let cfg = config();
         let at = |trim: f32| {
-            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, trim)
+            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, trim)
         };
         let (full, short) = (at(0.0), at(GRID_CELL_H));
         let (a, b) = (&full.sections[SECTION_APPS], &short.sections[SECTION_APPS]);
@@ -3170,7 +3192,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         );
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
@@ -3228,7 +3250,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         );
         let slot = l.dock_slots[0];
@@ -3281,7 +3303,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         );
         let apps = &l.sections[SECTION_APPS];
@@ -3400,7 +3422,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         );
         assert_eq!(l.dock_slots.len(), n, "every entry gets a slot");
@@ -3496,7 +3518,7 @@ mod tests {
                 [0.0; N_SECTIONS],
                 false,
                 (1.0, 1.0),
-                None,
+                None, 0.0,
                 0.0,
             )
         };
@@ -3534,7 +3556,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         );
         let row = open.dock_slots.last().unwrap().x + open.dock_slots.last().unwrap().w
@@ -3558,7 +3580,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         );
         assert!(
@@ -3576,7 +3598,7 @@ mod tests {
             let aspects = vec![MAX_TILE_ASPECT; n_min];
             layout(
                 &cfg, 1.0, SURFACE, docked, total, n_min, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
-                None,
+                None, 0.0,
                 0.0,
             )
         };
@@ -3616,7 +3638,7 @@ mod tests {
             [0.0; N_SECTIONS],
             false,
             (1.0, 1.0),
-            None,
+            None, 0.0,
             0.0,
         );
         let n = l.dock_slots.len();

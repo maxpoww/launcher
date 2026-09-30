@@ -77,6 +77,7 @@ impl App {
             return 0.0;
         }
         let (cols, rows) = (sec.cols.max(1), sec.rows.max(1));
+        let room = layout.apps_full_h.min(layout.apps_avail - self.controls_band_target());
         let per_page = cols * rows;
         // (Pages wrap cyclically, so the pager's target can run past them.)
         let page = self.scroll.per[content::SECTION_APPS].page(sec.viewport.w.max(1.0)) % sec.n_pages.max(1);
@@ -92,7 +93,24 @@ impl App {
         let needed = last.map_or(1, |l| l / cols + 1);
         let floor = if self.stack_open() { content::OPEN_BOX_COLS } else { 1 };
         let keep = needed.max(floor).min(rows);
-        (rows - keep) as f32 * content::GRID_CELL_H * self.icon_scale()
+        // Aimed with the room the Controls band is heading for, so the Apps
+        // viewport lands on exactly `keep` rows.
+        (room - keep as f32 * content::GRID_CELL_H * self.icon_scale()).max(0.0)
+    }
+
+    /// The Controls row's pill height: the control panel's near layer.
+    pub(crate) fn controls_pill_h(&self) -> f32 {
+        self.options_pill_h() * crate::panel::LAYER_SCALE[0]
+    }
+
+    /// The room the Controls band is heading for: a row's worth while a
+    /// search matches settings, none otherwise.
+    pub(crate) fn controls_band_target(&self) -> f32 {
+        if self.search.controls.is_empty() {
+            0.0
+        } else {
+            content::controls_band_h(self.icon_scale(), self.controls_pill_h())
+        }
     }
 
     pub(crate) fn layout_at(&self, extent: f32) -> content::Layout {
@@ -138,7 +156,8 @@ impl App {
             std::array::from_fn(|s| self.scroll.per[s].pos),
             self.stack_open() || self.closing_members.is_some(),
             stretch,
-            (!self.search.controls.is_empty()).then(|| self.options_pill_h() * crate::panel::LAYER_SCALE[0]),
+            (!self.search.controls.is_empty()).then(|| self.controls_pill_h()),
+            self.controls_band,
             self.ui.open_trim(),
         );
         // Search results split their partial rows about the titles.
@@ -319,15 +338,20 @@ impl App {
         // The open card fits the Apps page in view: its trim eases toward
         // the rows that page leaves empty; out of sight it just snaps, so an
         // open rises straight to the right height.
-        let mut trim_want = self.apps_trim_target();
-        let trim = self.ui.open_trim();
-        // While a search is live the card may grow but never shrinks, so
-        // typing doesn't bounce it with every result count (Max: "the only
-        // choppiness is when I search and the window has to resize back and
-        // forth"); clearing the search fits it to the page again.
-        if !self.search.query.is_empty() && self.ui.target() == Target::Open {
-            trim_want = trim_want.min(trim);
+        // The Controls band eases in and out at the same rate, so the
+        // sections make way as one smooth move (no row jump when the row
+        // appears).
+        let band_want = self.controls_band_target();
+        let k = 1.0 - (-dt.min(0.1) * TRIM_RATE).exp();
+        let out_of_sight = self.ui.target() != Target::Open && !self.ui.is_animating();
+        if !out_of_sight && (band_want - self.controls_band).abs() > 0.25 {
+            self.controls_band += (band_want - self.controls_band) * k;
+            self.dirty = true;
+        } else {
+            self.controls_band = band_want;
         }
+        let trim_want = self.apps_trim_target();
+        let trim = self.ui.open_trim();
         if self.ui.target() != Target::Open && !self.ui.is_animating() {
             if trim != trim_want {
                 self.ui.set_open_trim(trim_want);
