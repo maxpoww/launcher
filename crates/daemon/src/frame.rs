@@ -1100,9 +1100,16 @@ impl App {
             return; // wait for the compositor to report a real size
         }
         self.options_size = (width, height);
-        let scale = self.config.options.render_scale.max(1);
-        let (pw, ph) = (width * scale, height * scale);
+        let scale = self.surface_scale(crate::fractional::SurfaceKind::Options);
+        let (pw, ph) = (
+            crate::fractional::physical(width, scale),
+            crate::fractional::physical(height, scale),
+        );
+        if let Some(fs) = &self.options_fscale {
+            fs.set_logical_size(width, height);
+        }
         if let Some(renderer) = self.options_renderer.as_mut() {
+            renderer.set_scale(scale);
             renderer.resize(pw, ph);
         } else {
             let built = {

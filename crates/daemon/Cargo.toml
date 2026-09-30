@@ -33,7 +33,7 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # pointer-constraints + relative-pointer (both unstable): the [current task]
 # pill's right-click "nub drag" locks the cursor in place and reads raw touchpad
 # deltas to move the focused window (see nub_drag.rs).
-wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 # client_system: back the connection with libwayland so we can hand raw
 # wl_display/wl_surface pointers to wgpu.
 wayland-backend = { version = "0.3", features = ["client_system"] }

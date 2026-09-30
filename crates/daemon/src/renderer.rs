@@ -110,10 +110,12 @@ pub struct Renderer {
     /// the frame's work done.
     pace_by_gpu: bool,
     gpu_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Integer supersampling factor. `config.width/height` are physical
-    /// (`logical × scale`); geometry is authored in logical px and scaled
-    /// up automatically (see [`Renderer::render`]).
-    scale: u32,
+    /// Physical pixels per logical pixel: the output's fractional scale (see
+    /// `fractional.rs`), or the integer `render_scale` supersample without
+    /// that protocol. `config.width/height` are physical (`logical × scale`);
+    /// geometry is authored in logical px and scaled up automatically (see
+    /// [`Renderer::render`]).
+    scale: f32,
 
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
@@ -219,14 +221,14 @@ fn make_scene_target(
 impl Renderer {
     /// Create the wgpu device and configure the swapchain against an
     /// already-configured layer surface of `width` x `height` physical
-    /// (buffer) pixels. `scale` is the integer supersampling factor:
-    /// physical = logical × scale.
+    /// (buffer) pixels. `scale` is physical pixels per logical pixel:
+    /// physical = logical × scale (fractional on the viewport path).
     pub fn new(
         conn: &Connection,
         wl_surface: &WlSurface,
         width: u32,
         height: u32,
-        scale: u32,
+        scale: f32,
     ) -> anyhow::Result<Self> {
         // Held for the whole setup: the GL path initializes its EGL display
         // in create_surface, not Instance::new. See `NoVblankWait`.
@@ -855,7 +857,7 @@ impl Renderer {
             frame_throttle,
             pace_by_gpu,
             gpu_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            scale: scale.max(1),
+            scale: if scale > 0.0 { scale } else { 1.0 },
             globals_buf,
             globals_bind,
             shadow_pipeline,
@@ -1039,6 +1041,14 @@ impl Renderer {
     /// Whether sustained ambient animation must be frame-throttled to keep
     /// the single-threaded event loop responsive — true on a software
     /// adapter (see the `frame_throttle` field).
+    /// The output's scale changed (fractional scaling): physical pixels per
+    /// logical pixel from now on. Pair with [`Renderer::resize`].
+    pub fn set_scale(&mut self, scale: f32) {
+        if scale > 0.0 {
+            self.scale = scale;
+        }
+    }
+
     pub fn needs_frame_throttle(&self) -> bool {
         self.frame_throttle
     }
@@ -1137,7 +1147,7 @@ impl Renderer {
         // stay crisp, so its metrics, positions and clip bounds are scaled by
         // `scale` below.
         let (w, h) = (self.config.width, self.config.height);
-        let scale = self.scale as f32;
+        let scale = self.scale;
         let (lw, lh) = (w as f32 / scale, h as f32 / scale);
 
         // Advance anim_time only while frames are rendered — no phase jump

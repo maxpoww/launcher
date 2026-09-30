@@ -27,6 +27,7 @@ mod emoji;
 mod emoji_table;
 mod files;
 mod focus_cycle;
+mod fractional;
 mod frame;
 mod groups;
 mod hypr;
@@ -280,6 +281,19 @@ fn main() -> anyhow::Result<()> {
         config.options.render_scale.max(1),
     ));
 
+    // Draw each surface at the output's real scale (fractional.rs), when the
+    // compositor offers it; otherwise the integer render_scale path above.
+    let fractional = fractional::Fractional::bind(&globals, &qh);
+    let dock_fscale = fractional
+        .as_ref()
+        .map(|f| f.attach(layer.wl_surface(), fractional::SurfaceKind::Dock, &qh));
+    let options_fscale = fractional.as_ref().zip(options_layer.as_ref()).map(|(f, l)| {
+        f.attach(l.wl_surface(), fractional::SurfaceKind::Options, &qh)
+    });
+    let deck_fscale = fractional.as_ref().zip(deck_layer.as_ref()).map(|(f, l)| {
+        f.attach(l.wl_surface(), fractional::SurfaceKind::Deck, &qh)
+    });
+
     // wlr-screencopy + shm for the smart-gaps colour-match. Both optional:
     // without them (or without Hyprland IPC) the bar just never matches.
     let shm = Shm::bind(&globals, &qh).ok();
@@ -450,6 +464,9 @@ fn main() -> anyhow::Result<()> {
         pointer_constraints,
         relative_pointer_manager,
         pointer_gestures,
+        dock_fscale,
+        options_fscale,
+        deck_fscale,
         swipe_gesture: None,
         pinch_gesture: None,
         nub_drag: None,
@@ -1025,6 +1042,11 @@ pub struct App {
     compositor: CompositorState,
     layer: LayerSurface,
     renderer: Option<Renderer>,
+    /// Fractional-scale state per surface (see `fractional.rs`); `None` when
+    /// the compositor lacks the protocols (integer `render_scale` path).
+    dock_fscale: Option<fractional::SurfaceScale>,
+    options_fscale: Option<fractional::SurfaceScale>,
+    deck_fscale: Option<fractional::SurfaceScale>,
     /// The "OPTIONS" topbar surface (a near-transparent top-edge strip), its
     /// renderer, and its logical size from `configure`.
     options_layer: Option<LayerSurface>,
@@ -2807,7 +2829,7 @@ impl App {
     /// The breadcrumb goes through the COMPOSITOR's notification OSD, not
     /// ours — waverunner draws our notifications, so a renderer-less daemon
     /// announcing itself through its own surface would say nothing at all.
-    fn renderer_retry(&mut self, pw: u32, ph: u32, scale: u32) {
+    fn renderer_retry(&mut self, pw: u32, ph: u32, scale: f32) {
         self.renderer_fails += 1;
         if self.renderer_fails == 1 {
             hypr::notify_user(
@@ -4957,6 +4979,55 @@ impl App {
     /// is in flight; otherwise the damage is coalesced onto the pending
     /// callback, so redraw rate never exceeds the display refresh no
     /// matter how fast input events arrive.
+    /// Physical pixels per logical pixel for one of our surfaces: the
+    /// output's fractional scale once the compositor has said it, else the
+    /// integer `render_scale` supersample (also the whole story without the
+    /// fractional-scale protocol).
+    pub(crate) fn surface_scale(&self, kind: fractional::SurfaceKind) -> f32 {
+        use fractional::SurfaceKind;
+        let (fs, fallback) = match kind {
+            SurfaceKind::Dock => (&self.dock_fscale, self.config.window.render_scale),
+            SurfaceKind::Options => (&self.options_fscale, self.config.options.render_scale),
+            SurfaceKind::Deck => (&self.deck_fscale, self.config.options.render_scale),
+        };
+        let fallback = fallback.max(1) as f32;
+        fs.as_ref().map_or(fallback, |f| f.scale_or(fallback))
+    }
+
+    /// The compositor changed a surface's preferred scale (first report, or
+    /// the output's scale changed): resize its framebuffer to the new
+    /// physical size and redraw. A surface not configured yet picks the
+    /// scale up in its configure instead.
+    pub(crate) fn rescale_surface(&mut self, kind: fractional::SurfaceKind) {
+        use fractional::{physical, SurfaceKind};
+        let scale = self.surface_scale(kind);
+        let (size, renderer, fs) = match kind {
+            SurfaceKind::Dock => (self.buffer_size, self.renderer.as_mut(), &self.dock_fscale),
+            SurfaceKind::Options => (self.options_size, self.options_renderer.as_mut(), &self.options_fscale),
+            SurfaceKind::Deck => (self.deck_size, self.deck_renderer.as_mut(), &self.deck_fscale),
+        };
+        let (w, h) = size;
+        let Some(renderer) = renderer else {
+            return;
+        };
+        if w == 0 || h == 0 {
+            return;
+        }
+        renderer.set_scale(scale);
+        renderer.resize(physical(w, scale), physical(h, scale));
+        if let Some(fs) = fs {
+            fs.set_logical_size(w, h);
+        }
+        match kind {
+            SurfaceKind::Dock => {
+                self.dirty = true;
+                self.schedule_frame();
+            }
+            SurfaceKind::Options => self.draw_options(),
+            SurfaceKind::Deck => self.draw_deck(),
+        }
+    }
+
     fn schedule_frame(&mut self) {
         if self.renderer.is_none() {
             debug!("frame requested before first configure; deferring");
@@ -5451,13 +5522,20 @@ impl LayerShellHandler for App {
         // `new_size` is logical (surface-local). Input regions and pointer
         // hit-testing work in this space, so `buffer_size` stays logical.
         self.buffer_size = (width, height);
-        // The wgpu framebuffer is physical: `logical × render_scale`, matching
-        // the `set_buffer_scale` declared on the surface.
-        let scale = self.config.window.render_scale.max(1);
-        let (pw, ph) = (width * scale, height * scale);
+        // The wgpu framebuffer is physical: `logical × scale`, at the output's
+        // fractional scale (the viewport maps it back to logical), or the
+        // integer `render_scale` declared as the buffer scale without it.
+        let scale = self.surface_scale(fractional::SurfaceKind::Dock);
+        let (pw, ph) = (fractional::physical(width, scale), fractional::physical(height, scale));
+        if let Some(fs) = &self.dock_fscale {
+            fs.set_logical_size(width, height);
+        }
 
         match self.renderer.as_mut() {
-            Some(renderer) => renderer.resize(pw, ph),
+            Some(renderer) => {
+                renderer.set_scale(scale);
+                renderer.resize(pw, ph);
+            }
             None => match Renderer::new(&self.conn, self.layer.wl_surface(), pw, ph, scale) {
                 Ok(mut renderer) => {
                     if let Some(icons) = self.pending_icons.take() {

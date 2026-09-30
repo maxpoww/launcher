@@ -462,9 +462,16 @@ impl App {
             .map(|m| m.h as f32)
             .unwrap_or(width as f32 / 1.6);
         self.deck_screen = (width as f32, screen_h);
-        let scale = self.config.options.render_scale.max(1);
-        let (pw, ph) = (width * scale, height * scale);
+        let scale = self.surface_scale(crate::fractional::SurfaceKind::Deck);
+        let (pw, ph) = (
+            crate::fractional::physical(width, scale),
+            crate::fractional::physical(height, scale),
+        );
+        if let Some(fs) = &self.deck_fscale {
+            fs.set_logical_size(width, height);
+        }
         if let Some(renderer) = self.deck_renderer.as_mut() {
+            renderer.set_scale(scale);
             renderer.resize(pw, ph);
         } else {
             let built = {
