@@ -43,27 +43,29 @@ use waverunner_proto::Command;
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [(&str, u8); 20] = [
-    ("Resolution", 0),
-    ("Scale", 0),
-    ("Wi-Fi", 0),
-    ("Sound output", 0),
-    ("Dark mode", 0),
-    ("Brightness", 0),
-    ("Bluetooth", 0),
-    ("Volume", 0),
-    ("Wallpaper", 0),
-    ("Night light", 1),
-    ("Accent colour", 1),
-    ("Keyboard layout", 1),
-    ("Power mode", 1),
-    ("Notifications", 1),
-    ("Touchpad speed", 1),
-    ("Language", 1),
-    ("Time zone", 2),
-    ("Natural scrolling", 2),
-    ("Updates", 2),
-    ("About Golem", 2),
+const SETTINGS: [(&str, u8, &str); 20] = [
+    // (name, first layer, search keywords: what else people call it or
+    // look for it by).
+    ("Resolution", 0, "display screen monitor size pixels"),
+    ("Scale", 0, "display screen zoom size hidpi text bigger smaller"),
+    ("Wi-Fi", 0, "wifi wireless network internet connection"),
+    ("Sound output", 0, "audio speakers speaker headphones output"),
+    ("Dark mode", 0, "theme appearance light night colours colors"),
+    ("Brightness", 0, "display screen backlight dim"),
+    ("Bluetooth", 0, "wireless devices headphones pairing"),
+    ("Volume", 0, "audio sound loud quiet mute"),
+    ("Wallpaper", 0, "background desktop picture image appearance"),
+    ("Night light", 1, "display screen warm blue light sunset eyes"),
+    ("Accent colour", 1, "color theme appearance highlight"),
+    ("Keyboard layout", 1, "input language typing keys"),
+    ("Power mode", 1, "battery performance energy saver"),
+    ("Notifications", 1, "alerts do not disturb dnd messages"),
+    ("Touchpad speed", 1, "trackpad mouse pointer cursor gestures"),
+    ("Language", 1, "region locale translation input"),
+    ("Time zone", 2, "clock date time region"),
+    ("Natural scrolling", 2, "touchpad trackpad mouse scroll direction"),
+    ("Updates", 2, "upgrade system software version"),
+    ("About Golem", 2, "system version info hardware computer"),
 ];
 
 // ---- The layers --------------------------------------------------------
@@ -105,6 +107,11 @@ const SHIFT_COOLDOWN: Duration = Duration::from_millis(200);
 const SETTLE_RATE: f32 = 6.0;
 const LIFT_RATE: f32 = 12.0;
 const LIFT: f32 = 0.07;
+/// Search: how fast pills rise or sink as the query changes, how much a
+/// miss shrinks, and how far it dims.
+const SEARCH_RATE: f32 = 14.0;
+const SEARCH_SHRINK: f32 = 0.15;
+const SEARCH_DIM: f32 = 0.7;
 /// The open-box morph's rate.
 const OPEN_RATE: f32 = 14.0;
 
@@ -149,6 +156,12 @@ struct Exit {
 /// One setting's pill. Positions are field-relative centres.
 struct Pill {
     label: &'static str,
+    /// What else people call it or look for it by (search).
+    keywords: &'static str,
+    /// Search focus, easing: +1 a match (it rises to the front: the near
+    /// layer's size and light), -1 a miss (it sinks back and dims), 0 no
+    /// search.
+    focus: f32,
     /// Which settings travel together (the layer it started on).
     group: u8,
     /// The layer it is on now, and the one it is drawn as (they differ only
@@ -182,6 +195,23 @@ impl Pill {
     fn size(&self) -> (f32, f32) {
         let l = self.layer as usize;
         (self.w[l], self.h[l])
+    }
+
+    /// The extra size its search focus gives it: a match eases up to the
+    /// near layer's size, a miss shrinks a little.
+    fn focus_scale(&self) -> f32 {
+        let d = self.drawn as usize;
+        if self.focus >= 0.0 {
+            lerp(1.0, LAYER_SCALE[0] / LAYER_SCALE[d], self.focus)
+        } else {
+            1.0 - SEARCH_SHRINK * -self.focus
+        }
+    }
+
+    /// Whether it matches a (lowercased) search: in its name or any of its
+    /// keywords.
+    fn matches(&self, query: &str) -> bool {
+        self.label.to_lowercase().contains(query) || self.keywords.contains(query)
     }
 }
 
@@ -217,6 +247,8 @@ pub(crate) struct PanelPaint {
 /// and the open setting.
 #[derive(Default)]
 pub(crate) struct Panel {
+    /// The search, lowercased (empty: none).
+    query: String,
     pills: Vec<Pill>,
     /// Field size and bar scale the pills were measured and laid out for.
     key: (f32, f32, f32),
@@ -257,8 +289,10 @@ impl Panel {
             let mut rng = Rng(0x85EB_CA6B);
             self.pills = SETTINGS
                 .iter()
-                .map(|&(label, group)| Pill {
+                .map(|&(label, group, keywords)| Pill {
                     label,
+                    keywords,
+                    focus: 0.0,
                     group,
                     layer: group,
                     drawn: group,
@@ -364,10 +398,12 @@ impl Panel {
                 continue;
             }
             let d = p.drawn as usize;
-            let k = p.sc * (1.0 + LIFT * p.lift);
+            let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
             let (hw, hh) = (p.w[d] * k / 2.0, p.h[d] * k / 2.0);
-            if (fx - p.pos.0).abs() <= hw && (fy - p.pos.1).abs() <= hh && best.is_none_or(|(_, l)| p.drawn < l) {
-                best = Some((i, p.drawn));
+            // Nearest layer first; a risen search match counts as near.
+            let depth = if p.focus > 0.5 { 0 } else { p.drawn };
+            if (fx - p.pos.0).abs() <= hw && (fy - p.pos.1).abs() <= hh && best.is_none_or(|(_, l)| depth < l) {
+                best = Some((i, depth));
             }
         }
         best.map(|(i, _)| i)
@@ -387,9 +423,15 @@ impl Panel {
         let Some(i) = self.pill_at(pos) else {
             return false;
         };
+        self.open_pill(i);
+        true
+    }
+
+    /// Grow pill `i` into its setting.
+    fn open_pill(&mut self, i: usize) {
         let p = &self.pills[i];
         let d = p.drawn as usize;
-        let k = p.sc * (1.0 + LIFT * p.lift);
+        let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
         let (w, h) = (p.w[d] * k, p.h[d] * k);
         info!("settings: opening {}", p.label);
         self.open = Some(OpenBox {
@@ -399,7 +441,53 @@ impl Panel {
             from: Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h),
         });
         self.hot = None;
-        true
+    }
+
+    /// Set the search (from the card's search pill): matches rise to the
+    /// front, the rest sink back and dim.
+    pub(crate) fn set_query(&mut self, query: &str) {
+        self.query = query.trim().to_lowercase();
+    }
+
+    /// Where a pill's search focus is heading: see [`Pill::focus`].
+    fn focus_target(&self, p: &Pill) -> f32 {
+        if self.query.is_empty() {
+            0.0
+        } else if p.matches(&self.query) {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    /// Open the best match of the search: a name that starts with it, then
+    /// a name that contains it, then a keyword match; nearest layer first
+    /// among equals. Returns whether there was one.
+    fn open_best(&mut self) -> bool {
+        if self.query.is_empty() || self.open.is_some() {
+            return false;
+        }
+        let q = &self.query;
+        let rank = |p: &Pill| -> u8 {
+            let name = p.label.to_lowercase();
+            if name.starts_with(q.as_str()) {
+                0
+            } else if name.contains(q.as_str()) {
+                1
+            } else {
+                2
+            }
+        };
+        let best = (0..self.pills.len())
+            .filter(|&i| self.pills[i].exit.is_none() && self.pills[i].matches(q))
+            .min_by_key(|&i| (rank(&self.pills[i]), self.pills[i].layer));
+        match best {
+            Some(i) => {
+                self.open_pill(i);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Escape: fold an open setting back. Returns whether one was open.
@@ -417,6 +505,10 @@ impl Panel {
     pub(crate) fn reset(&mut self) {
         self.open = None;
         self.hot = None;
+        self.query.clear();
+        for p in &mut self.pills {
+            p.focus = 0.0;
+        }
     }
 
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
@@ -430,8 +522,10 @@ impl Panel {
         }
         self.hot = if self.open.is_none() { pointer.and_then(|p| self.pill_at(p)) } else { None };
         let s = self.scale;
+        let focus_to: Vec<f32> = self.pills.iter().map(|p| self.focus_target(p)).collect();
         for (i, p) in self.pills.iter_mut().enumerate() {
             let hot = self.hot == Some(i);
+            p.focus = approach(p.focus, focus_to[i], SEARCH_RATE, dt);
             if p.exit.is_none() {
                 p.anchor.0 = approach(p.anchor.0, p.home.0, GLIDE_RATE, dt);
                 p.anchor.1 = approach(p.anchor.1, p.home.1, GLIDE_RATE, dt);
@@ -485,6 +579,8 @@ impl Panel {
                 Some(e) if e.dir > 0 => 10,
                 Some(_) => -1,
                 None if p.lift > 0.02 => 9,
+                // A search match rises over everything at rest.
+                None if p.focus > 0.5 => 8,
                 None => 3 - p.drawn as i32,
             }
         };
@@ -520,15 +616,21 @@ impl Panel {
                     shrink = 1.0 - 0.12 * open_k;
                 }
             }
-            let a = p.op * fade;
+            // Search: a match rises to the near layer's size and light, a
+            // miss sinks back and dims.
+            let rise = p.focus.max(0.0);
+            let a = p.op * fade * (1.0 - SEARCH_DIM * (-p.focus).max(0.0));
             if a < 0.004 {
                 continue;
             }
-            let k = p.sc * grow * shrink * (1.0 + LIFT * p.lift);
+            let k = p.sc * grow * shrink * p.focus_scale() * (1.0 + LIFT * p.lift);
             let (w, h) = (p.w[d] * k, p.h[d] * k);
             let rect = Rect::new(f.x + p.pos.0 + dx - w / 2.0, f.y + p.pos.1 + dy - h / 2.0, w, h);
             let radius = h / 2.0;
-            let (blur, glow_a) = LAYER_GLOW[d];
+            let (blur, glow_a) = (
+                lerp(LAYER_GLOW[d].0, LAYER_GLOW[0].0, rise),
+                lerp(LAYER_GLOW[d].1, LAYER_GLOW[0].1, rise),
+            );
             if glow_a > 0.0 {
                 out.glows.push(ShadowInst {
                     rect,
@@ -538,7 +640,7 @@ impl Panel {
                     edges: [1.0, 1.0, 1.0, 1.0],
                 });
             }
-            let wa = lerp(layer_wash[d], hover_a, p.lift);
+            let wa = lerp(lerp(layer_wash[d], layer_wash[0], rise), hover_a, p.lift);
             let c = wash(wa);
             out.rects.push(RectInst {
                 rect,
@@ -562,7 +664,7 @@ impl Panel {
                 dim: false,
                 cache: resting,
                 family: TEXT_FONT,
-                color: Some([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * LAYER_INK[d] * a]),
+                color: Some([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * lerp(LAYER_INK[d], LAYER_INK[0], rise) * a]),
                 clip: None,
             });
         }
@@ -937,6 +1039,8 @@ impl App {
                 self.settings_panel = true;
                 self.settings_from_apps = true;
                 self.search.open = false;
+                self.search.query.clear();
+                self.panel_search();
                 self.schedule_frame();
             }
             return;
@@ -994,6 +1098,24 @@ impl App {
         if self.panel.click(pos) {
             self.schedule_frame();
         }
+    }
+
+    /// The card's search query changed while the panel is up: the panel
+    /// searches its settings.
+    pub(crate) fn panel_search(&mut self) {
+        let q = self.search.query.clone();
+        self.panel.set_query(&q);
+        self.schedule_frame();
+    }
+
+    /// Enter on the panel: open the best match of the search. Returns
+    /// whether one opened.
+    pub(crate) fn panel_open_best(&mut self) -> bool {
+        let opened = self.panel.open_best();
+        if opened {
+            self.schedule_frame();
+        }
+        opened
     }
 
     /// Escape on the panel: fold an open setting back first. Returns whether
@@ -1077,6 +1199,38 @@ mod tests {
         }
         assert!(p.pills.iter().all(|q| q.exit.is_none() && q.drawn == q.layer));
         assert!(p.pills.iter().all(|q| q.op > 0.95), "everyone back in view");
+    }
+
+    #[test]
+    fn search_raises_the_matches_and_sinks_the_rest() {
+        let mut p = panel();
+        p.set_query("display");
+        for _ in 0..60 {
+            p.step(1.0 / 60.0, None);
+        }
+        for q in &p.pills {
+            if q.matches("display") {
+                assert!(q.focus > 0.95 && q.focus_scale() >= 1.0, "{} should rise", q.label);
+            } else {
+                assert!(q.focus < -0.95 && q.focus_scale() < 1.0, "{} should sink", q.label);
+            }
+        }
+        let risen: Vec<&str> = p.pills.iter().filter(|q| q.focus > 0.5).map(|q| q.label).collect();
+        assert!(risen.contains(&"Resolution") && risen.contains(&"Scale"), "display → {risen:?}");
+        p.set_query("");
+        for _ in 0..60 {
+            p.step(1.0 / 60.0, None);
+        }
+        assert!(p.pills.iter().all(|q| q.focus.abs() < 0.01), "clearing settles every pill back");
+    }
+
+    #[test]
+    fn enter_opens_the_best_name_match_before_a_keyword_one() {
+        let mut p = panel();
+        // "sc" matches Resolution by its keyword "screen", Scale by name.
+        p.set_query("sc");
+        assert!(p.open_best());
+        assert_eq!(p.pills[p.open.as_ref().unwrap().pill].label, "Scale");
     }
 
     #[test]
