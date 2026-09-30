@@ -470,27 +470,58 @@ fn camera_in_use() -> bool {
 }
 
 /// First real battery's `(capacity%, charging)` from `/sys/class/power_supply`,
-/// or `None` if there's no battery (desktop).
+/// or `None` if there's no battery (desktop) or no battery whose gauge can
+/// be believed.
 fn read_battery() -> Option<(u8, bool)> {
     let dir = std::fs::read_dir("/sys/class/power_supply").ok()?;
-    for entry in dir.flatten() {
-        let p = entry.path();
-        let Ok(kind) = std::fs::read_to_string(p.join("type")) else {
-            continue;
-        };
-        if kind.trim() != "Battery" {
-            continue;
-        }
-        let Ok(cap) = std::fs::read_to_string(p.join("capacity")) else {
-            continue;
-        };
-        let Ok(pct) = cap.trim().parse::<u8>() else {
-            continue;
-        };
-        let status = std::fs::read_to_string(p.join("status")).unwrap_or_default();
-        return Some((pct.min(100), charging_from_status(status.trim())));
+    dir.flatten().find_map(|entry| battery_in(&entry.path()))
+}
+
+/// One `power_supply` entry's `(capacity%, charging)`, if it is a battery
+/// with a gauge worth believing.
+///
+/// A broken gauge must read as NO battery, not as a dying one: the 2013
+/// MacBook Air's SMC reports capacity 1%, status "Full" and a full charge
+/// 8.6x its design (deep debug 2026-09-30, parity P13). Taken at face value
+/// that is a "plug in now" offer forever and, once discharging, a critical
+/// alarm the dock acts on (`battery.rs` sleeps the machine on a proven
+/// critical streak). Two contradictions mark a gauge as lying:
+///   - "Full" while the capacity says under half;
+///   - a full charge above 150% of the design charge.
+fn battery_in(p: &std::path::Path) -> Option<(u8, bool)> {
+    let kind = std::fs::read_to_string(p.join("type")).ok()?;
+    if kind.trim() != "Battery" {
+        return None;
     }
-    None
+    let pct: u8 = std::fs::read_to_string(p.join("capacity"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let pct = pct.min(100);
+    let status = std::fs::read_to_string(p.join("status")).unwrap_or_default();
+    let status = status.trim();
+    if status.eq_ignore_ascii_case("Full") && pct < 50 {
+        return None;
+    }
+    let read_u64 = |name: &str| -> Option<u64> {
+        std::fs::read_to_string(p.join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    for (full, design) in [
+        ("charge_full", "charge_full_design"),
+        ("energy_full", "energy_full_design"),
+    ] {
+        if let (Some(full), Some(design)) = (read_u64(full), read_u64(design)) {
+            if design > 0 && full > design / 2 * 3 {
+                return None;
+            }
+        }
+    }
+    Some((pct, charging_from_status(status)))
 }
 
 /// A battery `status` string counts as charging only when actively "Charging"
@@ -618,5 +649,55 @@ wlp0s20f3: 0000   41.  -69.  -256        0      0      0      0      0        0
         assert_eq!(disk_used_pct(10, 20, 0), None);
         // Completely full reads 100.
         assert_eq!(disk_used_pct(100, 0, 0), Some(100.0));
+    }
+}
+
+#[cfg(test)]
+mod battery_gauge_tests {
+    use super::battery_in;
+
+    fn fake(dir: &std::path::Path, files: &[(&str, &str)]) {
+        std::fs::create_dir_all(dir).unwrap();
+        for (k, v) in files {
+            std::fs::write(dir.join(k), v).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_sane_gauge_is_believed() {
+        let d = std::env::temp_dir().join(format!("golem-batt-{}", std::process::id()));
+        let b = d.join("sane");
+        fake(&b, &[("type", "Battery\n"), ("capacity", "84\n"), ("status", "Discharging\n"),
+                   ("energy_full", "38840000\n"), ("energy_full_design", "45730000\n")]);
+        assert_eq!(battery_in(&b), Some((84, false)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_macbook_gauge_reads_as_no_battery() {
+        let d = std::env::temp_dir().join(format!("golem-batt-mac-{}", std::process::id()));
+        let b = d.join("smc");
+        // The 2013 MacBook Air, verbatim (2026-09-30).
+        fake(&b, &[("type", "Battery\n"), ("capacity", "1\n"), ("status", "Full\n"),
+                   ("charge_full", "60425000\n"), ("charge_full_design", "7000000\n")]);
+        assert_eq!(battery_in(&b), None);
+        // Either contradiction alone is enough.
+        let c = d.join("full-but-empty");
+        fake(&c, &[("type", "Battery\n"), ("capacity", "3\n"), ("status", "Full\n")]);
+        assert_eq!(battery_in(&c), None);
+        let e = d.join("over-design");
+        fake(&e, &[("type", "Battery\n"), ("capacity", "60\n"), ("status", "Discharging\n"),
+                   ("charge_full", "20000\n"), ("charge_full_design", "10000\n")]);
+        assert_eq!(battery_in(&e), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn mains_and_not_a_battery_are_ignored() {
+        let d = std::env::temp_dir().join(format!("golem-batt-ac-{}", std::process::id()));
+        let a = d.join("AC");
+        fake(&a, &[("type", "Mains\n"), ("online", "1\n")]);
+        assert_eq!(battery_in(&a), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

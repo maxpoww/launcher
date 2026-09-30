@@ -157,6 +157,10 @@ const TERMINALS: &[&str] = &[
 
 /// Web browsers.
 const BROWSERS: &[&str] = &[
+    // Golem's own browser and its webapp windows (webapp-<slug>). Missing until
+    // 2026-09-30: on Golem the Brain never saw a browser at all.
+    "seam",
+    "webapp-",
     "firefox",
     "chromium",
     "chrome",
@@ -682,6 +686,8 @@ mod tests {
             ("zoom", Activity::Call),
             ("Code", Activity::Coding),
             ("firefox", Activity::Browsing),
+            ("seam", Activity::Browsing), // Golem's browser
+            ("webapp-youtube-music", Activity::Browsing), // one of its webapp windows
             ("foot", Activity::Terminal),
             ("somerandomapp", Activity::Unknown),
         ] {

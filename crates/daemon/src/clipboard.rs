@@ -612,6 +612,8 @@ fn capture_window_snapshot(hash: u64) -> Option<PathBuf> {
 /// browser title suffix (see [`BROWSER_SUFFIXES`]).
 fn is_browser_source(class: &str, title: &str) -> bool {
     const BROWSER_CLASSES: &[&str] = &[
+        "seam",    // Golem's browser
+        "webapp-", // a Seam webapp window (was a chrome-<host> app window)
         "firefox",
         "chrome",
         "chromium",
@@ -633,6 +635,7 @@ fn is_browser_source(class: &str, title: &str) -> bool {
 /// Browser chrome appended to tab titles, stripped from a seeded link title so
 /// the heading reads as the page, not the browser. Lowercased for comparison.
 const BROWSER_SUFFIXES: &[&str] = &[
+    "seam", // Golem's browser signs its titles "Page — Seam"
     "mozilla firefox",
     "google chrome",
     "chromium",
@@ -2987,16 +2990,19 @@ impl App {
     /// routes it to that webapp rather than the plain browser. Hosts compared
     /// www-normalized and suffix-tolerant (a `youtube.com` webapp covers
     /// `www.youtube.com` / `music.youtube.com` links).
-    fn link_has_webapp(&self, host: &str) -> bool {
+    fn link_webapp(&self, host: &str) -> Option<String> {
         let norm = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_owned();
         let h = norm(host);
-        self.entries.iter().any(|e| {
-            e.id.starts_with("webapp-")
-                && crate::webapps::exec_app_host(&e.exec).is_some_and(|wh| {
+        self.entries
+            .iter()
+            .filter(|e| e.id.starts_with("webapp-"))
+            .find(|e| {
+                crate::webapps::exec_app_host(&e.exec).is_some_and(|wh| {
                     let wh = norm(wh);
                     h == wh || h.ends_with(&format!(".{wh}")) || wh.ends_with(&format!(".{h}"))
                 })
-        })
+            })
+            .and_then(|e| crate::webapps::exec_app_slug(&e.exec).map(str::to_owned))
     }
 
     /// The "‹ Back" seat shared by every full-cover mode of the box (the
@@ -4023,10 +4029,10 @@ impl App {
                     .filter(|e| e.is_link())
                     .map(|e| e.text.trim().to_owned());
                 if let Some(url) = url {
-                    let as_webapp =
-                        crate::webapps::url_host(&url).is_some_and(|h| self.link_has_webapp(h));
-                    let exec = if as_webapp {
-                        crate::webapps::app_open_exec(&url)
+                    let webapp = crate::webapps::url_host(&url).and_then(|h| self.link_webapp(h));
+                    let as_webapp = webapp.is_some();
+                    let exec = if let Some(slug) = webapp {
+                        crate::webapps::app_open_exec(&slug, &url)
                     } else {
                         format!("xdg-open {}", crate::launch::shell_quote(&url))
                     };
@@ -4034,7 +4040,7 @@ impl App {
                         warn!("clip: open link failed: {e}");
                     } else if !as_webapp {
                         // Raise the browser so the opened tab comes to the front
-                        // (the app-mode window focuses itself; the browser doesn't).
+                        // (Seam focuses a webapp window itself; a tab needs the raise).
                         crate::hypr::focus_browser();
                     }
                 }
@@ -4396,17 +4402,15 @@ impl App {
     /// - **Full browser** (address bar): inject Ctrl+L (focus + select the URL),
     ///   then Ctrl+C, then Escape, spaced so the browser processes one before the
     ///   next.
-    /// - **App-mode webapp** (no address bar): read the live URL off-thread from
-    ///   the shared webapp Chrome's DevTools endpoint and put it on the clipboard.
+    /// - **Webapp window** (no address bar): read the live URL from Seam's
+    ///   report of its webapp windows and put it on the clipboard.
     pub(crate) fn copy_active_link(&mut self) {
-        let (class, title) = crate::hypr::active_window_where().unwrap_or_default();
+        let (class, _title) = crate::hypr::active_window_where().unwrap_or_default();
         if crate::webapps::is_app_window(&class) {
-            std::thread::spawn(
-                move || match crate::webapps::active_app_url(&class, &title) {
-                    Some(url) => wl_copy("text/plain;charset=utf-8", url.as_bytes()),
-                    None => warn!("copy-link: no URL for webapp {class} (debug port up?)"),
-                },
-            );
+            std::thread::spawn(move || match crate::webapps::active_app_url(&class) {
+                Some(url) => wl_copy("text/plain;charset=utf-8", url.as_bytes()),
+                None => warn!("copy-link: Seam has not reported webapp {class}'s page"),
+            });
             return;
         }
         crate::hypr::send_shortcut_active("CTRL", "l");
@@ -5052,6 +5056,7 @@ mod tests {
     fn strips_only_known_browser_suffixes() {
         assert_eq!(clean_link_title("Rickroll - YouTube"), "Rickroll - YouTube"); // "YouTube" not a browser
         assert_eq!(clean_link_title("My Page — Mozilla Firefox"), "My Page");
+        assert_eq!(clean_link_title("My Page — Seam"), "My Page");
         assert_eq!(clean_link_title("Docs - Google Chrome"), "Docs");
         // A legitimate " - " in the title with an unknown tail is left intact.
         assert_eq!(

@@ -31,7 +31,7 @@ pub fn data_path(file_name: &str) -> PathBuf {
 /// bodies — no other account's business on a shared machine. Individual
 /// files inherit the umask (0644 typically); the directory bit is the
 /// reliable gate, and it also covers side dirs (notif-images,
-/// clipboard-previews, webapp-chrome) in one stroke.
+/// clipboard-previews) in one stroke.
 pub fn harden_state_dirs() {
     use std::os::unix::fs::PermissionsExt;
     let config = std::env::var("XDG_CONFIG_HOME")
