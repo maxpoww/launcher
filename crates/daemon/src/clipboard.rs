@@ -158,6 +158,11 @@ const GLYPH_OPEN: &str = "\u{f08e}";
 /// Texture-array slots kept for clipboard thumbnails (recycled round-robin),
 /// appended after the notif card avatars on the OPTIONS renderer.
 const THUMB_CAP: usize = 32;
+/// How long the loaded dictionary stays resident after its panel was last
+/// used: the word lists are ~37 MB of JSON and much more once parsed, too
+/// much to keep forever on a 4 GB machine. Reopening reloads them (a
+/// second or two, off the event loop).
+const DICT_IDLE: Duration = Duration::from_secs(5 * 60);
 /// One wheel notch (`wl_pointer` axis units) — the travel that opens the box.
 const NOTCH: f32 = 15.0;
 /// Pixels of list scroll per axis unit.
@@ -1167,6 +1172,9 @@ pub(crate) struct ClipState {
     dict_data: Option<crate::dict::Dict>,
     /// A load is in flight (so the panel shows "Loading…" and we don't re-spawn).
     dict_loading: bool,
+    /// Last time the dictionary panel was opened or typed in: the loaded map
+    /// is dropped after [`DICT_IDLE`] of disuse (see `watch_dict_idle`).
+    dict_used: Instant,
     /// Reason the load failed (missing file / bad JSON), for the panel hint.
     dict_error: Option<String>,
     /// Network link-unfurl worker. `Some` only when `[options] link_unfurl` is
@@ -1246,6 +1254,7 @@ impl ClipState {
             dict_scroll_target: 0.0,
             dict_data: None,
             dict_loading: false,
+            dict_used: Instant::now(),
             dict_error: None,
             unfurl,
             unfurl_sent: HashSet::new(),
@@ -2875,7 +2884,7 @@ impl App {
         self.clip.detail_meta_scroll = 0.0;
         self.clip.detail_meta_scroll_target = 0.0;
         // A fresh box never carries a dictionary panel over (the loaded word list
-        // is kept — only the open state and query reset).
+        // is kept until it idles out — only the open state and query reset).
         self.clip.dict_open = false;
         self.clip.dict_t = 0.0;
         self.clip.dict_p = 0.0;
@@ -3148,6 +3157,7 @@ impl App {
     /// offline word list the first time.
     pub(crate) fn open_dict(&mut self) {
         self.clip.dict_open = true;
+        self.clip.dict_used = Instant::now();
         self.clip.dict_query.clear();
         self.clip.dict_scroll = 0.0;
         self.clip.dict_scroll_target = 0.0;
@@ -3199,6 +3209,7 @@ impl App {
             Ok(d) => {
                 self.clip.dict_data = Some(d);
                 self.clip.dict_error = None;
+                self.watch_dict_idle();
             }
             Err(e) => {
                 warn!("dict: {e}");
@@ -3209,10 +3220,34 @@ impl App {
         self.schedule_clip_frame();
     }
 
+    /// Drop the loaded dictionary once it has gone unused for [`DICT_IDLE`]
+    /// with its panel closed, and hand the freed heap back to the system
+    /// (glibc keeps freed memory otherwise). Checked once a minute while a
+    /// dictionary is loaded.
+    fn watch_dict_idle(&self) {
+        let timer = Timer::from_duration(Duration::from_secs(60));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            if app.clip.dict_data.is_none() {
+                return TimeoutAction::Drop;
+            }
+            if app.clip.dict_open || app.clip.dict_used.elapsed() < DICT_IDLE {
+                return TimeoutAction::ToDuration(Duration::from_secs(60));
+            }
+            app.clip.dict_data = None;
+            // SAFETY: malloc_trim only returns free heap pages to the OS.
+            unsafe {
+                libc::malloc_trim(0);
+            }
+            tracing::info!("dict: unloaded after {} min unused", DICT_IDLE.as_secs() / 60);
+            TimeoutAction::Drop
+        });
+    }
+
     /// Handle one key while the dictionary panel owns the keyboard: Escape backs
     /// out, Backspace edits the query, printable characters extend it; the lookup
     /// itself is recomputed live at draw against the resident map.
     pub(crate) fn dict_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        self.clip.dict_used = Instant::now();
         match keysym {
             Keysym::Escape => {
                 self.close_dict();
