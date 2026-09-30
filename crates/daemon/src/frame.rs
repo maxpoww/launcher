@@ -26,6 +26,8 @@ const SOFTWARE_FRAME_MIN: Duration = Duration::from_millis(100);
 /// down. Covers smooth-scroll ease tails; a minutes-long install ring
 /// with nobody at the wheel throttles after this.
 const INPUT_ACTIVE_WINDOW: Duration = Duration::from_secs(2);
+/// How fast the open card eases to a new page's height (1/s).
+const TRIM_RATE: f32 = 16.0;
 /// Space between the pills of the Controls row (px at bar scale 1).
 const CONTROLS_GAP: f32 = 10.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
@@ -47,6 +49,38 @@ impl App {
                         | Some(apps::EntryKind::Package)
                 )
             })
+    }
+
+    /// How much shorter the open card should be: the Apps rows the page in
+    /// view leaves empty (Max, 2026-09-30: "card shrinks to fit"). Full
+    /// height on the control panel; a box open keeps its three rows; held
+    /// while a drag is in hand so the grid doesn't move under it.
+    pub(crate) fn apps_trim_target(&self) -> f32 {
+        if self.control_panel {
+            return 0.0;
+        }
+        if self.gesture.dragging.is_some() || self.box_drag.is_some() {
+            return self.ui.open_trim();
+        }
+        let layout = self.layout_at_rest(self.ui.extent_of(Target::Open));
+        let sec = &layout.sections[content::SECTION_APPS];
+        let (cols, rows) = (sec.cols.max(1), sec.rows.max(1));
+        let per_page = cols * rows;
+        // (Pages wrap cyclically, so the pager's target can run past them.)
+        let page = self.scroll.per[content::SECTION_APPS].page(sec.viewport.w.max(1.0)) % sec.n_pages.max(1);
+        // The last filled slot on that page sets the rows it needs.
+        let slots: &[usize] = if self.grid_resting() { &self.apps_slots } else { &[] };
+        let last = if slots.is_empty() {
+            // Search results: dense, one per cell.
+            let n = self.search.visible[content::SECTION_APPS].len();
+            n.checked_sub(page * per_page).map(|k| k.min(per_page).saturating_sub(1))
+        } else {
+            slots.iter().filter(|&&d| d / per_page == page).map(|&d| d % per_page).max()
+        };
+        let needed = last.map_or(1, |l| l / cols + 1);
+        let floor = if self.stack_open() { content::OPEN_BOX_COLS } else { 1 };
+        let keep = needed.max(floor).min(rows);
+        (rows - keep) as f32 * content::GRID_CELL_H * self.icon_scale()
     }
 
     pub(crate) fn layout_at(&self, extent: f32) -> content::Layout {
@@ -93,6 +127,7 @@ impl App {
             self.stack_open() || self.closing_members.is_some(),
             stretch,
             (!self.search.controls.is_empty()).then(|| self.options_pill_h() * crate::panel::LAYER_SCALE[0]),
+            self.ui.open_trim(),
         );
         // Search results split their partial rows about the titles.
         let centre_rows = !self.grid_resting();
@@ -269,6 +304,23 @@ impl App {
             .unwrap_or(1.0 / 60.0);
         self.last_frame = Some(now);
 
+        // The open card fits the Apps page in view: its trim eases toward
+        // the rows that page leaves empty; out of sight it just snaps, so an
+        // open rises straight to the right height.
+        let trim_want = self.apps_trim_target();
+        let trim = self.ui.open_trim();
+        if self.ui.target() != Target::Open && !self.ui.is_animating() {
+            if trim != trim_want {
+                self.ui.set_open_trim(trim_want);
+            }
+        } else if (trim_want - trim).abs() > 0.25 {
+            let k = 1.0 - (-dt.min(0.1) * TRIM_RATE).exp();
+            self.ui.set_open_trim(trim + (trim_want - trim) * k);
+            self.dirty = true;
+        } else if trim != trim_want {
+            self.ui.set_open_trim(trim_want);
+            self.dirty = true;
+        }
         let was_animating = self.ui.is_animating();
         let animating = self.ui.tick(dt);
         // AGUA: the card's speed pours energy into three water bodies —

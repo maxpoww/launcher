@@ -699,6 +699,11 @@ pub fn layout(
     // The Controls row's pill height while a search matches settings
     // (`None`: no row).
     controls_pill_h: Option<f32>,
+    // How much shorter the open card is than its full height: the Apps
+    // rows the page in view leaves empty (`App::apps_trim_target`, eased).
+    // The card's bottom stays put; its top, the dock row and the Apps title
+    // come down, and the Apps viewport shortens by as much.
+    trim: f32,
 ) -> Layout {
     // NOTE: icon_scale is already capped to fit the screen at its source,
     // App::icon_scale() (main.rs) — every extent and surface size derives from
@@ -781,7 +786,7 @@ pub fn layout(
     // AGUA silhouette: at rest the water spreads wide in its basin;
     // rising gathers it to the box width; the live stretch conserves
     // volume — taller is narrower, and the landing squash spills wider.
-    let full_extent = (config.window.height + config.window.bottom_margin) as f32 * icon_scale;
+    let full_extent = (config.window.height + config.window.bottom_margin) as f32 * icon_scale - trim;
     let dock_extent = dock_h + float_gap;
     let rise = ((extent - dock_extent) / (full_extent - dock_extent).max(1.0)).clamp(0.0, 1.0);
     // The dock stretches to wrap its row when its icons or the minimized
@@ -814,7 +819,7 @@ pub fn layout(
     // `y_off` so it rides the card: rising from the bottom edge as it
     // opens, sinking back into it as it closes (the reveal band clips
     // whatever sits past the card interior).
-    let content_top = h - (config.window.height + config.window.bottom_margin) as f32 * icon_scale;
+    let content_top = h - (config.window.height + config.window.bottom_margin) as f32 * icon_scale + trim;
     let content_bottom = h - float_gap;
     // Parallax: the content trails the card a touch (it sits deeper in
     // the stack) and catches up exactly as the card lands — the offset
@@ -887,7 +892,8 @@ pub fn layout(
     let fixed = (SECTION_ROWS[SECTION_INSTALL] + SECTION_ROWS[SECTION_FILES]) as f32 * grid_cell_h
         + N_SECTIONS as f32 * (SECTION_TITLE_H + DOT_ROOM)
         + (N_SECTIONS - 1) as f32 * SECTION_GAP;
-    let avail = grid_bottom - grid_top - fixed;
+    // Rows are counted on the untrimmed card: the trim only hides empty ones.
+    let avail = grid_bottom - (grid_top - trim) - fixed;
     let fits = ((avail / grid_cell_h) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
     // The Controls row (a search matching settings) takes its room out of
     // the Apps rows SHOWN — display only, like the shrink below: page
@@ -898,25 +904,12 @@ pub fn layout(
     let controls_h =
         controls_pill_h.map_or(0.0, |ph| SECTION_GAP + SECTION_TITLE_H + controls_drop + ph + DOT_ROOM);
     let fits_shown = (((avail - controls_h) / grid_cell_h) as usize).clamp(1, fits);
-    // …but never TALLER than the apps actually need. Sizing Apps to whatever
-    // fits meant a machine with fewer apps than the screen could hold got the
-    // slack as dead space INSIDE the Apps viewport — a visible void between
-    // the last icon row and the "Install" title (Max on the 2013 Air, 1440x900
-    // with 3 rows of apps in a 5-row viewport, 2026-09-03). Rows the content
-    // does not reach are not breathing room, they are a hole in the middle of
-    // the card; the leftover belongs at the bottom, above Search.
-    //
-    // The shrink is DISPLAY-ONLY: page capacity stays at `fits` rows (see
-    // `SectionLayout::cap`), so a small span never re-pages the stored
-    // order. The two agree wherever both apply: the shrink only engages
-    // when the whole span fits one page (needed ≤ fits ⇒ span ≤ rows·cols),
-    // where the page-major cell math is capacity-independent.
-    //
-    // Floor at OPEN_BOX_COLS while a group box is open: the magnified box is
-    // sized against this viewport, so a short grid would shrink the box too.
-    let needed = n_visible[SECTION_APPS].div_ceil(cols.max(1)).max(1);
-    let row_floor = if box_open { OPEN_BOX_COLS } else { 1 };
-    let apps_rows = fits_shown.min(needed.max(row_floor)).max(1);
+    // Apps shows every row that fits; a page that doesn't fill them
+    // shortens the card instead (`trim`, Max 2026-09-30: "card shrinks to
+    // fit"). That replaced the old display shrink, which parked the unused
+    // rows as air above Search. Page capacity stays at `fits` either way
+    // (`SectionLayout::cap`): the stored order never re-pages.
+    let apps_rows = fits_shown;
     let apps_cap_rows = fits;
 
     let mut y = grid_top;
@@ -935,7 +928,7 @@ pub fn layout(
             grid_x0,
             agua(y + y_off),
             cols as f32 * grid_cell_w,
-            rows as f32 * grid_cell_h,
+            (rows as f32 * grid_cell_h - if s == SECTION_APPS { trim } else { 0.0 }).max(0.0),
         );
         y += viewport.h + DOT_ROOM + SECTION_GAP;
         // Horizontal paging: each page is viewport.w wide. Pages wrap
@@ -1142,7 +1135,8 @@ pub fn hit_test(
             let page = (adjusted_x / page_w).floor() as usize % sec.n_pages.max(1);
             // Derive scaled cell dimensions from the already-scaled layout geometry.
             let cell_w = sec.viewport.w / sec.cols.max(1) as f32;
-            let cell_h = sec.viewport.h / sec.rows.max(1) as f32;
+            // (Not viewport.h / rows: a trimmed Apps viewport is shorter.)
+            let cell_h = cell_w * GRID_CELL_H / GRID_CELL_W;
             let row = ((pos.1 - sec.viewport.y) / cell_h).floor() as usize;
             let row_start = page * sec.cols * sec.rows + row * sec.cols;
             let col_f = (adjusted_x - page as f32 * page_w - sec.row_shift(row_start)) / cell_w;
@@ -3023,6 +3017,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         )
     }
 
@@ -3042,6 +3037,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         );
         assert!(!l.dock_slots.is_empty());
         // Content sits at its fixed open position; while docked the
@@ -3066,7 +3062,7 @@ mod tests {
     fn a_controls_row_takes_shown_rows_not_page_capacity() {
         let cfg = config();
         let args = |c: Option<f32>| {
-            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c)
+            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, 0.0)
         };
         let (plain, with) = (args(None), args(Some(23.0)));
         assert!(plain.controls_row.is_none());
@@ -3078,6 +3074,22 @@ mod tests {
             with.sections[SECTION_APPS].cap, plain.sections[SECTION_APPS].cap,
             "page capacity never moves with the row"
         );
+    }
+
+    #[test]
+    fn a_trimmed_card_drops_its_top_and_keeps_its_bottom() {
+        let cfg = config();
+        let at = |trim: f32| {
+            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, trim)
+        };
+        let (full, short) = (at(0.0), at(GRID_CELL_H));
+        let (a, b) = (&full.sections[SECTION_APPS], &short.sections[SECTION_APPS]);
+        assert!((b.viewport.y - a.viewport.y - GRID_CELL_H).abs() < 0.5, "the Apps grid comes down a row");
+        assert!((a.viewport.h - b.viewport.h - GRID_CELL_H).abs() < 0.5, "and is a row shorter");
+        assert_eq!(a.cap, b.cap, "page capacity never moves");
+        let (i, j) = (&full.sections[SECTION_INSTALL], &short.sections[SECTION_INSTALL]);
+        assert!((i.viewport.y - j.viewport.y).abs() < 0.5, "Install stays put");
+        assert!((full.search_box.y - short.search_box.y).abs() < 0.5, "so does Search");
     }
 
     #[test]
@@ -3167,6 +3179,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         );
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
         let s = scene(
@@ -3224,6 +3237,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         );
         let slot = l.dock_slots[0];
         assert_eq!(
@@ -3276,6 +3290,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         );
         let apps = &l.sections[SECTION_APPS];
         let mid = (
@@ -3394,6 +3409,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         );
         assert_eq!(l.dock_slots.len(), n, "every entry gets a slot");
         let es = entries(n);
@@ -3489,6 +3505,7 @@ mod tests {
                 false,
                 (1.0, 1.0),
                 None,
+                0.0,
             )
         };
 
@@ -3526,6 +3543,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         );
         let row = open.dock_slots.last().unwrap().x + open.dock_slots.last().unwrap().w
             - open.dock_slots[0].x;
@@ -3549,6 +3567,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         );
         assert!(
             open.sections[SECTION_APPS].cols > narrow.sections[SECTION_APPS].cols,
@@ -3566,6 +3585,7 @@ mod tests {
             layout(
                 &cfg, 1.0, SURFACE, docked, total, n_min, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
                 None,
+                0.0,
             )
         };
         let stretched = lay_wide(19, 9); // wide tiles are width-capped now, so more are needed to overflow
@@ -3605,6 +3625,7 @@ mod tests {
             false,
             (1.0, 1.0),
             None,
+            0.0,
         );
         let n = l.dock_slots.len();
         assert_eq!(n, 5, "all five tiles are shown");

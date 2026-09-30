@@ -40,6 +40,9 @@ pub struct UiState {
     animation: AnimationConfig,
     dock_extent: f32,
     full_extent: f32,
+    /// How much shorter than `full_extent` the open card is: the Apps rows
+    /// the page in view leaves empty (eased by the App).
+    open_trim: f32,
 }
 
 impl UiState {
@@ -54,6 +57,7 @@ impl UiState {
             animation,
             dock_extent: dock_extent.max(1.0),
             full_extent: full_extent.max(1.0),
+            open_trim: 0.0,
         }
     }
 
@@ -78,7 +82,7 @@ impl UiState {
     /// below) the dock bar, `1.0` fully open. Drives the card corner rounding
     /// (subtle/macOS-like when docked, rounder like the folder boxes when open).
     pub fn open_progress(&self) -> f32 {
-        let span = (self.full_extent - self.dock_extent).max(1.0);
+        let span = (self.extent_of(Target::Open) - self.dock_extent).max(1.0);
         ((self.extent - self.dock_extent) / span).clamp(0.0, 1.0)
     }
 
@@ -87,7 +91,28 @@ impl UiState {
         match target {
             Target::Hidden => 0.0,
             Target::Dock => self.dock_extent,
-            Target::Open => self.full_extent,
+            Target::Open => (self.full_extent - self.open_trim).max(self.dock_extent),
+        }
+    }
+
+    /// The open card's full height, before any trim.
+    pub fn full_extent(&self) -> f32 {
+        self.full_extent
+    }
+
+    /// The open card's trim (see [`Self::set_open_trim`]).
+    pub fn open_trim(&self) -> f32 {
+        self.open_trim
+    }
+
+    /// Shorten the open card by `trim` px. Settled open, the card follows at
+    /// once (the App eases `trim` itself); mid-transition the running slide
+    /// just lands on the new height.
+    pub fn set_open_trim(&mut self, trim: f32) {
+        self.open_trim = trim.max(0.0);
+        if self.animator.is_none() && self.target == Target::Open {
+            self.extent = self.extent_of(Target::Open);
+            self.start_extent = self.extent;
         }
     }
 

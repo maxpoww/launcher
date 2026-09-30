@@ -2285,7 +2285,7 @@ impl App {
     /// top of the app grid ... goes away after resizing").
     fn refresh_scaled_geometry(&mut self) {
         let (dock_extent, full_extent) = self.scaled_extents();
-        if (self.ui.extent_of(Target::Open) - full_extent).abs() < 0.5 {
+        if (self.ui.full_extent() - full_extent).abs() < 0.5 {
             return; // scale unchanged — don't churn the surface
         }
         self.ui.set_extents(dock_extent, full_extent);

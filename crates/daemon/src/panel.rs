@@ -1305,7 +1305,9 @@ impl App {
         // a bigger card (a longer dock) keeps it centred under the dock; a
         // smaller card shrinks it with the card.
         let s = self.options_scale();
-        let card_h = (settled.card_h - dock_h).max(1.0);
+        // Sized for the untrimmed card: while it grows back from an apps
+        // page's height the field keeps its size (no re-lay every frame).
+        let card_h = (settled.card_h + self.ui.open_trim() - dock_h).max(1.0);
         let w = settled.card_w.min(FIELD_MAX.0 * s);
         let h = card_h.min(FIELD_MAX.1 * s);
         Rect::new(
