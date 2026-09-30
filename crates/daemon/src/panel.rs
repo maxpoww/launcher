@@ -153,6 +153,12 @@ const LIFT_RATE: f32 = 12.0;
 const LIFT: f32 = 0.07;
 /// The open-box morph's rate.
 const OPEN_RATE: f32 = 14.0;
+/// At rest the only motion is the tiny orbits (well under a pixel a second),
+/// so the panel redraws on this slow cadence instead of every vsync: a
+/// continuously animating card at 165 Hz saturated an iGPU and stalled the
+/// dock's loop (Lenovo Iris Xe, 2026-09-30). Anything that actually moves
+/// runs at full rate.
+pub(crate) const IDLE_TICK: Duration = Duration::from_millis(80);
 
 /// A tiny deterministic generator: the field looks the same every time it
 /// opens (and across restarts) instead of reshuffling under the eye.
@@ -283,6 +289,10 @@ pub(crate) struct Panel {
     last_shift: Option<Instant>,
     hot: Option<usize>,
     open: Option<OpenBox>,
+    /// Wall-clock time of the last step: the panel keeps its own time, since
+    /// on the idle cadence the frame loop's dt (which skips idle gaps) would
+    /// slow the orbits to a crawl.
+    last_step: Option<Instant>,
 }
 
 impl Panel {
@@ -454,6 +464,26 @@ impl Panel {
         });
         self.hot = None;
         true
+    }
+
+    /// Whether anything is moving beyond the idle orbits: a layer leaving or
+    /// arriving, a pill gliding, easing in size or presence, settling or
+    /// lifting under the pointer, or the open setting growing or folding.
+    fn is_moving(&self) -> bool {
+        if self.open.as_ref().is_some_and(|o| (o.k - o.want).abs() > 0.002) {
+            return true;
+        }
+        self.pills.iter().enumerate().any(|(i, p)| {
+            let hot = self.hot == Some(i);
+            let (lift_to, rate_to) = if hot { (1.0, 0.0) } else { (0.0, 1.0) };
+            p.exit.is_some()
+                || (p.sc - 1.0).abs() > 0.002
+                || p.op < 0.995
+                || (p.lift - lift_to).abs() > 0.002
+                || (p.rate - rate_to).abs() > 0.01
+                || (p.anchor.0 - p.home.0).abs() > 0.05
+                || (p.anchor.1 - p.home.1).abs() > 0.05
+        })
     }
 
     /// Escape: fold an open setting back. Returns whether one was open.
@@ -1006,8 +1036,17 @@ impl App {
         )
     }
 
-    /// Advance the panel by `dt` and return what it draws this frame.
-    pub(crate) fn panel_frame(&mut self, layout: &Layout, dt: f32, paint: PanelPaint) -> PanelDraw {
+    /// Advance the panel (on its own clock while `live`, frozen otherwise)
+    /// and return what it draws this frame, and whether anything is moving
+    /// beyond the idle orbits (then the caller keeps full-rate frames; else
+    /// [`Self::panel_idle_tick`] paces it).
+    pub(crate) fn panel_frame(&mut self, layout: &Layout, live: bool, paint: PanelPaint) -> (PanelDraw, bool) {
+        let now = Instant::now();
+        let dt = match (live, self.panel.last_step) {
+            (true, Some(t)) => (now - t).as_secs_f32().min(0.1),
+            _ => 0.0,
+        };
+        self.panel.last_step = live.then_some(now);
         let field = self.panel_field(layout);
         let scale = self.options_scale();
         let pill_h = self.options_pill_h();
@@ -1018,7 +1057,25 @@ impl App {
         self.panel.field = field;
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
-        self.panel.draw(paint)
+        (self.panel.draw(paint), self.panel.is_moving())
+    }
+
+    /// At rest, redraw the panel on the slow [`IDLE_TICK`] cadence (one
+    /// timer at a time) instead of every vsync.
+    pub(crate) fn panel_idle_tick(&mut self) {
+        if self.panel_tick_armed {
+            return;
+        }
+        let timer = calloop::timer::Timer::from_duration(IDLE_TICK);
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.panel_tick_armed = false;
+                app.schedule_frame();
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
+        self.panel_tick_armed = armed;
     }
 
     /// Wheel over the open panel: move through its layers.
@@ -1115,6 +1172,21 @@ mod tests {
         }
         assert!(p.pills.iter().all(|q| q.exit.is_none() && q.drawn == q.layer));
         assert!(p.pills.iter().all(|q| q.op > 0.95), "everyone back in view");
+    }
+
+    #[test]
+    fn at_rest_only_the_orbits_move_so_it_can_idle() {
+        let mut p = panel();
+        for _ in 0..120 {
+            p.step(1.0 / 60.0, None);
+        }
+        assert!(!p.is_moving(), "settled: the idle cadence may take over");
+        p.shift_layers(1);
+        assert!(p.is_moving(), "a layer shift runs at full rate");
+        for _ in 0..240 {
+            p.step(1.0 / 60.0, None);
+        }
+        assert!(!p.is_moving(), "and settles back to rest");
     }
 
     #[test]

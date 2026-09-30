@@ -630,6 +630,7 @@ fn main() -> anyhow::Result<()> {
         panel: panel::Panel::default(),
         panel_mix: 0.0,
         settings_from_apps: false,
+        panel_tick_armed: false,
         box_from_dock: false,
         box_drag: None,
         box_drag_page_at: None,
@@ -1549,6 +1550,8 @@ pub struct App {
     /// The panel was entered from the open apps grid: the gear goes back to
     /// the apps instead of closing the card.
     settings_from_apps: bool,
+    /// The panel's idle-cadence timer is pending (see `panel_idle_tick`).
+    panel_tick_armed: bool,
     /// Whether the currently open box was opened *from the dock* (a dock
     /// folder or pinned directory), as opposed to a grid folder tile. Arms
     /// the dock hover-switch even when the box opened into the grid.

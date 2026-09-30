@@ -984,12 +984,17 @@ impl App {
         }
         let panel_draw = if self.settings_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
-            if open {
-                self.dirty = true;
-            }
             let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
             let paint = crate::panel::PanelPaint { ink: dock_ink, bright };
-            Some(self.panel_frame(&layout, if open { dt } else { 0.0 }, paint))
+            let (draw, moving) = self.panel_frame(&layout, open, paint);
+            // Full rate only while something moves; at rest the orbits
+            // ride the slow idle cadence (see `panel::IDLE_TICK`).
+            if open && moving {
+                self.dirty = true;
+            } else if open {
+                self.panel_idle_tick();
+            }
+            Some(draw)
         } else {
             None
         };
