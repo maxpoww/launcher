@@ -124,7 +124,7 @@ const MARGIN: f32 = 22.0;
 /// Air under the dock, and above the card's floor as a share of the field:
 /// the heap sits up under the dock with more room below.
 const GAP_TOP: f32 = 16.0;
-const GAP_BOTTOM_FRAC: f32 = 0.185;
+const GAP_BOTTOM_FRAC: f32 = 0.30;
 
 // ---- Motion (rates are 1/s for exponential approach) --------------------
 const GLIDE_RATE: f32 = 16.0;
