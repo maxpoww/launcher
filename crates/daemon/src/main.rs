@@ -3937,7 +3937,8 @@ impl App {
         } else {
             self.panel.matching_controls(&self.search.query)
         };
-        let font = options::FONT_PX * self.options_scale();
+        // The near layer's type (Max: "make the pills big as the nearest layer").
+        let font = options::FONT_PX * self.options_scale() * panel::LAYER_SCALE[0];
         self.search.controls = controls
             .into_iter()
             .map(|label| {

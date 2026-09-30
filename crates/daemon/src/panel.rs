@@ -88,7 +88,7 @@ const SETTINGS: [(&str, u8, &str); 24] = [
 // ---- The layers --------------------------------------------------------
 /// Size of each layer against the OPTIONS bar's own pill (the middle layer
 /// IS the bar's pill).
-const LAYER_SCALE: [f32; 3] = [1.53, 1.0, 0.8];
+pub(crate) const LAYER_SCALE: [f32; 3] = [1.53, 1.0, 0.8];
 /// Resting wash alpha per layer, on a dark card (white wash) and a bright
 /// one (black wash, which reads stronger at equal alpha).
 pub(crate) const LAYER_WASH_DARK: [f32; 3] = [0.19, 0.10, 0.055];

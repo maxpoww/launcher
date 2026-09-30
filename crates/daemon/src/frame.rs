@@ -92,13 +92,13 @@ impl App {
             std::array::from_fn(|s| self.scroll.per[s].pos),
             self.stack_open() || self.closing_members.is_some(),
             stretch,
-            (!self.search.controls.is_empty()).then(|| self.options_pill_h()),
+            (!self.search.controls.is_empty()).then(|| self.options_pill_h() * crate::panel::LAYER_SCALE[0]),
         );
-        // The Controls row: the matching settings as middle-layer pills,
+        // The Controls row: the matching settings as near-layer pills,
         // centred in their band; what doesn't fit its width is left out.
         if let Some(row) = layout.controls_row {
-            let s = self.options_scale();
-            let gap = CONTROLS_GAP * s;
+            let s = self.options_scale() * crate::panel::LAYER_SCALE[0];
+            let gap = CONTROLS_GAP * self.options_scale();
             let mut widths: Vec<f32> = Vec::new();
             let mut total = 0.0;
             for &(_, label_w) in &self.search.controls {

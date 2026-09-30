@@ -2508,7 +2508,7 @@ pub fn scene(
         }
     }
     // The Controls row: the settings the search matches, as the control
-    // panel's middle-layer pills under a section title. Apps content: it
+    // panel's near-layer pills under a section title. Apps content: it
     // rides the push with the rest.
     if let (Some(title), false) = (layout.controls_title, layout.controls.is_empty() || panel) {
         scene.labels.push(Label {
@@ -2524,16 +2524,19 @@ pub fn scene(
             color: None,
             clip: Some(reveal_rect),
         });
-        use crate::panel::{HOVER_WASH_BRIGHT, HOVER_WASH_DARK, LAYER_GLOW, LAYER_INK, LAYER_WASH_BRIGHT, LAYER_WASH_DARK, LIFT};
+        use crate::panel::{
+            HOVER_WASH_BRIGHT, HOVER_WASH_DARK, LAYER_GLOW, LAYER_INK, LAYER_SCALE, LAYER_WASH_BRIGHT, LAYER_WASH_DARK, LIFT,
+        };
         let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
         let (rest_a, hover_a) = if bright {
-            (LAYER_WASH_BRIGHT[1], HOVER_WASH_BRIGHT)
+            (LAYER_WASH_BRIGHT[0], HOVER_WASH_BRIGHT)
         } else {
-            (LAYER_WASH_DARK[1], HOVER_WASH_DARK)
+            (LAYER_WASH_DARK[0], HOVER_WASH_DARK)
         };
         let sc = search_pill.scale;
-        let (font, line) = (crate::options::FONT_PX * sc, crate::options::LINE_PX * sc);
-        let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * LAYER_INK[1]];
+        let near = LAYER_SCALE[0];
+        let (font, line) = (crate::options::FONT_PX * sc * near, crate::options::LINE_PX * sc * near);
+        let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * LAYER_INK[0]];
         let glow = if bright { 0.0 } else { 1.0 };
         let mut cgrid = GridContent {
             clip: reveal_rect,
@@ -2545,7 +2548,7 @@ pub fn scene(
             let (pw, ph) = (r.w * k, r.h * k);
             let rect = Rect::new(r.x + r.w / 2.0 - pw / 2.0, r.y + r.h / 2.0 - ph / 2.0, pw, ph);
             if panel_mix <= 0.0005 {
-                let (blur, glow_a) = LAYER_GLOW[1];
+                let (blur, glow_a) = LAYER_GLOW[0];
                 scene.overlay_shadows.push(ShadowInst {
                     rect,
                     radius: ph / 2.0,
