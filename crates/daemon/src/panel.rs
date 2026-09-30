@@ -131,7 +131,7 @@ const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 const EDGE: f32 = 6.0;
 /// How close together the pills sit: the share of the field's width and
 /// band height the rows use (Max: "tidy all closer together").
-const TIGHT: f32 = 0.85;
+const TIGHT: f32 = 0.76;
 /// How much wider than the card's own width the field may grow as a longer
 /// dock widens the card; past it the field stays centred (Max: "no more
 /// than a third, then it stays locked on the middle").
@@ -1001,7 +1001,7 @@ fn centre_weight(pills: &mut [Pill], w: f32, edge: f32) {
     let right_room = pills.iter().map(|p| w - edge - p.home.0 - p.slot().0 / 2.0).fold(f32::MAX, f32::min).max(0.0);
     // A nudge, not a slide: capped so a layer step never drags the whole
     // heap sideways as one block (that drowned the pills' own motion).
-    let cap = 3.0 * edge;
+    let cap = edge;
     let dx = (w / 2.0 - mx / m).clamp(-left_room, right_room).clamp(-cap, cap);
     for p in pills.iter_mut() {
         p.home.0 += dx;
@@ -1058,7 +1058,8 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
     // Tidied closer together: the rows use this share of the band (from the
     // top down, so the air under the dock stays put) and of the width.
     let row_h = (bottom - top).max(1.0) * TIGHT / ROWS.len() as f32;
-    let full = (w - 2.0 * edge).max(1.0) * TIGHT;
+    let whole = (w - 2.0 * edge).max(1.0);
+    let full = whole * TIGHT;
     let mut next = 0;
     for (r, (&frac, &n)) in ROWS.iter().zip(&counts).enumerate() {
         let row: Vec<usize> = order[next..(next + n).min(order.len())].to_vec();
@@ -1072,7 +1073,9 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
         // A row too full for its width grows toward the whole card (a
         // narrow card, long labels), and swings only by the room left.
         let min_gap = 12.0 * (edge / EDGE).max(0.01);
-        let base = (full * frac).max(widths + min_gap * (row.len() as f32 - 1.0)).min(full);
+        // Tight, but never tighter than the row's pills allow: a full row
+        // grows back toward the whole card (a narrow card, long labels).
+        let base = (full * frac).max(widths + min_gap * (row.len() as f32 - 1.0)).min(whole);
         let step = base / row.len().max(1) as f32;
         // The swing gives up the room it shifts by (the row stays inside
         // its own width), never more than the row can spare.
@@ -1107,7 +1110,9 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
             // Ends stray inward only, so the widest row still nearly
             // touches the sides.
             let st = p.stray[arrangement];
-            let mut sx = st[0] * JITTER_X * mean_gap;
+            // Strays scale with the room around a pill, but keep a floor so
+            // a tight row still moves both ways on a step.
+            let mut sx = st[0] * JITTER_X * mean_gap.max(24.0 * edge / EDGE);
             if k == 0 {
                 sx = sx.abs();
             } else if k == row.len() - 1 {
@@ -1378,7 +1383,7 @@ mod tests {
         // air, `END_AIR`).
         let left = p.pills.iter().map(|q| q.home.0 - q.size().0 / 2.0).fold(f32::MAX, f32::min);
         let right = p.pills.iter().map(|q| q.home.0 + q.size().0 / 2.0).fold(f32::MIN, f32::max);
-        assert!(right - left > 0.85 * p.key.0, "heap spans {left}..{right} of {}", p.key.0);
+        assert!(right - left > 0.8 * TIGHT * p.key.0, "heap spans {left}..{right} of {}", p.key.0);
     }
 
     #[test]
@@ -1487,7 +1492,9 @@ mod tests {
 
     #[test]
     fn a_layer_step_moves_the_pills_both_ways_a_little() {
-        let mut p = panel();
+        // A field with room to move (Max's card: the capped 1280 px); on a
+        // narrow card the tight rows are packed wall to wall.
+        let mut p = panel_sized((1280.0, 846.0));
         let before: Vec<(f32, f32)> = p.pills.iter().map(|q| q.home).collect();
         p.shift_layers(1);
         let dx: Vec<f32> = p.pills.iter().zip(&before).map(|(q, b)| q.home.0 - b.0).collect();
