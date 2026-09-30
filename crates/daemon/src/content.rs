@@ -572,10 +572,9 @@ pub struct SectionLayout {
 
 impl SectionLayout {
     /// How far right the row holding display cell `i` is drawn: a row that
-    /// isn't full, while searching, splits about the viewport's centre (the
-    /// title's) — one cell centres on it; otherwise the first half (the
-    /// smaller, for an odd count) ends at it and the rest starts there:
-    /// 1 | 2, 1 | 2 3, 1 2 | 3 4 (Max, 2026-09-30). Full rows don't move.
+    /// isn't full, while searching, centres on the viewport's centre (the
+    /// title's) — the middle result under the title for an odd count, the
+    /// middle gap for an even one (Max, 2026-09-30). Full rows don't move.
     pub fn row_shift(&self, i: usize) -> f32 {
         let cols = self.cols.max(1);
         if !self.centre_rows {
@@ -587,13 +586,9 @@ impl SectionLayout {
         if k == 0 || k >= cols {
             return 0.0;
         }
-        let cell_w = self.viewport.w / cols as f32;
-        let centre = self.viewport.w / 2.0;
-        if k == 1 {
-            centre - cell_w / 2.0
-        } else {
-            centre - (k / 2) as f32 * cell_w
-        }
+        // Equal cells: the middle one (odd) or the middle gap (even) on
+        // the centre is just the row centred.
+        (self.viewport.w - k as f32 * self.viewport.w / cols as f32) / 2.0
     }
 }
 
@@ -1025,40 +1020,34 @@ pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
     (page.min(max_page) as f32 * section.viewport.w).max(0.0)
 }
 
-/// Lay the Controls row's pills (`widths`, best match first) in `row`,
-/// split about its centre — the title's centre (Max, 2026-09-30): the first
-/// half (the smaller, for an odd count) ends `gap / 2` left of it, the rest
-/// starts `gap / 2` right of it, so the gap between the halves sits under
-/// the title: 1 | 2 3, 1 2 | 3 4, 1 2 | 3 4 5. One pill centres on it.
-/// Only as many as fit both sides are shown, best first.
+/// Lay the Controls row's pills (`widths`, best match first) in `row`
+/// about its centre — the title's (Max, 2026-09-30): an odd count puts the
+/// middle pill on it, an even count the gap between the middle two. Only
+/// as many as fit inside the row are shown, best first.
 pub(crate) fn controls_rects(row: Rect, widths: &[f32], gap: f32) -> Vec<Rect> {
     let cx = row.x + row.w / 2.0;
-    let side = |ws: &[f32]| ws.iter().sum::<f32>() + gap * ws.len().saturating_sub(1) as f32;
     for n in (1..=widths.len()).rev() {
         let ws = &widths[..n];
-        if n == 1 {
-            if ws[0] <= row.w {
-                return vec![Rect::new(cx - ws[0] / 2.0, row.y, ws[0], row.h)];
-            }
+        // Where the first pill starts, relative to the centre.
+        let before: f32 = ws[..n / 2].iter().map(|w| w + gap).sum();
+        let start = if n % 2 == 1 {
+            cx - ws[n / 2] / 2.0 - before
+        } else {
+            cx - before + gap / 2.0
+        };
+        let end = start + ws.iter().sum::<f32>() + gap * (n - 1) as f32;
+        if start < row.x - 0.01 || end > row.x + row.w + 0.01 {
             continue;
         }
-        let (left, right) = ws.split_at(n / 2);
-        let half = (row.w - gap) / 2.0;
-        if side(left) > half || side(right) > half {
-            continue;
-        }
-        let mut rects = Vec::with_capacity(n);
-        let mut x = cx - gap / 2.0 - side(left);
-        for &w in left {
-            rects.push(Rect::new(x, row.y, w, row.h));
-            x += w + gap;
-        }
-        let mut x = cx + gap / 2.0;
-        for &w in right {
-            rects.push(Rect::new(x, row.y, w, row.h));
-            x += w + gap;
-        }
-        return rects;
+        let mut x = start;
+        return ws
+            .iter()
+            .map(|&w| {
+                let r = Rect::new(x, row.y, w, row.h);
+                x += w + gap;
+                r
+            })
+            .collect();
     }
     Vec::new()
 }
@@ -3100,10 +3089,10 @@ mod tests {
         let (w, cell) = (sec.viewport.w, sec.viewport.w / sec.cols as f32);
         assert_eq!(sec.row_shift(0), 0.0, "the resting grid never moves");
         sec.centre_rows = true;
-        for (n, split) in [(2usize, 1usize), (3, 1), (4, 2), (5, 2)] {
+        for n in 2..6usize {
             sec.cells = n;
-            let edge = split as f32 * cell + sec.row_shift(0);
-            assert!((edge - w / 2.0).abs() < 0.01, "{n}: the gap after {split} is under the title");
+            let mid = sec.row_shift(0) + n as f32 * cell / 2.0;
+            assert!((mid - w / 2.0).abs() < 0.01, "{n}: the row's middle is under the title");
         }
         sec.cells = 1;
         assert!((sec.row_shift(0) + cell / 2.0 - w / 2.0).abs() < 0.01, "one result under the title");
@@ -3119,11 +3108,14 @@ mod tests {
         let centre = |r: &[Rect], after: usize| (r[after - 1].x + r[after - 1].w + r[after].x) / 2.0;
         let one = controls_rects(row, &[80.0], gap);
         assert_eq!(one[0].x + one[0].w / 2.0, 300.0, "one pill centres on the title");
-        for (n, split) in [(2, 1), (3, 1), (4, 2), (5, 2), (6, 3)] {
+        for n in [2, 4, 6] {
             let r = controls_rects(row, &vec![60.0; n], gap);
             assert_eq!(r.len(), n);
-            assert!((centre(&r, split) - 300.0).abs() < 0.01, "{n}: the gap after {split} sits on the title");
+            assert!((centre(&r, n / 2) - 300.0).abs() < 0.01, "{n}: the middle gap sits on the title");
         }
+        // Odd: the middle pill on the title, whatever its neighbours' widths.
+        let r = controls_rects(row, &[120.0, 50.0, 90.0], gap);
+        assert!((r[1].x + r[1].w / 2.0 - 300.0).abs() < 0.01, "3: the middle pill on the title");
         // Too wide for both halves: the best that fit are kept.
         assert_eq!(controls_rects(row, &[200.0; 4], gap).len(), 2);
     }
