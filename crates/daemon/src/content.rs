@@ -208,9 +208,19 @@ const SECTION_TITLES: [&str; N_SECTIONS] = ["Apps", "Install", "Files"];
 /// Grid rows per section (Apps is a cap; it shrinks on short cards).
 const SECTION_ROWS: [usize; N_SECTIONS] = [4, 1, 1];
 /// Height of a section's title line above its grid.
-const SECTION_TITLE_H: f32 = 17.0;
-/// Vertical gap beneath each section (page dots live here).
-const SECTION_GAP: f32 = 8.0;
+const SECTION_TITLE_H: f32 = 14.0;
+/// Vertical gap between one section's frame and the next.
+const SECTION_GAP: f32 = 20.0;
+/// Room under a section's grid, inside its frame, where its page dots sit.
+const DOT_ROOM: f32 = 6.0;
+/// The hairline frame round each section, its title and its dots (Max's
+/// mockup, 2026-09-30): room beyond the grid at the sides and beyond the
+/// title / dots above and below, its corners, and its strength (the card's
+/// ink at this alpha).
+const FRAME_X: f32 = 24.0;
+const FRAME_Y: f32 = 6.0;
+const FRAME_RADIUS: f32 = 23.0;
+const FRAME_ALPHA: f32 = 0.09;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
@@ -240,22 +250,22 @@ pub const OPEN_BOX_COLS: usize = 3;
 /// size of a group's member list (`groups::PAGE_CAP` re-exports it).
 pub const OPEN_BOX_CAP: usize = OPEN_BOX_COLS * OPEN_BOX_COLS;
 const GRID_PAD_X: f32 = 14.0;
-const GRID_TOP_GAP: f32 = 5.0;
+const GRID_TOP_GAP: f32 = 13.0;
 const GRID_BOTTOM_PAD: f32 = 6.0;
 /// How far the search pill lifts off the card's floor into spare room above
 /// it — never closer than [`SEARCH_LIFT_AIR`] to the Files row, so it never
 /// costs the grid a row (Max, 2026-09-29: "move the search up a little").
 const SEARCH_LIFT: f32 = 8.0;
 const SEARCH_LIFT_AIR: f32 = 4.0;
-/// Air the Controls row keeps below its pills (above the search pill).
-const CONTROLS_AIR: f32 = 6.0;
 /// Text metrics for the app-name labels.
 pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
-/// Section titles (Apps, Install, Files, Controls): a little bigger than
-/// the icon labels (Max, 2026-09-30).
-const TITLE_FONT_PX: f32 = 16.0;
-const TITLE_LINE_PX: f32 = 20.0;
+/// Section titles (Apps, Install, Files, Controls), from Max's mockup
+/// (2026-09-30): small and bold, faint, raised a little in their band.
+const TITLE_FONT_PX: f32 = 13.0;
+const TITLE_LINE_PX: f32 = 16.0;
+const TITLE_ALPHA: f32 = 0.3;
+const TITLE_DROP: f32 = -4.0;
 /// Search box: height, inner padding, text metrics.
 const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
@@ -842,14 +852,14 @@ pub fn layout(
     // and the three title lines, capped at its design height (6×3 at
     // the default card size); short cards degrade to fewer rows.
     let fixed = (SECTION_ROWS[SECTION_INSTALL] + SECTION_ROWS[SECTION_FILES]) as f32 * grid_cell_h
-        + N_SECTIONS as f32 * SECTION_TITLE_H
+        + N_SECTIONS as f32 * (SECTION_TITLE_H + DOT_ROOM)
         + (N_SECTIONS - 1) as f32 * SECTION_GAP;
     let avail = grid_bottom - grid_top - fixed;
     let fits = ((avail / grid_cell_h) as usize).clamp(1, SECTION_ROWS[SECTION_APPS]);
     // The Controls row (a search matching settings) takes its room out of
     // the Apps rows SHOWN — display only, like the shrink below: page
     // capacity stays at `fits`.
-    let controls_h = controls_pill_h.map_or(0.0, |ph| SECTION_TITLE_H + ph + CONTROLS_AIR);
+    let controls_h = controls_pill_h.map_or(0.0, |ph| SECTION_GAP + SECTION_TITLE_H + ph + DOT_ROOM);
     let fits_shown = (((avail - controls_h) / grid_cell_h) as usize).clamp(1, fits);
     // …but never TALLER than the apps actually need. Sizing Apps to whatever
     // fits meant a machine with fewer apps than the screen could hold got the
@@ -890,7 +900,7 @@ pub fn layout(
             cols as f32 * grid_cell_w,
             rows as f32 * grid_cell_h,
         );
-        y += viewport.h + SECTION_GAP;
+        y += viewport.h + DOT_ROOM + SECTION_GAP;
         // Horizontal paging: each page is viewport.w wide. Pages wrap
         // cyclically (infinite scroll), so the offset is normalized into
         // [0, n_pages * viewport.w) rather than clamped.
@@ -940,7 +950,7 @@ pub fn layout(
     let (controls_title, controls_row) = match controls_pill_h {
         Some(ph) => {
             let vp = sections[SECTION_FILES].viewport;
-            let title_y = files_bottom + SECTION_GAP;
+            let title_y = files_bottom + DOT_ROOM + SECTION_GAP;
             (
                 Some((vp.x + vp.w / 2.0, title_y)),
                 Some(Rect::new(vp.x, title_y + SECTION_TITLE_H, vp.w, ph)),
@@ -948,7 +958,8 @@ pub fn layout(
         }
         None => (None, None),
     };
-    let above_search = controls_row.map_or(files_bottom, |r| r.y + r.h);
+    // The last frame's bottom edge.
+    let above_search = controls_row.map_or(files_bottom, |r| r.y + r.h) + DOT_ROOM + FRAME_Y;
     // Lift the search pill into whatever room the sections left above it.
     let lift = (SEARCH_LIFT * icon_scale).min((search_box.y - above_search - SEARCH_LIFT_AIR).max(0.0));
     let search_box = Rect::new(search_box.x, search_box.y - lift, search_box.w, search_box.h);
@@ -983,13 +994,31 @@ pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
     (page.min(max_page) as f32 * section.viewport.w).max(0.0)
 }
 
+/// The hairline frame round a section: its grid's width (`vp`) plus the
+/// side room, from its title band's `top` to its dots' `bottom` plus the
+/// room above and below.
+fn section_frame(vp: Rect, top: f32, bottom: f32, ink: [f32; 4]) -> RectInst {
+    RectInst {
+        rect: Rect::new(
+            vp.x - FRAME_X,
+            top - FRAME_Y,
+            vp.w + 2.0 * FRAME_X,
+            bottom - top + 2.0 * FRAME_Y,
+        ),
+        radius: FRAME_RADIUS,
+        color: [ink[0], ink[1], ink[2], ink[3] * FRAME_ALPHA],
+        glass: 0.0,
+        border: 1.0,
+    }
+}
+
 /// Which section's scroll band contains `pos`: the viewport plus its
 /// title line above and the gap (page dots) beneath, so wheel paging is
 /// forgiving about the exact pointer height.
 pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
     layout.sections.iter().position(|sec| {
         pos.1 >= sec.viewport.y - SECTION_TITLE_H
-            && pos.1 < sec.viewport.y + sec.viewport.h + SECTION_GAP
+            && pos.1 < sec.viewport.y + sec.viewport.h + DOT_ROOM + SECTION_GAP
     })
 }
 
@@ -2121,6 +2150,13 @@ pub fn scene(
         search_grid = Some(sgrid);
     }
 
+    // The section titles' ink, and the frames round the sections (one grid,
+    // pushed after the sections so `scene.grids[s]` keeps indexing them).
+    let title_ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * TITLE_ALPHA];
+    let mut frames = GridContent {
+        clip: reveal_rect,
+        ..Default::default()
+    };
     // The three sections: title, grid cells with per-section horizontal
     // paging, page dots, and per-section empty states.
     for (s, sec) in layout.sections.iter().enumerate() {
@@ -2140,17 +2176,24 @@ pub fn scene(
         };
         scene.labels.push(Label {
             text: title,
-            pos: (sec.title_pos.0, sec.title_pos.1 + 1.0),
+            pos: (sec.title_pos.0, sec.title_pos.1 + TITLE_DROP),
             max_w: sec.viewport.w,
             font_px: TITLE_FONT_PX,
             line_px: TITLE_LINE_PX,
             centered: true,
-            dim: true,
+            dim: false,
             cache: true,
-            family: None,
-            color: None,
+            family: Some(FONT_BOLD),
+            color: Some(title_ink),
             clip: Some(reveal_rect),
         });
+        // Every section is framed, an empty one too.
+        frames.rects.push(section_frame(
+            sec.viewport,
+            sec.title_pos.1,
+            sec.viewport.y + sec.viewport.h + DOT_ROOM,
+            dock_ink,
+        ));
 
         let mut grid = GridContent {
             clip: reveal_clip(sec.viewport),
@@ -2488,7 +2531,7 @@ pub fn scene(
         // Page indicator dots in the gap beneath the section — gated by
         // the reveal edge (they ride the same fixed layout as the grid,
         // so unclipped they would linger as a ghost once the box hides).
-        let dot_y = sec.viewport.y + sec.viewport.h + SECTION_GAP / 2.0;
+        let dot_y = sec.viewport.y + sec.viewport.h + DOT_ROOM / 2.0;
         if sec.n_pages > 1 && (reveal_top..=reveal_bottom).contains(&dot_y) {
             let dot_r = 3.0;
             let dot_spacing = 10.0;
@@ -2512,21 +2555,22 @@ pub fn scene(
             }
         }
     }
+    scene.grids.push(frames);
     // The Controls row: the settings the search matches, as the control
     // panel's near-layer pills under a section title. Apps content: it
     // rides the push with the rest.
     if let (Some(title), false) = (layout.controls_title, layout.controls.is_empty() || panel) {
         scene.labels.push(Label {
             text: crate::i18n::tr("Controls").to_string(),
-            pos: (title.0, title.1 + 1.0),
+            pos: (title.0, title.1 + TITLE_DROP),
             max_w: 200.0,
             font_px: TITLE_FONT_PX,
             line_px: TITLE_LINE_PX,
             centered: true,
-            dim: true,
+            dim: false,
             cache: true,
-            family: None,
-            color: None,
+            family: Some(FONT_BOLD),
+            color: Some(title_ink),
             clip: Some(reveal_rect),
         });
         use crate::panel::{
@@ -2547,6 +2591,9 @@ pub fn scene(
             clip: reveal_rect,
             ..Default::default()
         };
+        if let Some(row) = layout.controls_row {
+            cgrid.rects.push(section_frame(row, title.1, row.y + row.h + DOT_ROOM, dock_ink));
+        }
         for (i, (r, &(label, _))) in layout.controls.iter().zip(controls).enumerate() {
             let lift = control_lift.get(i).copied().unwrap_or(0.0);
             let k = 1.0 + LIFT * lift;
@@ -2996,7 +3043,7 @@ mod tests {
         let l = open_layout(&cfg, 40, 1e9);
         let apps = &l.sections[SECTION_APPS];
         assert_eq!(apps.cols, 6, "720px card fits exactly 6 columns");
-        assert_eq!(apps.rows, 4, "tightened gaps let the default card fit 6×4");
+        assert_eq!(apps.rows, 3, "the framed sections leave the default card 6×3");
         assert_eq!(l.sections[SECTION_INSTALL].rows, 1);
         assert_eq!(l.sections[SECTION_FILES].rows, 1);
         // Sections stack without overlap and fit above the search box.
