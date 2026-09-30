@@ -119,11 +119,10 @@ pub(crate) fn pill_ink(layer: usize, ink: [f32; 4], alpha: f32) -> [f32; 4] {
 const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 
 // ---- Layout (px at bar scale 1) -----------------------------------------
-/// Air kept off the card's sides — per pill, somewhere between these two,
-/// so the pills at the edges stop at different distances and the heap's
-/// sides read uneven instead of ruled (Max, 2026-09-30).
-const MARGIN_MIN: f32 = 4.0;
-const MARGIN_MAX: f32 = 36.0;
+/// Air kept off the card's sides: the ends of the widest row stop this far
+/// from them ("the middle side pills almost touch the sides", Max
+/// 2026-09-30).
+const EDGE: f32 = 6.0;
 /// Air under the dock, and above the card's floor as a share of the field:
 /// the heap sits up under the dock with more room below.
 const GAP_TOP: f32 = 16.0;
@@ -132,26 +131,31 @@ const GAP_BOTTOM_FRAC: f32 = 0.30;
 /// the top gap grows by it and the bottom one shrinks by it (Max: "a little
 /// lower").
 const DROP: f32 = 34.0;
-
-/// How round the heap's silhouette is: 0 = straight sides; at this value
-/// the rows at the very top and bottom are held in by about a third of the
-/// half-width while the middle ones reach out to the sides ("a little
-/// circular", Max 2026-09-30).
-const ROUND: f32 = 0.55;
-
-/// Extra side air at height `y` (field-relative) for the rounded heap: none
-/// across the middle, growing toward the top and bottom of the band the
-/// pills live in (`gaps` off the dock and the floor), on an ellipse.
-fn round_inset(y: f32, size: (f32, f32), gaps: (f32, f32)) -> f32 {
-    let (top, bottom) = (gaps.0, size.1 - gaps.1);
-    let half = ((bottom - top) / 2.0).max(1.0);
-    let t = ((y - (top + half)) / half).clamp(-1.0, 1.0);
-    (size.0 / 2.0) * (1.0 - (1.0 - ROUND * t * t).max(0.0).sqrt())
-}
+/// The rows, top to bottom, as each one's width against the widest: brick
+/// courses on a gentle ellipse, so the middle reaches the sides and the
+/// top and bottom rows are held in — wide, and a little round.
+const ROWS: [f32; 5] = [0.64, 0.88, 1.0, 0.88, 0.64];
+/// How far a pill strays from its brick spot, as a share of the room around
+/// it (x: of its row's mean gap, y: of the row height): enough to read
+/// organic, never enough to break the courses.
+const JITTER_X: f32 = 0.35;
+const JITTER_Y: f32 = 0.22;
 
 /// The field's (top, bottom) air for a field `h` tall at bar scale `s`.
 fn gaps(h: f32, s: f32) -> (f32, f32) {
     ((GAP_TOP + DROP) * s, (GAP_BOTTOM_FRAC * h - DROP * s).max(GAP_TOP * s))
+}
+
+/// How many of `n` pills each row holds: in proportion to its width, the
+/// remainder to the middle. Neighbouring rows then hold different counts,
+/// so their gaps never line up — the pills cross like bricks.
+fn row_counts(n: usize) -> Vec<usize> {
+    let total: f32 = ROWS.iter().sum();
+    let mut counts: Vec<usize> = ROWS.iter().map(|f| ((n as f32) * f / total).round() as usize).collect();
+    let placed: usize = counts.iter().sum();
+    let mid = ROWS.len() / 2;
+    counts[mid] = (counts[mid] + n).saturating_sub(placed);
+    counts
 }
 
 // ---- Motion (rates are 1/s for exponential approach) --------------------
@@ -244,11 +248,9 @@ struct Pill {
     phase: [f32; 2],
     period: f32,
     spin: f32,
-    /// This pill's own side air (left, right): drawn from `edge`, a random
-    /// 0–1 per side, at the current scale.
-    edge: [f32; 2],
-    ml: f32,
-    mr: f32,
+    /// Where it strays from its brick spot (x, y) and how much room it
+    /// takes after it in its row, each a random -1..1.
+    stray: [f32; 3],
 }
 
 impl Pill {
@@ -305,6 +307,10 @@ pub(crate) struct Panel {
     last_shift: Option<Instant>,
     hot: Option<usize>,
     open: Option<OpenBox>,
+    /// The order the pills fill the rows in: shuffled once, so near, middle
+    /// and far mix through every row, and fixed, so a layer change keeps the
+    /// arrangement and only the sizes change.
+    order: Vec<usize>,
     /// Wall-clock time of the last step: the panel keeps its own time, since
     /// on the idle cadence the frame loop's dt (which skips idle gaps) would
     /// slow the orbits to a crawl.
@@ -350,11 +356,10 @@ impl Panel {
                     phase: [rng.next() * TAU, rng.next() * TAU],
                     period: 12.0 + rng.next() * 6.0,
                     spin: if rng.next() < 0.5 { -1.0 } else { 1.0 },
-                    edge: [rng.next(), rng.next()],
-                    ml: 0.0,
-                    mr: 0.0,
+                    stray: [rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0],
                 })
                 .collect();
+            self.order = brick_order(&self.pills, &mut rng);
         }
         for p in &mut self.pills {
             for (l, &f) in LAYER_SCALE.iter().enumerate() {
@@ -366,26 +371,21 @@ impl Panel {
         self.compose(size, true);
     }
 
-    /// Lay the field out for the current layer order: balanced, fitted up
-    /// under the dock, settled so nothing crowds. `snap` puts every pill
+    /// Lay the field out for the current layer order: brick courses, wide
+    /// and a little round, up under the dock, settled so nothing crowds. `snap` puts every pill
     /// there at once; otherwise they glide.
     fn compose(&mut self, size: (f32, f32), snap: bool) {
         let s = self.scale.max(0.01);
         let (w, h) = size;
-        let margin = MARGIN_MIN * s;
-        for p in &mut self.pills {
-            p.ml = (MARGIN_MIN + p.edge[0] * (MARGIN_MAX - MARGIN_MIN)) * s;
-            p.mr = (MARGIN_MIN + p.edge[1] * (MARGIN_MAX - MARGIN_MIN)) * s;
-        }
         let (top, bottom) = gaps(h, s);
-        balanced(&mut self.pills, (w, h), margin, (top, bottom));
+        bricks(&mut self.pills, &self.order, (w, h), EDGE * s, (top, bottom));
         for p in &mut self.pills {
             p.home = p.ideal;
         }
-        clamp_all(&mut self.pills, (w, h), (top, bottom));
-        settle(&mut self.pills, (w, h), (top, bottom), 18.0 * s, 0.0, 220);
-        fit_vertical(&mut self.pills, h, top, bottom);
-        settle(&mut self.pills, (w, h), (top, bottom), 12.0 * s, 0.08, 120);
+        clamp_all(&mut self.pills, (w, h), EDGE * s, (top, bottom));
+        // Only where a stray pushed two too close: nudge apart, held near
+        // the brick spots.
+        settle(&mut self.pills, (w, h), EDGE * s, (top, bottom), 12.0 * s, 0.12, 160);
         if snap {
             for p in &mut self.pills {
                 p.anchor = p.home;
@@ -817,20 +817,17 @@ fn content_hit(key: (f32, f32, f32), scale: f32, pos: (f32, f32), field: Rect) -
     false
 }
 
-/// Keep a pill inside the field: its own side air off the sides, `gaps` (top,
-/// bottom) off the dock and the floor.
-fn clamp_pill(p: &mut Pill, size: (f32, f32), gaps: (f32, f32)) {
+/// Keep a pill inside the field: `edge` off the sides, `gaps` (top, bottom)
+/// off the dock and the floor.
+fn clamp_pill(p: &mut Pill, size: (f32, f32), edge: f32, gaps: (f32, f32)) {
     let (w, h) = p.size();
+    p.home.0 = p.home.0.clamp(edge + w / 2.0, (size.0 - edge - w / 2.0).max(edge + w / 2.0));
     p.home.1 = p.home.1.clamp(gaps.0 + h / 2.0, (size.1 - gaps.1 - h / 2.0).max(gaps.0 + h / 2.0));
-    // Its own uneven side air, plus the round silhouette's at its height.
-    let inset = round_inset(p.home.1, size, gaps);
-    let (l, r) = (p.ml + inset, p.mr + inset);
-    p.home.0 = p.home.0.clamp(l + w / 2.0, (size.0 - r - w / 2.0).max(l + w / 2.0));
 }
 
-fn clamp_all(pills: &mut [Pill], size: (f32, f32), gaps: (f32, f32)) {
+fn clamp_all(pills: &mut [Pill], size: (f32, f32), edge: f32, gaps: (f32, f32)) {
     for p in pills {
-        clamp_pill(p, size, gaps);
+        clamp_pill(p, size, edge, gaps);
     }
 }
 
@@ -841,80 +838,93 @@ fn air(a: &Pill, b: &Pill) -> f32 {
     ((a.home.0 - b.home.0).abs() - (aw + bw) / 2.0).max((a.home.1 - b.home.1).abs() - (ah + bh) / 2.0)
 }
 
-/// Soft discs: start scattered, then each pill nudges only the neighbours
-/// inside its reach (and the edges, the same way) until the spacing is even
-/// everywhere. The short reach is what fills the middle; long-range
-/// repulsion would press everything against the rim. Distances count x at
-/// half, since pills are wide. Writes each pill's `ideal`.
-fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32)) {
-    // Counting x at under half is what spreads the heap out to the sides.
-    const SX: f32 = 0.28;
-    let (w, h) = size;
+/// The order the pills fill the rows in: each group (layer) spread evenly
+/// through the sequence — at every step the group furthest behind its
+/// share goes next — so near, middle and far alternate across every row
+/// instead of bunching; which pill of a group comes next is random.
+fn brick_order(pills: &[Pill], rng: &mut Rng) -> Vec<usize> {
+    let mut groups: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for (i, p) in pills.iter().enumerate() {
+        groups[(p.group as usize).min(2)].push(i);
+    }
+    for g in &mut groups {
+        for i in (1..g.len()).rev() {
+            let j = ((rng.next() * (i + 1) as f32) as usize).min(i);
+            g.swap(i, j);
+        }
+    }
     let n = pills.len().max(1) as f32;
-    let area = ((w - 2.0 * margin) * SX * (h - gaps.0 - gaps.1)).max(1.0);
-    let reach = 1.08 * (area / n).sqrt();
-    let mut rng = Rng(0x2545_F491);
+    let share: Vec<f32> = groups.iter().map(|g| g.len() as f32 / n).collect();
+    let mut used = [0usize; 3];
+    let mut order = Vec::with_capacity(pills.len());
+    for step in 0..pills.len() {
+        let due = |k: usize| share[k] * (step + 1) as f32 - used[k] as f32;
+        let Some(k) = (0..3)
+            .filter(|&k| used[k] < groups[k].len())
+            .max_by(|&a, &b| due(a).total_cmp(&due(b)))
+        else {
+            break;
+        };
+        order.push(groups[k][used[k]]);
+        used[k] += 1;
+    }
+    order
+}
+
+/// Brick courses: the pills, in `order`, fill [`ROWS`] top to bottom. Each
+/// row is centred and justified across its width (the widest reaching `edge`
+/// off the card's sides), its gaps varied a little per pill, and every pill
+/// strays a touch off its spot. Neighbouring rows hold different counts, so
+/// the gaps cross like bricks; the strays keep it organic. Writes `ideal`.
+fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps: (f32, f32)) {
+    let (w, _) = size;
+    let (top, bottom) = (gaps.0, size.1 - gaps.1);
+    let counts = row_counts(order.len());
+    let row_h = (bottom - top).max(1.0) / ROWS.len() as f32;
+    let full = (w - 2.0 * edge).max(1.0);
+    let mut next = 0;
+    for (r, (&frac, &n)) in ROWS.iter().zip(&counts).enumerate() {
+        let row: Vec<usize> = order[next..(next + n).min(order.len())].to_vec();
+        next += n;
+        if row.is_empty() {
+            continue;
+        }
+        let span = full * frac;
+        let widths: f32 = row.iter().map(|&i| pills[i].size().0).sum();
+        // Each gap takes a varied share of the free room.
+        let weights: Vec<f32> = row.iter().skip(1).map(|&i| 1.0 + 0.2 * pills[i].stray[2]).collect();
+        let wsum: f32 = weights.iter().sum::<f32>().max(0.001);
+        let free = (span - widths).max(0.0);
+        let mean_gap = if row.len() > 1 { free / (row.len() - 1) as f32 } else { 0.0 };
+        let cy = top + (r as f32 + 0.5) * row_h;
+        // A lone pill sits in the middle; a row starts at its left end.
+        let mut x = if row.len() == 1 { w / 2.0 - pills[row[0]].size().0 / 2.0 } else { w / 2.0 - span / 2.0 };
+        for (k, &i) in row.iter().enumerate() {
+            if k > 0 {
+                x += free * weights[k - 1] / wsum;
+            }
+            let pw = pills[i].size().0;
+            let p = &mut pills[i];
+            // Ends stray inward only, so the widest row still nearly
+            // touches the sides.
+            let mut sx = p.stray[0] * JITTER_X * mean_gap;
+            if k == 0 {
+                sx = sx.abs();
+            } else if k == row.len() - 1 {
+                sx = -sx.abs();
+            }
+            p.ideal = (x + pw / 2.0 + sx, cy + p.stray[1] * JITTER_Y * row_h);
+            x += pw;
+        }
+    }
     for p in pills.iter_mut() {
-        let (pw, ph) = p.size();
-        p.home = (
-            margin + pw / 2.0 + rng.next() * (w - 2.0 * margin - pw).max(0.0),
-            gaps.0 + ph / 2.0 + rng.next() * (h - gaps.0 - gaps.1 - ph).max(0.0),
-        );
-    }
-    let iters = 400;
-    let mut next = vec![(0.0f32, 0.0f32); pills.len()];
-    for it in 0..iters {
-        let k = 0.35 * (1.0 - it as f32 / iters as f32) + 0.05;
-        for (i, a) in pills.iter().enumerate() {
-            let (mut fx, mut fy) = (0.0, 0.0);
-            for (j, b) in pills.iter().enumerate() {
-                if i == j {
-                    continue;
-                }
-                let dx = (a.home.0 - b.home.0) * SX;
-                let dy = a.home.1 - b.home.1;
-                let d = dx.hypot(dy).max(0.01);
-                if d < reach {
-                    let f = (reach - d) / d;
-                    fx += dx * f;
-                    fy += dy * f;
-                }
-            }
-            // The edges push like a neighbour at half the reach.
-            let (aw, ah) = a.size();
-            let edge = reach / 2.0;
-            let inset = round_inset(a.home.1, size, gaps);
-            let l = (a.home.0 - aw / 2.0 - a.ml - inset) * SX;
-            let r = (w - a.mr - inset - a.home.0 - aw / 2.0) * SX;
-            let t = a.home.1 - ah / 2.0 - gaps.0;
-            let bt = h - gaps.1 - a.home.1 - ah / 2.0;
-            if l < edge {
-                fx += edge - l;
-            }
-            if r < edge {
-                fx -= edge - r;
-            }
-            if t < edge {
-                fy += edge - t;
-            }
-            if bt < edge {
-                fy -= edge - bt;
-            }
-            next[i] = (a.home.0 + fx / SX * k, a.home.1 + fy * k);
-        }
-        for (p, &n) in pills.iter_mut().zip(&next) {
-            p.home = n;
-            clamp_pill(p, size, gaps);
-        }
-    }
-    for p in pills {
-        p.ideal = p.home;
+        p.home = p.ideal;
     }
 }
 
 /// Settle: pills closer than `gap` push apart, each is pulled back toward
 /// its `ideal` by `pull`, and all stay inside the field.
-fn settle(pills: &mut [Pill], size: (f32, f32), gaps: (f32, f32), gap: f32, pull: f32, iters: usize) {
+fn settle(pills: &mut [Pill], size: (f32, f32), edge: f32, gaps: (f32, f32), gap: f32, pull: f32, iters: usize) {
     for _ in 0..iters {
         for i in 0..pills.len() {
             for j in i + 1..pills.len() {
@@ -935,21 +945,8 @@ fn settle(pills: &mut [Pill], size: (f32, f32), gaps: (f32, f32), gap: f32, pull
         for p in pills.iter_mut() {
             p.home.0 += (p.ideal.0 - p.home.0) * pull;
             p.home.1 += (p.ideal.1 - p.home.1) * pull;
-            clamp_pill(p, size, gaps);
+            clamp_pill(p, size, edge, gaps);
         }
-    }
-}
-
-/// Fit the heap to the vertical gaps: its top edge `top` under the dock,
-/// its bottom edge `bottom` above the floor.
-fn fit_vertical(pills: &mut [Pill], h: f32, top: f32, bottom: f32) {
-    let lo = pills.iter().map(|p| p.home.1 - p.size().1 / 2.0).fold(f32::MAX, f32::min);
-    let hi = pills.iter().map(|p| p.home.1 + p.size().1 / 2.0).fold(f32::MIN, f32::max);
-    let k = (h - top - bottom) / (hi - lo).max(1.0);
-    for p in pills {
-        let ph = p.size().1;
-        p.home.1 = top + (p.home.1 - ph / 2.0 - lo) * k + ph / 2.0;
-        p.ideal = p.home;
     }
 }
 
@@ -1140,8 +1137,8 @@ mod tests {
         for (i, a) in p.pills.iter().enumerate() {
             let (aw, ah) = a.size();
             assert!(
-                a.home.0 - aw / 2.0 >= MARGIN_MIN - 0.5
-                    && a.home.0 + aw / 2.0 <= w - MARGIN_MIN + 0.5
+                a.home.0 - aw / 2.0 >= EDGE - 0.5
+                    && a.home.0 + aw / 2.0 <= w - EDGE + 0.5
                     && a.home.1 - ah / 2.0 >= gaps(h, 1.0).0 - 0.5
                     && a.home.1 + ah / 2.0 <= h - gaps(h, 1.0).1 + 0.5,
                 "{what}: {} leaves the field at {:?}",
@@ -1155,15 +1152,22 @@ mod tests {
     }
 
     #[test]
-    fn the_field_is_balanced_inside_its_gaps_without_overlaps() {
+    fn the_field_is_wide_bricks_inside_its_gaps_without_overlaps() {
         let p = panel();
         assert_eq!(p.pills.len(), 20);
         let per_layer = [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
         assert_eq!(per_layer, [9, 7, 4]);
         assert_clean(&p, "at rest");
-        // Up under the dock: the heap starts at the top gap.
+        // Up under the dock: the top row sits in the first course below the
+        // top gap.
+        let (g_top, g_bottom) = gaps(p.key.1, 1.0);
+        let course = (p.key.1 - g_top - g_bottom) / ROWS.len() as f32;
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
-        assert!((top - gaps(p.key.1, 1.0).0).abs() < 3.0, "heap top at {top}");
+        assert!(top >= g_top - 0.5 && top <= g_top + course, "heap top at {top}");
+        // Wide: the widest row reaches nearly to both sides.
+        let left = p.pills.iter().map(|q| q.home.0 - q.size().0 / 2.0).fold(f32::MAX, f32::min);
+        let right = p.pills.iter().map(|q| q.home.0 + q.size().0 / 2.0).fold(f32::MIN, f32::max);
+        assert!(left < EDGE + 20.0 && right > p.key.0 - EDGE - 20.0, "heap spans {left}..{right}");
     }
 
     #[test]
@@ -1192,6 +1196,26 @@ mod tests {
         }
         assert!(p.pills.iter().all(|q| q.exit.is_none() && q.drawn == q.layer));
         assert!(p.pills.iter().all(|q| q.op > 0.95), "everyone back in view");
+    }
+
+    /// Not a check: dumps the laid-out field (label, layer, x, y, w, h) so a
+    /// layout change can be looked at off-screen. Run with
+    /// `cargo test dump_field -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_field() {
+        let size: (f32, f32) = std::env::var("FIELD")
+            .ok()
+            .and_then(|v| v.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+            .unwrap_or((900.0, 560.0));
+        let mut p = Panel::default();
+        let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
+        p.ensure(size, 1.0, 25.0, &mut est);
+        println!("FIELD {} {}", size.0, size.1);
+        for q in &p.pills {
+            let (w, h) = q.size();
+            println!("PILL {}|{}|{:.1}|{:.1}|{:.1}|{:.1}", q.label, q.layer, q.home.0, q.home.1, w, h);
+        }
     }
 
     #[test]
