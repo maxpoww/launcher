@@ -152,7 +152,7 @@ const TIGHT_X: f32 = 0.86;
 const FIELD_MAX_GROW: f32 = 4.0 / 3.0;
 /// Air under the dock, and above the card's floor as a share of the field:
 /// the heap sits up under the dock with more room below.
-const GAP_TOP: f32 = 16.0;
+const GAP_TOP: f32 = 4.0;
 const GAP_BOTTOM_FRAC: f32 = 0.24;
 /// The whole heap sits this much lower than those gaps alone would put it:
 /// the top gap grows by it and the bottom one shrinks by it (Max: "a little
