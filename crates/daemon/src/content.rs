@@ -262,7 +262,7 @@ pub const LABEL_LINE_PX: f32 = 16.0;
 const TITLE_FONT_PX: f32 = 13.0;
 const TITLE_LINE_PX: f32 = 16.0;
 const TITLE_ALPHA: f32 = 0.3;
-const TITLE_DROP: f32 = -4.0;
+const TITLE_DROP: f32 = -2.0;
 /// Search box: height, inner padding, text metrics.
 const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
