@@ -146,6 +146,11 @@ const EDGE: f32 = 6.0;
 /// together", then "spread them out a little to the sides").
 const TIGHT: f32 = 0.88;
 const TIGHT_X: f32 = 0.86;
+/// …but the rows never span less than this (px at bar scale 1), short of
+/// the whole card: on a small card (few dock icons) they reach its full
+/// width instead of huddling in 86% of it (Max: "make the minimum wide
+/// wider").
+const MIN_SPAN: f32 = 1090.0;
 /// How much wider than the card's own width the field may grow as a longer
 /// dock widens the card; past it the field stays centred (Max: "no more
 /// than a third, then it stays locked on the middle").
@@ -1127,7 +1132,7 @@ fn bricks(pills: &mut [Pill], order: &[usize], size: (f32, f32), edge: f32, gaps
     let swing = if phase.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
     let (top, bottom) = (gaps.0, size.1 - gaps.1);
     let whole = (w - 2.0 * edge).max(1.0);
-    let full = whole * TIGHT_X;
+    let full = (whole * TIGHT_X).max(MIN_SPAN * edge / EDGE).min(whole);
     let fracs = plan_rows(pills, order, whole, min_gap(edge));
     let counts = row_counts(order.len(), &fracs);
     // Tidied closer together: the rows use this share of the band (from the
