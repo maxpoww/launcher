@@ -85,6 +85,7 @@ mod trash;
 mod usage;
 mod webapps;
 mod window_memory;
+mod fast_launch;
 
 use std::collections::{HashMap, HashSet};
 use std::os::fd::AsFd;
@@ -664,6 +665,7 @@ fn main() -> anyhow::Result<()> {
         dock_hover_since: None,
         dock_names_warm: false,
         window_memory: window_memory::WindowMemory::load(),
+        fast: fast_launch::FastLaunch::default(),
         trash_react: 0.0,
         trash_hover: 0.0,
         reorder_slot: None,
@@ -1671,6 +1673,8 @@ pub struct App {
     dock_names_warm: bool,
     /// Window memory: where each app's window reopens (`window_memory.rs`).
     window_memory: window_memory::WindowMemory,
+    /// FAST LAUNCH: the Super+Alt+Space bubble (`fast_launch.rs`).
+    fast: fast_launch::FastLaunch,
     /// Recycle-bin reaction, eased 0→1 while an app (or box) is being
     /// dragged: the bin tile reddens and its lid opens, inviting a drop.
     /// Eased back to 0 (lid shuts, red fades) when the drag ends.
@@ -2382,6 +2386,14 @@ impl App {
                 self.open_clip_search_with(&query);
                 return;
             }
+            // While FAST LAUNCH is up the query is typed into its bubble.
+            Command::DebugQuery(query) if self.fast.open => {
+                self.fast.query = query;
+                self.fast.sel = 0;
+                self.fast_rematch();
+                self.schedule_frame();
+                return;
+            }
             Command::DebugQuery(query) => {
                 self.search.open = !query.is_empty();
                 self.install_drag_reset = false;
@@ -2603,6 +2615,10 @@ impl App {
             }
             // A window drag just ended (the plugin saw the pointer let go):
             // window memory notes its new size and place now.
+            Command::FastLaunch => {
+                self.toggle_fast_launch();
+                return;
+            }
             Command::WindowPlaced(_) => {
                 if self.settings.floating {
                     self.track_windows();
@@ -5205,7 +5221,8 @@ impl App {
         }
         // While a box floats above the dock, extend the input region to cover
         // the full surface so the pointer can reach the box without leaving.
-        if self.stack_open() {
+        // FAST LAUNCH too: its icons, and a click away that closes it.
+        if self.stack_open() || self.fast.open {
             extent = extent.max(self.buffer_size.1);
         }
         // The surface is full output width, but the plate is centered and only
@@ -5215,7 +5232,9 @@ impl App {
         // layout. While a box is open the plate gathers to the box; fall back
         // to the box width then. A DRAG_MARGIN_X floor keeps the resting bar's
         // grab margins.
-        let plate_w = if self.dock_basin_w < 1.0 {
+        let plate_w = if self.fast.open {
+            self.buffer_size.0 as f32 // the bubble's click-away covers it all
+        } else if self.dock_basin_w < 1.0 {
             self.config.window.width as f32 * self.icon_scale()
         } else if self.stack_open() {
             // The box, or a dock wider than it (it grows to fit its icons).
@@ -5451,6 +5470,11 @@ impl App {
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // FAST LAUNCH holds the keyboard while its bubble is up.
+        if self.fast.open {
+            self.fast_key(keysym, utf8);
+            return;
+        }
         // The clipboard "define a word" panel grabs the keyboard while open, so
         // its search field consumes every key before the launcher's shortcuts.
         if self.clip.dict_open {
@@ -6394,6 +6418,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         } else if app.zone_free {
                             debug!("pointer left, zone free → dock parks visible");
                         }
+                    }
+                }
+            }
+            // FAST LAUNCH: a click on an icon launches it, anywhere else
+            // closes the bubble.
+            wl_pointer::Event::Button { button, state, .. } if button == BTN_LEFT && app.fast.open => {
+                if state == WEnum::Value(wl_pointer::ButtonState::Released) {
+                    if let Some(pos) = app.pointer_pos {
+                        app.fast_click(pos);
                     }
                 }
             }

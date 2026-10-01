@@ -211,6 +211,9 @@ pub enum Command {
     /// just ended. Payload is the window address. Window memory re-reads the
     /// geometry at once instead of on its slow tick.
     WindowPlaced(String),
+    /// Open (or close) FAST LAUNCH: one bubble mid-screen, an apps-only
+    /// search that launches a new instance in a few letters (Super+Alt+Space).
+    FastLaunch,
 }
 
 impl fmt::Display for Command {
@@ -262,6 +265,7 @@ impl fmt::Display for Command {
             Command::MinAdd(p) => write!(f, "min-add {p}"),
             Command::MinDel(a) => write!(f, "min-del {a}"),
             Command::WindowPlaced(a) => write!(f, "window-placed {a}"),
+            Command::FastLaunch => f.write_str("fast-launch"),
         }
     }
 }
@@ -344,6 +348,7 @@ impl FromStr for Command {
                 s.trim_start_matches("debug-stats ").trim().parse().ok(),
             )),
             "control-panel" | "settings" => Ok(Command::ControlPanel),
+            "fast-launch" => Ok(Command::FastLaunch),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
@@ -413,6 +418,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "min-add <addr> <ws> <aspect> <class> <path> <title…>",
     "min-del <addr>",
     "window-placed <addr>",
+    "fast-launch",
 ];
 
 /// A response sent from the daemon back to the client.
@@ -523,7 +529,8 @@ mod tests {
                 | Command::WindowMode(_)
                 | Command::MinAdd(_)
                 | Command::MinDel(_)
-                | Command::WindowPlaced(_) => (),
+                | Command::WindowPlaced(_)
+                | Command::FastLaunch => (),
             }
         }
         vec![
@@ -573,6 +580,7 @@ mod tests {
             ),
             Command::MinDel("0x5c351e2e7660".into()),
             Command::WindowPlaced("0x5c351e2e7660".into()),
+            Command::FastLaunch,
         ]
     }
 

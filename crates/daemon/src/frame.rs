@@ -1222,6 +1222,54 @@ impl App {
         } else {
             content::NO_PLATE
         };
+        // FAST LAUNCH: the bubble and its icons ease in and out (snappy).
+        let fe = 1.0 - (-dt.min(0.1) * crate::fast_launch::EASE_RATE).exp();
+        let fast_want = if self.fast.open { 1.0 } else { 0.0 };
+        if (fast_want - self.fast.k).abs() > 0.004 {
+            self.fast.k += (fast_want - self.fast.k) * fe;
+            fit_animating = true;
+        } else {
+            self.fast.k = fast_want;
+        }
+        for ik in &mut self.fast.icon_k {
+            if *ik < 0.996 {
+                *ik += (1.0 - *ik) * fe;
+                fit_animating = true;
+            } else {
+                *ik = 1.0;
+            }
+        }
+        let fast_scale = self.options_scale();
+        let fast_text = if self.fast.query.is_empty() {
+            crate::i18n::tr("Launch").to_owned()
+        } else {
+            self.fast.query.clone()
+        };
+        let fast_text_w = self
+            .renderer
+            .as_mut()
+            .map(|r| r.measure_text(&fast_text, crate::fast_launch::FONT_PX * fast_scale, crate::options::TEXT_FONT))
+            .unwrap_or(0.0);
+        let (fast_bubble, fast_rects) = self.fast_geometry();
+        let fast_icons: Vec<(usize, content::Rect, f32)> = self
+            .fast
+            .shown()
+            .iter()
+            .zip(fast_rects)
+            .zip(self.fast.icon_k.iter())
+            .map(|((&e, r), &k)| (e, r, k))
+            .collect();
+        let fast_draw = (self.fast.k > 0.01).then_some(content::FastDraw {
+            k: self.fast.k,
+            bubble: fast_bubble,
+            text: &fast_text,
+            placeholder: self.fast.query.is_empty(),
+            font_px: crate::fast_launch::FONT_PX * fast_scale,
+            line_px: crate::fast_launch::LINE_PX * fast_scale,
+            icons: &fast_icons,
+            sel: self.fast.sel,
+            text_w: fast_text_w,
+        });
         let scene = content::scene(
             &self.config,
             self.icon_scale(),
@@ -1238,6 +1286,7 @@ impl App {
                 },
                 query_px,
                 search_pill,
+                fast: fast_draw,
                 controls: &self.search.controls,
                 control_lift: &self.search.control_lift,
                 stretch: self.agua_icons.pos,

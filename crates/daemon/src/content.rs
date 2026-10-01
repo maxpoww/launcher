@@ -602,6 +602,24 @@ pub struct DockOverflow {
     pub max_off: f32,
 }
 
+/// What FAST LAUNCH draws this frame (see `fast_launch.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct FastDraw<'a> {
+    /// Presence of the whole thing, 0..1.
+    pub k: f32,
+    pub bubble: Rect,
+    /// What the bubble shows, and whether it is the placeholder.
+    pub text: &'a str,
+    pub placeholder: bool,
+    pub font_px: f32,
+    pub line_px: f32,
+    /// The shown icons: entry index, rect, presence; and the selected one.
+    pub icons: &'a [(usize, Rect, f32)],
+    pub sel: usize,
+    /// Shaped width of the typed text (the caret sits after it).
+    pub text_w: f32,
+}
+
 /// Geometry shared by scene assembly and hit-testing.
 #[derive(Debug)]
 pub struct Layout {
@@ -1261,6 +1279,8 @@ pub struct FrameInput<'a> {
     /// `Layout::controls` order, and each pill's eased hover.
     pub controls: &'a [(&'static str, f32)],
     pub control_lift: &'a [f32],
+    /// FAST LAUNCH's bubble and icons, while it is up or fading.
+    pub fast: Option<FastDraw<'a>>,
     /// AGUA stretch factor (1.0 at rest): dock icons slosh vertically
     /// about their baseline with the card's motion — on the dock
     /// reveal, and at the top of the card as an open lands.
@@ -1541,6 +1561,7 @@ pub fn scene(
         search_pill,
         controls,
         control_lift,
+        fast,
         stretch,
         dock_tooltip,
         alpha,
@@ -3066,6 +3087,73 @@ pub fn scene(
                 });
             }
             scene.grids.push(dots);
+        }
+    }
+
+    // FAST LAUNCH: the bubble mid-screen and its icons, over everything.
+    if let Some(f) = fast.filter(|f| f.k > 0.01) {
+        let k = f.k;
+        let grow = |r: Rect, s: f32| {
+            Rect::new(r.x + r.w * (1.0 - s) / 2.0, r.y + r.h * (1.0 - s) / 2.0, r.w * s, r.h * s)
+        };
+        let b = grow(f.bubble, 0.94 + 0.06 * k);
+        let fill = [dock_bg[0], dock_bg[1], dock_bg[2], dock_bg[3].max(0.92) * k];
+        scene.overlay_shadows.push(ShadowInst {
+            rect: b,
+            radius: b.h / 2.0,
+            blur: 18.0,
+            color: [0.0, 0.0, 0.0, 0.35 * k],
+            edges: [1.0, 1.0, 1.0, 1.0],
+        });
+        scene.rects.push(RectInst { rect: b, radius: b.h / 2.0, color: fill, glass: 0.0, border: 0.0 });
+        scene.rects.push(RectInst { rect: b, radius: b.h / 2.0, color: plate_rim(fill), glass: 0.0, border: 1.0 });
+        let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * if f.placeholder { 0.45 } else { 1.0 }];
+        scene.labels.push(Label {
+            text: f.text.to_owned(),
+            pos: (b.x + b.w / 2.0, b.y + (b.h - f.line_px) / 2.0),
+            max_w: b.w,
+            font_px: f.font_px,
+            line_px: f.line_px,
+            centered: true,
+            dim: false,
+            cache: f.placeholder,
+            family: crate::options::TEXT_FONT,
+            color: Some(ink),
+            clip: None,
+        });
+        if !f.placeholder {
+            let x = (b.x + b.w / 2.0 + f.text_w / 2.0 + 3.0).min(b.x + b.w - 10.0);
+            scene.rects.push(RectInst {
+                rect: Rect::new(x, b.y + b.h * 0.25, 2.0, b.h * 0.5),
+                radius: 1.0,
+                color: [dock_ink[0], dock_ink[1], dock_ink[2], 0.9 * k],
+                glass: 0.0,
+                border: 0.0,
+            });
+        }
+        for (i, &(entry, rect, ik)) in f.icons.iter().enumerate() {
+            let s = (ik * k).clamp(0.0, 1.0);
+            if s < 0.02 {
+                continue;
+            }
+            let r = grow(rect, 0.6 + 0.4 * s);
+            if i == f.sel {
+                let hl = dock_highlight;
+                scene.rects.push(RectInst {
+                    rect: Rect::new(r.x - 6.0, r.y - 6.0, r.w + 12.0, r.h + 12.0),
+                    radius: (r.h + 12.0) * 0.26,
+                    color: [hl[0], hl[1], hl[2], (hl[3] * 2.4).min(0.55) * s],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            scene.overlay.push(IconInst {
+                rect: r,
+                layer: layer_of(entry),
+                tint: [0.0; 4],
+                ring: -1.0,
+                plate: plate_of(entry),
+            });
         }
     }
 

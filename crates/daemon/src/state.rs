@@ -227,7 +227,8 @@ impl UiState {
             // content changes, never its rest state.
             | Command::MinAdd(_)
             | Command::MinDel(_)
-            | Command::WindowPlaced(_) => false,
+            | Command::WindowPlaced(_)
+            | Command::FastLaunch => false,
         }
     }
 
