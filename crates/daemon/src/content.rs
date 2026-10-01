@@ -1438,7 +1438,7 @@ fn plate_rim(fill: [f32; 4]) -> [f32; 4] {
 }
 
 /// How far the Bin's tile warms toward red under a drag (1 = full red).
-const TRASH_RED: f32 = 0.7;
+const TRASH_RED: f32 = 0.5;
 
 /// The Recycle Bin tile's rounded-rect fill colour for reaction `react`. At
 /// rest it wears the live adaptive PLATE colour — the same hue-shifted frost
