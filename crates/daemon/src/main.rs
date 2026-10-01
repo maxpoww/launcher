@@ -4983,12 +4983,18 @@ impl App {
         // / New Window), falling through to the launch path below — as do
         // the right/middle-click arms, and *every* launch out of the box:
         // you went looking for an app there, so you get one.
-        // A webapp has exactly one window (Seam focuses it on a relaunch, but
-        // a focus from Seam cannot raise a window on Wayland): activating it is
-        // the dock's job wherever it was launched from.
+        // A webapp opens a fresh window only when asked to: a plain relaunch
+        // just focuses the one it has (Seam's focus can't raise a window on
+        // Wayland — the dock activates it instead), so its new instance is
+        // Seam's `-golem-new` flag (Max, 2026-10-01: the box and the
+        // right-click open a new instance for webapps too).
         let one_window = webapps::slug_of_id(&id).is_some();
-        let force_new = !one_window
-            && (self.modifiers.ctrl || self.force_new_instance || from == LaunchFrom::Box);
+        let force_new = self.modifiers.ctrl || self.force_new_instance || from == LaunchFrom::Box;
+        let exec = if one_window && force_new {
+            exec.replacen("-golem-app", "-golem-new -golem-app", 1)
+        } else {
+            exec
+        };
         if !force_new {
             // A window on screen wins; when every window of the app is
             // minimized, the click restores one (focusing a parked window
