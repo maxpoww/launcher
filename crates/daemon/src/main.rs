@@ -3649,10 +3649,12 @@ impl App {
         self.resolve_pending_installs();
 
         // The Recycle Bin is a box entry (no icon of its own): its metal
-        // figure rides one extra layer past the entries.
-        if let Some(bin) = apps::dock_figure("group:trash") {
+        // can and its lid ride two extra layers past the entries, the lid
+        // right after the can (`content` draws it at `layer + 1`).
+        if let (Some(can), Some(lid)) = (apps::dock_figure("group:trash"), apps::bin_lid_figure()) {
             self.bin_layer = icons.len() as u32;
-            icons.push(bin);
+            icons.push(can);
+            icons.push(lid);
         }
         self.pkg_layer_base = icons.len() as u32;
         match self.renderer.as_mut() {

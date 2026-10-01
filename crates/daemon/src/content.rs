@@ -1465,6 +1465,25 @@ fn grow_bottom(r: Rect, scale: f32) -> Rect {
 }
 
 
+/// The Recycle Bin's metal figure: the can at `layer`, its lid at
+/// `layer + 1` (uploaded together, see `App::bin_layer`), the lid lifting
+/// a little as `react` (a drag toward the bin) rises.
+fn push_bin(icons: &mut Vec<IconInst>, rect: Rect, layer: u32, react: f32) {
+    let lift = rect.h * BIN_LID_LIFT * react.clamp(0.0, 1.0);
+    for (layer, dy) in [(layer, 0.0), (layer + 1, -lift)] {
+        icons.push(IconInst {
+            rect: Rect::new(rect.x, rect.y + dy, rect.w, rect.h),
+            layer,
+            tint: [0.0; 4],
+            ring: -1.0,
+            plate: NO_PLATE,
+        });
+    }
+}
+
+/// How far the bin's lid rises under a drag, as a share of the icon.
+const BIN_LID_LIFT: f32 = 0.09;
+
 /// Assemble the draw scene for one frame.
 ///
 /// `visible` holds, per section, indices into `entries` ranked by the
@@ -1921,13 +1940,7 @@ pub fn scene(
                 border: 1.0,
             });
             // The metal bin figure (the tile behind it is the plate).
-            scene.icons.push(IconInst {
-                rect,
-                layer: layer_of(entry_idx),
-                tint: [0.0; 4],
-                ring: -1.0,
-                plate: NO_PLATE,
-            });
+            push_bin(&mut scene.icons, rect, layer_of(entry_idx), trash_react);
             continue;
         }
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
@@ -2414,13 +2427,7 @@ pub fn scene(
                     glass: 0.0,
                     border: 1.0,
                 });
-                g.icons.push(IconInst {
-                    rect,
-                    layer: layer_of(entry_idx),
-                    tint: [0.0; 4],
-                    ring: -1.0,
-                    plate: NO_PLATE,
-                });
+                push_bin(&mut g.icons, rect, layer_of(entry_idx), trash_react);
                 if !covered {
                     g.labels.push(Label {
                         text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),

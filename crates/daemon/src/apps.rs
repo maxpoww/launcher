@@ -364,9 +364,15 @@ pub const DOCK_FIXED: [&str; 3] = [APPS_GRID_ID, "group:trash", CONTROL_PANEL_ID
 /// `assets/dock/lab/gen-icons.js` if the design changes.
 const DOCK_FIGURES: [(&str, &[u8]); 3] = [
     (APPS_GRID_ID, include_bytes!("../assets/dock/apps.svg")),
-    ("group:trash", include_bytes!("../assets/dock/bin.svg")),
+    ("group:trash", include_bytes!("../assets/dock/bin-body.svg")),
     (CONTROL_PANEL_ID, include_bytes!("../assets/dock/control.svg")),
 ];
+
+/// The Recycle Bin's lid, drawn apart from its can so it can rise under a
+/// drag (the can is `DOCK_FIGURES`' "group:trash").
+pub(crate) fn bin_lid_figure() -> Option<Vec<u8>> {
+    Some(with_mips(rasterize_svg(include_bytes!("../assets/dock/bin-lid.svg"))?.take()))
+}
 
 /// The ready-to-upload tile of a fixed-tail figure, by entry id.
 pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {

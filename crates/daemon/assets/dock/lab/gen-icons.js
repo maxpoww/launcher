@@ -41,5 +41,15 @@ function svg(inner) {
 const out = process.argv[2];
 fs.writeFileSync(out + "/apps.svg", svg(GLYPH.apps(S.apps)));
 fs.writeFileSync(out + "/bin.svg", svg(GLYPH.bin(S.bin, false)));
+// The bin in two pieces so the dock can raise the lid under a drag: the
+// can body, and the lid (knob + rim) alone, on the same canvas.
+{
+  const full = GLYPH.bin(S.bin, false);
+  const parts = full.match(/<(path|rect)[^>]*\/>/g);
+  const lid = parts.filter((p) => !/fill-rule="evenodd"/.test(p)).join("");
+  const body = parts.filter((p) => /fill-rule="evenodd"/.test(p)).join("");
+  fs.writeFileSync(out + "/bin-body.svg", svg(body));
+  fs.writeFileSync(out + "/bin-lid.svg", svg(lid));
+}
 fs.writeFileSync(out + "/control.svg", svg(GLYPH.gear(S.gear)));
 console.log("wrote", hi, mid, lo, deep);
