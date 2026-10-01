@@ -1448,7 +1448,9 @@ const TRASH_RED: f32 = 0.7;
 fn trash_tile_color(plate: [f32; 4], react: f32) -> [f32; 4] {
     // Only part of the way to red (Max, 2026-10-01: "a little weaker").
     let r = react.clamp(0.0, 1.0) * TRASH_RED;
-    let red = [0.80, 0.20, 0.17, 0.66];
+    // The title bars' close-button red, #FF2E2E (waveview's traffic
+    // lights), in the renderer's linear space.
+    let red = [1.0, crate::options::srgb_to_linear(46.0 / 255.0), crate::options::srgb_to_linear(46.0 / 255.0), 0.66];
     [
         lerp(plate[0], red[0], r),
         lerp(plate[1], red[1], r),
