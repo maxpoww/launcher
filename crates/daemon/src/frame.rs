@@ -381,7 +381,9 @@ impl App {
                 self.dock_pin_target = self.dock_pin_target.clamp(0.0, ov.max_off);
                 let d = self.dock_pin_target - self.dock_pin_off;
                 if d.abs() > 0.002 {
-                    self.dock_pin_off += d * (1.0 - (-dt.min(0.1) * PIN_SLIDE_RATE).exp());
+                    // Reduced motion (and a scale dissolve's still) snaps.
+                    let k = if animation::reduce_motion() { 1.0 } else { 1.0 - (-dt.min(0.1) * PIN_SLIDE_RATE).exp() };
+                    self.dock_pin_off += d * k;
                     fit_animating = true;
                 } else {
                     self.dock_pin_off = self.dock_pin_target;
