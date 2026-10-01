@@ -2601,6 +2601,14 @@ impl App {
                 self.on_min_del(&addr);
                 return;
             }
+            // A window drag just ended (the plugin saw the pointer let go):
+            // window memory notes its new size and place now.
+            Command::WindowPlaced(_) => {
+                if self.settings.floating {
+                    self.track_windows();
+                }
+                return;
+            }
             // The map has STARTED closing over a live stage: put the stage shape
             // back now, while the overlay still covers the screen, so the close
             // lands ON the stage (Max, 2026-09-17: "i want it to go from overview

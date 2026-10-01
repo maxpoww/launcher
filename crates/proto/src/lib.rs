@@ -207,6 +207,10 @@ pub enum Command {
     /// is the window address; an unknown one is a no-op — the daemon's own
     /// `closewindow` eviction may have beaten this message to it.
     MinDel(String),
+    /// From the waveview plugin: a drag of a window (a move or a resize)
+    /// just ended. Payload is the window address. Window memory re-reads the
+    /// geometry at once instead of on its slow tick.
+    WindowPlaced(String),
 }
 
 impl fmt::Display for Command {
@@ -257,6 +261,7 @@ impl fmt::Display for Command {
             Command::WindowMode(m) => write!(f, "window-mode {m}"),
             Command::MinAdd(p) => write!(f, "min-add {p}"),
             Command::MinDel(a) => write!(f, "min-del {a}"),
+            Command::WindowPlaced(a) => write!(f, "window-placed {a}"),
         }
     }
 }
@@ -303,6 +308,7 @@ impl FromStr for Command {
             ("display", Command::Display as fn(String) -> Command),
             ("min-add", Command::MinAdd as fn(String) -> Command),
             ("min-del", Command::MinDel as fn(String) -> Command),
+            ("window-placed", Command::WindowPlaced as fn(String) -> Command),
         ] {
             if let Some(rest) = line.strip_prefix(verb) {
                 // `verb` alone (or `verb ` + text) — anything else is a
@@ -406,6 +412,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "display [scale <n>|mode <WxH[@Hz]>|keep|back|reset|show <scale|resolution>]",
     "min-add <addr> <ws> <aspect> <class> <path> <title…>",
     "min-del <addr>",
+    "window-placed <addr>",
 ];
 
 /// A response sent from the daemon back to the client.
@@ -515,7 +522,8 @@ mod tests {
                 | Command::StagePick(_)
                 | Command::WindowMode(_)
                 | Command::MinAdd(_)
-                | Command::MinDel(_) => (),
+                | Command::MinDel(_)
+                | Command::WindowPlaced(_) => (),
             }
         }
         vec![
@@ -564,6 +572,7 @@ mod tests {
                 "0x5c351e2e7660 3 1.6296 firefox /run/user/1000/min.rgba A Window Title".into(),
             ),
             Command::MinDel("0x5c351e2e7660".into()),
+            Command::WindowPlaced("0x5c351e2e7660".into()),
         ]
     }
 

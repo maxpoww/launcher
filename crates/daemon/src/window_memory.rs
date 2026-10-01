@@ -9,8 +9,9 @@
 //! floating mode's catch-all `center` (measured 2026-10-01).
 //!
 //! - **Remembering.** Every floating window's geometry is noted while it is
-//!   open (`track_windows`, on window events and a slow tick — there is no
-//!   resize event to listen for). When an app's LAST window closes, its last
+//!   open (`track_windows`): the moment a pointer drag of it ends (the
+//!   waveview plugin's `window-placed` — Hyprland itself has no resize
+//!   event), on window events, and on a slow backstop tick. When an app's LAST window closes, its last
 //!   good geometry becomes the app's place. A maximized, fullscreen, staged
 //!   or minimized window leaves the place as it was.
 //! - **A second window** of an app already open opens a step down-right of
@@ -35,8 +36,10 @@ const MIN_W: f64 = 240.0;
 const MIN_H: f64 = 160.0;
 /// The cascade step for each window of an app already open (logical px).
 const CASCADE: f64 = 30.0;
-/// How often open windows' geometry is re-read (there is no resize event).
-const TRACK_EVERY: Duration = Duration::from_secs(2);
+/// How often open windows' geometry is re-read as a backstop. A pointer drag
+/// is reported the moment it ends (the plugin's `window-placed`); this tick
+/// only catches what has no pointer — a keyboard or scripted resize.
+const TRACK_EVERY: Duration = Duration::from_secs(3);
 
 /// An app's remembered place: its window's size and its top-left corner
 /// relative to the monitor's top-left, logical px.

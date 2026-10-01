@@ -226,7 +226,8 @@ impl UiState {
             // Minimize-to-dock tiles too (`minimized.rs`) — the dock's
             // content changes, never its rest state.
             | Command::MinAdd(_)
-            | Command::MinDel(_) => false,
+            | Command::MinDel(_)
+            | Command::WindowPlaced(_) => false,
         }
     }
 
