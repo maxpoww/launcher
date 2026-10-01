@@ -4993,7 +4993,7 @@ impl App {
         // Appended AFTER the URL: a Seam that predates the flag takes the
         // first argument after the slug as the page, so a flag there loaded
         // "-golem-new" into the running window ("server not found").
-        let exec = if one_window && force_new { format!("{exec} -golem-new") } else { exec };
+        let exec = if one_window && force_new { webapps::new_window_exec(&exec) } else { exec };
         if !force_new {
             // A window on screen wins; when every window of the app is
             // minimized, the click restores one (focusing a parked window

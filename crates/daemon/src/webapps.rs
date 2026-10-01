@@ -278,6 +278,19 @@ pub fn slug_of_id(id: &str) -> Option<&str> {
     id.strip_prefix(PREFIX)
 }
 
+/// A webapp's launch command made to open ANOTHER window of it (the dock's
+/// "new instance"): Seam's `-golem-new`, appended after the URL — a Seam
+/// that predates the flag reads the first argument after the slug as the
+/// page, so the flag must never sit there. Only a Seam webapp command
+/// (`-golem-app`) gets it, and only once; anything else is returned as is.
+pub fn new_window_exec(exec: &str) -> String {
+    let words: Vec<&str> = exec.split_whitespace().collect();
+    if !words.contains(&"-golem-app") || words.contains(&"-golem-new") {
+        return exec.to_owned();
+    }
+    format!("{} -golem-new", exec.trim_end())
+}
+
 /// The desktop id a slug installs as (`netflix` -> `webapp-netflix`) —
 /// the inverse of [`slug_of_id`], matching [`WebappEntry::desktop_id`].
 pub fn id_for_slug(slug: &str) -> String {
@@ -296,6 +309,18 @@ pub fn recommended_slugs() -> std::collections::HashSet<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_new_window_flag_goes_after_the_url_once() {
+        assert_eq!(
+            new_window_exec("seam -golem-app youtube https://www.youtube.com"),
+            "seam -golem-app youtube https://www.youtube.com -golem-new"
+        );
+        let once = new_window_exec("seam -golem-app x https://x.test -golem-new");
+        assert_eq!(once, "seam -golem-app x https://x.test -golem-new", "never twice");
+        assert_eq!(new_window_exec("chromium --app=https://x.test"), "chromium --app=https://x.test", "not Seam: as is");
+    }
+
     use super::*;
 
     #[test]
