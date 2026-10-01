@@ -747,6 +747,71 @@ pub fn focus_window(addr: &str) {
     dispatch(&format!("hl.dsp.focus({{ window = \"address:{addr}\" }})"));
 }
 
+/// One open window's geometry and state, for window memory
+/// (`window_memory.rs`). Logical px, global layout coordinates.
+pub struct ClientGeometry {
+    pub address: String,
+    pub class: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub floating: bool,
+    /// Maximized or fullscreen (Hyprland's fullscreen state is non-zero).
+    pub fullscreen: bool,
+    /// On a special workspace (minimized, a scratchpad, the stage's park).
+    pub special: bool,
+    /// Framed by STAGE mode (the `golem-stage` tag): its geometry is the
+    /// stage's, not the user's.
+    pub staged: bool,
+}
+
+/// Every mapped window's geometry (one `j/clients` read).
+pub fn client_geometries() -> Vec<ClientGeometry> {
+    let Ok(raw) = request("j/clients") else {
+        return Vec::new();
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    let pair = |v: &serde_json::Value| {
+        let a = v.as_array();
+        let at = |i: usize| a.and_then(|a| a.get(i)).and_then(|n| n.as_f64()).unwrap_or(0.0);
+        (at(0), at(1))
+    };
+    clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["mapped"].as_bool().unwrap_or(false))
+        .filter_map(|c| {
+            let class = c["class"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| c["initialClass"].as_str())
+                .filter(|s| !s.is_empty())?
+                .to_owned();
+            let (x, y) = pair(&c["at"]);
+            let (w, h) = pair(&c["size"]);
+            Some(ClientGeometry {
+                address: c["address"].as_str()?.to_owned(),
+                class,
+                x,
+                y,
+                w,
+                h,
+                floating: c["floating"].as_bool().unwrap_or(false),
+                fullscreen: c["fullscreen"].as_i64().unwrap_or(0) != 0
+                    || c["fullscreen"].as_bool().unwrap_or(false),
+                special: c["workspace"]["id"].as_i64().unwrap_or(1) < 0,
+                staged: c["tags"]
+                    .as_array()
+                    .is_some_and(|t| t.iter().any(|t| t.as_str().is_some_and(|t| t.starts_with("golem-stage")))),
+            })
+        })
+        .collect()
+}
+
 /// The special workspace the waveview plugin parks minimized windows on.
 pub const MINIMIZED_WS: &str = "special:minimized";
 
@@ -1013,6 +1078,9 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 } else {
                                     app.on_window_opened(&addr);
                                 }
+                                // Window memory: note it, step the app's
+                                // cascade on for its next window.
+                                app.remember_window_opened(&addr);
                             }
                         }
                         // The space's shape changed: a window arrived, left, or
@@ -1046,6 +1114,9 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 let addr = format!("0x{}", addr.trim_start_matches("0x"));
                                 let was_on = app.stage.is_on();
                                 app.stage.forget(&addr);
+                                // Window memory: an app's last window closing
+                                // is where it reopens next time.
+                                app.remember_window_closed(&addr);
                                 // Addresses are window pointers and Hyprland
                                 // reuses them, so a thumbnail left filed under a
                                 // dead window's address would eventually be
@@ -1109,6 +1180,7 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                             debug!("hypr event: {} — re-asserting screen", name.trim());
                             app.reassert_screen_state();
                             app.reassert_floating_mode();
+                            app.reassert_place_rules();
                             app.reassert_window_border();
                         }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {

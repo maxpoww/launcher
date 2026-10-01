@@ -84,6 +84,7 @@ mod transition;
 mod trash;
 mod usage;
 mod webapps;
+mod window_memory;
 
 use std::collections::{HashMap, HashSet};
 use std::os::fd::AsFd;
@@ -662,6 +663,7 @@ fn main() -> anyhow::Result<()> {
         just_installed: None,
         dock_hover_since: None,
         dock_names_warm: false,
+        window_memory: window_memory::WindowMemory::load(),
         trash_react: 0.0,
         trash_hover: 0.0,
         reorder_slot: None,
@@ -1002,6 +1004,8 @@ fn main() -> anyhow::Result<()> {
     // which forgets it when it restarts, while the store still remembers
     // (`settings.rs`).
     app.reassert_floating_mode();
+    // Each app's remembered window place rides its own rule (`window_memory`).
+    app.reassert_place_rules();
 
     // Declarative installs: the package list is the source of truth.
     // Restore installs that were mid-flight when the daemon last stopped
@@ -1665,6 +1669,8 @@ pub struct App {
     /// A dock name has shown since the pointer came onto the dock: the
     /// others show without the dwell until it leaves.
     dock_names_warm: bool,
+    /// Window memory: where each app's window reopens (`window_memory.rs`).
+    window_memory: window_memory::WindowMemory,
     /// Recycle-bin reaction, eased 0→1 while an app (or box) is being
     /// dragged: the bin tile reddens and its lid opens, inviting a drop.
     /// Eased back to 0 (lid shuts, red fades) when the drag ends.

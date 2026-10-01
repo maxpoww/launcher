@@ -85,6 +85,8 @@ impl App {
         if !on {
             self.schedule_solitary_pseudo();
         }
+        // Remembered window places apply only while floating: on, off.
+        self.reassert_place_rules();
         self.draw_options();
     }
 
