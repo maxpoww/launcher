@@ -3105,6 +3105,16 @@ pub fn scene(
             scene.rects.push(RectInst { rect: r, radius: r.h * 0.24, color: rim, glass: 0.0, border: 1.0 });
         };
         let white = |a: f32| [1.0, 1.0, 1.0, a];
+        // Text sits on a pill of the dock's own colour with its own ink —
+        // the dock tooltips' recipe — so it reads over any window or
+        // wallpaper (Max: "not readable").
+        let ink = |a: f32| [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * a];
+        let backing = |scene: &mut Scene, cx: f32, top: f32, w: f32, line: f32, a: f32| {
+            let pad = line * 0.45;
+            let r = Rect::new(cx - w / 2.0 - pad, top - line * 0.12, w + 2.0 * pad, line * 1.24);
+            let bg = [dock_bg[0], dock_bg[1], dock_bg[2], dock_bg[3].max(0.9) * a];
+            scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: bg, glass: 0.0, border: 0.0 });
+        };
         // The slot is always there; a side place only while an icon holds it.
         let main = grow(f.places[0], 0.94 + 0.06 * k);
         well(&mut scene, main, k);
@@ -3128,9 +3138,13 @@ pub fn scene(
             if let Some(name) = entries.get(entry).map(|e| e.name.clone()) {
                 let px = if place == 0 { f.name_px } else { f.side_name_px };
                 let line = px * 1.3;
+                let top = slot.y - line - px * 0.6;
+                // Width from the same glyph-advance model the dock tooltip uses.
+                let w = (name.chars().count() as f32 * px * 0.52).min(240.0);
+                backing(&mut scene, slot.x + slot.w / 2.0, top, w, line, s);
                 scene.labels.push(Label {
                     text: name,
-                    pos: (slot.x + slot.w / 2.0, slot.y - line - px * 0.4),
+                    pos: (slot.x + slot.w / 2.0, top),
                     max_w: 240.0,
                     font_px: px,
                     line_px: line,
@@ -3138,7 +3152,7 @@ pub fn scene(
                     dim: false,
                     cache: true,
                     family: crate::options::TEXT_FONT,
-                    color: Some(white(0.9 * s)),
+                    color: Some(ink(s)),
                     clip: None,
                 });
             }
@@ -3147,9 +3161,12 @@ pub fn scene(
         let ty = f.places[0].y + f.places[0].h;
         let cx = f.places[0].x + f.places[0].w / 2.0;
         if !f.text.is_empty() {
+            backing(&mut scene, cx, ty + f.line_px * 0.1, f.text_w + 6.0, f.line_px, k);
+        }
+        if !f.text.is_empty() {
             scene.labels.push(Label {
                 text: f.text.to_owned(),
-                pos: (cx, ty),
+                pos: (cx, ty + f.line_px * 0.1),
                 max_w: 600.0,
                 font_px: f.font_px,
                 line_px: f.line_px,
@@ -3157,15 +3174,15 @@ pub fn scene(
                 dim: false,
                 cache: false,
                 family: crate::options::TEXT_FONT,
-                color: Some(white(0.88 * k)),
+                color: Some(ink(k)),
                 clip: None,
             });
         }
         let caret_x = cx + f.text_w / 2.0 + 2.0;
         scene.rects.push(RectInst {
-            rect: Rect::new(caret_x, ty + f.line_px * 0.15, 2.0, f.line_px * 0.75),
+            rect: Rect::new(caret_x, ty + f.line_px * 0.25, 2.0, f.line_px * 0.75),
             radius: 1.0,
-            color: white(0.8 * k),
+            color: if f.text.is_empty() { white(0.8 * k) } else { ink(0.9 * k) },
             glass: 0.0,
             border: 0.0,
         });
