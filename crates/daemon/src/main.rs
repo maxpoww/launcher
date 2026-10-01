@@ -661,6 +661,7 @@ fn main() -> anyhow::Result<()> {
         uninstalling: HashMap::new(),
         just_installed: None,
         dock_hover_since: None,
+        dock_names_warm: false,
         trash_react: 0.0,
         trash_hover: 0.0,
         reorder_slot: None,
@@ -1659,6 +1660,9 @@ pub struct App {
     /// tooltip appears once this passes [`DOCK_TOOLTIP_DELAY`]. `None`
     /// when the pointer isn't on a dock icon.
     dock_hover_since: Option<Instant>,
+    /// A dock name has shown since the pointer came onto the dock: the
+    /// others show without the dwell until it leaves.
+    dock_names_warm: bool,
     /// Recycle-bin reaction, eased 0→1 while an app (or box) is being
     /// dragged: the bin tile reddens and its lid opens, inviting a drop.
     /// Eased back to 0 (lid shuts, red fades) when the drag ends.
@@ -4534,20 +4538,39 @@ impl App {
             // Dock name tooltip: (re)start the dwell when the pointer
             // lands on a dock icon, and wake once to draw it when the
             // dwell elapses (a stationary pointer emits no more frames).
+            //
+            // Once one name has shown, the dock is "warm" (Max, 2026-10-01:
+            // looking for an app by name): every other icon's name shows at
+            // once until the pointer leaves the dock.
             if matches!(hover, Some(Hit::DockIcon(_))) {
-                self.dock_hover_since = Some(Instant::now());
-                let timer = Timer::from_duration(DOCK_TOOLTIP_DELAY);
-                if let Err(e) = self
-                    .loop_handle
-                    .insert_source(timer, |_, _, app: &mut App| {
-                        app.schedule_frame();
-                        TimeoutAction::Drop
-                    })
-                {
-                    warn!("cannot arm dock-tooltip timer: {e}");
+                if self.dock_names_warm {
+                    self.dock_hover_since = Instant::now().checked_sub(DOCK_TOOLTIP_DELAY);
+                } else {
+                    self.dock_hover_since = Some(Instant::now());
+                    let timer = Timer::from_duration(DOCK_TOOLTIP_DELAY);
+                    if let Err(e) = self
+                        .loop_handle
+                        .insert_source(timer, |_, _, app: &mut App| {
+                            if app.dock_tooltip().is_some() {
+                                app.dock_names_warm = true;
+                            }
+                            app.schedule_frame();
+                            TimeoutAction::Drop
+                        })
+                    {
+                        warn!("cannot arm dock-tooltip timer: {e}");
+                    }
                 }
             } else {
                 self.dock_hover_since = None;
+                // Off the dock band altogether: the names go cold again.
+                let layout = self.current_layout();
+                let on_dock = self
+                    .pointer_pos
+                    .is_some_and(|(_, y)| y >= layout.card_top && y < layout.dock_hit_bottom);
+                if !on_dock {
+                    self.dock_names_warm = false;
+                }
             }
             // Dock hover-switch: once a box has been opened *from the dock*
             // (by an explicit click), gliding the pointer onto a different
@@ -6279,6 +6302,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
             wl_pointer::Event::Leave { .. } => {
                 app.scroll.accum = 0.0;
                 app.pointer_pos = None;
+                // Leaving the surface leaves the dock: names go cold.
+                app.dock_names_warm = false;
                 app.gesture.pressed = None;
                 app.gesture.press_pos = None;
                 // An in-box reorder drag drops where it is (the box stays).
