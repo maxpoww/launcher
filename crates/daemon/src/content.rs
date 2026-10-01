@@ -1446,8 +1446,12 @@ fn plate_rim(fill: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// How far the Bin's tile warms toward red under a drag (1 = full red).
+const TRASH_RED: f32 = 0.7;
+
 fn trash_tile_color(plate: [f32; 4], react: f32) -> [f32; 4] {
-    let r = react.clamp(0.0, 1.0);
+    // Only part of the way to red (Max, 2026-10-01: "a little weaker").
+    let r = react.clamp(0.0, 1.0) * TRASH_RED;
     let red = [0.80, 0.20, 0.17, 0.66];
     [
         lerp(plate[0], red[0], r),
@@ -1463,7 +1467,6 @@ fn grow_bottom(r: Rect, scale: f32) -> Rect {
     let (w, h) = (r.w * scale, r.h * scale);
     Rect::new(r.x + r.w / 2.0 - w / 2.0, r.y + r.h - h, w, h)
 }
-
 
 /// The Recycle Bin's metal figure: the can at `layer`, its lid at
 /// `layer + 1` (uploaded together, see `App::bin_layer`), the lid lifting
