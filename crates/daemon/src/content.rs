@@ -1424,15 +1424,6 @@ pub fn open_box_slot_member(left: bool, slot: usize) -> usize {
     slot_member.get(slot).copied().unwrap_or(slot)
 }
 
-/// The Recycle Bin's garbage-can icon instance for `rect`, given the reaction
-/// `react` (0 = grey, lid shut at rest; 1 = red, lid wide open while an app is
-/// being dragged). Rendered by the icon shader's bin mode (`ring <= -2`, its
-/// fractional part the lid openness); the texture layer is ignored.
-/// The Recycle Bin tile's rounded-rect fill colour for reaction `react`. At
-/// rest it wears the live adaptive PLATE colour — the same hue-shifted frost
-/// every app icon's squircle plate wears (Max, 2026-09-10: "add the color to
-/// the recycle can plate too") — so the bin sits in the row as one of them;
-/// it lerps to a translucent red as an app arms the drop.
 /// Rim colour for a plate-coloured tile: the fill's hue lifted toward
 /// white with a floor of visibility — the CPU-side twin of the icon
 /// shader's plate hairline (icon.wgsl) so the Recycle Bin tile's border
@@ -1449,6 +1440,11 @@ fn plate_rim(fill: [f32; 4]) -> [f32; 4] {
 /// How far the Bin's tile warms toward red under a drag (1 = full red).
 const TRASH_RED: f32 = 0.7;
 
+/// The Recycle Bin tile's rounded-rect fill colour for reaction `react`. At
+/// rest it wears the live adaptive PLATE colour — the same hue-shifted frost
+/// every app icon's squircle plate wears (Max, 2026-09-10: "add the color to
+/// the recycle can plate too") — so the bin sits in the row as one of them;
+/// it lerps to a translucent red as an app arms the drop.
 fn trash_tile_color(plate: [f32; 4], react: f32) -> [f32; 4] {
     // Only part of the way to red (Max, 2026-10-01: "a little weaker").
     let r = react.clamp(0.0, 1.0) * TRASH_RED;
