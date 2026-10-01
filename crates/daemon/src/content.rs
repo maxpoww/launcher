@@ -1482,7 +1482,7 @@ fn push_bin(icons: &mut Vec<IconInst>, rect: Rect, layer: u32, react: f32) {
 }
 
 /// How far the bin's lid rises under a drag, as a share of the icon.
-const BIN_LID_LIFT: f32 = 0.09;
+const BIN_LID_LIFT: f32 = 0.14;
 
 /// Assemble the draw scene for one frame.
 ///
