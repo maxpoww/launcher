@@ -741,7 +741,7 @@ fn main() -> anyhow::Result<()> {
         pins: pins::PinDb::load(),
         dock_order: Vec::new(),
         dock_min_count: 0,
-        dock_fixed_count: 0,
+        dock_user_pins: 0,
         running: HashMap::new(),
         dock_divider: None,
         minimized: Vec::new(),
@@ -1904,9 +1904,10 @@ pub struct App {
     /// instead of clamping it off. Zero while the launcher is open (the
     /// tiles hide then — `minimized_entries`).
     dock_min_count: usize,
-    /// How many of the dock's fixed tail (`apps::DOCK_FIXED`) closed
-    /// `dock_order` — it follows the minimized tiles.
-    dock_fixed_count: usize,
+    /// How many of `dock_order`'s first entries are the user's own pins: the
+    /// fixed trio (`apps::DOCK_FIXED`) follows them, then the divider and the
+    /// running / minimized zone. Drops onto the dock land within the pins.
+    dock_user_pins: usize,
     /// Running apps (macOS dock model): entry index → its live window
     /// addresses, most-recently-used first. Presence ⇒ the app is
     /// running (shows the indicator dot; a click activates instead of
@@ -4362,6 +4363,16 @@ impl App {
         // a divider, and vanishes when it quits. Entry order ≈ alphabetical
         // (entries are name-sorted), so the zone stays stable as unrelated
         // apps come and go rather than reshuffling.
+        // The fixed trio closes the pinned part: Apps, Bin, Control panel.
+        self.dock_user_pins = self.dock_order.len();
+        for id in apps::DOCK_FIXED {
+            let idx = self.entries.iter().zip(&self.kinds).position(|(e, k)| {
+                e.id == id && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
+            });
+            if let Some(idx) = idx.filter(|i| !self.dock_order.contains(i)) {
+                self.dock_order.push(idx);
+            }
+        }
         let pinned_count = self.dock_order.len();
         let mut running_unpinned: Vec<usize> = self
             .running
@@ -4417,17 +4428,6 @@ impl App {
         self.dock_min_count = min_count;
         self.dock_divider = (!zone.is_empty()).then_some(pinned_count);
         self.dock_order.extend(zone);
-        // The fixed tail, always last: Apps, Bin, Control panel.
-        let before = self.dock_order.len();
-        for id in apps::DOCK_FIXED {
-            let idx = self.entries.iter().zip(&self.kinds).position(|(e, k)| {
-                e.id == id && matches!(k, apps::EntryKind::App | apps::EntryKind::Group)
-            });
-            if let Some(idx) = idx.filter(|i| !self.dock_order.contains(i)) {
-                self.dock_order.push(idx);
-            }
-        }
-        self.dock_fixed_count = self.dock_order.len() - before;
         // No truncation here — layout() honors the minimized tail (widening
         // the dock) and clamps only normal icons / the surface-width cap.
         // The tiles' corner badges depend on the app set + icon layers, both

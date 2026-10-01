@@ -29,15 +29,15 @@ impl PinDb {
             .and_then(|s| parse_file(&s))
             .unwrap_or_default()
             .into_iter()
-            // The fixed tail lives outside the list (older files carry it).
+            // The fixed trio lives outside the list (older files carry it).
             .filter(|p| !crate::apps::is_dock_fixed(p))
             .collect();
         Self { pins, path }
     }
 
-    /// Ordered slice of the user's pinned app IDs — the dock's fixed tail
+    /// Ordered slice of the user's pinned app IDs — the dock's fixed trio
     /// ([`crate::apps::DOCK_FIXED`]) is not among them; it is always pinned
-    /// and always last.
+    /// and always closes the pins.
     pub fn pins(&self) -> &[String] {
         &self.pins
     }
@@ -47,7 +47,7 @@ impl PinDb {
     }
 
     /// Insert `app_id` before dock slot `slot`, moving it if already pinned.
-    /// The fixed tail never moves: pinning one of it is a no-op.
+    /// The fixed trio never moves: pinning one of it is a no-op.
     pub fn pin_at(&mut self, app_id: &str, slot: usize) {
         if crate::apps::is_dock_fixed(app_id) {
             return;

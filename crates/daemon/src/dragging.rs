@@ -91,10 +91,9 @@ impl App {
             .iter()
             .position(|s| x < s.x + s.w / 2.0)
             .unwrap_or(slots.len());
-        // Never into or past the fixed tail (Apps, Bin, Control panel): a
-        // drop there lands just before it.
-        let first_fixed = self.dock_order.len().saturating_sub(self.dock_fixed_count);
-        Some(insert.min(first_fixed))
+        // Never into or past the fixed trio (Apps, Bin, Control panel) that
+        // closes the pins: a drop there lands just before it.
+        Some(insert.min(self.dock_user_pins))
     }
 
     /// The dock slot whose icon the pointer is centered over — a fold
@@ -130,7 +129,7 @@ impl App {
             let fx = (x - s.x) / s.w;
             (0.25..0.75).contains(&fx)
         })?;
-        // The fixed tail takes no folds — only the Bin takes drops (delete).
+        // The fixed trio takes no folds — only the Bin takes drops (delete).
         let id = self.dock_order.get(slot).and_then(|&e| self.entries.get(e)).map(|e| e.id.as_str());
         if id.is_some_and(|id| crate::apps::is_dock_fixed(id) && !groups::is_trash(id)) {
             return None;
