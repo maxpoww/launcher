@@ -4990,11 +4990,10 @@ impl App {
         // right-click open a new instance for webapps too).
         let one_window = webapps::slug_of_id(&id).is_some();
         let force_new = self.modifiers.ctrl || self.force_new_instance || from == LaunchFrom::Box;
-        let exec = if one_window && force_new {
-            exec.replacen("-golem-app", "-golem-new -golem-app", 1)
-        } else {
-            exec
-        };
+        // Appended AFTER the URL: a Seam that predates the flag takes the
+        // first argument after the slug as the page, so a flag there loaded
+        // "-golem-new" into the running window ("server not found").
+        let exec = if one_window && force_new { format!("{exec} -golem-new") } else { exec };
         if !force_new {
             // A window on screen wins; when every window of the app is
             // minimized, the click restores one (focusing a parked window
