@@ -37,6 +37,10 @@
 //!   setting is open, so the field is rearranged when it folds back — nothing
 //!   re-flows under the eye. The arrangement and the scores are saved
 //!   (`control-panel.json`), starting from [`SETTINGS`]' order.
+//! - **The first real settings: Scale and Resolution** (2026-10-01). Open,
+//!   they show the screen's choices as floating pills, the one in use lit
+//!   (the settings boxes' preset idiom); a click sets it live (see
+//!   [`crate::display`]). The rest still show the placeholder controls.
 
 use std::collections::BTreeMap;
 use std::f32::consts::TAU;
@@ -48,6 +52,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::content::{self, Label, Layout, Rect, RectInst, ShadowInst};
+use crate::display::DisplayView;
 use crate::options::{FONT_PX, LINE_PX, PILL_PAD_X, TEXT_FONT};
 use crate::state::Target;
 use crate::{apps, groups, App};
@@ -308,6 +313,50 @@ impl Pill {
     }
 }
 
+// ---- An open setting's choices ------------------------------------------
+/// Where an open setting's controls start under its title and subtitle.
+const CONTENT_TOP: f32 = 114.0;
+/// A choice pill: its height, the gap to the next, and between rows.
+const CHIP_H: f32 = 40.0;
+const CHIP_GAP: f32 = 12.0;
+const CHIP_ROW_GAP: f32 = 14.0;
+/// Between one group of choices and the next caption.
+const GROUP_GAP: f32 = 26.0;
+/// The most resolutions shown (largest first; the one in use always is).
+const MAX_SIZES: usize = 8;
+
+/// What a click on an open setting asks for; `App` runs it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum PanelAction {
+    Scale(f64),
+    /// A resolution, at this refresh rate or the one nearest the current.
+    Mode { w: u32, h: u32, hz: Option<f64> },
+    /// Keep, or give up, the resolution being tried.
+    Keep,
+    Revert,
+}
+
+/// One choice of an open setting: a floating pill, lit when it is the one
+/// in use.
+struct Chip {
+    /// At rest, in field coordinates.
+    rect: Rect,
+    text: String,
+    on: bool,
+    action: PanelAction,
+}
+
+/// A real setting's content at rest, in field coordinates: what
+/// [`Panel::draw_open`] draws and a click is tested against.
+struct OpenContent {
+    subtitle: String,
+    /// A line of small text over a group of choices, and its top.
+    captions: Vec<(String, f32)>,
+    chips: Vec<Chip>,
+    /// Top of the closing hint.
+    foot_y: f32,
+}
+
 /// The pill that became the whole card.
 struct OpenBox {
     pill: usize,
@@ -364,6 +413,16 @@ pub(crate) struct Panel {
     /// A setting to open as soon as the pills exist (asked for from the
     /// apps grid's search before the panel was ever laid out).
     pending_open: Option<&'static str>,
+    /// The pointer this frame, in surface coordinates.
+    pointer: Option<(f32, f32)>,
+    /// The screen an open display setting (Scale, Resolution) is about, as
+    /// last read; `display_at` is when to read it again.
+    display: Option<DisplayView>,
+    display_at: Option<Instant>,
+    /// Seconds a tried resolution still has before it goes back.
+    keep_left: Option<f32>,
+    /// What the last click asked for, until `App` takes it.
+    action: Option<PanelAction>,
 }
 
 impl Panel {
@@ -575,12 +634,20 @@ impl Panel {
 
     /// A click on the card below the dock. Returns whether it did anything.
     fn click(&mut self, pos: (f32, f32)) -> bool {
-        if let Some(open) = &mut self.open {
+        if let Some((pill, want)) = self.open.as_ref().map(|o| (o.pill, o.want)) {
             // Open, the setting is the whole card: a click on its floating
             // controls is theirs; anywhere else folds it back.
-            if open.want > 0.5 && !content_hit(self.key, self.scale, pos, self.field) {
-                open.want = 0.0;
-                info!("control panel: closing {}", self.pills[open.pill].label);
+            let label = self.pills[pill].label;
+            if want > 0.5 {
+                match self.open_hit(label, pos) {
+                    Some(action) => self.action = action,
+                    None => {
+                        if let Some(open) = &mut self.open {
+                            open.want = 0.0;
+                        }
+                        info!("control panel: closing {label}");
+                    }
+                }
             }
             return true;
         }
@@ -605,8 +672,149 @@ impl Panel {
             from: Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h),
         });
         self.hot = None;
+        if is_display_setting(self.pills[i].label) {
+            self.display_at = Some(Instant::now());
+        }
         // The swap happens now, behind the setting growing over the field.
         self.record_use(i, now_secs());
+    }
+
+    /// Whether the open setting is one about the screen, and it is time to
+    /// read the screen (again).
+    fn display_due(&self) -> bool {
+        self.display_at.is_some_and(|at| Instant::now() >= at)
+            && self.open.as_ref().is_some_and(|o| is_display_setting(self.pills[o.pill].label))
+    }
+
+    /// The screen as just read.
+    fn set_display(&mut self, view: Option<DisplayView>) {
+        self.display = view;
+        self.display_at = None;
+    }
+
+    /// Read the screen again at `at`: a change was asked for, and the
+    /// compositor needs a moment to make it.
+    pub(crate) fn display_refresh_at(&mut self, at: Instant) {
+        self.display_at = Some(at);
+    }
+
+    /// What the last click asked for, once.
+    fn take_action(&mut self) -> Option<PanelAction> {
+        self.action.take()
+    }
+
+    /// Lay a group of choices out in rows of `w`-wide pills from `y` down,
+    /// centred, wrapping to the field. Returns the top of what comes next.
+    fn flow(&self, out: &mut OpenContent, y: f32, w: f32, chips: Vec<(String, bool, PanelAction)>) -> f32 {
+        if chips.is_empty() {
+            return y;
+        }
+        let s = self.scale;
+        let fw = self.key.0;
+        let (w, h, gap, row_gap) = (w * s, CHIP_H * s, CHIP_GAP * s, CHIP_ROW_GAP * s);
+        let room = (fw - 2.0 * MARGIN * s).max(w);
+        let fit = (((room + gap) / (w + gap)).floor() as usize).max(1);
+        let total = chips.len();
+        // When they wrap, the rows share them evenly (seven as 4 + 3, not
+        // 6 + 1).
+        let rows = total.div_ceil(fit);
+        let per_row = total.div_ceil(rows);
+        for (i, (text, on, action)) in chips.into_iter().enumerate() {
+            let (row, col) = (i / per_row, i % per_row);
+            // Each row is centred by itself: the last may be short.
+            let in_row = (total - row * per_row).min(per_row);
+            let row_w = in_row as f32 * w + (in_row - 1) as f32 * gap;
+            let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
+            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action });
+        }
+        y + rows as f32 * h + (rows - 1) as f32 * row_gap + GROUP_GAP * s
+    }
+
+    /// A caption over the next group of choices. Returns the group's top.
+    fn caption(&self, out: &mut OpenContent, y: f32, text: String) -> f32 {
+        out.captions.push((text, y));
+        y + 27.0 * self.scale
+    }
+
+    /// The content of the open setting `label`, if it is a real one: the
+    /// screen's choices for Scale and Resolution. `None`: a placeholder.
+    fn open_content(&self, label: &str) -> Option<OpenContent> {
+        if !is_display_setting(label) {
+            return None;
+        }
+        let s = self.scale;
+        let top = CONTENT_TOP * s;
+        let mut out = OpenContent { subtitle: String::new(), captions: Vec::new(), chips: Vec::new(), foot_y: top };
+        let Some(v) = &self.display else {
+            out.subtitle = "No screen to set.".to_owned();
+            return Some(out);
+        };
+        let mut y = top;
+        if label == "Scale" {
+            let (lw, lh) = v.looks_like();
+            out.subtitle = format!("{} · looks like {lw} × {lh}", v.screen);
+            let chips = v
+                .stops
+                .iter()
+                .map(|&stop| {
+                    // Rounded as people round (112.5 reads 113).
+                    let text = format!("{}%", (stop * 100.0).round() as u32);
+                    (text, (stop - v.scale).abs() < 1e-4, PanelAction::Scale(stop))
+                })
+                .collect();
+            y = self.flow(&mut out, y, 76.0, chips);
+        } else {
+            out.subtitle = format!("{} · {}", v.screen, hz_text(v.mode.hz));
+            let now = (v.mode.w, v.mode.h);
+            let mut sizes: Vec<(u32, u32)> = v.sizes.iter().copied().take(MAX_SIZES).collect();
+            if !sizes.contains(&now) {
+                sizes.pop();
+                sizes.push(now);
+            }
+            let chips = sizes
+                .into_iter()
+                .map(|(w, h)| (format!("{w} × {h}"), (w, h) == now, PanelAction::Mode { w, h, hz: None }))
+                .collect();
+            y = self.flow(&mut out, y, 150.0, chips);
+            if v.rates.len() > 1 {
+                y = self.caption(&mut out, y, "Refresh rate".to_owned());
+                let chips = v
+                    .rates
+                    .iter()
+                    .map(|&hz| {
+                        let action = PanelAction::Mode { w: now.0, h: now.1, hz: Some(hz) };
+                        (hz_text(hz), (hz - v.mode.hz).abs() < 0.5, action)
+                    })
+                    .collect();
+                y = self.flow(&mut out, y, 96.0, chips);
+            }
+            if let Some(left) = self.keep_left {
+                let text = format!("Keep this resolution? Going back in {:.0} s", left.ceil().max(1.0));
+                y = self.caption(&mut out, y, text);
+                let chips = vec![
+                    ("Keep".to_owned(), true, PanelAction::Keep),
+                    ("Go back".to_owned(), false, PanelAction::Revert),
+                ];
+                y = self.flow(&mut out, y, 120.0, chips);
+            }
+        }
+        out.foot_y = y - (GROUP_GAP - 12.0) * s;
+        Some(out)
+    }
+
+    /// A click on the open setting `label`: `None` on the empty space,
+    /// else what the control it landed on asks for (a placeholder's
+    /// controls ask for nothing).
+    fn open_hit(&self, label: &str, pos: (f32, f32)) -> Option<Option<PanelAction>> {
+        let f = self.field;
+        match self.open_content(label) {
+            Some(content) => content
+                .chips
+                .iter()
+                .find(|c| Rect::new(f.x + c.rect.x, f.y + c.rect.y, c.rect.w, c.rect.h).contains(pos))
+                .map(|c| Some(c.action)),
+            None => content_hit(self.key, self.scale, pos, f).then_some(None),
+        }
     }
 
     /// The game: score a use of pill `i`, and if it now outscores the
@@ -741,6 +949,7 @@ impl Panel {
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
     fn step(&mut self, dt: f32, pointer: Option<(f32, f32)>) {
         self.clock += dt;
+        self.pointer = pointer;
         if let Some(open) = &mut self.open {
             if open.want == 0.0 {
                 // Fold back into where the pill is now: the game may have
@@ -1006,6 +1215,47 @@ impl Panel {
         let mut y = 30.0 * s;
         text(out, p.label.to_owned(), cx, y, 30.0, 36.0, 1.0);
         y += 44.0 * s;
+        if let Some(content) = self.open_content(p.label) {
+            // A real setting: its choices as floating pills, the one in use
+            // lit and ringed (the settings boxes' preset idiom), each on its
+            // own tiny orbit like the field's pills.
+            text(out, content.subtitle, cx, y, 14.0, 18.0, 0.55);
+            for (caption, top) in content.captions {
+                text(out, caption, cx, top, 13.0, 17.0, 0.55);
+            }
+            let layer_wash = if paint.bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
+            let hover_a = if paint.bright { HOVER_WASH_BRIGHT } else { HOVER_WASH_DARK };
+            let line = 20.0 * s;
+            for (i, chip) in content.chips.into_iter().enumerate() {
+                let r = chip.rect;
+                let hot = resting
+                    && self.pointer.is_some_and(|pos| Rect::new(f.x + r.x, f.y + r.y, r.w, r.h).contains(pos));
+                let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
+                let (x0, y0) = (r.x + 1.1 * s * a.cos(), r.y + 1.1 * s * a.sin());
+                let wa = if hot {
+                    hover_a
+                } else if chip.on {
+                    layer_wash[0]
+                } else {
+                    layer_wash[1]
+                };
+                rect(out, x0, y0, r.w, r.h, r.h / 2.0, crate::options::wash(!paint.bright, wa));
+                if chip.on {
+                    let (mx, my) = map(x0, y0);
+                    out.rects.push(RectInst {
+                        rect: Rect::new(mx, my, r.w * cs, r.h * cs),
+                        radius: r.h / 2.0 * cs,
+                        color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.5 * ca],
+                        glass: 0.0,
+                        border: (1.4 * s * cs).max(1.0),
+                    });
+                }
+                let ink_a = if chip.on || hot { 1.0 } else { LAYER_INK[1] };
+                text(out, chip.text, x0 + r.w / 2.0, y0 + (r.h - line) / 2.0, 16.0, 20.0, ink_a);
+            }
+            text(out, "Esc or a click on the empty space closes".to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
+            return;
+        }
         text(out, format!("Placeholder for the {} controls.", p.label.to_lowercase()), cx, y, 14.0, 18.0, 0.55);
         y += 40.0 * s;
         // The controls float in the air like the pills did, in their
@@ -1050,6 +1300,20 @@ impl Panel {
             y += rh + 22.0 * s;
         }
         text(out, "Esc or a click on the empty space closes".to_owned(), cx, y + 6.0 * s, 12.0, 16.0, 0.4);
+    }
+}
+
+/// The settings about the screen, fed by [`crate::display`].
+fn is_display_setting(label: &str) -> bool {
+    matches!(label, "Scale" | "Resolution")
+}
+
+/// A refresh rate as people read it: `60 Hz`, `59.95 Hz`.
+fn hz_text(hz: f64) -> String {
+    if (hz - hz.round()).abs() < 0.01 {
+        format!("{hz:.0} Hz")
+    } else {
+        format!("{hz:.2} Hz")
     }
 }
 
@@ -1328,6 +1592,13 @@ impl App {
             self.panel.ensure((field.w, field.h), scale, pill_h, &mut measure);
         }
         self.panel.field = field;
+        // An open display setting shows the screen as it is: read it when
+        // the setting opens and again after each change.
+        if self.panel.display_due() {
+            let view = self.display_view();
+            self.panel.set_display(view);
+        }
+        self.panel.keep_left = self.display_keep_left();
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
         self.panel.draw(paint)
@@ -1362,8 +1633,33 @@ impl App {
 
     pub(crate) fn panel_click(&mut self, pos: (f32, f32)) {
         if self.panel.click(pos) {
+            match self.panel.take_action() {
+                Some(PanelAction::Scale(scale)) => self.set_display_scale(scale),
+                Some(PanelAction::Mode { w, h, hz }) => self.set_display_mode(w, h, hz),
+                Some(PanelAction::Keep) => self.keep_display(),
+                Some(PanelAction::Revert) => self.revert_display(),
+                None => {}
+            }
             self.schedule_frame();
         }
+    }
+
+    /// Open the control panel on the setting `label`, from wherever the
+    /// card is (the `display show …` verb: a key binding's way straight to
+    /// a setting, and the pointer-free way to look at one).
+    pub(crate) fn show_control(&mut self, label: &'static str) {
+        if self.ui.target() != Target::Open {
+            self.toggle_control_panel();
+        } else if !self.control_panel {
+            self.open_control(label);
+            return;
+        }
+        // Another setting open: this one takes its place.
+        if self.panel.open.as_ref().is_some_and(|o| self.panel.pills[o.pill].label != label) {
+            self.panel.open = None;
+        }
+        self.panel.open_named(label);
+        self.schedule_frame();
     }
 
     /// The card's search query changed while the panel is up: the panel
@@ -1597,5 +1893,137 @@ mod tests {
             p.step(1.0 / 60.0, None);
         }
         assert!(p.open.is_none(), "folded back and gone");
+    }
+
+    /// The panel with `label` open and the MacBook's screen read into it.
+    fn display_open(label: &'static str, scale: f64) -> Panel {
+        let mut p = panel();
+        p.field = Rect::new(40.0, 90.0, 960.0, 560.0);
+        p.step(0.0, None);
+        p.open_named(label);
+        assert!(p.display_due(), "an opened display setting asks for the screen");
+        let mode = crate::display::Mode { w: 1440, h: 900, hz: 60.0 };
+        p.set_display(Some(DisplayView {
+            screen: "Built-in screen".to_owned(),
+            mode,
+            scale,
+            stops: crate::display::scale_stops(1440, 900, scale),
+            sizes: vec![(1440, 900), (1280, 800), (1024, 640)],
+            rates: vec![60.0],
+        }));
+        for _ in 0..40 {
+            p.step(1.0 / 60.0, None);
+        }
+        p
+    }
+
+    fn centre(p: &Panel, chip: &Chip) -> (f32, f32) {
+        (p.field.x + chip.rect.x + chip.rect.w / 2.0, p.field.y + chip.rect.y + chip.rect.h / 2.0)
+    }
+
+    #[test]
+    fn scale_offers_the_screens_stops_with_the_one_in_use_lit() {
+        let mut p = display_open("Scale", 1.25);
+        let content = p.open_content("Scale").expect("Scale is a real setting");
+        assert_eq!(content.subtitle, "Built-in screen · looks like 1152 × 720");
+        let texts: Vec<&str> = content.chips.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["75%", "83%", "90%", "100%", "113%", "125%", "150%"]);
+        let lit: Vec<&str> = content.chips.iter().filter(|c| c.on).map(|c| c.text.as_str()).collect();
+        assert_eq!(lit, ["125%"]);
+        for (i, a) in content.chips.iter().enumerate() {
+            assert!(a.rect.x >= MARGIN && a.rect.x + a.rect.w <= p.key.0 - MARGIN, "{} leaves the field", a.text);
+            for b in content.chips.iter().skip(i + 1) {
+                let apart = a.rect.x + a.rect.w <= b.rect.x || b.rect.x + b.rect.w <= a.rect.x || a.rect.y != b.rect.y;
+                assert!(apart, "{} and {} overlap", a.text, b.text);
+            }
+        }
+        // A click on a choice asks for it and leaves the setting open.
+        let chip = &content.chips[6];
+        assert!(p.click(centre(&p, chip)));
+        assert_eq!(p.take_action(), Some(PanelAction::Scale(1.5)));
+        assert_eq!(p.take_action(), None, "asked once");
+        assert!(p.open.as_ref().is_some_and(|o| o.want > 0.5));
+        // A click on the empty space folds it back, asking for nothing.
+        assert!(p.click((p.field.x + 5.0, p.field.y + p.field.h - 5.0)));
+        assert_eq!(p.take_action(), None);
+        assert!(p.open.as_ref().is_some_and(|o| o.want == 0.0));
+    }
+
+    #[test]
+    fn a_narrow_field_wraps_the_choices_and_keeps_them_inside() {
+        let mut p = display_open("Scale", 1.0);
+        p.key = (400.0, 560.0, 1.0);
+        let content = p.open_content("Scale").unwrap();
+        let rows: std::collections::BTreeSet<i32> = content.chips.iter().map(|c| c.rect.y as i32).collect();
+        assert!(rows.len() > 1, "seven pills do not fit one 400px row");
+        let per_row: Vec<usize> = rows.iter().map(|y| content.chips.iter().filter(|c| c.rect.y as i32 == *y).count()).collect();
+        assert!(per_row.iter().max().unwrap() - per_row.iter().min().unwrap() <= 1, "rows share the pills evenly: {per_row:?}");
+        for c in &content.chips {
+            assert!(c.rect.x >= MARGIN - 0.5 && c.rect.x + c.rect.w <= 400.0 - MARGIN + 0.5, "{} leaves the field", c.text);
+        }
+        assert!(content.foot_y > content.chips.last().unwrap().rect.y + CHIP_H);
+    }
+
+    #[test]
+    fn resolution_offers_the_sizes_and_a_tried_one_asks_to_be_kept() {
+        let mut p = display_open("Resolution", 1.0);
+        let content = p.open_content("Resolution").unwrap();
+        assert_eq!(content.subtitle, "Built-in screen · 60 Hz");
+        let texts: Vec<&str> = content.chips.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["1440 × 900", "1280 × 800", "1024 × 640"], "one rate: no refresh row");
+        assert!(content.chips[0].on && !content.chips[1].on);
+        assert!(p.click(centre(&p, &content.chips[1])));
+        assert_eq!(p.take_action(), Some(PanelAction::Mode { w: 1280, h: 800, hz: None }));
+        // While it is being tried: the question, Keep and Go back.
+        p.keep_left = Some(11.2);
+        let content = p.open_content("Resolution").unwrap();
+        assert_eq!(content.captions.len(), 1);
+        assert_eq!(content.captions[0].0, "Keep this resolution? Going back in 12 s");
+        let (keep, back) = (&content.chips[3], &content.chips[4]);
+        assert_eq!((keep.text.as_str(), back.text.as_str()), ("Keep", "Go back"));
+        assert!(content.captions[0].1 > content.chips[2].rect.y + CHIP_H && keep.rect.y > content.captions[0].1);
+        assert!(p.click(centre(&p, keep)));
+        assert_eq!(p.take_action(), Some(PanelAction::Keep));
+        assert!(p.click(centre(&p, back)));
+        assert_eq!(p.take_action(), Some(PanelAction::Revert));
+        // Two rates: a refresh row for the size in use.
+        if let Some(v) = &mut p.display {
+            v.rates = vec![60.0, 165.0];
+        }
+        p.keep_left = None;
+        let content = p.open_content("Resolution").unwrap();
+        assert_eq!(content.captions[0].0, "Refresh rate");
+        let rate = content.chips.iter().find(|c| c.text == "165 Hz").expect("the other rate is offered");
+        assert_eq!(rate.action, PanelAction::Mode { w: 1440, h: 900, hz: Some(165.0) });
+    }
+
+    #[test]
+    fn a_placeholder_setting_still_shows_its_sample_controls() {
+        let mut p = panel();
+        p.field = Rect::new(0.0, 0.0, 960.0, 560.0);
+        p.step(0.0, None);
+        p.open_named("Wi-Fi");
+        assert!(!p.display_due());
+        assert!(p.open_content("Wi-Fi").is_none());
+        let draw = p.draw(PanelPaint { ink: [1.0; 4], bright: false });
+        assert!(!draw.rects.is_empty());
+        // Its sample rows take a click without asking for anything.
+        for _ in 0..40 {
+            p.step(1.0 / 60.0, None);
+        }
+        assert!(p.click((480.0, 114.0 + 23.0)));
+        assert_eq!(p.take_action(), None);
+        assert!(p.open.as_ref().is_some_and(|o| o.want > 0.5), "a click on a control keeps it open");
+    }
+
+    #[test]
+    fn an_open_display_setting_draws_its_choices() {
+        let p = display_open("Scale", 1.0);
+        let draw = p.draw(PanelPaint { ink: [1.0; 4], bright: false });
+        for want in ["Scale", "Built-in screen · looks like 1440 × 900", "100%", "150%"] {
+            assert!(draw.labels.iter().any(|l| l.text == want), "{want:?} is drawn");
+        }
+        // The one in use wears a ring.
+        assert_eq!(draw.rects.iter().filter(|r| r.border > 0.0).count(), 1);
     }
 }

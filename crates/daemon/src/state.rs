@@ -200,6 +200,7 @@ impl UiState {
             | Command::DebugStats(_)
             | Command::FloatMode(_)
             | Command::ControlPanel
+            | Command::Display(_)
             | Command::OptionsTrigger(_)
             | Command::OverviewOn
             | Command::OverviewOff

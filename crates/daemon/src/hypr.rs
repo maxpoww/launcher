@@ -1302,6 +1302,24 @@ pub fn eval(lua: &str) {
     }
 }
 
+/// The connected monitors as the compositor reports them (`j/monitors`):
+/// what [`crate::display`] reads a screen's modes and scale from.
+pub fn monitors_json() -> Option<serde_json::Value> {
+    serde_json::from_str(&request("j/monitors").ok()?).ok()
+}
+
+/// Have the compositor read its config again — the only way to drop a
+/// runtime rule (a monitor rule has no "remove"). Costly: every runtime
+/// `hl.config` value goes back to the file's own, and the `configreloaded`
+/// handler in [`subscribe`] puts the shell's back.
+pub fn reload_config() {
+    match request("reload") {
+        Ok(reply) if reply.trim() == "ok" => {}
+        Ok(reply) => warn!("Hyprland reload replied: {}", reply.trim()),
+        Err(e) => warn!("Hyprland reload failed: {e:#}"),
+    }
+}
+
 /// [`eval`], reporting whether the chunk ran (`ok`) — for callers with a
 /// fallback when it did not (e.g. a plugin function that is not loaded).
 pub fn eval_ok(lua: &str) -> bool {

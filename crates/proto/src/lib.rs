@@ -97,6 +97,12 @@ pub enum Command {
     /// does: a key binding's way in (Super+Ctrl), and the pointer-free way
     /// to look at it. `settings` is accepted as its old name.
     ControlPanel,
+    /// The screen's live settings without the panel: `display scale 1.25`,
+    /// `display mode 1920x1080@60` (tried: goes back unless `display keep`),
+    /// `display back`, `display reset` (Golem's defaults again), `display
+    /// show scale|resolution` (open the panel on that setting); alone, log
+    /// what is on the screen.
+    Display(String),
     /// Trigger the dynamic OPTION offer with this affordance id (e.g.
     /// `media.playpause`, `git.commit`) — the same action a click on its pill
     /// runs. Exposed for scripting and for verifying the action end to end.
@@ -227,6 +233,8 @@ impl fmt::Display for Command {
             Command::DebugStats(Some(p)) => write!(f, "debug-stats {p}"),
             Command::FloatMode(m) => write!(f, "float-mode {m}"),
             Command::ControlPanel => f.write_str("control-panel"),
+            Command::Display(args) if args.is_empty() => f.write_str("display"),
+            Command::Display(args) => write!(f, "display {args}"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
@@ -292,6 +300,7 @@ impl FromStr for Command {
             ("stage-pick", Command::StagePick as fn(String) -> Command),
             ("window-mode", Command::WindowMode as fn(String) -> Command),
             ("float-mode", Command::FloatMode as fn(String) -> Command),
+            ("display", Command::Display as fn(String) -> Command),
             ("min-add", Command::MinAdd as fn(String) -> Command),
             ("min-del", Command::MinDel as fn(String) -> Command),
         ] {
@@ -394,6 +403,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "stage-pick <n>",
     "window-mode <tiled|float|pseudo|fullscreen>",
     "float-mode <on|off|toggle>",
+    "display [scale <n>|mode <WxH[@Hz]>|keep|back|reset|show <scale|resolution>]",
     "min-add <addr> <ws> <aspect> <class> <path> <title…>",
     "min-del <addr>",
 ];
@@ -483,6 +493,7 @@ mod tests {
                 | Command::DebugStats(_)
                 | Command::FloatMode(_)
                 | Command::ControlPanel
+                | Command::Display(_)
                 | Command::OptionsTrigger(_)
                 | Command::OverviewOn
                 | Command::OverviewOff
@@ -528,6 +539,8 @@ mod tests {
         Command::DebugStats(None),
         Command::FloatMode(String::new()),
         Command::ControlPanel,
+        Command::Display(String::new()),
+        Command::Display("scale 1.25".into()),
             Command::OptionsTrigger("media.playpause".into()),
             Command::OverviewOn,
             Command::OverviewOff,

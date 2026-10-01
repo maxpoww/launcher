@@ -22,6 +22,7 @@ mod deck;
 mod deck_audio;
 mod deck_thumbs;
 mod dict;
+mod display;
 mod dragging;
 mod emoji;
 mod emoji_table;
@@ -631,6 +632,7 @@ fn main() -> anyhow::Result<()> {
         panel: panel::Panel::load(),
         panel_mix: 0.0,
         panel_reset_due: false,
+        display_pending: None,
         controls_band: 0.0,
         control_panel_from_apps: false,
         box_from_dock: false,
@@ -1558,6 +1560,9 @@ pub struct App {
     /// The panel should start afresh once it is out of sight (see
     /// `panel::Panel::reset`).
     panel_reset_due: bool,
+    /// A resolution being tried from the control panel: on the screen, not
+    /// saved, going back by itself unless kept (see `display.rs`).
+    display_pending: Option<display::Pending>,
     /// The room the Controls row has under Files right now, eased toward
     /// `controls_band_target` (see `content::layout`).
     controls_band: f32,
@@ -2518,6 +2523,10 @@ impl App {
             // for a desk where the compositor lost the rule.
             Command::ControlPanel => {
                 self.toggle_control_panel();
+                return;
+            }
+            Command::Display(args) => {
+                self.display_command(&args);
                 return;
             }
             Command::FloatMode(mode) => {

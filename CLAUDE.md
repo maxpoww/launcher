@@ -191,4 +191,12 @@ The big daemon files are cohesive but long — go straight to the function:
 - `animation.rs` — `lerp`, `ease_toward` (exp approach), `Follower` (damped spring / AGUA body).
 - `install.rs` / `applier.rs` / `nix.rs` — declarative install flow + nixpkgs index.
 - `hypr.rs` — all compositor IPC (dispatch + JSON reads).
+- `panel.rs` — the control panel (the card as a field of settings pills); an open setting's
+  content is `open_content` (real: Scale, Resolution) or the placeholder rows.
+- `display.rs` — LIVE display settings (scale, resolution): reads the screen (`j/monitors`),
+  applies an `hl.monitor` rule at once, saves the owner's choice to
+  `~/.config/golem/settings.json` + the generated `settings.lua` that Golem's `hyprland.lua`
+  runs last (so it is there at compositor start, dock or no dock). A resolution is only
+  TRIED: it goes back after 15 s unless kept, and is saved only then. Pointer-free:
+  `waverunner-ctl display [scale <n>|mode <WxH[@Hz]>|keep|back|reset|show <scale|resolution>]`.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
