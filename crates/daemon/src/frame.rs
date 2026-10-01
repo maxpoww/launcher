@@ -26,6 +26,8 @@ const SOFTWARE_FRAME_MIN: Duration = Duration::from_millis(100);
 /// down. Covers smooth-scroll ease tails; a minutes-long install ring
 /// with nobody at the wheel throttles after this.
 const INPUT_ACTIVE_WINDOW: Duration = Duration::from_secs(2);
+/// How fast the overflowing pins' window slides (1/s): snappy.
+const PIN_SLIDE_RATE: f32 = 20.0;
 /// How fast the open card eases to a new page's height (1/s).
 const TRIM_RATE: f32 = 22.0;
 /// Space between the pills of the Controls row (px at bar scale 1).
@@ -147,6 +149,8 @@ impl App {
             // How many of those are minimized-window tiles (the tail of the
             // order): the zone the dock widens to fit rather than clamp.
             self.dock_min_count,
+            self.dock_user_pins,
+            self.dock_pin_off,
             &min_aspects,
             [
                 apps_cells,
@@ -352,6 +356,40 @@ impl App {
             fit_animating = true;
         } else {
             self.controls_band = band_want;
+        }
+        // The overflowing pins' window: home when the pointer is off the
+        // dock, the far end while it rests on the overflow tile, whole
+        // slots once a side-scroll settles; eased snappily.
+        let pin_layout = self.layout_at(self.ui.extent());
+        match pin_layout.dock_overflow {
+            None => {
+                self.dock_pin_target = 0.0;
+                self.dock_pin_off = 0.0;
+            }
+            Some(ov) => {
+                let on_dock = self
+                    .pointer_pos
+                    .is_some_and(|(_, y)| y >= pin_layout.card_top && y < pin_layout.dock_hit_bottom);
+                if !on_dock {
+                    self.dock_pin_target = 0.0;
+                } else if self.hover == Some(content::Hit::DockIcon(ov.apps_slot)) {
+                    self.dock_pin_target = ov.max_off;
+                } else if self.dock_hscroll_at.is_some_and(|t| t.elapsed() > Duration::from_millis(160)) {
+                    self.dock_pin_target = self.dock_pin_target.round();
+                    self.dock_hscroll_at = None;
+                }
+                self.dock_pin_target = self.dock_pin_target.clamp(0.0, ov.max_off);
+                let d = self.dock_pin_target - self.dock_pin_off;
+                if d.abs() > 0.002 {
+                    self.dock_pin_off += d * (1.0 - (-dt.min(0.1) * PIN_SLIDE_RATE).exp());
+                    fit_animating = true;
+                } else {
+                    self.dock_pin_off = self.dock_pin_target;
+                }
+                if self.dock_hscroll_at.is_some() {
+                    fit_animating = true;
+                }
+            }
         }
         let trim_want = self.apps_trim_target();
         let trim = self.ui.open_trim();

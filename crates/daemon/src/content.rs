@@ -592,6 +592,16 @@ impl SectionLayout {
     }
 }
 
+/// The dock's overflow state: the Apps tile's slot (the overflow tile), how
+/// many pins are folded into it past the window's right end, and how far the
+/// window can slide (in slots).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DockOverflow {
+    pub apps_slot: usize,
+    pub hidden_right: usize,
+    pub max_off: f32,
+}
+
 /// Geometry shared by scene assembly and hit-testing.
 #[derive(Debug)]
 pub struct Layout {
@@ -626,6 +636,11 @@ pub struct Layout {
     pub dock_min_start: usize,
     /// That gap in scaled px (0 when no minimized tiles are shown).
     pub dock_min_gap: f32,
+    /// Per dock slot, how much of it shows (1 = all): pins sliding out of
+    /// the overflow window shrink toward 0 (see `layout`'s OVERFLOW).
+    pub dock_slot_f: Vec<f32>,
+    /// Set while the pins overflow into the Apps tile.
+    pub dock_overflow: Option<DockOverflow>,
     /// The docked plate's resting width (the basin) — what the dock card
     /// spans while docked, grown to wrap the minimized tiles. The dock
     /// surface is full output width, so the input region is pinned to this
@@ -688,6 +703,12 @@ pub fn layout(
     extent: f32,
     n_entries: usize,
     n_min: usize,
+    // The user's pins (the first `pins` of the dock order, before the fixed
+    // trio) and how far their window is scrolled, in slots: once the row
+    // would overflow the screen the pins slide through a window that ends
+    // at the Apps tile — the overflow tile (Max, 2026-10-01).
+    pins: usize,
+    pin_off: f32,
     // Window aspects of the minimized tiles, in dock-tail order (`n_min`
     // long); each shapes its tile's width. Short/empty ⇒ square fallback.
     min_aspects: &[f32],
@@ -747,23 +768,6 @@ pub fn layout(
     // `dock_order` ends newest-last and the drawn row is its prefix, the very
     // newest minimize is the first held back; the count is logged on add.
     let n_normal = n_entries.saturating_sub(n_min);
-    let hard_cap = (((w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
-    let n_normal_shown = n_normal.min(hard_cap);
-    // Minimized tiles earn their honored slots only once every normal icon is
-    // shown: if the pins alone overflow the screen, the tail of
-    // `dock_order` past `n_normal_shown` is a pinned icon, not a minimized
-    // one, and the prefix slot→entry mapping must not shift under it.
-    let n_min_shown = if n_normal_shown == n_normal {
-        n_min.min(hard_cap.saturating_sub(n_normal_shown))
-    } else {
-        0
-    };
-    let n_dock = n_normal_shown + n_min_shown;
-    // The minimized zone is set off by DOCK_MIN_GAP: the tiles begin at
-    // `dock_min_start`, and everything from there is shifted right by the
-    // gap (the row and card grow to hold it — see the basin below).
-    let dock_min_start = if n_min_shown > 0 { n_normal_shown } else { usize::MAX };
-    let dock_min_gap = if n_min_shown > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
     // A minimized tile is fit into a box (`min_tile_dims`): its width follows
     // the window aspect over a SMALLER picture height (`dock_icon ×
     // MIN_TILE_SCALE`), but a wide window is width-capped (its height shrinks)
@@ -775,10 +779,54 @@ pub fn layout(
         let aspect = min_aspects.get(k).copied().unwrap_or(1.0);
         min_tile_dims(aspect, min_tile_h).0 + min_tile_pad
     };
+    // OVERFLOW (Max, 2026-10-01): when the whole row won't fit the screen,
+    // the pins give way, never the fixed trio or the running / minimized
+    // zone. They show through a window of `pin_cap` slots ending at the Apps
+    // tile (which becomes the overflow tile); `pin_off` slides it. An icon
+    // leaving the window at either end shrinks away (`pin_f`), so the
+    // window's width stays `pin_cap` slots throughout.
+    let pins = pins.min(n_normal);
+    let others_w = (n_normal - pins) as f32 * dock_slot
+        + (0..n_min).map(min_slot_w).sum::<f32>()
+        + if n_min > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
+    let budget = w - 4.0 * dock_pad_x;
+    let pin_room = ((budget - others_w) / dock_slot).floor();
+    let pin_cap = (pin_room.max(1.0) as usize).min(pins.max(1));
+    let overflow = pins > 0 && pin_room >= 1.0 && pins > pin_room as usize;
+    let max_off = if overflow { (pins - pin_cap) as f32 } else { 0.0 };
+    let off = pin_off.clamp(0.0, max_off);
+    let pin_f = |i: usize| -> f32 {
+        if !overflow || i >= pins {
+            1.0
+        } else {
+            (i as f32 + 1.0 - off).min(off + pin_cap as f32 - i as f32).clamp(0.0, 1.0)
+        }
+    };
+    let hard_cap = (((w - 2.0 * dock_pad_x) / dock_slot).floor() as usize).max(1);
+    // Overflowing pins don't count against the cap: they fold into the tile.
+    let n_normal_shown = if overflow { n_normal } else { n_normal.min(hard_cap) };
+    // Minimized tiles earn their honored slots only once every normal icon is
+    // shown: if the pins alone overflow the screen, the tail of
+    // `dock_order` past `n_normal_shown` is a pinned icon, not a minimized
+    // one, and the prefix slot→entry mapping must not shift under it.
+    let n_min_shown = if overflow {
+        n_min
+    } else if n_normal_shown == n_normal {
+        n_min.min(hard_cap.saturating_sub(n_normal_shown))
+    } else {
+        0
+    };
+    let n_dock = n_normal_shown + n_min_shown;
+    // The minimized zone is set off by DOCK_MIN_GAP: the tiles begin at
+    // `dock_min_start`, and everything from there is shifted right by the
+    // gap (the row and card grow to hold it — see the basin below).
+    let dock_min_start = if n_min_shown > 0 { n_normal_shown } else { usize::MAX };
+    let dock_min_gap = if n_min_shown > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
     // Total base (unmagnified) width of the honored row: the uniform normal
     // slots, the variable minimized tail, and the group gap before the tail.
     let min_zone_w: f32 = (0..n_min_shown).map(min_slot_w).sum();
-    let row_base_w = n_normal_shown as f32 * dock_slot + min_zone_w + dock_min_gap;
+    let normal_w: f32 = (0..n_normal_shown).map(|i| dock_slot * pin_f(i)).sum();
+    let row_base_w = normal_w + min_zone_w + dock_min_gap;
     let card_top = h - extent;
     let dock_h = config.window.input_bar_height as f32 * icon_scale;
     let float_gap = config.window.bottom_margin as f32 * icon_scale;
@@ -812,7 +860,7 @@ pub fn layout(
     // Only the normal icons count: the minimized tiles hide as the card
     // opens, and the grid's columns (below) — hence the stored page
     // capacity — must not come and go with every minimized window.
-    let open_row_w = n_normal_shown as f32 * dock_slot + 2.0 * dock_pad_x;
+    let open_row_w = normal_w + 2.0 * dock_pad_x;
     let open_w = card_w.max(open_row_w.min(max_basin));
     let gathered = basin_w + (open_w - basin_w) * rise;
     let card_w_now = (gathered * (1.0 - (stretch.0 - 1.0) * SPILL)).min(w);
@@ -862,7 +910,7 @@ pub fn layout(
         let sw = if i >= dock_min_start {
             min_slot_w(i - dock_min_start)
         } else {
-            dock_slot
+            dock_slot * pin_f(i)
         };
         dock_slots.push(Rect::new(slot_x, slot_y, sw, slot_h));
         slot_x += sw;
@@ -1013,6 +1061,12 @@ pub fn layout(
         dock_slots,
         dock_min_start,
         dock_min_gap,
+        dock_slot_f: (0..n_dock).map(pin_f).collect(),
+        dock_overflow: overflow.then(|| DockOverflow {
+            apps_slot: pins,
+            hidden_right: (0..pins).filter(|&i| i as f32 >= off && pin_f(i) < 0.5).count(),
+            max_off,
+        }),
         dock_basin_w: basin_w,
         sections,
         search_box,
@@ -1640,7 +1694,7 @@ pub fn scene(
             let grow = if i >= layout.dock_min_start {
                 (r.w - min_tile_pad).max(0.0)
             } else {
-                dock_icon
+                dock_icon * layout.dock_slot_f.get(i).copied().unwrap_or(1.0)
             };
             r.w + grow * (dock_scales[i] - 1.0)
         })
@@ -1793,6 +1847,12 @@ pub fn scene(
         if dock_hidden == Some(entry_idx) {
             continue;
         }
+        // A pin folded into the overflow tile (or slid off the left end)
+        // shrinks away with its slot.
+        let shown = layout.dock_slot_f.get(slot).copied().unwrap_or(1.0);
+        if shown < 0.02 {
+            continue;
+        }
         let slot_rect = &layout.dock_slots[slot];
         let vcx = dock_vcx[slot] + dock_slide.get(slot).copied().unwrap_or(0.0) * dock_slot;
         let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
@@ -1814,7 +1874,7 @@ pub fn scene(
             });
         }
         let scale = dock_scales[slot];
-        let size = (dock_icon * scale).min(slot_rect.h.min(dock_slot) + MAGNIFY_HEADROOM);
+        let size = (dock_icon * scale).min(slot_rect.h.min(dock_slot) + MAGNIFY_HEADROOM) * shown;
         // AGUA: the icon elongates/compresses vertically about its
         // baseline with the card's motion — a water drop on the bar
         // (amplified: at icon scale the raw factor reads as nothing).
@@ -2010,6 +2070,48 @@ pub fn scene(
                     clip: None,
                 });
             }
+        }
+    }
+    // The overflow tile's count: how many pins are folded into it, on a
+    // small pill at the Apps tile's top-right corner.
+    if let Some(ov) = layout.dock_overflow.filter(|o| o.hidden_right > 0) {
+        if let (Some(slot), Some(&vcx)) = (layout.dock_slots.get(ov.apps_slot), dock_vcx.get(ov.apps_slot)) {
+            let scale = dock_scales.get(ov.apps_slot).copied().unwrap_or(1.0);
+            let size = (dock_icon * scale).min(slot.h.min(dock_slot) + MAGNIFY_HEADROOM);
+            let top = slot.y + slot.h - DOCK_BASELINE_PAD * icon_scale - size;
+            let font_px = 10.0 * icon_scale.max(1.0);
+            let text = ov.hidden_right.to_string();
+            let pill_h = font_px + 4.0;
+            let pill_w = (text.len() as f32 * font_px * 0.62 + 7.0).max(pill_h);
+            let rect = Rect::new(vcx + size / 2.0 - pill_w * 0.75, top - pill_h * 0.25, pill_w, pill_h);
+            let bg = dock_bg;
+            scene.rects.push(RectInst {
+                rect,
+                radius: pill_h / 2.0,
+                color: [bg[0], bg[1], bg[2], bg[3].max(0.9)],
+                glass: 0.0,
+                border: 0.0,
+            });
+            scene.rects.push(RectInst {
+                rect,
+                radius: pill_h / 2.0,
+                color: plate_rim([bg[0], bg[1], bg[2], bg[3].max(0.9)]),
+                glass: 0.0,
+                border: 1.0,
+            });
+            scene.labels.push(Label {
+                text,
+                pos: (rect.x + pill_w / 2.0, rect.y + (pill_h - font_px * 1.3) / 2.0),
+                max_w: pill_w,
+                font_px,
+                line_px: font_px * 1.3,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: Some(FONT_BOLD),
+                color: Some(dock_ink),
+                clip: None,
+            });
         }
     }
     // Hover tooltip: the hovered dock icon's app name in a pill above it
@@ -3030,7 +3132,7 @@ mod tests {
             SURFACE,
             OPEN,
             n.min(10),
-            0,
+            0, 0, 0.0,
             &[],
             [n, 0, 0],
             [scroll, 0.0, 0.0],
@@ -3050,7 +3152,7 @@ mod tests {
             SURFACE,
             48.0,
             20,
-            0,
+            0, 0, 0.0,
             &[],
             [20, 0, 6],
             [0.0; N_SECTIONS],
@@ -3082,7 +3184,7 @@ mod tests {
     fn a_controls_row_takes_shown_rows_not_page_capacity() {
         let cfg = config();
         let args = |c: Option<f32>| {
-            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, c.map_or(0.0, |ph| controls_band_h(1.0, ph)), 0.0)
+            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, 0, 0.0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, c.map_or(0.0, |ph| controls_band_h(1.0, ph)), 0.0)
         };
         let (plain, with) = (args(None), args(Some(23.0)));
         assert!(plain.controls_row.is_none());
@@ -3100,7 +3202,7 @@ mod tests {
     fn a_trimmed_card_drops_its_top_and_keeps_its_bottom() {
         let cfg = config();
         let at = |trim: f32| {
-            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, trim)
+            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, 0, 0.0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, trim)
         };
         let (full, short) = (at(0.0), at(GRID_CELL_H));
         let (a, b) = (&full.sections[SECTION_APPS], &short.sections[SECTION_APPS]);
@@ -3130,6 +3232,32 @@ mod tests {
         sec.cells = sec.cols + 1;
         assert_eq!(sec.row_shift(0), 0.0, "a full row stays");
         assert!(sec.row_shift(sec.cols) > 0.0, "the partial row after it splits");
+    }
+
+    #[test]
+    fn overflowing_pins_fold_into_the_apps_tile() {
+        let cfg = config();
+        // 40 entries: 30 pins, the trio, 7 running apps — far wider than the
+        // 880 px surface.
+        let at = |off: f32| {
+            layout(&cfg, 1.0, SURFACE, 48.0, 40, 0, 30, off, &[], [0, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, 0.0)
+        };
+        let rest = at(0.0);
+        let ov = rest.dock_overflow.expect("30 pins overflow 880 px");
+        assert_eq!(ov.apps_slot, 30, "the Apps tile closes the pins");
+        assert!(ov.hidden_right > 0 && ov.max_off > 0.0);
+        let row: f32 = rest.dock_slots.iter().map(|r| r.w).sum();
+        assert!(row <= SURFACE.0 - 4.0 * DOCK_PAD_X + 0.5, "the row fits: {row}");
+        assert!((rest.dock_slots[30].w - DOCK_SLOT).abs() < 0.01, "the trio keeps whole slots");
+        assert!((7..40).skip(24).all(|i| rest.dock_slot_f[i] >= 0.999), "the running zone never folds");
+        // Slid to the far end: everything folded is out; the first pins left.
+        let end = at(ov.max_off);
+        assert_eq!(end.dock_overflow.unwrap().hidden_right, 0);
+        assert!(end.dock_slot_f[0] < 0.01 && end.dock_slot_f[29] > 0.99);
+        // Half a slot along, the two ends share one slot between them.
+        let half = at(0.5);
+        let w: f32 = half.dock_slots.iter().map(|r| r.w).sum();
+        assert!((w - row).abs() < 0.5, "the window keeps its width while sliding");
     }
 
     #[test]
@@ -3195,7 +3323,7 @@ mod tests {
             SURFACE,
             OPEN,
             10,
-            0,
+            0, 0, 0.0,
             &[],
             [4, 0, 6],
             [0.0; N_SECTIONS],
@@ -3253,7 +3381,7 @@ mod tests {
             SURFACE,
             OPEN,
             10,
-            0,
+            0, 0, 0.0,
             &[],
             [10, 0, 6],
             [0.0; N_SECTIONS],
@@ -3306,7 +3434,7 @@ mod tests {
             SURFACE,
             OPEN,
             10,
-            0,
+            0, 0, 0.0,
             &[],
             [10, 0, 6],
             [0.0; N_SECTIONS],
@@ -3425,7 +3553,7 @@ mod tests {
             SURFACE,
             48.0,
             n,
-            0,
+            0, 0, 0.0,
             &[],
             [n, 0, 0],
             [0.0; N_SECTIONS],
@@ -3521,7 +3649,7 @@ mod tests {
                 SURFACE,
                 docked,
                 total,
-                n_min,
+                n_min, 0, 0.0,
                 &aspects,
                 [total, 0, 0],
                 [0.0; N_SECTIONS],
@@ -3559,7 +3687,7 @@ mod tests {
             SURFACE,
             (cfg.window.height + cfg.window.bottom_margin) as f32,
             17,
-            0,
+            0, 0, 0.0,
             &[],
             [17, 0, 0],
             [0.0; N_SECTIONS],
@@ -3583,7 +3711,7 @@ mod tests {
             SURFACE,
             (cfg.window.height + cfg.window.bottom_margin) as f32,
             3,
-            0,
+            0, 0, 0.0,
             &[],
             [17, 0, 0],
             [0.0; N_SECTIONS],
@@ -3606,7 +3734,7 @@ mod tests {
         let lay_wide = |total: usize, n_min: usize| {
             let aspects = vec![MAX_TILE_ASPECT; n_min];
             layout(
-                &cfg, 1.0, SURFACE, docked, total, n_min, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
+                &cfg, 1.0, SURFACE, docked, total, n_min, 0, 0.0, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
                 None, 0.0,
                 0.0,
             )
@@ -3641,7 +3769,7 @@ mod tests {
             SURFACE,
             48.0,
             5,
-            2,
+            2, 0, 0.0,
             &aspects,
             [5, 0, 0],
             [0.0; N_SECTIONS],

@@ -742,6 +742,9 @@ fn main() -> anyhow::Result<()> {
         dock_order: Vec::new(),
         dock_min_count: 0,
         dock_user_pins: 0,
+        dock_pin_off: 0.0,
+        dock_pin_target: 0.0,
+        dock_hscroll_at: None,
         running: HashMap::new(),
         dock_divider: None,
         minimized: Vec::new(),
@@ -1908,6 +1911,14 @@ pub struct App {
     /// fixed trio (`apps::DOCK_FIXED`) follows them, then the divider and the
     /// running / minimized zone. Drops onto the dock land within the pins.
     dock_user_pins: usize,
+    /// The overflowing pins' window: its offset in slots (eased) and where
+    /// it is heading — the far end while the pointer is on the overflow
+    /// tile, a side-scroll's mark, home (0) once the pointer leaves the dock.
+    dock_pin_off: f32,
+    dock_pin_target: f32,
+    /// When the dock was last side-scrolled: the window snaps to whole
+    /// slots once the scroll rests.
+    dock_hscroll_at: Option<Instant>,
     /// Running apps (macOS dock model): entry index → its live window
     /// addresses, most-recently-used first. Presence ⇒ the app is
     /// running (shows the indicator dot; a click activates instead of
@@ -5287,6 +5298,18 @@ impl App {
         // Mid-drag wheel events must not page (see `on_scroll`).
         if self.gesture.dragging.is_some() || self.box_drag.is_some() {
             return;
+        }
+        // On an overflowing dock a side-scroll slides the pins' window:
+        // icons come out of the overflow tile one way, go back the other.
+        let layout = self.current_layout();
+        if let (Some(ov), Some((_, y))) = (layout.dock_overflow, self.pointer_pos) {
+            if y >= layout.card_top && y < layout.dock_hit_bottom {
+                let slot_px = layout.dock_slots.get(ov.apps_slot).map_or(44.0, |r| r.w.max(1.0));
+                self.dock_pin_target = (self.dock_pin_target + value as f32 / slot_px).clamp(0.0, ov.max_off);
+                self.dock_hscroll_at = Some(Instant::now());
+                self.schedule_frame();
+                return;
+            }
         }
         if self.ui.target() == Target::Open && !self.control_panel {
             if self.stack_open() {
