@@ -55,6 +55,11 @@ pub(crate) fn edge_page_due(timer: &mut Option<Instant>, dir: i64) -> bool {
     }
 }
 
+/// How far past its own slot the Recycle Bin catches a drop: a share of a
+/// slot to each side, and of its height above the dock.
+const BIN_REACH: f32 = 0.6;
+const BIN_REACH_ABOVE: f32 = 0.8;
+
 /// Horizontal band within a cell (fraction of its width) where a drop onto
 /// an app makes/joins a box. The centre ~40% folds; the outer edges (the
 /// seam between two icons) reorder instead.
@@ -101,6 +106,23 @@ impl App {
         pos: (f32, f32),
     ) -> Option<usize> {
         let (x, y) = pos;
+        // The Recycle Bin is easy to aim (Max, 2026-10-01): it catches its
+        // whole slot plus a share of each neighbour's (Apps and the control
+        // panel take no drops anyway), and a margin above the dock.
+        if let Some(bin) = self.dock_order.iter().position(|&e| {
+            self.entries.get(e).is_some_and(|e| groups::is_trash(&e.id))
+        }) {
+            if let Some(s) = layout.dock_slots.get(bin) {
+                let reach = s.w * BIN_REACH;
+                if x >= s.x - reach
+                    && x <= s.x + s.w + reach
+                    && y >= layout.card_top - s.h * BIN_REACH_ABOVE
+                    && y <= layout.dock_hit_bottom
+                {
+                    return Some(bin);
+                }
+            }
+        }
         if y < layout.card_top || y > layout.dock_hit_bottom {
             return None;
         }
