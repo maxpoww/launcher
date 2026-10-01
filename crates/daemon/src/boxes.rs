@@ -92,7 +92,9 @@ impl App {
                     needs_terminal: false,
                     path: None,
                 };
-                let idx = self.push_transient(entry, apps::EntryKind::Group, false, 0);
+                // The Bin wears its metal figure; other boxes draw minis.
+                let layer = if groups::is_trash(&entry.id) { self.bin_layer } else { 0 };
+                let idx = self.push_transient(entry, apps::EntryKind::Group, false, layer);
                 self.group_minis.push((idx, minis));
                 idx
             })

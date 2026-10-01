@@ -1464,18 +1464,6 @@ fn grow_bottom(r: Rect, scale: f32) -> Rect {
     Rect::new(r.x + r.w / 2.0 - w / 2.0, r.y + r.h - h, w, h)
 }
 
-fn bin_icon(rect: Rect, react: f32) -> IconInst {
-    let r = react.clamp(0.0, 1.0);
-    IconInst {
-        rect,
-        layer: 0,
-        // A light can glyph; the rounded tile behind it (drawn as a RectInst by
-        // the caller) carries the grey→red colour. Only the openness varies.
-        tint: [0.95, 0.96, 0.97, 1.0],
-        ring: -2.0 - r,
-        plate: NO_PLATE,
-    }
-}
 
 /// Assemble the draw scene for one frame.
 ///
@@ -1932,7 +1920,14 @@ pub fn scene(
                 glass: 0.0,
                 border: 1.0,
             });
-            scene.icons.push(bin_icon(rect, trash_react));
+            // The metal bin figure (the tile behind it is the plate).
+            scene.icons.push(IconInst {
+                rect,
+                layer: layer_of(entry_idx),
+                tint: [0.0; 4],
+                ring: -1.0,
+                plate: NO_PLATE,
+            });
             continue;
         }
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {
@@ -2419,7 +2414,13 @@ pub fn scene(
                     glass: 0.0,
                     border: 1.0,
                 });
-                g.icons.push(bin_icon(rect, trash_react));
+                g.icons.push(IconInst {
+                    rect,
+                    layer: layer_of(entry_idx),
+                    tint: [0.0; 4],
+                    ring: -1.0,
+                    plate: NO_PLATE,
+                });
                 if !covered {
                     g.labels.push(Label {
                         text: truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX),

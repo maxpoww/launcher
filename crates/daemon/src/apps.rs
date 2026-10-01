@@ -357,6 +357,23 @@ pub fn drain_inotify(fd: std::os::fd::BorrowedFd<'_>) {
 /// moved (`PinDb` ignores both).
 pub const DOCK_FIXED: [&str; 3] = [APPS_GRID_ID, "group:trash", CONTROL_PANEL_ID];
 
+/// The fixed tail's own figures (Max's metal icon lab, 2026-10-01): cast
+/// silver, drawn at 0.90 of the plate at 0.60 opacity. Built into the
+/// binary, so every Golem shows the same three whatever icon theme it has;
+/// the dock still draws the plate under them. Regenerate from the lab with
+/// `assets/dock/lab/gen-icons.js` if the design changes.
+const DOCK_FIGURES: [(&str, &[u8]); 3] = [
+    (APPS_GRID_ID, include_bytes!("../assets/dock/apps.svg")),
+    ("group:trash", include_bytes!("../assets/dock/bin.svg")),
+    (CONTROL_PANEL_ID, include_bytes!("../assets/dock/control.svg")),
+];
+
+/// The ready-to-upload tile of a fixed-tail figure, by entry id.
+pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
+    let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
+    Some(with_mips(rasterize_svg(svg)?.take()))
+}
+
 /// Whether `id` is one of the dock's fixed tail ([`DOCK_FIXED`]).
 pub fn is_dock_fixed(id: &str) -> bool {
     DOCK_FIXED.contains(&id)
@@ -606,6 +623,11 @@ impl IconLoader {
 
     /// The entry's icon as `(pixels, is_placeholder)`.
     pub(crate) fn icon_for(&mut self, entry: &AppEntry) -> (Vec<u8>, bool) {
+        // The fixed tail wears its built-in figure, sized as designed (not
+        // re-fitted to the 80% every theme icon is normalized to).
+        if let Some(chain) = dock_figure(&entry.id) {
+            return (chain, false);
+        }
         // `asset-*` carriers are keyed by their id (not the resolved path):
         // they render unplated while an app using the same themed icon stays
         // plated, so the two must not share a cache slot.

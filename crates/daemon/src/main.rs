@@ -610,6 +610,7 @@ fn main() -> anyhow::Result<()> {
         pkg_hit_icons: Vec::new(),
         pkg_hit_placeholders: Vec::new(),
         pkg_layer_base: 0,
+        bin_layer: 0,
         pkg_state: PkgIndexState::Loading,
         pkg_load_kicked: false,
         busy_ids: HashSet::new(),
@@ -1487,6 +1488,8 @@ pub struct App {
     /// First reserved texture layer: the app icon count from the last
     /// `set_icons` upload.
     pkg_layer_base: u32,
+    /// Texture layer of the Recycle Bin's metal figure (see `apps::dock_figure`).
+    bin_layer: u32,
     /// Whether the package index is usable yet (drives the Install hint).
     pkg_state: PkgIndexState,
     /// Whether we've asked the nix thread to load the index yet. The index is
@@ -3645,6 +3648,12 @@ impl App {
         // reads the order).
         self.resolve_pending_installs();
 
+        // The Recycle Bin is a box entry (no icon of its own): its metal
+        // figure rides one extra layer past the entries.
+        if let Some(bin) = apps::dock_figure("group:trash") {
+            self.bin_layer = icons.len() as u32;
+            icons.push(bin);
+        }
         self.pkg_layer_base = icons.len() as u32;
         match self.renderer.as_mut() {
             Some(renderer) => {
