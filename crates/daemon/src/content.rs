@@ -607,17 +607,18 @@ pub struct DockOverflow {
 pub struct FastDraw<'a> {
     /// Presence of the whole thing, 0..1.
     pub k: f32,
-    pub bubble: Rect,
-    /// What the bubble shows, and whether it is the placeholder.
+    /// The slot (0) and the places off its left (1) and right (2).
+    pub places: [Rect; 3],
+    /// The typed letters, shown under the slot, and their shaped width.
     pub text: &'a str,
-    pub placeholder: bool,
+    pub text_w: f32,
     pub font_px: f32,
     pub line_px: f32,
-    /// The shown icons: entry index, rect, presence; and the selected one.
-    pub icons: &'a [(usize, Rect, f32)],
-    pub sel: usize,
-    /// Shaped width of the typed text (the caret sits after it).
-    pub text_w: f32,
+    /// Name sizes: over the slot, over a side icon.
+    pub name_px: f32,
+    pub side_name_px: f32,
+    /// The icons: entry index, place (0..3), presence (pops in).
+    pub icons: &'a [(usize, usize, f32)],
 }
 
 /// Geometry shared by scene assembly and hit-testing.
@@ -3090,63 +3091,33 @@ pub fn scene(
         }
     }
 
-    // FAST LAUNCH: the bubble mid-screen and its icons, over everything.
+    // FAST LAUNCH: the glass slot mid-screen, its icons, their names and the
+    // letters typed, over everything.
     if let Some(f) = fast.filter(|f| f.k > 0.01) {
         let k = f.k;
         let grow = |r: Rect, s: f32| {
             Rect::new(r.x + r.w * (1.0 - s) / 2.0, r.y + r.h * (1.0 - s) / 2.0, r.w * s, r.h * s)
         };
-        let b = grow(f.bubble, 0.94 + 0.06 * k);
-        let fill = [dock_bg[0], dock_bg[1], dock_bg[2], dock_bg[3].max(0.92) * k];
-        scene.overlay_shadows.push(ShadowInst {
-            rect: b,
-            radius: b.h / 2.0,
-            blur: 18.0,
-            color: [0.0, 0.0, 0.0, 0.35 * k],
-            edges: [1.0, 1.0, 1.0, 1.0],
-        });
-        scene.rects.push(RectInst { rect: b, radius: b.h / 2.0, color: fill, glass: 0.0, border: 0.0 });
-        scene.rects.push(RectInst { rect: b, radius: b.h / 2.0, color: plate_rim(fill), glass: 0.0, border: 1.0 });
-        let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * if f.placeholder { 0.45 } else { 1.0 }];
-        scene.labels.push(Label {
-            text: f.text.to_owned(),
-            pos: (b.x + b.w / 2.0, b.y + (b.h - f.line_px) / 2.0),
-            max_w: b.w,
-            font_px: f.font_px,
-            line_px: f.line_px,
-            centered: true,
-            dim: false,
-            cache: f.placeholder,
-            family: crate::options::TEXT_FONT,
-            color: Some(ink),
-            clip: None,
-        });
-        if !f.placeholder {
-            let x = (b.x + b.w / 2.0 + f.text_w / 2.0 + 3.0).min(b.x + b.w - 10.0);
-            scene.rects.push(RectInst {
-                rect: Rect::new(x, b.y + b.h * 0.25, 2.0, b.h * 0.5),
-                radius: 1.0,
-                color: [dock_ink[0], dock_ink[1], dock_ink[2], 0.9 * k],
-                glass: 0.0,
-                border: 0.0,
-            });
+        let well = |scene: &mut Scene, r: Rect, a: f32| {
+            let fill = crate::options::wash(true, 0.12 * a);
+            scene.rects.push(RectInst { rect: r, radius: r.h * 0.24, color: fill, glass: 0.5, border: 0.0 });
+            let rim = crate::options::wash(true, 0.24 * a);
+            scene.rects.push(RectInst { rect: r, radius: r.h * 0.24, color: rim, glass: 0.0, border: 1.0 });
+        };
+        let white = |a: f32| [1.0, 1.0, 1.0, a];
+        // The slot is always there; a side place only while an icon holds it.
+        let main = grow(f.places[0], 0.94 + 0.06 * k);
+        well(&mut scene, main, k);
+        for &(_, place, ik) in f.icons.iter().filter(|(_, p, _)| *p > 0) {
+            well(&mut scene, f.places[place], (ik * k).min(1.0));
         }
-        for (i, &(entry, rect, ik)) in f.icons.iter().enumerate() {
+        for &(entry, place, ik) in f.icons {
             let s = (ik * k).clamp(0.0, 1.0);
             if s < 0.02 {
                 continue;
             }
-            let r = grow(rect, 0.6 + 0.4 * s);
-            if i == f.sel {
-                let hl = dock_highlight;
-                scene.rects.push(RectInst {
-                    rect: Rect::new(r.x - 6.0, r.y - 6.0, r.w + 12.0, r.h + 12.0),
-                    radius: (r.h + 12.0) * 0.26,
-                    color: [hl[0], hl[1], hl[2], (hl[3] * 2.4).min(0.55) * s],
-                    glass: 0.0,
-                    border: 0.0,
-                });
-            }
+            let slot = f.places[place];
+            let r = grow(grow(slot, 0.84), 0.4 + 0.6 * s);
             scene.overlay.push(IconInst {
                 rect: r,
                 layer: layer_of(entry),
@@ -3154,7 +3125,50 @@ pub fn scene(
                 ring: -1.0,
                 plate: plate_of(entry),
             });
+            if let Some(name) = entries.get(entry).map(|e| e.name.clone()) {
+                let px = if place == 0 { f.name_px } else { f.side_name_px };
+                let line = px * 1.3;
+                scene.labels.push(Label {
+                    text: name,
+                    pos: (slot.x + slot.w / 2.0, slot.y - line - px * 0.4),
+                    max_w: 240.0,
+                    font_px: px,
+                    line_px: line,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: crate::options::TEXT_FONT,
+                    color: Some(white(0.9 * s)),
+                    clip: None,
+                });
+            }
         }
+        // The letters typed, right under the slot, with a caret.
+        let ty = f.places[0].y + f.places[0].h;
+        let cx = f.places[0].x + f.places[0].w / 2.0;
+        if !f.text.is_empty() {
+            scene.labels.push(Label {
+                text: f.text.to_owned(),
+                pos: (cx, ty),
+                max_w: 600.0,
+                font_px: f.font_px,
+                line_px: f.line_px,
+                centered: true,
+                dim: false,
+                cache: false,
+                family: crate::options::TEXT_FONT,
+                color: Some(white(0.88 * k)),
+                clip: None,
+            });
+        }
+        let caret_x = cx + f.text_w / 2.0 + 2.0;
+        scene.rects.push(RectInst {
+            rect: Rect::new(caret_x, ty + f.line_px * 0.15, 2.0, f.line_px * 0.75),
+            radius: 1.0,
+            color: white(0.8 * k),
+            glass: 0.0,
+            border: 0.0,
+        });
     }
 
     // Ghost of a box member being reordered, following the pointer (topmost).

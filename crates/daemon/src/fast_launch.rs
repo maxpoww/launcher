@@ -20,18 +20,18 @@ use crate::{apps, App, KbSurface, LaunchFrom};
 /// How many matches have to remain before their icons show.
 pub(crate) const REVEAL_AT: usize = 3;
 
-/// The bubble and its icons, in logical px at bar scale 1 (scaled by the
-/// OPTIONS scale).
-const BUBBLE_H: f32 = 46.0;
-const BUBBLE_MIN_W: f32 = 240.0;
-const BUBBLE_PAD_X: f32 = 22.0;
-pub(crate) const FONT_PX: f32 = 22.0;
-pub(crate) const LINE_PX: f32 = 28.0;
-const ICON: f32 = 56.0;
-const ICON_GAP: f32 = 14.0;
-/// Space between the bubble and the icons beside it.
-const ICON_AIR: f32 = 18.0;
-/// How fast the bubble and the icons ease in (1/s): snappy.
+/// Max's look (the Fast Launch mockup, 2026-10-01), logical px at bar
+/// scale 1: an empty glass SLOT anchored mid-screen; the best match takes
+/// it, the others hang smaller off its sides without moving it; the typed
+/// letters sit right under it; every icon wears its name on top.
+const SLOT: f32 = 58.0;
+const SIDE: f32 = 44.0;
+const SIDE_GAP: f32 = 36.0;
+pub(crate) const FONT_PX: f32 = 20.0;
+pub(crate) const LINE_PX: f32 = 25.0;
+pub(crate) const NAME_PX: f32 = 13.0;
+pub(crate) const SIDE_NAME_PX: f32 = 11.5;
+/// How fast the slot and the icons ease in (1/s): snappy.
 pub(crate) const EASE_RATE: f32 = 26.0;
 
 /// How well an app `name` matches `q` (both lowercased): 4 its name starts
@@ -104,32 +104,32 @@ impl FastLaunch {
     }
 }
 
-/// Where the bubble and its icons sit on the dock surface: the bubble's
-/// centre is the screen's centre (or as near as the surface reaches), and
-/// the icons follow it on the right, centred as a group with the bubble.
-/// `text_w` is the shaped width of what the bubble shows.
-pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32, text_w: f32, n: usize) -> (Rect, Vec<Rect>) {
+/// The order the shown icons take their places in: the selected one in
+/// the slot, the others left then right of it.
+pub(crate) fn placement(n: usize, sel: usize) -> Vec<usize> {
+    let mut order = Vec::with_capacity(n);
+    if n > 0 {
+        order.push(sel.min(n - 1));
+        order.extend((0..n).filter(|&i| i != sel.min(n - 1)));
+    }
+    order
+}
+
+/// Where the slot and the icons beside it sit on the dock surface: the slot
+/// is centred on the screen's centre (or as near as the surface reaches) and
+/// never moves; place 1 hangs off its left, place 2 off its right.
+pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32) -> [Rect; 3] {
     let (w, h) = surface;
-    let bh = BUBBLE_H * scale;
-    let bw = (text_w + 2.0 * BUBBLE_PAD_X * scale).max(BUBBLE_MIN_W * scale);
-    let icon = ICON * scale;
-    let icons_w = if n == 0 {
-        0.0
-    } else {
-        ICON_AIR * scale + n as f32 * icon + (n - 1) as f32 * ICON_GAP * scale
-    };
+    let slot = SLOT * scale;
+    let side = SIDE * scale;
+    let gap = SIDE_GAP * scale;
     // The surface is anchored to the screen's bottom edge: the screen's
     // centre is `screen_h / 2` above that edge.
-    let cy = (h - screen_h / 2.0).clamp(bh, h - bh);
-    let x0 = (w - bw - icons_w) / 2.0;
-    let bubble = Rect::new(x0, cy - bh / 2.0, bw, bh);
-    let icons = (0..n)
-        .map(|i| {
-            let x = x0 + bw + ICON_AIR * scale + i as f32 * (icon + ICON_GAP * scale);
-            Rect::new(x, cy - icon / 2.0, icon, icon)
-        })
-        .collect();
-    (bubble, icons)
+    let cy = (h - screen_h / 2.0).clamp(slot, h - slot);
+    let main = Rect::new(w / 2.0 - slot / 2.0, cy - slot / 2.0, slot, slot);
+    let left = Rect::new(main.x - gap - side, cy - side / 2.0, side, side);
+    let right = Rect::new(main.x + slot + gap, cy - side / 2.0, side, side);
+    [main, left, right]
 }
 
 impl App {
@@ -261,37 +261,25 @@ impl App {
         self.schedule_frame();
     }
 
-    /// A left click while the bubble is open: an icon launches; anywhere
+    /// A left click while the launcher is up: an icon launches; anywhere
     /// else closes.
     pub(crate) fn fast_click(&mut self, pos: (f32, f32)) {
-        let (_, icons) = self.fast_geometry();
-        match icons.iter().position(|r| r.contains(pos)) {
-            Some(i) => self.fast_launch_pick(Some(i)),
-            None => {
-                let (bubble, _) = self.fast_geometry();
-                if !bubble.contains(pos) {
-                    self.close_fast_launch();
-                }
-            }
+        let places = self.fast_geometry();
+        let order = placement(self.fast.shown().len(), self.fast.sel);
+        match order.iter().enumerate().find(|(p, _)| places[*p].contains(pos)) {
+            Some((_, &shown_i)) => self.fast_launch_pick(Some(shown_i)),
+            None if places[0].contains(pos) => {}
+            None => self.close_fast_launch(),
         }
     }
 
-    /// The bubble's and the icons' rects right now.
-    pub(crate) fn fast_geometry(&mut self) -> (Rect, Vec<Rect>) {
-        let scale = self.options_scale();
-        let text = if self.fast.query.is_empty() { crate::i18n::tr("Launch") } else { self.fast.query.as_str() };
-        let text_w = self
-            .renderer
-            .as_mut()
-            .map(|r| r.measure_text(text, FONT_PX * scale, crate::options::TEXT_FONT))
-            .unwrap_or(text.len() as f32 * FONT_PX * scale * 0.55);
+    /// The slot's and the side places' rects right now.
+    pub(crate) fn fast_geometry(&self) -> [Rect; 3] {
         let screen_h = self.output_logical_height().unwrap_or(self.buffer_size.1 as f32);
         geometry(
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             screen_h,
-            scale,
-            text_w,
-            self.fast.shown().len(),
+            self.options_scale(),
         )
     }
 }
@@ -319,13 +307,13 @@ mod tests {
     }
 
     #[test]
-    fn the_bubble_sits_mid_screen_with_its_icons_beside_it() {
+    fn the_slot_is_anchored_and_the_others_hang_off_it() {
         // A 1250-tall screen, the dock surface its bottom 760.
-        let (b, icons) = geometry((2000.0, 760.0), 1250.0, 1.0, 100.0, 3);
-        assert!((b.y + b.h / 2.0 - (760.0 - 625.0)).abs() < 0.01, "the screen's centre");
-        assert_eq!(icons.len(), 3);
-        assert!(icons[0].x > b.x + b.w);
-        let span = icons[2].x + icons[2].w - b.x;
-        assert!((b.x + span / 2.0 - 1000.0).abs() < 0.5, "bubble + icons centred together");
+        let [main, left, right] = geometry((2000.0, 760.0), 1250.0, 1.0);
+        assert!((main.y + main.h / 2.0 - (760.0 - 625.0)).abs() < 0.01, "the screen's centre");
+        assert!((main.x + main.w / 2.0 - 1000.0).abs() < 0.01, "and its middle");
+        assert!(left.x + left.w < main.x && right.x > main.x + main.w);
+        assert_eq!(placement(3, 1), vec![1, 0, 2], "the selected one takes the slot");
+        assert_eq!(placement(1, 0), vec![0]);
     }
 }

@@ -1240,35 +1240,32 @@ impl App {
             }
         }
         let fast_scale = self.options_scale();
-        let fast_text = if self.fast.query.is_empty() {
-            crate::i18n::tr("Launch").to_owned()
-        } else {
-            self.fast.query.clone()
-        };
+        let fast_text = self.fast.query.clone();
         let fast_text_w = self
             .renderer
             .as_mut()
             .map(|r| r.measure_text(&fast_text, crate::fast_launch::FONT_PX * fast_scale, crate::options::TEXT_FONT))
             .unwrap_or(0.0);
-        let (fast_bubble, fast_rects) = self.fast_geometry();
-        let fast_icons: Vec<(usize, content::Rect, f32)> = self
-            .fast
-            .shown()
+        let fast_places = self.fast_geometry();
+        let fast_order = crate::fast_launch::placement(self.fast.shown().len(), self.fast.sel);
+        let fast_icons: Vec<(usize, usize, f32)> = fast_order
             .iter()
-            .zip(fast_rects)
-            .zip(self.fast.icon_k.iter())
-            .map(|((&e, r), &k)| (e, r, k))
+            .enumerate()
+            .filter_map(|(place, &i)| {
+                let e = *self.fast.shown().get(i)?;
+                Some((e, place, self.fast.icon_k.get(i).copied().unwrap_or(1.0)))
+            })
             .collect();
         let fast_draw = (self.fast.k > 0.01).then_some(content::FastDraw {
             k: self.fast.k,
-            bubble: fast_bubble,
+            places: fast_places,
             text: &fast_text,
-            placeholder: self.fast.query.is_empty(),
+            text_w: fast_text_w,
             font_px: crate::fast_launch::FONT_PX * fast_scale,
             line_px: crate::fast_launch::LINE_PX * fast_scale,
+            name_px: crate::fast_launch::NAME_PX * fast_scale,
+            side_name_px: crate::fast_launch::SIDE_NAME_PX * fast_scale,
             icons: &fast_icons,
-            sel: self.fast.sel,
-            text_w: fast_text_w,
         });
         let scene = content::scene(
             &self.config,
