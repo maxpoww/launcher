@@ -754,6 +754,8 @@ fn main() -> anyhow::Result<()> {
         dock_pin_target: 0.0,
         dock_hscroll_at: None,
         running: HashMap::new(),
+        parked_windows: HashSet::new(),
+        min_adopted: false,
         dock_divider: None,
         minimized: Vec::new(),
         last_rescan: Instant::now(),
@@ -1945,6 +1947,12 @@ pub struct App {
     /// running (shows the indicator dot; a click activates instead of
     /// launching). Rebuilt from Hyprland on window open/close.
     running: HashMap<usize, Vec<String>>,
+    /// Which of those windows are minimized (parked on the plugin's
+    /// `special:minimized`): a dock click restores rather than focuses them.
+    parked_windows: HashSet<String>,
+    /// Whether the minimized windows already parked when this daemon started
+    /// have been given their tiles back (`adopt_minimized`, once).
+    min_adopted: bool,
     /// Dock slot at which the running-but-unpinned zone begins (the
     /// divider position), or `None` when no such apps are shown. Slots
     /// `[divider..]` are ephemeral running apps that vanish on quit.
@@ -3707,6 +3715,12 @@ impl App {
             }
             None => self.pending_icons = Some(icons),
         }
+        // Windows minimized before this daemon started (a restart, a crash)
+        // were stranded with no tile to click: give them their tiles back.
+        if !self.min_adopted {
+            self.min_adopted = true;
+            self.adopt_minimized();
+        }
         // Indices may have shifted: drop any armed click or in-flight drag,
         // rebuild the dock order, re-rank the query, re-resolve hover.
         self.gesture.pressed = None;
@@ -4218,11 +4232,16 @@ impl App {
             }
         }
         let mut running: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut parked = HashSet::new();
         for win in hypr::running_windows() {
             if let Some(&idx) = by_class.get(&win.class.to_lowercase()) {
+                if win.parked {
+                    parked.insert(win.address.clone());
+                }
                 running.entry(idx).or_default().push(win.address);
             }
         }
+        self.parked_windows = parked;
         if running != self.running {
             self.running = running;
             // The unpinned-running dock zone depends on this set, so rebuild
@@ -4971,7 +4990,27 @@ impl App {
         let force_new = !one_window
             && (self.modifiers.ctrl || self.force_new_instance || from == LaunchFrom::Box);
         if !force_new {
-            if let Some(addr) = self.running.get(&index).and_then(|w| w.first()).cloned() {
+            // A window on screen wins; when every window of the app is
+            // minimized, the click restores one (focusing a parked window
+            // would only expose the hidden minimized workspace).
+            let windows = self.running.get(&index);
+            let visible = windows.and_then(|w| w.iter().find(|a| !self.parked_windows.contains(*a)));
+            let parked = windows.and_then(|w| w.first()).filter(|a| self.parked_windows.contains(*a));
+            if visible.is_none() {
+                if let Some(addr) = parked.cloned() {
+                    info!("activating running app {id} -> restoring minimized {addr}");
+                    self.usage.increment(&id);
+                    if self.interactive {
+                        self.begin_keyboard_handback(KbSurface::Launcher, None);
+                        surface::set_interactive(&self.layer, false);
+                        self.interactive = false;
+                    }
+                    self.restore_minimized(&addr);
+                    self.dismiss();
+                    return;
+                }
+            }
+            if let Some(addr) = visible.cloned() {
                 info!("activating running app {id} -> window {addr}");
                 self.usage.increment(&id);
                 if self.interactive {

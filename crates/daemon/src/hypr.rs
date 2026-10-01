@@ -730,11 +730,80 @@ pub fn paste_active() {
 /// The compositor only actually moves the seat when focus *changes*
 /// between windows — so we bounce focus through another window on the
 /// same workspace and back. The detour is what re-routes the keyboard.
+///
+/// A window parked on the plugin's `special:minimized` is restored instead:
+/// focusing it would only expose that hidden workspace over the screen with
+/// the window "there but not there" (Max, 2026-10-01). Every caller — the
+/// dock's activate, the browser raise, the workspace focus memory — goes
+/// through here, so none of them can strand a minimized window that way.
 pub fn focus_window(addr: &str) {
+    if is_minimized(addr) {
+        eval(&format!("hl.plugin.waveview.restore_min(\"{addr}\")"));
+        return;
+    }
     if let Some(other) = same_workspace_neighbor(addr) {
         dispatch(&format!("hl.dsp.focus({{ window = \"address:{other}\" }})"));
     }
     dispatch(&format!("hl.dsp.focus({{ window = \"address:{addr}\" }})"));
+}
+
+/// The special workspace the waveview plugin parks minimized windows on.
+pub const MINIMIZED_WS: &str = "special:minimized";
+
+/// Whether `addr` is parked on [`MINIMIZED_WS`] (one `j/clients` read).
+pub fn is_minimized(addr: &str) -> bool {
+    let Ok(raw) = request("j/clients") else {
+        return false;
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    clients.as_array().into_iter().flatten().any(|c| {
+        c["address"].as_str() == Some(addr) && c["workspace"]["name"].as_str() == Some(MINIMIZED_WS)
+    })
+}
+
+/// One window parked on [`MINIMIZED_WS`]: what a dock tile needs to stand
+/// for it again after the daemon restarted (`App::adopt_minimized`).
+pub struct ParkedWindow {
+    pub address: String,
+    pub class: String,
+    pub title: String,
+    /// Width / height (1.0 when unknown).
+    pub aspect: f32,
+}
+
+/// Every window parked on [`MINIMIZED_WS`].
+pub fn minimized_windows() -> Vec<ParkedWindow> {
+    let Ok(raw) = request("j/clients") else {
+        return Vec::new();
+    };
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["workspace"]["name"].as_str() == Some(MINIMIZED_WS))
+        .filter_map(|c| {
+            let size = c["size"].as_array();
+            let dim = |i: usize| size.and_then(|s| s.get(i)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let (w, h) = (dim(0), dim(1));
+            Some(ParkedWindow {
+                address: c["address"].as_str()?.to_owned(),
+                class: c["initialClass"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| c["class"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("?")
+                    .to_owned(),
+                title: c["title"].as_str().unwrap_or("").to_owned(),
+                aspect: if w > 0.0 && h > 0.0 { (w / h) as f32 } else { 1.0 },
+            })
+        })
+        .collect()
 }
 
 /// The active workspace's id and its most-recent window address, if any.
@@ -1236,6 +1305,8 @@ pub fn bottom_fill() -> Option<BottomFill> {
 pub struct RunningWindow {
     /// Window address (`0x…`) — the focus/activate handle.
     pub address: String,
+    /// Parked on the plugin's minimized workspace ([`MINIMIZED_WS`]).
+    pub parked: bool,
     /// The app_id/class the window reports. `initialClass` is preferred
     /// (stable across title-driven class changes), falling back to
     /// `class`.
@@ -1269,7 +1340,8 @@ pub fn running_windows() -> Vec<RunningWindow> {
                 .or_else(|| c["class"].as_str())
                 .unwrap_or("")
                 .to_owned();
-            (!class.is_empty()).then_some(RunningWindow { address, class })
+            let parked = c["workspace"]["name"].as_str() == Some(MINIMIZED_WS);
+            (!class.is_empty()).then_some(RunningWindow { address, class, parked })
         })
         .collect();
     if let Some(active) = active {

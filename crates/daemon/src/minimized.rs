@@ -206,6 +206,27 @@ impl App {
         self.refilter();
     }
 
+    /// Give every window already parked on the plugin's minimized workspace a
+    /// tile — the daemon keeps its tiles in memory only, so after a restart
+    /// (or a crash) those windows used to be stranded with nothing to click.
+    /// Each is re-announced exactly as the plugin would, with the thumbnail
+    /// the plugin left in its runtime folder (a letter tile when it is gone).
+    pub(crate) fn adopt_minimized(&mut self) {
+        let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()) + "/waverunner-min";
+        for w in crate::hypr::minimized_windows() {
+            let addr = norm_addr(&w.address);
+            if self.minimized.iter().any(|m| m.addr == addr) {
+                continue;
+            }
+            // One token per field before the title: a class with spaces
+            // would shift them (the badge just won't resolve for it).
+            let class: String = w.class.split_whitespace().collect::<Vec<_>>().join("_");
+            let path = format!("{dir}/{addr}.rgba");
+            debug!("minimized: adopting {addr} ({class}) left from before this daemon");
+            self.on_min_add(&format!("{addr} -1 {} {class} {path} {}", w.aspect, w.title));
+        }
+    }
+
     /// `min-del <addr>` — the window was restored or died; drop its tile.
     /// Unknown addresses are a no-op (the `closewindow` eviction may have
     /// beaten the plugin's message to it).
