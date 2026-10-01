@@ -438,7 +438,9 @@ impl App {
     }
 
     /// Set the screen's scale (to the nearest one that divides it cleanly),
-    /// live, and save it.
+    /// live, and save it. The change is made under a dissolve (see
+    /// [`crate::transition`]): every client redraws at the new scale on its
+    /// own frame, and shown bare that reads as the screen jumping.
     pub(crate) fn set_display_scale(&mut self, want: f64) {
         let Some(m) = self.display_target() else {
             warn!("display: no screen to scale");
@@ -452,24 +454,36 @@ impl App {
             return;
         }
         let selector = m.selector();
-        let mut store = GolemSettings::load();
-        let choice = DisplayChoice {
-            mode: m.mode.rule(),
+        let position = GolemSettings::load().displays.get(&selector).and_then(|c| c.position.clone());
+        let choice = DisplayChoice { mode: m.mode.rule(), scale, position };
+        // The pill asked for is the lit one from the first frame drawn at
+        // the new scale, not once the screen has been read back.
+        self.panel.display_expect_scale(scale);
+        let (name, old) = (m.name.clone(), m.scale);
+        let output = name.clone();
+        self.dissolve(
+            &output,
             scale,
-            position: store.displays.get(&selector).and_then(|c| c.position.clone()),
-        };
-        if !apply(&selector, &choice) {
-            return;
-        }
-        info!("display: {} scale {} -> {scale}", m.name, m.scale);
-        match &mut self.display_pending {
-            // On a resolution still being tried: part of the trial.
-            Some(p) if p.selector == selector => p.wanted = choice,
-            _ => {
-                store.displays.insert(selector, choice);
-                store.save();
+            Box::new(move |app: &mut App| app.apply_display_scale(&name, &selector, choice, old)),
+        );
+    }
+
+    /// Put a scale on the screen and save it.
+    fn apply_display_scale(&mut self, name: &str, selector: &str, choice: DisplayChoice, old: f64) {
+        if apply(selector, &choice) {
+            info!("display: {name} scale {old} -> {}", choice.scale);
+            match &mut self.display_pending {
+                // On a resolution still being tried: part of the trial.
+                Some(p) if p.selector == selector => p.wanted = choice,
+                _ => {
+                    let mut store = GolemSettings::load();
+                    store.displays.insert(selector.to_owned(), choice);
+                    store.save();
+                }
             }
         }
+        // Read the screen back either way: it confirms the change, or puts
+        // the lit pill back when the compositor refused it.
         self.display_changed();
     }
 

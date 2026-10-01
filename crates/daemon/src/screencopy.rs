@@ -480,7 +480,7 @@ impl App {
         }
     }
 
-    fn output_by_name(&self, name: &str) -> Option<WlOutput> {
+    pub(crate) fn output_by_name(&self, name: &str) -> Option<WlOutput> {
         self.output_state
             .outputs()
             .find(|o| self.output_state.info(o).and_then(|i| i.name).as_deref() == Some(name))

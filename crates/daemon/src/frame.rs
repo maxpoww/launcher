@@ -398,7 +398,9 @@ impl App {
                 self.ui.set_open_trim(trim_want);
             }
         } else if (trim_want - trim).abs() > 0.25 {
-            let k = 1.0 - (-dt.min(0.1) * TRIM_RATE).exp();
+            // Reduced motion (also what a scale change's dissolve asks for
+            // under its still, see `transition.rs`): there at once.
+            let k = if animation::reduce_motion() { 1.0 } else { 1.0 - (-dt.min(0.1) * TRIM_RATE).exp() };
             self.ui.set_open_trim(trim + (trim_want - trim) * k);
             fit_animating = true;
         } else if trim != trim_want {

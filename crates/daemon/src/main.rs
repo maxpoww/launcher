@@ -80,6 +80,7 @@ mod unfurl;
 // empty/restore gestures land.
 #[allow(dead_code)]
 mod residue;
+mod transition;
 mod trash;
 mod usage;
 mod webapps;
@@ -633,6 +634,9 @@ fn main() -> anyhow::Result<()> {
         panel_mix: 0.0,
         panel_reset_due: false,
         display_pending: None,
+        veil: transition::Veil::bind(&globals, &qh, layer_shell),
+        dissolve: None,
+        dissolve_runs: 0,
         controls_band: 0.0,
         control_panel_from_apps: false,
         box_from_dock: false,
@@ -1563,6 +1567,11 @@ pub struct App {
     /// A resolution being tried from the control panel: on the screen, not
     /// saved, going back by itself unless kept (see `display.rs`).
     display_pending: Option<display::Pending>,
+    /// What a change of scale is dissolved with, the dissolve in flight, and
+    /// how many there have been (see `transition.rs`).
+    veil: transition::Veil,
+    dissolve: Option<transition::Dissolve>,
+    dissolve_runs: u64,
     /// The room the Controls row has under Files right now, eased toward
     /// `controls_band_target` (see `content::layout`).
     controls_band: f32,
@@ -5634,7 +5643,13 @@ impl CompositorHandler for App {
         surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        // Route by surface. The deck runs its own tweens on its own renderer;
+        // Route by surface. A dissolve's still asks for one frame: the one
+        // that shows it.
+        if self.is_dissolve_surface(surface) {
+            self.dissolve_covered();
+            return;
+        }
+        // The deck runs its own tweens on its own renderer;
         // without this its frame callback drove the DOCK's draw instead, so the
         // tile motion advanced exactly one tick per click and then froze.
         if self
@@ -5696,7 +5711,12 @@ impl CompositorHandler for App {
 }
 
 impl LayerShellHandler for App {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        // A dissolve's still closed under us (its output went): end it.
+        if self.is_dissolve_surface(layer.wl_surface()) {
+            self.dissolve_end();
+            return;
+        }
         self.exit = true;
     }
 
@@ -5708,8 +5728,13 @@ impl LayerShellHandler for App {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        // Route by surface: the OPTIONS topbar has its own renderer and draw
-        // path; everything below is the dock/card.
+        // Route by surface: a dissolve's still, then the OPTIONS topbar
+        // with its own renderer and draw path; everything below is the
+        // dock/card.
+        if self.is_dissolve_surface(layer.wl_surface()) {
+            self.configure_dissolve(configure);
+            return;
+        }
         if self
             .options_layer
             .as_ref()

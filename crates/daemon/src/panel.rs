@@ -698,6 +698,14 @@ impl Panel {
         self.display_at = Some(at);
     }
 
+    /// A scale was just asked for: its pill is the lit one from now, before
+    /// the screen has been read back (the read confirms or corrects it).
+    pub(crate) fn display_expect_scale(&mut self, scale: f64) {
+        if let Some(view) = &mut self.display {
+            view.scale = scale;
+        }
+    }
+
     /// What the last click asked for, once.
     fn take_action(&mut self) -> Option<PanelAction> {
         self.action.take()

@@ -199,4 +199,11 @@ The big daemon files are cohesive but long — go straight to the function:
   runs last (so it is there at compositor start, dock or no dock). A resolution is only
   TRIED: it goes back after 15 s unless kept, and is saved only then. Pointer-free:
   `waverunner-ctl display [scale <n>|mode <WxH[@Hz]>|keep|back|reset|show <scale|resolution>]`.
+- `transition.rs` — a scale change is DISSOLVED, not shown bare (every client redraws on its own
+  frame and the compositor slides each layer surface: it read as the screen jumping). A still of
+  the screen (`wlr-screencopy` → plain shm overlay layer, namespace `golem-transition`, no input)
+  covers everything, the change is made under it with compositor animation and our own motion
+  snapping, then the still fades out (`wp_alpha_modifier_v1`). The still's size at the NEW scale
+  is committed just before the change so it never shows magnified. Any failure → the change is
+  made bare; the still cannot outlive 2 s. `App::dissolve(output, new_scale, then)`.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
