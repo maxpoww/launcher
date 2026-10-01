@@ -6,7 +6,7 @@ const pick = (start, end) => { const i = src.indexOf(start); const j = src.index
 eval(pick("function gearPath", "const svgURI").replace("const GLYPH", "var GLYPH"));
 const S = { apps: "disc", bin: "round", gear: "gear8" };
 // Max's settings (2026-10-01): Cast finish, gold 0, shine 0, brightness 1.15,
-// every figure at 0.90 of the plate, opacity 0.60.
+// every figure at 0.90 of the plate, opacity 0.60 (raised to 0.80: "brighter").
 const hsl = (l) => { const v = Math.round(Math.min(99, l * 1.15) / 100 * 255); const h = v.toString(16).padStart(2, "0"); return "#" + h + h + h; };
 // "Whiter" (Max, 2026-10-01): every stop pulled this far toward white.
 const WHITEN = 0.8;
@@ -29,7 +29,7 @@ function svg(inner) {
       <feDropShadow dx="0" dy="4" stdDeviation="1.8" flood-color="#000" flood-opacity="0.5"/>
     </filter>
   </defs>
-  <g opacity="0.6">
+  <g opacity="0.8">
     <g transform="translate(5 5) scale(0.9)">
       <g filter="url(#bevel)" fill="url(#cast)">${inner}</g>
       <g fill="url(#gloss)">${inner}</g>

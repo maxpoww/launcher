@@ -14,7 +14,7 @@
       <feDropShadow dx="0" dy="4" stdDeviation="1.8" flood-color="#000" flood-opacity="0.5"/>
     </filter>
   </defs>
-  <g opacity="0.6">
+  <g opacity="0.8">
     <g transform="translate(5 5) scale(0.9)">
       <g filter="url(#bevel)" fill="url(#cast)">
       <path d="M40 18 a10 6 0 0 1 20 0 v4 h-20 Z"/>
