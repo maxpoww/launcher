@@ -3,8 +3,8 @@
        Drawn at 0.90 of the plate (the dock draws the plate itself). -->
   <defs>
     <linearGradient id="cast" x1="0.44" y1="0" x2="0.56" y2="1">
-      <stop offset="0" stop-color="#fcfcfc"/><stop offset="0.38" stop-color="#e5e5e5"/>
-      <stop offset="0.72" stop-color="#aaaaaa"/><stop offset="1" stop-color="#818181"/>
+      <stop offset="0" stop-color="#fefefe"/><stop offset="0.38" stop-color="#fafafa"/>
+      <stop offset="0.72" stop-color="#eeeeee"/><stop offset="1" stop-color="#e6e6e6"/>
     </linearGradient>
     <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#fff" stop-opacity="0.22"/><stop offset="0.55" stop-color="#fff" stop-opacity="0"/>

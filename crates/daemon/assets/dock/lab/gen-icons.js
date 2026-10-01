@@ -8,7 +8,10 @@ const S = { apps: "disc", bin: "round", gear: "gear8" };
 // Max's settings (2026-10-01): Cast finish, gold 0, shine 0, brightness 1.15,
 // every figure at 0.90 of the plate, opacity 0.60.
 const hsl = (l) => { const v = Math.round(Math.min(99, l * 1.15) / 100 * 255); const h = v.toString(16).padStart(2, "0"); return "#" + h + h + h; };
-const hi = hsl(94), mid = hsl(78), lo = hsl(58), deep = hsl(44);
+// "Whiter" (Max, 2026-10-01): every stop pulled this far toward white.
+const WHITEN = 0.8;
+const white = (hex) => { const v = parseInt(hex.slice(1, 3), 16); const w = Math.round(v + (255 - v) * WHITEN).toString(16).padStart(2, "0"); return "#" + w + w + w; };
+const hi = white(hsl(94)), mid = white(hsl(78)), lo = white(hsl(58)), deep = white(hsl(44));
 function svg(inner) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256">
   <!-- Golem dock figure: cast silver, from the metal icon lab (Max, 2026-10-01).
