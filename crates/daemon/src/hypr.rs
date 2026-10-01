@@ -1308,6 +1308,17 @@ pub fn monitors_json() -> Option<serde_json::Value> {
     serde_json::from_str(&request("j/monitors").ok()?).ok()
 }
 
+/// Where the pointer is, in the compositor's global logical coordinates.
+pub fn cursor_pos() -> Option<(f64, f64)> {
+    let json: serde_json::Value = serde_json::from_str(&request("j/cursorpos").ok()?).ok()?;
+    Some((json["x"].as_f64()?, json["y"].as_f64()?))
+}
+
+/// Put the pointer at a global logical position.
+pub fn move_cursor(x: f64, y: f64) {
+    dispatch(&format!("hl.dsp.cursor.move({{ x = {}, y = {} }})", x.round(), y.round()));
+}
+
 /// Have the compositor read its config again — the only way to drop a
 /// runtime rule (a monitor rule has no "remove"). Costly: every runtime
 /// `hl.config` value goes back to the file's own, and the `configreloaded`

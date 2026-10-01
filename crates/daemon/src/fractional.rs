@@ -111,6 +111,11 @@ impl Dispatch<WpFractionalScaleV1, SurfaceKind> for App {
                 return;
             }
             slot.scale120 = Some(scale);
+            // A change of scale we asked for has landed: the pointer goes
+            // back to where it was on the glass (see `display.rs`).
+            if matches!(kind, SurfaceKind::Dock) {
+                app.display_pointer_back(Some(scale));
+            }
             tracing::info!("{kind:?}: output scale {:.3}", scale as f32 / 120.0);
             app.rescale_surface(*kind);
         }

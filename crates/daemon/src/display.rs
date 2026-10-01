@@ -45,6 +45,10 @@ const KEEP_SECS: u64 = 15;
 /// panel reads the screen back (a rule lands with the next rendered frame).
 const SETTLE: Duration = Duration::from_millis(350);
 
+/// The pointer is put back this long after a change of scale at the latest
+/// (normally as soon as our own surface is told the new scale).
+const POINTER_DEADLINE: Duration = Duration::from_millis(150);
+
 /// The compositor counts a scale in 120ths (the fractional-scale protocol).
 const SCALE_UNIT: f64 = 120.0;
 /// The scales the panel offers: from this one up…
@@ -112,6 +116,8 @@ pub(crate) struct Monitor {
     pub scale: f64,
     pub modes: Vec<Mode>,
     pub focused: bool,
+    /// Its top-left corner among the screens, in logical pixels.
+    pub pos: (f64, f64),
 }
 
 impl Monitor {
@@ -172,6 +178,7 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
                 scale,
                 modes,
                 focused: m["focused"].as_bool().unwrap_or(false),
+                pos: (m["x"].as_f64().unwrap_or(0.0), m["y"].as_f64().unwrap_or(0.0)),
             })
         })
         .collect()
@@ -228,6 +235,29 @@ pub(crate) fn scale_stops(w: u32, h: u32, current: f64) -> Vec<f64> {
     }
     kept.sort_unstable();
     kept.into_iter().map(|k| f64::from(k) / SCALE_UNIT).collect()
+}
+
+/// Where the pointer belongs after a change of scale so that it has not
+/// moved on the glass.
+///
+/// The compositor keeps the pointer's LOGICAL position through the change,
+/// and a logical pixel is exactly what changes size: left alone the pointer
+/// leaps toward or away from the screen's corner by the ratio of the two
+/// scales — off the very pill that was just clicked. `cursor` and `origin`
+/// (the screen's corner) are global logical positions before the change;
+/// `px` is the screen in pixels. `None` when the pointer is on another
+/// screen.
+fn pointer_after(cursor: (f64, f64), origin: (f64, f64), px: (u32, u32), old: f64, new: f64) -> Option<(f64, f64)> {
+    let (dx, dy) = (cursor.0 - origin.0, cursor.1 - origin.1);
+    let inside = dx >= 0.0 && dy >= 0.0 && dx * old < f64::from(px.0) && dy * old < f64::from(px.1);
+    inside.then(|| (origin.0 + dx * old / new, origin.1 + dy * old / new))
+}
+
+/// A pointer to put back once the compositor has made a change of scale.
+pub(crate) struct PointerFix {
+    to: (f64, f64),
+    /// The scale being waited for, in 120ths.
+    scale120: u32,
 }
 
 /// What the owner chose for one screen.
@@ -460,17 +490,48 @@ impl App {
         // the new scale, not once the screen has been read back.
         self.panel.display_expect_scale(scale);
         let (name, old) = (m.name.clone(), m.scale);
+        let (origin, px) = (m.pos, (m.mode.w, m.mode.h));
         let output = name.clone();
         self.dissolve(
             &output,
             scale,
-            Box::new(move |app: &mut App| app.apply_display_scale(&name, &selector, choice, old)),
+            Box::new(move |app: &mut App| {
+                // Where the pointer is on the glass, read at the last moment.
+                let pointer = hypr::cursor_pos().and_then(|c| pointer_after(c, origin, px, old, choice.scale));
+                let scale120 = (choice.scale * SCALE_UNIT).round() as u32;
+                if app.apply_display_scale(&name, &selector, choice, old) {
+                    app.display_pointer = pointer.map(|to| PointerFix { to, scale120 });
+                    // The cue is our own surface being told the new scale;
+                    // should that never come, put the pointer back anyway.
+                    let armed = app.loop_handle.insert_source(Timer::from_duration(POINTER_DEADLINE), |_, _, app: &mut App| {
+                        app.display_pointer_back(None);
+                        TimeoutAction::Drop
+                    });
+                    if armed.is_err() {
+                        app.display_pointer_back(None);
+                    }
+                }
+            }),
         );
     }
 
-    /// Put a scale on the screen and save it.
-    fn apply_display_scale(&mut self, name: &str, selector: &str, choice: DisplayChoice, old: f64) {
-        if apply(selector, &choice) {
+    /// The compositor has made a change of scale (`scale120`: our surface
+    /// was just told so; `None`: time is up): the pointer goes back to
+    /// where it was on the glass.
+    pub(crate) fn display_pointer_back(&mut self, scale120: Option<u32>) {
+        if scale120.is_some_and(|s| self.display_pointer.as_ref().is_some_and(|f| f.scale120 != s)) {
+            return;
+        }
+        if let Some(fix) = self.display_pointer.take() {
+            hypr::move_cursor(fix.to.0, fix.to.1);
+        }
+    }
+
+    /// Put a scale on the screen and save it. Returns whether the
+    /// compositor took it.
+    fn apply_display_scale(&mut self, name: &str, selector: &str, choice: DisplayChoice, old: f64) -> bool {
+        let applied = apply(selector, &choice);
+        if applied {
             info!("display: {name} scale {old} -> {}", choice.scale);
             match &mut self.display_pending {
                 // On a resolution still being tried: part of the trial.
@@ -485,6 +546,7 @@ impl App {
         // Read the screen back either way: it confirms the change, or puts
         // the lit pill back when the compositor refused it.
         self.display_changed();
+        applied
     }
 
     /// Try a resolution, live. It goes back by itself unless kept
@@ -671,6 +733,21 @@ mod tests {
         assert_eq!(percents(&scale_stops(1440, 900, 1.0)), [75, 83, 90, 100, 113, 125, 150]);
         assert_eq!(percents(&scale_stops(1920, 1080, 1.5)), [75, 83, 100, 125, 150, 167, 200]);
         assert_eq!(percents(&scale_stops(3200, 2000, 1.6)), [80, 100, 125, 160, 200, 250]);
+    }
+
+    #[test]
+    fn the_pointer_stays_where_it_is_on_the_glass() {
+        // MacBook, 83 % -> 125 %: the pointer at pixel (700, 400).
+        let old = 100.0 / 120.0;
+        let cursor = (700.0 / old, 400.0 / old);
+        let to = pointer_after(cursor, (0.0, 0.0), (1440, 900), old, 1.25).unwrap();
+        assert!((to.0 * 1.25 - 700.0).abs() < 1e-6 && (to.1 * 1.25 - 400.0).abs() < 1e-6, "{to:?}");
+        // A screen that does not start at the corner of the desk.
+        let to = pointer_after((2100.0, 50.0), (2000.0, 0.0), (1920, 1080), 1.0, 1.5).unwrap();
+        assert_eq!(to, (2000.0 + 100.0 / 1.5, 50.0 / 1.5));
+        // On another screen: left alone.
+        assert!(pointer_after((100.0, 100.0), (2000.0, 0.0), (1920, 1080), 1.0, 1.5).is_none());
+        assert!(pointer_after((2000.0 + 1920.0, 10.0), (2000.0, 0.0), (1920, 1080), 1.0, 1.5).is_none());
     }
 
     #[test]

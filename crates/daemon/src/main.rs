@@ -634,6 +634,7 @@ fn main() -> anyhow::Result<()> {
         panel_mix: 0.0,
         panel_reset_due: false,
         display_pending: None,
+        display_pointer: None,
         veil: transition::Veil::bind(&globals, &qh, layer_shell),
         dissolve: None,
         dissolve_runs: 0,
@@ -1567,6 +1568,8 @@ pub struct App {
     /// A resolution being tried from the control panel: on the screen, not
     /// saved, going back by itself unless kept (see `display.rs`).
     display_pending: Option<display::Pending>,
+    /// The pointer to put back once a change of scale has landed.
+    display_pointer: Option<display::PointerFix>,
     /// What a change of scale is dissolved with, the dissolve in flight, and
     /// how many there have been (see `transition.rs`).
     veil: transition::Veil,
