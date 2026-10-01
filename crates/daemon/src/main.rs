@@ -2147,7 +2147,7 @@ const BOUNCE_DURATION: Duration = Duration::from_millis(550);
 /// Peak height of the launch bounce, in logical pixels.
 const BOUNCE_HEIGHT: f32 = 18.0;
 /// Hover dwell before a dock icon's name tooltip appears.
-const DOCK_TOOLTIP_DELAY: Duration = Duration::from_millis(600);
+const DOCK_TOOLTIP_DELAY: Duration = Duration::from_millis(750);
 
 impl App {
     /// Uniform size multiplier for the topbar OPTIONS surfaces (pills, and the
