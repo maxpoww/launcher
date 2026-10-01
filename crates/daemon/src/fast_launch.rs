@@ -23,14 +23,15 @@ pub(crate) const REVEAL_AT: usize = 3;
 /// Max's look (the Fast Launch mockup, 2026-10-01), logical px at bar
 /// scale 1: an empty glass SLOT anchored mid-screen; the best match takes
 /// it, the others hang smaller off its sides without moving it; the typed
-/// letters sit right under it; every icon wears its name on top.
-const SLOT: f32 = 58.0;
-const SIDE: f32 = 44.0;
-const SIDE_GAP: f32 = 36.0;
-pub(crate) const FONT_PX: f32 = 20.0;
-pub(crate) const LINE_PX: f32 = 25.0;
-pub(crate) const NAME_PX: f32 = 13.0;
-pub(crate) const SIDE_NAME_PX: f32 = 11.5;
+/// letters sit right under it; every icon wears its name on top. (Then
+/// "a little bigger": about a fifth.)
+const SLOT: f32 = 70.0;
+const SIDE: f32 = 53.0;
+const SIDE_GAP: f32 = 40.0;
+pub(crate) const FONT_PX: f32 = 22.0;
+pub(crate) const LINE_PX: f32 = 28.0;
+pub(crate) const NAME_PX: f32 = 14.0;
+pub(crate) const SIDE_NAME_PX: f32 = 12.5;
 /// How fast the slot and the icons ease in (1/s): snappy.
 pub(crate) const EASE_RATE: f32 = 26.0;
 
