@@ -28,7 +28,8 @@ pub(crate) const REVEAL_AT: usize = 3;
 /// anymore", "a little contoured, kind of like a cross": THE GLASS IS A
 /// CROSS. A column round the front app's bare icon and the word under it
 /// (the word's pill shows past it only when the name is wider), and a bar
-/// across it holding the side icons — the arms grow out with the icons —
+/// across it holding the side icons, nearly as tall ("still too much": a
+/// small step in at each corner) — the arms grow out with the icons —
 /// joined by a smooth union with small rounded inner corners (the bar
 /// banner's blister, `rounded_rect.wgsl`). (`GROW`: the dock reads the mockup a fifth bigger — "a
 /// little bigger" on the first port.)
@@ -52,6 +53,8 @@ const WORD_TUCK: f32 = 4.0;
 const WORD_MAX: f32 = 320.0;
 /// How soft the inner corners of the cross are (the union's fillet).
 const MELT: f32 = 5.0;
+/// The cross's step: how far the side bar's edges sit in from the column's.
+const NOTCH: f32 = 7.0;
 
 /// "Super snappy" (seconds). Opening: the front icon pops, the sides wait a
 /// beat, then slide out from behind it the glass melting out with them.
@@ -215,6 +218,8 @@ pub(crate) struct Geo {
     pub icon_r: f32,
     pub side_r: f32,
     pub melt: f32,
+    /// How far the bar's top and bottom step in from the column's.
+    pub notch: f32,
     /// The word's pill: its top, margins, widest; the word's type.
     pub word_top: f32,
     pub word_pad: (f32, f32),
@@ -384,6 +389,11 @@ impl FastLaunch {
         let arm = shapes[2..].iter().flatten().fold(None::<Rect>, |b, r| Some(b.map_or(*r, |b| union(b, *r))));
         if let Some(arm) = arm {
             let mid = front.x + front.w / 2.0;
+            // "Still too much": the bar is nearly as tall as the column — the
+            // cross shows only as a small step in at each corner.
+            let col = shapes[0].unwrap_or(front);
+            let notch = g.notch.min(col.h / 4.0);
+            let arm = union(arm, Rect::new(arm.x, col.y + notch, arm.w, col.h - 2.0 * notch));
             shapes[2] = Some(union(arm, Rect::new(mid, arm.y, 0.0, arm.h)));
             shapes[3] = None;
         }
@@ -474,6 +484,7 @@ pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32) -> Geo {
         icon_r: ICON_R * u,
         side_r: SIDE_R * u,
         melt: MELT * u,
+        notch: NOTCH * u,
         word_top: top + glass - WORD_TUCK * u,
         word_pad,
         word_max: WORD_MAX * u,
