@@ -14,6 +14,10 @@ struct Globals {
     // bar_edge_y — the banner swells around the module like a snake with the
     // pill inside. x < -9000 = off.
     neck:      vec4<f32>,
+    // FAST LAUNCH's melted glass (glass ≈ 3): the front icon's shape, the
+    // word's pill, the left and right icons' (min.xy, max.xy; max < min =
+    // absent), then (fillet k, front radius, side radius, _).
+    blob:      array<vec4<f32>, 5>,
 };
 
 // Polynomial smooth-min: blends two SDFs with a fillet of radius ~k — the
@@ -24,6 +28,33 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
+
+fn rounded_box(p: vec2<f32>, mn: vec2<f32>, mx: vec2<f32>, radius: f32) -> f32 {
+    let c = (mn + mx) * 0.5;
+    let h = (mx - mn) * 0.5;
+    let r = min(radius, min(h.x, h.y));
+    let q = abs(p - c) - h + vec2<f32>(r);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+// FAST LAUNCH's figure: the shapes smooth-unioned — glass that contours the
+// icons and the word, melting between them.
+fn blob_sdf(p: vec2<f32>) -> f32 {
+    let k = globals.blob[4].x;
+    let b0 = globals.blob[0];
+    var d = rounded_box(p, b0.xy, b0.zw, globals.blob[4].y);
+    let b1 = globals.blob[1];
+    if b1.z > b1.x {
+        d = smin(d, rounded_box(p, b1.xy, b1.zw, 9999.0), k);
+    }
+    for (var i = 2; i < 4; i++) {
+        let b = globals.blob[i];
+        if b.z > b.x {
+            d = smin(d, rounded_box(p, b.xy, b.zw, globals.blob[4].z), k);
+        }
+    }
+    return d;
+}
 
 struct Instance {
     @location(0) rect_min: vec2<f32>,
@@ -70,7 +101,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     let r = min(in.radius, min(half.x, half.y));
     let q = abs(p) - half + vec2<f32>(r);
-    let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    var d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    let is_blob = abs(in.glass - 3.0) < 0.5;
+    if is_blob {
+        d = blob_sdf(in.px);
+    }
 
     // A stroke keeps only a band of `border` px just INSIDE the edge: fold
     // the signed distance about the band's midline, so the outline follows
@@ -107,7 +142,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     // Solid fill (hover highlights, dividers, box overlay, etc.)
-    if in.glass < 0.5 {
+    if in.glass < 0.5 || is_blob {
         var rgb = in.color.rgb;
         // Hard-edged fill (glass < -0.5): no SDF anti-aliasing. Used by the
         // colour-matched OPTIONS bar, whose bottom edge abuts a window of the

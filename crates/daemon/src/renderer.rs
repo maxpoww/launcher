@@ -37,6 +37,9 @@ struct Globals {
     // Banner blister: (bar_edge_y, k, _, _); the sunset module's banner rect
     // smooth-unions with the half-plane above bar_edge_y. x < -9000 = off.
     neck: [f32; 4],
+    // FAST LAUNCH's melted glass (rounded_rect.wgsl, glass ≈ 3): four
+    // shapes then (fillet, front radius, side radius, _); see Scene::blob.
+    blob: [[f32; 4]; 5],
 }
 
 /// Per-instance data for one rounded rectangle.
@@ -1190,6 +1193,7 @@ impl Renderer {
                 squircle,
                 thumb_base: thumb_base as f32,
                 neck: scene.neck.unwrap_or([-9999.0, 0.0, 0.0, 0.0]),
+                blob: scene.blob.unwrap_or([[0.0, 0.0, -1.0, -1.0]; 5]),
             }),
         );
 
