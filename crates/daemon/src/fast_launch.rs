@@ -11,7 +11,7 @@
 //!
 //! Ranking, best first: a name that starts with the letters, then a word of
 //! the name that does ("code" → Visual Studio Code), then the initials ("vs"
-//! → Visual Studio Code), then the letters anywhere in the name; ties go to
+//! → Visual Studio Code), then the letters anywhere in the name (three or more); ties go to
 //! the app used most, then the shorter name.
 
 use smithay_client_toolkit::seat::keyboard::Keysym;
@@ -82,7 +82,7 @@ const POP_CURVE: (f32, f32, f32, f32) = (0.2, 0.9, 0.25, 1.3);
 
 /// How well an app `name` matches `q` (both lowercased): 4 its name starts
 /// with it, 3 a word does, 2 the initials do, 1 it is anywhere in the name;
-/// 0 no match.
+/// 0 no match (see `ANYWHERE_FROM`).
 pub(crate) fn match_tier(name: &str, q: &str) -> u8 {
     if q.is_empty() {
         return 0;
@@ -101,11 +101,16 @@ pub(crate) fn match_tier(name: &str, q: &str) -> u8 {
     if initials.starts_with(q) {
         return 2;
     }
-    if name.contains(q) {
+    // Anywhere in the name only from three letters on: two letters inside a
+    // word are noise ("be" is not YouTube — Max, 2026-10-02).
+    if q.chars().count() >= ANYWHERE_FROM && name.contains(q) {
         return 1;
     }
     0
 }
+
+/// How many letters a match in the middle of a word needs.
+const ANYWHERE_FROM: usize = 3;
 
 /// Rank `apps` — (name, times used) — for the query `q`: the indices of the
 /// matches, best first (see the module doc). Nothing typed: every app, the
@@ -574,6 +579,8 @@ mod tests {
         assert_eq!(match_tier("visual studio code", "vsc"), 2);
         assert_eq!(match_tier("thunar file manager", "ile"), 1);
         assert_eq!(match_tier("spotify", "zz"), 0);
+        assert_eq!(match_tier("youtube", "be"), 0, "two letters inside a word are noise");
+        assert_eq!(match_tier("youtube", "tub"), 1);
     }
 
     #[test]
