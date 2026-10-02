@@ -17,7 +17,7 @@
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
 use crate::content::Rect;
-use crate::{apps, App, KbSurface, LaunchFrom};
+use crate::{apps, webapps, App, KbSurface, LaunchFrom};
 
 /// How many matches have to remain before they all show (more than that:
 /// only the best guess, in the middle).
@@ -201,6 +201,10 @@ pub(crate) struct FastLaunch {
     /// How much wider than at rest the card is for the name, now / wanted.
     pub wide: f32,
     pub wide_to: f32,
+    /// ENTER HELD (Max, 2026-10-02): Enter launches when it is let go;
+    /// a digit pressed while it is down sets how many instances (4 → four
+    /// Foots). `None` = Enter is up.
+    pub enter: Option<u32>,
 }
 
 /// Where everything sits, logical px on the dock surface.
@@ -510,7 +514,19 @@ impl App {
 
         match keysym {
             Keysym::Escape => self.close_fast_launch(),
-            Keysym::Return | Keysym::KP_Enter => self.fast_launch_pick(None),
+            // Down: wait for the release (or a digit); its auto-repeat is
+            // nothing.
+            Keysym::Return | Keysym::KP_Enter => {
+                if self.fast.enter.is_none() {
+                    self.fast.enter = Some(1);
+                }
+            }
+            _ if self.fast.enter.is_some() => {
+                // A digit while Enter is down: that many (0 = ten).
+                if let Some(d) = utf8.and_then(|t| t.chars().next()).and_then(|c| c.to_digit(10)) {
+                    self.fast.enter = Some(if d == 0 { 10 } else { d });
+                }
+            }
             Keysym::BackSpace => {
                 self.fast.query.pop();
                 self.fast.sel = 0;
@@ -544,6 +560,22 @@ impl App {
 
     /// Launch `entry` if given, else the app in front, else the best match.
     pub(crate) fn fast_launch_pick(&mut self, entry: Option<usize>) {
+        self.fast_launch_many(entry, 1);
+    }
+
+    /// A key let go while the launcher is up: Enter's release launches —
+    /// as many instances as the digit pressed while it was down.
+    pub(crate) fn fast_key_release(&mut self, keysym: Keysym) {
+        if matches!(keysym, Keysym::Return | Keysym::KP_Enter) {
+            if let Some(n) = self.fast.enter.take() {
+                self.fast_launch_many(None, n);
+            }
+        }
+    }
+
+    /// Launch `n` new instances of `entry` (else the app in front, else the
+    /// best match).
+    fn fast_launch_many(&mut self, entry: Option<usize>, n: u32) {
         let pick = entry
             .or(self.fast.want()[0])
             .or_else(|| self.fast.matches.first().copied());
@@ -553,6 +585,19 @@ impl App {
         self.fast.open = false;
         // Always a NEW instance — the box's rule: you asked to launch.
         self.activate(idx, LaunchFrom::Box);
+        // The rest straight after it (window memory cascades them as they
+        // map); a webapp asks Seam for a new window each time.
+        if let Some(e) = self.entries.get(idx).filter(|_| n > 1) {
+            let exec = if webapps::slug_of_id(&e.id).is_some() { webapps::new_window_exec(&e.exec) } else { e.exec.clone() };
+            let needs_terminal = e.needs_terminal;
+            tracing::info!("fast launch: {} x{n}", e.id);
+            for _ in 1..n {
+                if let Err(err) = crate::launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
+                    tracing::error!("launch failed: {err:#}");
+                    break;
+                }
+            }
+        }
         self.close_fast_launch_after_launch();
     }
 

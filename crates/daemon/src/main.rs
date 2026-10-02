@@ -6086,8 +6086,11 @@ impl KeyboardHandler for App {
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
-        _event: KeyEvent,
+        event: KeyEvent,
     ) {
+        if self.fast.open {
+            self.fast_key_release(event.keysym);
+        }
     }
 
     fn update_modifiers(
