@@ -215,7 +215,9 @@ pub(crate) fn scale_stops(w: u32, h: u32, current: f64) -> Vec<f64> {
     let (long, short) = (f64::from(w.max(h)), f64::from(w.min(h)));
     let offered = |k: u32| {
         let s = f64::from(k) / SCALE_UNIT;
-        k == current || (s >= OFFER_MIN && long / s >= OFFER_LOGICAL_MIN.0 && short / s >= OFFER_LOGICAL_MIN.1)
+        // 100 % (the panel's own pixels) always: whatever was chosen, the way
+        // home is one click — even on a panel too small for the size rule.
+        k == current || k == SCALE_UNIT as u32 || (s >= OFFER_MIN && long / s >= OFFER_LOGICAL_MIN.0 && short / s >= OFFER_LOGICAL_MIN.1)
     };
     // Whole and half scales, then quarters, then eighths, then the rest.
     let rank = |k: u32| {
@@ -239,14 +241,26 @@ pub(crate) fn scale_stops(w: u32, h: u32, current: f64) -> Vec<f64> {
     // alone, so the ASUS showed no Scale options at all. Then offer the
     // nearest clean scale on each side of the current one, the smaller even
     // under the usual floor, the larger only if the panel still fits.
+    // Each side prefers the nearest stop far enough away to see, else the
+    // nearest at all.
     if kept.len() < 2 {
         let clean = clean_units(w, h);
-        if let Some(&k) = clean.iter().filter(|&&k| k < current).max() {
+        let apart = |k: u32| f64::from(k.max(current)) / f64::from(k.min(current)) >= OFFER_GAP;
+        let below: Vec<u32> = clean.iter().copied().filter(|&k| k < current).collect();
+        let above: Vec<u32> = clean.iter().copied().filter(|&k| k > current && offered(k)).collect();
+        if let Some(k) = below.iter().copied().filter(|&k| apart(k)).max().or_else(|| below.iter().copied().max()) {
             kept.push(k);
         }
-        if let Some(&k) = clean.iter().filter(|&&k| k > current && offered(k)).min() {
+        if let Some(k) = above.iter().copied().filter(|&k| apart(k)).min() {
             kept.push(k);
         }
+    }
+    // The way home survives the crowding rule: from 101.7 % (a 976×549
+    // panel) the 100 % next to it is still the one to offer.
+    let home = SCALE_UNIT as u32;
+    if !kept.contains(&home) && clean_units(w, h).contains(&home) {
+        kept.retain(|&k| k == current || f64::from(k.max(home)) / f64::from(k.min(home)) >= OFFER_GAP);
+        kept.push(home);
     }
     kept.sort_unstable();
     kept.into_iter().map(|k| f64::from(k) / SCALE_UNIT).collect()
@@ -748,6 +762,47 @@ mod tests {
         assert_eq!(percents(&scale_stops(1440, 900, 1.0)), [75, 83, 90, 100, 113, 125, 150]);
         assert_eq!(percents(&scale_stops(1920, 1080, 1.5)), [75, 83, 100, 125, 150, 167, 200]);
         assert_eq!(percents(&scale_stops(3200, 2000, 1.6)), [80, 100, 125, 160, 200, 250]);
+    }
+
+    #[test]
+    fn every_panel_always_has_a_scale_choice_and_a_way_home() {
+        // Max (2026-10-02): "make sure all Golem installations have scale
+        // options". Every width from 640 to 7680 px in eight shapes, plus
+        // real panels: from 100 % follow every stop offered, and at each
+        // one there are at least two choices, the current one, 100 % (the
+        // way home) and nothing the compositor would refuse.
+        let mut panels: Vec<(u32, u32)> = vec![
+            (1366, 768), (1360, 768), (1280, 800), (1280, 1024), (1024, 768), (1024, 600), (800, 600),
+            (1600, 900), (1680, 1050), (1920, 1200), (2256, 1504), (2736, 1824), (2880, 1800),
+            (3000, 2000), (2560, 1080), (3440, 1440), (5120, 2880), (1080, 1920), (768, 1366),
+        ];
+        for w in (640..=7680).step_by(2) {
+            for (a, b) in [(16, 9), (16, 10), (3, 2), (4, 3), (5, 4), (21, 9), (32, 9), (9, 16)] {
+                panels.push((w, (f64::from(w) * f64::from(b) / f64::from(a)).round() as u32));
+            }
+        }
+        let clean = |w: u32, h: u32, s: f64| {
+            let (lw, lh) = (f64::from(w) / s, f64::from(h) / s);
+            (lw - lw.round()).abs() < 1e-6 && (lh - lh.round()).abs() < 1e-6
+        };
+        for (w, h) in panels {
+            let mut todo = vec![1.0_f64];
+            let mut seen: Vec<f64> = Vec::new();
+            while let Some(now) = todo.pop() {
+                if seen.iter().any(|s| (s - now).abs() < 1e-9) {
+                    continue;
+                }
+                seen.push(now);
+                let stops = scale_stops(w, h, now);
+                assert!(stops.len() >= 2, "{w}x{h} at {now}: no choice {stops:?}");
+                assert!(stops.iter().any(|s| (s - now).abs() < 1e-9), "{w}x{h} at {now}: current missing");
+                assert!(stops.iter().any(|s| (s - 1.0).abs() < 1e-9), "{w}x{h} at {now}: no way home {stops:?}");
+                for &s in &stops {
+                    assert!(clean(w, h, s), "{w}x{h}: {s} is not clean");
+                    todo.push(s);
+                }
+            }
+        }
     }
 
     #[test]
