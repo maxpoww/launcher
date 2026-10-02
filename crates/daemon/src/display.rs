@@ -233,6 +233,21 @@ pub(crate) fn scale_stops(w: u32, h: u32, current: f64) -> Vec<f64> {
             kept.push(k);
         }
     }
+    // ALWAYS a choice (Max, 2026-10-02): a panel whose width has a large
+    // prime factor has almost no clean scales — 1366×768 (1366 = 2·683)
+    // allows only 50, 67, 100 and 200 %, and the rules above left 100 %
+    // alone, so the ASUS showed no Scale options at all. Then offer the
+    // nearest clean scale on each side of the current one, the smaller even
+    // under the usual floor, the larger only if the panel still fits.
+    if kept.len() < 2 {
+        let clean = clean_units(w, h);
+        if let Some(&k) = clean.iter().filter(|&&k| k < current).max() {
+            kept.push(k);
+        }
+        if let Some(&k) = clean.iter().filter(|&&k| k > current && offered(k)).min() {
+            kept.push(k);
+        }
+    }
     kept.sort_unstable();
     kept.into_iter().map(|k| f64::from(k) / SCALE_UNIT).collect()
 }
@@ -733,6 +748,19 @@ mod tests {
         assert_eq!(percents(&scale_stops(1440, 900, 1.0)), [75, 83, 90, 100, 113, 125, 150]);
         assert_eq!(percents(&scale_stops(1920, 1080, 1.5)), [75, 83, 100, 125, 150, 167, 200]);
         assert_eq!(percents(&scale_stops(3200, 2000, 1.6)), [80, 100, 125, 160, 200, 250]);
+    }
+
+    #[test]
+    fn a_panel_with_few_clean_scales_still_offers_a_choice() {
+        // The ASUS X550LC: 1366×768, clean only at 50/67/100/200 %; 200 %
+        // would be 683×384. 67 % (2049×1152) is the choice.
+        assert_eq!(percents(&scale_stops(1366, 768, 1.0)), [67, 100]);
+        // From 67 % the way back to 100 % is there too.
+        assert_eq!(percents(&scale_stops(1366, 768, 80.0 / 120.0)), [67, 100]);
+        // Every panel offers at least two scales.
+        for (w, h) in [(1366, 768), (1440, 900), (1920, 1080), (1600, 900), (1280, 800), (3200, 2000), (1024, 600)] {
+            assert!(scale_stops(w, h, 1.0).len() >= 2, "{w}x{h}: {:?}", scale_stops(w, h, 1.0));
+        }
     }
 
     #[test]

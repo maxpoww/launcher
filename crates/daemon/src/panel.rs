@@ -784,6 +784,11 @@ impl Panel {
                 .map(|(w, h)| (format!("{w} × {h}"), (w, h) == now, PanelAction::Mode { w, h, hz: None }))
                 .collect();
             y = self.flow(&mut out, y, 150.0, chips);
+            // A panel with ONE mode (the MacBook Air, the ASUS X550LC): say
+            // so, rather than leave a lone lit pill that looks broken.
+            if v.sizes.len() < 2 {
+                y = self.caption(&mut out, y, "This screen has one resolution.".to_owned());
+            }
             if v.rates.len() > 1 {
                 y = self.caption(&mut out, y, "Refresh rate".to_owned());
                 let chips = v
@@ -2003,6 +2008,20 @@ mod tests {
         assert_eq!(content.captions[0].0, "Refresh rate");
         let rate = content.chips.iter().find(|c| c.text == "165 Hz").expect("the other rate is offered");
         assert_eq!(rate.action, PanelAction::Mode { w: 1440, h: 900, hz: Some(165.0) });
+    }
+
+    #[test]
+    fn a_screen_with_one_resolution_says_so() {
+        let mut p = display_open("Resolution", 1.0);
+        if let Some(v) = &mut p.display {
+            v.sizes = vec![(1440, 900)];
+        }
+        let content = p.open_content("Resolution").unwrap();
+        assert_eq!(content.chips.len(), 1);
+        assert!(content.chips[0].on);
+        assert_eq!(content.captions.len(), 1);
+        assert!(content.captions[0].0.starts_with("This screen has one resolution"));
+        assert!(content.captions[0].1 > content.chips[0].rect.y);
     }
 
     #[test]
