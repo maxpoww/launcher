@@ -640,7 +640,8 @@ mod tests {
         let g = geometry((2000.0, 760.0), 1250.0, 1.0);
         assert!((g.card.y + g.card.h / 2.0 - (760.0 - 625.0)).abs() < 0.01, "the screen's centre");
         assert!((g.card.x + g.card.w / 2.0 - 1000.0).abs() < 0.01, "and its middle");
-        assert!(g.sides[0].x + g.sides[0].w < g.card.x && g.sides[1].x > g.card.x + g.card.w);
+        assert!(g.sides[0].x + g.sides[0].w < g.icon.x && g.sides[1].x > g.icon.x + g.icon.w, "beside the front icon");
+        assert!(g.sides[0].x >= g.card.x - g.ext && g.sides[1].x + g.sides[1].w <= g.card.x + g.card.w + g.ext, "inside the card reached out");
         assert_eq!(placement(3, 1), vec![1, 0, 2], "the selected one goes in front");
         assert_eq!(placement(1, 0), vec![0]);
     }
