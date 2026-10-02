@@ -1224,11 +1224,7 @@ impl App {
         };
         // FAST LAUNCH: the card and its icons (their motion lives in
         // `fast_launch.rs`).
-        if self.fast.step(dt) {
-            fit_animating = true;
-        }
         let fast_geo = self.fast_geometry();
-        let fast_view = self.fast.view(&fast_geo);
         let (fast_typed, fast_rest) = if self.fast.visible() { self.fast_words() } else { Default::default() };
         let (fast_typed_w, fast_rest_w) = self
             .renderer
@@ -1238,6 +1234,16 @@ impl App {
                 (m(&fast_typed), m(&fast_rest))
             })
             .unwrap_or((0.0, 0.0));
+        // The card grows with the name (plus a margin); closing, it keeps
+        // the width it had.
+        if self.fast.open {
+            let need = fast_typed_w + fast_rest_w + 2.0 * fast_geo.word_margin;
+            self.fast.wide_to = (need - fast_geo.card.w).max(0.0);
+        }
+        if self.fast.step(dt) {
+            fit_animating = true;
+        }
+        let fast_view = self.fast.view(&fast_geo);
         let fast_draw = self.fast.visible().then_some(content::FastDraw {
             card: fast_view.card,
             radius: fast_geo.radius,

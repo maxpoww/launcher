@@ -47,6 +47,11 @@ const LETTER_PX: f32 = 20.0;
 const LINE: f32 = 1.25;
 const TEXT_PAD: f32 = 4.0;
 const TYPE_GAP: f32 = 3.0;
+/// A name wider than the card widens it, this much clear each side of it
+/// (Max, 2026-10-02: "grow with the title plus a little margin").
+const WORD_MARGIN: f32 = 9.0;
+/// How fast the card follows the name's width (1/s): snappy.
+const WIDEN_RATE: f32 = 30.0;
 
 /// "Super snappy" (seconds). Opening: the front icon pops, the sides wait a
 /// beat, then slide out from behind it while the card grows with them.
@@ -191,6 +196,9 @@ pub(crate) struct FastLaunch {
     /// Time since it opened / since it began to close.
     pub since_open: f32,
     pub since_close: f32,
+    /// How much wider than at rest the card is for the name, now / wanted.
+    pub wide: f32,
+    pub wide_to: f32,
 }
 
 /// Where everything sits, logical px on the dock surface.
@@ -206,6 +214,8 @@ pub(crate) struct Geo {
     /// out from behind the front icon.
     pub ext: f32,
     pub travel: f32,
+    /// The clear space each side of a name that widens the card.
+    pub word_margin: f32,
     /// The word's box (centred in it, clipped to it) and its type.
     pub text: Rect,
     pub font_px: f32,
@@ -260,6 +270,15 @@ impl FastLaunch {
             return false;
         }
         let mut moving = false;
+        // The card follows the name's width (from the first frame as it is).
+        if self.since_open <= 0.0 && self.open {
+            self.wide = self.wide_to;
+        } else if (self.wide - self.wide_to).abs() > 0.3 {
+            self.wide += (self.wide_to - self.wide) * (1.0 - (-dt * WIDEN_RATE).exp());
+            moving = true;
+        } else {
+            self.wide = self.wide_to;
+        }
         let want = if self.open {
             self.since_open += dt;
             self.since_close = 0.0;
@@ -321,6 +340,9 @@ impl FastLaunch {
     /// The card and the icons where they are this frame.
     pub(crate) fn view(&self, g: &Geo) -> View {
         let mut card = g.card;
+        // Widened for a long name; the side icons move out with its edges.
+        card.x -= self.wide / 2.0;
+        card.w += self.wide;
         let mut icons = Vec::with_capacity(3);
         let [_, left, right] = self.places;
         for (i, side) in [left, right].iter().enumerate() {
@@ -337,7 +359,7 @@ impl FastLaunch {
             let toward = if i == 0 { 1.0 } else { -1.0 };
             let s = (0.55 + 0.45 * v) * pop_scale(side.pop);
             let r = g.sides[i];
-            let r = Rect::new(r.x + toward * g.travel * (1.0 - v), r.y, r.w, r.h);
+            let r = Rect::new(r.x - toward * self.wide / 2.0 + toward * (g.travel + self.wide / 2.0) * (1.0 - v), r.y, r.w, r.h);
             icons.push((entry, grow(r, s)));
         }
         if let Some(entry) = self.places[0].entry {
@@ -414,6 +436,7 @@ pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32) -> Geo {
         sides: [grow(slot_l, 1.0 - 2.0 * SIDE_INSET), grow(slot_r, 1.0 - 2.0 * SIDE_INSET)],
         ext,
         travel: cw / 2.0 + ext / 2.0,
+        word_margin: WORD_MARGIN * u,
         text: Rect::new(card.x + pad, card.y + ch - TYPE_GAP * u - line_px, cw - 2.0 * pad, line_px),
         font_px,
         line_px,

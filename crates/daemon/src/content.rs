@@ -3118,9 +3118,9 @@ pub fn scene(
             });
         }
         // The whole word centred (it never jumps as you type: "sp" already
-        // sits where "Spotify" will be), and always whole: a name wider than
-        // the card runs past its sides (Max, 2026-10-02: "the titles dont
-        // show complete") — the halo keeps it legible off the glass.
+        // sits where "Spotify" will be), and always whole (Max, 2026-10-02:
+        // "the titles dont show complete"): the card widens round a long
+        // name (`FastLaunch::wide`).
         let b = f.text_box;
         let total = f.typed_w + f.rest_w;
         let left = b.x + (b.w - total) / 2.0;
