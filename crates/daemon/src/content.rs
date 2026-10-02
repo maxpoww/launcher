@@ -3118,11 +3118,12 @@ pub fn scene(
             });
         }
         // The whole word centred (it never jumps as you type: "sp" already
-        // sits where "Spotify" will be); too long, it starts at the left and
-        // is cut at the card's margin. A soft shadow under it keeps it legible.
+        // sits where "Spotify" will be), and always whole: a name wider than
+        // the card runs past its sides (Max, 2026-10-02: "the titles dont
+        // show complete") — the halo keeps it legible off the glass.
         let b = f.text_box;
         let total = f.typed_w + f.rest_w;
-        let left = if total > b.w { b.x } else { b.x + (b.w - total) / 2.0 };
+        let left = b.x + (b.w - total) / 2.0;
         // Readable over anything through the clear glass (Max, 2026-10-02,
         // "1 and 2"): a HALO — the word drawn eight times round itself in
         // the opposite of the ink, a hair out, like subtitles over a film —
@@ -3131,9 +3132,8 @@ pub fn scene(
         let halo_r = (f.font_px * 0.07).max(1.0);
         let light_ink = dock_ink[0] + dock_ink[1] + dock_ink[2] > 1.5;
         let halo_rgb = if light_ink { [0.0, 0.0, 0.0] } else { [1.0, 1.0, 1.0] };
-        let clip = Rect::new(b.x - halo_r, b.y - halo_r, b.w + 2.0 * halo_r, b.h + 2.0 * halo_r);
         let mut word = |text: &str, x: f32, color: [f32; 4]| {
-            if text.is_empty() || x >= b.x + b.w {
+            if text.is_empty() {
                 return;
             }
             let halo = [halo_rgb[0], halo_rgb[1], halo_rgb[2], 0.28 * color[3]];
@@ -3147,7 +3147,7 @@ pub fn scene(
                 scene.labels.push(Label {
                     text: text.to_owned(),
                     pos: (x + dx, b.y + dy),
-                    max_w: b.x + b.w - x,
+                    max_w: total + 4.0 * halo_r + f.font_px,
                     font_px: f.font_px,
                     line_px: f.line_px,
                     centered: false,
@@ -3155,7 +3155,7 @@ pub fn scene(
                     cache: false,
                     family: crate::options::TEXT_FONT,
                     color: Some(c),
-                    clip: Some(clip),
+                    clip: None,
                 });
             }
         };
