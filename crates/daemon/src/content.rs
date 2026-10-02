@@ -3123,22 +3123,29 @@ pub fn scene(
         let b = f.text_box;
         let total = f.typed_w + f.rest_w;
         let left = if total > b.w { b.x } else { b.x + (b.w - total) / 2.0 };
-        let shadow_dy = (f.font_px * 0.05).max(1.0);
-        // The dock's own ink, measured against that glass: light on a dark
-        // card (with a soft shadow), dark on a bright one.
+        // Readable over anything through the clear glass (Max, 2026-10-02,
+        // "1 and 2"): a HALO — the word drawn eight times round itself in
+        // the opposite of the ink, a hair out, like subtitles over a film —
+        // and the dimmed rest of the name lifted to 65%.
+        let halo_r = (f.font_px * 0.07).max(1.0);
         let light_ink = dock_ink[0] + dock_ink[1] + dock_ink[2] > 1.5;
+        let halo_rgb = if light_ink { [0.0, 0.0, 0.0] } else { [1.0, 1.0, 1.0] };
+        let clip = Rect::new(b.x - halo_r, b.y - halo_r, b.w + 2.0 * halo_r, b.h + 2.0 * halo_r);
         let mut word = |text: &str, x: f32, color: [f32; 4]| {
             if text.is_empty() || x >= b.x + b.w {
                 return;
             }
-            let shadow = [0.0, 0.0, 0.0, if light_ink { 0.5 * color[3] } else { 0.0 }];
-            for (dy, c) in [(shadow_dy, shadow), (0.0, color)] {
-                if c[3] <= 0.0 {
-                    continue;
-                }
+            let halo = [halo_rgb[0], halo_rgb[1], halo_rgb[2], 0.4 * color[3]];
+            let d = halo_r * std::f32::consts::FRAC_1_SQRT_2;
+            let rings = [
+                (halo_r, 0.0), (-halo_r, 0.0), (0.0, halo_r), (0.0, -halo_r),
+                (d, d), (-d, d), (d, -d), (-d, -d),
+            ];
+            let copies = rings.iter().map(|&o| (o, halo)).chain(std::iter::once(((0.0, 0.0), color)));
+            for ((dx, dy), c) in copies {
                 scene.labels.push(Label {
                     text: text.to_owned(),
-                    pos: (x, b.y + dy),
+                    pos: (x + dx, b.y + dy),
                     max_w: b.x + b.w - x,
                     font_px: f.font_px,
                     line_px: f.line_px,
@@ -3147,13 +3154,13 @@ pub fn scene(
                     cache: false,
                     family: crate::options::TEXT_FONT,
                     color: Some(c),
-                    clip: Some(b),
+                    clip: Some(clip),
                 });
             }
         };
         let ink = |k: f32| [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * a];
         word(f.typed, left, ink(0.95));
-        word(f.rest, left + f.typed_w, ink(0.38));
+        word(f.rest, left + f.typed_w, ink(0.65));
     }
 
     // Ghost of a box member being reordered, following the pointer (topmost).
