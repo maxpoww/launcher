@@ -2369,6 +2369,16 @@ impl App {
     /// Entry point for IPC commands (called from ipc.rs) and for
     /// internally generated commands (Escape, focus loss, scroll).
     pub fn handle_command(&mut self, command: Command) {
+        // Calling the dock or a box closes FAST LAUNCH (Max, 2026-10-02).
+        // A box takes the keyboard over itself, so the bubble lets go of it
+        // without handing it back to a window first.
+        if self.fast.open {
+            match command {
+                Command::Show => self.close_fast_launch(),
+                Command::Toggle | Command::Expand | Command::ControlPanel => self.fast_yield_keyboard_to_box(),
+                _ => {}
+            }
+        }
         // Debug/verification verbs force-open an OPTIONS surface (clipboard /
         // notification box) so it can be screenshotted — they don't touch the
         // launcher rest-state machine, so handle and return before `ui.apply`.
@@ -6248,8 +6258,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 app.hide_deadline = None;
                 app.pointer_pos = Some((surface_x as f32, surface_y as f32));
                 // While hidden, only the edge-reveal strip is
-                // pointer-sensitive, so entering means "summon".
-                if app.ui.target() == Target::Hidden && app.config.input.edge_reveal {
+                // pointer-sensitive, so entering means "summon" — except
+                // while FAST LAUNCH spans the whole surface: then only the
+                // strip itself calls the dock (and closes the bubble).
+                if app.ui.target() == Target::Hidden
+                    && app.config.input.edge_reveal
+                    && (!app.fast.open || app.pointer_on_reveal_strip())
+                {
                     app.handle_command(Command::Show);
                 }
                 app.update_hover();
@@ -6303,7 +6318,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 // it would vanish out from under the cursor.
                 if app.ui.target() == Target::Hidden
                     && (app.pointer_on_reveal_strip()
-                        || matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))))
+                        || (!app.fast.open && matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_)))))
                 {
                     app.hide_deadline = None;
                     app.handle_command(Command::Show);

@@ -499,6 +499,14 @@ impl App {
         self.schedule_frame();
     }
 
+    /// A box is opening over the bubble: close it, leaving the keyboard to
+    /// the box (no hand-back to a window in between).
+    pub(crate) fn fast_yield_keyboard_to_box(&mut self) {
+        self.fast.open = false;
+        self.sync_input_region();
+        self.schedule_frame();
+    }
+
     /// Close the bubble and hand the keyboard back to the window you were on.
     pub(crate) fn close_fast_launch(&mut self) {
         if !self.fast.open {
