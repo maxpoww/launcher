@@ -24,29 +24,29 @@ use crate::{apps, App, KbSurface, LaunchFrom};
 pub(crate) const REVEAL_AT: usize = 3;
 
 /// Max's look, the Fast Launch mockup as he left it (2026-10-02), in the
-/// mockup's px — then "a little smaller, tight", then tighter still
-/// (the icons the same size): the card hugs its icon and word. THE CARD: a glass card mid-screen, the front app's bare
+/// mockup's px — then "a little smaller, tight", then tighter still, and
+/// a little smaller again (the icons the same size): the card hugs its icon and word. THE CARD: a glass card mid-screen, the front app's bare
 /// icon in its upper part and the word at its bottom; the card reaches out
 /// left and right only while an icon sits there. (`GROW`: the dock reads
 /// the mockup a fifth bigger — "a little bigger" on the first port.)
 const GROW: f32 = 1.2;
-const CARD_W: f32 = 90.0;
-const CARD_H: f32 = 97.0;
-const CARD_R: f32 = 18.0;
+const CARD_W: f32 = 84.0;
+const CARD_H: f32 = 92.0;
+const CARD_R: f32 = 17.0;
 /// The front icon: its size, and its distance from the card's top.
 const ICON: f32 = 58.0;
-const CARD_PAD: f32 = 8.0;
+const CARD_PAD: f32 = 6.0;
 /// A side app's slot (its icon is inset a tenth), and how far the card
 /// reaches out to hold it; each side icon is nudged in toward the middle.
 const SIDE: f32 = 52.0;
 const SIDE_INSET: f32 = 0.10;
-const EXT: f32 = 52.0;
-const NUDGE: f32 = 6.0;
+const EXT: f32 = 49.0;
+const NUDGE: f32 = 5.0;
 /// The word: its size, its margin inside the card, its gap to the bottom.
 const LETTER_PX: f32 = 20.0;
 const LINE: f32 = 1.45;
-const TEXT_PAD: f32 = 7.0;
-const TYPE_GAP: f32 = 5.0;
+const TEXT_PAD: f32 = 5.0;
+const TYPE_GAP: f32 = 4.0;
 
 /// "Super snappy" (seconds). Opening: the front icon pops, the sides wait a
 /// beat, then slide out from behind it while the card grows with them.
