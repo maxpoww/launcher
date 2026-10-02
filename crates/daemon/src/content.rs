@@ -3097,6 +3097,13 @@ pub fn scene(
     // word at its bottom, over everything.
     if let Some(f) = fast.filter(|f| f.a > 0.0) {
         let a = f.a;
+        // BLURRY (Max, 2026-10-02): the compositor blurs behind the dock's
+        // pixels only where they are at least half opaque (the layer rule's
+        // ignore_alpha 0.5), so the card first lays down the dock's own glass —
+        // its sampled colour at the dock's alpha — then the mockup's light
+        // wash and rim on top.
+        let base = [dock_bg[0], dock_bg[1], dock_bg[2], dock_bg[3].max(0.51) * a];
+        scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: base, glass: 0.0, border: 0.0 });
         let fill = crate::options::wash(true, 0.12 * a);
         scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: fill, glass: 0.5, border: 0.0 });
         let rim = crate::options::wash(true, 0.22 * a);
@@ -3117,11 +3124,18 @@ pub fn scene(
         let total = f.typed_w + f.rest_w;
         let left = if total > b.w { b.x } else { b.x + (b.w - total) / 2.0 };
         let shadow_dy = (f.font_px * 0.05).max(1.0);
+        // The dock's own ink, measured against that glass: light on a dark
+        // card (with a soft shadow), dark on a bright one.
+        let light_ink = dock_ink[0] + dock_ink[1] + dock_ink[2] > 1.5;
         let mut word = |text: &str, x: f32, color: [f32; 4]| {
             if text.is_empty() || x >= b.x + b.w {
                 return;
             }
-            for (dy, c) in [(shadow_dy, [0.0, 0.0, 0.0, 0.5 * color[3]]), (0.0, color)] {
+            let shadow = [0.0, 0.0, 0.0, if light_ink { 0.5 * color[3] } else { 0.0 }];
+            for (dy, c) in [(shadow_dy, shadow), (0.0, color)] {
+                if c[3] <= 0.0 {
+                    continue;
+                }
                 scene.labels.push(Label {
                     text: text.to_owned(),
                     pos: (x, b.y + dy),
@@ -3137,8 +3151,9 @@ pub fn scene(
                 });
             }
         };
-        word(f.typed, left, [0.95, 0.96, 0.93, 0.95 * a]);
-        word(f.rest, left + f.typed_w, [0.95, 0.96, 0.93, 0.38 * a]);
+        let ink = |k: f32| [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * a];
+        word(f.typed, left, ink(0.95));
+        word(f.rest, left + f.typed_w, ink(0.38));
     }
 
     // Ghost of a box member being reordered, following the pointer (topmost).
