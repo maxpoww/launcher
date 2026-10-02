@@ -50,6 +50,8 @@ const TYPE_GAP: f32 = 3.0;
 /// A name wider than the card widens it, this much clear each side of it
 /// (Max, 2026-10-02: "grow with the title plus a little margin").
 const WORD_MARGIN: f32 = 9.0;
+/// ...and a little more on its right ("a little more margin to the right").
+const WORD_MARGIN_RIGHT_EXTRA: f32 = 6.0;
 /// How fast the card follows the name's width (1/s): snappy.
 const WIDEN_RATE: f32 = 30.0;
 
@@ -216,6 +218,7 @@ pub(crate) struct Geo {
     pub travel: f32,
     /// The clear space each side of a name that widens the card.
     pub word_margin: f32,
+    pub word_margin_extra: f32,
     /// The word's box (centred in it, clipped to it) and its type.
     pub text: Rect,
     pub font_px: f32,
@@ -437,6 +440,7 @@ pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32) -> Geo {
         ext,
         travel: cw / 2.0 + ext / 2.0,
         word_margin: WORD_MARGIN * u,
+        word_margin_extra: WORD_MARGIN_RIGHT_EXTRA * u,
         text: Rect::new(card.x + pad, card.y + ch - TYPE_GAP * u - line_px, cw - 2.0 * pad, line_px),
         font_px,
         line_px,

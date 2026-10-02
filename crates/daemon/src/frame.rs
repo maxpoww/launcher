@@ -1237,7 +1237,7 @@ impl App {
         // The card grows with the name (plus a margin); closing, it keeps
         // the width it had.
         if self.fast.open {
-            let need = fast_typed_w + fast_rest_w + 2.0 * fast_geo.word_margin;
+            let need = fast_typed_w + fast_rest_w + 2.0 * fast_geo.word_margin + fast_geo.word_margin_extra;
             self.fast.wide_to = (need - fast_geo.card.w).max(0.0);
         }
         if self.fast.step(dt) {
@@ -1253,7 +1253,12 @@ impl App {
             rest: &fast_rest,
             typed_w: fast_typed_w,
             rest_w: fast_rest_w,
-            text_box: fast_geo.text,
+            // The card widens evenly: the word sits left of its middle by
+            // half the right margin's extra, as far as the card has grown.
+            text_box: {
+                let shift = fast_geo.word_margin_extra.min(self.fast.wide) / 2.0;
+                content::Rect::new(fast_geo.text.x - shift, fast_geo.text.y, fast_geo.text.w, fast_geo.text.h)
+            },
             font_px: fast_geo.font_px,
             line_px: fast_geo.line_px,
         });
