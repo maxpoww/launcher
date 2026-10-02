@@ -482,12 +482,15 @@ impl App {
             self.close_fast_launch();
             return;
         }
+        // Up FIRST: the card collapsing below then keeps the keyboard on our
+        // layer (`sync_surface_state`) instead of releasing it — a release
+        // the compositor answers with a leave, which closes the bubble.
+        let batch = self.fast.batch.take();
+        self.fast = FastLaunch { batch, ..FastLaunch::opened() };
         // The big card is the other way to launch: out of the way.
         if self.ui.target() == crate::state::Target::Open {
             self.handle_command(waverunner_proto::Command::Collapse);
         }
-        let batch = self.fast.batch.take();
-        self.fast = FastLaunch { batch, ..FastLaunch::opened() };
         // Nothing typed yet: the card already holds the three apps you use
         // most — Enter launches the middle one straight away.
         self.fast_rematch();
@@ -579,7 +582,11 @@ impl App {
             }
             _ => {
                 if let Some(text) = utf8 {
-                    let printable: String = text.chars().filter(|c| !c.is_control()).collect();
+                    let mut printable: String = text.chars().filter(|c| !c.is_control()).collect();
+                    // Nothing typed yet: a space starts nothing.
+                    if self.fast.query.is_empty() {
+                        printable = printable.trim_start().to_owned();
+                    }
                     if !printable.is_empty() {
                         self.fast.query.push_str(&printable);
                         self.fast.sel = 0;
@@ -628,7 +635,9 @@ impl App {
                 needs_terminal: e.needs_terminal,
                 to_launch: n - 1,
                 to_map: n,
-                class: None,
+                // The class its windows will carry when the entry says so
+                // (else learnt from the first window that maps).
+                class: e.startup_wm_class.clone().or_else(|| webapps::slug_of_id(&e.id).map(|_| e.id.clone())),
                 step: 0,
             });
             self.arm_batch_patience();
@@ -643,7 +652,7 @@ impl App {
             return;
         };
         match &b.class {
-            Some(c) if c != class => return,
+            Some(c) if !c.eq_ignore_ascii_case(class) => return,
             Some(_) => {}
             None => b.class = Some(class.to_owned()),
         }
@@ -709,14 +718,13 @@ impl App {
     /// A left click while the launcher is up: an icon launches its app; the
     /// card itself does nothing; anywhere else closes.
     pub(crate) fn fast_click(&mut self, pos: (f32, f32)) {
-        let g = self.fast_geometry();
-        let want = self.fast.want();
-        let hit = [(g.icon, want[0]), (g.sides[0], want[1]), (g.sides[1], want[2])]
-            .into_iter()
-            .find_map(|(r, e)| e.filter(|_| r.contains(pos)));
+        // The icons where they are DRAWN (a long name widens the card and
+        // moves the side icons out), the front one first: it is on top.
+        let view = self.fast.view(&self.fast_geometry());
+        let hit = view.icons.iter().rev().find(|(_, r)| r.contains(pos)).map(|&(e, _)| e);
         if let Some(entry) = hit {
             self.fast_launch_pick(Some(entry));
-        } else if !self.fast.view(&g).card.contains(pos) {
+        } else if !view.card.contains(pos) {
             self.close_fast_launch();
         }
     }

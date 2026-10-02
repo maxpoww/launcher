@@ -5123,7 +5123,10 @@ impl App {
             self.search.open = false;
             self.refilter();
         }
-        let interactive = self.ui.wants_keyboard();
+        // FAST LAUNCH holds the keyboard whatever the dock does under it (a
+        // dock auto-hiding mid-launch released it: the typing went to the
+        // window behind).
+        let interactive = self.ui.wants_keyboard() || self.fast.open;
         if interactive != self.interactive {
             if interactive {
                 // Grabbing the keyboard for type-to-search steals it from
@@ -5341,6 +5344,11 @@ impl App {
     /// the grid (down = next, up = previous) and never collapses the
     /// popup — dismissal is Escape / pointer-leave / toggle only.
     fn on_scroll(&mut self, value: f64) {
+        // FAST LAUNCH spans the whole surface: a scroll anywhere is not a
+        // reach for the dock.
+        if self.fast.open {
+            return;
+        }
         // A drag in flight owns paging (the clamped edge bands): wheel
         // events mid-drag — real or a trackpad's spurious axis noise —
         // must not wrap-cycle the pages out from under the drag.
@@ -5426,6 +5434,9 @@ impl App {
     /// (Untestable in the dev VM — its virtual pointer has no horizontal
     /// axis; verify on real hardware.)
     fn on_hscroll(&mut self, value: f64) {
+        if self.fast.open {
+            return;
+        }
         // Mid-drag wheel events must not page (see `on_scroll`).
         if self.gesture.dragging.is_some() || self.box_drag.is_some() {
             return;
@@ -6064,6 +6075,20 @@ impl KeyboardHandler for App {
             return;
         }
         debug!("keyboard focus lost; target={:?}", self.ui.target());
+        if self.fast.open {
+            // The keyboard went elsewhere while FAST LAUNCH was up (a click on
+            // a window, another grab): the user chose — close, no hand-back.
+            self.cancel_keyboard_handback(KbSurface::Launcher);
+            self.fast.enter = None;
+            self.fast.open = false;
+            if self.ui.target() != Target::Open {
+                surface::set_interactive(&self.layer, false);
+                self.interactive = false;
+            }
+            self.sync_input_region();
+            self.schedule_frame();
+            return;
+        }
         if self.ui.target() == Target::Open {
             // Still open when the keyboard left us: the user focused
             // another window. Respect their choice — no hand-back — and
