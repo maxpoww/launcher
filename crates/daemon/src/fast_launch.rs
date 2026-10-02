@@ -214,8 +214,8 @@ pub(crate) struct FastLaunch {
     pub idle_gen: u32,
 }
 
-/// How long the bubble stays up with nothing happening.
-const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long the bubble stays up with nothing happening (3 s, then "make it 2s").
+const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// SEVERAL INSTANCES (Max, 2026-10-02): they are launched ONE AFTER ANOTHER,
 /// each as soon as the one before has mapped — window memory steps the
