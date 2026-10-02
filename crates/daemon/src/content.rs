@@ -1799,7 +1799,7 @@ pub fn scene(
     if !config.accessibility.reduce_transparency {
         // Open, the card reaches `theme.open_opacity` when one is set (the
         // light tier's denser box), else the background's own alpha.
-        let open_a = config.theme.open_opacity.map_or(card_fill[3], |a| a.clamp(0.0, 1.0));
+        let open_a = config.theme.open_alpha(card_fill[3]);
         card_fill[3] = lerp(card_fill[3] * DOCK_REST_FILL, open_a, card_open);
     }
     scene.rects.push(RectInst {
@@ -2915,6 +2915,9 @@ pub fn scene(
         // animation — so a group box reads as the same colour as the main box,
         // not a darker, more opaque panel.
         let mut panel = dock_bg;
+        if !config.accessibility.reduce_transparency {
+            panel[3] = config.theme.open_alpha(panel[3]);
+        }
         panel[3] *= t;
         let (bjl, bjr, bjt, bjb) = box_push;
         let box_draw = Rect::new(

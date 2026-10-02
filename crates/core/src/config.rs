@@ -372,11 +372,14 @@ pub struct ThemeConfig {
     /// so it rounds full-bleed square icons but leaves circular or padded
     /// ones unchanged — hence plates are the default for real cohesion.
     pub icon_squircle: f32,
-    /// Opacity of the OPEN card (the menubox: Apps / Install / Files),
-    /// `0.0..=1.0`. Unset: the background's own alpha, as before. Golem's
-    /// light effects tier (no compositor blur) sets it denser, so what sits
-    /// behind the open card does not read straight through it (ASUS
-    /// X550LC, 2026-10-02). The resting dock keeps `background`'s look.
+    /// Opacity of every OPEN box — the menubox (Apps / Install / Files and
+    /// the settings panel on it), the dock's group boxes and the OPTIONS
+    /// boxes (clipboard, notifications, …) — `0.0..=1.0`. Unset: each keeps
+    /// its own glass as before (the background's alpha; OPTIONS boxes 80%).
+    /// Golem's light effects tier (no compositor blur) sets it denser, so
+    /// what sits behind an open box does not read straight through it (ASUS
+    /// X550LC, 2026-10-02; Max picked 95%). The resting dock and FAST
+    /// LAUNCH keep their lighter glass.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_opacity: Option<f32>,
 }
@@ -400,6 +403,12 @@ impl ThemeConfig {
     /// Parse [`ThemeConfig::background`] into linear-ish RGBA floats in
     /// `0.0..=1.0`. Invalid values fall back to an opaque dark grey rather
     /// than erroring per frame.
+    /// An open box's alpha: [`ThemeConfig::open_opacity`] when set, else
+    /// that box's own `fallback`.
+    pub fn open_alpha(&self, fallback: f32) -> f32 {
+        self.open_opacity.map_or(fallback, |a| a.clamp(0.0, 1.0))
+    }
+
     pub fn background_rgba(&self) -> [f32; 4] {
         parse_hex_rgba(&self.background).unwrap_or([0.02, 0.027, 0.035, 0.502])
     }

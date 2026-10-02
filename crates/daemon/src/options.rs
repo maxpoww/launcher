@@ -1122,13 +1122,14 @@ const LIST_DIM: f32 = 0.67;
 const LIST_DIM_LIGHT: f32 = 0.88;
 
 impl crate::App {
-    /// The open boxes' panel/zebra alpha: [`BOX_ALPHA`] glass normally,
+    /// The open boxes' panel/zebra alpha: [`BOX_ALPHA`] glass normally, the
+    /// theme's `open_opacity` where set (the light tier: no blur behind),
     /// fully opaque under the reduce-transparency intent.
     pub(crate) fn box_panel_alpha(&self) -> f32 {
         if self.config.accessibility.reduce_transparency {
             1.0
         } else {
-            BOX_ALPHA
+            self.config.theme.open_alpha(BOX_ALPHA)
         }
     }
 }
