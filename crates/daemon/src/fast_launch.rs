@@ -25,11 +25,12 @@ pub(crate) const REVEAL_AT: usize = 3;
 
 /// Max's look, the Fast Launch mockup as he left it (2026-10-02), in the
 /// mockup's px, made tighter step by step — and then "not a square card
-/// anymore": THE GLASS CONTOURS THE FIGURES. A rounded shape round the front
-/// app's bare icon, a pill round the word under it, one round each side
-/// icon — melted into one figure by a smooth union (the bar banner's
-/// blister, `rounded_rect.wgsl`), so a side icon comes out of the front one
-/// like a drop. (`GROW`: the dock reads the mockup a fifth bigger — "a
+/// anymore", "a little contoured, kind of like a cross": THE GLASS IS A
+/// CROSS. A column round the front app's bare icon and the word under it
+/// (the word's pill shows past it only when the name is wider), and a bar
+/// across it holding the side icons — the arms grow out with the icons —
+/// joined by a smooth union with small rounded inner corners (the bar
+/// banner's blister, `rounded_rect.wgsl`). (`GROW`: the dock reads the mockup a fifth bigger — "a
 /// little bigger" on the first port.)
 const GROW: f32 = 1.2;
 /// The front icon, and the glass round it: margin and corner radius.
@@ -49,8 +50,8 @@ const WORD_PAD_X: f32 = 10.0;
 const WORD_PAD_Y: f32 = 2.0;
 const WORD_TUCK: f32 = 4.0;
 const WORD_MAX: f32 = 320.0;
-/// How soft the necks between the shapes are (the union's fillet).
-const MELT: f32 = 12.0;
+/// How soft the inner corners of the cross are (the union's fillet).
+const MELT: f32 = 5.0;
 
 /// "Super snappy" (seconds). Opening: the front icon pops, the sides wait a
 /// beat, then slide out from behind it the glass melting out with them.
@@ -372,7 +373,19 @@ impl FastLaunch {
         let tw = word_w.min(g.word_max);
         let text = Rect::new(cx - tw / 2.0, g.word_top + g.word_pad.1, tw, g.line_px);
         if word_w > 0.0 {
-            shapes[1] = Some(grow(pad2(text, g.word_pad), shrink));
+            let pill = grow(pad2(text, g.word_pad), shrink);
+            shapes[1] = Some(pill);
+            // A CROSS, only a little contoured (Max, 2026-10-02): the front's
+            // glass runs down as one column to the word's bottom (the pill
+            // only shows past it when the name is wider)...
+            shapes[0] = Some(Rect::new(front.x, front.y, front.w, (pill.y + pill.h - front.y).max(front.h)));
+        }
+        // ...and the side icons sit on one bar across it.
+        let arm = shapes[2..].iter().flatten().fold(None::<Rect>, |b, r| Some(b.map_or(*r, |b| union(b, *r))));
+        if let Some(arm) = arm {
+            let mid = front.x + front.w / 2.0;
+            shapes[2] = Some(union(arm, Rect::new(mid, arm.y, 0.0, arm.h)));
+            shapes[3] = None;
         }
         let bounds = shapes.iter().flatten().fold(front, |b, r| union(b, *r));
         View { shapes, bounds, a: self.card_a, icons, text }
@@ -672,7 +685,7 @@ mod tests {
         let v = f.view(&g, 80.0);
         assert_eq!(v.icons.len(), 3);
         assert_eq!(v.icons[2].0, 5, "the front icon is drawn last, on top");
-        assert!(v.shapes.iter().all(Option::is_some), "glass round all three, and the word");
+        assert!(v.shapes[0].is_some() && v.shapes[1].is_some() && v.shapes[2].is_some(), "a cross: the column, the word, the bar");
         assert!(v.bounds.x < g.sides[0].x && v.bounds.x + v.bounds.w > g.sides[1].x + g.sides[1].w);
         f.open = false;
         t = 0.0;
