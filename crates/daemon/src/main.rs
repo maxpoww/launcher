@@ -6302,6 +6302,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 let prev_pos = app.pointer_pos; // save before update for velocity
                 let pos = (surface_x as f32, surface_y as f32);
                 app.pointer_pos = Some(pos);
+                if app.fast.open {
+                    app.fast_touch();
+                }
                 // Edge-crossing jelly poke: fire whenever the pointer crosses
                 // the card boundary (inside ↔ outside), regardless of click.
                 {

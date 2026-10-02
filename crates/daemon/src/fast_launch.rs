@@ -207,7 +207,15 @@ pub(crate) struct FastLaunch {
     pub enter: Option<u32>,
     /// A launch of several instances in progress (see [`Batch`]).
     pub batch: Option<Batch>,
+    /// AUTO-HIDE (Max, 2026-10-02): the last key, click or pointer move;
+    /// `IDLE_CLOSE` without one closes the bubble. `idle_gen` tells this
+    /// opening's watch from a previous one's.
+    pub touched: Option<std::time::Instant>,
+    pub idle_gen: u32,
 }
+
+/// How long the bubble stays up with nothing happening.
+const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// SEVERAL INSTANCES (Max, 2026-10-02): they are launched ONE AFTER ANOTHER,
 /// each as soon as the one before has mapped — window memory steps the
@@ -486,7 +494,10 @@ impl App {
         // layer (`sync_surface_state`) instead of releasing it — a release
         // the compositor answers with a leave, which closes the bubble.
         let batch = self.fast.batch.take();
-        self.fast = FastLaunch { batch, ..FastLaunch::opened() };
+        let idle_gen = self.fast.idle_gen.wrapping_add(1);
+        self.fast = FastLaunch { batch, idle_gen, ..FastLaunch::opened() };
+        self.fast_touch();
+        self.arm_fast_idle(IDLE_CLOSE);
         // The big card is the other way to launch: out of the way.
         if self.ui.target() == crate::state::Target::Open {
             self.handle_command(waverunner_proto::Command::Collapse);
@@ -500,6 +511,30 @@ impl App {
         self.interactive = true;
         self.sync_input_region();
         self.schedule_frame();
+    }
+
+    /// Something happened in the bubble: its idle clock starts over.
+    pub(crate) fn fast_touch(&mut self) {
+        self.fast.touched = Some(std::time::Instant::now());
+    }
+
+    /// One watch per opening: when it fires, the bubble closes if nothing
+    /// happened for `IDLE_CLOSE` (and Enter is not held down), else it
+    /// looks again when that much will have passed.
+    fn arm_fast_idle(&mut self, after: std::time::Duration) {
+        let gen = self.fast.idle_gen;
+        let timer = calloop::timer::Timer::from_duration(after);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if !app.fast.open || app.fast.idle_gen != gen {
+                return calloop::timer::TimeoutAction::Drop;
+            }
+            let idle = app.fast.touched.map_or(IDLE_CLOSE, |t| t.elapsed());
+            if idle >= IDLE_CLOSE && app.fast.enter.is_none() {
+                app.close_fast_launch();
+                return calloop::timer::TimeoutAction::Drop;
+            }
+            calloop::timer::TimeoutAction::ToDuration(IDLE_CLOSE.saturating_sub(idle).max(std::time::Duration::from_millis(50)))
+        });
     }
 
     /// A box is opening over the bubble: close it, leaving the keyboard to
@@ -547,6 +582,7 @@ impl App {
 
     /// A key while the bubble is open: it takes every key.
     pub(crate) fn fast_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        self.fast_touch();
 
         match keysym {
             Keysym::Escape => self.close_fast_launch(),
@@ -606,6 +642,7 @@ impl App {
     /// A key let go while the launcher is up: Enter's release launches —
     /// as many instances as the digit pressed while it was down.
     pub(crate) fn fast_key_release(&mut self, keysym: Keysym) {
+        self.fast_touch();
         if matches!(keysym, Keysym::Return | Keysym::KP_Enter) {
             if let Some(n) = self.fast.enter.take() {
                 self.fast_launch_many(None, n);
@@ -718,6 +755,7 @@ impl App {
     /// A left click while the launcher is up: an icon launches its app; the
     /// card itself does nothing; anywhere else closes.
     pub(crate) fn fast_click(&mut self, pos: (f32, f32)) {
+        self.fast_touch();
         // The icons where they are DRAWN (a long name widens the card and
         // moves the side icons out), the front one first: it is on top.
         let view = self.fast.view(&self.fast_geometry());
