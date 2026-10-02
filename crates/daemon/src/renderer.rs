@@ -244,14 +244,14 @@ impl Renderer {
         // and one failed attempt used to be fatal. Each rung is tried in
         // turn and the reason for the previous one is logged.
         const ATTEMPTS: [(wgpu::Backends, bool, &str); 3] = [
-            // What we want: a real GPU on Vulkan (or GL).
-            (
-                wgpu::Backends::from_bits_truncate(
-                    wgpu::Backends::VULKAN.bits() | wgpu::Backends::GL.bits(),
-                ),
-                false,
-                "gpu",
-            ),
+            // What we want: a real GPU on Vulkan. Vulkan ALONE: asking for
+            // GL too made every start also bring up EGL, Mesa's GL driver
+            // (libgallium, 60 MB) and two GL contexts on machines that never
+            // draw through them — reads a spinning disk pays for at login
+            // (ThinkPad, 2026-10-01). LLVM still loads on most machines
+            // (RADV and lavapipe link it). A machine without a usable Vulkan
+            // GPU reaches GL on the next rung, as before.
+            (wgpu::Backends::VULKAN, false, "gpu"),
             // Some stacks present fine on GL while their Vulkan surface path
             // is broken; asking for GL alone changes which one is picked.
             // MUST come before the software fallback: on pre-Skylake Intel
@@ -389,6 +389,15 @@ impl Renderer {
             .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
         {
             wgpu::CompositeAlphaMode::PreMultiplied
+        } else if adapter.get_info().backend == wgpu::Backend::Gl {
+            // wgpu's GL backend always REPORTS Opaque (a `//TODO` in
+            // wgpu-hal), but on Wayland the EGL config has 8 alpha bits, the
+            // buffers go out as ARGB8888 and the compositor blends them:
+            // the bar and the dock's glass are translucent. Measured over an
+            // orange wallpaper on the ASUS X550LC (Haswell, GL), 2026-10-02,
+            // identical to the same chip on Vulkan. Nothing to warn about.
+            tracing::debug!("GL reports {:?}; its Wayland buffers carry alpha", caps.alpha_modes);
+            caps.alpha_modes[0]
         } else {
             tracing::warn!(
                 "premultiplied alpha unsupported, transparency may be wrong: {:?}",
