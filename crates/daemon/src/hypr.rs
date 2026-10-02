@@ -1081,6 +1081,10 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 // Window memory: note it, step the app's
                                 // cascade on for its next window.
                                 app.remember_window_opened(&addr);
+                                // FAST LAUNCH's several instances: the next
+                                // one goes now the cascade has stepped.
+                                let class = line.split(">>").nth(1).and_then(|d| d.split(',').nth(2)).unwrap_or("");
+                                app.fast_batch_window_opened(class.trim());
                             }
                         }
                         // The space's shape changed: a window arrived, left, or

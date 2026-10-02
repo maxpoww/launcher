@@ -205,7 +205,31 @@ pub(crate) struct FastLaunch {
     /// a digit pressed while it is down sets how many instances (4 → four
     /// Foots). `None` = Enter is up.
     pub enter: Option<u32>,
+    /// A launch of several instances in progress (see [`Batch`]).
+    pub batch: Option<Batch>,
 }
+
+/// SEVERAL INSTANCES (Max, 2026-10-02): they are launched ONE AFTER ANOTHER,
+/// each as soon as the one before has mapped — window memory steps the
+/// app's cascade as each window maps, so launched together they all landed
+/// on one spot — and when the last is in, the workspace opens in the SPREAD
+/// ("i want the spreaded when more than 1 anyway").
+pub(crate) struct Batch {
+    exec: String,
+    needs_terminal: bool,
+    /// Instances still to launch, and windows still to arrive.
+    to_launch: u32,
+    to_map: u32,
+    /// The app's window class, learned from its first window (another
+    /// app's window mapping meanwhile does not count).
+    class: Option<String>,
+    /// Bumped at every step: a stale timeout finds a different number.
+    step: u32,
+}
+
+/// How long one instance may take to map before the rest are launched
+/// anyway (and the spread opened).
+const BATCH_PATIENCE: std::time::Duration = std::time::Duration::from_millis(2500);
 
 /// Where everything sits, logical px on the dock surface.
 #[derive(Debug, Clone, Copy)]
@@ -462,7 +486,8 @@ impl App {
         if self.ui.target() == crate::state::Target::Open {
             self.handle_command(waverunner_proto::Command::Collapse);
         }
-        self.fast = FastLaunch::opened();
+        let batch = self.fast.batch.take();
+        self.fast = FastLaunch { batch, ..FastLaunch::opened() };
         // Nothing typed yet: the card already holds the three apps you use
         // most — Enter launches the middle one straight away.
         self.fast_rematch();
@@ -585,20 +610,84 @@ impl App {
         self.fast.open = false;
         // Always a NEW instance — the box's rule: you asked to launch.
         self.activate(idx, LaunchFrom::Box);
-        // The rest straight after it (window memory cascades them as they
-        // map); a webapp asks Seam for a new window each time.
+        // The rest one by one as each window maps (see `Batch`); a webapp
+        // asks Seam for a new window each time.
         if let Some(e) = self.entries.get(idx).filter(|_| n > 1) {
             let exec = if webapps::slug_of_id(&e.id).is_some() { webapps::new_window_exec(&e.exec) } else { e.exec.clone() };
-            let needs_terminal = e.needs_terminal;
             tracing::info!("fast launch: {} x{n}", e.id);
-            for _ in 1..n {
-                if let Err(err) = crate::launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
-                    tracing::error!("launch failed: {err:#}");
-                    break;
-                }
-            }
+            self.fast.batch = Some(Batch {
+                exec,
+                needs_terminal: e.needs_terminal,
+                to_launch: n - 1,
+                to_map: n,
+                class: None,
+                step: 0,
+            });
+            self.arm_batch_patience();
         }
         self.close_fast_launch_after_launch();
+    }
+
+    /// A window mapped (`openwindow`, class `class`): the batch's next
+    /// instance goes; after its last, the spread.
+    pub(crate) fn fast_batch_window_opened(&mut self, class: &str) {
+        let Some(b) = self.fast.batch.as_mut() else {
+            return;
+        };
+        match &b.class {
+            Some(c) if c != class => return,
+            Some(_) => {}
+            None => b.class = Some(class.to_owned()),
+        }
+        b.to_map = b.to_map.saturating_sub(1);
+        self.fast_batch_next();
+    }
+
+    /// Launch the batch's next instance, or — none left to launch and every
+    /// window in — open the spread and finish.
+    fn fast_batch_next(&mut self) {
+        let Some(b) = self.fast.batch.as_mut() else {
+            return;
+        };
+        if b.to_launch > 0 {
+            b.to_launch -= 1;
+            let (exec, term) = (b.exec.clone(), b.needs_terminal);
+            if let Err(err) = crate::launch::launch(&exec, term, &self.config.launch.terminal) {
+                tracing::error!("launch failed: {err:#}");
+            }
+            self.arm_batch_patience();
+        } else if b.to_map == 0 {
+            self.fast_batch_done();
+        }
+    }
+
+    /// Every instance is in (or the wait ran out): show them spread out.
+    fn fast_batch_done(&mut self) {
+        self.fast.batch = None;
+        // The Mission Control key's first press: the spread of this
+        // workspace (`hl.plugin.waveview.cycle`).
+        crate::hypr::dispatch("(function() hl.plugin.waveview.cycle() return hl.dsp.no_op() end)()");
+    }
+
+    /// A slow (or never-mapping) instance does not hold the rest up: after
+    /// `BATCH_PATIENCE` the next goes anyway; past the last, the spread.
+    fn arm_batch_patience(&mut self) {
+        let Some(b) = self.fast.batch.as_mut() else {
+            return;
+        };
+        b.step += 1;
+        let step = b.step;
+        let timer = calloop::timer::Timer::from_duration(BATCH_PATIENCE);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if let Some(b) = app.fast.batch.as_mut().filter(|b| b.step == step) {
+                if b.to_launch > 0 {
+                    app.fast_batch_next();
+                } else {
+                    app.fast_batch_done();
+                }
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 
     /// After `activate` took care of the keyboard (it hands it to the app it
