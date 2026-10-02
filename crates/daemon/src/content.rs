@@ -605,20 +605,22 @@ pub struct DockOverflow {
 /// What FAST LAUNCH draws this frame (see `fast_launch.rs`).
 #[derive(Debug, Clone, Copy)]
 pub struct FastDraw<'a> {
-    /// Presence of the whole thing, 0..1.
-    pub k: f32,
-    /// The slot (0) and the places off its left (1) and right (2).
-    pub places: [Rect; 3],
-    /// The typed letters, shown under the slot, and their shaped width.
-    pub text: &'a str,
-    pub text_w: f32,
+    /// The card's glass as it is now (reaching out for the sides), its
+    /// corner radius, and its presence 0..1.
+    pub card: Rect,
+    pub radius: f32,
+    pub a: f32,
+    /// The bare icons in draw order (the front one last): entry, rect.
+    pub icons: &'a [(usize, Rect)],
+    /// The word: what you typed (bright) then the rest of the name
+    /// (dimmed), their shaped widths, the box it is centred in.
+    pub typed: &'a str,
+    pub rest: &'a str,
+    pub typed_w: f32,
+    pub rest_w: f32,
+    pub text_box: Rect,
     pub font_px: f32,
     pub line_px: f32,
-    /// Name sizes: over the slot, over a side icon.
-    pub name_px: f32,
-    pub side_name_px: f32,
-    /// The icons: entry index, place (0..3), presence (pops in).
-    pub icons: &'a [(usize, usize, f32)],
 }
 
 /// Geometry shared by scene assembly and hit-testing.
@@ -3091,101 +3093,52 @@ pub fn scene(
         }
     }
 
-    // FAST LAUNCH: the glass slot mid-screen, its icons, their names and the
-    // letters typed, over everything.
-    if let Some(f) = fast.filter(|f| f.k > 0.01) {
-        let k = f.k;
-        let grow = |r: Rect, s: f32| {
-            Rect::new(r.x + r.w * (1.0 - s) / 2.0, r.y + r.h * (1.0 - s) / 2.0, r.w * s, r.h * s)
-        };
-        let well = |scene: &mut Scene, r: Rect, a: f32| {
-            let fill = crate::options::wash(true, 0.12 * a);
-            scene.rects.push(RectInst { rect: r, radius: r.h * 0.24, color: fill, glass: 0.5, border: 0.0 });
-            let rim = crate::options::wash(true, 0.24 * a);
-            scene.rects.push(RectInst { rect: r, radius: r.h * 0.24, color: rim, glass: 0.0, border: 1.0 });
-        };
-        let white = |a: f32| [1.0, 1.0, 1.0, a];
-        // Text sits on a pill of the dock's own colour with its own ink —
-        // the dock tooltips' recipe — so it reads over any window or
-        // wallpaper (Max: "not readable").
-        let ink = |a: f32| [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * a];
-        let backing = |scene: &mut Scene, cx: f32, top: f32, w: f32, line: f32, a: f32| {
-            let pad = line * 0.45;
-            let r = Rect::new(cx - w / 2.0 - pad, top - line * 0.12, w + 2.0 * pad, line * 1.24);
-            let bg = [dock_bg[0], dock_bg[1], dock_bg[2], dock_bg[3].max(0.9) * a];
-            scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: bg, glass: 0.0, border: 0.0 });
-        };
-        // The slot is always there; a side place only while an icon holds it.
-        let main = grow(f.places[0], 0.94 + 0.06 * k);
-        well(&mut scene, main, k);
-        for &(_, place, ik) in f.icons.iter().filter(|(_, p, _)| *p > 0) {
-            well(&mut scene, f.places[place], (ik * k).min(1.0));
-        }
-        for &(entry, place, ik) in f.icons {
-            let s = (ik * k).clamp(0.0, 1.0);
-            if s < 0.02 {
-                continue;
-            }
-            let slot = f.places[place];
-            let r = grow(grow(slot, 0.84), 0.4 + 0.6 * s);
+    // FAST LAUNCH: the glass card mid-screen, the bare icons on it, and the
+    // word at its bottom, over everything.
+    if let Some(f) = fast.filter(|f| f.a > 0.0) {
+        let a = f.a;
+        let fill = crate::options::wash(true, 0.12 * a);
+        scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: fill, glass: 0.5, border: 0.0 });
+        let rim = crate::options::wash(true, 0.22 * a);
+        scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: rim, glass: 0.0, border: 1.0 });
+        for &(entry, rect) in f.icons {
             scene.overlay.push(IconInst {
-                rect: r,
+                rect,
                 layer: layer_of(entry),
                 tint: [0.0; 4],
                 ring: -1.0,
-                plate: plate_of(entry),
+                plate: NO_PLATE, // the card is its plate
             });
-            if let Some(name) = entries.get(entry).map(|e| e.name.clone()) {
-                let px = if place == 0 { f.name_px } else { f.side_name_px };
-                let line = px * 1.3;
-                let top = slot.y - line - px * 0.6;
-                // Width from the same glyph-advance model the dock tooltip uses.
-                let w = (name.chars().count() as f32 * px * 0.52).min(240.0);
-                backing(&mut scene, slot.x + slot.w / 2.0, top, w, line, s);
+        }
+        // The whole word centred (it never jumps as you type: "sp" already
+        // sits where "Spotify" will be); too long, it starts at the left and
+        // is cut at the card's margin. A soft shadow under it keeps it legible.
+        let b = f.text_box;
+        let total = f.typed_w + f.rest_w;
+        let left = if total > b.w { b.x } else { b.x + (b.w - total) / 2.0 };
+        let shadow_dy = (f.font_px * 0.05).max(1.0);
+        let mut word = |text: &str, x: f32, color: [f32; 4]| {
+            if text.is_empty() || x >= b.x + b.w {
+                return;
+            }
+            for (dy, c) in [(shadow_dy, [0.0, 0.0, 0.0, 0.5 * color[3]]), (0.0, color)] {
                 scene.labels.push(Label {
-                    text: name,
-                    pos: (slot.x + slot.w / 2.0, top),
-                    max_w: 240.0,
-                    font_px: px,
-                    line_px: line,
-                    centered: true,
+                    text: text.to_owned(),
+                    pos: (x, b.y + dy),
+                    max_w: b.x + b.w - x,
+                    font_px: f.font_px,
+                    line_px: f.line_px,
+                    centered: false,
                     dim: false,
-                    cache: true,
+                    cache: false,
                     family: crate::options::TEXT_FONT,
-                    color: Some(ink(s)),
-                    clip: None,
+                    color: Some(c),
+                    clip: Some(b),
                 });
             }
-        }
-        // The letters typed, right under the slot, with a caret.
-        let ty = f.places[0].y + f.places[0].h;
-        let cx = f.places[0].x + f.places[0].w / 2.0;
-        if !f.text.is_empty() {
-            backing(&mut scene, cx, ty + f.line_px * 0.1, f.text_w + 6.0, f.line_px, k);
-        }
-        if !f.text.is_empty() {
-            scene.labels.push(Label {
-                text: f.text.to_owned(),
-                pos: (cx, ty + f.line_px * 0.1),
-                max_w: 600.0,
-                font_px: f.font_px,
-                line_px: f.line_px,
-                centered: true,
-                dim: false,
-                cache: false,
-                family: crate::options::TEXT_FONT,
-                color: Some(ink(k)),
-                clip: None,
-            });
-        }
-        let caret_x = cx + f.text_w / 2.0 + 2.0;
-        scene.rects.push(RectInst {
-            rect: Rect::new(caret_x, ty + f.line_px * 0.25, 2.0, f.line_px * 0.75),
-            radius: 1.0,
-            color: if f.text.is_empty() { white(0.8 * k) } else { ink(0.9 * k) },
-            glass: 0.0,
-            border: 0.0,
-        });
+        };
+        word(f.typed, left, [0.95, 0.96, 0.93, 0.95 * a]);
+        word(f.rest, left + f.typed_w, [0.95, 0.96, 0.93, 0.38 * a]);
     }
 
     // Ghost of a box member being reordered, following the pointer (topmost).

@@ -1,11 +1,13 @@
-//! FAST LAUNCH (Max, 2026-10-01): Super+Alt+Space → one bubble in the
-//! middle of the screen, a search for APPS only, warm with what you use.
-//! Nothing shows while more than three apps match; at three their icons
-//! appear beside the search, then two, then one. Enter launches the best
-//! (a NEW instance) even before it has narrowed; a click on an icon launches
-//! that one; Escape or a click anywhere else closes it. No card, no grid —
-//! the dock surface draws it with the app icons it already holds, so it
-//! costs no extra memory.
+//! FAST LAUNCH (Max, 2026-10-01): Super+J → a glass card in the middle of
+//! the screen, a search for APPS only, warm with what you use. It opens
+//! holding your three most-used apps (the most used in front); type, and the
+//! front takes your best guess, the sides showing again once three or fewer
+//! match. The front app's name is written in the card, dimmed, with what you
+//! typed bright. Enter launches the front app (a NEW instance), Tab/arrows
+//! bring another to the front, a click on an icon launches that one; Escape
+//! or a click anywhere else closes it — the opening played backward. The
+//! dock surface draws it with the app icons it already holds, so it costs no
+//! extra memory. (The look: Max's Fast Launch mockup, 2026-10-02.)
 //!
 //! Ranking, best first: a name that starts with the letters, then a word of
 //! the name that does ("code" → Visual Studio Code), then the initials ("vs"
@@ -17,23 +19,66 @@ use smithay_client_toolkit::seat::keyboard::Keysym;
 use crate::content::Rect;
 use crate::{apps, App, KbSurface, LaunchFrom};
 
-/// How many matches have to remain before their icons show.
+/// How many matches have to remain before they all show (more than that:
+/// only the best guess, in the middle).
 pub(crate) const REVEAL_AT: usize = 3;
 
-/// Max's look (the Fast Launch mockup, 2026-10-01), logical px at bar
-/// scale 1: an empty glass SLOT anchored mid-screen; the best match takes
-/// it, the others hang smaller off its sides without moving it; the typed
-/// letters sit right under it; every icon wears its name on top. (Then
-/// "a little bigger": about a fifth.)
-const SLOT: f32 = 70.0;
-const SIDE: f32 = 53.0;
-const SIDE_GAP: f32 = 40.0;
-pub(crate) const FONT_PX: f32 = 22.0;
-pub(crate) const LINE_PX: f32 = 28.0;
-pub(crate) const NAME_PX: f32 = 14.0;
-pub(crate) const SIDE_NAME_PX: f32 = 12.5;
-/// How fast the slot and the icons ease in (1/s): snappy.
-pub(crate) const EASE_RATE: f32 = 26.0;
+/// Max's look, the Fast Launch mockup as he left it (2026-10-02), in the
+/// mockup's px. THE CARD: a glass card mid-screen, the front app's bare
+/// icon in its upper part and the word at its bottom; the card reaches out
+/// left and right only while an icon sits there. (`GROW`: the dock reads
+/// the mockup a fifth bigger — "a little bigger" on the first port.)
+const GROW: f32 = 1.2;
+const CARD_W: f32 = 112.0;
+const CARD_H: f32 = 112.0;
+const CARD_R: f32 = 20.0;
+/// The front icon: its size, and its distance from the card's top.
+const ICON: f32 = 58.0;
+const CARD_PAD: f32 = 14.0;
+/// A side app's slot (its icon is inset a tenth), and how far the card
+/// reaches out to hold it; each side icon is nudged in toward the middle.
+const SIDE: f32 = 52.0;
+const SIDE_INSET: f32 = 0.10;
+const EXT: f32 = 62.0;
+const NUDGE: f32 = 8.0;
+/// The word: its size, its margin inside the card, its gap to the bottom.
+const LETTER_PX: f32 = 20.0;
+const LINE: f32 = 1.45;
+const TEXT_PAD: f32 = 14.0;
+const TYPE_GAP: f32 = 9.0;
+
+/// "Super snappy" (seconds). Opening: the front icon pops, the sides wait a
+/// beat, then slide out from behind it while the card grows with them.
+const POP: f32 = 0.09;
+const INTRO_WAIT: f32 = 0.04;
+const SLIDE: f32 = 0.15;
+/// A side that comes or goes later, while typing.
+const SLIDE_QUICK: f32 = 0.11;
+/// Closing — the opening backward: the sides slide back in (SLIDE), and
+/// from this far into it the front icon shrinks away and the glass fades.
+const CLOSE_HOLD: f32 = SLIDE * 0.8;
+const SHRINK: f32 = 0.08;
+const FADE: f32 = 0.09;
+
+/// CSS's `cubic-bezier(x1, y1, x2, y2)` at time `t` — the mockup's curves.
+fn bezier((x1, y1, x2, y2): (f32, f32, f32, f32), t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let at = |a: f32, b: f32, s: f32| 3.0 * a * s * (1.0 - s).powi(2) + 3.0 * b * s * s * (1.0 - s) + s.powi(3);
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if at(x1, x2, mid) < t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    at(y1, y2, (lo + hi) / 2.0)
+}
+/// Out with a touch of overshoot; back in accelerating; the pop.
+const OUT: (f32, f32, f32, f32) = (0.2, 0.9, 0.3, 1.12);
+const IN: (f32, f32, f32, f32) = (0.5, 0.0, 0.75, 0.15);
+const POP_CURVE: (f32, f32, f32, f32) = (0.2, 0.9, 0.25, 1.3);
 
 /// How well an app `name` matches `q` (both lowercased): 4 its name starts
 /// with it, 3 a word does, 2 the initials do, 1 it is anywhere in the name;
@@ -63,7 +108,8 @@ pub(crate) fn match_tier(name: &str, q: &str) -> u8 {
 }
 
 /// Rank `apps` — (name, times used) — for the query `q`: the indices of the
-/// matches, best first (see the module doc).
+/// matches, best first (see the module doc). Nothing typed: every app, the
+/// most used first.
 pub(crate) fn rank(apps: &[(&str, u32)], q: &str) -> Vec<usize> {
     let q = q.trim().to_lowercase();
     let mut hits: Vec<(u8, u32, usize, usize)> = apps
@@ -71,7 +117,7 @@ pub(crate) fn rank(apps: &[(&str, u32)], q: &str) -> Vec<usize> {
         .enumerate()
         .filter_map(|(i, (name, used))| {
             let name = name.to_lowercase();
-            let tier = match_tier(&name, &q);
+            let tier = if q.is_empty() { 1 } else { match_tier(&name, &q) };
             (tier > 0).then_some((tier, *used, name.len(), i))
         })
         .collect();
@@ -79,34 +125,238 @@ pub(crate) fn rank(apps: &[(&str, u32)], q: &str) -> Vec<usize> {
     hits.into_iter().map(|(.., i)| i).collect()
 }
 
+/// One of the three places (0 the front, 1 left, 2 right) as it moves.
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct Place {
+    /// The app there (kept while a side slides back in).
+    pub entry: Option<usize>,
+    /// The icon's pop, 0 → 1 (linear time; a new app in the place pops).
+    pub pop: f32,
+    /// A side's way out, 0 (behind the front icon) → 1 (in its place),
+    /// linear time; `outward` says which curve it is on.
+    pub out: f32,
+    pub outward: bool,
+}
+
+impl Place {
+    /// How far out a side is shown (the curve applied; overshoots a hair).
+    fn shown_out(&self) -> f32 {
+        if self.outward {
+            bezier(OUT, self.out)
+        } else {
+            1.0 - bezier(IN, 1.0 - self.out)
+        }
+    }
+
+    /// Turn around, picking the time on the new curve that shows the side
+    /// where it is now (no jump).
+    fn turn(&mut self, outward: bool) {
+        if self.outward == outward {
+            return;
+        }
+        let now = self.shown_out();
+        self.outward = outward;
+        let mut best = (f32::MAX, self.out);
+        for i in 0..=64 {
+            let p = i as f32 / 64.0;
+            self.out = p;
+            let d = (self.shown_out() - now).abs();
+            if d < best.0 {
+                best = (d, p);
+            }
+        }
+        self.out = best.1;
+    }
+}
+
 /// The fast-launch state.
 #[derive(Default)]
 pub(crate) struct FastLaunch {
     pub open: bool,
     pub query: String,
-    /// Which of the shown icons Enter launches (0 = the best).
+    /// Which of the shown apps is in the middle (0 = the best).
     pub sel: usize,
-    /// The bubble's presence, easing 0 → 1 (and back as it closes).
-    pub k: f32,
-    /// The matching apps (entry indices), best first.
+    /// The matching apps (entry indices), best first; nothing typed: every
+    /// app, the most used first.
     pub matches: Vec<usize>,
-    /// Each shown icon's presence, easing in as it appears.
-    pub icon_k: Vec<f32>,
+    /// The card's glass, 0..1 (fades only as it closes).
+    pub card_a: f32,
+    pub places: [Place; 3],
+    /// Time since it opened / since it began to close.
+    pub since_open: f32,
+    pub since_close: f32,
+}
+
+/// Where everything sits, logical px on the dock surface.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Geo {
+    /// The card at rest (the middle only), and its corner radius.
+    pub card: Rect,
+    pub radius: f32,
+    /// The front icon, and the side icons in their places (left, right).
+    pub icon: Rect,
+    pub sides: [Rect; 2],
+    /// How far the card reaches out for a side; how far a side travels
+    /// out from behind the front icon.
+    pub ext: f32,
+    pub travel: f32,
+    /// The word's box (centred in it, clipped to it) and its type.
+    pub text: Rect,
+    pub font_px: f32,
+    pub line_px: f32,
+}
+
+/// What to draw this frame.
+pub(crate) struct View {
+    pub card: Rect,
+    pub card_a: f32,
+    /// Icons in draw order (the front one last, on top): entry, rect.
+    pub icons: Vec<(usize, Rect)>,
 }
 
 impl FastLaunch {
-    /// The icons on show: the matches, once there are at most three.
+    /// Opened fresh: the opening plays from the start.
+    pub(crate) fn opened() -> Self {
+        Self { open: true, card_a: 1.0, ..Self::default() }
+    }
+
+    /// The apps on show: nothing typed, the three you use most; typed, the
+    /// matches once at most three are left — before that, the best guess.
     pub(crate) fn shown(&self) -> &[usize] {
-        if self.matches.len() <= REVEAL_AT {
-            &self.matches
+        let n = if self.query.trim().is_empty() || self.matches.len() <= REVEAL_AT {
+            self.matches.len().min(REVEAL_AT)
         } else {
-            &[]
+            1
+        };
+        &self.matches[..n]
+    }
+
+    /// The app each place wants now: the selected one in front, the others
+    /// left then right of it.
+    pub(crate) fn want(&self) -> [Option<usize>; 3] {
+        let shown = self.shown();
+        let mut want = [None; 3];
+        for (p, &i) in placement(shown.len(), self.sel).iter().enumerate().take(3) {
+            want[p] = shown.get(i).copied();
         }
+        want
+    }
+
+    /// Anything left to draw.
+    pub(crate) fn visible(&self) -> bool {
+        self.open || self.card_a > 0.0
+    }
+
+    /// Advance the motion by `dt` seconds; true while anything still moves.
+    pub(crate) fn step(&mut self, dt: f32) -> bool {
+        let dt = dt.clamp(0.0, 0.05);
+        if !self.visible() {
+            return false;
+        }
+        let mut moving = false;
+        let want = if self.open {
+            self.since_open += dt;
+            self.since_close = 0.0;
+            self.card_a = 1.0;
+            self.want()
+        } else {
+            self.since_close += dt;
+            [self.places[0].entry, None, None]
+        };
+        // The front: a new app pops in; closing, it shrinks away and the
+        // glass fades, once the sides are nearly back in.
+        let front = &mut self.places[0];
+        if want[0] != front.entry {
+            front.entry = want[0];
+            front.pop = 0.0;
+        }
+        if !self.open && self.since_close >= CLOSE_HOLD {
+            front.pop = (front.pop - dt / SHRINK).max(0.0);
+            self.card_a = (self.card_a - dt / FADE).max(0.0);
+            moving |= self.card_a > 0.0;
+        } else {
+            moving |= !self.open || front.pop < 1.0;
+            front.pop = (front.pop + dt / POP).min(1.0);
+        }
+        // The sides: out from behind the front icon (after a beat, the
+        // first time), back in behind it when they go.
+        let intro = self.since_open < INTRO_WAIT + SLIDE;
+        let dur = if intro || !self.open { SLIDE } else { SLIDE_QUICK };
+        let waiting = self.open && self.since_open < INTRO_WAIT;
+        for (side, &w) in self.places[1..].iter_mut().zip(&want[1..]) {
+            match w {
+                Some(e) => {
+                    if side.entry != Some(e) {
+                        // Out already (another app was there): this one pops.
+                        side.pop = if side.out > 0.0 { 0.0 } else { 1.0 };
+                        side.entry = Some(e);
+                    }
+                    side.turn(true);
+                    if !waiting {
+                        side.out = (side.out + dt / dur).min(1.0);
+                    }
+                    side.pop = (side.pop + dt / POP).min(1.0);
+                    moving |= side.out < 1.0 || side.pop < 1.0;
+                }
+                None if side.entry.is_some() => {
+                    side.turn(false);
+                    side.out = (side.out - dt / dur).max(0.0);
+                    if side.out <= 0.0 {
+                        side.entry = None;
+                    }
+                    moving = true;
+                }
+                None => {}
+            }
+        }
+        moving
+    }
+
+    /// The card and the icons where they are this frame.
+    pub(crate) fn view(&self, g: &Geo) -> View {
+        let mut card = g.card;
+        let mut icons = Vec::with_capacity(3);
+        let [_, left, right] = self.places;
+        for (i, side) in [left, right].iter().enumerate() {
+            let Some(entry) = side.entry else {
+                continue;
+            };
+            let v = side.shown_out();
+            if i == 0 {
+                card.x -= g.ext * v;
+            }
+            card.w += g.ext * v;
+            // From behind the front icon (toward the middle, smaller) to
+            // its place; a new app there pops.
+            let toward = if i == 0 { 1.0 } else { -1.0 };
+            let s = (0.55 + 0.45 * v) * pop_scale(side.pop);
+            let r = g.sides[i];
+            let r = Rect::new(r.x + toward * g.travel * (1.0 - v), r.y, r.w, r.h);
+            icons.push((entry, grow(r, s)));
+        }
+        if let Some(entry) = self.places[0].entry {
+            let p = self.places[0].pop;
+            let s = if self.open || self.since_close < CLOSE_HOLD { pop_scale(p) } else { 0.4 * p + 0.6 * p * p };
+            if s > 0.02 {
+                icons.push((entry, grow(g.icon, s)));
+            }
+        }
+        View { card, card_a: self.card_a, icons }
     }
 }
 
-/// The order the shown icons take their places in: the selected one in
-/// the slot, the others left then right of it.
+/// An icon's size through its pop: from four tenths, overshooting a little.
+fn pop_scale(p: f32) -> f32 {
+    0.4 + 0.6 * bezier(POP_CURVE, p)
+}
+
+/// `r` scaled by `s` about its centre.
+fn grow(r: Rect, s: f32) -> Rect {
+    Rect::new(r.x + r.w * (1.0 - s) / 2.0, r.y + r.h * (1.0 - s) / 2.0, r.w * s, r.h * s)
+}
+
+/// The order the shown apps take their places in: the selected one in
+/// front, the others left then right of it.
 pub(crate) fn placement(n: usize, sel: usize) -> Vec<usize> {
     let mut order = Vec::with_capacity(n);
     if n > 0 {
@@ -116,21 +366,52 @@ pub(crate) fn placement(n: usize, sel: usize) -> Vec<usize> {
     order
 }
 
-/// Where the slot and the icons beside it sit on the dock surface: the slot
-/// is centred on the screen's centre (or as near as the surface reaches) and
-/// never moves; place 1 hangs off its left, place 2 off its right.
-pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32) -> [Rect; 3] {
+/// The word in the card: the front app's name, dimmed, with what you typed
+/// bright where the name starts with it — `(bright, dim)`. A name that does
+/// not start with it shows alone (dimmed); no app, just what you typed.
+pub(crate) fn words(name: Option<&str>, query: &str) -> (String, String) {
+    let Some(name) = name else {
+        return (query.to_owned(), String::new());
+    };
+    let n = query.chars().count();
+    if n > 0 && name.to_lowercase().starts_with(&query.to_lowercase()) {
+        let cut = name.char_indices().nth(n).map_or(name.len(), |(i, _)| i);
+        (name[..cut].to_owned(), name[cut..].to_owned())
+    } else {
+        (String::new(), name.to_owned())
+    }
+}
+
+/// Where the card sits on the dock surface: centred on the screen's centre
+/// (or as near as the surface reaches); it never moves.
+pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32) -> Geo {
     let (w, h) = surface;
-    let slot = SLOT * scale;
-    let side = SIDE * scale;
-    let gap = SIDE_GAP * scale;
+    let u = scale * GROW;
+    let (cw, ch) = (CARD_W * u, CARD_H * u);
     // The surface is anchored to the screen's bottom edge: the screen's
     // centre is `screen_h / 2` above that edge.
-    let cy = (h - screen_h / 2.0).clamp(slot, h - slot);
-    let main = Rect::new(w / 2.0 - slot / 2.0, cy - slot / 2.0, slot, slot);
-    let left = Rect::new(main.x - gap - side, cy - side / 2.0, side, side);
-    let right = Rect::new(main.x + slot + gap, cy - side / 2.0, side, side);
-    [main, left, right]
+    let cy = (h - screen_h / 2.0).clamp(ch / 2.0, (h - ch / 2.0).max(ch / 2.0));
+    let card = Rect::new(w / 2.0 - cw / 2.0, cy - ch / 2.0, cw, ch);
+    let icon = ICON * u;
+    let icon_r = Rect::new(card.x + (cw - icon) / 2.0, card.y + CARD_PAD * u, icon, icon);
+    let (side, ext, nudge) = (SIDE * u, EXT * u, NUDGE * u);
+    let top = card.y + (ch - side) / 2.0;
+    let slot_l = Rect::new(card.x - ext + (ext - side) / 2.0 + nudge, top, side, side);
+    let slot_r = Rect::new(card.x + cw + (ext - side) / 2.0 - nudge, top, side, side);
+    let font_px = LETTER_PX * u;
+    let line_px = font_px * LINE;
+    let pad = TEXT_PAD * u;
+    Geo {
+        card,
+        radius: CARD_R * u,
+        icon: icon_r,
+        sides: [grow(slot_l, 1.0 - 2.0 * SIDE_INSET), grow(slot_r, 1.0 - 2.0 * SIDE_INSET)],
+        ext,
+        travel: cw / 2.0 + ext / 2.0,
+        text: Rect::new(card.x + pad, card.y + ch - TYPE_GAP * u - line_px, cw - 2.0 * pad, line_px),
+        font_px,
+        line_px,
+    }
 }
 
 impl App {
@@ -144,7 +425,10 @@ impl App {
         if self.ui.target() == crate::state::Target::Open {
             self.handle_command(waverunner_proto::Command::Collapse);
         }
-        self.fast = FastLaunch { open: true, k: self.fast.k, ..FastLaunch::default() };
+        self.fast = FastLaunch::opened();
+        // Nothing typed yet: the card already holds the three apps you use
+        // most — Enter launches the middle one straight away.
+        self.fast_rematch();
         // Take the keyboard: what you type goes into the bubble.
         self.cancel_keyboard_handback(KbSurface::Launcher);
         crate::surface::set_interactive(&self.layer, true);
@@ -184,18 +468,7 @@ impl App {
             .collect();
         let order = rank(&named, &self.fast.query);
         let matches: Vec<usize> = order.into_iter().map(|j| candidates[j]).collect();
-        if matches != self.fast.matches {
-            // Icons already on show keep their presence; new ones ease in.
-            let keep = self.fast.icon_k.clone();
-            let was = self.fast.shown().to_vec();
-            self.fast.matches = matches;
-            self.fast.icon_k = self
-                .fast
-                .shown()
-                .iter()
-                .map(|e| was.iter().position(|w| w == e).and_then(|p| keep.get(p).copied()).unwrap_or(0.0))
-                .collect();
-        }
+        self.fast.matches = matches;
         self.fast.sel = self.fast.sel.min(self.fast.shown().len().saturating_sub(1));
     }
 
@@ -236,15 +509,11 @@ impl App {
         self.schedule_frame();
     }
 
-    /// Launch: the icon `slot` if given, else the selected icon, else the
-    /// best match (Enter before the search has narrowed to three).
-    pub(crate) fn fast_launch_pick(&mut self, slot: Option<usize>) {
-        let shown = self.fast.shown();
-        let pick = slot
-            .and_then(|s| shown.get(s))
-            .or_else(|| shown.get(self.fast.sel))
-            .or_else(|| self.fast.matches.first())
-            .copied();
+    /// Launch `entry` if given, else the app in front, else the best match.
+    pub(crate) fn fast_launch_pick(&mut self, entry: Option<usize>) {
+        let pick = entry
+            .or(self.fast.want()[0])
+            .or_else(|| self.fast.matches.first().copied());
         let Some(idx) = pick else {
             return;
         };
@@ -262,26 +531,35 @@ impl App {
         self.schedule_frame();
     }
 
-    /// A left click while the launcher is up: an icon launches; anywhere
-    /// else closes.
+    /// A left click while the launcher is up: an icon launches its app; the
+    /// card itself does nothing; anywhere else closes.
     pub(crate) fn fast_click(&mut self, pos: (f32, f32)) {
-        let places = self.fast_geometry();
-        let order = placement(self.fast.shown().len(), self.fast.sel);
-        match order.iter().enumerate().find(|(p, _)| places[*p].contains(pos)) {
-            Some((_, &shown_i)) => self.fast_launch_pick(Some(shown_i)),
-            None if places[0].contains(pos) => {}
-            None => self.close_fast_launch(),
+        let g = self.fast_geometry();
+        let want = self.fast.want();
+        let hit = [(g.icon, want[0]), (g.sides[0], want[1]), (g.sides[1], want[2])]
+            .into_iter()
+            .find_map(|(r, e)| e.filter(|_| r.contains(pos)));
+        if let Some(entry) = hit {
+            self.fast_launch_pick(Some(entry));
+        } else if !self.fast.view(&g).card.contains(pos) {
+            self.close_fast_launch();
         }
     }
 
-    /// The slot's and the side places' rects right now.
-    pub(crate) fn fast_geometry(&self) -> [Rect; 3] {
+    /// Where the card and its icons sit.
+    pub(crate) fn fast_geometry(&self) -> Geo {
         let screen_h = self.output_logical_height().unwrap_or(self.buffer_size.1 as f32);
         geometry(
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             screen_h,
             self.options_scale(),
         )
+    }
+
+    /// The word in the card (see [`words`]).
+    pub(crate) fn fast_words(&self) -> (String, String) {
+        let name = self.fast.places[0].entry.and_then(|e| self.entries.get(e)).map(|e| e.name.as_str());
+        words(name, &self.fast.query)
     }
 }
 
@@ -304,17 +582,58 @@ mod tests {
         assert_eq!(rank(&apps, "sp"), vec![1, 0], "both start with sp: the used one first");
         assert_eq!(rank(&apps, "cape"), vec![2], "anywhere in the name still counts");
         assert_eq!(rank(&apps, "spo"), vec![0]);
-        assert!(rank(&apps, "").is_empty(), "nothing typed, nothing matched");
     }
 
     #[test]
-    fn the_slot_is_anchored_and_the_others_hang_off_it() {
+    fn nothing_typed_ranks_by_use() {
+        let apps = [("Spotify", 3), ("Speedcrunch", 40), ("Inkscape", 90), ("Foot", 7)];
+        assert_eq!(rank(&apps, ""), vec![2, 1, 3, 0]);
+        let f = FastLaunch { matches: vec![2, 1, 3, 0], ..FastLaunch::opened() };
+        assert_eq!(f.shown(), &[2, 1, 3], "the three most used");
+        assert_eq!(f.want(), [Some(2), Some(1), Some(3)], "the most used in front, then left, right");
+        let f = FastLaunch { query: "s".into(), matches: vec![1, 0, 2, 3], ..FastLaunch::opened() };
+        assert_eq!(f.shown(), &[1], "more than three: only the best guess");
+    }
+
+    #[test]
+    fn the_word_is_the_name_with_what_you_typed_bright() {
+        assert_eq!(words(Some("Spotify"), "sp"), ("Sp".into(), "otify".into()));
+        assert_eq!(words(Some("Spotify"), ""), ("".into(), "Spotify".into()));
+        assert_eq!(words(Some("Visual Studio Code"), "code"), ("".into(), "Visual Studio Code".into()));
+        assert_eq!(words(None, "zzq"), ("zzq".into(), "".into()));
+    }
+
+    #[test]
+    fn it_opens_and_closes_in_a_blink() {
+        let mut f = FastLaunch { matches: vec![5, 6, 7], ..FastLaunch::opened() };
+        let g = geometry((2000.0, 760.0), 1250.0, 1.0);
+        let mut t = 0.0;
+        while f.step(1.0 / 144.0) {
+            t += 1.0 / 144.0;
+            assert!(t < 0.3, "the opening settles fast");
+        }
+        let v = f.view(&g);
+        assert_eq!(v.icons.len(), 3);
+        assert_eq!(v.icons[2].0, 5, "the front icon is drawn last, on top");
+        assert!((v.card.w - (g.card.w + 2.0 * g.ext)).abs() < 0.5, "the card reached out both ways");
+        f.open = false;
+        t = 0.0;
+        while f.step(1.0 / 144.0) {
+            t += 1.0 / 144.0;
+            assert!(t < 0.3, "the closing too");
+        }
+        assert!(!f.visible());
+        assert!(f.places[1].entry.is_none() && f.places[2].entry.is_none(), "the sides went back in");
+    }
+
+    #[test]
+    fn the_card_is_anchored_mid_screen() {
         // A 1250-tall screen, the dock surface its bottom 760.
-        let [main, left, right] = geometry((2000.0, 760.0), 1250.0, 1.0);
-        assert!((main.y + main.h / 2.0 - (760.0 - 625.0)).abs() < 0.01, "the screen's centre");
-        assert!((main.x + main.w / 2.0 - 1000.0).abs() < 0.01, "and its middle");
-        assert!(left.x + left.w < main.x && right.x > main.x + main.w);
-        assert_eq!(placement(3, 1), vec![1, 0, 2], "the selected one takes the slot");
+        let g = geometry((2000.0, 760.0), 1250.0, 1.0);
+        assert!((g.card.y + g.card.h / 2.0 - (760.0 - 625.0)).abs() < 0.01, "the screen's centre");
+        assert!((g.card.x + g.card.w / 2.0 - 1000.0).abs() < 0.01, "and its middle");
+        assert!(g.sides[0].x + g.sides[0].w < g.card.x && g.sides[1].x > g.card.x + g.card.w);
+        assert_eq!(placement(3, 1), vec![1, 0, 2], "the selected one goes in front");
         assert_eq!(placement(1, 0), vec![0]);
     }
 }
