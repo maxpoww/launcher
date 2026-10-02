@@ -1,8 +1,8 @@
-//! FAST LAUNCH (Max, 2026-10-01): Super+J → a glass figure in the middle of
+//! FAST LAUNCH (Max, 2026-10-01): Super+J → a glass card in the middle of
 //! the screen, a search for APPS only, warm with what you use. It opens
 //! holding your three most-used apps (the most used in front); type, and the
 //! front takes your best guess, the sides showing again once three or fewer
-//! match. The front app's name is written under it, dimmed, with what you
+//! match. The front app's name is written in the card, dimmed, with what you
 //! typed bright. Enter launches the front app (a NEW instance), Tab/arrows
 //! bring another to the front, a click on an icon launches that one; Escape
 //! or a click anywhere else closes it — the opening played backward. The
@@ -24,40 +24,32 @@ use crate::{apps, App, KbSurface, LaunchFrom};
 pub(crate) const REVEAL_AT: usize = 3;
 
 /// Max's look, the Fast Launch mockup as he left it (2026-10-02), in the
-/// mockup's px, made tighter step by step — and then "not a square card
-/// anymore", "a little contoured, kind of like a cross": THE GLASS IS A
-/// CROSS. A column round the front app's bare icon and the word under it
-/// (the word's pill shows past it only when the name is wider), and a bar
-/// across it holding the side icons, nearly as tall ("still too much": a
-/// small step in at each corner) — the arms grow out with the icons —
-/// joined by a smooth union with small rounded inner corners (the bar
-/// banner's blister, `rounded_rect.wgsl`). (`GROW`: the dock reads the mockup a fifth bigger — "a
-/// little bigger" on the first port.)
+/// mockup's px — then "a little smaller, tight", then tighter still, and
+/// smaller twice more (the icons the same size; the word's line tighter): the card hugs its icon and word. THE CARD: a glass card mid-screen, the front app's bare
+/// icon in its upper part and the word at its bottom; the card reaches out
+/// left and right only while an icon sits there. (`GROW`: the dock reads
+/// the mockup a fifth bigger — "a little bigger" on the first port.)
 const GROW: f32 = 1.2;
-/// The front icon, and the glass round it: margin and corner radius.
+const CARD_W: f32 = 78.0;
+const CARD_H: f32 = 88.0;
+const CARD_R: f32 = 16.0;
+/// The front icon: its size, and its distance from the card's top.
 const ICON: f32 = 58.0;
-const ICON_PAD: f32 = 7.0;
-const ICON_R: f32 = 19.0;
-/// A side icon, its glass, and the gap between its glass and the front's.
-const SIDE_ICON: f32 = 42.0;
-const SIDE_PAD: f32 = 6.0;
-const SIDE_R: f32 = 15.0;
-const SIDE_GAP: f32 = 0.0;
-/// The word: its size and line; its pill's margins; how far the pill tucks
-/// under the icon's glass; how wide it may grow (longer: cut).
+const CARD_PAD: f32 = 5.0;
+/// A side app's slot (its icon is inset a tenth), and how far the card
+/// reaches out to hold it; each side icon is nudged in toward the middle.
+const SIDE: f32 = 52.0;
+const SIDE_INSET: f32 = 0.10;
+const EXT: f32 = 46.0;
+const NUDGE: f32 = 4.0;
+/// The word: its size, its margin inside the card, its gap to the bottom.
 const LETTER_PX: f32 = 20.0;
 const LINE: f32 = 1.25;
-const WORD_PAD_X: f32 = 10.0;
-const WORD_PAD_Y: f32 = 2.0;
-const WORD_TUCK: f32 = 4.0;
-const WORD_MAX: f32 = 320.0;
-/// How soft the inner corners of the cross are (the union's fillet).
-const MELT: f32 = 5.0;
-/// The cross's step: how far the side bar's edges sit in from the column's.
-const NOTCH: f32 = 7.0;
+const TEXT_PAD: f32 = 4.0;
+const TYPE_GAP: f32 = 3.0;
 
 /// "Super snappy" (seconds). Opening: the front icon pops, the sides wait a
-/// beat, then slide out from behind it the glass melting out with them.
+/// beat, then slide out from behind it while the card grows with them.
 const POP: f32 = 0.09;
 const INTRO_WAIT: f32 = 0.04;
 const SLIDE: f32 = 0.15;
@@ -199,47 +191,33 @@ pub(crate) struct FastLaunch {
     /// Time since it opened / since it began to close.
     pub since_open: f32,
     pub since_close: f32,
-    /// The word's width as last drawn (its pill's size).
-    pub word_w: f32,
 }
 
 /// Where everything sits, logical px on the dock surface.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Geo {
+    /// The card at rest (the middle only), and its corner radius.
+    pub card: Rect,
+    pub radius: f32,
     /// The front icon, and the side icons in their places (left, right).
     pub icon: Rect,
     pub sides: [Rect; 2],
-    /// How far a side travels out from behind the front icon.
+    /// How far the card reaches out for a side; how far a side travels
+    /// out from behind the front icon.
+    pub ext: f32,
     pub travel: f32,
-    /// The glass: margins round the front / a side icon, their corner
-    /// radii, and the fillet that melts the shapes together.
-    pub icon_pad: f32,
-    pub side_pad: f32,
-    pub icon_r: f32,
-    pub side_r: f32,
-    pub melt: f32,
-    /// How far the bar's top and bottom step in from the column's.
-    pub notch: f32,
-    /// The word's pill: its top, margins, widest; the word's type.
-    pub word_top: f32,
-    pub word_pad: (f32, f32),
-    pub word_max: f32,
+    /// The word's box (centred in it, clipped to it) and its type.
+    pub text: Rect,
     pub font_px: f32,
     pub line_px: f32,
 }
 
 /// What to draw this frame.
 pub(crate) struct View {
-    /// The glass shapes melted together: the front icon's, the word's
-    /// pill, the left and right icons' (`None` = not there).
-    pub shapes: [Option<Rect>; 4],
-    /// All of it (for the draw quad and the click-away test).
-    pub bounds: Rect,
-    pub a: f32,
+    pub card: Rect,
+    pub card_a: f32,
     /// Icons in draw order (the front one last, on top): entry, rect.
     pub icons: Vec<(usize, Rect)>,
-    /// Where the word is written (centred in it, clipped to it).
-    pub text: Rect,
 }
 
 impl FastLaunch {
@@ -340,80 +318,37 @@ impl FastLaunch {
         moving
     }
 
-    /// The glass and the icons where they are this frame; `word_w` is the
-    /// word's shaped width.
-    pub(crate) fn view(&self, g: &Geo, word_w: f32) -> View {
+    /// The card and the icons where they are this frame.
+    pub(crate) fn view(&self, g: &Geo) -> View {
+        let mut card = g.card;
         let mut icons = Vec::with_capacity(3);
-        let mut shapes = [None; 4];
         let [_, left, right] = self.places;
         for (i, side) in [left, right].iter().enumerate() {
             let Some(entry) = side.entry else {
                 continue;
             };
             let v = side.shown_out();
+            if i == 0 {
+                card.x -= g.ext * v;
+            }
+            card.w += g.ext * v;
             // From behind the front icon (toward the middle, smaller) to
-            // its place, its glass round it; a new app there pops.
+            // its place; a new app there pops.
             let toward = if i == 0 { 1.0 } else { -1.0 };
-            let s = 0.55 + 0.45 * v;
+            let s = (0.55 + 0.45 * v) * pop_scale(side.pop);
             let r = g.sides[i];
-            let r = grow(Rect::new(r.x + toward * g.travel * (1.0 - v), r.y, r.w, r.h), s);
-            shapes[2 + i] = Some(pad(r, g.side_pad * s));
-            icons.push((entry, grow(r, pop_scale(side.pop))));
+            let r = Rect::new(r.x + toward * g.travel * (1.0 - v), r.y, r.w, r.h);
+            icons.push((entry, grow(r, s)));
         }
-        // The front's glass stays whole while it is open (a new app pops on
-        // it); closing, it shrinks away with the icon.
-        let closing = !self.open && self.since_close >= CLOSE_HOLD;
-        let p = self.places[0].pop;
-        let shrink = if closing { 0.4 * p + 0.6 * p * p } else { 1.0 };
-        let front = grow(pad(g.icon, g.icon_pad), shrink);
-        shapes[0] = Some(front);
         if let Some(entry) = self.places[0].entry {
-            let s = if closing { shrink } else { pop_scale(p) };
+            let p = self.places[0].pop;
+            let s = if self.open || self.since_close < CLOSE_HOLD { pop_scale(p) } else { 0.4 * p + 0.6 * p * p };
             if s > 0.02 {
                 icons.push((entry, grow(g.icon, s)));
             }
         }
-        // The word's pill, tucked under the front's glass, as wide as the word.
-        let cx = g.icon.x + g.icon.w / 2.0;
-        let tw = word_w.min(g.word_max);
-        let text = Rect::new(cx - tw / 2.0, g.word_top + g.word_pad.1, tw, g.line_px);
-        if word_w > 0.0 {
-            let pill = grow(pad2(text, g.word_pad), shrink);
-            shapes[1] = Some(pill);
-            // A CROSS, only a little contoured (Max, 2026-10-02): the front's
-            // glass runs down as one column to the word's bottom (the pill
-            // only shows past it when the name is wider)...
-            shapes[0] = Some(Rect::new(front.x, front.y, front.w, (pill.y + pill.h - front.y).max(front.h)));
-        }
-        // ...and the side icons sit on one bar across it.
-        let arm = shapes[2..].iter().flatten().fold(None::<Rect>, |b, r| Some(b.map_or(*r, |b| union(b, *r))));
-        if let Some(arm) = arm {
-            let mid = front.x + front.w / 2.0;
-            // "Still too much": the bar is nearly as tall as the column — the
-            // cross shows only as a small step in at each corner.
-            let col = shapes[0].unwrap_or(front);
-            let notch = g.notch.min(col.h / 4.0);
-            let arm = union(arm, Rect::new(arm.x, col.y + notch, arm.w, col.h - 2.0 * notch));
-            shapes[2] = Some(union(arm, Rect::new(mid, arm.y, 0.0, arm.h)));
-            shapes[3] = None;
-        }
-        let bounds = shapes.iter().flatten().fold(front, |b, r| union(b, *r));
-        View { shapes, bounds, a: self.card_a, icons, text }
+        View { card, card_a: self.card_a, icons }
     }
-}
-
-/// `r` with a margin `m` all round.
-fn pad(r: Rect, m: f32) -> Rect {
-    pad2(r, (m, m))
-}
-
-fn pad2(r: Rect, (mx, my): (f32, f32)) -> Rect {
-    Rect::new(r.x - mx, r.y - my, r.w + 2.0 * mx, r.h + 2.0 * my)
-}
-
-fn union(a: Rect, b: Rect) -> Rect {
-    let (x, y) = (a.x.min(b.x), a.y.min(b.y));
-    Rect::new(x, y, (a.x + a.w).max(b.x + b.w) - x, (a.y + a.h).max(b.y + b.h) - y)
 }
 
 /// An icon's size through its pop: from four tenths, overshooting a little.
@@ -453,41 +388,33 @@ pub(crate) fn words(name: Option<&str>, query: &str) -> (String, String) {
     }
 }
 
-/// Where the figure sits on the dock surface: the front icon and its word
-/// centred on the screen's centre (or as near as the surface reaches); it
-/// never moves.
+/// Where the card sits on the dock surface: centred on the screen's centre
+/// (or as near as the surface reaches); it never moves.
 pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32) -> Geo {
     let (w, h) = surface;
     let u = scale * GROW;
-    let icon = ICON * u;
-    let font_px = LETTER_PX * u;
-    let line_px = font_px * LINE;
-    let word_pad = (WORD_PAD_X * u, WORD_PAD_Y * u);
-    let glass = icon + 2.0 * ICON_PAD * u;
-    let tall = glass - WORD_TUCK * u + line_px + 2.0 * word_pad.1;
+    let (cw, ch) = (CARD_W * u, CARD_H * u);
     // The surface is anchored to the screen's bottom edge: the screen's
     // centre is `screen_h / 2` above that edge.
-    let cy = (h - screen_h / 2.0).clamp(tall / 2.0, (h - tall / 2.0).max(tall / 2.0));
-    let top = cy - tall / 2.0;
-    let icon_r = Rect::new(w / 2.0 - icon / 2.0, top + ICON_PAD * u, icon, icon);
-    let side = SIDE_ICON * u;
-    let icy = icon_r.y + icon / 2.0;
-    // Glass to glass, SIDE_GAP apart.
-    let reach = glass / 2.0 + SIDE_GAP * u + SIDE_PAD * u + side / 2.0;
-    let side_at = |dir: f32| Rect::new(w / 2.0 + dir * reach - side / 2.0, icy - side / 2.0, side, side);
+    let cy = (h - screen_h / 2.0).clamp(ch / 2.0, (h - ch / 2.0).max(ch / 2.0));
+    let card = Rect::new(w / 2.0 - cw / 2.0, cy - ch / 2.0, cw, ch);
+    let icon = ICON * u;
+    let icon_r = Rect::new(card.x + (cw - icon) / 2.0, card.y + CARD_PAD * u, icon, icon);
+    let (side, ext, nudge) = (SIDE * u, EXT * u, NUDGE * u);
+    let top = card.y + (ch - side) / 2.0;
+    let slot_l = Rect::new(card.x - ext + (ext - side) / 2.0 + nudge, top, side, side);
+    let slot_r = Rect::new(card.x + cw + (ext - side) / 2.0 - nudge, top, side, side);
+    let font_px = LETTER_PX * u;
+    let line_px = font_px * LINE;
+    let pad = TEXT_PAD * u;
     Geo {
+        card,
+        radius: CARD_R * u,
         icon: icon_r,
-        sides: [side_at(-1.0), side_at(1.0)],
-        travel: reach,
-        icon_pad: ICON_PAD * u,
-        side_pad: SIDE_PAD * u,
-        icon_r: ICON_R * u,
-        side_r: SIDE_R * u,
-        melt: MELT * u,
-        notch: NOTCH * u,
-        word_top: top + glass - WORD_TUCK * u,
-        word_pad,
-        word_max: WORD_MAX * u,
+        sides: [grow(slot_l, 1.0 - 2.0 * SIDE_INSET), grow(slot_r, 1.0 - 2.0 * SIDE_INSET)],
+        ext,
+        travel: cw / 2.0 + ext / 2.0,
+        text: Rect::new(card.x + pad, card.y + ch - TYPE_GAP * u - line_px, cw - 2.0 * pad, line_px),
         font_px,
         line_px,
     }
@@ -620,7 +547,7 @@ impl App {
             .find_map(|(r, e)| e.filter(|_| r.contains(pos)));
         if let Some(entry) = hit {
             self.fast_launch_pick(Some(entry));
-        } else if !self.fast.view(&g, self.fast.word_w).bounds.contains(pos) {
+        } else if !self.fast.view(&g).card.contains(pos) {
             self.close_fast_launch();
         }
     }
@@ -693,11 +620,10 @@ mod tests {
             t += 1.0 / 144.0;
             assert!(t < 0.3, "the opening settles fast");
         }
-        let v = f.view(&g, 80.0);
+        let v = f.view(&g);
         assert_eq!(v.icons.len(), 3);
         assert_eq!(v.icons[2].0, 5, "the front icon is drawn last, on top");
-        assert!(v.shapes[0].is_some() && v.shapes[1].is_some() && v.shapes[2].is_some(), "a cross: the column, the word, the bar");
-        assert!(v.bounds.x < g.sides[0].x && v.bounds.x + v.bounds.w > g.sides[1].x + g.sides[1].w);
+        assert!((v.card.w - (g.card.w + 2.0 * g.ext)).abs() < 0.5, "the card reached out both ways");
         f.open = false;
         t = 0.0;
         while f.step(1.0 / 144.0) {
@@ -712,11 +638,10 @@ mod tests {
     fn the_card_is_anchored_mid_screen() {
         // A 1250-tall screen, the dock surface its bottom 760.
         let g = geometry((2000.0, 760.0), 1250.0, 1.0);
-        let top = g.icon.y - g.icon_pad;
-        let bottom = g.word_top + g.line_px + 2.0 * g.word_pad.1;
-        assert!(((top + bottom) / 2.0 - (760.0 - 625.0)).abs() < 0.01, "the screen's centre");
-        assert!((g.icon.x + g.icon.w / 2.0 - 1000.0).abs() < 0.01, "and its middle");
+        assert!((g.card.y + g.card.h / 2.0 - (760.0 - 625.0)).abs() < 0.01, "the screen's centre");
+        assert!((g.card.x + g.card.w / 2.0 - 1000.0).abs() < 0.01, "and its middle");
         assert!(g.sides[0].x + g.sides[0].w < g.icon.x && g.sides[1].x > g.icon.x + g.icon.w, "beside the front icon");
+        assert!(g.sides[0].x >= g.card.x - g.ext && g.sides[1].x + g.sides[1].w <= g.card.x + g.card.w + g.ext, "inside the card reached out");
         assert_eq!(placement(3, 1), vec![1, 0, 2], "the selected one goes in front");
         assert_eq!(placement(1, 0), vec![0]);
     }

@@ -177,11 +177,6 @@ pub struct Scene {
     /// Banner blister: `(bar_edge_y, k, _, _)` for the sunset module's swell.
     /// `None` = no blister this frame.
     pub neck: Option<[f32; 4]>,
-    /// FAST LAUNCH's melted glass: shapes (min x, min y, max x, max y; an
-    /// empty one is skipped) — front icon, word pill, left, right — then
-    /// (fillet, front radius, side radius, _). Rects drawn with `glass`
-    /// ≈ 3 take this shape instead of their own.
-    pub blob: Option<[[f32; 4]; 5]>,
 }
 
 /// What the pointer is over.
@@ -610,14 +605,10 @@ pub struct DockOverflow {
 /// What FAST LAUNCH draws this frame (see `fast_launch.rs`).
 #[derive(Debug, Clone, Copy)]
 pub struct FastDraw<'a> {
-    /// The glass shapes melted into one figure — round the front icon, the
-    /// word, the left and right icons (`None` = not there) — all of it,
-    /// the corner radii (front, —, sides; the word is a pill), the
-    /// fillet, and the presence 0..1.
-    pub shapes: [Option<Rect>; 4],
-    pub bounds: Rect,
-    pub radii: [f32; 3],
-    pub melt: f32,
+    /// The card's glass as it is now (reaching out for the sides), its
+    /// corner radius, and its presence 0..1.
+    pub card: Rect,
+    pub radius: f32,
     pub a: f32,
     /// The bare icons in draw order (the front one last): entry, rect.
     pub icons: &'a [(usize, Rect)],
@@ -3111,23 +3102,12 @@ pub fn scene(
         // ignore_alpha 0.5), so the card first lays down the dock's own glass —
         // its sampled colour at the dock's alpha — then the mockup's light
         // wash and rim on top.
-        // The shape is the melted figure (`Scene::blob`), drawn on a quad
-        // round all of it.
-        let mut blob = [[0.0, 0.0, -1.0, -1.0]; 5];
-        for (b, r) in blob.iter_mut().zip(f.shapes) {
-            if let Some(r) = r {
-                *b = [r.x, r.y, r.x + r.w, r.y + r.h];
-            }
-        }
-        blob[4] = [f.melt, f.radii[0], f.radii[2], 0.0];
-        scene.blob = Some(blob);
-        let quad = Rect::new(f.bounds.x - f.melt, f.bounds.y - f.melt, f.bounds.w + 2.0 * f.melt, f.bounds.h + 2.0 * f.melt);
         let base = [dock_bg[0], dock_bg[1], dock_bg[2], dock_bg[3].max(0.51) * a];
-        scene.rects.push(RectInst { rect: quad, radius: 0.0, color: base, glass: 3.0, border: 0.0 });
+        scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: base, glass: 0.0, border: 0.0 });
         let fill = crate::options::wash(true, 0.12 * a);
-        scene.rects.push(RectInst { rect: quad, radius: 0.0, color: fill, glass: 3.0, border: 0.0 });
+        scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: fill, glass: 0.5, border: 0.0 });
         let rim = crate::options::wash(true, 0.22 * a);
-        scene.rects.push(RectInst { rect: quad, radius: 0.0, color: rim, glass: 3.0, border: 1.0 });
+        scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: rim, glass: 0.0, border: 1.0 });
         for &(entry, rect) in f.icons {
             scene.overlay.push(IconInst {
                 rect,

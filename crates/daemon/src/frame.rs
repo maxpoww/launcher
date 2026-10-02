@@ -1228,6 +1228,7 @@ impl App {
             fit_animating = true;
         }
         let fast_geo = self.fast_geometry();
+        let fast_view = self.fast.view(&fast_geo);
         let (fast_typed, fast_rest) = if self.fast.visible() { self.fast_words() } else { Default::default() };
         let (fast_typed_w, fast_rest_w) = self
             .renderer
@@ -1237,20 +1238,16 @@ impl App {
                 (m(&fast_typed), m(&fast_rest))
             })
             .unwrap_or((0.0, 0.0));
-        self.fast.word_w = fast_typed_w + fast_rest_w;
-        let fast_view = self.fast.view(&fast_geo, self.fast.word_w);
         let fast_draw = self.fast.visible().then_some(content::FastDraw {
-            shapes: fast_view.shapes,
-            bounds: fast_view.bounds,
-            radii: [fast_geo.icon_r, 0.0, fast_geo.side_r],
-            melt: fast_geo.melt,
-            a: fast_view.a,
+            card: fast_view.card,
+            radius: fast_geo.radius,
+            a: fast_view.card_a,
             icons: &fast_view.icons,
             typed: &fast_typed,
             rest: &fast_rest,
             typed_w: fast_typed_w,
             rest_w: fast_rest_w,
-            text_box: fast_view.text,
+            text_box: fast_geo.text,
             font_px: fast_geo.font_px,
             line_px: fast_geo.line_px,
         });
