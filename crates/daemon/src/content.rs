@@ -3126,7 +3126,8 @@ pub fn scene(
         // Readable over anything through the clear glass (Max, 2026-10-02,
         // "1 and 2"): a HALO — the word drawn eight times round itself in
         // the opposite of the ink, a hair out, like subtitles over a film —
-        // and the dimmed rest of the name lifted to 65%.
+        // and the dimmed rest of the name lifted to 65% (then "a little
+        // lighter" halo, 40% → 28%, and the completion dimmer, 50%).
         let halo_r = (f.font_px * 0.07).max(1.0);
         let light_ink = dock_ink[0] + dock_ink[1] + dock_ink[2] > 1.5;
         let halo_rgb = if light_ink { [0.0, 0.0, 0.0] } else { [1.0, 1.0, 1.0] };
@@ -3135,7 +3136,7 @@ pub fn scene(
             if text.is_empty() || x >= b.x + b.w {
                 return;
             }
-            let halo = [halo_rgb[0], halo_rgb[1], halo_rgb[2], 0.4 * color[3]];
+            let halo = [halo_rgb[0], halo_rgb[1], halo_rgb[2], 0.28 * color[3]];
             let d = halo_r * std::f32::consts::FRAC_1_SQRT_2;
             let rings = [
                 (halo_r, 0.0), (-halo_r, 0.0), (0.0, halo_r), (0.0, -halo_r),
@@ -3160,7 +3161,7 @@ pub fn scene(
         };
         let ink = |k: f32| [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * a];
         word(f.typed, left, ink(0.95));
-        word(f.rest, left + f.typed_w, ink(0.65));
+        word(f.rest, left + f.typed_w, ink(0.5));
     }
 
     // Ghost of a box member being reordered, following the pointer (topmost).
