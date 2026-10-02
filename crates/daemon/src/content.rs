@@ -3104,8 +3104,12 @@ pub fn scene(
         // wash and rim on top.
         let base = [dock_bg[0], dock_bg[1], dock_bg[2], dock_bg[3].max(0.51) * a];
         scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: base, glass: 0.0, border: 0.0 });
-        let fill = crate::options::wash(true, 0.12 * a);
-        scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: fill, glass: 0.5, border: 0.0 });
+        // "A little shallower" (Max, 2026-10-02 — the blur's strength is one
+        // global Hyprland setting, so the card fakes it): a thinner light
+        // wash and less of the glass material, the background reading
+        // through more.
+        let fill = crate::options::wash(true, 0.06 * a);
+        scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: fill, glass: 0.3, border: 0.0 });
         let rim = crate::options::wash(true, 0.22 * a);
         scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: rim, glass: 0.0, border: 1.0 });
         for &(entry, rect) in f.icons {
