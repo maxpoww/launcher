@@ -24,6 +24,10 @@ use wgpu::util::DeviceExt;
 use crate::apps::{ICON_CHAIN_BYTES, ICON_MIPS, ICON_SIZE};
 use crate::content::Scene;
 
+/// The largest texture side the device is asked for — and so the largest
+/// framebuffer a surface may have (`App::surface_scale` caps the scale to it).
+pub const MAX_TEXTURE_SIDE: u32 = 8192;
+
 /// Global uniforms shared by the rect and icon pipelines.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -362,7 +366,7 @@ impl Renderer {
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits {
                     // Allow surface expansion to full screen height (>2048 on 4K displays).
-                    max_texture_dimension_2d: 8192,
+                    max_texture_dimension_2d: MAX_TEXTURE_SIDE,
                     // The icon array is one texture layer per app icon plus a
                     // reserved block (rank hits + pending installs + thumbs +
                     // minimized = 113). downlevel_defaults() caps

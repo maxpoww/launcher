@@ -509,6 +509,13 @@ impl App {
             warn!("display: {}x{} has no clean scale near {want}", m.mode.w, m.mode.h);
             return;
         };
+        // Only a scale the panel offers: `display scale 7` became 300 % on
+        // the MacBook — a 480×300 desktop, saved, so it came back on every
+        // login (night dogfood, 2026-10-03).
+        if !scale_stops(m.mode.w, m.mode.h, m.scale).iter().any(|s| (s - scale).abs() < 1e-4) {
+            warn!("display: {}x{} does not offer {scale} (asked {want})", m.mode.w, m.mode.h);
+            return;
+        }
         if (scale - m.scale).abs() < 1e-4 {
             return;
         }

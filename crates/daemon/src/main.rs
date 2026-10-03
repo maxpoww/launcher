@@ -5285,7 +5285,21 @@ impl App {
             SurfaceKind::Deck => (&self.deck_fscale, self.config.options.render_scale),
         };
         let fallback = fallback.max(1) as f32;
-        fs.as_ref().map_or(fallback, |f| f.scale_or(fallback))
+        let scale = fs.as_ref().map_or(fallback, |f| f.scale_or(fallback));
+        // Never a framebuffer past the device's texture limit: at a 300 %
+        // screen the dock asked for 8640×2991 and wgpu panicked in
+        // Surface::configure (MacBook, 2026-10-03). Past the cap the
+        // compositor's viewport stretches a slightly softer buffer instead.
+        let (w, h) = match kind {
+            SurfaceKind::Dock => self.buffer_size,
+            SurfaceKind::Options => self.options_size,
+            SurfaceKind::Deck => self.deck_size,
+        };
+        let long = w.max(h);
+        if long == 0 {
+            return scale;
+        }
+        scale.min(renderer::MAX_TEXTURE_SIDE as f32 / long as f32)
     }
 
     /// The compositor changed a surface's preferred scale (first report, or
