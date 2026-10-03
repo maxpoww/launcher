@@ -97,8 +97,8 @@ const SETTINGS: [Item; 24] = [
 // MODULES' pills come from the catalog (`modules.rs`, `assets/modules.json`).
 
 // ---- An open module (Max's approved design, 2026-10-03) -------------------
-/// A program's name in the list (px at bar scale 1).
-const MOD_NAME_PX: f32 = 14.0;
+/// A program's name in the list (px at bar scale 1; "a little bigger", Max 2026-10-03).
+const MOD_NAME_PX: f32 = 16.0;
 /// List pixels per wheel unit.
 const MOD_WHEEL: f32 = 2.0;
 
@@ -1144,24 +1144,24 @@ impl Panel {
                 ),
             };
         // From the foot up: the hint, the link, the lines, the button.
-        let line = 17.0 * s;
+        let line = 18.0 * s;
         // Clear of the card's Search pill, which sits in the field's foot.
         let hint_y = fh - 64.0 * s;
         let mut y = hint_y - 6.0 * s;
         let link = link.map(|(what, t)| {
             y -= line;
-            let w = est(t, 13.0 * s) + 8.0 * s;
+            let w = est(t, 14.0 * s) + 8.0 * s;
             (Rect::new((fw - w) / 2.0, y, w, line), what, t)
         });
         y -= sub.len() as f32 * line + 4.0 * s;
         let sub: Vec<(String, f32)> = sub.into_iter().enumerate().map(|(i, t)| (t, y + i as f32 * line)).collect();
-        let bh = 28.0 * s;
+        let bh = 32.0 * s;
         y -= 8.0 * s + bh;
-        let bw = est(&button_text, 15.0 * s) + 34.0 * s;
+        let bw = est(&button_text, 16.5 * s) + 38.0 * s;
         let button = Rect::new((fw - bw) / 2.0, y, bw, bh);
         // The list: captions over groups of rows.
-        let row_h = 30.0 * s;
-        let row_w = (400.0 * s).min(fw - 48.0 * s);
+        let row_h = 36.0 * s;
+        let row_w = (470.0 * s).min(fw - 40.0 * s);
         let (mut captions, mut rows, mut cy) = (Vec::new(), Vec::new(), 0.0);
         for g in &m.groups {
             let progs: Vec<&'static crate::modules::Program> =
@@ -1170,10 +1170,10 @@ impl Panel {
                 continue;
             }
             captions.push((g.name.clone(), cy));
-            cy += line + 6.0 * s;
+            cy += line + 8.0 * s;
             for prog in progs {
                 rows.push(ModRow { prog, y: cy });
-                cy += row_h + 6.0 * s;
+                cy += row_h + 7.0 * s;
             }
             cy += 10.0 * s;
         }
@@ -1631,7 +1631,7 @@ impl Panel {
             let mut inside = PanelDraw::default();
             let top = l.list.y - self.mods.scroll;
             for (cap, cy) in &l.captions {
-                text(&mut inside, cap.clone(), cx, top + cy, 13.0, 17.0, 0.6);
+                text(&mut inside, cap.clone(), cx, top + cy, 14.5, 18.0, 0.62);
             }
             let hover_a = if paint.bright { HOVER_WASH_BRIGHT } else { HOVER_WASH_DARK };
             for row in &l.rows {
@@ -1672,8 +1672,8 @@ impl Panel {
                         clip: Some(clip),
                     }
                 };
-                let pad = 14.0 * s;
-                let sw = (28.0 * s, 16.0 * s);
+                let pad = 16.0 * s;
+                let sw = (34.0 * s, 20.0 * s);
                 let name_w = self.name_w.get(row.prog.name.as_str()).copied().unwrap_or(0.0);
                 inside.labels.push(left(row.prog.name.clone(), pad, MOD_NAME_PX, 1.0, rw - 2.0 * pad - sw.0));
                 let what = match (on, was) {
@@ -1684,13 +1684,13 @@ impl Panel {
                 let dx = pad + name_w + 10.0 * s;
                 let room = rw - dx - pad - sw.0 - 8.0 * s;
                 if room > 20.0 * s {
-                    inside.labels.push(left(what, dx, 12.0, 0.62, room));
+                    inside.labels.push(left(what, dx, 13.5, 0.65, room));
                 }
                 // The switch: on, white with a dark knob; off, a quiet wash.
-                let (tx, ty) = (rx + rw - 7.0 * s - sw.0, ry + (rh - sw.1) / 2.0);
+                let (tx, ty) = (rx + rw - 9.0 * s - sw.0, ry + (rh - sw.1) / 2.0);
                 rect(&mut inside, tx, ty, sw.0, sw.1, sw.1 / 2.0, if on { [paint.ink[0], paint.ink[1], paint.ink[2], 0.92] } else { wash(0.16) });
-                let knob = 11.0 * s;
-                let kx = if on { tx + sw.0 - 2.5 * s - knob } else { tx + 2.5 * s };
+                let knob = 14.0 * s;
+                let kx = if on { tx + sw.0 - 3.0 * s - knob } else { tx + 3.0 * s };
                 let kc = if on { [0.02, 0.025, 0.035, 1.0] } else { [paint.ink[0], paint.ink[1], paint.ink[2], 0.8] };
                 rect(&mut inside, kx, ty + (sw.1 - knob) / 2.0, knob, knob, knob / 2.0, kc);
             }
@@ -1712,14 +1712,14 @@ impl Panel {
                 glass: 0.0,
                 border: 1.0,
             });
-            text(out, l.button_text.clone(), cx, b.y + (b.h - 19.0 * s) / 2.0, 15.0, 19.0, 1.0);
+            text(out, l.button_text.clone(), cx, b.y + (b.h - 21.0 * s) / 2.0, 16.5, 21.0, 1.0);
             for (t, ty) in &l.sub {
-                text(out, t.clone(), cx, *ty, 13.0, 17.0, 0.62);
+                text(out, t.clone(), cx, *ty, 14.0, 18.0, 0.65);
             }
             if let Some((r, _, t)) = &l.link {
                 let hot = resting && self.pointer.is_some_and(|pos| Rect::new(f.x + r.x, f.y + r.y, r.w, r.h).contains(pos));
-                text(out, t.to_string(), cx, r.y, 13.0, 17.0, if hot { 1.0 } else { 0.85 });
-                rect(out, cx - r.w / 2.0 + 4.0 * s, r.y + 16.0 * s, r.w - 8.0 * s, 1.0 * s, 0.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.5]);
+                text(out, t.to_string(), cx, r.y, 14.0, 18.0, if hot { 1.0 } else { 0.85 });
+                rect(out, cx - r.w / 2.0 + 4.0 * s, r.y + 17.0 * s, r.w - 8.0 * s, 1.0 * s, 0.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.5]);
             }
             text(out, "Esc or a click on the empty space closes".to_owned(), cx, l.hint_y, 12.0, 16.0, 0.4);
             return;
