@@ -1280,6 +1280,7 @@ impl App {
                 search_pill,
                 fast: fast_draw,
                 controls: &self.search.controls,
+                control_modules: &self.search.control_modules,
                 control_lift: &self.search.control_lift,
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {

@@ -635,6 +635,7 @@ fn main() -> anyhow::Result<()> {
         control_panel_opening: false,
         panel: panel::Panel::load(),
         panel_parked: panel::Panel::load_modules(),
+        panel_leaving: 0.0,
         panel_mix: 0.0,
         panel_reset_due: false,
         display_pending: None,
@@ -1572,6 +1573,8 @@ pub struct App {
     /// The field not on show: the card shows one field at a time — the
     /// settings or the MODULES — and `panel_switch` trades them.
     panel_parked: panel::Panel,
+    /// Seconds the replaced field still draws as it falls away.
+    panel_leaving: f32,
     /// Apps ↔ settings, eased: 0 = the apps grid, 1 = the panel. Only the
     /// swap inside an open card animates; a card opening straight into
     /// either view starts there.
@@ -2061,6 +2064,8 @@ struct SearchState {
     controls: Vec<(&'static str, f32)>,
     /// Eased pointer hover per control pill, as `lift`.
     control_lift: Vec<f32>,
+    /// Which of `controls` are MODULES (they open the module), not settings.
+    control_modules: Vec<bool>,
 }
 
 impl Default for SearchState {
@@ -2075,6 +2080,7 @@ impl Default for SearchState {
             lift: 0.0,
             controls: Vec::new(),
             control_lift: Vec::new(),
+            control_modules: Vec::new(),
         }
     }
 }
@@ -4069,11 +4075,29 @@ impl App {
         self.search.visible = visible;
         // The settings that match, for the Controls row (not on the panel
         // itself, which searches its own field).
-        let controls = if self.control_panel {
-            Vec::new()
+        // And the modules that match (Max, 2026-10-03: "as controls do"):
+        // settings first, then up to three modules, six pills at most.
+        let (settings, modules) = if self.control_panel {
+            (Vec::new(), Vec::new())
         } else {
-            self.settings_panel().matching_controls(&self.search.query)
+            (
+                self.settings_panel().matching_controls(&self.search.query),
+                self.modules_panel().matching_controls(&self.search.query),
+            )
         };
+        // The row keeps only the pills that fit, from the front: the best
+        // setting and the best module lead, so both kinds show when both
+        // match; then the rest of each.
+        let mut settings = settings.into_iter();
+        let mut modules = modules.into_iter().take(3);
+        let mut picked: Vec<(&'static str, bool)> = Vec::new();
+        picked.extend(settings.next().map(|l| (l, false)));
+        picked.extend(modules.next().map(|l| (l, true)));
+        picked.extend(settings.map(|l| (l, false)));
+        picked.extend(modules.map(|l| (l, true)));
+        picked.truncate(panel::MAX_SEARCH_CONTROLS);
+        self.search.control_modules = picked.iter().map(|&(_, m)| m).collect();
+        let controls: Vec<&'static str> = picked.into_iter().map(|(l, _)| l).collect();
         // The near layer's type (Max: "make the pills big as the nearest layer").
         let font = options::FONT_PX * self.options_scale() * panel::LAYER_SCALE[0];
         self.search.controls = controls
@@ -4910,7 +4934,14 @@ impl App {
             }
             Hit::Control(i) => {
                 if let Some(&(label, _)) = self.search.controls.get(i) {
-                    self.open_control(label);
+                    if self.search.control_modules.get(i).copied().unwrap_or(false) {
+                        self.search.open = false;
+                        self.search.query.clear();
+                        self.refilter();
+                        self.show_module(label);
+                    } else {
+                        self.open_control(label);
+                    }
                 }
             }
             Hit::SearchButton => {

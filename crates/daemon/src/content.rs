@@ -1282,6 +1282,8 @@ pub struct FrameInput<'a> {
     /// `Layout::controls` order, and each pill's eased hover.
     pub controls: &'a [(&'static str, f32)],
     pub control_lift: &'a [f32],
+    /// Which of `controls` are modules: the row's title names what it shows.
+    pub control_modules: &'a [bool],
     /// FAST LAUNCH's bubble and icons, while it is up or fading.
     pub fast: Option<FastDraw<'a>>,
     /// AGUA stretch factor (1.0 at rest): dock icons slosh vertically
@@ -1564,6 +1566,7 @@ pub fn scene(
         search_pill,
         controls,
         control_lift,
+        control_modules,
         fast,
         stretch,
         dock_tooltip,
@@ -2750,7 +2753,17 @@ pub fn scene(
     // rides the push with the rest.
     if let (Some(title), false) = (layout.controls_title, layout.controls.is_empty() || panel) {
         scene.labels.push(Label {
-            text: crate::i18n::tr("Controls").to_string(),
+            text: {
+                // Named for the pills that fit (the row drops the rest).
+                let shown = &control_modules[..layout.controls.len().min(control_modules.len())];
+                let (m, c) = (shown.iter().any(|&m| m), shown.iter().any(|&m| !m));
+                crate::i18n::tr(match (c, m) {
+                    (true, true) => "Controls · Modules",
+                    (false, true) => "Modules",
+                    _ => "Controls",
+                })
+                .to_string()
+            },
             pos: (title.0, title.1 + TITLE_DROP),
             max_w: 200.0,
             font_px: TITLE_FONT_PX,

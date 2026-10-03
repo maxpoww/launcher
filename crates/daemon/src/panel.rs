@@ -94,6 +94,9 @@ const SETTINGS: [Item; 24] = [
     ("Privacy", 2, "security permissions camera location"),
 ];
 
+/// How long the field being replaced keeps drawing as it falls away.
+const PANEL_LEAVE_SECS: f32 = 0.22;
+
 // MODULES' pills come from the catalog (`modules.rs`, `assets/modules.json`).
 
 // ---- An open module (Max's approved design, 2026-10-03) -------------------
@@ -491,6 +494,8 @@ pub(crate) struct Panel {
     installed: std::collections::HashSet<String>,
     /// Each program name's shaped width at the list's type size.
     name_w: std::collections::HashMap<&'static str, f32>,
+    /// Arrive (see [`Panel::arrive`]) as soon as the pills exist.
+    arrive_pending: bool,
     /// An Apply asked for: (module, to add, to remove); `App` takes it.
     pub(crate) pending_apply: Option<(&'static str, Vec<&'static crate::modules::Program>, Vec<&'static crate::modules::Program>)>,
     /// The search, lowercased (empty: none).
@@ -634,6 +639,9 @@ impl Panel {
             }
         }
         self.compose(size, true);
+        if std::mem::take(&mut self.arrive_pending) {
+            self.arrive();
+        }
         if let Some(label) = self.pending_open.take() {
             self.open_named(label);
         }
@@ -1075,6 +1083,35 @@ impl Panel {
     }
 
     /// Escape: fold an open setting back. Returns whether one was open.
+    /// The other field takes this one's place (settings ↔ modules, Max
+    /// 2026-10-03: "improve the animation"): every pill falls away past the
+    /// viewer at once, the field's own "near layer leaves" motion.
+    pub(crate) fn leave(&mut self) {
+        self.open = None;
+        self.hot = None;
+        for p in &mut self.pills {
+            if p.exit.is_none() {
+                p.exit = Some(Exit { dir: 1, k: 0.0 });
+            }
+        }
+    }
+
+    /// This field comes in: every pill rises out of the depth to its place,
+    /// small and faint first, the near layer a beat behind the far ones.
+    pub(crate) fn arrive(&mut self) {
+        if self.pills.is_empty() {
+            self.arrive_pending = true;
+            return;
+        }
+        let s = self.scale.max(0.01);
+        for p in &mut self.pills {
+            let depth = p.layer as f32; // 0 near … 2 far
+            p.sc = 0.45 + 0.1 * depth;
+            p.op = -0.35 * (2.0 - depth); // the near ones wait a beat
+            p.anchor.1 = p.home.1 + (34.0 - 8.0 * depth) * s;
+        }
+    }
+
     /// The catalog programs in this computer (lowercased names), from `App`.
     pub(crate) fn set_installed(&mut self, installed: std::collections::HashSet<String>) {
         self.installed = installed;
@@ -1428,7 +1465,7 @@ impl Panel {
             // Search: a match rises to the near layer's size and light, a
             // miss sinks back and dims.
             let rise = p.focus.max(0.0);
-            let a = p.op * fade * (1.0 - SEARCH_DIM * (-p.focus).max(0.0));
+            let a = p.op.max(0.0) * fade * (1.0 - SEARCH_DIM * (-p.focus).max(0.0));
             if a < 0.004 {
                 continue;
             }
@@ -1992,6 +2029,11 @@ impl App {
         if self.panel.is_modules() { &self.panel_parked } else { &self.panel }
     }
 
+    /// The modules' field, wherever it is.
+    pub(crate) fn modules_panel(&self) -> &Panel {
+        if self.panel.is_modules() { &self.panel } else { &self.panel_parked }
+    }
+
     pub(crate) fn settings_panel_mut(&mut self) -> &mut Panel {
         if self.panel.is_modules() { &mut self.panel_parked } else { &mut self.panel }
     }
@@ -2002,6 +2044,13 @@ impl App {
         if self.panel.is_modules() != modules {
             std::mem::swap(&mut self.panel, &mut self.panel_parked);
             self.panel.reset();
+            // On show already (the card open on the other field): the old one
+            // falls away while this one rises in.
+            if self.ui.target() == Target::Open && self.control_panel {
+                self.panel_parked.leave();
+                self.panel.arrive();
+                self.panel_leaving = PANEL_LEAVE_SECS;
+            }
         }
         if modules {
             let installed = self.modules_installed();
@@ -2145,7 +2194,21 @@ impl App {
         self.panel.keep_left = self.display_keep_left();
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
-        self.panel.draw(paint)
+        let mut draw = self.panel.draw(paint);
+        // The field it replaced, falling away underneath for a moment.
+        if self.panel_leaving > 0.0 {
+            self.panel_leaving -= dt;
+            self.panel_parked.field = field;
+            self.panel_parked.step(dt, None);
+            let mut old = self.panel_parked.draw(paint);
+            old.rects.append(&mut draw.rects);
+            old.labels.append(&mut draw.labels);
+            old.glows.append(&mut draw.glows);
+            old.clipped.append(&mut draw.clipped);
+            draw = old;
+            self.schedule_frame();
+        }
+        draw
     }
 
     /// Wheel over the open panel: move through its layers.
