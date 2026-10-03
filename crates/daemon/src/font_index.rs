@@ -19,21 +19,25 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use glyphon::cosmic_text::fontdb as fontdb_family;
 use glyphon::cosmic_text::fontdb::{
     Database, FaceInfo, Language, Source, Stretch, Style, Weight, ID,
 };
 use serde::{Deserialize, Serialize};
 
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct Index {
     format: u32,
     key: String,
+    /// The generic families as the scan left them (serif, sans-serif,
+    /// cursive, fantasy, monospace): fontconfig's choices, not cosmic-text's.
+    generic: [String; 5],
     faces: Vec<Face>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Face {
     path: PathBuf,
     index: u32,
@@ -81,8 +85,12 @@ fn build() -> Database {
         return db;
     }
     let mut db = Database::new();
-    db.load_system_fonts();
+    // cosmic-text's order: its defaults FIRST, then the scan, which lets
+    // fontconfig name the generic families (sans-serif → the system's
+    // choice). Set after, they replaced it, and the bar's sans-serif came
+    // out in another face — the clock a few pixels wider (Acer, 2026-10-03).
     defaults(&mut db);
+    db.load_system_fonts();
     tracing::info!(
         "fonts: scanned {} faces in {:?}; index saved",
         db.len(),
@@ -165,7 +173,7 @@ fn load(path: &Path, key: &str) -> Option<Database> {
         return None;
     }
     let mut db = Database::new();
-    for f in index.faces {
+    for f in index.faces.iter().cloned() {
         let data: Arc<dyn AsRef<[u8]> + Sync + Send> = Arc::new(LazyFile::new(f.path.clone()));
         let mut families = f.families.into_iter();
         let first = families.next()?;
@@ -188,7 +196,12 @@ fn load(path: &Path, key: &str) -> Option<Database> {
             monospaced: f.monospaced,
         });
     }
-    defaults(&mut db);
+    let [serif, sans, cursive, fantasy, mono] = index.generic;
+    db.set_serif_family(serif);
+    db.set_sans_serif_family(sans);
+    db.set_cursive_family(cursive);
+    db.set_fantasy_family(fantasy);
+    db.set_monospace_family(mono);
     Some(db)
 }
 
@@ -216,7 +229,17 @@ fn save(path: &Path, key: &str, db: &Database) {
             monospaced: info.monospaced,
         });
     }
+    use fontdb_family::Family;
+    let generic = [
+        Family::Serif,
+        Family::SansSerif,
+        Family::Cursive,
+        Family::Fantasy,
+        Family::Monospace,
+    ]
+    .map(|f| db.family_name(&f).to_string());
     let index = Index {
+        generic,
         format: FORMAT,
         key: key.to_string(),
         faces,
@@ -298,6 +321,7 @@ mod tests {
     #[test]
     fn an_index_gives_back_the_scanned_faces() {
         let mut scanned = Database::new();
+        defaults(&mut scanned);
         scanned.load_system_fonts();
         if scanned.is_empty() {
             return; // no fonts in this build environment
@@ -328,6 +352,14 @@ mod tests {
             v
         };
         assert_eq!(sig(&scanned), sig(&loaded));
+        use fontdb_family::Family;
+        for f in [Family::Serif, Family::SansSerif, Family::Monospace] {
+            assert_eq!(
+                scanned.family_name(&f),
+                loaded.family_name(&f),
+                "generic family {f:?}"
+            );
+        }
         // A face from the index reads its file on first use.
         let id = loaded.faces().next().expect("a face").id;
         assert!(loaded
