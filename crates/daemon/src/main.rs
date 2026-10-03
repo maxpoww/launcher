@@ -86,6 +86,7 @@ mod usage;
 mod webapps;
 mod window_memory;
 mod fast_launch;
+mod modules;
 
 use std::collections::{HashMap, HashSet};
 use std::os::fd::AsFd;
@@ -2379,7 +2380,7 @@ impl App {
         if self.fast.open {
             match command {
                 Command::Show => self.close_fast_launch(),
-                Command::Toggle | Command::Expand | Command::ControlPanel | Command::Modules => {
+                Command::Toggle | Command::Expand | Command::ControlPanel | Command::Modules(_) => {
                     self.fast_yield_keyboard_to_box()
                 }
                 _ => {}
@@ -2587,8 +2588,12 @@ impl App {
                 self.toggle_control_panel();
                 return;
             }
-            Command::Modules => {
-                self.toggle_modules();
+            Command::Modules(name) => {
+                if name.is_empty() {
+                    self.toggle_modules();
+                } else {
+                    self.show_module(&name);
+                }
                 return;
             }
             Command::Display(args) => {

@@ -2889,6 +2889,28 @@ pub fn scene(
             l
         }));
         scene.grids.push(field);
+        // Parts that scroll inside their own window (an open module's list).
+        for (clip, rects, labels) in &pd.clipped {
+            let mut c = *clip;
+            c.y += rise;
+            let (x0, y0) = (c.x.max(reveal_rect.x), c.y.max(reveal_rect.y));
+            let x1 = (c.x + c.w).min(reveal_rect.x + reveal_rect.w);
+            let y1 = (c.y + c.h).min(reveal_rect.y + reveal_rect.h);
+            let c = Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0));
+            let mut g = GridContent { clip: c, ..Default::default() };
+            g.rects.extend(rects.iter().map(|r| {
+                let mut r = *r;
+                r.rect.y += rise;
+                r
+            }));
+            g.labels.extend(labels.iter().map(|l| {
+                let mut l = l.clone();
+                l.clip = Some(c);
+                l.pos.1 += rise;
+                l
+            }));
+            scene.grids.push(g);
+        }
     }
 
     // Magnified open box: a rounded panel that grows from the clicked tile

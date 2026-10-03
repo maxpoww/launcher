@@ -98,8 +98,8 @@ pub enum Command {
     /// to look at it. `settings` is accepted as its old name.
     ControlPanel,
     /// Open (or close) the card as the MODULES field, as a click on the
-    /// Modules tile does.
-    Modules,
+    /// Modules tile does; `modules <name>` opens that module.
+    Modules(String),
     /// The screen's live settings without the panel: `display scale 1.25`,
     /// `display mode 1920x1080@60` (tried: goes back unless `display keep`),
     /// `display back`, `display reset` (Golem's defaults again), `display
@@ -243,7 +243,8 @@ impl fmt::Display for Command {
             Command::DebugStats(Some(p)) => write!(f, "debug-stats {p}"),
             Command::FloatMode(m) => write!(f, "float-mode {m}"),
             Command::ControlPanel => f.write_str("control-panel"),
-            Command::Modules => f.write_str("modules"),
+            Command::Modules(name) if name.is_empty() => f.write_str("modules"),
+            Command::Modules(name) => write!(f, "modules {name}"),
             Command::Display(args) if args.is_empty() => f.write_str("display"),
             Command::Display(args) => write!(f, "display {args}"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
@@ -314,6 +315,7 @@ impl FromStr for Command {
             ("window-mode", Command::WindowMode as fn(String) -> Command),
             ("float-mode", Command::FloatMode as fn(String) -> Command),
             ("display", Command::Display as fn(String) -> Command),
+            ("modules", Command::Modules as fn(String) -> Command),
             ("min-add", Command::MinAdd as fn(String) -> Command),
             ("min-del", Command::MinDel as fn(String) -> Command),
             ("window-placed", Command::WindowPlaced as fn(String) -> Command),
@@ -352,7 +354,6 @@ impl FromStr for Command {
                 s.trim_start_matches("debug-stats ").trim().parse().ok(),
             )),
             "control-panel" | "settings" => Ok(Command::ControlPanel),
-            "modules" => Ok(Command::Modules),
             "fast-launch" => Ok(Command::FastLaunch),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
@@ -399,7 +400,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-stats",
     "options-trigger <id>",
     "control-panel",
-    "modules",
+    "modules [name]",
     "overview-on",
     "overview-off",
     "resize-drag-on",
@@ -512,7 +513,7 @@ mod tests {
                 | Command::DebugStats(_)
                 | Command::FloatMode(_)
                 | Command::ControlPanel
-                | Command::Modules
+                | Command::Modules(_)
                 | Command::Display(_)
                 | Command::OptionsTrigger(_)
                 | Command::OverviewOn
@@ -561,7 +562,8 @@ mod tests {
         Command::DebugStats(None),
         Command::FloatMode(String::new()),
         Command::ControlPanel,
-        Command::Modules,
+        Command::Modules(String::new()),
+        Command::Modules("Music Production".into()),
         Command::Display(String::new()),
         Command::Display("scale 1.25".into()),
             Command::OptionsTrigger("media.playpause".into()),

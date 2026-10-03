@@ -94,75 +94,89 @@ const SETTINGS: [Item; 24] = [
     ("Privacy", 2, "security permissions camera location"),
 ];
 
-/// MODULES (Max, 2026-10-02): Golem's software bundles — check a box, get
-/// the whole setup: apps, webapps, system setup, first-run fits
-/// (`~/Golem/docs/system/GolemModules.md`). The same field as the
-/// settings, opened from the Modules tile among the apps; what lives inside
-/// each pill comes next. Named for what you DO, not for the software.
-/// 5 near (the broadest needs), 8 middle, 13 far; the game reorders them.
-/// "Coming soon" keeps a spot for the next one.
-pub(crate) const MODULES: [Item; 26] = [
-    ("Office", 0, "documents spreadsheets slides pdf printing scanning"),
-    ("Internet", 0, "browser downloads phone cloud drive"),
-    ("Social", 0, "chat messages friends"),
-    ("Media & Entertainment", 0, "movies tv music video player"),
-    ("Gaming", 0, "games steam controller retro play"),
-    ("Productivity", 1, "notes tasks calendar mail focus"),
-    ("Content Creation", 1, "streaming recording podcast youtube"),
-    ("Photography", 1, "photos raw camera library"),
-    ("Education", 1, "school study learning flashcards books"),
-    ("Kids", 1, "children family parental time limits"),
-    ("AI", 1, "assistant chat local models"),
-    ("Remote Work", 1, "meetings calls video remote desktop"),
-    ("Privacy & Security", 1, "passwords vpn encryption privacy"),
-    ("Music Production", 2, "audio daw synth recording mixing midi"),
-    ("Video Editing", 2, "film movie edit cut render"),
-    ("Graphic Design", 2, "drawing illustration vector layout fonts"),
-    ("3D & Printing", 2, "3d cad modelling printer slicer"),
-    ("Writing", 2, "books novels essays grammar references"),
-    ("Web Design", 2, "website html css design"),
-    ("Development", 2, "programming code containers git"),
-    ("Commerce", 2, "shop store sell invoices labels"),
-    ("Trading & Finance", 2, "stocks crypto charts budget wallet"),
-    ("Science & Data", 2, "research data statistics maps"),
-    ("Accessibility", 2, "screen reader magnifier contrast keyboard"),
-    ("Windows Apps", 2, "windows programs compatibility"),
-    ("Coming soon", 2, "coming soon"),
-];
+// MODULES' pills come from the catalog (`modules.rs`, `assets/modules.json`).
 
-/// Each module's one line, shown under its name when it opens.
-const MODULE_ABOUT: [(&str, &str); 26] = [
-    ("Office", "Documents, spreadsheets and PDFs, with printing and scanning"),
-    ("Internet", "Browsing, downloads, cloud drives and your phone, connected"),
-    ("Social", "Every chat and social network in one place"),
-    ("Media & Entertainment", "Movies, series and music, ready to play"),
-    ("Gaming", "Games, launchers and controllers, tuned to play well"),
-    ("Productivity", "Notes, tasks, mail and calendar to organise your day"),
-    ("Content Creation", "Recording, streaming and podcasting tools"),
-    ("Photography", "Photo library and RAW development for your camera"),
-    ("Education", "Study tools, flashcards and books for learners"),
-    ("Kids", "Games and learning for children, with parental controls"),
-    ("AI", "AI assistants, online and on your own machine"),
-    ("Remote Work", "Video calls, meetings and remote desktop that just work"),
-    ("Privacy & Security", "Passwords, VPN and encrypted vaults to keep you private"),
-    ("Music Production", "Music production and generation tools"),
-    ("Video Editing", "Video editing and rendering"),
-    ("Graphic Design", "Drawing, illustration, vector and layout tools"),
-    ("3D & Printing", "3D modelling, CAD and 3D printing"),
-    ("Writing", "Writing tools for books, essays and research"),
-    ("Web Design", "Building and designing websites"),
-    ("Development", "Programming tools, editors and containers"),
-    ("Commerce", "Selling online: stores, invoices and labels"),
-    ("Trading & Finance", "Charts, budgets and hardware wallets"),
-    ("Science & Data", "Data analysis, statistics and maps for research"),
-    ("Accessibility", "Screen reader, magnifier and easier input"),
-    ("Windows Apps", "Run the Windows programs you still need"),
-    ("Coming soon", "A new module is on its way"),
-];
+// ---- An open module (Max's approved design, 2026-10-03) -------------------
+/// A program's name in the list (px at bar scale 1).
+const MOD_NAME_PX: f32 = 14.0;
+/// List pixels per wheel unit.
+const MOD_WHEEL: f32 = 2.0;
 
-/// The one line about module `label`, if it is one.
-fn module_about(label: &str) -> Option<&'static str> {
-    MODULE_ABOUT.iter().find(|(n, _)| *n == label).map(|(_, d)| *d)
+/// An open module's switches and confirmation.
+#[derive(Default)]
+struct ModView {
+    /// The programs switched on (catalog names).
+    want: std::collections::BTreeSet<&'static str>,
+    /// The button asked once: the next click confirms.
+    sure: bool,
+    /// The list's scroll, px from its top.
+    scroll: f32,
+}
+
+/// What the one button at the foot says, by state.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ModButton {
+    /// Nothing of the module in this computer: switch on our picks, then confirm.
+    InstallRecommended,
+    /// Some of it in, no change made: confirm, then everything goes.
+    Uninstall,
+    /// Switches flipped: confirm, then apply them.
+    Apply,
+    /// The confirmation (adding only).
+    Confirm,
+    /// The confirmation, something leaving (soft red).
+    ConfirmRemove,
+}
+
+/// The small link under the button.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ModLink {
+    Undo,
+    KeepChoosing,
+    KeepThem,
+}
+
+struct ModRow {
+    prog: &'static crate::modules::Program,
+    /// Its top inside the list's content.
+    y: f32,
+}
+
+/// Where everything of an open module sits (field coordinates): drawing and
+/// clicks read the same layout.
+struct ModLayout {
+    /// The visible list, cut halfway through a pill when there is more.
+    list: Rect,
+    max_scroll: f32,
+    captions: Vec<(String, f32)>,
+    rows: Vec<ModRow>,
+    row_x: f32,
+    row_w: f32,
+    row_h: f32,
+    button: Rect,
+    button_text: String,
+    kind: ModButton,
+    sub: Vec<(String, f32)>,
+    link: Option<(Rect, ModLink, &'static str)>,
+    hint_y: f32,
+    add: Vec<&'static crate::modules::Program>,
+    remove: Vec<&'static crate::modules::Program>,
+}
+
+/// "A, B and C" — at most `n` names, then "and N more".
+fn names(progs: &[&crate::modules::Program], n: usize) -> String {
+    let shown: Vec<&str> = progs.iter().take(n).map(|p| p.name.as_str()).collect();
+    let more = progs.len().saturating_sub(n);
+    match (shown.len(), more) {
+        (0, _) => String::new(),
+        (1, 0) => shown[0].to_owned(),
+        (_, 0) => format!("{} and {}", shown[..shown.len() - 1].join(", "), shown[shown.len() - 1]),
+        (_, m) => format!("{} and {m} more", shown.join(", ")),
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "program" } else { "programs" }
 }
 
 // ---- The layers --------------------------------------------------------
@@ -450,6 +464,9 @@ pub(crate) struct PanelDraw {
     pub rects: Vec<RectInst>,
     pub labels: Vec<Label>,
     pub glows: Vec<ShadowInst>,
+    /// Drawn clipped to their rect (an open module's scrolling list: the
+    /// pill at its foot is cut in half, which is what says "more below").
+    pub clipped: Vec<(Rect, Vec<RectInst>, Vec<Label>)>,
 }
 
 /// The card's colours the panel draws in.
@@ -465,9 +482,17 @@ pub(crate) struct PanelPaint {
 #[derive(Default)]
 pub(crate) struct Panel {
     /// What the field holds: the settings ([`SETTINGS`]) or the modules
-    /// ([`MODULES`]).
+    /// (the catalog's, `modules.rs`).
     items: &'static [Item],
     modules: bool,
+    /// An open module: its switches and confirmation (MODULES only).
+    mods: ModView,
+    /// The catalog programs in this computer (lowercased names).
+    installed: std::collections::HashSet<String>,
+    /// Each program name's shaped width at the list's type size.
+    name_w: std::collections::HashMap<&'static str, f32>,
+    /// An Apply asked for: (module, to add, to remove); `App` takes it.
+    pub(crate) pending_apply: Option<(&'static str, Vec<&'static crate::modules::Program>, Vec<&'static crate::modules::Program>)>,
     /// The search, lowercased (empty: none).
     query: String,
     pills: Vec<Pill>,
@@ -513,7 +538,7 @@ impl Panel {
     /// The modules' field, with its own saved arrangement
     /// (`modules-panel.json`).
     pub(crate) fn load_modules() -> Self {
-        Self::load_with(&MODULES, true, "modules-panel.json")
+        Self::load_with(crate::modules::items(), true, "modules-panel.json")
     }
 
     fn load_with(items: &'static [Item], modules: bool, file: &str) -> Self {
@@ -598,6 +623,14 @@ impl Panel {
                 let h = pill_h * f;
                 p.h[l] = h;
                 p.w[l] = (measure(p.label, FONT_PX * scale * f) + 2.0 * PILL_PAD_X * scale * f).max(h);
+            }
+        }
+        if self.modules {
+            self.name_w.clear();
+            for m in &crate::modules::catalog().modules {
+                for prog in m.groups.iter().flat_map(|g| &g.programs) {
+                    self.name_w.insert(prog.name.as_str(), measure(&prog.name, MOD_NAME_PX * scale));
+                }
             }
         }
         self.compose(size, true);
@@ -695,6 +728,13 @@ impl Panel {
     /// Wheel travel over the panel: a layer step once it adds up, never
     /// faster than the move itself.
     fn wheel(&mut self, value: f64) {
+        if self.modules {
+            if let Some(m) = self.open.as_ref().filter(|o| o.want > 0.5).and_then(|o| crate::modules::module(self.pills[o.pill].label)) {
+                let max = self.mod_layout(m).max_scroll;
+                self.mods.scroll = (self.mods.scroll + value as f32 * MOD_WHEEL).clamp(0.0, max);
+                return;
+            }
+        }
         let now = Instant::now();
         if self.wheel_at.is_none_or(|t| now - t > Duration::from_millis(250)) {
             self.wheel = 0.0;
@@ -736,6 +776,15 @@ impl Panel {
             // Open, the setting is the whole card: a click on its floating
             // controls is theirs; anywhere else folds it back.
             let label = self.pills[pill].label;
+            if want > 0.5 && self.modules {
+                if !self.mod_click(label, pos) {
+                    if let Some(open) = &mut self.open {
+                        open.want = 0.0;
+                    }
+                    info!("modules: closing {label}");
+                }
+                return true;
+            }
             if want > 0.5 {
                 match self.open_hit(label, pos) {
                     Some(action) => self.action = action,
@@ -770,6 +819,13 @@ impl Panel {
             from: Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h),
         });
         self.hot = None;
+        if self.modules {
+            let name = self.pills[i].label;
+            self.mods = ModView::default();
+            if let Some(m) = crate::modules::module(name) {
+                self.mods.want = m.programs().filter(|p| self.installed.contains(&p.name.to_lowercase())).map(|p| p.name.as_str()).collect();
+            }
+        }
         if is_display_setting(self.pills[i].label) {
             self.display_at = Some(Instant::now());
         }
@@ -1019,6 +1075,203 @@ impl Panel {
     }
 
     /// Escape: fold an open setting back. Returns whether one was open.
+    /// The catalog programs in this computer (lowercased names), from `App`.
+    pub(crate) fn set_installed(&mut self, installed: std::collections::HashSet<String>) {
+        self.installed = installed;
+    }
+
+    /// Lay an open module out for its state (see [`ModLayout`]).
+    fn mod_layout(&self, m: &'static crate::modules::Module) -> ModLayout {
+        let s = self.scale.max(0.01);
+        let (fw, fh) = (self.key.0, self.key.1);
+        let est = crate::options::est_text_w;
+        let have: Vec<&'static crate::modules::Program> =
+            m.programs().filter(|p| self.installed.contains(&p.name.to_lowercase())).collect();
+        let want = &self.mods.want;
+        let add: Vec<&'static crate::modules::Program> =
+            m.programs().filter(|p| want.contains(p.name.as_str()) && !have.iter().any(|h| h.name == p.name)).collect();
+        let remove: Vec<&'static crate::modules::Program> =
+            have.iter().copied().filter(|p| !want.contains(p.name.as_str())).collect();
+        let changed = !add.is_empty() || !remove.is_empty();
+        let (kind, button_text, sub, link): (ModButton, String, Vec<String>, Option<(ModLink, &'static str)>) =
+            match (changed, self.mods.sure, have.is_empty()) {
+                (true, false, _) => {
+                    let mut parts = Vec::new();
+                    if !add.is_empty() {
+                        parts.push(format!("{} to add", add.len()));
+                    }
+                    if !remove.is_empty() {
+                        parts.push(format!("{} to remove", remove.len()));
+                    }
+                    (ModButton::Apply, "Apply changes".to_owned(), vec![parts.join(" · ")], Some((ModLink::Undo, "undo")))
+                }
+                (true, true, _) => {
+                    let mut say = Vec::new();
+                    if !add.is_empty() {
+                        say.push(format!("install {}", add.len()));
+                    }
+                    if !remove.is_empty() {
+                        say.push(format!("remove {}", remove.len()));
+                    }
+                    let n = add.len() + remove.len();
+                    let mut sub = Vec::new();
+                    if !remove.is_empty() {
+                        sub.push(format!("{} will be removed.", names(&remove, 3)));
+                        sub.push("Your files stay where they are.".to_owned());
+                    } else {
+                        sub.push(format!("{}.", names(&add, 4)));
+                    }
+                    let kind = if remove.is_empty() { ModButton::Confirm } else { ModButton::ConfirmRemove };
+                    (kind, format!("Yes, {} {}", say.join(" and "), plural(n)), sub, Some((ModLink::KeepChoosing, "keep choosing")))
+                }
+                (false, _, true) => (
+                    ModButton::InstallRecommended,
+                    "Install recommended".to_owned(),
+                    vec!["or switch on the programs you want".to_owned()],
+                    None,
+                ),
+                (false, false, false) => (
+                    ModButton::Uninstall,
+                    "Uninstall all".to_owned(),
+                    vec!["or switch programs on and off".to_owned()],
+                    None,
+                ),
+                (false, true, false) => (
+                    ModButton::ConfirmRemove,
+                    format!("Yes, uninstall {} {}", have.len(), plural(have.len())),
+                    vec!["Your files stay where they are.".to_owned()],
+                    Some((ModLink::KeepThem, "keep them")),
+                ),
+            };
+        // From the foot up: the hint, the link, the lines, the button.
+        let line = 17.0 * s;
+        // Clear of the card's Search pill, which sits in the field's foot.
+        let hint_y = fh - 64.0 * s;
+        let mut y = hint_y - 6.0 * s;
+        let link = link.map(|(what, t)| {
+            y -= line;
+            let w = est(t, 13.0 * s) + 8.0 * s;
+            (Rect::new((fw - w) / 2.0, y, w, line), what, t)
+        });
+        y -= sub.len() as f32 * line + 4.0 * s;
+        let sub: Vec<(String, f32)> = sub.into_iter().enumerate().map(|(i, t)| (t, y + i as f32 * line)).collect();
+        let bh = 28.0 * s;
+        y -= 8.0 * s + bh;
+        let bw = est(&button_text, 15.0 * s) + 34.0 * s;
+        let button = Rect::new((fw - bw) / 2.0, y, bw, bh);
+        // The list: captions over groups of rows.
+        let row_h = 30.0 * s;
+        let row_w = (400.0 * s).min(fw - 48.0 * s);
+        let (mut captions, mut rows, mut cy) = (Vec::new(), Vec::new(), 0.0);
+        for g in &m.groups {
+            let progs: Vec<&'static crate::modules::Program> =
+                g.programs.iter().filter(|p| crate::modules::machine().can(p.needs)).collect();
+            if progs.is_empty() {
+                continue;
+            }
+            captions.push((g.name.clone(), cy));
+            cy += line + 6.0 * s;
+            for prog in progs {
+                rows.push(ModRow { prog, y: cy });
+                cy += row_h + 6.0 * s;
+            }
+            cy += 10.0 * s;
+        }
+        let content_h = (cy - 16.0 * s).max(0.0);
+        let top = 82.0 * s;
+        let mut h = (y - 14.0 * s - top).max(row_h);
+        if content_h > h {
+            // Cut halfway through the last pill that fits: the cut says "more".
+            if let Some(r) = rows.iter().rfind(|r| r.y + row_h / 2.0 <= h) {
+                h = r.y + row_h / 2.0;
+            }
+        }
+        ModLayout {
+            list: Rect::new(0.0, top, fw, h),
+            max_scroll: (content_h - h).max(0.0),
+            captions,
+            rows,
+            row_x: (fw - row_w) / 2.0,
+            row_w,
+            row_h,
+            button,
+            button_text,
+            kind,
+            sub,
+            link,
+            hint_y,
+            add,
+            remove,
+        }
+    }
+
+    /// A click on an open module: a switch, the button, the link. `false`:
+    /// none of them (the empty space closes the module).
+    fn mod_click(&mut self, label: &str, pos: (f32, f32)) -> bool {
+        let Some(m) = crate::modules::module(label) else {
+            return false;
+        };
+        let l = self.mod_layout(m);
+        let f = self.field;
+        let p = (pos.0 - f.x, pos.1 - f.y);
+        if l.button.contains(p) {
+            match l.kind {
+                ModButton::InstallRecommended => {
+                    // Switch our picks on so they show, then ask.
+                    self.mods.want = m.programs().filter(|p| p.in_recommended()).map(|p| p.name.as_str()).collect();
+                    self.mods.sure = true;
+                }
+                ModButton::Uninstall | ModButton::Apply => self.mods.sure = true,
+                ModButton::Confirm | ModButton::ConfirmRemove => {
+                    let remove = if l.add.is_empty() && l.remove.is_empty() {
+                        // "Yes, uninstall": everything of it that is in.
+                        m.programs().filter(|p| self.installed.contains(&p.name.to_lowercase())).collect()
+                    } else {
+                        l.remove
+                    };
+                    info!("modules: {label} — apply");
+                    self.pending_apply = Some((m.name.as_str(), l.add, remove));
+                    self.mods = ModView::default();
+                    if let Some(open) = &mut self.open {
+                        open.want = 0.0;
+                    }
+                }
+            }
+            return true;
+        }
+        if let Some((r, what, _)) = l.link {
+            if r.contains(p) {
+                match what {
+                    ModLink::Undo => {
+                        self.mods.want = m
+                            .programs()
+                            .filter(|p| self.installed.contains(&p.name.to_lowercase()))
+                            .map(|p| p.name.as_str())
+                            .collect();
+                    }
+                    ModLink::KeepChoosing | ModLink::KeepThem => self.mods.sure = false,
+                }
+                return true;
+            }
+        }
+        if l.list.contains(p) {
+            let y = p.1 - l.list.y + self.mods.scroll;
+            if let Some(row) = l
+                .rows
+                .iter()
+                .find(|r| y >= r.y && y < r.y + l.row_h && p.0 >= l.row_x && p.0 < l.row_x + l.row_w)
+            {
+                let name = row.prog.name.as_str();
+                if !self.mods.want.remove(name) {
+                    self.mods.want.insert(name);
+                }
+                self.mods.sure = false;
+                return true;
+            }
+        }
+        false
+    }
+
     fn escape(&mut self) -> bool {
         match &mut self.open {
             Some(open) if open.want > 0.5 => {
@@ -1367,10 +1620,108 @@ impl Panel {
             text(out, "Esc or a click on the empty space closes".to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
             return;
         }
-        // A module: its one line; what lives inside comes next.
-        if let Some(about) = self.modules.then(|| module_about(p.label)).flatten() {
-            text(out, about.to_owned(), cx, y, 14.0, 18.0, 0.55);
-            text(out, "Esc or a click on the empty space closes".to_owned(), cx, y + 46.0 * s, 12.0, 16.0, 0.4);
+        // A module: its programs as a list of switches, ONE button at the foot.
+        if let Some(m) = self.modules.then(|| crate::modules::module(p.label)).flatten() {
+            let l = self.mod_layout(m);
+            let wash = |a: f32| crate::options::wash(!paint.bright, a);
+            let clip = {
+                let (x, y) = map(l.list.x, l.list.y);
+                Rect::new(x, y, l.list.w * cs, l.list.h * cs)
+            };
+            let mut inside = PanelDraw::default();
+            let top = l.list.y - self.mods.scroll;
+            for (cap, cy) in &l.captions {
+                text(&mut inside, cap.clone(), cx, top + cy, 13.0, 17.0, 0.6);
+            }
+            let hover_a = if paint.bright { HOVER_WASH_BRIGHT } else { HOVER_WASH_DARK };
+            for row in &l.rows {
+                let (rx, ry, rw, rh) = (l.row_x, top + row.y, l.row_w, l.row_h);
+                if ry + rh < l.list.y || ry > l.list.y + l.list.h {
+                    continue;
+                }
+                let on = self.mods.want.contains(row.prog.name.as_str());
+                let was = self.installed.contains(&row.prog.name.to_lowercase());
+                let hot = resting
+                    && self.pointer.is_some_and(|pos| clip.contains(pos) && Rect::new(f.x + rx, f.y + ry, rw, rh).contains(pos));
+                let fill = if hot { hover_a } else if on { 0.11 } else { 0.07 };
+                rect(&mut inside, rx, ry, rw, rh, rh / 2.0, wash(fill));
+                if on {
+                    let (mx, my) = map(rx, ry);
+                    inside.rects.push(RectInst {
+                        rect: Rect::new(mx, my, rw * cs, rh * cs),
+                        radius: rh / 2.0 * cs,
+                        color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.55 * ca],
+                        glass: 0.0,
+                        border: 1.0,
+                    });
+                }
+                // The name, then what it is (or what will happen to it).
+                let left = |t: String, x: f32, px: f32, a: f32, max: f32| {
+                    let (mx, my) = map(rx + x, ry + (rh - px * 1.3 * s) / 2.0);
+                    Label {
+                        text: t,
+                        pos: (mx, my),
+                        max_w: max * cs,
+                        font_px: px * s * cs,
+                        line_px: px * 1.3 * s * cs,
+                        centered: false,
+                        dim: false,
+                        cache: resting,
+                        family: TEXT_FONT,
+                        color: ink(a),
+                        clip: Some(clip),
+                    }
+                };
+                let pad = 14.0 * s;
+                let sw = (28.0 * s, 16.0 * s);
+                let name_w = self.name_w.get(row.prog.name.as_str()).copied().unwrap_or(0.0);
+                inside.labels.push(left(row.prog.name.clone(), pad, MOD_NAME_PX, 1.0, rw - 2.0 * pad - sw.0));
+                let what = match (on, was) {
+                    (true, false) => format!("will be added · {}", row.prog.what),
+                    (false, true) => format!("will be removed · {}", row.prog.what),
+                    _ => row.prog.what.clone(),
+                };
+                let dx = pad + name_w + 10.0 * s;
+                let room = rw - dx - pad - sw.0 - 8.0 * s;
+                if room > 20.0 * s {
+                    inside.labels.push(left(what, dx, 12.0, 0.62, room));
+                }
+                // The switch: on, white with a dark knob; off, a quiet wash.
+                let (tx, ty) = (rx + rw - 7.0 * s - sw.0, ry + (rh - sw.1) / 2.0);
+                rect(&mut inside, tx, ty, sw.0, sw.1, sw.1 / 2.0, if on { [paint.ink[0], paint.ink[1], paint.ink[2], 0.92] } else { wash(0.16) });
+                let knob = 11.0 * s;
+                let kx = if on { tx + sw.0 - 2.5 * s - knob } else { tx + 2.5 * s };
+                let kc = if on { [0.02, 0.025, 0.035, 1.0] } else { [paint.ink[0], paint.ink[1], paint.ink[2], 0.8] };
+                rect(&mut inside, kx, ty + (sw.1 - knob) / 2.0, knob, knob, knob / 2.0, kc);
+            }
+            out.clipped.push((clip, inside.rects, inside.labels));
+            // The one button and what it means.
+            let b = l.button;
+            let hot = resting && self.pointer.is_some_and(|pos| Rect::new(f.x + b.x, f.y + b.y, b.w, b.h).contains(pos));
+            let (fill, ring) = match l.kind {
+                ModButton::ConfirmRemove => ([1.0, 0.18, 0.18, 0.35], [1.0, 0.55, 0.55, 0.7]),
+                ModButton::Apply | ModButton::Confirm => (wash(if hot { 0.30 } else { 0.22 }), [paint.ink[0], paint.ink[1], paint.ink[2], 0.9]),
+                _ => (wash(if hot { 0.27 } else { 0.14 }), [paint.ink[0], paint.ink[1], paint.ink[2], 0.6]),
+            };
+            rect(out, b.x, b.y, b.w, b.h, b.h / 2.0, fill);
+            let (mx, my) = map(b.x, b.y);
+            out.rects.push(RectInst {
+                rect: Rect::new(mx, my, b.w * cs, b.h * cs),
+                radius: b.h / 2.0 * cs,
+                color: [ring[0], ring[1], ring[2], ring[3] * ca],
+                glass: 0.0,
+                border: 1.0,
+            });
+            text(out, l.button_text.clone(), cx, b.y + (b.h - 19.0 * s) / 2.0, 15.0, 19.0, 1.0);
+            for (t, ty) in &l.sub {
+                text(out, t.clone(), cx, *ty, 13.0, 17.0, 0.62);
+            }
+            if let Some((r, _, t)) = &l.link {
+                let hot = resting && self.pointer.is_some_and(|pos| Rect::new(f.x + r.x, f.y + r.y, r.w, r.h).contains(pos));
+                text(out, t.to_string(), cx, r.y, 13.0, 17.0, if hot { 1.0 } else { 0.85 });
+                rect(out, cx - r.w / 2.0 + 4.0 * s, r.y + 16.0 * s, r.w - 8.0 * s, 1.0 * s, 0.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.5]);
+            }
+            text(out, "Esc or a click on the empty space closes".to_owned(), cx, l.hint_y, 12.0, 16.0, 0.4);
             return;
         }
         text(out, format!("Placeholder for the {} controls.", p.label.to_lowercase()), cx, y, 14.0, 18.0, 0.55);
@@ -1652,12 +2003,46 @@ impl App {
             std::mem::swap(&mut self.panel, &mut self.panel_parked);
             self.panel.reset();
         }
+        if modules {
+            let installed = self.modules_installed();
+            self.panel.set_installed(installed);
+        }
+    }
+
+    /// The catalog programs this computer has: an app in the grid by the
+    /// program's name (lowercased).
+    fn modules_installed(&self) -> std::collections::HashSet<String> {
+        let have: std::collections::HashSet<String> = (0..self.base_len.min(self.entries.len()))
+            .filter(|&i| self.kinds.get(i) == Some(&apps::EntryKind::App) && !self.is_catalog_webapp(i))
+            .map(|i| self.entries[i].name.to_lowercase())
+            .collect();
+        crate::modules::catalog()
+            .modules
+            .iter()
+            .flat_map(|m| m.groups.iter().flat_map(|g| &g.programs))
+            .map(|p| p.name.to_lowercase())
+            .filter(|n| have.contains(n))
+            .collect()
     }
 
     /// The gear was clicked: the control panel's settings (see
     /// [`Self::toggle_panel`]).
     pub(crate) fn toggle_control_panel(&mut self) {
         self.toggle_panel(false);
+    }
+
+    /// Open the modules' field on module `name` (the `modules <name>` verb:
+    /// a key's way straight to one, and the pointer-free way to look at it).
+    pub(crate) fn show_module(&mut self, name: &str) {
+        let Some(label) = crate::modules::items().iter().map(|i| i.0).find(|n| n.eq_ignore_ascii_case(name)) else {
+            tracing::warn!("modules: no module named {name:?}");
+            return;
+        };
+        if !(self.ui.target() == Target::Open && self.control_panel && self.panel.is_modules()) {
+            self.toggle_modules();
+        }
+        self.panel.open_named(label);
+        self.schedule_frame();
     }
 
     /// The Modules tile was clicked: the same field, holding the modules.
@@ -1794,6 +2179,13 @@ impl App {
 
     pub(crate) fn panel_click(&mut self, pos: (f32, f32)) {
         if self.panel.click(pos) {
+            // A module's Apply: the wanted set goes to the system side, and
+            // the card folds away.
+            if let Some((module, add, remove)) = self.panel.pending_apply.take() {
+                crate::modules::apply(module, &add, &remove);
+                self.handle_command(Command::Collapse);
+                return;
+            }
             match self.panel.take_action() {
                 Some(PanelAction::Scale(scale)) => self.set_display_scale(scale),
                 Some(PanelAction::Mode { w, h, hz }) => self.set_display_mode(w, h, hz),
@@ -1996,14 +2388,13 @@ mod tests {
 
     #[test]
     fn the_modules_field_lays_out_clean_and_searches_its_own() {
-        let mut p = Panel { items: &MODULES, modules: true, ..Panel::default() };
+        let mut p = Panel { items: crate::modules::items(), modules: true, ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
         p.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
         assert!(p.is_modules());
-        assert_eq!(p.pills.len(), MODULES.len());
+        assert_eq!(p.pills.len(), crate::modules::items().len());
         assert_clean(&p, "the modules field");
         assert_eq!(p.matching_controls("steam").first(), Some(&"Gaming"), "a keyword finds its module");
-        assert!(MODULES.iter().all(|m| module_about(m.0).is_some()), "every module has its line");
         assert!(p.matching_controls("resolution").is_empty(), "no settings in the modules");
     }
 

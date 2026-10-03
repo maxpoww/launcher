@@ -1,0 +1,3360 @@
+{
+ "_about": "Golem's module catalog: what each module offers and what 'Install recommended' takes. Golem manages it; the dock only draws it. Each program: pkg (a nixpkgs attribute) or web (a webapp URL); recommended (in 'Install recommended'); needs (gpu | virt | ram: hidden where the machine lacks it); placement (editorial by default; 'Install recommended' only ever takes editorial entries).",
+ "version": 1,
+ "modules": [
+  {
+   "name": "Office",
+   "layer": 0,
+   "keywords": "documents spreadsheets slides pdf printing scanning mail calendar",
+   "groups": [
+    {
+     "name": "Documents",
+     "programs": [
+      {
+       "name": "LibreOffice",
+       "what": "Writer, Calc, Impress, the full office",
+       "pkg": "libreoffice",
+       "recommended": true
+      },
+      {
+       "name": "OnlyOffice",
+       "what": "best with Microsoft files",
+       "pkg": "onlyoffice-desktopeditors"
+      },
+      {
+       "name": "WPS Office",
+       "what": "looks like Microsoft Office",
+       "pkg": "wpsoffice"
+      },
+      {
+       "name": "Microsoft 365",
+       "what": "Word, Excel, PowerPoint online",
+       "web": "https://www.office.com"
+      },
+      {
+       "name": "Google Docs",
+       "what": "documents online",
+       "web": "https://docs.google.com"
+      },
+      {
+       "name": "Google Sheets",
+       "what": "spreadsheets online",
+       "web": "https://sheets.google.com"
+      },
+      {
+       "name": "Gnumeric",
+       "what": "light spreadsheet",
+       "pkg": "gnumeric"
+      },
+      {
+       "name": "AbiWord",
+       "what": "light word processor",
+       "pkg": "abiword"
+      }
+     ]
+    },
+    {
+     "name": "PDF",
+     "programs": [
+      {
+       "name": "Okular",
+       "what": "read, annotate and sign PDFs",
+       "pkg": "kdePackages.okular",
+       "recommended": true
+      },
+      {
+       "name": "PDF Arranger",
+       "what": "merge, split and rotate pages",
+       "pkg": "pdfarranger",
+       "recommended": true
+      },
+      {
+       "name": "Xournal++",
+       "what": "write and draw on PDFs",
+       "pkg": "xournalpp"
+      },
+      {
+       "name": "Master PDF Editor",
+       "what": "edit PDF text and forms",
+       "pkg": "masterpdfeditor"
+      }
+     ]
+    },
+    {
+     "name": "Mail & calendar",
+     "programs": [
+      {
+       "name": "Thunderbird",
+       "what": "mail, calendar and contacts",
+       "pkg": "thunderbird",
+       "recommended": true
+      },
+      {
+       "name": "Evolution",
+       "what": "mail with Exchange support",
+       "pkg": "evolution"
+      },
+      {
+       "name": "GNOME Calendar",
+       "what": "simple calendar",
+       "pkg": "gnome-calendar"
+      },
+      {
+       "name": "Outlook",
+       "what": "Microsoft mail online",
+       "web": "https://outlook.office.com"
+      },
+      {
+       "name": "Google Calendar",
+       "what": "calendar online",
+       "web": "https://calendar.google.com"
+      }
+     ]
+    },
+    {
+     "name": "Diagrams & extras",
+     "programs": [
+      {
+       "name": "draw.io",
+       "what": "flowcharts and diagrams",
+       "pkg": "drawio"
+      },
+      {
+       "name": "LanguageTool",
+       "what": "grammar and spelling check",
+       "pkg": "languagetool"
+      },
+      {
+       "name": "Microsoft fonts",
+       "what": "Arial, Times, Calibri-like fonts for Word files",
+       "pkg": "corefonts",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Scanning",
+     "programs": [
+      {
+       "name": "Document Scanner",
+       "what": "scan pages to PDF",
+       "pkg": "simple-scan",
+       "recommended": true
+      },
+      {
+       "name": "gscan2pdf",
+       "what": "scan with text recognition",
+       "pkg": "gscan2pdf"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Internet",
+   "layer": 0,
+   "keywords": "browser web downloads phone cloud drive sharing",
+   "groups": [
+    {
+     "name": "Browsers",
+     "programs": [
+      {
+       "name": "Brave",
+       "what": "private Chromium browser",
+       "pkg": "brave",
+       "recommended": true
+      },
+      {
+       "name": "Google Chrome",
+       "what": "Google's browser",
+       "pkg": "google-chrome"
+      },
+      {
+       "name": "Chromium",
+       "what": "open-source Chrome",
+       "pkg": "chromium"
+      },
+      {
+       "name": "Firefox",
+       "what": "Mozilla's browser",
+       "pkg": "firefox"
+      },
+      {
+       "name": "Vivaldi",
+       "what": "browser with many tools",
+       "pkg": "vivaldi"
+      },
+      {
+       "name": "Microsoft Edge",
+       "what": "Microsoft's browser",
+       "pkg": "microsoft-edge"
+      }
+     ]
+    },
+    {
+     "name": "Downloads & torrents",
+     "programs": [
+      {
+       "name": "qBittorrent",
+       "what": "torrents",
+       "pkg": "qbittorrent",
+       "recommended": true
+      },
+      {
+       "name": "Transmission",
+       "what": "simple torrents",
+       "pkg": "transmission_4-gtk"
+      },
+      {
+       "name": "Motrix",
+       "what": "download manager",
+       "pkg": "motrix"
+      },
+      {
+       "name": "Varia",
+       "what": "download manager",
+       "pkg": "varia"
+      },
+      {
+       "name": "Parabolic",
+       "what": "save videos from the web",
+       "pkg": "parabolic"
+      }
+     ]
+    },
+    {
+     "name": "Phone & devices",
+     "programs": [
+      {
+       "name": "LocalSend",
+       "what": "send files to your phone",
+       "pkg": "localsend",
+       "recommended": true
+      },
+      {
+       "name": "KDE Connect",
+       "what": "your phone and computer, linked",
+       "pkg": "kdePackages.kdeconnect-kde",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Cloud storage",
+     "programs": [
+      {
+       "name": "Nextcloud",
+       "what": "your own cloud",
+       "pkg": "nextcloud-client"
+      },
+      {
+       "name": "Dropbox",
+       "what": "Dropbox sync",
+       "pkg": "dropbox"
+      },
+      {
+       "name": "MEGA",
+       "what": "MEGA sync",
+       "pkg": "megasync"
+      },
+      {
+       "name": "Google Drive",
+       "what": "Google's cloud",
+       "web": "https://drive.google.com"
+      },
+      {
+       "name": "OneDrive",
+       "what": "Microsoft's cloud",
+       "pkg": "onedriver"
+      },
+      {
+       "name": "Syncthing",
+       "what": "sync between your devices",
+       "pkg": "syncthing"
+      }
+     ]
+    },
+    {
+     "name": "Files",
+     "programs": [
+      {
+       "name": "FileZilla",
+       "what": "FTP and SFTP",
+       "pkg": "filezilla"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Social",
+   "layer": 0,
+   "keywords": "chat messages friends social networks",
+   "groups": [
+    {
+     "name": "Messaging",
+     "programs": [
+      {
+       "name": "WhatsApp",
+       "what": "WhatsApp on your desktop",
+       "pkg": "zapzap",
+       "recommended": true
+      },
+      {
+       "name": "Telegram",
+       "what": "fast messaging",
+       "pkg": "telegram-desktop",
+       "recommended": true
+      },
+      {
+       "name": "Signal",
+       "what": "private messaging",
+       "pkg": "signal-desktop",
+       "recommended": true
+      },
+      {
+       "name": "Discord",
+       "what": "voice and chat communities",
+       "pkg": "discord"
+      },
+      {
+       "name": "Vesktop",
+       "what": "lighter Discord",
+       "pkg": "vesktop"
+      },
+      {
+       "name": "Element",
+       "what": "Matrix messaging",
+       "pkg": "element-desktop"
+      },
+      {
+       "name": "Messenger",
+       "what": "Facebook messages",
+       "web": "https://www.messenger.com"
+      },
+      {
+       "name": "Session",
+       "what": "anonymous messaging",
+       "pkg": "session-desktop"
+      },
+      {
+       "name": "Beeper",
+       "what": "all chats in one app",
+       "pkg": "beeper"
+      }
+     ]
+    },
+    {
+     "name": "Social networks",
+     "programs": [
+      {
+       "name": "Instagram",
+       "what": "photos and reels",
+       "web": "https://www.instagram.com"
+      },
+      {
+       "name": "Facebook",
+       "what": "friends and groups",
+       "web": "https://www.facebook.com"
+      },
+      {
+       "name": "X",
+       "what": "posts and news",
+       "web": "https://x.com"
+      },
+      {
+       "name": "TikTok",
+       "what": "short videos",
+       "web": "https://www.tiktok.com"
+      },
+      {
+       "name": "Reddit",
+       "what": "communities",
+       "web": "https://www.reddit.com"
+      },
+      {
+       "name": "LinkedIn",
+       "what": "work network",
+       "web": "https://www.linkedin.com"
+      },
+      {
+       "name": "Pinterest",
+       "what": "ideas and boards",
+       "web": "https://www.pinterest.com"
+      },
+      {
+       "name": "Threads",
+       "what": "Instagram's posts",
+       "web": "https://www.threads.net"
+      },
+      {
+       "name": "Bluesky",
+       "what": "open social network",
+       "web": "https://bsky.app"
+      },
+      {
+       "name": "Tuba",
+       "what": "Mastodon",
+       "pkg": "tuba"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Media & Entertainment",
+   "layer": 0,
+   "keywords": "movies tv music video player streaming podcasts radio",
+   "groups": [
+    {
+     "name": "Video",
+     "programs": [
+      {
+       "name": "VLC",
+       "what": "plays everything",
+       "pkg": "vlc",
+       "recommended": true
+      },
+      {
+       "name": "mpv",
+       "what": "light and fast player",
+       "pkg": "mpv"
+      },
+      {
+       "name": "Celluloid",
+       "what": "simple player",
+       "pkg": "celluloid"
+      },
+      {
+       "name": "Haruna",
+       "what": "player with playlists",
+       "pkg": "haruna"
+      }
+     ]
+    },
+    {
+     "name": "Music",
+     "programs": [
+      {
+       "name": "Spotify",
+       "what": "music streaming",
+       "pkg": "spotify",
+       "recommended": true
+      },
+      {
+       "name": "YouTube Music",
+       "what": "music streaming",
+       "web": "https://music.youtube.com"
+      },
+      {
+       "name": "Apple Music",
+       "what": "music streaming",
+       "web": "https://music.apple.com"
+      },
+      {
+       "name": "Tidal",
+       "what": "hi-fi streaming",
+       "web": "https://listen.tidal.com"
+      },
+      {
+       "name": "Deezer",
+       "what": "music streaming",
+       "web": "https://www.deezer.com"
+      },
+      {
+       "name": "Strawberry",
+       "what": "your music library",
+       "pkg": "strawberry"
+      },
+      {
+       "name": "Rhythmbox",
+       "what": "your music library",
+       "pkg": "rhythmbox"
+      },
+      {
+       "name": "Amberol",
+       "what": "tiny music player",
+       "pkg": "amberol"
+      }
+     ]
+    },
+    {
+     "name": "Watch online",
+     "programs": [
+      {
+       "name": "Netflix",
+       "what": "series and movies",
+       "web": "https://www.netflix.com",
+       "recommended": true
+      },
+      {
+       "name": "YouTube",
+       "what": "videos",
+       "web": "https://www.youtube.com",
+       "recommended": true
+      },
+      {
+       "name": "Prime Video",
+       "what": "series and movies",
+       "web": "https://www.primevideo.com"
+      },
+      {
+       "name": "Disney+",
+       "what": "series and movies",
+       "web": "https://www.disneyplus.com"
+      },
+      {
+       "name": "Max",
+       "what": "series and movies",
+       "web": "https://play.max.com"
+      },
+      {
+       "name": "Twitch",
+       "what": "live streams",
+       "web": "https://www.twitch.tv"
+      },
+      {
+       "name": "Crunchyroll",
+       "what": "anime",
+       "web": "https://www.crunchyroll.com"
+      }
+     ]
+    },
+    {
+     "name": "Media center",
+     "programs": [
+      {
+       "name": "Kodi",
+       "what": "TV media center",
+       "pkg": "kodi"
+      },
+      {
+       "name": "Jellyfin",
+       "what": "your own media server",
+       "pkg": "jellyfin-desktop"
+      },
+      {
+       "name": "Plex",
+       "what": "Plex media",
+       "pkg": "plex-desktop"
+      },
+      {
+       "name": "FreeTube",
+       "what": "YouTube without ads",
+       "pkg": "freetube"
+      }
+     ]
+    },
+    {
+     "name": "Podcasts & radio",
+     "programs": [
+      {
+       "name": "Shortwave",
+       "what": "internet radio",
+       "pkg": "shortwave"
+      },
+      {
+       "name": "Podcasts",
+       "what": "podcast player",
+       "pkg": "gnome-podcasts"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Gaming",
+   "layer": 0,
+   "keywords": "games steam controller retro emulators play minecraft",
+   "groups": [
+    {
+     "name": "Stores & launchers",
+     "programs": [
+      {
+       "name": "Steam",
+       "what": "the biggest PC game store",
+       "pkg": "steam",
+       "recommended": true
+      },
+      {
+       "name": "Heroic",
+       "what": "Epic, GOG and Amazon games",
+       "pkg": "heroic",
+       "recommended": true
+      },
+      {
+       "name": "Lutris",
+       "what": "all your games in one place",
+       "pkg": "lutris"
+      },
+      {
+       "name": "itch",
+       "what": "indie games",
+       "pkg": "itch"
+      },
+      {
+       "name": "Prism Launcher",
+       "what": "Minecraft",
+       "pkg": "prismlauncher",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Performance",
+     "programs": [
+      {
+       "name": "GameMode",
+       "what": "faster while you play",
+       "pkg": "gamemode",
+       "recommended": true
+      },
+      {
+       "name": "MangoHud",
+       "what": "FPS and temperatures overlay",
+       "pkg": "mangohud"
+      },
+      {
+       "name": "Gamescope",
+       "what": "smoother fullscreen games",
+       "pkg": "gamescope"
+      },
+      {
+       "name": "ProtonUp-Qt",
+       "what": "newer Proton versions",
+       "pkg": "protonup-qt"
+      }
+     ]
+    },
+    {
+     "name": "Stream your games",
+     "programs": [
+      {
+       "name": "Sunshine",
+       "what": "stream from this computer",
+       "pkg": "sunshine"
+      },
+      {
+       "name": "Moonlight",
+       "what": "play streamed games",
+       "pkg": "moonlight-qt"
+      },
+      {
+       "name": "Parsec",
+       "what": "remote play with friends",
+       "pkg": "parsec-bin"
+      }
+     ]
+    },
+    {
+     "name": "Retro",
+     "programs": [
+      {
+       "name": "RetroArch",
+       "what": "all classic consoles",
+       "pkg": "retroarch"
+      },
+      {
+       "name": "Dolphin",
+       "what": "GameCube and Wii",
+       "pkg": "dolphin-emu"
+      },
+      {
+       "name": "PCSX2",
+       "what": "PlayStation 2",
+       "pkg": "pcsx2"
+      },
+      {
+       "name": "PPSSPP",
+       "what": "PSP",
+       "pkg": "ppsspp"
+      },
+      {
+       "name": "RPCS3",
+       "what": "PlayStation 3",
+       "pkg": "rpcs3",
+       "needs": "gpu"
+      },
+      {
+       "name": "Cemu",
+       "what": "Wii U",
+       "pkg": "cemu",
+       "needs": "gpu"
+      },
+      {
+       "name": "mGBA",
+       "what": "Game Boy Advance",
+       "pkg": "mgba"
+      },
+      {
+       "name": "ScummVM",
+       "what": "classic adventure games",
+       "pkg": "scummvm"
+      }
+     ]
+    },
+    {
+     "name": "Free games",
+     "programs": [
+      {
+       "name": "SuperTuxKart",
+       "what": "kart racing",
+       "pkg": "supertuxkart"
+      },
+      {
+       "name": "0 A.D.",
+       "what": "historical strategy",
+       "pkg": "zeroad"
+      },
+      {
+       "name": "Luanti",
+       "what": "block building",
+       "pkg": "luanti"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Productivity",
+   "layer": 1,
+   "keywords": "notes tasks calendar mail focus organise",
+   "groups": [
+    {
+     "name": "Notes",
+     "programs": [
+      {
+       "name": "Obsidian",
+       "what": "notes that link together",
+       "pkg": "obsidian",
+       "recommended": true
+      },
+      {
+       "name": "Notion",
+       "what": "notes and wikis",
+       "web": "https://www.notion.so"
+      },
+      {
+       "name": "Logseq",
+       "what": "outline notes",
+       "pkg": "logseq"
+      },
+      {
+       "name": "Joplin",
+       "what": "notes with sync",
+       "pkg": "joplin-desktop"
+      },
+      {
+       "name": "AppFlowy",
+       "what": "open Notion alternative",
+       "pkg": "appflowy"
+      },
+      {
+       "name": "Anytype",
+       "what": "private notes and objects",
+       "pkg": "anytype"
+      },
+      {
+       "name": "Standard Notes",
+       "what": "encrypted notes",
+       "pkg": "standardnotes"
+      }
+     ]
+    },
+    {
+     "name": "Tasks",
+     "programs": [
+      {
+       "name": "Planify",
+       "what": "tasks and projects",
+       "pkg": "planify",
+       "recommended": true
+      },
+      {
+       "name": "Todoist",
+       "what": "tasks",
+       "web": "https://app.todoist.com"
+      },
+      {
+       "name": "Errands",
+       "what": "simple to-do list",
+       "pkg": "errands"
+      },
+      {
+       "name": "Super Productivity",
+       "what": "tasks and time tracking",
+       "pkg": "super-productivity"
+      },
+      {
+       "name": "Trello",
+       "what": "boards",
+       "web": "https://trello.com"
+      },
+      {
+       "name": "Asana",
+       "what": "team projects",
+       "web": "https://app.asana.com"
+      }
+     ]
+    },
+    {
+     "name": "Mail & calendar",
+     "programs": [
+      {
+       "name": "Thunderbird",
+       "what": "mail, calendar and contacts",
+       "pkg": "thunderbird",
+       "recommended": true
+      },
+      {
+       "name": "GNOME Calendar",
+       "what": "simple calendar",
+       "pkg": "gnome-calendar"
+      },
+      {
+       "name": "Mailspring",
+       "what": "modern mail",
+       "pkg": "mailspring"
+      },
+      {
+       "name": "Proton Mail",
+       "what": "private mail",
+       "web": "https://mail.proton.me"
+      },
+      {
+       "name": "Gmail",
+       "what": "Google mail",
+       "web": "https://mail.google.com"
+      }
+     ]
+    },
+    {
+     "name": "Think & plan",
+     "programs": [
+      {
+       "name": "Miro",
+       "what": "whiteboard",
+       "web": "https://miro.com"
+      },
+      {
+       "name": "Excalidraw",
+       "what": "sketchy whiteboard",
+       "web": "https://excalidraw.com"
+      },
+      {
+       "name": "Minder",
+       "what": "mind maps",
+       "pkg": "minder"
+      },
+      {
+       "name": "draw.io",
+       "what": "diagrams",
+       "pkg": "drawio"
+      }
+     ]
+    },
+    {
+     "name": "Time & focus",
+     "programs": [
+      {
+       "name": "Clockify",
+       "what": "time tracking",
+       "web": "https://app.clockify.me"
+      },
+      {
+       "name": "Pomodoro",
+       "what": "focus timer",
+       "pkg": "gnome-solanum"
+      },
+      {
+       "name": "Syncthing",
+       "what": "sync between your devices",
+       "pkg": "syncthing"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Content Creation",
+   "layer": 1,
+   "keywords": "streaming recording podcast youtube twitch tiktok creator",
+   "groups": [
+    {
+     "name": "Record & stream",
+     "programs": [
+      {
+       "name": "OBS Studio",
+       "what": "recording and streaming",
+       "pkg": "obs-studio",
+       "recommended": true
+      },
+      {
+       "name": "GPU Screen Recorder",
+       "what": "light screen recording",
+       "pkg": "gpu-screen-recorder-gtk"
+      },
+      {
+       "name": "Kooha",
+       "what": "quick screen recording",
+       "pkg": "kooha"
+      },
+      {
+       "name": "Webcamoid",
+       "what": "webcam effects",
+       "pkg": "webcamoid"
+      }
+     ]
+    },
+    {
+     "name": "Sound",
+     "programs": [
+      {
+       "name": "Audacity",
+       "what": "record and edit audio",
+       "pkg": "audacity",
+       "recommended": true
+      },
+      {
+       "name": "EasyEffects",
+       "what": "microphone clean-up",
+       "pkg": "easyeffects",
+       "recommended": true
+      },
+      {
+       "name": "Tenacity",
+       "what": "audio editor",
+       "pkg": "tenacity"
+      }
+     ]
+    },
+    {
+     "name": "Edit",
+     "programs": [
+      {
+       "name": "Kdenlive",
+       "what": "video editor",
+       "pkg": "kdePackages.kdenlive",
+       "recommended": true
+      },
+      {
+       "name": "Shotcut",
+       "what": "simple video editor",
+       "pkg": "shotcut"
+      },
+      {
+       "name": "CapCut",
+       "what": "quick edits online",
+       "web": "https://www.capcut.com"
+      }
+     ]
+    },
+    {
+     "name": "Graphics & thumbnails",
+     "programs": [
+      {
+       "name": "GIMP",
+       "what": "images and thumbnails",
+       "pkg": "gimp"
+      },
+      {
+       "name": "Canva",
+       "what": "designs from templates",
+       "web": "https://www.canva.com",
+       "recommended": true
+      },
+      {
+       "name": "Krita",
+       "what": "drawing",
+       "pkg": "krita"
+      }
+     ]
+    },
+    {
+     "name": "Channels",
+     "programs": [
+      {
+       "name": "YouTube Studio",
+       "what": "your channel",
+       "web": "https://studio.youtube.com"
+      },
+      {
+       "name": "Twitch Dashboard",
+       "what": "your stream",
+       "web": "https://dashboard.twitch.tv"
+      },
+      {
+       "name": "TikTok Studio",
+       "what": "your videos",
+       "web": "https://www.tiktok.com/tiktokstudio"
+      },
+      {
+       "name": "Chatterino",
+       "what": "Twitch chat",
+       "pkg": "chatterino2"
+      },
+      {
+       "name": "Streamlink",
+       "what": "watch streams in your player",
+       "pkg": "streamlink"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Photography",
+   "layer": 1,
+   "keywords": "photo raw camera library lightroom photoshop editing",
+   "groups": [
+    {
+     "name": "Develop RAW",
+     "programs": [
+      {
+       "name": "darktable",
+       "what": "RAW developer, like Lightroom",
+       "pkg": "darktable",
+       "recommended": true
+      },
+      {
+       "name": "RawTherapee",
+       "what": "precise RAW developer",
+       "pkg": "rawtherapee"
+      },
+      {
+       "name": "ART",
+       "what": "simpler RawTherapee",
+       "pkg": "art"
+      },
+      {
+       "name": "Ansel",
+       "what": "streamlined darktable",
+       "pkg": "ansel"
+      },
+      {
+       "name": "Lightroom",
+       "what": "Adobe Lightroom online",
+       "web": "https://lightroom.adobe.com"
+      }
+     ]
+    },
+    {
+     "name": "Library",
+     "programs": [
+      {
+       "name": "digiKam",
+       "what": "organise big photo collections",
+       "pkg": "digikam",
+       "recommended": true
+      },
+      {
+       "name": "Shotwell",
+       "what": "simple photo library",
+       "pkg": "shotwell"
+      },
+      {
+       "name": "Google Photos",
+       "what": "Google's photo cloud",
+       "web": "https://photos.google.com"
+      }
+     ]
+    },
+    {
+     "name": "Retouch",
+     "programs": [
+      {
+       "name": "GIMP",
+       "what": "retouching, like Photoshop",
+       "pkg": "gimp",
+       "recommended": true
+      },
+      {
+       "name": "Krita",
+       "what": "painting and retouching",
+       "pkg": "krita"
+      },
+      {
+       "name": "Photopea",
+       "what": "Photoshop-like, online",
+       "web": "https://www.photopea.com"
+      },
+      {
+       "name": "Photoshop",
+       "what": "Adobe Photoshop online",
+       "web": "https://photoshop.adobe.com"
+      }
+     ]
+    },
+    {
+     "name": "Tools",
+     "programs": [
+      {
+       "name": "Hugin",
+       "what": "panoramas",
+       "pkg": "hugin"
+      },
+      {
+       "name": "Upscayl",
+       "what": "AI image upscaling",
+       "pkg": "upscayl",
+       "needs": "gpu"
+      },
+      {
+       "name": "Converseen",
+       "what": "resize and convert many photos",
+       "pkg": "converseen"
+      },
+      {
+       "name": "Rapid Photo Downloader",
+       "what": "import from cameras and cards",
+       "pkg": "rapid-photo-downloader"
+      },
+      {
+       "name": "Entangle",
+       "what": "shoot tethered to the computer",
+       "pkg": "entangle"
+      },
+      {
+       "name": "DisplayCAL",
+       "what": "calibrate your screen",
+       "pkg": "displaycal"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Education",
+   "layer": 1,
+   "keywords": "school study learning flashcards math books science languages",
+   "groups": [
+    {
+     "name": "Study",
+     "programs": [
+      {
+       "name": "Anki",
+       "what": "flashcards that stick",
+       "pkg": "anki",
+       "recommended": true
+      },
+      {
+       "name": "Xournal++",
+       "what": "handwritten notes",
+       "pkg": "xournalpp",
+       "recommended": true
+      },
+      {
+       "name": "Rnote",
+       "what": "sketch notes",
+       "pkg": "rnote"
+      },
+      {
+       "name": "Zotero",
+       "what": "references and citations",
+       "pkg": "zotero"
+      }
+     ]
+    },
+    {
+     "name": "Math & science",
+     "programs": [
+      {
+       "name": "GeoGebra",
+       "what": "geometry and graphs",
+       "pkg": "geogebra6",
+       "recommended": true
+      },
+      {
+       "name": "Stellarium",
+       "what": "planetarium",
+       "pkg": "stellarium"
+      },
+      {
+       "name": "Kalzium",
+       "what": "periodic table",
+       "pkg": "kdePackages.kalzium"
+      },
+      {
+       "name": "wxMaxima",
+       "what": "algebra system",
+       "pkg": "wxmaxima"
+      },
+      {
+       "name": "Celestia",
+       "what": "space simulator",
+       "pkg": "celestia"
+      }
+     ]
+    },
+    {
+     "name": "Geography",
+     "programs": [
+      {
+       "name": "Marble",
+       "what": "virtual globe",
+       "pkg": "kdePackages.marble"
+      },
+      {
+       "name": "KGeography",
+       "what": "learn the map",
+       "pkg": "kdePackages.kgeography"
+      }
+     ]
+    },
+    {
+     "name": "Languages & typing",
+     "programs": [
+      {
+       "name": "Duolingo",
+       "what": "learn a language",
+       "web": "https://www.duolingo.com"
+      },
+      {
+       "name": "GoldenDict",
+       "what": "dictionaries",
+       "pkg": "goldendict-ng"
+      },
+      {
+       "name": "Klavaro",
+       "what": "touch typing",
+       "pkg": "klavaro"
+      }
+     ]
+    },
+    {
+     "name": "Reading",
+     "programs": [
+      {
+       "name": "Calibre",
+       "what": "e-book library",
+       "pkg": "calibre",
+       "recommended": true
+      },
+      {
+       "name": "Foliate",
+       "what": "e-book reader",
+       "pkg": "foliate"
+      },
+      {
+       "name": "Kiwix",
+       "what": "Wikipedia offline",
+       "pkg": "kiwix"
+      }
+     ]
+    },
+    {
+     "name": "Online classes",
+     "programs": [
+      {
+       "name": "Khan Academy",
+       "what": "free lessons",
+       "web": "https://www.khanacademy.org"
+      },
+      {
+       "name": "Google Classroom",
+       "what": "your school's class",
+       "web": "https://classroom.google.com"
+      },
+      {
+       "name": "Coursera",
+       "what": "online courses",
+       "web": "https://www.coursera.org"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Kids",
+   "layer": 1,
+   "keywords": "children child family parental controls time limits games learning",
+   "groups": [
+    {
+     "name": "Learn & play",
+     "programs": [
+      {
+       "name": "GCompris",
+       "what": "100+ learning activities",
+       "pkg": "gcompris",
+       "recommended": true
+      },
+      {
+       "name": "Tux Paint",
+       "what": "drawing for kids",
+       "pkg": "tuxpaint",
+       "recommended": true
+      },
+      {
+       "name": "TuxType",
+       "what": "typing games",
+       "pkg": "tuxtype"
+      },
+      {
+       "name": "KTurtle",
+       "what": "first steps in coding",
+       "pkg": "kdePackages.kturtle"
+      },
+      {
+       "name": "Scratch",
+       "what": "make games and stories",
+       "web": "https://scratch.mit.edu",
+       "recommended": true
+      },
+      {
+       "name": "Code.org",
+       "what": "coding lessons",
+       "web": "https://code.org"
+      }
+     ]
+    },
+    {
+     "name": "Games",
+     "programs": [
+      {
+       "name": "SuperTuxKart",
+       "what": "kart racing",
+       "pkg": "supertuxkart",
+       "recommended": true
+      },
+      {
+       "name": "SuperTux",
+       "what": "jump-and-run",
+       "pkg": "supertux"
+      },
+      {
+       "name": "Luanti",
+       "what": "block building",
+       "pkg": "luanti"
+      }
+     ]
+    },
+    {
+     "name": "Create",
+     "programs": [
+      {
+       "name": "Pencil2D",
+       "what": "cartoon animation",
+       "pkg": "pencil2d"
+      },
+      {
+       "name": "Krita",
+       "what": "digital painting",
+       "pkg": "krita"
+      }
+     ]
+    },
+    {
+     "name": "Parental controls",
+     "programs": [
+      {
+       "name": "Time limits",
+       "what": "daily time on the computer",
+       "pkg": "timekpr",
+       "recommended": true
+      },
+      {
+       "name": "App limits",
+       "what": "which apps they can open",
+       "pkg": "malcontent",
+       "recommended": true
+      },
+      {
+       "name": "Family-safe web",
+       "what": "safe search and filtered sites",
+       "web": "https://cleanbrowsing.org",
+       "recommended": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "AI",
+   "layer": 1,
+   "keywords": "assistant chat local models images coding",
+   "groups": [
+    {
+     "name": "Assistants",
+     "programs": [
+      {
+       "name": "Claude",
+       "what": "Anthropic's assistant",
+       "web": "https://claude.ai",
+       "recommended": true
+      },
+      {
+       "name": "ChatGPT",
+       "what": "OpenAI's assistant",
+       "web": "https://chatgpt.com",
+       "recommended": true
+      },
+      {
+       "name": "Gemini",
+       "what": "Google's assistant",
+       "web": "https://gemini.google.com",
+       "recommended": true
+      },
+      {
+       "name": "Microsoft Copilot",
+       "what": "Microsoft's assistant",
+       "web": "https://copilot.microsoft.com"
+      },
+      {
+       "name": "Perplexity",
+       "what": "answers with sources",
+       "web": "https://www.perplexity.ai"
+      },
+      {
+       "name": "Le Chat",
+       "what": "Mistral's assistant",
+       "web": "https://chat.mistral.ai"
+      }
+     ]
+    },
+    {
+     "name": "On your computer",
+     "programs": [
+      {
+       "name": "Ollama",
+       "what": "run models locally",
+       "pkg": "ollama",
+       "needs": "ram"
+      },
+      {
+       "name": "Alpaca",
+       "what": "chat with local models",
+       "pkg": "alpaca",
+       "needs": "ram"
+      },
+      {
+       "name": "Jan",
+       "what": "offline assistant",
+       "pkg": "jan",
+       "needs": "ram"
+      },
+      {
+       "name": "LM Studio",
+       "what": "try local models",
+       "pkg": "lmstudio",
+       "needs": "ram"
+      },
+      {
+       "name": "GPT4All",
+       "what": "private local chat",
+       "pkg": "gpt4all",
+       "needs": "ram"
+      },
+      {
+       "name": "Open WebUI",
+       "what": "a web chat for local models",
+       "pkg": "open-webui",
+       "needs": "ram"
+      }
+     ]
+    },
+    {
+     "name": "Create",
+     "programs": [
+      {
+       "name": "Upscayl",
+       "what": "AI image upscaling",
+       "pkg": "upscayl",
+       "needs": "gpu"
+      }
+     ]
+    },
+    {
+     "name": "Code",
+     "programs": [
+      {
+       "name": "Claude Code",
+       "what": "AI coding in the terminal",
+       "pkg": "claude-code"
+      },
+      {
+       "name": "Cursor",
+       "what": "AI code editor",
+       "pkg": "code-cursor"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Remote Work",
+   "layer": 1,
+   "keywords": "meetings calls video remote desktop office home",
+   "groups": [
+    {
+     "name": "Meetings",
+     "programs": [
+      {
+       "name": "Zoom",
+       "what": "video meetings",
+       "pkg": "zoom-us",
+       "recommended": true
+      },
+      {
+       "name": "Microsoft Teams",
+       "what": "Teams meetings and chat",
+       "pkg": "teams-for-linux",
+       "recommended": true
+      },
+      {
+       "name": "Google Meet",
+       "what": "meetings in the browser",
+       "web": "https://meet.google.com",
+       "recommended": true
+      },
+      {
+       "name": "Webex",
+       "what": "Cisco meetings",
+       "pkg": "webex"
+      },
+      {
+       "name": "Jitsi Meet",
+       "what": "free open meetings",
+       "pkg": "jitsi-meet-electron"
+      }
+     ]
+    },
+    {
+     "name": "Team chat",
+     "programs": [
+      {
+       "name": "Slack",
+       "what": "team chat",
+       "pkg": "slack",
+       "recommended": true
+      },
+      {
+       "name": "Mattermost",
+       "what": "open team chat",
+       "pkg": "mattermost-desktop"
+      },
+      {
+       "name": "Rocket.Chat",
+       "what": "open team chat",
+       "pkg": "rocketchat-desktop"
+      }
+     ]
+    },
+    {
+     "name": "Remote desktop",
+     "programs": [
+      {
+       "name": "RustDesk",
+       "what": "help or be helped remotely",
+       "pkg": "rustdesk",
+       "recommended": true
+      },
+      {
+       "name": "Remmina",
+       "what": "connect to work computers",
+       "pkg": "remmina"
+      },
+      {
+       "name": "AnyDesk",
+       "what": "remote desktop",
+       "pkg": "anydesk"
+      },
+      {
+       "name": "TeamViewer",
+       "what": "remote desktop",
+       "pkg": "teamviewer"
+      }
+     ]
+    },
+    {
+     "name": "Sound & camera",
+     "programs": [
+      {
+       "name": "EasyEffects",
+       "what": "clean microphone on calls",
+       "pkg": "easyeffects",
+       "recommended": true
+      },
+      {
+       "name": "NoiseTorch",
+       "what": "remove background noise",
+       "pkg": "noisetorch"
+      }
+     ]
+    },
+    {
+     "name": "Work online",
+     "programs": [
+      {
+       "name": "Microsoft 365",
+       "what": "Office online",
+       "web": "https://www.office.com"
+      },
+      {
+       "name": "Google Workspace",
+       "what": "Docs, Drive, Meet",
+       "web": "https://workspace.google.com"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Privacy & Security",
+   "layer": 1,
+   "keywords": "passwords vpn encryption privacy backups two-factor",
+   "groups": [
+    {
+     "name": "Passwords",
+     "programs": [
+      {
+       "name": "KeePassXC",
+       "what": "passwords, kept on your computer",
+       "pkg": "keepassxc",
+       "recommended": true
+      },
+      {
+       "name": "Bitwarden",
+       "what": "passwords synced everywhere",
+       "pkg": "bitwarden-desktop",
+       "recommended": true
+      },
+      {
+       "name": "1Password",
+       "what": "password manager",
+       "pkg": "_1password-gui"
+      },
+      {
+       "name": "Proton Pass",
+       "what": "private password manager",
+       "pkg": "proton-pass"
+      }
+     ]
+    },
+    {
+     "name": "VPN",
+     "programs": [
+      {
+       "name": "Proton VPN",
+       "what": "private VPN",
+       "pkg": "proton-vpn",
+       "recommended": true
+      },
+      {
+       "name": "Mullvad VPN",
+       "what": "anonymous VPN",
+       "pkg": "mullvad-vpn"
+      },
+      {
+       "name": "Tailscale",
+       "what": "your devices on one private network",
+       "pkg": "tailscale"
+      }
+     ]
+    },
+    {
+     "name": "Browse privately",
+     "programs": [
+      {
+       "name": "Tor Browser",
+       "what": "anonymous browsing",
+       "pkg": "tor-browser"
+      },
+      {
+       "name": "Mullvad Browser",
+       "what": "private browser",
+       "pkg": "mullvad-browser"
+      }
+     ]
+    },
+    {
+     "name": "Encrypt",
+     "programs": [
+      {
+       "name": "Cryptomator",
+       "what": "encrypted cloud folders",
+       "pkg": "cryptomator"
+      },
+      {
+       "name": "VeraCrypt",
+       "what": "encrypted drives",
+       "pkg": "veracrypt"
+      },
+      {
+       "name": "Kleopatra",
+       "what": "encrypt and sign files",
+       "pkg": "kdePackages.kleopatra"
+      }
+     ]
+    },
+    {
+     "name": "Two-factor codes",
+     "programs": [
+      {
+       "name": "Authenticator",
+       "what": "two-factor codes",
+       "pkg": "authenticator",
+       "recommended": true
+      },
+      {
+       "name": "Ente Auth",
+       "what": "synced two-factor codes",
+       "pkg": "ente-auth"
+      }
+     ]
+    },
+    {
+     "name": "Watch the network",
+     "programs": [
+      {
+       "name": "OpenSnitch",
+       "what": "asks before apps go online",
+       "pkg": "opensnitch-ui"
+      }
+     ]
+    },
+    {
+     "name": "Backups",
+     "programs": [
+      {
+       "name": "Déjà Dup",
+       "what": "simple backups",
+       "pkg": "deja-dup",
+       "recommended": true
+      },
+      {
+       "name": "Pika Backup",
+       "what": "backups you can browse",
+       "pkg": "pika-backup"
+      }
+     ]
+    },
+    {
+     "name": "Scan",
+     "programs": [
+      {
+       "name": "ClamTk",
+       "what": "virus scan for files",
+       "pkg": "clamtk"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Music Production",
+   "layer": 2,
+   "keywords": "audio daw synth recording mixing midi studio beats dj",
+   "groups": [
+    {
+     "name": "Studios (DAW)",
+     "programs": [
+      {
+       "name": "Ardour",
+       "what": "multitrack recording and mixing",
+       "pkg": "ardour",
+       "recommended": true
+      },
+      {
+       "name": "Bitwig Studio",
+       "what": "modern studio, like Ableton",
+       "pkg": "bitwig-studio"
+      },
+      {
+       "name": "Reaper",
+       "what": "fast studio, huge plugin support",
+       "pkg": "reaper"
+      },
+      {
+       "name": "LMMS",
+       "what": "beats and loops, like FL Studio",
+       "pkg": "lmms",
+       "recommended": true
+      },
+      {
+       "name": "Renoise",
+       "what": "tracker studio",
+       "pkg": "renoise"
+      },
+      {
+       "name": "Zrythm",
+       "what": "modern open studio",
+       "pkg": "zrythm"
+      },
+      {
+       "name": "Qtractor",
+       "what": "light studio",
+       "pkg": "qtractor"
+      }
+     ]
+    },
+    {
+     "name": "Rhythm & live",
+     "programs": [
+      {
+       "name": "Hydrogen",
+       "what": "drum machine",
+       "pkg": "hydrogen",
+       "recommended": true
+      },
+      {
+       "name": "Giada",
+       "what": "live loops",
+       "pkg": "giada"
+      },
+      {
+       "name": "SooperLooper",
+       "what": "hands-free looper",
+       "pkg": "sooperlooper"
+      },
+      {
+       "name": "Mixxx",
+       "what": "DJ software",
+       "pkg": "mixxx"
+      },
+      {
+       "name": "Sonic Pi",
+       "what": "make music with code",
+       "pkg": "sonic-pi"
+      }
+     ]
+    },
+    {
+     "name": "Instruments",
+     "programs": [
+      {
+       "name": "Surge XT",
+       "what": "powerful synth",
+       "pkg": "surge-xt",
+       "recommended": true
+      },
+      {
+       "name": "Vital",
+       "what": "wavetable synth",
+       "pkg": "vital"
+      },
+      {
+       "name": "Dexed",
+       "what": "FM synth, DX7 style",
+       "pkg": "dexed"
+      },
+      {
+       "name": "Odin 2",
+       "what": "semi-modular synth",
+       "pkg": "odin2"
+      },
+      {
+       "name": "ZynAddSubFX",
+       "what": "classic synth",
+       "pkg": "zynaddsubfx"
+      },
+      {
+       "name": "Helm",
+       "what": "easy synth",
+       "pkg": "helm"
+      },
+      {
+       "name": "setBfree",
+       "what": "tonewheel organ",
+       "pkg": "setbfree"
+      },
+      {
+       "name": "VCV Rack",
+       "what": "modular synth rack",
+       "pkg": "vcv-rack"
+      },
+      {
+       "name": "Cardinal",
+       "what": "modular synth plugin",
+       "pkg": "cardinal"
+      },
+      {
+       "name": "sfizz",
+       "what": "sample instruments",
+       "pkg": "sfizz"
+      },
+      {
+       "name": "Decent Sampler",
+       "what": "free sample libraries",
+       "pkg": "decent-sampler"
+      }
+     ]
+    },
+    {
+     "name": "Effects",
+     "programs": [
+      {
+       "name": "Calf",
+       "what": "studio effects",
+       "pkg": "calf",
+       "recommended": true
+      },
+      {
+       "name": "LSP",
+       "what": "pro effects",
+       "pkg": "lsp-plugins"
+      },
+      {
+       "name": "x42",
+       "what": "meters and effects",
+       "pkg": "x42-plugins"
+      },
+      {
+       "name": "Guitarix",
+       "what": "guitar amps",
+       "pkg": "guitarix"
+      },
+      {
+       "name": "Dragonfly Reverb",
+       "what": "reverbs",
+       "pkg": "dragonfly-reverb"
+      }
+     ]
+    },
+    {
+     "name": "Tools",
+     "programs": [
+      {
+       "name": "Audacity",
+       "what": "record and edit audio",
+       "pkg": "audacity",
+       "recommended": true
+      },
+      {
+       "name": "MuseScore",
+       "what": "sheet music",
+       "pkg": "musescore"
+      },
+      {
+       "name": "Carla",
+       "what": "plugin host",
+       "pkg": "carla"
+      },
+      {
+       "name": "qpwgraph",
+       "what": "route audio between apps",
+       "pkg": "qpwgraph"
+      },
+      {
+       "name": "yabridge",
+       "what": "use Windows plugins",
+       "pkg": "yabridge"
+      },
+      {
+       "name": "VMPK",
+       "what": "on-screen piano",
+       "pkg": "vmpk"
+      },
+      {
+       "name": "Scarlett Control",
+       "what": "Focusrite interface mixer",
+       "pkg": "alsa-scarlett-gui"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Video Editing",
+   "layer": 2,
+   "keywords": "film movie edit cut render effects subtitles",
+   "groups": [
+    {
+     "name": "Editors",
+     "programs": [
+      {
+       "name": "Kdenlive",
+       "what": "full video editor",
+       "pkg": "kdePackages.kdenlive",
+       "recommended": true
+      },
+      {
+       "name": "DaVinci Resolve",
+       "what": "pro editing and colour",
+       "pkg": "davinci-resolve",
+       "needs": "gpu"
+      },
+      {
+       "name": "Shotcut",
+       "what": "simple video editor",
+       "pkg": "shotcut"
+      },
+      {
+       "name": "OpenShot",
+       "what": "easy video editor",
+       "pkg": "openshot-qt"
+      },
+      {
+       "name": "Flowblade",
+       "what": "fast editor",
+       "pkg": "flowblade"
+      },
+      {
+       "name": "Pitivi",
+       "what": "simple editor",
+       "pkg": "pitivi"
+      },
+      {
+       "name": "LosslessCut",
+       "what": "cut without re-encoding",
+       "pkg": "losslesscut-bin"
+      }
+     ]
+    },
+    {
+     "name": "Effects & motion",
+     "programs": [
+      {
+       "name": "Blender",
+       "what": "3D, effects and editing",
+       "pkg": "blender",
+       "needs": "gpu"
+      },
+      {
+       "name": "Natron",
+       "what": "compositing",
+       "pkg": "natron"
+      },
+      {
+       "name": "Glaxnimate",
+       "what": "motion graphics",
+       "pkg": "kdePackages.glaxnimate"
+      },
+      {
+       "name": "Synfig",
+       "what": "2D animation",
+       "pkg": "synfigstudio"
+      }
+     ]
+    },
+    {
+     "name": "Convert & trim",
+     "programs": [
+      {
+       "name": "HandBrake",
+       "what": "convert and compress",
+       "pkg": "handbrake",
+       "recommended": true
+      },
+      {
+       "name": "Video Trimmer",
+       "what": "quick trims",
+       "pkg": "video-trimmer"
+      }
+     ]
+    },
+    {
+     "name": "Subtitles",
+     "programs": [
+      {
+       "name": "Aegisub",
+       "what": "subtitle editor",
+       "pkg": "aegisub"
+      }
+     ]
+    },
+    {
+     "name": "Record",
+     "programs": [
+      {
+       "name": "OBS Studio",
+       "what": "screen recording",
+       "pkg": "obs-studio"
+      }
+     ]
+    },
+    {
+     "name": "Online",
+     "programs": [
+      {
+       "name": "CapCut",
+       "what": "quick edits online",
+       "web": "https://www.capcut.com"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Graphic Design",
+   "layer": 2,
+   "keywords": "drawing illustration vector layout fonts photoshop illustrator figma",
+   "groups": [
+    {
+     "name": "Vector",
+     "programs": [
+      {
+       "name": "Inkscape",
+       "what": "vector graphics, like Illustrator",
+       "pkg": "inkscape",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Paint & retouch",
+     "programs": [
+      {
+       "name": "Krita",
+       "what": "digital painting",
+       "pkg": "krita",
+       "recommended": true
+      },
+      {
+       "name": "GIMP",
+       "what": "image editing",
+       "pkg": "gimp",
+       "recommended": true
+      },
+      {
+       "name": "Pinta",
+       "what": "simple image editor",
+       "pkg": "pinta"
+      },
+      {
+       "name": "MyPaint",
+       "what": "painting",
+       "pkg": "mypaint"
+      },
+      {
+       "name": "Photopea",
+       "what": "Photoshop-like, online",
+       "web": "https://www.photopea.com"
+      }
+     ]
+    },
+    {
+     "name": "Layout",
+     "programs": [
+      {
+       "name": "Scribus",
+       "what": "print layout, like InDesign",
+       "pkg": "scribus"
+      }
+     ]
+    },
+    {
+     "name": "UI & web design",
+     "programs": [
+      {
+       "name": "Figma",
+       "what": "interface design",
+       "web": "https://www.figma.com",
+       "recommended": true
+      },
+      {
+       "name": "Penpot",
+       "what": "open Figma alternative",
+       "pkg": "penpot-desktop"
+      },
+      {
+       "name": "Lunacy",
+       "what": "interface design",
+       "pkg": "lunacy"
+      }
+     ]
+    },
+    {
+     "name": "Templates",
+     "programs": [
+      {
+       "name": "Canva",
+       "what": "designs from templates",
+       "web": "https://www.canva.com"
+      },
+      {
+       "name": "Adobe Express",
+       "what": "quick designs",
+       "web": "https://new.express.adobe.com"
+      }
+     ]
+    },
+    {
+     "name": "Pixel art",
+     "programs": [
+      {
+       "name": "Aseprite",
+       "what": "pixel art and sprites",
+       "pkg": "aseprite"
+      },
+      {
+       "name": "Pixelorama",
+       "what": "pixel art",
+       "pkg": "pixelorama"
+      }
+     ]
+    },
+    {
+     "name": "Fonts & colour",
+     "programs": [
+      {
+       "name": "Font Manager",
+       "what": "install and preview fonts",
+       "pkg": "font-manager"
+      },
+      {
+       "name": "Gpick",
+       "what": "pick colours from the screen",
+       "pkg": "gpick"
+      }
+     ]
+    },
+    {
+     "name": "Tablets",
+     "programs": [
+      {
+       "name": "OpenTabletDriver",
+       "what": "drawing tablets",
+       "pkg": "opentabletdriver"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "3D & Printing",
+   "layer": 2,
+   "keywords": "3d cad modelling printer slicer blender",
+   "groups": [
+    {
+     "name": "Model",
+     "programs": [
+      {
+       "name": "Blender",
+       "what": "3D modelling and rendering",
+       "pkg": "blender",
+       "recommended": true
+      },
+      {
+       "name": "FreeCAD",
+       "what": "parts and mechanical design",
+       "pkg": "freecad",
+       "recommended": true
+      },
+      {
+       "name": "OpenSCAD",
+       "what": "models from code",
+       "pkg": "openscad"
+      },
+      {
+       "name": "SolveSpace",
+       "what": "quick parametric parts",
+       "pkg": "solvespace"
+      },
+      {
+       "name": "Dune 3D",
+       "what": "modern parametric CAD",
+       "pkg": "dune3d"
+      }
+     ]
+    },
+    {
+     "name": "2D drawing",
+     "programs": [
+      {
+       "name": "LibreCAD",
+       "what": "2D CAD drawings",
+       "pkg": "librecad"
+      },
+      {
+       "name": "QCAD",
+       "what": "2D CAD",
+       "pkg": "qcad"
+      }
+     ]
+    },
+    {
+     "name": "Meshes",
+     "programs": [
+      {
+       "name": "MeshLab",
+       "what": "clean and repair meshes",
+       "pkg": "meshlab"
+      }
+     ]
+    },
+    {
+     "name": "Print",
+     "programs": [
+      {
+       "name": "PrusaSlicer",
+       "what": "slicer for most printers",
+       "pkg": "prusa-slicer",
+       "recommended": true
+      },
+      {
+       "name": "OrcaSlicer",
+       "what": "slicer with many profiles",
+       "pkg": "orca-slicer",
+       "recommended": true
+      },
+      {
+       "name": "Bambu Studio",
+       "what": "for Bambu Lab printers",
+       "pkg": "bambu-studio"
+      }
+     ]
+    },
+    {
+     "name": "Online",
+     "programs": [
+      {
+       "name": "Tinkercad",
+       "what": "easy 3D for beginners",
+       "web": "https://www.tinkercad.com"
+      },
+      {
+       "name": "Onshape",
+       "what": "pro CAD online",
+       "web": "https://cad.onshape.com"
+      },
+      {
+       "name": "Printables",
+       "what": "models to print",
+       "web": "https://www.printables.com"
+      },
+      {
+       "name": "Thingiverse",
+       "what": "models to print",
+       "web": "https://www.thingiverse.com"
+      }
+     ]
+    },
+    {
+     "name": "Laser & CNC",
+     "programs": [
+      {
+       "name": "LightBurn",
+       "what": "laser cutters",
+       "pkg": "lightburn"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Writing",
+   "layer": 2,
+   "keywords": "books novels essays grammar references screenplay latex",
+   "groups": [
+    {
+     "name": "Write",
+     "programs": [
+      {
+       "name": "Zettlr",
+       "what": "writing with notes and citations",
+       "pkg": "zettlr",
+       "recommended": true
+      },
+      {
+       "name": "novelWriter",
+       "what": "novels in chapters and scenes",
+       "pkg": "novelwriter",
+       "recommended": true
+      },
+      {
+       "name": "Manuskript",
+       "what": "plan and write a novel",
+       "pkg": "manuskript"
+      },
+      {
+       "name": "ghostwriter",
+       "what": "distraction-free writing",
+       "pkg": "kdePackages.ghostwriter"
+      },
+      {
+       "name": "Apostrophe",
+       "what": "clean Markdown writing",
+       "pkg": "apostrophe"
+      },
+      {
+       "name": "Typora",
+       "what": "Markdown, seen as you type",
+       "pkg": "typora"
+      },
+      {
+       "name": "Google Docs",
+       "what": "documents online",
+       "web": "https://docs.google.com"
+      }
+     ]
+    },
+    {
+     "name": "Grammar",
+     "programs": [
+      {
+       "name": "LanguageTool",
+       "what": "grammar and style",
+       "pkg": "languagetool",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Research",
+     "programs": [
+      {
+       "name": "Zotero",
+       "what": "references and citations",
+       "pkg": "zotero",
+       "recommended": true
+      },
+      {
+       "name": "JabRef",
+       "what": "bibliographies",
+       "pkg": "jabref"
+      }
+     ]
+    },
+    {
+     "name": "Typesetting",
+     "programs": [
+      {
+       "name": "LyX",
+       "what": "LaTeX without the code",
+       "pkg": "lyx"
+      },
+      {
+       "name": "TeXstudio",
+       "what": "LaTeX editor",
+       "pkg": "texstudio"
+      },
+      {
+       "name": "Typst",
+       "what": "modern typesetting",
+       "pkg": "typst"
+      },
+      {
+       "name": "Pandoc",
+       "what": "convert between document formats",
+       "pkg": "pandoc"
+      }
+     ]
+    },
+    {
+     "name": "E-books",
+     "programs": [
+      {
+       "name": "Sigil",
+       "what": "make EPUB e-books",
+       "pkg": "sigil"
+      },
+      {
+       "name": "Calibre",
+       "what": "e-book library and converter",
+       "pkg": "calibre"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Web Design",
+   "layer": 2,
+   "keywords": "website html css design wordpress hosting",
+   "groups": [
+    {
+     "name": "Code",
+     "programs": [
+      {
+       "name": "Visual Studio Code",
+       "what": "the web's favourite editor",
+       "pkg": "vscode",
+       "recommended": true
+      },
+      {
+       "name": "Zed",
+       "what": "fast editor",
+       "pkg": "zed-editor"
+      },
+      {
+       "name": "Sublime Text",
+       "what": "light editor",
+       "pkg": "sublime4"
+      },
+      {
+       "name": "WebStorm",
+       "what": "pro web IDE",
+       "pkg": "jetbrains.webstorm"
+      }
+     ]
+    },
+    {
+     "name": "Design",
+     "programs": [
+      {
+       "name": "Figma",
+       "what": "interface design",
+       "web": "https://www.figma.com",
+       "recommended": true
+      },
+      {
+       "name": "Penpot",
+       "what": "open Figma alternative",
+       "pkg": "penpot-desktop"
+      }
+     ]
+    },
+    {
+     "name": "Test in browsers",
+     "programs": [
+      {
+       "name": "Chromium",
+       "what": "Chrome engine",
+       "pkg": "chromium",
+       "recommended": true
+      },
+      {
+       "name": "Firefox Developer Edition",
+       "what": "Firefox for developers",
+       "pkg": "firefox-devedition"
+      },
+      {
+       "name": "Brave",
+       "what": "Chromium browser",
+       "pkg": "brave"
+      }
+     ]
+    },
+    {
+     "name": "Build",
+     "programs": [
+      {
+       "name": "Node.js",
+       "what": "JavaScript runtime",
+       "pkg": "nodejs",
+       "recommended": true
+      },
+      {
+       "name": "Bun",
+       "what": "fast JavaScript runtime",
+       "pkg": "bun"
+      },
+      {
+       "name": "Deno",
+       "what": "secure JavaScript runtime",
+       "pkg": "deno"
+      },
+      {
+       "name": "Hugo",
+       "what": "static websites",
+       "pkg": "hugo"
+      },
+      {
+       "name": "Zola",
+       "what": "static websites",
+       "pkg": "zola"
+      }
+     ]
+    },
+    {
+     "name": "APIs & files",
+     "programs": [
+      {
+       "name": "Bruno",
+       "what": "test APIs",
+       "pkg": "bruno"
+      },
+      {
+       "name": "Postman",
+       "what": "test APIs",
+       "pkg": "postman"
+      },
+      {
+       "name": "Insomnia",
+       "what": "test APIs",
+       "pkg": "insomnia"
+      },
+      {
+       "name": "FileZilla",
+       "what": "upload with FTP",
+       "pkg": "filezilla"
+      }
+     ]
+    },
+    {
+     "name": "Publish",
+     "programs": [
+      {
+       "name": "WordPress",
+       "what": "websites and blogs",
+       "web": "https://wordpress.com"
+      },
+      {
+       "name": "Webflow",
+       "what": "visual websites",
+       "web": "https://webflow.com"
+      },
+      {
+       "name": "Vercel",
+       "what": "host your site",
+       "web": "https://vercel.com"
+      },
+      {
+       "name": "Netlify",
+       "what": "host your site",
+       "web": "https://app.netlify.com"
+      },
+      {
+       "name": "Cloudflare",
+       "what": "domains and DNS",
+       "web": "https://dash.cloudflare.com"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Development",
+   "layer": 2,
+   "keywords": "programming code containers git ide databases languages game engines",
+   "groups": [
+    {
+     "name": "Editors & IDEs",
+     "programs": [
+      {
+       "name": "Visual Studio Code",
+       "what": "the most used editor",
+       "pkg": "vscode",
+       "recommended": true
+      },
+      {
+       "name": "VSCodium",
+       "what": "VS Code without telemetry",
+       "pkg": "vscodium"
+      },
+      {
+       "name": "Zed",
+       "what": "fast editor",
+       "pkg": "zed-editor"
+      },
+      {
+       "name": "Neovim",
+       "what": "keyboard editor",
+       "pkg": "neovim"
+      },
+      {
+       "name": "Emacs",
+       "what": "extensible editor",
+       "pkg": "emacs"
+      },
+      {
+       "name": "JetBrains Toolbox",
+       "what": "IntelliJ, PyCharm, Rider…",
+       "pkg": "jetbrains-toolbox"
+      },
+      {
+       "name": "Android Studio",
+       "what": "Android apps",
+       "pkg": "android-studio"
+      },
+      {
+       "name": "Cursor",
+       "what": "AI code editor",
+       "pkg": "code-cursor"
+      },
+      {
+       "name": "Kate",
+       "what": "light editor",
+       "pkg": "kdePackages.kate"
+      }
+     ]
+    },
+    {
+     "name": "Git",
+     "programs": [
+      {
+       "name": "Git",
+       "what": "version control",
+       "pkg": "git",
+       "recommended": true
+      },
+      {
+       "name": "GitHub CLI",
+       "what": "GitHub from the terminal",
+       "pkg": "gh",
+       "recommended": true
+      },
+      {
+       "name": "lazygit",
+       "what": "Git in a friendly terminal UI",
+       "pkg": "lazygit"
+      },
+      {
+       "name": "GitHub Desktop",
+       "what": "Git with buttons",
+       "pkg": "github-desktop"
+      },
+      {
+       "name": "GitKraken",
+       "what": "visual Git",
+       "pkg": "gitkraken"
+      },
+      {
+       "name": "Meld",
+       "what": "compare files and folders",
+       "pkg": "meld"
+      }
+     ]
+    },
+    {
+     "name": "Run anything",
+     "programs": [
+      {
+       "name": "Downloaded programs",
+       "what": "run programs downloaded from the web",
+       "pkg": "nix-ld",
+       "recommended": true
+      },
+      {
+       "name": "direnv",
+       "what": "per-project environments",
+       "pkg": "direnv"
+      },
+      {
+       "name": "Distrobox",
+       "what": "other Linux systems in a box",
+       "pkg": "distrobox"
+      }
+     ]
+    },
+    {
+     "name": "Containers",
+     "programs": [
+      {
+       "name": "Docker",
+       "what": "containers",
+       "pkg": "docker",
+       "recommended": true
+      },
+      {
+       "name": "Podman Desktop",
+       "what": "containers with a window",
+       "pkg": "podman-desktop"
+      }
+     ]
+    },
+    {
+     "name": "Databases",
+     "programs": [
+      {
+       "name": "DBeaver",
+       "what": "every database",
+       "pkg": "dbeaver-bin"
+      },
+      {
+       "name": "Beekeeper Studio",
+       "what": "friendly SQL",
+       "pkg": "beekeeper-studio"
+      },
+      {
+       "name": "pgAdmin",
+       "what": "PostgreSQL",
+       "pkg": "pgadmin4-desktopmode"
+      },
+      {
+       "name": "MongoDB Compass",
+       "what": "MongoDB",
+       "pkg": "mongodb-compass"
+      }
+     ]
+    },
+    {
+     "name": "APIs",
+     "programs": [
+      {
+       "name": "Bruno",
+       "what": "test APIs",
+       "pkg": "bruno"
+      },
+      {
+       "name": "Postman",
+       "what": "test APIs",
+       "pkg": "postman"
+      }
+     ]
+    },
+    {
+     "name": "Languages",
+     "programs": [
+      {
+       "name": "Python",
+       "what": "Python",
+       "pkg": "python3",
+       "recommended": true
+      },
+      {
+       "name": "Node.js",
+       "what": "JavaScript",
+       "pkg": "nodejs"
+      },
+      {
+       "name": "Rust",
+       "what": "Rust",
+       "pkg": "rustup"
+      },
+      {
+       "name": "Go",
+       "what": "Go",
+       "pkg": "go"
+      },
+      {
+       "name": "Java",
+       "what": "Java",
+       "pkg": "jdk"
+      },
+      {
+       "name": ".NET",
+       "what": "C# and .NET",
+       "pkg": "dotnet-sdk"
+      }
+     ]
+    },
+    {
+     "name": "Game engines",
+     "programs": [
+      {
+       "name": "Godot",
+       "what": "open game engine",
+       "pkg": "godot"
+      },
+      {
+       "name": "Unity Hub",
+       "what": "Unity game engine",
+       "pkg": "unityhub",
+       "needs": "gpu"
+      }
+     ]
+    },
+    {
+     "name": "Terminals",
+     "programs": [
+      {
+       "name": "Ghostty",
+       "what": "fast terminal",
+       "pkg": "ghostty"
+      },
+      {
+       "name": "WezTerm",
+       "what": "configurable terminal",
+       "pkg": "wezterm"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Commerce",
+   "layer": 2,
+   "keywords": "shop store sell invoices labels accounting payments",
+   "groups": [
+    {
+     "name": "Stores",
+     "programs": [
+      {
+       "name": "Shopify",
+       "what": "your online store",
+       "web": "https://admin.shopify.com",
+       "recommended": true
+      },
+      {
+       "name": "Etsy",
+       "what": "sell handmade",
+       "web": "https://www.etsy.com/your/shops/me"
+      },
+      {
+       "name": "Amazon Seller Central",
+       "what": "sell on Amazon",
+       "web": "https://sellercentral.amazon.com"
+      },
+      {
+       "name": "eBay",
+       "what": "sell on eBay",
+       "web": "https://www.ebay.com/sh/ovw"
+      },
+      {
+       "name": "Mercado Libre",
+       "what": "sell in Latin America",
+       "web": "https://www.mercadolibre.com"
+      },
+      {
+       "name": "WooCommerce",
+       "what": "store on WordPress",
+       "web": "https://woocommerce.com"
+      }
+     ]
+    },
+    {
+     "name": "Payments",
+     "programs": [
+      {
+       "name": "Stripe",
+       "what": "card payments",
+       "web": "https://dashboard.stripe.com"
+      },
+      {
+       "name": "PayPal",
+       "what": "payments",
+       "web": "https://www.paypal.com"
+      },
+      {
+       "name": "Square",
+       "what": "point of sale",
+       "web": "https://squareup.com/dashboard"
+      }
+     ]
+    },
+    {
+     "name": "Accounting",
+     "programs": [
+      {
+       "name": "GnuCash",
+       "what": "accounts and invoices",
+       "pkg": "gnucash",
+       "recommended": true
+      },
+      {
+       "name": "KMyMoney",
+       "what": "business money",
+       "pkg": "kmymoney"
+      },
+      {
+       "name": "QuickBooks",
+       "what": "accounting online",
+       "web": "https://qbo.intuit.com"
+      },
+      {
+       "name": "Xero",
+       "what": "accounting online",
+       "web": "https://go.xero.com"
+      }
+     ]
+    },
+    {
+     "name": "Product images",
+     "programs": [
+      {
+       "name": "Canva",
+       "what": "product images and posts",
+       "web": "https://www.canva.com",
+       "recommended": true
+      },
+      {
+       "name": "GIMP",
+       "what": "edit product photos",
+       "pkg": "gimp"
+      }
+     ]
+    },
+    {
+     "name": "Labels",
+     "programs": [
+      {
+       "name": "gLabels",
+       "what": "labels and barcodes",
+       "pkg": "glabels-qt"
+      }
+     ]
+    },
+    {
+     "name": "Customers",
+     "programs": [
+      {
+       "name": "WhatsApp Business",
+       "what": "talk to customers",
+       "web": "https://web.whatsapp.com"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Trading & Finance",
+   "layer": 2,
+   "keywords": "stocks crypto charts budget wallet broker money",
+   "groups": [
+    {
+     "name": "Charts",
+     "programs": [
+      {
+       "name": "TradingView",
+       "what": "charts and analysis",
+       "pkg": "tradingview",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Brokers & exchanges",
+     "programs": [
+      {
+       "name": "Interactive Brokers",
+       "what": "global broker",
+       "web": "https://www.interactivebrokers.com"
+      },
+      {
+       "name": "eToro",
+       "what": "social investing",
+       "web": "https://www.etoro.com"
+      },
+      {
+       "name": "Robinhood",
+       "what": "stocks and crypto",
+       "web": "https://robinhood.com"
+      },
+      {
+       "name": "Binance",
+       "what": "crypto exchange",
+       "web": "https://www.binance.com"
+      },
+      {
+       "name": "Coinbase",
+       "what": "crypto exchange",
+       "web": "https://www.coinbase.com"
+      },
+      {
+       "name": "Kraken",
+       "what": "crypto exchange",
+       "web": "https://www.kraken.com"
+      }
+     ]
+    },
+    {
+     "name": "Your money",
+     "programs": [
+      {
+       "name": "HomeBank",
+       "what": "budget at home",
+       "pkg": "homebank",
+       "recommended": true
+      },
+      {
+       "name": "GnuCash",
+       "what": "full accounting",
+       "pkg": "gnucash"
+      },
+      {
+       "name": "KMyMoney",
+       "what": "personal finance",
+       "pkg": "kmymoney"
+      }
+     ]
+    },
+    {
+     "name": "Wallets",
+     "programs": [
+      {
+       "name": "Ledger Live",
+       "what": "Ledger hardware wallet",
+       "pkg": "ledger-live-desktop"
+      },
+      {
+       "name": "Trezor Suite",
+       "what": "Trezor hardware wallet",
+       "pkg": "trezor-suite"
+      },
+      {
+       "name": "Sparrow",
+       "what": "Bitcoin wallet",
+       "pkg": "sparrow"
+      },
+      {
+       "name": "Electrum",
+       "what": "Bitcoin wallet",
+       "pkg": "electrum"
+      },
+      {
+       "name": "Exodus",
+       "what": "multi-coin wallet",
+       "pkg": "exodus"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Science & Data",
+   "layer": 2,
+   "keywords": "research data statistics maps notebooks math lab",
+   "groups": [
+    {
+     "name": "Notebooks",
+     "programs": [
+      {
+       "name": "JupyterLab",
+       "what": "Python notebooks",
+       "pkg": "python3Packages.jupyterlab",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Statistics",
+     "programs": [
+      {
+       "name": "RStudio",
+       "what": "R for statistics",
+       "pkg": "rstudio",
+       "recommended": true
+      },
+      {
+       "name": "JASP",
+       "what": "statistics with clicks",
+       "pkg": "jasp-desktop"
+      },
+      {
+       "name": "PSPP",
+       "what": "free SPSS alternative",
+       "pkg": "pspp"
+      },
+      {
+       "name": "gretl",
+       "what": "econometrics",
+       "pkg": "gretl"
+      }
+     ]
+    },
+    {
+     "name": "Math",
+     "programs": [
+      {
+       "name": "GNU Octave",
+       "what": "MATLAB-compatible",
+       "pkg": "octave",
+       "recommended": true
+      },
+      {
+       "name": "Scilab",
+       "what": "numerical computing",
+       "pkg": "scilab-bin"
+      },
+      {
+       "name": "SageMath",
+       "what": "advanced math",
+       "pkg": "sage"
+      },
+      {
+       "name": "wxMaxima",
+       "what": "algebra",
+       "pkg": "wxmaxima"
+      },
+      {
+       "name": "MATLAB Online",
+       "what": "MATLAB in the browser",
+       "web": "https://matlab.mathworks.com"
+      }
+     ]
+    },
+    {
+     "name": "Plots",
+     "programs": [
+      {
+       "name": "LabPlot",
+       "what": "plots and analysis",
+       "pkg": "labplot"
+      },
+      {
+       "name": "gnuplot",
+       "what": "plots from data",
+       "pkg": "gnuplot"
+      },
+      {
+       "name": "Veusz",
+       "what": "publication plots",
+       "pkg": "veusz"
+      }
+     ]
+    },
+    {
+     "name": "Maps",
+     "programs": [
+      {
+       "name": "QGIS",
+       "what": "maps and GIS",
+       "pkg": "qgis",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Data",
+     "programs": [
+      {
+       "name": "DBeaver",
+       "what": "databases",
+       "pkg": "dbeaver-bin"
+      },
+      {
+       "name": "DB Browser for SQLite",
+       "what": "SQLite files",
+       "pkg": "sqlitebrowser"
+      }
+     ]
+    },
+    {
+     "name": "Lab",
+     "programs": [
+      {
+       "name": "Fiji",
+       "what": "image analysis (ImageJ)",
+       "pkg": "fiji"
+      },
+      {
+       "name": "Avogadro",
+       "what": "molecules",
+       "pkg": "avogadro2"
+      },
+      {
+       "name": "PyMOL",
+       "what": "protein structures",
+       "pkg": "pymol"
+      }
+     ]
+    },
+    {
+     "name": "References",
+     "programs": [
+      {
+       "name": "Zotero",
+       "what": "references",
+       "pkg": "zotero"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Accessibility",
+   "layer": 2,
+   "keywords": "screen reader magnifier contrast keyboard dictation voices",
+   "groups": [
+    {
+     "name": "Hearing the screen",
+     "programs": [
+      {
+       "name": "Screen reader",
+       "what": "reads the screen aloud",
+       "pkg": "orca",
+       "recommended": true
+      },
+      {
+       "name": "Voices",
+       "what": "voices for reading aloud",
+       "pkg": "espeak-ng",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Seeing",
+     "programs": [
+      {
+       "name": "Magnifier",
+       "what": "zoom into the screen",
+       "pkg": "kdePackages.kmag",
+       "recommended": true
+      },
+      {
+       "name": "High contrast",
+       "what": "clearer colours",
+       "pkg": "gnome-themes-extra"
+      }
+     ]
+    },
+    {
+     "name": "Typing & pointing",
+     "programs": [
+      {
+       "name": "On-screen keyboard",
+       "what": "type with the mouse",
+       "pkg": "onboard",
+       "recommended": true
+      }
+     ]
+    },
+    {
+     "name": "Reading",
+     "programs": [
+      {
+       "name": "Read aloud",
+       "what": "any app can read text aloud",
+       "pkg": "speechd"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Windows Apps",
+   "layer": 2,
+   "keywords": "windows programs compatibility wine exe",
+   "groups": [
+    {
+     "name": "Run Windows programs",
+     "programs": [
+      {
+       "name": "Bottles",
+       "what": "each Windows program in its own box",
+       "pkg": "bottles",
+       "recommended": true
+      },
+      {
+       "name": "Wine",
+       "what": "the compatibility layer",
+       "pkg": "wineWow64Packages.stable"
+      },
+      {
+       "name": "winetricks",
+       "what": "fix and tweak Windows programs",
+       "pkg": "winetricks"
+      },
+      {
+       "name": "PlayOnLinux",
+       "what": "ready-made installers",
+       "pkg": "playonlinux"
+      }
+     ]
+    },
+    {
+     "name": "Windows as windows",
+     "programs": [
+      {
+       "name": "WinBoat",
+       "what": "Windows apps as normal windows",
+       "pkg": "winboat",
+       "needs": "virt"
+      }
+     ]
+    },
+    {
+     "name": "A whole Windows",
+     "programs": [
+      {
+       "name": "GNOME Boxes",
+       "what": "a full Windows machine",
+       "pkg": "gnome-boxes",
+       "needs": "virt"
+      },
+      {
+       "name": "Virtual Machine Manager",
+       "what": "advanced virtual machines",
+       "pkg": "virt-manager",
+       "needs": "virt"
+      },
+      {
+       "name": "Quickemu",
+       "what": "quick virtual machines",
+       "pkg": "quickemu",
+       "needs": "virt"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Coming soon",
+   "layer": 2,
+   "keywords": "coming soon",
+   "groups": []
+  }
+ ]
+}
