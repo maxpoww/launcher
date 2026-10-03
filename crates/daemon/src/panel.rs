@@ -95,22 +95,75 @@ const SETTINGS: [Item; 24] = [
 ];
 
 /// MODULES (Max, 2026-10-02): Golem's software bundles — check a box, get
-/// the whole setup (`~/Golem/docs/system/GolemModules.md`). The same field
-/// as the settings, opened from the Modules tile among the apps; what lives
-/// inside each pill comes next. 3 near, 4 middle, 4 far.
-pub(crate) const MODULES: [Item; 11] = [
-    ("Music Production", 0, "audio daw synth organ recording mixing midi studio ardour reaper"),
-    ("Gaming", 0, "games steam proton lutris heroic controller play"),
-    ("Image Editing", 0, "photo picture gimp krita inkscape raw darktable drawing"),
-    ("Video Editing", 1, "film movie kdenlive shotcut davinci resolve obs recording"),
-    ("Office", 1, "documents spreadsheet libreoffice onlyoffice word excel writing"),
-    ("Virtualization", 1, "vm virtual machine qemu kvm libvirt containers docker podman"),
-    ("Development", 1, "programming code coding editor compiler languages dev tools"),
-    ("Security", 2, "passwords keepass vpn wireguard wireshark privacy firewall"),
-    ("Artificial Intelligence", 2, "ai chat assistant claude chatgpt gemini agents"),
-    ("Local AI", 2, "ollama llama models offline inference llm"),
-    ("3D & CAD", 2, "blender freecad modelling modeling design printing"),
+/// the whole setup: apps, webapps, system setup, first-run fits
+/// (`~/Golem/docs/system/GolemModules.md`). The same field as the
+/// settings, opened from the Modules tile among the apps; what lives inside
+/// each pill comes next. Named for what you DO, not for the software.
+/// 5 near (the broadest needs), 8 middle, 13 far; the game reorders them.
+/// "Coming soon" keeps a spot for the next one.
+pub(crate) const MODULES: [Item; 26] = [
+    ("Office", 0, "documents spreadsheets slides pdf printing scanning"),
+    ("Internet", 0, "browser downloads phone cloud drive"),
+    ("Social", 0, "chat messages friends"),
+    ("Media & Entertainment", 0, "movies tv music video player"),
+    ("Gaming", 0, "games steam controller retro play"),
+    ("Productivity", 1, "notes tasks calendar mail focus"),
+    ("Content Creation", 1, "streaming recording podcast youtube"),
+    ("Photography", 1, "photos raw camera library"),
+    ("Education", 1, "school study learning flashcards books"),
+    ("Kids", 1, "children family parental time limits"),
+    ("AI", 1, "assistant chat local models"),
+    ("Remote Work", 1, "meetings calls video remote desktop"),
+    ("Privacy & Security", 1, "passwords vpn encryption privacy"),
+    ("Music Production", 2, "audio daw synth recording mixing midi"),
+    ("Video Editing", 2, "film movie edit cut render"),
+    ("Graphic Design", 2, "drawing illustration vector layout fonts"),
+    ("3D & Printing", 2, "3d cad modelling printer slicer"),
+    ("Writing", 2, "books novels essays grammar references"),
+    ("Web Design", 2, "website html css design"),
+    ("Development", 2, "programming code containers git"),
+    ("Commerce", 2, "shop store sell invoices labels"),
+    ("Trading & Finance", 2, "stocks crypto charts budget wallet"),
+    ("Science & Data", 2, "research data statistics maps"),
+    ("Accessibility", 2, "screen reader magnifier contrast keyboard"),
+    ("Windows Apps", 2, "windows programs compatibility"),
+    ("Coming soon", 2, "coming soon"),
 ];
+
+/// Each module's one line, shown under its name when it opens.
+const MODULE_ABOUT: [(&str, &str); 26] = [
+    ("Office", "Documents, spreadsheets and PDFs, with printing and scanning"),
+    ("Internet", "Browsing, downloads, cloud drives and your phone, connected"),
+    ("Social", "Every chat and social network in one place"),
+    ("Media & Entertainment", "Movies, series and music, ready to play"),
+    ("Gaming", "Games, launchers and controllers, tuned to play well"),
+    ("Productivity", "Notes, tasks, mail and calendar to organise your day"),
+    ("Content Creation", "Recording, streaming and podcasting tools"),
+    ("Photography", "Photo library and RAW development for your camera"),
+    ("Education", "Study tools, flashcards and books for learners"),
+    ("Kids", "Games and learning for children, with parental controls"),
+    ("AI", "AI assistants, online and on your own machine"),
+    ("Remote Work", "Video calls, meetings and remote desktop that just work"),
+    ("Privacy & Security", "Passwords, VPN and encrypted vaults to keep you private"),
+    ("Music Production", "Music production and generation tools"),
+    ("Video Editing", "Video editing and rendering"),
+    ("Graphic Design", "Drawing, illustration, vector and layout tools"),
+    ("3D & Printing", "3D modelling, CAD and 3D printing"),
+    ("Writing", "Writing tools for books, essays and research"),
+    ("Web Design", "Building and designing websites"),
+    ("Development", "Programming tools, editors and containers"),
+    ("Commerce", "Selling online: stores, invoices and labels"),
+    ("Trading & Finance", "Charts, budgets and hardware wallets"),
+    ("Science & Data", "Data analysis, statistics and maps for research"),
+    ("Accessibility", "Screen reader, magnifier and easier input"),
+    ("Windows Apps", "Run the Windows programs you still need"),
+    ("Coming soon", "A new module is on its way"),
+];
+
+/// The one line about module `label`, if it is one.
+fn module_about(label: &str) -> Option<&'static str> {
+    MODULE_ABOUT.iter().find(|(n, _)| *n == label).map(|(_, d)| *d)
+}
 
 // ---- The layers --------------------------------------------------------
 /// Size of each layer against the OPTIONS bar's own pill (the middle layer
@@ -1314,6 +1367,12 @@ impl Panel {
             text(out, "Esc or a click on the empty space closes".to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
             return;
         }
+        // A module: its one line; what lives inside comes next.
+        if let Some(about) = self.modules.then(|| module_about(p.label)).flatten() {
+            text(out, about.to_owned(), cx, y, 14.0, 18.0, 0.55);
+            text(out, "Esc or a click on the empty space closes".to_owned(), cx, y + 46.0 * s, 12.0, 16.0, 0.4);
+            return;
+        }
         text(out, format!("Placeholder for the {} controls.", p.label.to_lowercase()), cx, y, 14.0, 18.0, 0.55);
         y += 40.0 * s;
         // The controls float in the air like the pills did, in their
@@ -1944,6 +2003,7 @@ mod tests {
         assert_eq!(p.pills.len(), MODULES.len());
         assert_clean(&p, "the modules field");
         assert_eq!(p.matching_controls("steam").first(), Some(&"Gaming"), "a keyword finds its module");
+        assert!(MODULES.iter().all(|m| module_about(m.0).is_some()), "every module has its line");
         assert!(p.matching_controls("resolution").is_empty(), "no settings in the modules");
     }
 
