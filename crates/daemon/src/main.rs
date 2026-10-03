@@ -635,7 +635,7 @@ fn main() -> anyhow::Result<()> {
         control_panel_opening: false,
         panel: panel::Panel::load(),
         panel_parked: panel::Panel::load_modules(),
-        panel_leaving: 0.0,
+        panel_swap_t: 1.0,
         panel_mix: 0.0,
         panel_reset_due: false,
         display_pending: None,
@@ -1573,8 +1573,8 @@ pub struct App {
     /// The field not on show: the card shows one field at a time — the
     /// settings or the MODULES — and `panel_switch` trades them.
     panel_parked: panel::Panel,
-    /// Seconds the replaced field still draws as it falls away.
-    panel_leaving: f32,
+    /// The settings <-> modules swap's progress (1: none under way).
+    panel_swap_t: f32,
     /// Apps ↔ settings, eased: 0 = the apps grid, 1 = the panel. Only the
     /// swap inside an open card animates; a card opening straight into
     /// either view starts there.
@@ -4085,17 +4085,13 @@ impl App {
                 self.modules_panel().matching_controls(&self.search.query),
             )
         };
-        // The row keeps only the pills that fit, from the front: the best
-        // setting and the best module lead, so both kinds show when both
-        // match; then the rest of each.
-        let mut settings = settings.into_iter();
-        let mut modules = modules.into_iter().take(3);
-        let mut picked: Vec<(&'static str, bool)> = Vec::new();
-        picked.extend(settings.next().map(|l| (l, false)));
-        picked.extend(modules.next().map(|l| (l, true)));
-        picked.extend(settings.map(|l| (l, false)));
-        picked.extend(modules.map(|l| (l, true)));
-        picked.truncate(panel::MAX_SEARCH_CONTROLS);
+        // Two rows, never mixed (Max, 2026-10-03): the settings in the
+        // Controls row, the modules in the Modules row under it.
+        let picked: Vec<(&'static str, bool)> = settings
+            .into_iter()
+            .map(|l| (l, false))
+            .chain(modules.into_iter().take(panel::MAX_SEARCH_CONTROLS).map(|l| (l, true)))
+            .collect();
         self.search.control_modules = picked.iter().map(|&(_, m)| m).collect();
         let controls: Vec<&'static str> = picked.into_iter().map(|(l, _)| l).collect();
         // The near layer's type (Max: "make the pills big as the nearest layer").

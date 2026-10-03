@@ -94,8 +94,48 @@ const SETTINGS: [Item; 24] = [
     ("Privacy", 2, "security permissions camera location"),
 ];
 
-/// How long the field being replaced keeps drawing as it falls away.
-const PANEL_LEAVE_SECS: f32 = 0.22;
+/// How long the settings and the modules take to trade places.
+const PANEL_SWAP_SECS: f32 = 0.30;
+
+/// A whole field drawn `scale` times about `centre`, at `alpha`.
+fn transform_draw(d: &mut PanelDraw, centre: (f32, f32), scale: f32, alpha: f32) {
+    let still = (scale - 1.0).abs() < 0.0005;
+    let at = |x: f32, y: f32| (centre.0 + (x - centre.0) * scale, centre.1 + (y - centre.1) * scale);
+    let rect = |r: Rect| {
+        let (x, y) = at(r.x, r.y);
+        Rect::new(x, y, r.w * scale, r.h * scale)
+    };
+    let fix_rect = |r: &mut RectInst| {
+        r.rect = rect(r.rect);
+        r.radius *= scale;
+        r.color[3] *= alpha;
+    };
+    let fix_label = |l: &mut Label| {
+        l.pos = at(l.pos.0, l.pos.1);
+        l.font_px *= scale;
+        l.line_px *= scale;
+        l.max_w *= scale;
+        l.cache &= still;
+        if let Some(c) = &mut l.color {
+            c[3] *= alpha;
+        }
+        if let Some(c) = &mut l.clip {
+            *c = rect(*c);
+        }
+    };
+    d.rects.iter_mut().for_each(fix_rect);
+    d.labels.iter_mut().for_each(fix_label);
+    for g in &mut d.glows {
+        g.rect = rect(g.rect);
+        g.radius *= scale;
+        g.color[3] *= alpha;
+    }
+    for (clip, rects, labels) in &mut d.clipped {
+        *clip = rect(*clip);
+        rects.iter_mut().for_each(fix_rect);
+        labels.iter_mut().for_each(fix_label);
+    }
+}
 
 // MODULES' pills come from the catalog (`modules.rs`, `assets/modules.json`).
 
@@ -494,8 +534,6 @@ pub(crate) struct Panel {
     installed: std::collections::HashSet<String>,
     /// Each program name's shaped width at the list's type size.
     name_w: std::collections::HashMap<&'static str, f32>,
-    /// Arrive (see [`Panel::arrive`]) as soon as the pills exist.
-    arrive_pending: bool,
     /// An Apply asked for: (module, to add, to remove); `App` takes it.
     pub(crate) pending_apply: Option<(&'static str, Vec<&'static crate::modules::Program>, Vec<&'static crate::modules::Program>)>,
     /// The search, lowercased (empty: none).
@@ -639,9 +677,6 @@ impl Panel {
             }
         }
         self.compose(size, true);
-        if std::mem::take(&mut self.arrive_pending) {
-            self.arrive();
-        }
         if let Some(label) = self.pending_open.take() {
             self.open_named(label);
         }
@@ -1083,35 +1118,6 @@ impl Panel {
     }
 
     /// Escape: fold an open setting back. Returns whether one was open.
-    /// The other field takes this one's place (settings ↔ modules, Max
-    /// 2026-10-03: "improve the animation"): every pill falls away past the
-    /// viewer at once, the field's own "near layer leaves" motion.
-    pub(crate) fn leave(&mut self) {
-        self.open = None;
-        self.hot = None;
-        for p in &mut self.pills {
-            if p.exit.is_none() {
-                p.exit = Some(Exit { dir: 1, k: 0.0 });
-            }
-        }
-    }
-
-    /// This field comes in: every pill rises out of the depth to its place,
-    /// small and faint first, the near layer a beat behind the far ones.
-    pub(crate) fn arrive(&mut self) {
-        if self.pills.is_empty() {
-            self.arrive_pending = true;
-            return;
-        }
-        let s = self.scale.max(0.01);
-        for p in &mut self.pills {
-            let depth = p.layer as f32; // 0 near … 2 far
-            p.sc = 0.45 + 0.1 * depth;
-            p.op = -0.35 * (2.0 - depth); // the near ones wait a beat
-            p.anchor.1 = p.home.1 + (34.0 - 8.0 * depth) * s;
-        }
-    }
-
     /// The catalog programs in this computer (lowercased names), from `App`.
     pub(crate) fn set_installed(&mut self, installed: std::collections::HashSet<String>) {
         self.installed = installed;
@@ -2047,9 +2053,8 @@ impl App {
             // On show already (the card open on the other field): the old one
             // falls away while this one rises in.
             if self.ui.target() == Target::Open && self.control_panel {
-                self.panel_parked.leave();
-                self.panel.arrive();
-                self.panel_leaving = PANEL_LEAVE_SECS;
+                self.panel_parked.open = None;
+                self.panel_swap_t = 0.0;
             }
         }
         if modules {
@@ -2195,12 +2200,21 @@ impl App {
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
         let mut draw = self.panel.draw(paint);
-        // The field it replaced, falling away underneath for a moment.
-        if self.panel_leaving > 0.0 {
-            self.panel_leaving -= dt;
+        // Settings <-> modules (Max, 2026-10-03: the first motion "sucks"):
+        // the two fields cross as wholes — the old one sinks back a little
+        // and fades, the new one settles in from a touch closer and fades up.
+        if self.panel_swap_t < 1.0 {
+            self.panel_swap_t = (self.panel_swap_t + dt / PANEL_SWAP_SECS).min(1.0);
+            let t = self.panel_swap_t;
+            let ease = |x: f32| 1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3);
+            let centre = (field.x + field.w / 2.0, field.y + field.h * 0.45);
+            let k_in = ease((t - 0.18) / 0.82);
+            transform_draw(&mut draw, centre, 1.04 - 0.04 * k_in, k_in);
             self.panel_parked.field = field;
             self.panel_parked.step(dt, None);
             let mut old = self.panel_parked.draw(paint);
+            let k_out = ease(t / 0.62);
+            transform_draw(&mut old, centre, 1.0 - 0.06 * k_out, 1.0 - k_out);
             old.rects.append(&mut draw.rects);
             old.labels.append(&mut draw.labels);
             old.glows.append(&mut draw.glows);

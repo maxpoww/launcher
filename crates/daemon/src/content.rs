@@ -677,11 +677,10 @@ pub struct Layout {
     /// or a square above the dock for a dock folder's stack. Present only
     /// while a box is open. A click inside is inert (only outside closes).
     pub open_box: Option<Rect>,
-    /// The Controls row under Files while a search matches settings: its
-    /// title's position, and the band its pills sit in (pill height, grid
-    /// width).
-    pub controls_title: Option<(f32, f32)>,
-    pub controls_row: Option<Rect>,
+    /// The band under Files while a search matches settings or modules:
+    /// each row's title position and the band its pills sit in (pill
+    /// height, grid width) — the Controls row, then the Modules row.
+    pub control_bands: Vec<((f32, f32), Rect)>,
     /// The control pills' rects in that band (filled in by the App, which
     /// measures their labels), in `SearchState::controls` order.
     pub controls: Vec<Rect>,
@@ -750,6 +749,9 @@ pub fn layout(
     // The card's bottom stays put; its top, the dock row and the Apps title
     // come down, and the Apps viewport shortens by as much.
     trim: f32,
+    // How many pill rows the band holds: Controls, Modules, or both
+    // (Max, 2026-10-03: "two different things, not mixed").
+    control_rows: usize,
 ) -> Layout {
     // NOTE: icon_scale is already capped to fit the screen at its source,
     // App::icon_scale() (main.rs) — every extent and surface size derives from
@@ -974,7 +976,8 @@ pub fn layout(
     // The pills sit as far under their title as the icons do under theirs,
     // and a little more (Max: "move only the pills a little lower").
     let controls_drop = GRID_ICON_TOP * icon_scale + CONTROLS_EXTRA_DROP;
-    let controls_h = controls_pill_h.map_or(0.0, |ph| controls_band_h(icon_scale, ph));
+    let control_rows = control_rows.max(1);
+    let controls_h = controls_pill_h.map_or(0.0, |ph| controls_band_h(icon_scale, ph) * control_rows as f32);
     let fits_shown = (((avail - controls_h) / grid_cell_h) as usize).clamp(1, fits);
     // Apps shows every row that fits; a page that doesn't fill them
     // shortens the card instead (`trim`, Max 2026-09-30: "card shrinks to
@@ -1055,19 +1058,22 @@ pub fn layout(
     // The Controls row: titled like a section, its pills in a band under
     // the title.
     let files_bottom = sections[SECTION_FILES].viewport.y + sections[SECTION_FILES].viewport.h;
-    let (controls_title, controls_row) = match controls_pill_h {
+    // One band per row, each titled like a section.
+    let control_bands: Vec<((f32, f32), Rect)> = match controls_pill_h {
         Some(ph) => {
             let vp = sections[SECTION_FILES].viewport;
-            let title_y = files_bottom + DOT_ROOM + SECTION_GAP;
-            (
-                Some((vp.x + vp.w / 2.0, title_y)),
-                Some(Rect::new(vp.x, title_y + SECTION_TITLE_H + controls_drop, vp.w, ph)),
-            )
+            let band = controls_band_h(icon_scale, ph);
+            (0..control_rows)
+                .map(|r| {
+                    let title_y = files_bottom + DOT_ROOM + SECTION_GAP + r as f32 * band;
+                    ((vp.x + vp.w / 2.0, title_y), Rect::new(vp.x, title_y + SECTION_TITLE_H + controls_drop, vp.w, ph))
+                })
+                .collect()
         }
-        None => (None, None),
+        None => Vec::new(),
     };
     // Under the last section's dots.
-    let above_search = controls_row.map_or(files_bottom, |r| r.y + r.h) + DOT_ROOM + LAST_SECTION_AIR;
+    let above_search = control_bands.last().map_or(files_bottom, |b| b.1.y + b.1.h) + DOT_ROOM + LAST_SECTION_AIR;
     // Lift the search pill into whatever room the sections left above it.
     let lift = (SEARCH_LIFT * icon_scale).min((search_box.y - above_search - SEARCH_LIFT_AIR).max(0.0));
     let search_box = Rect::new(search_box.x, search_box.y - lift, search_box.w, search_box.h);
@@ -1093,8 +1099,7 @@ pub fn layout(
         search_box,
         search_btn,
         open_box,
-        controls_title,
-        controls_row,
+        control_bands,
         controls: Vec::new(),
         apps_full_h: fits as f32 * grid_cell_h,
         apps_avail: avail,
@@ -2751,30 +2756,25 @@ pub fn scene(
     // The Controls row: the settings the search matches, as the control
     // panel's near-layer pills under a section title. Apps content: it
     // rides the push with the rest.
-    if let (Some(title), false) = (layout.controls_title, layout.controls.is_empty() || panel) {
-        scene.labels.push(Label {
-            text: {
-                // Named for the pills that fit (the row drops the rest).
-                let shown = &control_modules[..layout.controls.len().min(control_modules.len())];
-                let (m, c) = (shown.iter().any(|&m| m), shown.iter().any(|&m| !m));
-                crate::i18n::tr(match (c, m) {
-                    (true, true) => "Controls · Modules",
-                    (false, true) => "Modules",
-                    _ => "Controls",
-                })
-                .to_string()
-            },
-            pos: (title.0, title.1 + TITLE_DROP),
-            max_w: 200.0,
-            font_px: TITLE_FONT_PX,
-            line_px: TITLE_LINE_PX,
-            centered: true,
-            dim: false,
-            cache: true,
-            family: Some(FONT_BOLD),
-            color: Some([title_ink[0], title_ink[1], title_ink[2], title_ink[3] * layout.controls_k]),
-            clip: Some(reveal_rect),
-        });
+    if !layout.control_bands.is_empty() && !layout.controls.is_empty() && !panel {
+        // One title per row: Controls over the settings, Modules over the modules.
+        let has = |m: bool| control_modules.contains(&m);
+        let names: Vec<&str> = [(false, "Controls"), (true, "Modules")].into_iter().filter(|&(m, _)| has(m)).map(|(_, n)| n).collect();
+        for (&(title, _), name) in layout.control_bands.iter().zip(names) {
+            scene.labels.push(Label {
+                text: crate::i18n::tr(name).to_string(),
+                pos: (title.0, title.1 + TITLE_DROP),
+                max_w: 200.0,
+                font_px: TITLE_FONT_PX,
+                line_px: TITLE_LINE_PX,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: Some(FONT_BOLD),
+                color: Some([title_ink[0], title_ink[1], title_ink[2], title_ink[3] * layout.controls_k]),
+                clip: Some(reveal_rect),
+            });
+        }
         use crate::panel::{
             HOVER_WASH_BRIGHT, HOVER_WASH_DARK, LAYER_GLOW, LAYER_INK, LAYER_SCALE, LAYER_WASH_BRIGHT, LAYER_WASH_DARK, LIFT,
         };
@@ -2794,6 +2794,9 @@ pub fn scene(
             ..Default::default()
         };
         for (i, (r, &(label, _))) in layout.controls.iter().zip(controls).enumerate() {
+            if r.w <= 0.0 {
+                continue; // didn't fit its row
+            }
             let lift = control_lift.get(i).copied().unwrap_or(0.0);
             let k = 1.0 + LIFT * lift;
             let (pw, ph) = (r.w * k, r.h * k);
@@ -3276,6 +3279,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         )
     }
 
@@ -3296,6 +3300,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         );
         assert!(!l.dock_slots.is_empty());
         // Content sits at its fixed open position; while docked the
@@ -3320,11 +3325,11 @@ mod tests {
     fn a_controls_row_takes_shown_rows_not_page_capacity() {
         let cfg = config();
         let args = |c: Option<f32>| {
-            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, 0, 0.0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, c.map_or(0.0, |ph| controls_band_h(1.0, ph)), 0.0)
+            layout(&cfg, 1.0, SURFACE, OPEN, 10, 0, 0, 0.0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), c, c.map_or(0.0, |ph| controls_band_h(1.0, ph)), 0.0, 1)
         };
         let (plain, with) = (args(None), args(Some(23.0)));
-        assert!(plain.controls_row.is_none());
-        let row = with.controls_row.expect("a row while controls match");
+        assert!(plain.control_bands.is_empty());
+        let row = with.control_bands.first().map(|b| b.1).expect("a row while controls match");
         let files = &with.sections[SECTION_FILES].viewport;
         assert!(row.y >= files.y + files.h, "the row sits under Files");
         assert!(row.y + row.h <= with.search_box.y, "and above the search pill");
@@ -3338,7 +3343,7 @@ mod tests {
     fn a_trimmed_card_drops_its_top_and_keeps_its_bottom() {
         let cfg = config();
         let at = |trim: f32| {
-            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, 0, 0.0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, trim)
+            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, 0, 0.0, &[], [40, 1, 6], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, trim, 1)
         };
         let (full, short) = (at(0.0), at(GRID_CELL_H));
         let (a, b) = (&full.sections[SECTION_APPS], &short.sections[SECTION_APPS]);
@@ -3376,7 +3381,7 @@ mod tests {
         // 40 entries: 30 pins, the trio, 7 running apps — far wider than the
         // 880 px surface.
         let at = |off: f32| {
-            layout(&cfg, 1.0, SURFACE, 48.0, 40, 0, 30, off, &[], [0, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, 0.0)
+            layout(&cfg, 1.0, SURFACE, 48.0, 40, 0, 30, off, &[], [0, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, 0.0, 1)
         };
         let rest = at(0.0);
         let ov = rest.dock_overflow.expect("30 pins overflow 880 px");
@@ -3467,6 +3472,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         );
         let visible = [vec![0, 1, 2, 3], Vec::new(), vec![4, 5, 6, 7, 8, 9]];
         let s = scene(
@@ -3525,6 +3531,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         );
         let slot = l.dock_slots[0];
         assert_eq!(
@@ -3578,6 +3585,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         );
         let apps = &l.sections[SECTION_APPS];
         let mid = (
@@ -3697,6 +3705,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         );
         assert_eq!(l.dock_slots.len(), n, "every entry gets a slot");
         let es = entries(n);
@@ -3793,6 +3802,7 @@ mod tests {
                 (1.0, 1.0),
                 None, 0.0,
                 0.0,
+                1,
             )
         };
 
@@ -3831,6 +3841,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         );
         let row = open.dock_slots.last().unwrap().x + open.dock_slots.last().unwrap().w
             - open.dock_slots[0].x;
@@ -3855,6 +3866,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         );
         assert!(
             open.sections[SECTION_APPS].cols > narrow.sections[SECTION_APPS].cols,
@@ -3873,6 +3885,7 @@ mod tests {
                 &cfg, 1.0, SURFACE, docked, total, n_min, 0, 0.0, &aspects, [total, 0, 0], [0.0; N_SECTIONS], false, (1.0, 1.0),
                 None, 0.0,
                 0.0,
+                1,
             )
         };
         let stretched = lay_wide(19, 9); // wide tiles are width-capped now, so more are needed to overflow
@@ -3913,6 +3926,7 @@ mod tests {
             (1.0, 1.0),
             None, 0.0,
             0.0,
+            1,
         );
         let n = l.dock_slots.len();
         assert_eq!(n, 5, "all five tiles are shown");

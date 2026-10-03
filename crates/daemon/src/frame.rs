@@ -111,8 +111,14 @@ impl App {
         if self.search.controls.is_empty() {
             0.0
         } else {
-            content::controls_band_h(self.icon_scale(), self.controls_pill_h())
+            content::controls_band_h(self.icon_scale(), self.controls_pill_h()) * self.control_rows() as f32
         }
+    }
+
+    /// The band's rows: Controls, Modules, or both — never mixed.
+    pub(crate) fn control_rows(&self) -> usize {
+        let m = &self.search.control_modules;
+        usize::from(m.iter().any(|&x| !x)) + usize::from(m.iter().any(|&x| x))
     }
 
     pub(crate) fn layout_at(&self, extent: f32) -> content::Layout {
@@ -163,6 +169,7 @@ impl App {
             (!self.search.controls.is_empty()).then(|| self.controls_pill_h()),
             self.controls_band,
             self.ui.open_trim(),
+            self.control_rows(),
         );
         // Search results split their partial rows about the titles.
         let centre_rows = !self.grid_resting();
@@ -171,16 +178,32 @@ impl App {
         }
         // The Controls row: the matching settings as near-layer pills,
         // split about the title's centre (see `content::controls_rects`).
-        if let Some(row) = layout.controls_row {
+        // Settings in their row, modules in theirs: each row centred on
+        // its own title; a pill that doesn't fit gets no rect.
+        if !layout.control_bands.is_empty() {
             let s = self.options_scale() * crate::panel::LAYER_SCALE[0];
             let gap = CONTROLS_GAP * self.options_scale();
-            let widths: Vec<f32> = self
-                .search
-                .controls
-                .iter()
-                .map(|&(_, label_w)| (label_w + 2.0 * crate::options::PILL_PAD_X * s).max(row.h))
-                .collect();
-            layout.controls = content::controls_rects(row, &widths, gap);
+            let kinds = &self.search.control_modules;
+            let mut rects = vec![content::Rect::new(0.0, 0.0, 0.0, 0.0); self.search.controls.len()];
+            let mut band = 0;
+            for module in [false, true] {
+                let idx: Vec<usize> = (0..self.search.controls.len()).filter(|&i| kinds.get(i).copied().unwrap_or(false) == module).collect();
+                if idx.is_empty() {
+                    continue;
+                }
+                let Some(&(_, row)) = layout.control_bands.get(band) else {
+                    break;
+                };
+                band += 1;
+                let widths: Vec<f32> = idx
+                    .iter()
+                    .map(|&i| (self.search.controls[i].1 + 2.0 * crate::options::PILL_PAD_X * s).max(row.h))
+                    .collect();
+                for (r, &i) in content::controls_rects(row, &widths, gap).into_iter().zip(&idx) {
+                    rects[i] = r;
+                }
+            }
+            layout.controls = rects;
         }
         // Position the open box's rest square. A grid box anchors to the
         // side of the grid it sits on (pinned preview icon lands on its
