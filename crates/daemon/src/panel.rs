@@ -58,10 +58,14 @@ use crate::state::Target;
 use crate::{apps, groups, App};
 use waverunner_proto::Command;
 
+/// One pill of a field: its name, the layer it starts on (0 near, 1
+/// middle, 2 far), and its search keywords.
+type Item = (&'static str, u8, &'static str);
+
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [(&str, u8, &str); 24] = [
+const SETTINGS: [Item; 24] = [
     // (name, first layer, search keywords: what else people call it or
     // look for it by). 5 near, 8 middle, 11 far.
     ("Resolution", 0, "display screen monitor size pixels"),
@@ -88,6 +92,24 @@ const SETTINGS: [(&str, u8, &str); 24] = [
     ("Battery", 2, "power charge energy"),
     ("Default apps", 2, "applications browser open with"),
     ("Privacy", 2, "security permissions camera location"),
+];
+
+/// MODULES (Max, 2026-10-02): Golem's software bundles — check a box, get
+/// the whole setup (`~/Golem/docs/system/GolemModules.md`). The same field
+/// as the settings, opened from the Modules tile among the apps; what lives
+/// inside each pill comes next. 3 near, 4 middle, 4 far.
+pub(crate) const MODULES: [Item; 11] = [
+    ("Music Production", 0, "audio daw synth organ recording mixing midi studio ardour reaper"),
+    ("Gaming", 0, "games steam proton lutris heroic controller play"),
+    ("Image Editing", 0, "photo picture gimp krita inkscape raw darktable drawing"),
+    ("Video Editing", 1, "film movie kdenlive shotcut davinci resolve obs recording"),
+    ("Office", 1, "documents spreadsheet libreoffice onlyoffice word excel writing"),
+    ("Virtualization", 1, "vm virtual machine qemu kvm libvirt containers docker podman"),
+    ("Development", 1, "programming code coding editor compiler languages dev tools"),
+    ("Security", 2, "passwords keepass vpn wireguard wireshark privacy firewall"),
+    ("Artificial Intelligence", 2, "ai chat assistant claude chatgpt gemini agents"),
+    ("Local AI", 2, "ollama llama models offline inference llm"),
+    ("3D & CAD", 2, "blender freecad modelling modeling design printing"),
 ];
 
 // ---- The layers --------------------------------------------------------
@@ -173,17 +195,17 @@ struct Usage {
 }
 
 impl Usage {
-    /// The saved layer of every setting in [`SETTINGS`] order, if the save
-    /// covers them all and keeps the layers' sizes; otherwise (first run, or
-    /// the settings changed) `None`.
-    fn arrangement(&self) -> Option<Vec<u8>> {
-        let layers: Vec<u8> = SETTINGS
+    /// The saved layer of every item in `items`' order, if the save covers
+    /// them all and keeps the layers' sizes; otherwise (first run, or the
+    /// items changed) `None`.
+    fn arrangement(&self, items: &[Item]) -> Option<Vec<u8>> {
+        let layers: Vec<u8> = items
             .iter()
             .map(|(name, ..)| self.settings.get(*name).map(|st| st.layer).filter(|&l| l < 3))
             .collect::<Option<_>>()?;
         let count = |ls: &mut dyn Iterator<Item = u8>, l: u8| ls.filter(|&x| x == l).count();
         (0..3u8)
-            .all(|l| count(&mut layers.iter().copied(), l) == count(&mut SETTINGS.iter().map(|s| s.1), l))
+            .all(|l| count(&mut layers.iter().copied(), l) == count(&mut items.iter().map(|s| s.1), l))
             .then_some(layers)
     }
 }
@@ -389,6 +411,10 @@ pub(crate) struct PanelPaint {
 /// and the open setting.
 #[derive(Default)]
 pub(crate) struct Panel {
+    /// What the field holds: the settings ([`SETTINGS`]) or the modules
+    /// ([`MODULES`]).
+    items: &'static [Item],
+    modules: bool,
     /// The search, lowercased (empty: none).
     query: String,
     pills: Vec<Pill>,
@@ -428,12 +454,29 @@ pub(crate) struct Panel {
 impl Panel {
     /// The panel with its saved arrangement (`control-panel.json`).
     pub(crate) fn load() -> Self {
-        let path = crate::persist::data_path("control-panel.json");
+        Self::load_with(&SETTINGS, false, "control-panel.json")
+    }
+
+    /// The modules' field, with its own saved arrangement
+    /// (`modules-panel.json`).
+    pub(crate) fn load_modules() -> Self {
+        Self::load_with(&MODULES, true, "modules-panel.json")
+    }
+
+    fn load_with(items: &'static [Item], modules: bool, file: &str) -> Self {
+        let path = crate::persist::data_path(file);
         Self {
+            items,
+            modules,
             usage: crate::persist::read_json(&path).unwrap_or_default(),
             store: Some(path),
             ..Self::default()
         }
+    }
+
+    /// Whether this is the modules' field.
+    pub(crate) fn is_modules(&self) -> bool {
+        self.modules
     }
 
     /// Build (or rebuild for a new field size or bar scale) the pills:
@@ -458,17 +501,18 @@ impl Panel {
             // The saved arrangement, or (first run, or the settings changed)
             // the first order, each setting seeded with its layer's score
             // (scores already earned are kept).
-            let groups = self.usage.arrangement().unwrap_or_else(|| {
+            let items = self.items;
+            let groups = self.usage.arrangement(items).unwrap_or_else(|| {
                 let now = now_secs();
-                for &(name, layer, _) in &SETTINGS {
+                for &(name, layer, _) in items {
                     let st = self.usage.settings.entry(name.to_owned()).or_default();
                     let earned = st.score_at(now);
                     *st = Standing { layer, score: earned.max(SEED_SCORE[layer as usize]), at: now };
                 }
-                SETTINGS.iter().map(|s| s.1).collect()
+                items.iter().map(|s| s.1).collect()
             });
             let mut rng = Rng(0x85EB_CA6B);
-            self.pills = SETTINGS
+            self.pills = items
                 .iter()
                 .zip(groups)
                 .map(|(&(label, _, keywords), group)| Pill {
@@ -517,18 +561,19 @@ impl Panel {
         if q.is_empty() {
             return Vec::new();
         }
-        let groups: Vec<u8> = if self.pills.len() == SETTINGS.len() {
+        let items = self.items;
+        let groups: Vec<u8> = if self.pills.len() == items.len() {
             self.pills.iter().map(|p| p.group).collect()
         } else {
-            self.usage.arrangement().unwrap_or_else(|| SETTINGS.iter().map(|s| s.1).collect())
+            self.usage.arrangement(items).unwrap_or_else(|| items.iter().map(|s| s.1).collect())
         };
-        let mut hits: Vec<(u8, u8, usize)> = SETTINGS
+        let mut hits: Vec<(u8, u8, usize)> = items
             .iter()
             .enumerate()
             .filter_map(|(i, &(label, _, keywords))| Some((match_rank(label, keywords, &q)?, groups[i], i)))
             .collect();
         hits.sort();
-        hits.into_iter().take(MAX_SEARCH_CONTROLS).map(|(.., i)| SETTINGS[i].0).collect()
+        hits.into_iter().take(MAX_SEARCH_CONTROLS).map(|(.., i)| items[i].0).collect()
     }
 
     /// Open the setting named `label` (from the apps grid's search): now if
@@ -1532,24 +1577,66 @@ impl App {
         self.handle_command(Command::Toggle);
     }
 
-    /// The gear was clicked: open the card as the panel, or close it if the
-    /// panel is what's showing. With the card already open on the apps, the
-    /// sections clear in place.
+    /// The settings' field, wherever it is (on show or parked).
+    pub(crate) fn settings_panel(&self) -> &Panel {
+        if self.panel.is_modules() { &self.panel_parked } else { &self.panel }
+    }
+
+    pub(crate) fn settings_panel_mut(&mut self) -> &mut Panel {
+        if self.panel.is_modules() { &mut self.panel_parked } else { &mut self.panel }
+    }
+
+    /// Put the modules' field (`modules`) or the settings' on show; the one
+    /// coming in starts fresh, on its first layer.
+    fn panel_switch(&mut self, modules: bool) {
+        if self.panel.is_modules() != modules {
+            std::mem::swap(&mut self.panel, &mut self.panel_parked);
+            self.panel.reset();
+        }
+    }
+
+    /// The gear was clicked: the control panel's settings (see
+    /// [`Self::toggle_panel`]).
     pub(crate) fn toggle_control_panel(&mut self) {
+        self.toggle_panel(false);
+    }
+
+    /// The Modules tile was clicked: the same field, holding the modules.
+    pub(crate) fn toggle_modules(&mut self) {
+        self.toggle_panel(true);
+    }
+
+    /// Open the card as the field (`modules`: the modules', else the
+    /// settings'), or close it if that field is what's showing. With the
+    /// card already open on the apps, the sections clear in place; on the
+    /// other field, this one takes its place.
+    fn toggle_panel(&mut self, modules: bool) {
+        let what = if modules { "modules" } else { "control panel" };
         self.close_group();
+        if self.ui.target() == Target::Open && self.control_panel && self.panel.is_modules() != modules {
+            info!("{what}: in place of the other field");
+            self.panel_switch(modules);
+            self.search.open = false;
+            self.search.query.clear();
+            self.panel_search();
+            return;
+        }
+        if self.ui.target() != Target::Open || !self.control_panel {
+            self.panel_switch(modules);
+        }
         if self.ui.target() == Target::Open {
             if self.control_panel && self.control_panel_from_apps {
                 // Entered from the apps: the gear goes back to them.
-                info!("control panel: back to the apps");
+                info!("{what}: back to the apps");
                 self.control_panel = false;
                 self.control_panel_from_apps = false;
                 self.panel_reset_due = true;
                 self.schedule_frame();
             } else if self.control_panel {
-                info!("control panel: closing the panel");
+                info!("{what}: closing the panel");
                 self.handle_command(Command::Collapse);
             } else {
-                info!("control panel: panel in place of the apps");
+                info!("{what}: panel in place of the apps");
                 self.control_panel = true;
                 self.control_panel_from_apps = true;
                 self.search.open = false;
@@ -1559,7 +1646,7 @@ impl App {
             }
             return;
         }
-        info!("control panel: opening the panel");
+        info!("{what}: opening the panel");
         self.control_panel_opening = true;
         self.handle_command(Command::Toggle);
         // Refused (e.g. the dock is suppressed): don't let a later open
@@ -1629,6 +1716,8 @@ impl App {
     pub(crate) fn open_control(&mut self, label: &'static str) {
         info!("control panel: {label} from the apps search");
         self.close_group();
+        // The Controls row holds settings, never modules.
+        self.panel_switch(false);
         if self.panel_reset_due {
             // Out of sight until now: start it fresh before opening.
             self.panel.reset();
@@ -1661,6 +1750,9 @@ impl App {
     /// card is (the `display show …` verb: a key binding's way straight to
     /// a setting, and the pointer-free way to look at one).
     pub(crate) fn show_control(&mut self, label: &'static str) {
+        if self.ui.target() == Target::Open && self.control_panel && self.panel.is_modules() {
+            self.panel_switch(false);
+        }
         if self.ui.target() != Target::Open {
             self.toggle_control_panel();
         } else if !self.control_panel {
@@ -1711,7 +1803,7 @@ mod tests {
     /// A panel laid out at bar scale 1 over a typical card field, with
     /// estimated label widths (no text shaper in tests).
     fn panel() -> Panel {
-        let mut p = Panel::default();
+        let mut p = Panel { items: &SETTINGS, ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
         p.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
         p
@@ -1833,7 +1925,7 @@ mod tests {
 
     #[test]
     fn the_apps_search_finds_controls_best_first() {
-        let p = Panel::default();
+        let p = Panel { items: &SETTINGS, ..Panel::default() };
         let audio = p.matching_controls("audio");
         for want in ["Sound output", "Volume", "Microphone"] {
             assert!(audio.contains(&want), "{want} in {audio:?}");
@@ -1841,6 +1933,18 @@ mod tests {
         assert_eq!(p.matching_controls("res").first(), Some(&"Resolution"), "a name prefix first");
         assert!(p.matching_controls("  ").is_empty());
         assert!(p.matching_controls("e").len() <= MAX_SEARCH_CONTROLS);
+    }
+
+    #[test]
+    fn the_modules_field_lays_out_clean_and_searches_its_own() {
+        let mut p = Panel { items: &MODULES, modules: true, ..Panel::default() };
+        let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
+        p.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
+        assert!(p.is_modules());
+        assert_eq!(p.pills.len(), MODULES.len());
+        assert_clean(&p, "the modules field");
+        assert_eq!(p.matching_controls("steam").first(), Some(&"Gaming"), "a keyword finds its module");
+        assert!(p.matching_controls("resolution").is_empty(), "no settings in the modules");
     }
 
     #[test]
@@ -1880,7 +1984,7 @@ mod tests {
         p.record_use(far, 1_000);
         p.record_use(far, 1_000);
         let json = serde_json::to_string(&p.usage).unwrap();
-        let mut again = Panel { usage: serde_json::from_str(&json).unwrap(), ..Panel::default() };
+        let mut again = Panel { items: &SETTINGS, usage: serde_json::from_str(&json).unwrap(), ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
         again.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
         let groups = |p: &Panel| p.pills.iter().map(|q| q.group).collect::<Vec<_>>();

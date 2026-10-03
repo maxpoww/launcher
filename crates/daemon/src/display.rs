@@ -492,7 +492,7 @@ impl App {
     /// The compositor needs a moment to put a rule on the screen: have the
     /// panel read the screen back once it has.
     fn display_changed(&mut self) {
-        self.panel.display_refresh_at(Instant::now() + SETTLE);
+        self.settings_panel_mut().display_refresh_at(Instant::now() + SETTLE);
         self.schedule_frame();
     }
 
@@ -517,7 +517,7 @@ impl App {
         let choice = DisplayChoice { mode: m.mode.rule(), scale, position };
         // The pill asked for is the lit one from the first frame drawn at
         // the new scale, not once the screen has been read back.
-        self.panel.display_expect_scale(scale);
+        self.settings_panel_mut().display_expect_scale(scale);
         let (name, old) = (m.name.clone(), m.scale);
         let (origin, px) = (m.pos, (m.mode.w, m.mode.h));
         let output = name.clone();

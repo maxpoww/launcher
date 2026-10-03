@@ -633,6 +633,7 @@ fn main() -> anyhow::Result<()> {
         control_panel: false,
         control_panel_opening: false,
         panel: panel::Panel::load(),
+        panel_parked: panel::Panel::load_modules(),
         panel_mix: 0.0,
         panel_reset_due: false,
         display_pending: None,
@@ -1567,6 +1568,9 @@ pub struct App {
     control_panel_opening: bool,
     /// The control panel's field: its pills, layers and open setting.
     panel: panel::Panel,
+    /// The field not on show: the card shows one field at a time — the
+    /// settings or the MODULES — and `panel_switch` trades them.
+    panel_parked: panel::Panel,
     /// Apps ↔ settings, eased: 0 = the apps grid, 1 = the panel. Only the
     /// swap inside an open card animates; a card opening straight into
     /// either view starts there.
@@ -2375,7 +2379,9 @@ impl App {
         if self.fast.open {
             match command {
                 Command::Show => self.close_fast_launch(),
-                Command::Toggle | Command::Expand | Command::ControlPanel => self.fast_yield_keyboard_to_box(),
+                Command::Toggle | Command::Expand | Command::ControlPanel | Command::Modules => {
+                    self.fast_yield_keyboard_to_box()
+                }
                 _ => {}
             }
         }
@@ -2409,6 +2415,10 @@ impl App {
                 self.install_drag_reset = false;
                 self.search.query = query;
                 self.refilter();
+                // Over the panel, typing searches its field: so does this.
+                if self.control_panel {
+                    self.panel_search();
+                }
                 self.schedule_frame();
                 return;
             }
@@ -2575,6 +2585,10 @@ impl App {
             // for a desk where the compositor lost the rule.
             Command::ControlPanel => {
                 self.toggle_control_panel();
+                return;
+            }
+            Command::Modules => {
+                self.toggle_modules();
                 return;
             }
             Command::Display(args) => {
@@ -4053,7 +4067,7 @@ impl App {
         let controls = if self.control_panel {
             Vec::new()
         } else {
-            self.panel.matching_controls(&self.search.query)
+            self.settings_panel().matching_controls(&self.search.query)
         };
         // The near layer's type (Max: "make the pills big as the nearest layer").
         let font = options::FONT_PX * self.options_scale() * panel::LAYER_SCALE[0];
@@ -5001,6 +5015,11 @@ impl App {
         }
         // The Settings gear launches nothing: it opens the configuration
         // panel — the main card, emptied (see `panel.rs`).
+        // The Modules tile opens the same card as the modules' field.
+        if entry.id == apps::MODULES_ID {
+            self.toggle_modules();
+            return;
+        }
         if entry.id == apps::CONTROL_PANEL_ID {
             self.toggle_control_panel();
             return;

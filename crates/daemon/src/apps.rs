@@ -230,6 +230,8 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 entries.extend(cli);
                 entries.push(control_panel_tile());
                 kinds.push(EntryKind::App);
+                entries.push(modules_tile());
+                kinds.push(EntryKind::App);
                 entries.push(apps_grid_tile());
                 kinds.push(EntryKind::App);
                 let folders = home_folders();
@@ -396,6 +398,24 @@ fn control_panel_tile() -> AppEntry {
         description: Some(crate::i18n::tr("Configure Golem").to_owned()),
         exec: String::new(),
         icon: Some("org.gnome.Settings".to_owned()),
+        startup_wm_class: None,
+        needs_terminal: false,
+        path: None,
+    }
+}
+
+/// Entry id of the MODULES tile: an app among the apps whose click opens
+/// the card as the modules' field (see `App::toggle_modules`).
+pub(crate) const MODULES_ID: &str = "golem-modules";
+
+/// The Modules tile. Synthesized like [`control_panel_tile`].
+fn modules_tile() -> AppEntry {
+    AppEntry {
+        id: MODULES_ID.to_owned(),
+        name: crate::i18n::tr("Modules").to_owned(),
+        description: Some(crate::i18n::tr("Add a whole setup: software, tuned").to_owned()),
+        exec: String::new(),
+        icon: Some("org.gnome.Extensions".to_owned()),
         startup_wm_class: None,
         needs_terminal: false,
         path: None,

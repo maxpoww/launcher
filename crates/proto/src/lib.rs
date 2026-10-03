@@ -97,6 +97,9 @@ pub enum Command {
     /// does: a key binding's way in (Super+Ctrl), and the pointer-free way
     /// to look at it. `settings` is accepted as its old name.
     ControlPanel,
+    /// Open (or close) the card as the MODULES field, as a click on the
+    /// Modules tile does.
+    Modules,
     /// The screen's live settings without the panel: `display scale 1.25`,
     /// `display mode 1920x1080@60` (tried: goes back unless `display keep`),
     /// `display back`, `display reset` (Golem's defaults again), `display
@@ -240,6 +243,7 @@ impl fmt::Display for Command {
             Command::DebugStats(Some(p)) => write!(f, "debug-stats {p}"),
             Command::FloatMode(m) => write!(f, "float-mode {m}"),
             Command::ControlPanel => f.write_str("control-panel"),
+            Command::Modules => f.write_str("modules"),
             Command::Display(args) if args.is_empty() => f.write_str("display"),
             Command::Display(args) => write!(f, "display {args}"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
@@ -348,6 +352,7 @@ impl FromStr for Command {
                 s.trim_start_matches("debug-stats ").trim().parse().ok(),
             )),
             "control-panel" | "settings" => Ok(Command::ControlPanel),
+            "modules" => Ok(Command::Modules),
             "fast-launch" => Ok(Command::FastLaunch),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
@@ -394,6 +399,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-stats",
     "options-trigger <id>",
     "control-panel",
+    "modules",
     "overview-on",
     "overview-off",
     "resize-drag-on",
@@ -506,6 +512,7 @@ mod tests {
                 | Command::DebugStats(_)
                 | Command::FloatMode(_)
                 | Command::ControlPanel
+                | Command::Modules
                 | Command::Display(_)
                 | Command::OptionsTrigger(_)
                 | Command::OverviewOn
@@ -554,6 +561,7 @@ mod tests {
         Command::DebugStats(None),
         Command::FloatMode(String::new()),
         Command::ControlPanel,
+        Command::Modules,
         Command::Display(String::new()),
         Command::Display("scale 1.25".into()),
             Command::OptionsTrigger("media.playpause".into()),
