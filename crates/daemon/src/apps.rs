@@ -994,7 +994,7 @@ fn mtime_secs(path: &str) -> u64 {
 }
 
 /// `$XDG_CACHE_HOME`, falling back to `~/.cache`.
-fn cache_base() -> PathBuf {
+pub(crate) fn cache_base() -> PathBuf {
     std::env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"))

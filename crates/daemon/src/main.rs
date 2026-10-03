@@ -28,6 +28,7 @@ mod emoji;
 mod emoji_table;
 mod files;
 mod focus_cycle;
+mod font_index;
 mod fractional;
 mod frame;
 mod groups;

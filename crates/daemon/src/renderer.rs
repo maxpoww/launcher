@@ -859,7 +859,10 @@ impl Renderer {
         let blur_pipeline_v = make_blur_pipeline("fs_vertical");
 
         // Text stack (glyphon).
-        let font_system = FontSystem::new();
+        // One font database for every renderer, remembered between runs
+        // (crate::font_index): the cold scan was the slowest part of a start
+        // on a spinning disk.
+        let font_system = FontSystem::new_with_locale_and_db(crate::font_index::locale(), crate::font_index::database());
         let swash = SwashCache::new();
         let text_cache = TextCache::new(&device);
         let text_viewport = Viewport::new(&device, &text_cache);

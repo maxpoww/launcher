@@ -2608,6 +2608,7 @@ dependencies = [
  "image",
  "libc",
  "md5",
+ "memmap2 0.9.11",
  "options-engine",
  "options-notify",
  "pollster",
