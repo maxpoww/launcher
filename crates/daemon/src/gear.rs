@@ -132,6 +132,7 @@ pub(crate) enum Hit {
     HsPass,
     HsBand(bool),
     HsEye,
+    BtShare,
     // Bluetooth
     BtPower,
     BtName,
@@ -310,6 +311,7 @@ enum BtView {
     Detail(String),
     Pair(String),
     Send,
+    Share,
 }
 
 #[derive(Default)]
@@ -331,6 +333,8 @@ pub(crate) struct GearState {
     net_err: Option<String>,
     net_scanning: bool,
     hs_busy: bool,
+    /// Why sharing did not start, as a title and a line under it.
+    share_err: Option<(&'static str, &'static str)>,
     share: bool,
     show_pw: bool,
     qr: Option<Vec<Vec<bool>>>,
@@ -698,14 +702,16 @@ impl App {
         self.gear.scroll = 0.0;
         self.gear.scroll_target = 0.0;
         self.gear.view_t = 0.0;
-        if page == Some(PageKind::Net) {
+        if page.is_some() {
             self.ensure_net();
         }
         if page == Some(PageKind::Bt) {
             self.ensure_bt();
         }
         if let Some(h) = &self.gear.net {
-            h.send(NetCommand::Watch(page == Some(PageKind::Net)));
+            // Watched from the Bluetooth page too: sharing internet over
+            // Bluetooth is NetworkManager's, and its state shows there.
+            h.send(NetCommand::Watch(page.is_some()));
         }
         if let Some(h) = &self.gear.bt {
             h.send(BtCommand::Watch(page == Some(PageKind::Bt)));
@@ -835,6 +841,20 @@ impl App {
                     self.gear.net_view = NetView::List;
                     self.open_gear_field(password_field(ssid, false));
                 }
+            }
+            NetEvent::ShareFailed { wifi } => {
+                self.gear.hs_busy = false;
+                self.gear.share_err = Some(if wifi {
+                    (
+                        "The Wi-Fi hotspot did not start",
+                        "Use Bluetooth sharing instead",
+                    )
+                } else {
+                    (
+                        "Sharing over Bluetooth did not start",
+                        "Check that Bluetooth is on",
+                    )
+                });
             }
             NetEvent::Idle => {
                 self.gear.net_busy = None;
@@ -1090,7 +1110,7 @@ impl App {
                 Btn {
                     hit: Hit::Hotspot,
                     glyph: G_HOTSPOT,
-                    lit: snap.hotspot_on,
+                    lit: snap.hotspot_on || snap.bt_share_on,
                 },
                 btn(Hit::Airplane, G_PLANE),
             ],
@@ -1246,32 +1266,110 @@ impl App {
         }
     }
 
+    /// Share this computer's internet: as a Wi-Fi hotspot, over Bluetooth, or
+    /// both. One page, reached from the hotspot circle of either list.
     fn hotspot_view(&self) -> View {
         let g = &self.gear;
-        let on = g.net_snap.hotspot_on;
+        let wifi_on = g.net_snap.hotspot_on;
+        let bt_on = g.net_snap.bt_share_on;
         let name = self.hotspot_name();
         let pass = &self.settings.hotspot_pass;
-        let card = Item::Card {
+        let mut items = vec![Item::Card {
             glyph: G_HOTSPOT,
-            title: "Hotspot".into(),
-            sub: if on {
-                format!("On as “{name}”")
-            } else {
-                "Share this computer's internet".into()
+            title: "Share internet".into(),
+            sub: match (wifi_on, bt_on) {
+                (true, true) => format!("Wi-Fi “{name}” and Bluetooth"),
+                (true, false) => format!("Wi-Fi hotspot “{name}” is on"),
+                (false, true) => "Sharing over Bluetooth".into(),
+                (false, false) => "Other devices use this computer's internet".into(),
             },
-            extra: match (&g.qr, on) {
+            extra: match (&g.qr, wifi_on) {
                 (Some(m), true) => Extra::Qr(m.clone(), "Scan with a phone camera to join".into()),
                 _ => Extra::None,
             },
             rename: None,
+        }];
+        if let Some((title, sub)) = g.share_err {
+            items.push(Item::Row {
+                hit: Hit::None,
+                more: None,
+                tile: None,
+                title: title.into(),
+                sub: sub.into(),
+                tone: Tone::Warn,
+                trail: Trail::None,
+                sel: false,
+            });
+        }
+        let busy = |hint: &str| {
+            if g.hs_busy {
+                "Working…".to_owned()
+            } else {
+                hint.to_owned()
+            }
         };
-        let hint = if g.hs_busy {
-            "Working…"
-        } else if g.net_snap.wired.is_some() {
-            "Shares the wired connection"
-        } else {
-            "Wi-Fi pauses while it is on"
-        };
+        items.push(Item::Toggle {
+            hit: Hit::HsPower,
+            label: "Wi-Fi hotspot".into(),
+            hint: busy(if g.net_snap.wifi_dev.is_none() {
+                "This computer has no Wi-Fi"
+            } else if g.net_snap.wired.is_some() {
+                "Shares the wired connection"
+            } else {
+                "Without a cable there is nothing to share"
+            }),
+            on: wifi_on,
+        });
+        items.push(Item::Kv {
+            hit: Some(Hit::HsName),
+            key: "Name".into(),
+            value: name,
+        });
+        items.push(Item::Kv {
+            hit: Some(Hit::HsPass),
+            key: "Password".into(),
+            value: if g.show_pw {
+                pass.clone()
+            } else {
+                "•".repeat(pass.chars().count())
+            },
+        });
+        items.push(Item::Choice {
+            key: "Band".into(),
+            opts: vec![
+                (
+                    Hit::HsBand(false),
+                    "2.4 GHz".into(),
+                    !self.settings.hotspot_5ghz,
+                ),
+                (
+                    Hit::HsBand(true),
+                    "5 GHz".into(),
+                    self.settings.hotspot_5ghz,
+                ),
+            ],
+        });
+        let bt = &g.bt_snap;
+        items.push(Item::Toggle {
+            hit: Hit::BtShare,
+            label: "Over Bluetooth".into(),
+            hint: busy(if !bt.present {
+                "This computer has no Bluetooth"
+            } else if !bt.powered {
+                "Turn Bluetooth on first"
+            } else if bt_on {
+                "Paired devices can connect now"
+            } else {
+                "Paired devices use this internet"
+            }),
+            on: bt_on,
+        });
+        if bt_on {
+            items.push(Item::Heading {
+                text: format!("On the phone: Bluetooth, “{}”, Internet access", bt.alias),
+                busy: false,
+            });
+        }
         View {
             strip: vec![
                 btn(Hit::Back, G_BACK),
@@ -1281,44 +1379,7 @@ impl App {
                     lit: g.show_pw,
                 },
             ],
-            items: vec![
-                card,
-                Item::Toggle {
-                    hit: Hit::HsPower,
-                    label: "Hotspot".into(),
-                    hint: hint.into(),
-                    on,
-                },
-                Item::Kv {
-                    hit: Some(Hit::HsName),
-                    key: "Name".into(),
-                    value: name,
-                },
-                Item::Kv {
-                    hit: Some(Hit::HsPass),
-                    key: "Password".into(),
-                    value: if g.show_pw {
-                        pass.clone()
-                    } else {
-                        "•".repeat(pass.chars().count())
-                    },
-                },
-                Item::Choice {
-                    key: "Band".into(),
-                    opts: vec![
-                        (
-                            Hit::HsBand(false),
-                            "2.4 GHz".into(),
-                            !self.settings.hotspot_5ghz,
-                        ),
-                        (
-                            Hit::HsBand(true),
-                            "5 GHz".into(),
-                            self.settings.hotspot_5ghz,
-                        ),
-                    ],
-                },
-            ],
+            items,
             sheet_from: Some(1),
             ..View::default()
         }
@@ -1331,6 +1392,7 @@ impl App {
             BtView::Detail(path) => return self.bt_detail_view(path),
             BtView::Pair(path) => return self.bt_pair_view(path),
             BtView::Send => return self.bt_send_view(),
+            BtView::Share => return self.hotspot_view(),
             BtView::List => {}
         }
         if self.settings.airplane {
@@ -1461,6 +1523,11 @@ impl App {
                     lit: snap.discoverable,
                 },
                 btn(Hit::BtFiles, G_SEND),
+                Btn {
+                    hit: Hit::Hotspot,
+                    glyph: G_HOTSPOT,
+                    lit: g.net_snap.bt_share_on || g.net_snap.hotspot_on,
+                },
                 btn(Hit::Airplane, G_PLANE),
             ],
             zebra: true,
@@ -2899,7 +2966,14 @@ impl App {
                 }
                 self.refresh_hotspot_qr();
                 self.gear.show_pw = false;
-                self.gear.net_view = NetView::Hotspot;
+                self.gear.share_err = None;
+                // The same page from either list; Back returns to the one it
+                // was opened from.
+                if self.gear_page() == Some(PageKind::Bt) {
+                    self.gear.bt_view = BtView::Share;
+                } else {
+                    self.gear.net_view = NetView::Hotspot;
+                }
                 self.show_view();
             }
             Hit::NetShare => {
@@ -2921,8 +2995,18 @@ impl App {
             Hit::NetAuto | Hit::NetMetered | Hit::NetPrivate | Hit::NetIp(_) | Hit::NetEdit(_) => {
                 self.net_detail_click(hit);
             }
+            Hit::BtShare => {
+                let on = !self.gear.net_snap.bt_share_on;
+                if on && !self.gear.bt_snap.powered {
+                    return;
+                }
+                self.gear.share_err = None;
+                self.gear.hs_busy = true;
+                self.net_send(NetCommand::BtShare(on));
+            }
             Hit::HsPower => {
                 let on = !self.gear.net_snap.hotspot_on;
+                self.gear.share_err = None;
                 self.gear.hs_busy = true;
                 self.refresh_hotspot_qr();
                 let cmd = NetCommand::Hotspot {

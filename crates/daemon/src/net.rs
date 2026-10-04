@@ -26,6 +26,9 @@ const CONNECT_WAIT: &str = "30";
 /// The one profile the hotspot lives in — named, so it is never listed as a
 /// saved network and turning it off is a `con down` of a known name.
 pub(crate) const HOTSPOT_PROFILE: &str = "golem-hotspot";
+/// The profile that shares this computer's internet over Bluetooth (a NAP
+/// server: NetworkManager makes the bridge, the addresses and the routing).
+const BT_SHARE_PROFILE: &str = "golem-bt-hotspot";
 
 /// One network in range (the strongest access point of each name).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -72,6 +75,8 @@ pub(crate) struct NetSnapshot {
     /// The network wants a sign-in page before it lets anything through.
     pub(crate) portal: bool,
     pub(crate) hotspot_on: bool,
+    /// Internet sharing over Bluetooth is up.
+    pub(crate) bt_share_on: bool,
 }
 
 /// What the details view shows for one network, read on demand.
@@ -119,6 +124,8 @@ pub(crate) enum NetCommand {
         password: String,
         band5: bool,
     },
+    /// Share this computer's internet with paired Bluetooth devices.
+    BtShare(bool),
 }
 
 #[derive(Debug)]
@@ -129,6 +136,10 @@ pub(crate) enum NetEvent {
     Failed {
         ssid: String,
         wrong_password: bool,
+    },
+    /// Sharing could not be started (`wifi`: the hotspot; else Bluetooth).
+    ShareFailed {
+        wifi: bool,
     },
     /// A rescan or a connection attempt has finished (well or not).
     Idle,
@@ -341,10 +352,53 @@ fn execute(cmd: NetCommand, events: &Sender<NetEvent>, profiles: &mut HashMap<St
                     "password",
                     &password,
                 ]) {
+                    // Some cards say they can be an access point and then
+                    // cannot (Broadcom's `wl`, measured on the MacBook Air).
                     warn!("net: hotspot failed: {e}");
+                    let _ = nmcli(&["con", "delete", "id", HOTSPOT_PROFILE]);
+                    let _ = events.send(NetEvent::ShareFailed { wifi: true });
+                    // The attempt took the radio off its network: put it back.
+                    let _ = nmcli(&["dev", "connect", &dev]);
                 }
             } else {
                 let _ = nmcli(&["con", "down", "id", HOTSPOT_PROFILE]);
+                if let Some(dev) = wifi_device() {
+                    let _ = nmcli(&["dev", "connect", &dev]);
+                }
+            }
+            let _ = events.send(NetEvent::Idle);
+        }
+        NetCommand::BtShare(on) => {
+            if on {
+                let exists =
+                    nmcli(&["-g", "connection.id", "con", "show", "id", BT_SHARE_PROFILE]).is_ok();
+                let made = exists
+                    || nmcli(&[
+                        "con",
+                        "add",
+                        "type",
+                        "bluetooth",
+                        "con-name",
+                        BT_SHARE_PROFILE,
+                        "ifname",
+                        "golem-bt",
+                        "autoconnect",
+                        "no",
+                        "bt-type",
+                        "nap",
+                        "ipv4.method",
+                        "shared",
+                        "ipv6.method",
+                        "disabled",
+                    ])
+                    .is_ok();
+                let up = made && nmcli(&["-w", "15", "con", "up", "id", BT_SHARE_PROFILE]).is_ok();
+                if !up {
+                    warn!("net: sharing over Bluetooth could not start");
+                    let _ = events.send(NetEvent::ShareFailed { wifi: false });
+                }
+            } else {
+                let _ = nmcli(&["con", "down", "id", BT_SHARE_PROFILE]);
             }
             let _ = events.send(NetEvent::Idle);
         }
@@ -584,9 +638,10 @@ pub(crate) fn parse_wifi_list(out: &str) -> Vec<Ap> {
 /// hotspot's own profile left out.
 fn saved_profiles(
     profiles: &mut HashMap<String, String>,
-) -> (HashMap<String, (String, bool)>, bool) {
+) -> (HashMap<String, (String, bool)>, bool, bool) {
     let mut out = HashMap::new();
     let mut hotspot_on = false;
+    let mut bt_share_on = false;
     let Ok(list) = nmcli(&[
         "-t",
         "-f",
@@ -594,10 +649,13 @@ fn saved_profiles(
         "con",
         "show",
     ]) else {
-        return (out, false);
+        return (out, false, false);
     };
     for line in list.lines() {
         let f = split_terse(line);
+        if f.len() >= 5 && f[0] == BT_SHARE_PROFILE {
+            bt_share_on = f[4] == "yes";
+        }
         if f.len() < 5 || f[2] != "802-11-wireless" {
             continue;
         }
@@ -620,7 +678,7 @@ fn saved_profiles(
             out.insert(ssid, (uuid, f[3] == "yes"));
         }
     }
-    (out, hotspot_on)
+    (out, hotspot_on, bt_share_on)
 }
 
 fn saved_uuid(ssid: &str, profiles: &mut HashMap<String, String>) -> Option<String> {
@@ -646,8 +704,9 @@ fn snapshot(profiles: &mut HashMap<String, String>) -> NetSnapshot {
     snap.wifi_on = nmcli(&["-t", "-f", "WIFI", "radio"]).is_ok_and(|s| s.trim() == "enabled");
     snap.portal =
         nmcli(&["-t", "-f", "CONNECTIVITY", "general"]).is_ok_and(|s| s.trim() == "portal");
-    let (saved, hotspot_on) = saved_profiles(profiles);
+    let (saved, hotspot_on, bt_share_on) = saved_profiles(profiles);
     snap.hotspot_on = hotspot_on;
+    snap.bt_share_on = bt_share_on;
     if snap.wifi_on && !hotspot_on {
         snap.aps = wifi_list();
         for ap in &mut snap.aps {
