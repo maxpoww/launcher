@@ -31,6 +31,16 @@ pub(crate) struct Settings {
     pub(crate) hotspot_5ghz: bool,
     /// Take files that paired Bluetooth devices send (into Downloads).
     pub(crate) bt_receive: bool,
+    /// The low-battery saver is on unless the owner turned it off.
+    pub(crate) battery_saver_off: bool,
+    /// The owner's idle times, in seconds; `None` = the system's own,
+    /// `Some(0)` = never.
+    pub(crate) screen_off_secs: Option<u32>,
+    pub(crate) sleep_secs: Option<u32>,
+    /// Closing the lid does nothing.
+    pub(crate) lid_nothing: bool,
+    /// Apps (desktop ids) that are opened on the fast graphics card.
+    pub(crate) gpu_fast: Vec<String>,
 }
 
 impl Settings {

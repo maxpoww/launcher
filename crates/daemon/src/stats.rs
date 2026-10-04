@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use calloop::timer::{TimeoutAction, Timer};
 
 use crate::animation::{ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SETTLE_PX};
-use crate::content::{Label, Rect, RectInst, Scene};
+use crate::content::{Label, Rect, Scene};
 use crate::gear::PageKind;
 use crate::options::{PillId, BOND_GAP, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
 use crate::App;
@@ -76,17 +76,6 @@ const NOTCH: f32 = 1.0;
 /// as another reading. A placeholder — it goes when the pages get content.
 const PAGE_PX: f32 = 44.0;
 
-// --- Page 1: Golem's settings ---
-/// Inset of a setting row from the panel edge, and the row's own height.
-const SETTING_PAD: f32 = 16.0;
-const SETTING_ROW_H: f32 = 26.0;
-/// A setting's label type — the box's reading size, not the row's gauge size.
-const SETTING_PX: f32 = 14.0;
-/// The switch, the SUNSET panel's exactly (`module_box.rs`): one toggle shape
-/// on this bar, not one per box.
-const SWITCH_W: f32 = 40.0;
-const SWITCH_H: f32 = 20.0;
-
 /// A symbol and the size it has to be drawn at to LOOK the size of its
 /// neighbours.
 ///
@@ -120,6 +109,8 @@ struct Icon {
 /// One readout: the thing's own symbol, where it stands, and how much room its
 /// number needs at its widest.
 struct Reading {
+    /// The page this reading opens.
+    kind: PageKind,
     icon: Icon,
     value: String,
     /// The widest form this number can take — what the layout RESERVES for it,
@@ -549,6 +540,26 @@ impl App {
             .map(|(p, _)| p)
     }
 
+    /// What the page numbered `page` is: the gear's own, or the page of the
+    /// reading in that place (the numbers shift with what a machine has).
+    pub(crate) fn stats_kind_of_page(&self, page: usize) -> PageKind {
+        match page {
+            0 | 1 => PageKind::Gear,
+            n => self
+                .stats_readings()
+                .get(n - 2)
+                .map_or(PageKind::Other, |r| r.kind),
+        }
+    }
+
+    /// The number of the page of `kind`, if this machine has it.
+    pub(crate) fn stats_page_for(&self, kind: PageKind) -> Option<usize> {
+        if kind == PageKind::Gear {
+            return Some(1);
+        }
+        self.stats_readings().iter().position(|r| r.kind == kind).map(|i| i + 2)
+    }
+
     /// A button was pressed: show its page. Pressing the button of the page
     /// already showing closes the panel — the gear's own toggle, generalised, so
     /// every button behaves the way the one that came first does.
@@ -615,7 +626,7 @@ impl App {
         // A page with a list in it travels that list; it is put away by
         // leaving, by Escape, or by its own reading's button.
         if self.stats.open
-            && matches!(self.stats_page_kind(), PageKind::Net | PageKind::Bt)
+            && self.stats_page_kind() != PageKind::Other
         {
             self.gear_axis(delta);
             return;
@@ -871,16 +882,19 @@ impl App {
         let net = &ctx.network;
         out.push(match net.link {
             NetworkLink::Wireless => Reading {
+                kind: PageKind::Net,
                 icon: net.signal_pct.map_or(ICON_WIFI_NONE, wifi_glyph),
                 value: rate_text(net.throughput_bps),
                 reserve: RESERVE_RATE,
             },
             NetworkLink::Wired => Reading {
+                kind: PageKind::Net,
                 icon: ICON_WIRED,
                 value: rate_text(net.throughput_bps),
                 reserve: RESERVE_RATE,
             },
             NetworkLink::Down => Reading {
+                kind: PageKind::Net,
                 icon: ICON_NO_LINK,
                 value: String::new(),
                 reserve: "",
@@ -899,6 +913,7 @@ impl App {
         let bt = &ctx.bluetooth;
         if bt.present {
             out.push(Reading {
+                kind: PageKind::Bt,
                 icon: match (bt.powered, bt.connected) {
                     (false, _) => ICON_BT_OFF,
                     (true, 0) => ICON_BT,
@@ -910,17 +925,20 @@ impl App {
         }
         if let Some(disk) = m.disk_usage_pct {
             out.push(Reading {
+                kind: PageKind::Disk,
                 icon: ICON_DISK,
                 value: format!("{disk:.0}%"),
                 reserve: RESERVE_PCT,
             });
         }
         out.push(Reading {
+            kind: PageKind::Cpu,
             icon: ICON_CPU,
             value: format!("{:.0}%", m.cpu_usage_pct),
             reserve: RESERVE_PCT,
         });
         out.push(Reading {
+            kind: PageKind::Ram,
             icon: ICON_RAM,
             value: format!("{:.0}%", m.ram_usage_pct),
             reserve: RESERVE_PCT,
@@ -931,6 +949,7 @@ impl App {
         // `options-engine`'s `collectors::gpu`).
         if let Some(gpu) = m.gpu_usage_pct {
             out.push(Reading {
+                kind: PageKind::Gpu,
                 icon: ICON_GPU,
                 value: format!("{gpu:.0}%"),
                 reserve: RESERVE_PCT,
@@ -938,6 +957,7 @@ impl App {
         }
         if let Some(bat) = m.battery_pct {
             out.push(Reading {
+                kind: PageKind::Battery,
                 // Charging is the one thing a percentage cannot say on its own:
                 // 40% climbing and 40% falling are different situations, so the
                 // symbol carries it.
@@ -1057,14 +1077,8 @@ impl App {
         }
         let e = self.stats_open_t();
         // The pages with real content draw themselves (`gear.rs`).
-        if e > 0.01 && matches!(self.stats_page_kind(), PageKind::Net | PageKind::Bt) {
+        if e > 0.01 && self.stats_page_kind() != PageKind::Other {
             self.push_gear_page(scene, a * e);
-            return;
-        }
-        // Page 1 is the gear's own, and it has its first real setting on it;
-        // the rest still say only their number.
-        if e > 0.01 && self.stats_page() == 1 {
-            self.push_settings_page(scene, rect, ink, a * e);
             return;
         }
         // The page, under the row. A number for now — Max is choosing what each
@@ -1090,109 +1104,10 @@ impl App {
         }
     }
 
-    /// The rect of page 1's floating switch row — label on the left, switch on
-    /// the right. The ONE source for its draw and its hit-test.
-    fn stats_floating_row(&self, rect: Rect) -> Rect {
-        let s = self.options_scale();
-        let pad = SETTING_PAD * s;
-        Rect::new(
-            rect.x + pad,
-            rect.y + self.options_pill_h() + pad,
-            (rect.w - 2.0 * pad).max(0.0),
-            SETTING_ROW_H * s,
-        )
-    }
-
-    /// Page 1: the gear's own page, and Golem's settings.
-    ///
-    /// The switch is the SUNSET panel's switch — a stadium track with a knob
-    /// that slides on, label to its left — not a second opinion about what a
-    /// toggle looks like on this bar (`options-design-patterns`).
-    fn push_settings_page(&self, scene: &mut Scene, rect: Rect, ink: [f32; 4], a: f32) {
-        let s = self.options_scale();
-        let row = self.stats_floating_row(rect);
-        let line = LINE_PX * s;
-        scene.labels.push(Label {
-            text: "Floating windows".to_owned(),
-            pos: (row.x, row.y + (row.h - line) / 2.0),
-            max_w: row.w - SWITCH_W * s - 8.0 * s,
-            font_px: SETTING_PX * s,
-            line_px: line,
-            centered: false,
-            dim: false,
-            cache: false,
-            family: None,
-            color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
-            clip: Some(rect),
-        });
-        let sw_w = SWITCH_W * s;
-        let sw_h = SWITCH_H * s;
-        let sw = Rect::new(
-            row.x + row.w - sw_w,
-            row.y + (row.h - sw_h) / 2.0,
-            sw_w,
-            sw_h,
-        );
-        let on = self.floating_mode();
-        scene.rects.push(RectInst {
-            rect: sw,
-            radius: sw_h / 2.0,
-            color: [ink[0], ink[1], ink[2], if on { 0.35 } else { 0.14 } * a],
-            glass: 0.0,
-            border: 0.0,
-        });
-        let knob_d = sw_h - 4.0 * s;
-        let kx = if on {
-            sw.x + sw.w - knob_d - 2.0 * s
-        } else {
-            sw.x + 2.0 * s
-        };
-        scene.rects.push(RectInst {
-            rect: Rect::new(kx, sw.y + 2.0 * s, knob_d, knob_d),
-            radius: knob_d / 2.0,
-            color: [ink[0], ink[1], ink[2], ink[3] * a],
-            glass: 0.0,
-            border: 0.0,
-        });
-        // What the switch actually does, under it — this one reaches past the
-        // shell and re-shapes the whole desktop, which is worth a sentence.
-        scene.labels.push(Label {
-            text: if on {
-                "Every window floats, and new ones open floating.".to_owned()
-            } else {
-                "Windows tile. Golem places them.".to_owned()
-            },
-            pos: (row.x, row.y + row.h + 4.0 * s),
-            max_w: row.w,
-            font_px: 13.0 * s,
-            line_px: 16.0 * s,
-            centered: false,
-            dim: false,
-            cache: false,
-            family: None,
-            color: Some([ink[0], ink[1], ink[2], ink[3] * 0.55 * a]),
-            clip: Some(rect),
-        });
-    }
-
-    /// A press inside the open panel: page 1's switch is the only thing on any
-    /// page that takes one. Returns whether it was consumed.
-    pub(crate) fn stats_panel_click(&mut self, px: f32, py: f32) -> bool {
-        if self.gear_press() {
-            return true;
-        }
-        if self.stats_open_t() < 0.5 || self.stats_page() != 1 {
-            return false;
-        }
-        let row = self.stats_floating_row(self.stats_geom());
-        // The whole ROW is the target, not just the little stadium: a switch
-        // with a label is one control, and hunting for a 40px pill is not what
-        // the row looks like it is asking for.
-        if row.contains((px, py)) {
-            self.toggle_floating_mode();
-            return true;
-        }
-        false
+    /// A press inside the open panel: the page's own controls get it first.
+    /// Returns whether it was consumed.
+    pub(crate) fn stats_panel_click(&mut self, _px: f32, _py: f32) -> bool {
+        self.gear_press()
     }
 
     /// One reading's measured `(symbol, number)` widths, with the rough guess

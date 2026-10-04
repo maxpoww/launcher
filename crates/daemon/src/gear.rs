@@ -30,6 +30,7 @@ const ROW_PAD_X: f32 = 14.0;
 const ROW_PAD_Y: f32 = 11.0;
 const TILE: f32 = 40.0;
 const TILE_GAP: f32 = 11.0;
+const SMALL_TILE: f32 = 28.0;
 const SUB_GAP: f32 = 3.0;
 const TRAIL_PAD: f32 = 8.0;
 const MORE_SZ: f32 = 28.0;
@@ -55,6 +56,8 @@ const SWITCH_H: f32 = 20.0;
 /// The box's height when the page has nothing to list (radio off, airplane
 /// mode): the switch row and one line under it.
 const COMPACT_H: f32 = 150.0;
+const GRAPH_H: f32 = 56.0;
+const CORES_H: f32 = 30.0;
 /// Pixels of list travel per wheel unit — the other boxes' figure.
 const SCROLL_SPEED: f32 = 3.0;
 /// The accent the bar already uses for "look here" (the unread bell).
@@ -99,6 +102,11 @@ pub(crate) enum PageKind {
     Gear,
     Net,
     Bt,
+    Disk,
+    Cpu,
+    Ram,
+    Gpu,
+    Battery,
     Other,
 }
 
@@ -151,6 +159,10 @@ pub(crate) enum Hit {
     BtFiles,
     SendTo(String),
     BtReceive,
+    /// The footer's "click again" line: do what was asked.
+    Confirm,
+    /// The machine pages' own targets (`gear_pages.rs`).
+    Sys(crate::gear_pages::SysHit),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +189,8 @@ pub(crate) enum Trail {
     Glyph(&'static str),
     Switch(bool),
     Battery(u8),
+    /// A figure at the row's end ("12%", "3.2 GB").
+    Text(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -188,6 +202,8 @@ pub(crate) enum Extra {
     /// A pairing number, large.
     Code(String),
     Battery(u8),
+    /// A filled bar (0–100) and the line under it.
+    Meter(u8, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,17 +247,25 @@ pub(crate) enum Item {
         opts: Vec<(Hit, String, bool)>,
     },
     Empty(String),
+    /// A reading's recent past, as a row of bars (0–100 each).
+    Graph(Vec<f32>),
+    /// One short bar per processor core (0–100 each).
+    Cores(Vec<f32>),
+    /// A segmented bar and its legend: `(label, weight, opacity)`.
+    Bar(Vec<(String, f32, f32)>),
+    /// A small dim line under what it explains.
+    Note(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Btn {
-    hit: Hit,
-    glyph: &'static str,
+    pub(crate) hit: Hit,
+    pub(crate) glyph: &'static str,
     /// Drawn pressed-in: the state it switches is on.
-    lit: bool,
+    pub(crate) lit: bool,
 }
 
-fn btn(hit: Hit, glyph: &'static str) -> Btn {
+pub(crate) fn btn(hit: Hit, glyph: &'static str) -> Btn {
     Btn {
         hit,
         glyph,
@@ -253,15 +277,15 @@ fn btn(hit: Hit, glyph: &'static str) -> Btn {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct View {
     /// Round buttons under the band (a details view's way out and actions).
-    strip: Vec<Btn>,
-    items: Vec<Item>,
+    pub(crate) strip: Vec<Btn>,
+    pub(crate) items: Vec<Item>,
     /// Round buttons floating at the bottom.
-    footer: Vec<Btn>,
+    pub(crate) footer: Vec<Btn>,
     /// Nothing to list: the box shrinks to [`COMPACT_H`].
-    compact: bool,
-    zebra: bool,
+    pub(crate) compact: bool,
+    pub(crate) zebra: bool,
     /// Items from this index on sit on the second tone (a details sheet).
-    sheet_from: Option<usize>,
+    pub(crate) sheet_from: Option<usize>,
 }
 
 /// Where a [`View`] lands inside the box.
@@ -277,7 +301,12 @@ pub(crate) struct Layout {
 #[derive(Debug, Clone, PartialEq)]
 enum FieldKind {
     Search,
-    Password { ssid: String, hidden: bool },
+    /// The name of an app to open on the fast graphics card.
+    FastApp,
+    Password {
+        ssid: String,
+        hidden: bool,
+    },
     HiddenSsid,
     Edit(EditKey),
     Rename(String),
@@ -355,6 +384,11 @@ pub(crate) struct GearState {
     /// `debug-gear open`: keep the box up with no pointer on it (the rig has
     /// none), until `debug-gear close`.
     debug_hold: bool,
+    /// The machine pages' state (`gear_pages.rs`).
+    pub(crate) pages: crate::gear_pages::PagesState,
+    /// A thing that cannot be undone, asked once: what the footer says, and
+    /// what a second click does.
+    arm: Option<(String, Hit)>,
 }
 
 impl GearState {
@@ -454,7 +488,7 @@ fn host_name() -> String {
         .unwrap_or_else(|| "golem".to_owned())
 }
 
-fn item_h(item: &Item, s: f32) -> f32 {
+fn item_h(item: &Item, s: f32, box_w: f32) -> f32 {
     match item {
         Item::Row { sub, .. } => {
             let text = if sub.is_empty() {
@@ -473,12 +507,30 @@ fn item_h(item: &Item, s: f32) -> f32 {
                 Extra::None => 0.0,
                 Extra::Qr(..) => 8.0 + QR_SZ + 2.0 * QR_PAD + 6.0 + SMALL_LINE,
                 Extra::Code(_) => 8.0 + CODE_PX * 1.2,
-                Extra::Battery(_) => 10.0 + 5.0 + 6.0 + SMALL_LINE,
+                Extra::Battery(_) | Extra::Meter(..) => 10.0 + 5.0 + 6.0 + SMALL_LINE,
             };
             (6.0 + CARD_TILE + 8.0 + LINE_PX + SUB_GAP + LINE_PX + extra + 16.0) * s
         }
         // Takes whatever is left; this is only its floor.
         Item::Empty(_) => 60.0 * s,
+        Item::Graph(_) => GRAPH_H * s,
+        Item::Cores(_) => CORES_H * s,
+        Item::Bar(parts) => {
+            // The legend wraps: count its lines the way the draw lays them.
+            let w = box_w - 2.0 * ROW_PAD_X * s;
+            let mut lines = 1.0;
+            let mut x = 0.0;
+            for (label, _, _) in parts {
+                let lw = est_w(label, SMALL_PX * s) * 1.14 + 26.0 * s;
+                if x > 0.0 && x + lw > w {
+                    lines += 1.0;
+                    x = 0.0;
+                }
+                x += lw;
+            }
+            (6.0 + 8.0 + 8.0 + lines * SMALL_LINE + 8.0) * s
+        }
+        Item::Note(_) => (SMALL_LINE + 8.0) * s,
     }
 }
 
@@ -651,20 +703,13 @@ impl App {
     /// What the page under the open box is, or `Other` for the ones that still
     /// only show their number.
     pub(crate) fn stats_page_kind(&self) -> PageKind {
-        match self.stats_page() {
-            1 => PageKind::Gear,
-            // The network reading is always the first; Bluetooth is the second
-            // only on a machine that has it (see `stats_readings`).
-            2 => PageKind::Net,
-            3 if self.brain.as_ref().is_some_and(|c| c.bluetooth.present) => PageKind::Bt,
-            _ => PageKind::Other,
-        }
+        self.stats_kind_of_page(self.stats_page())
     }
 
     /// The page with content that is on screen, if one is.
     fn gear_page(&self) -> Option<PageKind> {
         let kind = self.stats_page_kind();
-        (self.stats.open && matches!(kind, PageKind::Net | PageKind::Bt)).then_some(kind)
+        (self.stats.open && kind != PageKind::Other).then_some(kind)
     }
 
     /// Whether the open page must not fold when the pointer wanders off: a
@@ -674,6 +719,8 @@ impl App {
         self.gear_page().is_some()
             && (self.gear.debug_hold
                 || self.gear.field.is_some()
+                || self.gear.arm.is_some()
+                || self.gear.pages.pins_box()
                 || matches!(self.gear.bt_view, BtView::Pair(_)))
     }
 
@@ -692,6 +739,8 @@ impl App {
             }
         }
         self.gear.watching = page;
+        self.gear.arm = None;
+        self.pages_sync(page);
         self.gear.field = None;
         self.gear.field_t = 0.0;
         self.gear.net_view = NetView::List;
@@ -702,7 +751,8 @@ impl App {
         self.gear.scroll = 0.0;
         self.gear.scroll_target = 0.0;
         self.gear.view_t = 0.0;
-        if page.is_some() {
+        let radio = matches!(page, Some(PageKind::Net | PageKind::Bt));
+        if radio {
             self.ensure_net();
         }
         if page == Some(PageKind::Bt) {
@@ -711,12 +761,22 @@ impl App {
         if let Some(h) = &self.gear.net {
             // Watched from the Bluetooth page too: sharing internet over
             // Bluetooth is NetworkManager's, and its state shows there.
-            h.send(NetCommand::Watch(page.is_some()));
+            h.send(NetCommand::Watch(radio));
         }
         if let Some(h) = &self.gear.bt {
             h.send(BtCommand::Watch(page == Some(PageKind::Bt)));
         }
-        self.set_gear_keyboard(page.is_some());
+        self.sync_gear_keyboard();
+    }
+
+    /// The box holds the keyboard on the pages where typing means something
+    /// by itself (a search), and anywhere while a field is out.
+    fn sync_gear_keyboard(&mut self) {
+        let typing = matches!(
+            self.gear_page(),
+            Some(PageKind::Net | PageKind::Bt | PageKind::Cpu | PageKind::Ram)
+        );
+        self.set_gear_keyboard(typing || (self.gear_page().is_some() && self.gear.field.is_some()));
     }
 
     fn ensure_net(&mut self) {
@@ -778,6 +838,7 @@ impl App {
     /// At start: what the owner switched on stays on without the page ever
     /// being opened (receiving files is an agent that has to exist).
     pub(crate) fn gear_startup(&mut self) {
+        self.pages_startup();
         if self.settings.bt_receive {
             self.files_send(FileCommand::Receive(true));
         }
@@ -901,7 +962,7 @@ impl App {
     }
 
     /// Something the page shows has changed: redraw it if it is on screen.
-    fn gear_changed(&mut self) {
+    pub(crate) fn gear_changed(&mut self) {
         if self.gear_page().is_none() {
             return;
         }
@@ -919,7 +980,7 @@ impl App {
         self.gear.bt_snap.devices.iter().find(|d| d.path == path)
     }
 
-    fn search_query(&self) -> String {
+    pub(crate) fn search_query(&self) -> String {
         match &self.gear.field {
             Some(f) if f.kind == FieldKind::Search => f.text.trim().to_lowercase(),
             _ => String::new(),
@@ -940,7 +1001,8 @@ impl App {
         match self.gear_page() {
             Some(PageKind::Net) => self.net_view(),
             Some(PageKind::Bt) => self.bt_view(),
-            _ => View::default(),
+            Some(kind) => self.pages_view(kind),
+            None => View::default(),
         }
     }
 
@@ -1281,7 +1343,7 @@ impl App {
                 (true, true) => format!("Wi-Fi “{name}” and Bluetooth"),
                 (true, false) => format!("Wi-Fi hotspot “{name}” is on"),
                 (false, true) => "Sharing over Bluetooth".into(),
-                (false, false) => "Other devices use this computer's internet".into(),
+                (false, false) => "Lets other devices online".into(),
             },
             extra: match (&g.qr, wifi_on) {
                 (Some(m), true) => Extra::Qr(m.clone(), "Scan with a phone camera to join".into()),
@@ -1316,7 +1378,7 @@ impl App {
             } else if g.net_snap.wired.is_some() {
                 "Shares the wired connection"
             } else {
-                "Without a cable there is nothing to share"
+                "Needs a cable to share from"
             }),
             on: wifi_on,
         });
@@ -1726,7 +1788,8 @@ impl App {
         let band = self.options_pill_h();
         let d = self.gear_footer_d();
         let has_field = self.gear.field.is_some();
-        let foot_h = if view.footer.is_empty() && !has_field {
+        let armed = self.gear.arm.is_some();
+        let foot_h = if view.footer.is_empty() && !has_field && !armed {
             0.0
         } else {
             self.gear_footer_h()
@@ -1766,7 +1829,7 @@ impl App {
                 )
             })
             .collect();
-        let field = has_field.then(|| {
+        let field = (has_field || armed).then(|| {
             let full = Rect::new(
                 rect.x + FIELD_PAD * s,
                 fy,
@@ -1774,7 +1837,7 @@ impl App {
                 d,
             );
             let seat = Rect::new(rect.x + (rect.w - d) / 2.0, fy, d, d);
-            let t = self.gear.field_t;
+            let t = if armed { 1.0 } else { self.gear.field_t };
             Rect::new(lerp(seat.x, full.x, t), fy, lerp(seat.w, full.w, t), d)
         });
         // Stack the items; an `Empty` takes whatever height is left.
@@ -1782,14 +1845,14 @@ impl App {
             .items
             .iter()
             .filter(|i| !matches!(i, Item::Empty(_)))
-            .map(|i| item_h(i, s))
+            .map(|i| item_h(i, s, rect.w))
             .sum();
         let mut y = content.y - self.gear.scroll;
         let mut items = Vec::with_capacity(view.items.len());
         for item in &view.items {
             let h = match item {
-                Item::Empty(_) => (content.h - fixed).max(item_h(item, s)),
-                _ => item_h(item, s),
+                Item::Empty(_) => (content.h - fixed).max(item_h(item, s, rect.w)),
+                _ => item_h(item, s, rect.w),
             };
             items.push(Rect::new(rect.x, y, rect.w, h));
             y += h;
@@ -1843,7 +1906,11 @@ impl App {
         let s = self.options_scale();
         let view = self.gear_view();
         let lay = self.gear_layout(&view, self.gear_rect());
-        if let Some(fr) = lay.field {
+        if let (Some(fr), true) = (lay.field, self.gear.arm.is_some()) {
+            if fr.contains(p) {
+                return Hit::Confirm;
+            }
+        } else if let Some(fr) = lay.field {
             if self.gear.field.as_ref().is_some_and(|f| f.secret) && field_eye_rect(fr).contains(p)
             {
                 return Hit::FieldEye;
@@ -1988,16 +2055,12 @@ impl App {
                     let col = if lit { pen.hot } else { pen.dim };
                     let mut tx = r.x + ROW_PAD_X * s;
                     if let Some(g) = tile {
-                        let t = Rect::new(tx, r.y + ROW_PAD_Y * s, TILE * s, TILE * s);
-                        pen.rect(
-                            scene,
-                            t,
-                            TILE * s / 2.0,
-                            [ink[0], ink[1], ink[2], 0.10],
-                            0.0,
-                        );
-                        pen.glyph(scene, g, (t.x + t.w / 2.0, t.y + t.h / 2.0), 21.0 * s, col);
-                        tx += (TILE + TILE_GAP) * s;
+                        // A one-line row wears a smaller tile, so it fits the row's own height.
+                        let d = if sub.is_empty() { SMALL_TILE } else { TILE } * s;
+                        let t = Rect::new(tx, r.y + (r.h - d) / 2.0, d, d);
+                        pen.rect(scene, t, d / 2.0, [ink[0], ink[1], ink[2], 0.10], 0.0);
+                        pen.glyph(scene, g, (t.x + t.w / 2.0, t.y + t.h / 2.0), d * 0.52, col);
+                        tx += (TILE + TILE_GAP) * s - (TILE * s - d);
                     }
                     // The trail: its resting form, or the corner control while
                     // the pointer is on the row (only ever one of the two).
@@ -2029,6 +2092,20 @@ impl App {
                             Trail::Switch(on) => {
                                 pen.switch(scene, right - 6.0 * s, line_cy, *on);
                                 text_right = right - (SWITCH_W + 14.0) * s;
+                            }
+                            Trail::Text(t) => {
+                                let w = est_w(t, 15.0 * s) * 1.25 + 6.0 * s;
+                                pen.text(
+                                    scene,
+                                    t.clone(),
+                                    (right - w, r.y + ROW_PAD_Y * s),
+                                    w + 4.0,
+                                    (15.0 * s, LINE_PX * s),
+                                    col,
+                                    false,
+                                    None,
+                                );
+                                text_right = right - w - 6.0 * s;
                             }
                             Trail::Battery(b) => {
                                 let t = format!("{b}%");
@@ -2077,6 +2154,110 @@ impl App {
                         );
                     }
                 }
+                Item::Graph(vals) => {
+                    // A bar per sample, the newest at the right edge.
+                    let (x0, w) = (r.x + ROW_PAD_X * s, r.w - 2.0 * ROW_PAD_X * s);
+                    let (top, h) = (r.y + 4.0 * s, r.h - 10.0 * s);
+                    let n = crate::gear_pages::HIST_LEN as f32;
+                    let step = w / n;
+                    pen.rect(
+                        scene,
+                        Rect::new(x0, top + h, w, 1.0),
+                        0.0,
+                        [ink[0], ink[1], ink[2], 0.18],
+                        0.0,
+                    );
+                    let skip = crate::gear_pages::HIST_LEN.saturating_sub(vals.len());
+                    for (i, v) in vals.iter().enumerate() {
+                        let bh = (h * (v / 100.0).clamp(0.0, 1.0)).max(1.0);
+                        pen.rect(
+                            scene,
+                            Rect::new(
+                                x0 + (skip + i) as f32 * step,
+                                top + h - bh,
+                                (step - 1.5 * s).max(1.0),
+                                bh,
+                            ),
+                            1.0,
+                            [ink[0], ink[1], ink[2], 0.62],
+                            0.0,
+                        );
+                    }
+                }
+                Item::Cores(vals) => {
+                    let (x0, w) = (r.x + ROW_PAD_X * s, r.w - 2.0 * ROW_PAD_X * s);
+                    let (top, h) = (r.y + 2.0 * s, r.h - 10.0 * s);
+                    let step = w / vals.len().max(1) as f32;
+                    for (i, v) in vals.iter().enumerate() {
+                        let slot =
+                            Rect::new(x0 + i as f32 * step, top, (step - 3.0 * s).max(2.0), h);
+                        pen.rect(scene, slot, 2.0, [ink[0], ink[1], ink[2], 0.10], 0.0);
+                        let bh = (h * (v / 100.0).clamp(0.0, 1.0)).max(1.0);
+                        pen.rect(
+                            scene,
+                            Rect::new(slot.x, top + h - bh, slot.w, bh),
+                            2.0,
+                            [ink[0], ink[1], ink[2], 0.55],
+                            0.0,
+                        );
+                    }
+                }
+                Item::Bar(parts) => {
+                    let (x0, w) = (r.x + ROW_PAD_X * s, r.w - 2.0 * ROW_PAD_X * s);
+                    let total: f32 = parts.iter().map(|p| p.1.max(0.0)).sum::<f32>().max(1.0);
+                    let top = r.y + 6.0 * s;
+                    let mut x = x0;
+                    for (_, weight, opacity) in parts {
+                        let pw = w * weight.max(0.0) / total;
+                        if pw >= 1.0 {
+                            pen.rect(
+                                scene,
+                                Rect::new(x, top, (pw - 2.0 * s).max(1.0), 8.0 * s),
+                                3.0 * s,
+                                [ink[0], ink[1], ink[2], *opacity],
+                                0.0,
+                            );
+                        }
+                        x += pw;
+                    }
+                    // The legend, wrapping the same way `item_h` counted it.
+                    let (mut lx, mut ly) = (0.0, top + 16.0 * s);
+                    for (label, _, opacity) in parts {
+                        let lw = est_w(label, SMALL_PX * s) * 1.14 + 26.0 * s;
+                        if lx > 0.0 && lx + lw > w {
+                            lx = 0.0;
+                            ly += SMALL_LINE * s;
+                        }
+                        pen.rect(
+                            scene,
+                            Rect::new(x0 + lx, ly + 4.5 * s, 8.0 * s, 8.0 * s),
+                            2.0 * s,
+                            [ink[0], ink[1], ink[2], *opacity],
+                            0.0,
+                        );
+                        pen.text(
+                            scene,
+                            label.clone(),
+                            (x0 + lx + 13.0 * s, ly),
+                            lw,
+                            (SMALL_PX * s, SMALL_LINE * s),
+                            [ink[0], ink[1], ink[2], ink[3] * 0.62],
+                            false,
+                            None,
+                        );
+                        lx += lw;
+                    }
+                }
+                Item::Note(text) => pen.text(
+                    scene,
+                    fit(text, r.w - 2.0 * ROW_PAD_X * s, SMALL_PX * s),
+                    (r.x + ROW_PAD_X * s, r.y),
+                    r.w - 2.0 * ROW_PAD_X * s + 4.0,
+                    (SMALL_PX * s, SMALL_LINE * s),
+                    [ink[0], ink[1], ink[2], ink[3] * 0.5],
+                    false,
+                    None,
+                ),
                 Item::Heading { text, .. } => pen.text(
                     scene,
                     text.clone(),
@@ -2293,7 +2474,12 @@ impl App {
                             true,
                             Some(NERD),
                         ),
-                        Extra::Battery(b) => {
+                        Extra::Battery(_) | Extra::Meter(..) => {
+                            let (b, line) = match extra {
+                                Extra::Meter(b, line) => (b, line.clone()),
+                                Extra::Battery(b) => (b, format!("Battery {b}%")),
+                                _ => unreachable!("matched above"),
+                            };
                             let bw = 150.0 * s;
                             let bar = Rect::new(cx - bw / 2.0, y + 10.0 * s, bw, 5.0 * s);
                             pen.rect(scene, bar, bar.h / 2.0, [ink[0], ink[1], ink[2], 0.14], 0.0);
@@ -2307,7 +2493,7 @@ impl App {
                             );
                             pen.text(
                                 scene,
-                                format!("Battery {b}%"),
+                                line,
                                 (cx, bar.y + bar.h + 6.0 * s),
                                 w,
                                 (SMALL_PX * s, SMALL_LINE * s),
@@ -2415,7 +2601,9 @@ impl App {
         for (b, r) in view.strip.iter().zip(&lay.strip) {
             round(scene, b, *r, pen.a);
         }
-        let t = if self.gear.field.is_some() {
+        let t = if self.gear.arm.is_some() {
+            1.0
+        } else if self.gear.field.is_some() {
             self.gear.field_t
         } else {
             0.0
@@ -2423,7 +2611,42 @@ impl App {
         for (b, r) in view.footer.iter().zip(&lay.footer) {
             round(scene, b, *r, pen.a * (1.0 - t));
         }
-        if let (Some(fr), Some(f)) = (lay.field, &self.gear.field) {
+        if let (Some(fr), Some((text, _))) = (lay.field, &self.gear.arm) {
+            if fr.y + fr.h <= bottom {
+                // The footer as a question: the field's own stadium, in the
+                // accent, saying what a second click does.
+                let over = self.gear.hit == Hit::Confirm;
+                let radius = fr.h / 2.0;
+                push_neumorph(scene, fr, radius, bright, a);
+                let mut wash = if over {
+                    self.options_hover_wash()
+                } else {
+                    self.options_rest_wash()
+                };
+                wash[3] *= a;
+                scene.rects.push(RectInst {
+                    rect: fr,
+                    radius,
+                    color: wash,
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                let px = 15.0 * s;
+                scene.labels.push(Label {
+                    text: fit(text, fr.w - 2.0 * PILL_PAD_X, px),
+                    pos: (fr.x + fr.w / 2.0, fr.y + (fr.h - LINE_PX * s) / 2.0),
+                    max_w: fr.w - PILL_PAD_X,
+                    font_px: px,
+                    line_px: LINE_PX * s,
+                    centered: true,
+                    dim: false,
+                    cache: false,
+                    family: None,
+                    color: Some([AMBER[0], AMBER[1], AMBER[2], a]),
+                    clip: Some(fr),
+                });
+            }
+        } else if let (Some(fr), Some(f)) = (lay.field, &self.gear.field) {
             if fr.y + fr.h <= bottom {
                 self.push_gear_field(scene, fr, f, a, bright);
             }
@@ -2629,6 +2852,8 @@ impl App {
     fn open_gear_field(&mut self, f: Field) {
         self.gear.field = Some(f);
         self.gear.field_t = 0.0;
+        self.gear.arm = None;
+        self.sync_gear_keyboard();
         self.schedule_stats_frame();
         self.draw_options();
     }
@@ -2636,6 +2861,7 @@ impl App {
     fn close_gear_field(&mut self) {
         self.gear.field = None;
         self.gear.field_t = 0.0;
+        self.sync_gear_keyboard();
         self.clamp_gear_scroll();
         // The field held the box open; the usual leave rule is back.
         self.update_stats_reveal();
@@ -2645,9 +2871,14 @@ impl App {
     pub(crate) fn gear_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
         match keysym {
             Keysym::Escape => {
-                // One layer at a time: the field, the details, then the box.
-                if self.gear.field.is_some() {
+                // One layer at a time: the question, the field, the details,
+                // then the box.
+                if self.gear.arm.take().is_some() {
+                    self.gear_changed();
+                } else if self.gear.field.is_some() {
                     self.close_gear_field();
+                } else if self.pages_back() {
+                    self.gear_changed();
                 } else if self.gear_page() == Some(PageKind::Net)
                     && self.gear.net_view != NetView::List
                 {
@@ -2695,7 +2926,7 @@ impl App {
             let on_list = match self.gear_page() {
                 Some(PageKind::Net) => self.gear.net_view == NetView::List,
                 Some(PageKind::Bt) => self.gear.bt_view == BtView::List,
-                _ => false,
+                _ => self.pages_can_search(),
             };
             if !on_list || self.gear_view().compact || text.trim().is_empty() {
                 return;
@@ -2737,13 +2968,17 @@ impl App {
         match f.kind {
             FieldKind::Search => {
                 // Enter takes the first match, like the clipboard's search.
-                let first = self.gear_view().items.into_iter().find_map(|i| match i {
-                    Item::Row {
-                        hit: h @ (Hit::Net(_) | Hit::Dev(_)),
-                        ..
-                    } => Some(h),
-                    _ => None,
-                });
+                let first =
+                    self.gear_view().items.into_iter().find_map(|i| match i {
+                        Item::Row {
+                            hit:
+                                h @ (Hit::Net(_)
+                                | Hit::Dev(_)
+                                | Hit::Sys(crate::gear_pages::SysHit::App(_))),
+                            ..
+                        } => Some(h),
+                        _ => None,
+                    });
                 self.close_gear_field();
                 if let Some(h) = first {
                     self.gear_click(h);
@@ -2767,6 +3002,10 @@ impl App {
                     password: Some(f.text),
                     hidden,
                 });
+                self.close_gear_field();
+            }
+            FieldKind::FastApp => {
+                self.pages_add_fast_app(&text);
                 self.close_gear_field();
             }
             FieldKind::HiddenSsid => {
@@ -2829,6 +3068,26 @@ impl App {
 
     // --- acting --------------------------------------------------------------
 
+    /// Ask once before something that cannot be undone: the footer says
+    /// `text`, and a click on it does `then`.
+    pub(crate) fn gear_arm(&mut self, text: &str, then: Hit) {
+        self.gear.field = None;
+        self.gear.arm = Some((text.to_owned(), then));
+        self.schedule_stats_frame();
+    }
+
+    /// The field that asks which app opens on the fast graphics card.
+    pub(crate) fn gear_ask_app(&mut self) {
+        self.open_gear_field(Field {
+            kind: FieldKind::FastApp,
+            text: String::new(),
+            prompt: "Name of the app".into(),
+            glyph: G_SEARCH,
+            secret: false,
+            show: false,
+        });
+    }
+
     /// A press inside the open page. Returns whether it was the page's.
     pub(crate) fn gear_press(&mut self) -> bool {
         if self.gear_page().is_none() {
@@ -2859,7 +3118,7 @@ impl App {
         true
     }
 
-    fn show_view(&mut self) {
+    pub(crate) fn gear_show_view(&mut self) {
         self.gear.view_t = 0.0;
         self.gear.scroll = 0.0;
         self.gear.scroll_target = 0.0;
@@ -2913,7 +3172,17 @@ impl App {
 
     pub(crate) fn gear_click(&mut self, hit: Hit) {
         debug!("gear: {hit:?}");
+        // Any click but the confirming one withdraws a pending question.
+        let armed = self.gear.arm.take();
         match hit {
+            Hit::Confirm => {
+                if let Some((_, then)) = armed {
+                    self.gear_click(then);
+                }
+                self.update_stats_reveal();
+                return;
+            }
+            Hit::Sys(h) => self.sys_click(h),
             Hit::None | Hit::Field => {}
             Hit::FieldEye => {
                 if let Some(f) = &mut self.gear.field {
@@ -2921,11 +3190,12 @@ impl App {
                 }
             }
             Hit::Back => {
+                self.pages_back();
                 self.gear.net_view = NetView::List;
                 self.gear.bt_view = BtView::List;
                 self.gear.share = false;
                 self.gear.show_pw = false;
-                self.show_view();
+                self.gear_show_view();
             }
             Hit::Airplane => self.set_airplane(!self.settings.airplane),
             Hit::WifiPower => {
@@ -2945,7 +3215,7 @@ impl App {
                 self.gear.show_pw = false;
                 self.net_send(NetCommand::Detail(ssid.clone()));
                 self.gear.net_view = NetView::Detail(ssid);
-                self.show_view();
+                self.gear_show_view();
             }
             Hit::WifiScan => {
                 self.gear.net_scanning = true;
@@ -2974,7 +3244,7 @@ impl App {
                 } else {
                     self.gear.net_view = NetView::Hotspot;
                 }
-                self.show_view();
+                self.gear_show_view();
             }
             Hit::NetShare => {
                 self.gear.share = !self.gear.share;
@@ -2989,7 +3259,7 @@ impl App {
                 if let NetView::Detail(ssid) = self.gear.net_view.clone() {
                     self.net_send(NetCommand::Forget(ssid));
                     self.gear.net_view = NetView::List;
-                    self.show_view();
+                    self.gear_show_view();
                 }
             }
             Hit::NetAuto | Hit::NetMetered | Hit::NetPrivate | Hit::NetIp(_) | Hit::NetEdit(_) => {
@@ -3067,7 +3337,7 @@ impl App {
                     self.bt_send(BtCommand::Audio(address));
                 }
                 self.gear.bt_view = BtView::Detail(path);
-                self.show_view();
+                self.gear_show_view();
             }
             Hit::BtScan => {
                 let on = self.gear.bt_snap.discovering;
@@ -3086,7 +3356,7 @@ impl App {
             }
             Hit::BtFiles => {
                 self.gear.bt_view = BtView::Send;
-                self.show_view();
+                self.gear_show_view();
             }
             Hit::BtReceive => {
                 self.settings.bt_receive = !self.settings.bt_receive;
@@ -3113,7 +3383,7 @@ impl App {
                 self.gear.bt_busy = None;
                 self.gear.pair = None;
                 self.gear.bt_view = BtView::List;
-                self.show_view();
+                self.gear_show_view();
                 self.update_stats_reveal();
             }
         }
@@ -3187,7 +3457,7 @@ impl App {
             Hit::DevForget => {
                 self.bt_send(BtCommand::Forget(path));
                 self.gear.bt_view = BtView::List;
-                self.show_view();
+                self.gear_show_view();
             }
             Hit::DevAuto => self.bt_send(BtCommand::Trust(path, !d.trusted)),
             Hit::DevRename => self.open_gear_field(Field {
@@ -3213,7 +3483,19 @@ impl App {
         let (verb, arg) = what.split_once(' ').unwrap_or((what, ""));
         match verb {
             "open" => {
-                let page = if arg == "bt" { 3 } else { 2 };
+                let kind = match arg {
+                    "gear" => PageKind::Gear,
+                    "bt" => PageKind::Bt,
+                    "disk" => PageKind::Disk,
+                    "cpu" => PageKind::Cpu,
+                    "ram" => PageKind::Ram,
+                    "gpu" => PageKind::Gpu,
+                    "bat" => PageKind::Battery,
+                    _ => PageKind::Net,
+                };
+                let Some(page) = self.stats_page_for(kind) else {
+                    return format!("this machine has no {arg} page");
+                };
                 self.gear.debug_hold = true;
                 self.stats.reveal = true;
                 if !(self.stats.open && self.stats_page() == page) {
@@ -3259,6 +3541,12 @@ impl App {
                     None => return "nothing to show details for".into(),
                 }
             }
+            "page" => {
+                if !self.pages_debug(arg) {
+                    return format!("no such view: {arg}");
+                }
+                self.gear_changed();
+            }
             "share" => self.gear_click(Hit::NetShare),
             "files" => self.gear_click(Hit::BtFiles),
             "hotspot" => self.gear_click(Hit::Hotspot),
@@ -3274,7 +3562,7 @@ impl App {
                 if let Some(d) = self.gear.bt_snap.devices.first().cloned() {
                     self.gear.bt_view = BtView::Pair(d.path);
                     self.gear.pair = Some(("482913".into(), true));
-                    self.show_view();
+                    self.gear_show_view();
                     self.gear_changed();
                 }
             }
@@ -3369,7 +3657,7 @@ mod tests {
             trail: Trail::None,
             sel: false,
         };
-        let r = Rect::new(0.0, 0.0, 400.0, item_h(&row, 1.0));
+        let r = Rect::new(0.0, 0.0, 400.0, item_h(&row, 1.0, 400.0));
         let zones = item_zones(&row, r, 1.0);
         let at = |p: (f32, f32)| {
             zones

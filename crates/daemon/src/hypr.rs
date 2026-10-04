@@ -1447,6 +1447,29 @@ pub struct RunningWindow {
 /// currently-focused window is moved to the front so a click on a
 /// running app can activate the most-recently-used window first.
 /// Empty (not an error) when Hyprland is unreachable.
+/// `(class, address, pid)` of every mapped window — what groups processes
+/// into apps on the gear's machine pages.
+pub fn window_pids() -> Vec<(String, String, i32)> {
+    let Some(clients) = reply_json("j/clients") else {
+        return Vec::new();
+    };
+    clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["mapped"].as_bool().unwrap_or(false))
+        .filter_map(|c| {
+            let class = c["initialClass"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| c["class"].as_str())
+                .filter(|s| !s.is_empty())?;
+            let pid = i32::try_from(c["pid"].as_i64()?).ok().filter(|p| *p > 1)?;
+            Some((class.to_owned(), c["address"].as_str()?.to_owned(), pid))
+        })
+        .collect()
+}
+
 pub fn running_windows() -> Vec<RunningWindow> {
     let Some(clients) = reply_json("j/clients") else {
         return Vec::new();

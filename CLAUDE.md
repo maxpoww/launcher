@@ -217,5 +217,13 @@ The big daemon files are cohesive but long — go straight to the function:
   `bt.rs` (BlueZ on the system bus, with its own pairing agent; the sound side through
   **`pw-dump`**/**`wpctl`**), `bt_files.rs` (OBEX on the session bus: send through the desktop
   portal's file picker, receive into Downloads; results go out as notifications).
-  Pointer-free: `waverunner-ctl debug-gear <open net|open bt|close|detail|hotspot|files|…>`.
+  The machine pages (this computer, storage, processor, memory, graphics, battery) are views on
+  the same engine in `gear_pages.rs`, fed by `sys.rs` (`/proc`, `/sys`, `lsblk`, `udisksctl`,
+  `powerprofilesctl`; folder sizes on a thread of their own). A row exists only where the
+  machine can answer. Things that cannot be undone are asked once (`gear_arm`: the footer says
+  what a second click does). Standing choices: idle times are a copy of Golem's hypridle config
+  with the owner's numbers plus a unit drop-in (`apply_idle`); "lid does nothing" is an inhibitor
+  the dock holds; apps on the fast card get NVIDIA's offload variables at launch (`gpu_exec`).
+  Pointer-free: `waverunner-ctl debug-gear <open net|bt|gear|disk|cpu|ram|gpu|bat>`, then
+  `detail|hotspot|files|page <about|health|clean|drive|folder|card|app|system>|close|…`.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

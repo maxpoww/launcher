@@ -33,6 +33,7 @@ mod focus_cycle;
 mod font_index;
 mod fractional;
 mod gear;
+mod gear_pages;
 mod frame;
 mod groups;
 mod hypr;
@@ -76,6 +77,7 @@ mod state;
 mod module_box;
 mod stats;
 mod surface;
+mod sys;
 mod task_title;
 mod thumbs;
 mod unfurl;
@@ -3552,6 +3554,7 @@ impl App {
             );
         }
         self.check_battery(&ctx);
+        self.battery_watch(ctx.metrics.battery_pct, ctx.metrics.is_charging || ctx.metrics.on_ac);
         // Compared by reference, not by cloning both sides: this runs on every
         // brain update, which is often.
         let playing_changed = self.brain.as_ref().is_none_or(|c| c.playing != ctx.playing);
@@ -5159,6 +5162,8 @@ impl App {
         // first argument after the slug as the page, so a flag there loaded
         // "-golem-new" into the running window ("server not found").
         let exec = if one_window && force_new { webapps::new_window_exec(&exec) } else { exec };
+        // An app the owner set to open on the fast graphics card.
+        let exec = self.gpu_exec(&id, exec);
         if !force_new {
             // A window on screen wins; when every window of the app is
             // minimized, the click restores one (focusing a parked window

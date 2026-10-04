@@ -308,6 +308,9 @@ pub(crate) struct GolemSettings {
     /// Rule selector (`desc:…`) → the choice for that screen.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub displays: BTreeMap<String, DisplayChoice>,
+    /// Light effects: the compositor's blur off (the gear's Graphics page).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub light_effects: bool,
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
 }
@@ -343,6 +346,10 @@ impl GolemSettings {
              -- Do not edit: it is rewritten on every change. Golem's hyprland.lua runs\n\
              -- it last, so what is here wins over the system's defaults.\n",
         );
+        if self.light_effects {
+            out.push_str(LIGHT_EFFECTS_LUA);
+            out.push('\n');
+        }
         for (selector, choice) in &self.displays {
             match monitor_rule(selector, choice) {
                 Some(rule) => {
@@ -353,6 +360,22 @@ impl GolemSettings {
             }
         }
         out
+    }
+}
+
+/// Blur off, in the compositor's own config call.
+const LIGHT_EFFECTS_LUA: &str = "hl.config({ [\"decoration.blur.enabled\"] = false })";
+
+impl GolemSettings {
+    /// Turn the light effects on or off: at once in the compositor, and in
+    /// the file so they are there after a restart.
+    pub(crate) fn set_light_effects(&mut self, light: bool) {
+        self.light_effects = light;
+        self.save();
+        crate::hypr::eval(&format!(
+            "hl.config({{ [\"decoration.blur.enabled\"] = {} }})",
+            !light
+        ));
     }
 }
 
