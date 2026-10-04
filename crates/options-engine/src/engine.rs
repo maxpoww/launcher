@@ -50,7 +50,7 @@ impl Engine {
     pub fn start_shell() -> Self {
         Self::start_with(vec![
             Box::new(crate::collectors::hyprland::HyprlandCollector::new()),
-            Box::new(crate::collectors::system::SystemCollector::new()),
+            Box::new(crate::collectors::system::SystemCollector::metrics_only()),
             Box::new(crate::collectors::media::MediaCollector::new()),
             Box::new(crate::collectors::audio::AudioCollector::new()),
             Box::new(crate::collectors::bluetooth::BluetoothCollector::new()),

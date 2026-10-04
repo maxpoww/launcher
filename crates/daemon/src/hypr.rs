@@ -57,13 +57,63 @@ fn instance_dir() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(runtime).join("hypr").join(sig))
 }
 
+thread_local! {
+    /// The event loop's view of the compositor for ONE turn of the loop: the
+    /// reply to each read-only query (`j/…`), asked once. `None` on every
+    /// thread but the event loop's (workers always ask afresh).
+    ///
+    /// Why: one layout re-evaluation asked `j/monitors` five times and
+    /// `j/clients` four, each a connection and a blocking round trip, and the
+    /// re-evaluation runs on two timers and on every compositor event — an
+    /// idle desktop made 29 requests a second (night audit, 2026-10-04). The
+    /// answers within one turn are the same answer.
+    static SNAPSHOT: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Make this thread (the event loop's) keep a per-turn snapshot of the
+/// compositor's read-only replies. Pair with [`snapshot_reset`] after every
+/// turn of the loop.
+pub fn snapshot_enable() {
+    SNAPSHOT.with(|s| *s.borrow_mut() = Some(std::collections::HashMap::new()));
+}
+
+/// Forget the snapshot: the next read asks the compositor again. Called
+/// after each turn of the event loop, when a compositor event arrives, and
+/// by every command we send (it changes what the compositor would answer).
+pub fn snapshot_reset() {
+    SNAPSHOT.with(|s| {
+        if let Some(map) = s.borrow_mut().as_mut() {
+            map.clear();
+        }
+    });
+}
+
 /// One-shot request over Hyprland's control socket (`j/` = JSON reply).
 fn request(cmd: &str) -> anyhow::Result<String> {
+    let read_only = cmd.starts_with("j/");
+    if read_only {
+        let hit = SNAPSHOT.with(|s| s.borrow().as_ref().and_then(|m| m.get(cmd).cloned()));
+        if let Some(reply) = hit {
+            return Ok(reply);
+        }
+    } else {
+        snapshot_reset();
+    }
     let mut stream = UnixStream::connect(instance_dir()?.join(".socket.sock"))
         .context("connecting to Hyprland control socket")?;
     stream.write_all(cmd.as_bytes())?;
-    let mut out = String::new();
+    // Room up front: a reply read into an empty String arrives 32 bytes at a
+    // time (50 reads for one monitor list).
+    let mut out = String::with_capacity(16 * 1024);
     stream.read_to_string(&mut out)?;
+    if read_only {
+        SNAPSHOT.with(|s| {
+            if let Some(map) = s.borrow_mut().as_mut() {
+                map.insert(cmd.to_owned(), out.clone());
+            }
+        });
+    }
     Ok(out)
 }
 
@@ -1035,6 +1085,8 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
         .insert_source(
             Generic::new(stream, Interest::READ, Mode::Level),
             move |_, stream, app: &mut App| {
+                // The compositor has news: whatever was read this turn is old.
+                snapshot_reset();
                 let mut relevant = false;
                 let mut buf = [0u8; 4096];
                 // NoIoDrop only exposes a shared ref; &UnixStream is Read.

@@ -461,6 +461,8 @@ fn main() -> anyhow::Result<()> {
         options_match: None,
         capture: None,
         options_poll_pending: false,
+        capture_from_poll: false,
+        capture_sampled: None,
         options_burst_pending: false,
         options_capture_failing: false,
         screencopy,
@@ -1049,10 +1051,13 @@ fn main() -> anyhow::Result<()> {
     stage::recover_if_stranded();
 
     info!("daemon up; try: waverunner-ctl toggle");
+    // One view of the compositor per turn of the loop (hypr::SNAPSHOT).
+    hypr::snapshot_enable();
     while !app.exit {
         event_loop
             .dispatch(None, &mut app)
             .context("event loop dispatch")?;
+        hypr::snapshot_reset();
     }
     info!("layer surface closed, exiting");
     Ok(())
@@ -1132,6 +1137,11 @@ pub struct App {
     capture: Option<screencopy::Capture>,
     /// Whether a resample timer is already queued.
     options_poll_pending: bool,
+    /// The resample poll is the caller of the capture being started (it may
+    /// then be a patient one — `screencopy::App::start_options_capture`).
+    capture_from_poll: bool,
+    /// The rows of the last capture that delivered.
+    capture_sampled: Option<Vec<(screencopy::Slot, u32)>>,
     /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
     /// follow-up capture after a sample changed a colour).
     options_burst_pending: bool,

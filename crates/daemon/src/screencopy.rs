@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_shm;
-use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
     self, ZwlrScreencopyFrameV1,
 };
@@ -58,6 +58,12 @@ const POLL: Duration = Duration::from_millis(700);
 /// each capture, so the worst case is this value plus one round-trip
 /// rather than this value plus a poll period.
 const CAPTURE_STALL: Duration = Duration::from_millis(600);
+
+/// The stall limit of a PATIENT capture — one that asked the compositor to
+/// deliver only when the screen has changed (`copy_with_damage`), so it is
+/// supposed to sit for as long as nothing moves. It is only replaced after
+/// this long in case its events were lost: re-arming one is free.
+const PATIENT_STALL: Duration = Duration::from_secs(10);
 
 /// Quick follow-up re-evaluation after a sample actually changed a
 /// colour: the screen was probably still moving when that capture read
@@ -186,6 +192,9 @@ pub(crate) struct Capture {
     copied: bool,
     /// When this capture was requested, for the [`CAPTURE_STALL`] reaper.
     started: std::time::Instant,
+    /// Deliver only once the screen has changed (see
+    /// [`App::start_options_capture`]).
+    patient: bool,
 }
 
 impl App {
@@ -344,9 +353,7 @@ impl App {
         let had_match = self.dock_bar_matched.take().is_some();
         if let Ok(mon) = hypr::focused_monitor() {
             if let Some(output) = self.output_by_name(&mon.name) {
-                let sample_y = ((mon.h - GAP_ROW_UP) * mon.scale.max(0.1))
-                    .round()
-                    .max(1.0) as u32;
+                let sample_y = ((mon.h - GAP_ROW_UP) * mon.scale.max(0.1)).round().max(1.0) as u32;
                 if had_match {
                     self.draw();
                 }
@@ -460,11 +467,14 @@ impl App {
     /// Drop a capture that is past [`CAPTURE_STALL`] — its events are never
     /// coming, and it would otherwise hold the one in-flight slot forever.
     pub(crate) fn reap_stalled_capture(&mut self) {
-        if self
-            .capture
-            .as_ref()
-            .is_some_and(|c| c.started.elapsed() > CAPTURE_STALL)
-        {
+        if self.capture.as_ref().is_some_and(|c| {
+            c.started.elapsed()
+                > if c.patient {
+                    PATIENT_STALL
+                } else {
+                    CAPTURE_STALL
+                }
+        }) {
             debug!("options: capture stalled; reaping");
             self.abort_capture();
         }
@@ -494,9 +504,6 @@ impl App {
         // tick to notice it is exactly the window in which a colour switch
         // looks stuck. Any event-driven re-evaluation clears it here.
         self.reap_stalled_capture();
-        if self.capture.is_some() {
-            return;
-        }
         let Some(mgr) = self.screencopy.clone() else {
             return;
         };
@@ -505,6 +512,27 @@ impl App {
         };
         let output = target.output.clone();
         let samples = target.samples.clone();
+        // PATIENT or not. The resample poll used to capture the whole output
+        // every 700 ms for as long as the session lived, and a plain `copy`
+        // makes Hyprland damage — redraw — the entire monitor each time: an
+        // idle desktop was repainted and read back forever (night audit,
+        // 2026-10-04). The poll's job is to notice a colour that changed with
+        // no layout event, and a colour cannot change unless the screen is
+        // redrawn. So when the poll asks again for rows it has ALREADY
+        // sampled, the capture is taken with `copy_with_damage`: the
+        // compositor delivers it with the next frame it draws anyway, and at
+        // rest that is never. Everything else — a layout event, new rows, the
+        // settle burst — still captures at once, and takes over from a
+        // patient capture that is still waiting.
+        let patient = self.capture_from_poll
+            && mgr.version() >= 2
+            && self.capture_sampled.as_ref() == Some(&samples);
+        if let Some(cap) = self.capture.as_ref() {
+            if !cap.patient || patient {
+                return;
+            }
+            self.abort_capture();
+        }
         // Declare the capture as ours BEFORE asking for it: Hyprland announces
         // every screencopy session on its event socket, and the OPTIONS Mind
         // would otherwise surface "Screen is being shared" for the bar's own
@@ -523,6 +551,7 @@ impl App {
             samples,
             copied: false,
             started: std::time::Instant::now(),
+            patient,
         });
     }
 
@@ -579,7 +608,11 @@ impl App {
             &self.qh,
         );
         if let Some(cap) = self.capture.as_mut() {
-            cap.frame.copy(&buffer);
+            if cap.patient {
+                cap.frame.copy_with_damage(&buffer);
+            } else {
+                cap.frame.copy(&buffer);
+            }
             cap.buffer = Some(buffer);
             cap.width = width;
             cap.height = height;
@@ -597,6 +630,7 @@ impl App {
             return;
         };
         self.options_capture_failing = false;
+        self.capture_sampled = Some(cap.samples.clone());
         let mut bar_changed = false;
         let mut dock_changed = false;
         for &(slot, sample_y) in &cap.samples {
@@ -984,7 +1018,10 @@ impl App {
             return None;
         }
         let (mr, mg, mb) = ((rsum / n) as u8, (gsum / n) as u8, (bsum / n) as u8);
-        debug!("{}: colour-match edge = #{mr:02x}{mg:02x}{mb:02x}", slot.tag());
+        debug!(
+            "{}: colour-match edge = #{mr:02x}{mg:02x}{mb:02x}",
+            slot.tag()
+        );
         // The captured bytes are sRGB-encoded (display values), but the
         // swapchain is an sRGB surface that re-encodes shader output — so we
         // must hand it the *linear* colour, or it comes out doubly-brightened
@@ -1036,8 +1073,12 @@ impl App {
                 // `start_options_capture` reaps too — this is the net for
                 // the case where no want survives to get that far.
                 app.reap_stalled_capture();
+                // Captures started from here may be patient ones (see
+                // `start_options_capture`).
+                app.capture_from_poll = true;
                 app.reeval_options_bar();
                 app.reeval_dock_bar();
+                app.capture_from_poll = false;
                 TimeoutAction::Drop
             });
     }
