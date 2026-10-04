@@ -1143,6 +1143,10 @@ pub(crate) fn parse_drives(json: &serde_json::Value) -> Vec<Drive> {
         if name.starts_with("zram") || name.starts_with("loop") {
             continue;
         }
+        // An empty card reader is a drive with no size: nothing to show.
+        if num(&d["size"]).unwrap_or(0) == 0 {
+            continue;
+        }
         // Every mount point under this drive (its partitions, and what is
         // layered on them).
         let mut mounts: Vec<(String, Option<u64>)> = Vec::new();
@@ -1532,10 +1536,15 @@ mod tests {
               "children": [ { "name": "sda1", "kname": "sda1", "type": "part", "label": "PHOTOS", "size": 31_000_000_000u64,
                               "fstype": "exfat", "fsused": 20_000_000_000u64, "fssize": 32_000_000_000u64,
                               "mountpoints": ["/run/media/max/PHOTOS"], "fsavail": 12_000_000_000u64 } ] },
-            { "name": "zram0", "type": "disk", "size": 8_000_000_000u64, "mountpoints": ["[SWAP]"] }
+            { "name": "zram0", "type": "disk", "size": 8_000_000_000u64, "mountpoints": ["[SWAP]"] },
+            { "name": "sdb", "type": "disk", "size": 0, "rm": true, "tran": "usb", "mountpoints": [null] }
         ]});
         let d = parse_drives(&json);
-        assert_eq!(d.len(), 2, "compressed memory is not a drive");
+        assert_eq!(
+            d.len(),
+            2,
+            "compressed memory and an empty card reader are not drives"
+        );
         assert!(d[0].system && !d[0].removable && !d[0].rotational);
         assert_eq!(d[0].name, "SAMSUNG MZVL2512");
         assert_eq!(d[0].free, Some(300_000_000_000));
