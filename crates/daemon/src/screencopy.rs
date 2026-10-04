@@ -65,6 +65,10 @@ const CAPTURE_STALL: Duration = Duration::from_millis(600);
 /// this long in case its events were lost: re-arming one is free.
 const PATIENT_STALL: Duration = Duration::from_secs(10);
 
+/// How long a patient capture must have waited for the screen to count as
+/// quiet again (see the trailing sample in [`App::start_options_capture`]).
+const TRAIL_QUIET: Duration = Duration::from_millis(250);
+
 /// Quick follow-up re-evaluation after a sample actually changed a
 /// colour: the screen was probably still moving when that capture read
 /// it (workspace slide, window animation), so look again shortly instead
@@ -524,14 +528,26 @@ impl App {
         // rest that is never. Everything else — a layout event, new rows, the
         // settle burst — still captures at once, and takes over from a
         // patient capture that is still waiting.
-        let patient = self.capture_from_poll
+        //
+        // The trailing sample: a patient capture delivers the FIRST frame
+        // drawn after it was armed, so when the screen changes for a while
+        // and then stops, the last frame can fall between two of them. After
+        // a patient capture has delivered, the first poll that finds the next
+        // one still waiting (the screen has gone quiet) samples at once.
+        let mut patient = self.capture_from_poll
             && mgr.version() >= 2
             && self.capture_sampled.as_ref() == Some(&samples);
         if let Some(cap) = self.capture.as_ref() {
-            if !cap.patient || patient {
+            let quiet = cap.patient && cap.started.elapsed() >= TRAIL_QUIET;
+            if patient && quiet && self.capture_trail_due {
+                patient = false;
+            } else if !cap.patient || patient {
                 return;
             }
             self.abort_capture();
+        }
+        if !patient {
+            self.capture_trail_due = false;
         }
         // Declare the capture as ours BEFORE asking for it: Hyprland announces
         // every screencopy session on its event socket, and the OPTIONS Mind
@@ -631,6 +647,9 @@ impl App {
         };
         self.options_capture_failing = false;
         self.capture_sampled = Some(cap.samples.clone());
+        if cap.patient {
+            self.capture_trail_due = true;
+        }
         let mut bar_changed = false;
         let mut dock_changed = false;
         for &(slot, sample_y) in &cap.samples {

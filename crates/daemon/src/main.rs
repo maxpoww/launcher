@@ -463,6 +463,7 @@ fn main() -> anyhow::Result<()> {
         options_poll_pending: false,
         capture_from_poll: false,
         capture_sampled: None,
+        capture_trail_due: false,
         options_burst_pending: false,
         options_capture_failing: false,
         screencopy,
@@ -987,7 +988,11 @@ fn main() -> anyhow::Result<()> {
                     if let Err(e) = event_loop.handle().insert_source(
                         Timer::from_duration(ZONE_POLL_INTERVAL),
                         |_, _, app: &mut App| {
+                            // A timer, not news: the colour captures it
+                            // starts may wait for the screen to change.
+                            app.capture_from_poll = true;
                             app.on_layout_changed();
+                            app.capture_from_poll = false;
                             TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
                         },
                     ) {
@@ -1142,6 +1147,9 @@ pub struct App {
     capture_from_poll: bool,
     /// The rows of the last capture that delivered.
     capture_sampled: Option<Vec<(screencopy::Slot, u32)>>,
+    /// A patient capture has delivered since the last immediate one: the
+    /// screen was changing, and its last frame may not have been sampled.
+    capture_trail_due: bool,
     /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
     /// follow-up capture after a sample changed a colour).
     options_burst_pending: bool,
