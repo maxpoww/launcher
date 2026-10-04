@@ -98,6 +98,30 @@ struct BoxBackdropInstance {
     _pad: f32,
 }
 
+/// The GPU the whole shell draws on: one wgpu instance, adapter, device and
+/// queue, opened by the first [`Renderer`] and cloned (they are handles) by
+/// every later one.
+///
+/// Each renderer used to open its OWN device. On the Acer (Intel HD 5500,
+/// hasvk) the kernel's per-client accounting showed what that cost: 311 +
+/// 223 + 144 MB of resident GPU memory for dock, OPTIONS bar and deck — the
+/// deck's 144 MB for a strip that was not even on screen is all device
+/// overhead — on a machine with 3.8 GB (night audit, 2026-10-04). It also
+/// meant three walks of the adapter ladder at every start.
+#[derive(Clone)]
+struct SharedGpu {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
+thread_local! {
+    /// Renderers live on the event loop's thread; so does the GPU they share.
+    static SHARED_GPU: std::cell::RefCell<Option<SharedGpu>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -247,92 +271,166 @@ impl Renderer {
         // (Vulkan passthrough in the VM) gave us a surface with NO adapter,
         // and one failed attempt used to be fatal. Each rung is tried in
         // turn and the reason for the previous one is logged.
-        const ATTEMPTS: [(wgpu::Backends, bool, &str); 3] = [
-            // What we want: a real GPU on Vulkan. Vulkan ALONE: asking for
-            // GL too made every start also bring up EGL, Mesa's GL driver
-            // (libgallium, 60 MB) and two GL contexts on machines that never
-            // draw through them — reads a spinning disk pays for at login
-            // (ThinkPad, 2026-10-01). LLVM still loads on most machines
-            // (RADV and lavapipe link it). A machine without a usable Vulkan
-            // GPU reaches GL on the next rung, as before.
-            (wgpu::Backends::VULKAN, false, "gpu"),
-            // Some stacks present fine on GL while their Vulkan surface path
-            // is broken; asking for GL alone changes which one is picked.
-            // MUST come before the software fallback: on pre-Skylake Intel
-            // (Haswell — "Vulkan support is incomplete") the only Vulkan
-            // adapter mesa offers is llvmpipe, so the attempt above yields a
-            // CPU rasterizer while a perfectly good REAL GPU sits on the GL
-            // path (crocus). Found live on a 2013 MacBook Air: the whole
-            // shell was software-rendered (menubox = 80% CPU) until GL was
-            // tried before accepting CPU (2026-09-02).
-            (wgpu::Backends::GL, false, "gl only"),
-            // Anything at all, including lavapipe/llvmpipe on the CPU. Slow
-            // (the F12 throttle exists for exactly this) but it is a desktop.
-            (
-                wgpu::Backends::from_bits_truncate(
-                    wgpu::Backends::VULKAN.bits() | wgpu::Backends::GL.bits(),
+        // ONE GPU device for every surface of the shell (see [`SharedGpu`]):
+        // the first renderer walks the adapter ladder and opens the device,
+        // the others draw on it.
+        let reuse = SHARED_GPU.with(|g| g.borrow().clone()).and_then(|g| {
+            let surface = unsafe {
+                g.instance
+                    .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+                            display,
+                        )),
+                        raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                            window,
+                        )),
+                    })
+            }
+            .map_err(|e| tracing::warn!("renderer: no surface on the shared GPU: {e}"))
+            .ok()?;
+            if !g.adapter.is_surface_supported(&surface) {
+                tracing::warn!("renderer: the shared GPU cannot present to this surface");
+                return None;
+            }
+            tracing::info!(
+                "renderer: sharing the GPU device ({})",
+                g.adapter.get_info().name
+            );
+            Some((surface, g.adapter, g.device, g.queue))
+        });
+        let (surface, adapter, device, queue) = if let Some(reuse) = reuse {
+            reuse
+        } else {
+            const ATTEMPTS: [(wgpu::Backends, bool, &str); 3] = [
+                // What we want: a real GPU on Vulkan. Vulkan ALONE: asking for
+                // GL too made every start also bring up EGL, Mesa's GL driver
+                // (libgallium, 60 MB) and two GL contexts on machines that never
+                // draw through them — reads a spinning disk pays for at login
+                // (ThinkPad, 2026-10-01). LLVM still loads on most machines
+                // (RADV and lavapipe link it). A machine without a usable Vulkan
+                // GPU reaches GL on the next rung, as before.
+                (wgpu::Backends::VULKAN, false, "gpu"),
+                // Some stacks present fine on GL while their Vulkan surface path
+                // is broken; asking for GL alone changes which one is picked.
+                // MUST come before the software fallback: on pre-Skylake Intel
+                // (Haswell — "Vulkan support is incomplete") the only Vulkan
+                // adapter mesa offers is llvmpipe, so the attempt above yields a
+                // CPU rasterizer while a perfectly good REAL GPU sits on the GL
+                // path (crocus). Found live on a 2013 MacBook Air: the whole
+                // shell was software-rendered (menubox = 80% CPU) until GL was
+                // tried before accepting CPU (2026-09-02).
+                (wgpu::Backends::GL, false, "gl only"),
+                // Anything at all, including lavapipe/llvmpipe on the CPU. Slow
+                // (the F12 throttle exists for exactly this) but it is a desktop.
+                (
+                    wgpu::Backends::from_bits_truncate(
+                        wgpu::Backends::VULKAN.bits() | wgpu::Backends::GL.bits(),
+                    ),
+                    true,
+                    "software fallback",
                 ),
-                true,
-                "software fallback",
-            ),
-        ];
+            ];
 
-        let mut chosen: Option<(wgpu::Surface<'static>, wgpu::Adapter)> = None;
-        // The instance must outlive the surface it created; hold the winning
-        // one until the device is built below.
-        let mut _live_instance: Option<wgpu::Instance> = None;
-        for (backends, force_fallback_adapter, label) in ATTEMPTS {
-            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-                backends,
-                ..Default::default()
-            });
-            // SAFETY: both handles point at live Wayland objects owned by
-            // App, which outlives the renderer and drops it first.
-            let surface = match unsafe {
-                instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                    raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-                        display,
-                    )),
-                    raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(window)),
-                })
-            } {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("renderer: no surface via {label}: {e}");
-                    continue;
-                }
-            };
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter,
-            })) {
-                Some(adapter) => {
-                    // A CPU rasterizer only counts on the explicit software
-                    // attempt — a non-fallback attempt returning one (mesa's
-                    // llvmpipe posing as the Vulkan adapter on old Intel)
-                    // must keep looking so a real GPU on another backend
-                    // gets its turn.
-                    if !force_fallback_adapter
-                        && adapter.get_info().device_type == wgpu::DeviceType::Cpu
-                    {
-                        tracing::warn!(
-                            "renderer: {label} offered a CPU adapter ({}); trying next backend",
-                            adapter.get_info().name
-                        );
+            let mut chosen: Option<(wgpu::Surface<'static>, wgpu::Adapter)> = None;
+            // The instance must outlive the surface it created; hold the winning
+            // one until the device is built below.
+            let mut _live_instance: Option<wgpu::Instance> = None;
+            for (backends, force_fallback_adapter, label) in ATTEMPTS {
+                let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                    backends,
+                    ..Default::default()
+                });
+                // SAFETY: both handles point at live Wayland objects owned by
+                // App, which outlives the renderer and drops it first.
+                let surface = match unsafe {
+                    instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+                            display,
+                        )),
+                        raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                            window,
+                        )),
+                    })
+                } {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("renderer: no surface via {label}: {e}");
                         continue;
                     }
-                    tracing::info!("renderer: adapter via {label}: {:?}", adapter.get_info());
-                    chosen = Some((surface, adapter));
-                    _live_instance = Some(instance);
-                    break;
+                };
+                match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter,
+                })) {
+                    Some(adapter) => {
+                        // A CPU rasterizer only counts on the explicit software
+                        // attempt — a non-fallback attempt returning one (mesa's
+                        // llvmpipe posing as the Vulkan adapter on old Intel)
+                        // must keep looking so a real GPU on another backend
+                        // gets its turn.
+                        if !force_fallback_adapter
+                            && adapter.get_info().device_type == wgpu::DeviceType::Cpu
+                        {
+                            tracing::warn!(
+                                "renderer: {label} offered a CPU adapter ({}); trying next backend",
+                                adapter.get_info().name
+                            );
+                            continue;
+                        }
+                        tracing::info!("renderer: adapter via {label}: {:?}", adapter.get_info());
+                        chosen = Some((surface, adapter));
+                        _live_instance = Some(instance);
+                        break;
+                    }
+                    None => tracing::warn!("renderer: no adapter via {label}"),
                 }
-                None => tracing::warn!("renderer: no adapter via {label}"),
             }
-        }
-        let (surface, adapter) = chosen.ok_or_else(|| {
-            anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
-        })?;
+            let (surface, adapter) = chosen.ok_or_else(|| {
+                anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
+            })?;
+            let (device, queue) = pollster::block_on(adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("waverunner"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits {
+                        // Allow surface expansion to full screen height (>2048 on 4K displays).
+                        max_texture_dimension_2d: MAX_TEXTURE_SIDE,
+                        // The icon array is one texture layer per app icon plus a
+                        // reserved block (rank hits + pending installs + thumbs +
+                        // minimized = 113). downlevel_defaults() caps
+                        // texture_array_layers at
+                        // 256, so a machine with ~160+ .desktop entries overflowed
+                        // it — create_texture("waverunner.icons") panicked the
+                        // daemon on cold start (267 layers on a 170-app machine,
+                        // 2026-09-01). Request what the adapter actually offers
+                        // (2048 on any real GPU, incl. this Iris Xe / RTX 4050);
+                        // this never exceeds hardware, so device creation is safe.
+                        max_texture_array_layers: adapter.limits().max_texture_array_layers,
+                        ..wgpu::Limits::downlevel_defaults()
+                    },
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            ))
+            .context("wgpu device request failed")?;
+            let live_instance =
+                _live_instance.ok_or_else(|| anyhow!("the chosen adapter has no instance"))?;
+            SHARED_GPU.with(|g| {
+                let mut g = g.borrow_mut();
+                // A renderer that could not use the shared device keeps its
+                // own; the shared one stays what the others draw on.
+                if g.is_none() {
+                    *g = Some(SharedGpu {
+                        instance: live_instance,
+                        adapter: adapter.clone(),
+                        device: device.clone(),
+                        queue: queue.clone(),
+                    });
+                }
+            });
+            (surface, adapter, device, queue)
+        };
         let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
         // Only a software adapter gets the fixed throttle: every frame there
         // costs real cores. The GL backend used to be throttled too (100 ms a
@@ -360,32 +458,6 @@ impl Renderer {
         // long before the next, so pacing costs it nothing.
         let pace_by_gpu = !software;
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("waverunner"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits {
-                    // Allow surface expansion to full screen height (>2048 on 4K displays).
-                    max_texture_dimension_2d: MAX_TEXTURE_SIDE,
-                    // The icon array is one texture layer per app icon plus a
-                    // reserved block (rank hits + pending installs + thumbs +
-                    // minimized = 113). downlevel_defaults() caps
-                    // texture_array_layers at
-                    // 256, so a machine with ~160+ .desktop entries overflowed
-                    // it — create_texture("waverunner.icons") panicked the
-                    // daemon on cold start (267 layers on a 170-app machine,
-                    // 2026-09-01). Request what the adapter actually offers
-                    // (2048 on any real GPU, incl. this Iris Xe / RTX 4050);
-                    // this never exceeds hardware, so device creation is safe.
-                    max_texture_array_layers: adapter.limits().max_texture_array_layers,
-                    ..wgpu::Limits::downlevel_defaults()
-                },
-                memory_hints: wgpu::MemoryHints::default(),
-            },
-            None,
-        ))
-        .context("wgpu device request failed")?;
-
         let caps = surface.get_capabilities(&adapter);
         // Transparency requires a premultiplied compositing mode.
         let alpha_mode = if caps
@@ -400,7 +472,10 @@ impl Renderer {
             // the bar and the dock's glass are translucent. Measured over an
             // orange wallpaper on the ASUS X550LC (Haswell, GL), 2026-10-02,
             // identical to the same chip on Vulkan. Nothing to warn about.
-            tracing::debug!("GL reports {:?}; its Wayland buffers carry alpha", caps.alpha_modes);
+            tracing::debug!(
+                "GL reports {:?}; its Wayland buffers carry alpha",
+                caps.alpha_modes
+            );
             caps.alpha_modes[0]
         } else {
             tracing::warn!(
@@ -862,7 +937,10 @@ impl Renderer {
         // One font database for every renderer, remembered between runs
         // (crate::font_index): the cold scan was the slowest part of a start
         // on a spinning disk.
-        let font_system = FontSystem::new_with_locale_and_db(crate::font_index::locale(), crate::font_index::database());
+        let font_system = FontSystem::new_with_locale_and_db(
+            crate::font_index::locale(),
+            crate::font_index::database(),
+        );
         let swash = SwashCache::new();
         let text_cache = TextCache::new(&device);
         let text_viewport = Viewport::new(&device, &text_cache);
