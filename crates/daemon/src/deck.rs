@@ -653,6 +653,7 @@ impl App {
         if w == 0 || h == 0 {
             return;
         }
+        let _perf = crate::perf::DECK_DRAW.time();
         let now = std::time::Instant::now();
         let dt = self
             .deck_last_frame

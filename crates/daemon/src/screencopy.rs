@@ -585,6 +585,7 @@ impl App {
         // colour-match — twice a second, forever (see
         // `options_engine::begin_self_capture`).
         options_engine::begin_self_capture();
+        crate::perf::CAPTURE.hit();
         let frame = mgr.capture_output(0, &output, &self.qh, ());
         self.capture = Some(Capture {
             frame,

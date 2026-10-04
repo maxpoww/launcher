@@ -355,6 +355,7 @@ impl App {
             }
         }
 
+        let _perf = crate::perf::DOCK_DRAW.time();
         let now = Instant::now();
         let dt = self
             .last_frame
@@ -1466,6 +1467,7 @@ impl App {
         if w == 0 || h == 0 {
             return;
         }
+        let _perf = crate::perf::OPTIONS_DRAW.time();
         // Concealed in fullscreen: render an empty (transparent) frame so the
         // bar disappears until a deliberate top-edge hold reveals it.
         //

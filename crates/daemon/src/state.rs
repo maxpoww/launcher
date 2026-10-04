@@ -192,6 +192,7 @@ impl UiState {
             | Command::DebugEmoji(_)
             | Command::DebugNotif
             | Command::DebugSticky
+            | Command::DebugPerf
             | Command::DebugDict
             | Command::DebugOptions
             | Command::DebugHoverOption

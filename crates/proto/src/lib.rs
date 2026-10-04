@@ -65,6 +65,9 @@ pub enum Command {
     /// fullscreen control plus its doorway) so §4 can be screenshotted without
     /// a pointer and a real fullscreen window.
     DebugSticky,
+    /// Debug/verification: log the hot-path counters since the last call
+    /// (frames per surface, render time, compositor requests) and reset them.
+    DebugPerf,
     /// Debug/verification: force-open the clipboard box on the dictionary
     /// "define a word" panel, pre-filled with a sample query.
     DebugDict,
@@ -243,6 +246,7 @@ impl fmt::Display for Command {
             Command::DebugEmoji(q) => write!(f, "debug-emoji {q}"),
             Command::DebugNotif => f.write_str("debug-notif"),
             Command::DebugSticky => f.write_str("debug-sticky"),
+            Command::DebugPerf => f.write_str("debug-perf"),
             Command::DebugDict => f.write_str("debug-dict"),
             Command::DebugOptions => f.write_str("debug-options"),
             Command::DebugHoverOption => f.write_str("debug-hover-option"),
@@ -352,6 +356,7 @@ impl FromStr for Command {
             "debug-clip-detail" => Ok(Command::DebugClipDetail),
             "debug-notif" => Ok(Command::DebugNotif),
             "debug-sticky" => Ok(Command::DebugSticky),
+            "debug-perf" => Ok(Command::DebugPerf),
             "debug-dict" => Ok(Command::DebugDict),
             "debug-options" => Ok(Command::DebugOptions),
             "debug-hover-option" => Ok(Command::DebugHoverOption),
@@ -403,6 +408,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-emoji [query]",
     "debug-notif",
     "debug-sticky",
+    "debug-perf",
     "debug-dict",
     "debug-options",
     "debug-hover-option",
@@ -517,6 +523,7 @@ mod tests {
                 | Command::DebugEmoji(_)
                 | Command::DebugNotif
                 | Command::DebugSticky
+                | Command::DebugPerf
                 | Command::DebugDict
                 | Command::DebugOptions
                 | Command::DebugHoverOption
@@ -567,6 +574,7 @@ mod tests {
             Command::DebugEmoji("happy".into()),
             Command::DebugNotif,
             Command::DebugSticky,
+            Command::DebugPerf,
             Command::DebugDict,
             Command::DebugOptions,
             Command::DebugHoverOption,

@@ -1329,6 +1329,7 @@ impl Renderer {
         if text.is_empty() {
             return 0.0;
         }
+        let _perf = crate::perf::MEASURE.time();
         let mut font_system = self.font_system.borrow_mut();
         let mut buffer = TextBuffer::new(&mut font_system, Metrics::new(font_px, font_px * 1.3));
         let (fam, weight) = resolve_family(family);
@@ -1377,6 +1378,7 @@ impl Renderer {
         squircle: f32,
         thumb_base: u32,
     ) -> anyhow::Result<()> {
+        let _perf = crate::perf::RENDER.time();
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             // Timeout is recovered the same way as Lost/Outdated: a fresh
@@ -1552,6 +1554,7 @@ impl Renderer {
         // Shaped at physical px (metrics × scale) so glyphs are rasterized at
         // the resolution they are displayed, then laid out in physical coords.
         let shape = |font_system: &mut FontSystem, label: &crate::content::Label| {
+            crate::perf::SHAPE.hit();
             let mut buffer = TextBuffer::new(
                 font_system,
                 Metrics::new(label.font_px * scale, label.line_px * scale),

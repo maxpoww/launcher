@@ -85,6 +85,7 @@ type Json = std::rc::Rc<serde_json::Value>;
 /// Every `j/…` reader goes through here.
 fn reply_json(cmd: &str) -> Option<Json> {
     if let Some(hit) = PARSED.with(|p| p.borrow().get(cmd).cloned()) {
+        crate::perf::HYPR_CACHED.hit();
         return Some(hit);
     }
     let value: Json = std::rc::Rc::new(serde_json::from_str(&request(cmd).ok()?).ok()?);
@@ -121,11 +122,13 @@ fn request(cmd: &str) -> anyhow::Result<String> {
     if read_only {
         let hit = SNAPSHOT.with(|s| s.borrow().as_ref().and_then(|m| m.get(cmd).cloned()));
         if let Some(reply) = hit {
+            crate::perf::HYPR_CACHED.hit();
             return Ok(reply);
         }
     } else {
         snapshot_reset();
     }
+    let _perf = crate::perf::HYPR_REQUEST.time();
     let mut stream = UnixStream::connect(instance_dir()?.join(".socket.sock"))
         .context("connecting to Hyprland control socket")?;
     stream.write_all(cmd.as_bytes())?;

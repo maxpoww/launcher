@@ -63,6 +63,7 @@ mod options;
 mod order;
 // Golem's control panel: the main card, opened empty.
 mod panel;
+mod perf;
 mod pager;
 mod pages;
 mod persist;
@@ -2493,6 +2494,10 @@ impl App {
             }
             Command::DebugSticky => {
                 self.debug_stand_sticky();
+                return;
+            }
+            Command::DebugPerf => {
+                info!("perf: {}", perf::report());
                 return;
             }
             Command::OverviewOn => {

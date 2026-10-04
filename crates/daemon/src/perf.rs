@@ -1,0 +1,100 @@
+//! Counters for the shell's hot paths — always on, almost free (two relaxed
+//! atomic adds and, where timed, two clock reads).
+//!
+//! "Is it faster?" was answered from outside the process for the first two
+//! unify rounds (CPU time, wakeups, GPU memory). That cannot say how many
+//! frames a surface drew for one animation, or how long the event loop spent
+//! inside a draw — the numbers that decide whether an optimisation worked.
+//! `waverunner-ctl debug-perf` logs every counter since the last call and
+//! resets them, so a scripted workload reads as one line before and one after.
+
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::time::Instant;
+
+pub(crate) struct Counter {
+    calls: AtomicU64,
+    nanos: AtomicU64,
+}
+
+impl Counter {
+    const fn new() -> Self {
+        Self {
+            calls: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Count one occurrence.
+    pub(crate) fn hit(&self) {
+        self.calls.fetch_add(1, Relaxed);
+    }
+
+    /// Count one occurrence and the time until the guard drops.
+    pub(crate) fn time(&self) -> Timed<'_> {
+        Timed {
+            counter: self,
+            start: Instant::now(),
+        }
+    }
+
+    fn take(&self) -> (u64, f64) {
+        (
+            self.calls.swap(0, Relaxed),
+            self.nanos.swap(0, Relaxed) as f64 / 1e6,
+        )
+    }
+}
+
+pub(crate) struct Timed<'a> {
+    counter: &'a Counter,
+    start: Instant,
+}
+
+impl Drop for Timed<'_> {
+    fn drop(&mut self) {
+        self.counter.calls.fetch_add(1, Relaxed);
+        self.counter
+            .nanos
+            .fetch_add(self.start.elapsed().as_nanos() as u64, Relaxed);
+    }
+}
+
+/// A whole dock frame: animation step, scene build, render.
+pub(crate) static DOCK_DRAW: Counter = Counter::new();
+/// A whole OPTIONS-bar frame.
+pub(crate) static OPTIONS_DRAW: Counter = Counter::new();
+/// A whole deck frame.
+pub(crate) static DECK_DRAW: Counter = Counter::new();
+/// `Renderer::render` on any surface (inside the three above).
+pub(crate) static RENDER: Counter = Counter::new();
+/// `Renderer::measure_text`.
+pub(crate) static MEASURE: Counter = Counter::new();
+/// A label shaped (a cache miss, or an uncached label).
+pub(crate) static SHAPE: Counter = Counter::new();
+/// A request that went to Hyprland's socket.
+pub(crate) static HYPR_REQUEST: Counter = Counter::new();
+/// A read answered from the turn's snapshot.
+pub(crate) static HYPR_CACHED: Counter = Counter::new();
+/// A screen capture started (colour match / frost sample).
+pub(crate) static CAPTURE: Counter = Counter::new();
+
+/// Every counter since the last report, as one line; resets them.
+pub(crate) fn report() -> String {
+    let timed = |name: &str, c: &Counter| {
+        let (n, ms) = c.take();
+        format!("{name} {n} in {ms:.1} ms")
+    };
+    let count = |name: &str, c: &Counter| format!("{name} {}", c.take().0);
+    [
+        timed("dock", &DOCK_DRAW),
+        timed("options", &OPTIONS_DRAW),
+        timed("deck", &DECK_DRAW),
+        timed("render", &RENDER),
+        timed("measure_text", &MEASURE),
+        count("shapes", &SHAPE),
+        timed("hypr", &HYPR_REQUEST),
+        count("hypr-cached", &HYPR_CACHED),
+        count("captures", &CAPTURE),
+    ]
+    .join(" | ")
+}
