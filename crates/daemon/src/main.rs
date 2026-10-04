@@ -471,10 +471,15 @@ fn main() -> anyhow::Result<()> {
         capture: None,
         options_poll_pending: false,
         capture_from_poll: false,
-        capture_sampled: None,
-        capture_trail_due: false,
+        capture_from_event: false,
+        capture_demand: screencopy::Demand::Idle,
+        demand_since: None,
+        capture_delivered: None,
+        capture_next_at: None,
+        capture_force: false,
+        capture_share_timer: false,
+        capture_deadline_timer: false,
         zone_poll_running: false,
-        sentinel_skip: 0,
         options_burst_pending: false,
         options_capture_failing: false,
         screencopy,
@@ -1013,7 +1018,6 @@ fn main() -> anyhow::Result<()> {
                             // A timer, not news: the colour captures it
                             // starts may wait for the screen to change.
                             app.capture_from_poll = true;
-                            app.sentinel_skip = app.sentinel_skip.saturating_sub(1);
                             app.on_layout_changed();
                             app.capture_from_poll = false;
                             TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
@@ -1172,17 +1176,23 @@ pub struct App {
     /// The resample poll is the caller of the capture being started (it may
     /// then be a patient one — `screencopy::App::start_options_capture`).
     capture_from_poll: bool,
-    /// The rows of the last capture that delivered.
-    capture_sampled: Option<Vec<(screencopy::Slot, u32)>>,
-    /// A patient capture has delivered since the last immediate one: the
-    /// screen was changing, and its last frame may not have been sampled.
-    capture_trail_due: bool,
+    /// …or a compositor event is (a window moved, a workspace switched): the
+    /// sample wanted is the frame that shows the change.
+    capture_from_event: bool,
+    /// The sampler's state (`screencopy::App::pump_capture`): how much a
+    /// sample is wanted and since when; when the last one was delivered; the
+    /// earliest the next unasked one may be taken; whether the next frame is
+    /// to be forced; and its two timers.
+    capture_demand: screencopy::Demand,
+    demand_since: Option<Instant>,
+    capture_delivered: Option<Instant>,
+    capture_next_at: Option<Instant>,
+    capture_force: bool,
+    capture_share_timer: bool,
+    capture_deadline_timer: bool,
     /// The steady zone poll is installed (intellihide): it re-evaluates the
     /// colour-match on every tick, so the colour poll does not run as well.
     zone_poll_running: bool,
-    /// Poll ticks left before a sentinel capture is armed again (the screen
-    /// was busy — `screencopy::App::arm_sentinel`).
-    sentinel_skip: u8,
     /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
     /// follow-up capture after a sample changed a colour).
     options_burst_pending: bool,

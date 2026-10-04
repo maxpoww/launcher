@@ -78,10 +78,11 @@ pub(crate) static HYPR_CACHED: Counter = Counter::new();
 /// A screen capture started (colour match / frost sample).
 pub(crate) static CAPTURE: Counter = Counter::new();
 
-/// …of which: sentinels (delivered when the screen changes), and captures
-/// started by a poll tick. The rest are event-driven.
+/// …of which: unasked ones (the sentinel: delivered when the screen changes),
+/// and FORCED ones (the compositor redraws the whole output for each). The
+/// rest were asked for and rode a frame the compositor drew anyway.
 pub(crate) static CAPTURE_SENTINEL: Counter = Counter::new();
-pub(crate) static CAPTURE_POLL: Counter = Counter::new();
+pub(crate) static CAPTURE_FORCED: Counter = Counter::new();
 /// A capture whose sample moved a colour.
 pub(crate) static COLOR_CHANGED: Counter = Counter::new();
 
@@ -103,7 +104,7 @@ pub(crate) fn report() -> String {
         count("hypr-cached", &HYPR_CACHED),
         count("captures", &CAPTURE),
         count("sentinel", &CAPTURE_SENTINEL),
-        count("poll", &CAPTURE_POLL),
+        count("forced", &CAPTURE_FORCED),
         count("colour-changes", &COLOR_CHANGED),
     ]
     .join(" | ")

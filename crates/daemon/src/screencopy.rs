@@ -11,13 +11,15 @@
 //! Wayland forbids reading another window's pixels directly, so screencopy is
 //! the only way. We capture the whole focused output into an shm buffer, read
 //! the physical rows either surface currently wants, and average each. Both
-//! surfaces share ONE capture per tick (a [`Slot`] per row wanted) rather than
-//! paying for two independent captures — the constant screencopy readback is
-//! already a flagged perf cost (see `POLL`), and doubling it would double
-//! that cost for nothing. Captures are event-driven (Hyprland layout events)
-//! plus a slow resample while anything is wanted (for content whose colour
-//! changes). Everything degrades gracefully: without the protocol neither
-//! surface ever colour-matches.
+//! surfaces share ONE capture (a [`Slot`] per row wanted).
+//!
+//! WHEN a capture is taken is the whole cost of this module — a capture the
+//! compositor has to redraw the screen for is two orders of magnitude dearer
+//! than one that rides a frame it was drawing anyway. See
+//! [`App::pump_capture`]: one frame object is always held; it is asked to
+//! deliver when something wants a sample, and otherwise sits until the screen
+//! changes. At rest nothing is captured at all. Everything degrades
+//! gracefully: without the protocol neither surface ever colour-matches.
 
 use std::time::Duration;
 
@@ -59,19 +61,23 @@ const POLL: Duration = Duration::from_millis(700);
 /// rather than this value plus a poll period.
 const CAPTURE_STALL: Duration = Duration::from_millis(600);
 
-/// The stall limit of a PATIENT capture — one that asked the compositor to
-/// deliver only when the screen has changed (`copy_with_damage`), so it is
-/// supposed to sit for as long as nothing moves. It is only replaced after
-/// this long in case its events were lost: re-arming one is free.
-const PATIENT_STALL: Duration = Duration::from_secs(60);
+/// A frame that is WAITING for the screen to change is supposed to sit for as
+/// long as nothing moves; it is only replaced after this long in case its
+/// events were lost.
+const SENTINEL_STALL: Duration = Duration::from_secs(300);
 
-/// Poll ticks without a sentinel after one came straight back (a busy
-/// screen).
-const SENTINEL_SKIP: u8 = 3;
+/// The least time between two samples while nothing asks for one: the pace
+/// the bar follows a colour that changes with no layout event (a page under a
+/// maximized browser) when the screen keeps changing.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(800);
 
-/// How long a patient capture must have waited for the screen to count as
-/// quiet again (see the trailing sample in [`App::start_options_capture`]).
-const TRAIL_QUIET: Duration = Duration::from_millis(250);
+/// The least time between two samples that something DID ask for (an event
+/// storm must not become a capture storm).
+const DEMAND_FLOOR: Duration = Duration::from_millis(40);
+
+/// How long a sample that MUST come waits for the screen to change by itself
+/// before the compositor is made to redraw for it.
+const DEMAND_DEADLINE: Duration = Duration::from_millis(80);
 
 /// Quick follow-up re-evaluation after a sample actually changed a
 /// colour: the screen was probably still moving when that capture read
@@ -183,7 +189,36 @@ pub(crate) struct CaptureTarget {
     samples: Vec<(Slot, u32)>,
 }
 
-/// An in-flight screencopy of the focused output.
+/// How far along a capture is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Stage {
+    /// The frame object exists; the compositor has not said what buffer it
+    /// wants yet.
+    AwaitBuffer,
+    /// It has its buffer and waits to be asked to fill it. Costs the
+    /// compositor nothing.
+    Primed,
+    /// Asked to fill it: with the next frame the compositor draws (a
+    /// patient capture), or at once (a forced one).
+    Shared,
+}
+
+/// How much a fresh sample is wanted.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum Demand {
+    /// Nothing asked: sample when the screen changes, at most every
+    /// [`SAMPLE_INTERVAL`].
+    Idle,
+    /// The compositor reported a change (a window moved, a workspace
+    /// switched): sample the frame that shows it. If the screen does not
+    /// change after all, the last sample still stands.
+    Fresh,
+    /// Something of OURS changed what is read (new rows, a box opened over
+    /// the sample columns): a sample must come even if the screen is still.
+    Must,
+}
+
+/// A screencopy of the focused output, from frame object to delivery.
 pub(crate) struct Capture {
     frame: ZwlrScreencopyFrameV1,
     buffer: Option<WlBuffer>,
@@ -192,17 +227,13 @@ pub(crate) struct Capture {
     stride: u32,
     format: wl_shm::Format,
     y_invert: bool,
-    /// Rows wanted at capture-start; baked in so a want that changes while
-    /// this capture is in flight doesn't retroactively change what it reads
-    /// — the next poll tick picks up the fresh want (same tolerance the bar
-    /// alone used to rely on).
-    samples: Vec<(Slot, u32)>,
-    copied: bool,
-    /// When this capture was requested, for the [`CAPTURE_STALL`] reaper.
+    stage: Stage,
+    /// Filled at once (`copy`: the compositor redraws the whole output for
+    /// it) instead of with the next frame it draws anyway.
+    forced: bool,
+    /// When the frame object was made, and when it was asked to deliver.
     started: std::time::Instant,
-    /// Deliver only once the screen has changed (see
-    /// [`App::start_options_capture`]).
-    patient: bool,
+    shared_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -448,6 +479,8 @@ impl App {
         if samples.is_empty() {
             self.abort_capture();
             self.options_match = None;
+            self.capture_demand = Demand::Idle;
+            self.demand_since = None;
             return;
         }
         // Any want's output — in the ordinary single-monitor-focused
@@ -456,33 +489,51 @@ impl App {
         let Some(output) = wants.iter().find_map(|w| w.map(|w| w.output.clone())) else {
             return;
         };
-        // A capture in flight was baked for the OLD wants; if they changed,
-        // waiting for it (then for the next poll) delays the fresh colour by
-        // up to `POLL`. Abort and recapture with the new rows instead, so an
-        // event-driven change lands within one capture round-trip. Identical
-        // wants leave the in-flight capture alone (no thrash on repeats).
-        if self
-            .capture
+        let changed = self
+            .options_match
             .as_ref()
-            .is_some_and(|cap| cap.samples != samples)
+            .is_none_or(|t| t.samples != samples || t.output != output);
+        // A frame of another output is no use.
+        if self
+            .options_match
+            .as_ref()
+            .is_some_and(|t| t.output != output)
         {
             self.abort_capture();
         }
         self.options_match = Some(CaptureTarget { output, samples });
-        self.start_options_capture();
+        // Why this was called decides how much a sample is wanted: a poll
+        // tick asks for nothing; a compositor event for the frame that shows
+        // the change; anything of ours (new rows, a box over the sample
+        // columns, the dock coming to rest) for a sample no matter what.
+        let demand = if changed {
+            Demand::Must
+        } else if self.capture_from_poll {
+            Demand::Idle
+        } else if self.capture_from_event {
+            Demand::Fresh
+        } else {
+            Demand::Must
+        };
+        self.demand_capture(demand);
     }
 
-    /// Drop a capture that is past [`CAPTURE_STALL`] — its events are never
-    /// coming, and it would otherwise hold the one in-flight slot forever.
+    /// Drop a capture whose events are never coming: it would otherwise hold
+    /// the one slot forever.
     pub(crate) fn reap_stalled_capture(&mut self) {
-        if self.capture.as_ref().is_some_and(|c| {
-            c.started.elapsed()
-                > if c.patient {
-                    PATIENT_STALL
-                } else {
-                    CAPTURE_STALL
-                }
-        }) {
+        let stalled = self.capture.as_ref().is_some_and(|c| match c.stage {
+            Stage::AwaitBuffer => c.started.elapsed() > CAPTURE_STALL,
+            Stage::Primed => false,
+            Stage::Shared => c.shared_at.is_some_and(|t| {
+                t.elapsed()
+                    > if c.forced {
+                        CAPTURE_STALL
+                    } else {
+                        SENTINEL_STALL
+                    }
+            }),
+        });
+        if stalled {
             debug!("options: capture stalled; reaping");
             self.abort_capture();
         }
@@ -504,28 +555,66 @@ impl App {
             .find(|o| self.output_state.info(o).and_then(|i| i.name).as_deref() == Some(name))
     }
 
-    /// Begin capturing the focused output (one capture at a time — bar and
-    /// dock rows are both read out of it via `target.samples`).
-    pub(crate) fn start_options_capture(&mut self) {
-        self.start_capture(false);
+    /// Ask for a sample (see [`Demand`]) and move the capture along.
+    fn demand_capture(&mut self, demand: Demand) {
+        if demand > self.capture_demand {
+            self.capture_demand = demand;
+        }
+        if self.capture_demand != Demand::Idle && self.demand_since.is_none() {
+            self.demand_since = Some(std::time::Instant::now());
+        }
+        self.pump_capture();
     }
 
-    /// Arm the sentinel: a capture of the rows just sampled that the
-    /// compositor delivers only when the screen changes (see
-    /// [`Self::start_capture`]). Not while the screen is busy
-    /// (`sentinel_skip`): there the poll's own cadence is the cheaper one.
-    fn arm_sentinel(&mut self) {
-        if self.sentinel_skip == 0 && !self.options_paused() {
-            self.start_capture(true);
+    /// THE SAMPLER. One frame object is kept at all times, and what the
+    /// screen costs us is decided by when it is asked to deliver:
+    ///
+    /// - A capture taken with `copy` makes Hyprland redraw the WHOLE output
+    ///   — 8 ms of its CPU and 18 ms of GPU on the Acer's empty desktop,
+    ///   blur and all — and so does the first frame of a capture "session"
+    ///   (one ends 500 ms after its last frame). Every sample used to be one
+    ///   of those: 2–3 a second through any animation (night audit,
+    ///   2026-10-04).
+    /// - A frame object made right after a delivery is inside the session,
+    ///   and may then WAIT, unasked, at no cost at all ([`Stage::Primed`]).
+    ///   Asked with `copy_with_damage` it is filled with the next frame the
+    ///   compositor draws — and if the screen changed while it waited,
+    ///   Hyprland redraws just what changed and delivers at once.
+    ///
+    /// So: after each delivery the next frame object is made immediately and
+    /// held. It is asked to deliver when a sample is wanted ([`Demand`]) or,
+    /// unasked, once [`SAMPLE_INTERVAL`] has passed — after which it sits as
+    /// the sentinel until the screen changes. Nothing is ever forced, except
+    /// a sample that MUST come while the screen stands still.
+    pub(crate) fn pump_capture(&mut self) {
+        if self.options_match.is_none() || self.screencopy.is_none() {
+            return;
+        }
+        self.reap_stalled_capture();
+        let now = std::time::Instant::now();
+        match self.capture.as_ref().map(|c| c.stage) {
+            None => self.begin_frame(),
+            Some(Stage::AwaitBuffer | Stage::Shared) => {}
+            Some(Stage::Primed) => {
+                let due = match self.capture_demand {
+                    Demand::Idle => self.capture_next_at,
+                    Demand::Fresh | Demand::Must => {
+                        self.capture_delivered.map(|t| t + DEMAND_FLOOR)
+                    }
+                };
+                match due {
+                    Some(at) if at > now => self.arm_share_timer(at - now),
+                    _ => self.share_frame(),
+                }
+            }
+        }
+        if self.capture_demand == Demand::Must {
+            self.arm_capture_deadline();
         }
     }
 
-    fn start_capture(&mut self, sentinel: bool) {
-        // Before concluding a capture is already in flight, make sure it is
-        // alive: a zombie blocks every future sample, so waiting for a poll
-        // tick to notice it is exactly the window in which a colour switch
-        // looks stuck. Any event-driven re-evaluation clears it here.
-        self.reap_stalled_capture();
+    /// Make the frame object of the next capture.
+    fn begin_frame(&mut self) {
         let Some(mgr) = self.screencopy.clone() else {
             return;
         };
@@ -533,64 +622,11 @@ impl App {
             return;
         };
         let output = target.output.clone();
-        let samples = target.samples.clone();
-        // PATIENT or not.
-        //
-        // The resample poll used to capture the whole output every 700 ms for
-        // as long as the session lived, and Hyprland damages — redraws — the
-        // ENTIRE monitor for a capture: an idle desktop was repainted and read
-        // back forever (night audit, 2026-10-04). The poll's job is to notice
-        // a colour that changed with no layout event, and a colour cannot
-        // change unless the screen is redrawn. `copy_with_damage` asks for
-        // exactly that: the frame is delivered with the next one the
-        // compositor draws anyway.
-        //
-        // Hyprland's fine print (ScreenshareFrame.cpp): the first frame of a
-        // screen-share session is always forced (`scheduleFrame` +
-        // `damageMonitor`), with or without damage, and a session counts as
-        // over 500 ms after its last frame. So a patient capture only waits
-        // if it is asked for right after another one delivered. That is the
-        // SENTINEL ([`Self::arm_sentinel`]): armed the moment a capture has
-        // been read, it sits until the screen really changes. At rest there is
-        // one sentinel waiting and no other work at all.
-        //
-        // Everything else captures at once and takes over from a waiting
-        // sentinel: a layout event, new rows, the settle burst — and the
-        // TRAILING sample: a sentinel delivers the first frame drawn after it
-        // was armed, so the last frame of a burst of changes can fall between
-        // two of them; after one has delivered, the first poll tick that
-        // finds the next still waiting (the screen has gone quiet) samples at
-        // once.
-        let patient =
-            sentinel && mgr.version() >= 2 && self.capture_sampled.as_ref() == Some(&samples);
-        if sentinel && !patient {
-            return;
-        }
-        if let Some(cap) = self.capture.as_ref() {
-            if !cap.patient || patient {
-                return;
-            }
-            let quiet = cap.started.elapsed() >= TRAIL_QUIET;
-            if self.capture_from_poll && !(quiet && self.capture_trail_due) {
-                return; // a tick, and the sentinel is doing its job
-            }
-            self.abort_capture();
-        }
-        if !patient {
-            self.capture_trail_due = false;
-        }
         // Declare the capture as ours BEFORE asking for it: Hyprland announces
         // every screencopy session on its event socket, and the OPTIONS Mind
         // would otherwise surface "Screen is being shared" for the bar's own
-        // colour-match — twice a second, forever (see
-        // `options_engine::begin_self_capture`).
+        // colour-match (see `options_engine::begin_self_capture`).
         options_engine::begin_self_capture();
-        crate::perf::CAPTURE.hit();
-        if patient {
-            crate::perf::CAPTURE_SENTINEL.hit();
-        } else if self.capture_from_poll {
-            crate::perf::CAPTURE_POLL.hit();
-        }
         let frame = mgr.capture_output(0, &output, &self.qh, ());
         self.capture = Some(Capture {
             frame,
@@ -600,15 +636,118 @@ impl App {
             stride: 0,
             format: wl_shm::Format::Xrgb8888,
             y_invert: false,
-            samples,
-            copied: false,
+            stage: Stage::AwaitBuffer,
+            forced: std::mem::take(&mut self.capture_force),
             started: std::time::Instant::now(),
-            patient,
+            shared_at: None,
         });
     }
 
-    /// `buffer` event: allocate the shm buffer and kick off the copy. Extra
-    /// buffer offers (e.g. dmabuf) after we've picked an shm one are ignored.
+    /// Ask the primed frame to deliver.
+    fn share_frame(&mut self) {
+        let patient_ok = self.screencopy.as_ref().is_some_and(|m| m.version() >= 2);
+        let idle = self.capture_demand == Demand::Idle;
+        let Some(cap) = self.capture.as_mut() else {
+            return;
+        };
+        let (Stage::Primed, Some(buffer)) = (cap.stage, cap.buffer.as_ref()) else {
+            return;
+        };
+        if !patient_ok {
+            cap.forced = true;
+        }
+        crate::perf::CAPTURE.hit();
+        if cap.forced {
+            crate::perf::CAPTURE_FORCED.hit();
+            cap.frame.copy(buffer);
+        } else {
+            if idle {
+                crate::perf::CAPTURE_SENTINEL.hit();
+            }
+            cap.frame.copy_with_damage(buffer);
+        }
+        cap.stage = Stage::Shared;
+        cap.shared_at = Some(std::time::Instant::now());
+    }
+
+    /// Look at the capture again in `wait` (the sample interval has passed).
+    fn arm_share_timer(&mut self, wait: Duration) {
+        if self.capture_share_timer {
+            return;
+        }
+        let armed = self
+            .loop_handle
+            .insert_source(Timer::from_duration(wait), |_, _, app: &mut App| {
+                app.capture_share_timer = false;
+                app.pump_capture();
+                TimeoutAction::Drop
+            })
+            .is_ok();
+        self.capture_share_timer = armed;
+    }
+
+    /// A sample MUST come: if the screen does not change by itself within
+    /// [`DEMAND_DEADLINE`] of the asking, make the compositor draw.
+    fn arm_capture_deadline(&mut self) {
+        if self.capture_deadline_timer {
+            return;
+        }
+        let waited = self.demand_since.map_or(Duration::ZERO, |t| t.elapsed());
+        let wait = DEMAND_DEADLINE
+            .saturating_sub(waited)
+            .max(Duration::from_millis(1));
+        let armed = self
+            .loop_handle
+            .insert_source(Timer::from_duration(wait), |_, _, app: &mut App| {
+                app.capture_deadline_timer = false;
+                app.capture_deadline();
+                TimeoutAction::Drop
+            })
+            .is_ok();
+        self.capture_deadline_timer = armed;
+    }
+
+    fn capture_deadline(&mut self) {
+        if self.capture_demand != Demand::Must || self.options_match.is_none() {
+            return;
+        }
+        if self
+            .demand_since
+            .is_some_and(|t| t.elapsed() < DEMAND_DEADLINE)
+        {
+            self.arm_capture_deadline();
+            return;
+        }
+        match self.capture.as_ref().map(|c| (c.stage, c.forced)) {
+            // Already being forced: the reaper minds it.
+            Some((Stage::Shared, true)) => {}
+            // Waiting on a screen that is not changing: replace it.
+            Some((Stage::Shared, false)) => {
+                self.abort_capture();
+                self.capture_force = true;
+                self.begin_frame();
+            }
+            Some((Stage::Primed, _)) => {
+                if let Some(cap) = self.capture.as_mut() {
+                    cap.forced = true;
+                }
+                self.share_frame();
+            }
+            Some((Stage::AwaitBuffer, _)) => {
+                if let Some(cap) = self.capture.as_mut() {
+                    cap.forced = true;
+                }
+            }
+            None => {
+                self.capture_force = true;
+                self.begin_frame();
+            }
+        }
+    }
+
+    /// `buffer` event: allocate the shm buffer; the frame is then primed (see
+    /// [`Self::pump_capture`]). Extra buffer offers (e.g. dmabuf) after we've
+    /// picked an shm one are ignored.
     fn options_capture_buffer(
         &mut self,
         format: WEnum<wl_shm::Format>,
@@ -616,7 +755,11 @@ impl App {
         height: u32,
         stride: u32,
     ) {
-        if self.capture.as_ref().is_none_or(|c| c.copied) {
+        if self
+            .capture
+            .as_ref()
+            .is_none_or(|c| c.stage != Stage::AwaitBuffer)
+        {
             return;
         }
         let WEnum::Value(fmt) = format else {
@@ -660,57 +803,31 @@ impl App {
             &self.qh,
         );
         if let Some(cap) = self.capture.as_mut() {
-            if cap.patient {
-                cap.frame.copy_with_damage(&buffer);
-            } else {
-                cap.frame.copy(&buffer);
-            }
             cap.buffer = Some(buffer);
             cap.width = width;
             cap.height = height;
             cap.stride = stride;
             cap.format = fmt;
-            cap.copied = true;
+            cap.stage = Stage::Primed;
         }
+        self.pump_capture();
     }
 
-    /// `ready` event: the buffer holds the frame — sample every row either
-    /// surface wanted, paint whichever changed, and let the poll schedule
-    /// the next resample.
+    /// `ready` event: the buffer holds the frame — sample every row that is
+    /// wanted NOW (the frame has them all), paint whichever changed, and make
+    /// the next frame object while the capture session is still open.
     fn options_capture_ready(&mut self) {
         let Some(cap) = self.capture.take() else {
             return;
         };
         self.options_capture_failing = false;
-        self.capture_sampled = Some(cap.samples.clone());
-        if cap.patient {
-            self.capture_trail_due = true;
-            // A sentinel that came straight back: the screen is busy (a
-            // video, an animation). Keeping one armed there would capture
-            // every frame, so the next few samples are the poll's.
-            if cap.started.elapsed() < TRAIL_QUIET {
-                self.sentinel_skip = SENTINEL_SKIP;
-            }
-        }
+        let wants: Vec<(Slot, u32)> = [&self.bar_want, &self.dock_want, &self.clip_want]
+            .into_iter()
+            .filter_map(|w| w.as_ref().map(|w| (w.slot, w.sample_y)))
+            .collect();
         let mut bar_changed = false;
         let mut dock_changed = false;
-        for &(slot, sample_y) in &cap.samples {
-            // A capture bakes its rows at start; the want may have moved on
-            // while it was in flight (regime flip, a workspace swipe moving
-            // the match row). Landing such a stale sample would flash an
-            // outdated colour one tick after the change — skip it. The row
-            // must match too: same slot at a different `sample_y` means a
-            // different window edge (fast swipes), read at the wrong place.
-            let still_wanted = match slot {
-                Slot::BarMatch | Slot::BarFrost => &self.bar_want,
-                Slot::DockMatch | Slot::DockFrost => &self.dock_want,
-                Slot::ClipFrost => &self.clip_want,
-            }
-            .as_ref()
-            .is_some_and(|w| w.slot == slot && w.sample_y == sample_y);
-            if !still_wanted {
-                continue;
-            }
+        for (slot, sample_y) in wants {
             let Some(color) = self.read_sample(&cap, slot, sample_y) else {
                 continue;
             };
@@ -734,7 +851,24 @@ impl App {
             buf.destroy();
         }
         options_engine::end_self_capture();
-        if bar_changed || dock_changed {
+        let changed = bar_changed || dock_changed;
+        let now = std::time::Instant::now();
+        self.capture_delivered = Some(now);
+        self.capture_demand = Demand::Idle;
+        self.demand_since = None;
+        // A colour just moved — the screen was likely still animating when
+        // this capture read it (workspace slide, window settling): the next
+        // look may come soon, so the colour converges on the settled screen.
+        // Otherwise the usual interval. Either way the next frame WAITS for
+        // the screen to change: a settled screen is not captured again.
+        self.capture_next_at = Some(
+            now + if changed {
+                SETTLE_BURST
+            } else {
+                SAMPLE_INTERVAL
+            },
+        );
+        if changed {
             crate::perf::COLOR_CHANGED.hit();
             // Fresh colours: hand the window borders their new gradient
             // (the regime half of this lives in `rebuild_capture_target`).
@@ -746,20 +880,14 @@ impl App {
         if dock_changed {
             self.draw();
         }
-        // A colour just moved — the screen was likely still animating when
-        // this capture read it (workspace slide, window settling). Look
-        // again shortly so the colour converges on the settled screen
-        // instead of a transitional read sitting until the next POLL tick.
-        if bar_changed || dock_changed {
-            self.arm_settle_burst();
-        }
-        // …and from here on, wait for the screen to change.
-        self.arm_sentinel();
+        // The next frame object, made inside the capture session (see
+        // `pump_capture`).
+        self.pump_capture();
     }
 
-    /// Re-evaluate both surfaces after [`SETTLE_BURST`] — the quick
-    /// follow-up used both when a colour just moved and when a capture
-    /// failed outright. Idempotent: a burst already armed is left alone.
+    /// Re-evaluate both surfaces after [`SETTLE_BURST`] — the quick retry
+    /// after a capture failed outright. Idempotent: a burst already armed is
+    /// left alone.
     fn arm_settle_burst(&mut self) {
         if self.options_burst_pending {
             return;
@@ -1146,7 +1274,6 @@ impl App {
                 // Captures started from here may be patient ones (see
                 // `start_options_capture`).
                 app.capture_from_poll = true;
-                app.sentinel_skip = app.sentinel_skip.saturating_sub(1);
                 app.reeval_options_bar();
                 app.reeval_dock_bar();
                 app.capture_from_poll = false;
@@ -1201,12 +1328,16 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for App {
 impl Dispatch<ZwlrScreencopyFrameV1, ()> for App {
     fn event(
         app: &mut Self,
-        _: &ZwlrScreencopyFrameV1,
+        frame: &ZwlrScreencopyFrameV1,
         event: zwlr_screencopy_frame_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        // Only the frame in flight: one that was replaced has nothing to say.
+        if app.capture.as_ref().is_none_or(|c| &c.frame != frame) {
+            return;
+        }
         match event {
             zwlr_screencopy_frame_v1::Event::Buffer {
                 format,

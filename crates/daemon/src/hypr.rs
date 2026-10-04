@@ -1251,7 +1251,11 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                     }
                 }
                 if relevant {
+                    // The compositor's own news: the colour sample wanted is
+                    // the frame that shows it (`screencopy::Demand::Fresh`).
+                    app.capture_from_event = true;
                     app.on_layout_changed();
+                    app.capture_from_event = false;
                 }
                 Ok(PostAction::Continue)
             },
