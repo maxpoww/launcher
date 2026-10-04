@@ -1071,7 +1071,12 @@ impl Renderer {
         reserved: usize,
         chains: impl Iterator<Item = &'a Vec<u8>>,
     ) {
-        let mut layers = (count + reserved).max(1) as u32;
+        // Never ONE layer: the same GLES guess (below) makes a one-layer
+        // array a plain 2D texture, the `texture_2d_array` sampler reads
+        // black — the OPTIONS bar's array with a single notification avatar
+        // showed a black square on the GL machines (MacBook, found by the
+        // night's pixel diff, 2026-10-04). A second, empty layer costs 349 KB.
+        let mut layers = (count + reserved).max(2) as u32;
         // wgpu's GLES backend cannot see our explicit D2Array view dimension
         // and GUESSES it from the layer count: depth==6 → Cube, depth>6 &&
         // depth%6==0 → CubeArray. When our icon atlas lands on 6 or a
