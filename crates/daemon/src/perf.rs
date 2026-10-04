@@ -78,6 +78,13 @@ pub(crate) static HYPR_CACHED: Counter = Counter::new();
 /// A screen capture started (colour match / frost sample).
 pub(crate) static CAPTURE: Counter = Counter::new();
 
+/// …of which: sentinels (delivered when the screen changes), and captures
+/// started by a poll tick. The rest are event-driven.
+pub(crate) static CAPTURE_SENTINEL: Counter = Counter::new();
+pub(crate) static CAPTURE_POLL: Counter = Counter::new();
+/// A capture whose sample moved a colour.
+pub(crate) static COLOR_CHANGED: Counter = Counter::new();
+
 /// Every counter since the last report, as one line; resets them.
 pub(crate) fn report() -> String {
     let timed = |name: &str, c: &Counter| {
@@ -95,6 +102,9 @@ pub(crate) fn report() -> String {
         timed("hypr", &HYPR_REQUEST),
         count("hypr-cached", &HYPR_CACHED),
         count("captures", &CAPTURE),
+        count("sentinel", &CAPTURE_SENTINEL),
+        count("poll", &CAPTURE_POLL),
+        count("colour-changes", &COLOR_CHANGED),
     ]
     .join(" | ")
 }

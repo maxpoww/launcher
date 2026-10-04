@@ -36,6 +36,10 @@ const CONTROLS_GAP: f32 = 10.0;
 /// pacing, see `Renderer::gpu_ready`).
 const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
 
+/// How long a surface waits for its frame callback before it draws without
+/// one (see `draw_options`). Far above any healthy frame time.
+const FRAME_OVERDUE: Duration = Duration::from_millis(100);
+
 impl App {
     /// Layout for an arbitrary card extent at the current scroll offsets.
     /// Whether a drag that can land on the Apps grid is in flight — the
@@ -292,6 +296,19 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
+        // ONE frame per compositor frame. A frame callback is still out: the
+        // screen has not shown the last frame yet, so this one waits for the
+        // callback (which draws whenever `dirty`). Drawing here anyway — as
+        // the colour-match's direct `draw()` calls did — rendered a frame
+        // nobody saw AND asked for a second callback, and from then on both
+        // callbacks drew, every frame, for as long as the animation ran: the
+        // dock measured ~95 fps on a 60 Hz panel, 2 callbacks a vblank (night
+        // audit 2026-10-04). Only a `configure` must commit regardless.
+        if self.frame_pending && !self.draw_forced {
+            self.dirty = true;
+            return;
+        }
+        self.draw_forced = false;
 
         // F12: on a software (CPU) adapter every frame costs real cores —
         // a minutes-long install animation ran the daemon at 450% CPU in
@@ -562,9 +579,12 @@ impl App {
 
         self.dirty = false;
 
-        let wl_surface = self.layer.wl_surface();
-        wl_surface.frame(&self.qh, wl_surface.clone());
-        self.frame_pending = true;
+        // Never a second callback while one is out (see the top of `draw`).
+        if !self.frame_pending {
+            let wl_surface = self.layer.wl_surface();
+            wl_surface.frame(&self.qh, wl_surface.clone());
+            self.frame_pending = true;
+        }
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
@@ -1467,6 +1487,38 @@ impl App {
         if w == 0 || h == 0 {
             return;
         }
+        // ONE render per compositor frame, as the dock. The OPTION
+        // animations tick on 8 ms timers and every state change calls this
+        // directly (67 call sites): on a 60 Hz panel that was 125 renders a
+        // second, of which the compositor showed 60 — the newest at each
+        // vblank. While the last frame's callback is still out, a draw only
+        // marks the surface dirty; the callback renders the newest state.
+        // What reaches the screen is the same frame it showed before.
+        let concealed =
+            self.options_hidden && self.options_sticky.is_none() && self.options_show.t <= 0.0;
+        if self.options_frame_pending {
+            let overdue = self
+                .options_frame_asked
+                .is_none_or(|t| t.elapsed() >= FRAME_OVERDUE);
+            if !overdue {
+                self.options_dirty = true;
+                // The bookkeeping a draw does stays on time.
+                if !concealed {
+                    self.sync_lead();
+                }
+                return;
+            }
+            // The callback is overdue (the output is off, the compositor is
+            // stalled): draw anyway, at most once per FRAME_OVERDUE, so
+            // nothing ever waits on a callback that is not coming.
+            self.options_frame_asked = Some(Instant::now());
+        } else if let Some(layer) = self.options_layer.as_ref() {
+            let surface = layer.wl_surface();
+            surface.frame(&self.qh, surface.clone());
+            self.options_frame_pending = true;
+            self.options_frame_asked = Some(Instant::now());
+        }
+        self.options_dirty = false;
         let _perf = crate::perf::OPTIONS_DRAW.time();
         // Concealed in fullscreen: render an empty (transparent) frame so the
         // bar disappears until a deliberate top-edge hold reveals it.
@@ -1475,7 +1527,7 @@ impl App {
         // frame carries exactly two pills, the control that took the bar away
         // and its doorway, and falls through to the ordinary draw below so they
         // get the surface's real styling rather than a special-case painting.
-        if self.options_hidden && self.options_sticky.is_none() && self.options_show.t <= 0.0 {
+        if concealed {
             if let Some(renderer) = self.options_renderer.as_mut() {
                 let scene = content::Scene {
                     alpha: 1.0,

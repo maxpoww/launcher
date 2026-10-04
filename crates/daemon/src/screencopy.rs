@@ -586,6 +586,11 @@ impl App {
         // `options_engine::begin_self_capture`).
         options_engine::begin_self_capture();
         crate::perf::CAPTURE.hit();
+        if patient {
+            crate::perf::CAPTURE_SENTINEL.hit();
+        } else if self.capture_from_poll {
+            crate::perf::CAPTURE_POLL.hit();
+        }
         let frame = mgr.capture_output(0, &output, &self.qh, ());
         self.capture = Some(Capture {
             frame,
@@ -730,6 +735,7 @@ impl App {
         }
         options_engine::end_self_capture();
         if bar_changed || dock_changed {
+            crate::perf::COLOR_CHANGED.hit();
             // Fresh colours: hand the window borders their new gradient
             // (the regime half of this lives in `rebuild_capture_target`).
             self.push_window_border();

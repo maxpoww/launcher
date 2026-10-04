@@ -575,6 +575,10 @@ fn main() -> anyhow::Result<()> {
         scale_factor: 1,
         last_frame: None,
         frame_pending: false,
+        draw_forced: false,
+        options_frame_pending: false,
+        options_frame_asked: None,
+        options_dirty: false,
         dirty: false,
         keyboard: None,
         pointer: None,
@@ -1408,6 +1412,14 @@ pub struct App {
     last_frame: Option<Instant>,
     /// True while a frame callback is in flight (avoid double-requesting).
     frame_pending: bool,
+    /// The next `draw` renders even with a frame callback out (a configure).
+    draw_forced: bool,
+    /// The OPTIONS bar's frame pacing (see `draw_options`): a callback is
+    /// out since `options_frame_asked`; `options_dirty` = a draw was asked
+    /// for meanwhile.
+    options_frame_pending: bool,
+    options_frame_asked: Option<Instant>,
+    options_dirty: bool,
     /// Scene changed since the last draw; the pending frame callback
     /// (if any) will redraw.
     dirty: bool,
@@ -5954,6 +5966,18 @@ impl CompositorHandler for App {
             self.draw_deck();
             return;
         }
+        // The OPTIONS bar's callback: render what was asked for meanwhile.
+        if self
+            .options_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            self.options_frame_pending = false;
+            if self.options_dirty {
+                self.draw_options();
+            }
+            return;
+        }
         self.frame_pending = false;
         if self.ui.is_animating() || self.bounce.is_some() || self.dirty {
             self.draw();
@@ -6100,6 +6124,7 @@ impl LayerShellHandler for App {
         self.sync_surface_state();
         // First (and per-configure) draw: layer-shell requires a commit in
         // response to configure; presenting a frame satisfies it.
+        self.draw_forced = true;
         self.draw();
     }
 }
