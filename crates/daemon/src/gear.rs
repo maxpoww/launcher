@@ -3554,6 +3554,14 @@ impl App {
                 }
                 self.gear_changed();
             }
+            "confirm" => self.gear_click(Hit::Confirm),
+            "enter" => self.submit_gear_field(),
+            "do" => {
+                if !self.pages_debug_do(arg) {
+                    return format!("cannot do: {arg}");
+                }
+                self.gear_changed();
+            }
             "share" => self.gear_click(Hit::NetShare),
             "files" => self.gear_click(Hit::BtFiles),
             "hotspot" => self.gear_click(Hit::Hotspot),

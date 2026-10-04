@@ -2020,6 +2020,53 @@ impl App {
         }
     }
 
+    /// `debug-gear do <what>`: press one of these pages' controls without a
+    /// pointer. A question it raises is answered with `debug-gear confirm`, a
+    /// field it opens with `debug-gear type …` then `debug-gear enter`.
+    pub(crate) fn pages_debug_do(&mut self, what: &str) -> bool {
+        let (verb, arg) = what.split_once(' ').unwrap_or((what, ""));
+        let ext = self.gear.pages.disk.drives.iter().position(|d| d.removable);
+        let secs = arg.parse::<u32>().unwrap_or(0);
+        let hit = match (verb, ext) {
+            ("ext-mount", Some(i)) => SysHit::ExtMount(i),
+            ("ext-check", Some(i)) => SysHit::ExtCheck(i),
+            ("ext-rename", Some(i)) => SysHit::ExtRename(i),
+            ("ext-unlock", Some(i)) => SysHit::ExtUnlock(i),
+            ("ext-format", Some(i)) => SysHit::ExtFormat(i),
+            ("eject", Some(i)) => SysHit::Eject(i),
+            ("format-for", _) => SysHit::FormatFor(match arg {
+                "golem" => Target::Golem,
+                "win" => Target::Windows,
+                _ => Target::Any,
+            }),
+            ("format-lock", _) => SysHit::FormatLock,
+            ("format-thorough", _) => SysHit::FormatThorough,
+            ("format-name", _) => SysHit::FormatName,
+            ("format", _) => SysHit::AskFormat,
+            ("mode", _) => SysHit::Mode(arg.to_owned()),
+            ("saver", _) => SysHit::AutoSaver,
+            ("limit", _) => SysHit::ChargeLimit,
+            ("awake", _) => SysHit::Awake,
+            ("effects", _) => SysHit::Effects(arg == "light"),
+            ("lid", _) => SysHit::Lid(arg == "nothing"),
+            ("screen", _) => SysHit::ScreenOff(secs),
+            ("sleepafter", _) => SysHit::SleepAfter(secs),
+            ("updates", _) => SysHit::CheckUpdates,
+            ("erase", _) => SysHit::AskErase,
+            ("clean", _) => SysHit::AskClean,
+            ("junk", _) => SysHit::Junk(match arg {
+                "trash" => Junk::Trash,
+                "caches" => Junk::Caches,
+                "browser" => Junk::Browser,
+                "store" => Junk::Store,
+                _ => Junk::System,
+            }),
+            _ => return false,
+        };
+        self.gear_click(Hit::Sys(hit));
+        true
+    }
+
     /// `debug-gear page <what>`: reach a details view without a pointer.
     pub(crate) fn pages_debug(&mut self, what: &str) -> bool {
         let v = match what {

@@ -94,6 +94,9 @@ pub enum Command {
     /// `share`, `hotspot`, `files`, `back`, `password <network>`,
     /// `type <text>`, `scroll <n>`, and two pictures that change nothing:
     /// `pair` (the pairing view) and `fake-off` (the radios-off page).
+    /// The machine pages: `open <gear|disk|cpu|ram|gpu|bat>`,
+    /// `page <about|health|clean|drive|ext|format|folder|card|video|app|system>`,
+    /// `do <control> [value]` to press one, then `confirm` / `enter`.
     DebugGear(String),
     /// Golem as a floating window manager instead of a tiling one: `on`, `off`
     /// or `toggle` (empty = toggle). The gear's page-1 switch sends the same
