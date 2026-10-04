@@ -591,8 +591,8 @@ fn scan_home_files() -> Vec<FileEntry> {
 }
 
 /// Turns an `AppEntry` into `ICON_SIZE`² pixels, cheapest source first:
-/// in-memory rasters (covers rescans), on-disk rasters (covers cold
-/// start), then rasterizing the icon file. Icon-name → file-path
+/// in-memory rasters (the tiles the disk cache does not hold), on-disk
+/// rasters (cold start and rescans), then rasterizing the icon file. Icon-name → file-path
 /// resolutions get their own persistent cache because the theme
 /// directory walk — not rasterization — dominates index time.
 pub(crate) struct IconLoader {
@@ -655,19 +655,28 @@ impl IconLoader {
         } else {
             path.as_deref().and_then(|p| self.disk.file_for(p))
         };
-        let (pixels, is_placeholder) = match cache_file.as_deref().and_then(DiskCache::load) {
-            Some(pixels) => (pixels, false),
-            None => match path.and_then(|p| rasterize_icon_file(&p, &entry.id)) {
-                Some(pixels) => {
-                    if let Some(file) = &cache_file {
-                        self.disk.store(file, &pixels);
+        // `on_disk`: the persistent cache holds this tile, so a rescan reads
+        // it back from there (one 349 KB file, usually still in the page
+        // cache) and it is NOT kept in memory as well. Every tile used to
+        // stay in `rasters` for the life of the daemon — ~37 MB for 108
+        // apps on the Acer, growing with every app and every package search
+        // (night audit, 2026-10-04).
+        let (pixels, is_placeholder, on_disk) =
+            match cache_file.as_deref().and_then(DiskCache::load) {
+                Some(pixels) => (pixels, false, true),
+                None => match path.and_then(|p| rasterize_icon_file(&p, &entry.id)) {
+                    Some(pixels) => {
+                        let stored = cache_file
+                            .as_deref()
+                            .is_some_and(|file| self.disk.store(file, &pixels));
+                        (pixels, false, stored)
                     }
-                    (pixels, false)
-                }
-                None => (placeholder_icon(&entry.name), true),
-            },
-        };
-        self.rasters.insert(key, (pixels.clone(), is_placeholder));
+                    None => (placeholder_icon(&entry.name), true, false),
+                },
+            };
+        if !on_disk {
+            self.rasters.insert(key, (pixels.clone(), is_placeholder));
+        }
         (pixels, is_placeholder)
     }
 
@@ -736,18 +745,20 @@ impl DiskCache {
 
     /// Persist a raster via write-to-temp + rename, so a concurrent
     /// reader never sees a half-written file. Failures only cost a
-    /// re-rasterize next cold start.
-    fn store(&self, file: &std::path::Path, pixels: &[u8]) {
+    /// re-rasterize next cold start. Returns whether the tile is on disk.
+    fn store(&self, file: &std::path::Path, pixels: &[u8]) -> bool {
         if let Err(e) = std::fs::create_dir_all(&self.dir) {
             debug!("icon cache: cannot create {:?}: {e}", self.dir);
-            return;
+            return false;
         }
         let tmp = file.with_extension(format!("tmp{}", std::process::id()));
         let write = std::fs::write(&tmp, pixels).and_then(|()| std::fs::rename(&tmp, file));
         if let Err(e) = write {
             debug!("icon cache: cannot write {file:?}: {e}");
             let _ = std::fs::remove_file(&tmp);
+            return false;
         }
+        true
     }
 }
 
