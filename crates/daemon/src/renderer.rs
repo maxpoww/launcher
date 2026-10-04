@@ -416,7 +416,11 @@ impl Renderer {
                         max_texture_array_layers: adapter.limits().max_texture_array_layers,
                         ..wgpu::Limits::downlevel_defaults()
                     },
-                    memory_hints: wgpu::MemoryHints::default(),
+                    // Small device-memory blocks (8 MB, growing to 64): the
+                    // default hint, Performance, takes GPU memory 128 MB at a
+                    // time — sized for a game, and most of what the shell held
+                    // on the Acer (night audit, 2026-10-04).
+                    memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
                 None,
             ))
