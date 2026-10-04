@@ -240,6 +240,9 @@ pub struct Renderer {
     /// dynamic package icons; layer count includes the reserved tail.
     icon_texture: Option<wgpu::Texture>,
     icon_layer_count: u32,
+    /// The most layers the array may grow to (its content + the reserved
+    /// tail).
+    icon_layer_cap: u32,
 
     /// The shell's ONE font system and glyph-image cache (see
     /// [`shared_text`]): the same on every renderer.
@@ -1095,6 +1098,7 @@ impl Renderer {
             icon_bind: None,
             icon_texture: None,
             icon_layer_count: 0,
+            icon_layer_cap: 0,
             font_system,
             swash,
             text_viewport,
@@ -1190,24 +1194,22 @@ impl Renderer {
         reserved: usize,
         chains: impl Iterator<Item = &'a Vec<u8>>,
     ) {
-        // Never ONE layer: the same GLES guess (below) makes a one-layer
-        // array a plain 2D texture, the `texture_2d_array` sampler reads
-        // black — the OPTIONS bar's array with a single notification avatar
-        // showed a black square on the GL machines (MacBook, found by the
-        // night's pixel diff, 2026-10-04). A second, empty layer costs 349 KB.
-        let mut layers = (count + reserved).max(2) as u32;
-        // wgpu's GLES backend cannot see our explicit D2Array view dimension
-        // and GUESSES it from the layer count: depth==6 → Cube, depth>6 &&
-        // depth%6==0 → CubeArray. When our icon atlas lands on 6 or a
-        // multiple of 6 layers it gets bound as a cubemap and the sampler
-        // reads black — the transient "app icons go black" bug on the
-        // GL-backend Haswell (Golem #42; the count shifts with app/pending
-        // counts, so icons render fine until a rescan hits a multiple of 6).
-        // One empty pad layer dodges every bad count; harmless on Vulkan.
-        if layers == 6 || (layers > 6 && layers.is_multiple_of(6)) {
-            layers += 1;
+        // The RESERVED layers are not allocated up front: they are the
+        // dock's slots for search hits, pending installs, file thumbnails and
+        // minimized windows — 113 layers, ~39 MB of GPU memory, mostly never
+        // written. The array is made for what it holds and grows when a
+        // reserved layer is first written ([`Self::update_icon_layer`]).
+        let layers = icon_layers(count);
+        self.icon_layer_cap = icon_layers(count + reserved);
+        let texture = self.create_icon_texture(layers);
+        for (i, chain) in chains.enumerate() {
+            write_icon_chain(&self.queue, &texture, i as u32, chain);
         }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        self.bind_icon_texture(texture, layers);
+    }
+
+    fn create_icon_texture(&self, layers: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("waverunner.icons"),
             size: wgpu::Extent3d {
                 width: ICON_SIZE,
@@ -1218,12 +1220,14 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
-        });
-        for (i, chain) in chains.enumerate() {
-            write_icon_chain(&self.queue, &texture, i as u32, chain);
-        }
+        })
+    }
+
+    fn bind_icon_texture(&mut self, texture: wgpu::Texture, layers: u32) {
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -1244,6 +1248,44 @@ impl Renderer {
         }));
         self.icon_layer_count = layers;
         self.icon_texture = Some(texture);
+    }
+
+    /// Make the icon array hold at least `need` layers (within its cap),
+    /// keeping what is in it: the old layers are copied on the GPU.
+    fn grow_icon_array(&mut self, need: u32) {
+        let Some(old) = self.icon_texture.take() else {
+            return;
+        };
+        let had = self.icon_layer_count;
+        // A step at a time, not a layer at a time: one copy per burst of
+        // new thumbnails rather than one per thumbnail.
+        let layers = icon_layers(need.max(had + ICON_GROW_STEP) as usize).min(self.icon_layer_cap);
+        let texture = self.create_icon_texture(layers);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("waverunner.icons-grow"),
+            });
+        for mip in 0..ICON_MIPS {
+            let size = (ICON_SIZE >> mip).max(1);
+            let at = |texture| wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: mip,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            };
+            encoder.copy_texture_to_texture(
+                at(&old),
+                at(&texture),
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: had,
+                },
+            );
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.bind_icon_texture(texture, layers);
     }
 
     /// Width in pixels of `text` shaped at `font_px` — the same family
@@ -1307,12 +1349,18 @@ impl Renderer {
     /// the reserved tail of the array). Out-of-range layers and missing
     /// textures are ignored — a rescan re-uploads shortly anyway.
     pub fn update_icon_layer(&mut self, layer: u32, pixels: &[u8]) {
+        if self.icon_texture.is_none() {
+            return;
+        }
+        if layer >= self.icon_layer_cap || pixels.len() != ICON_CHAIN_BYTES {
+            return;
+        }
+        if layer >= self.icon_layer_count {
+            self.grow_icon_array(layer + 1);
+        }
         let Some(texture) = &self.icon_texture else {
             return;
         };
-        if layer >= self.icon_layer_count || pixels.len() != ICON_CHAIN_BYTES {
-            return;
-        }
         write_icon_chain(&self.queue, texture, layer, pixels);
     }
 
@@ -1878,6 +1926,30 @@ impl Renderer {
 /// `write_texture` per mip level. Chains are produced by
 /// [`crate::apps::with_mips`], so the levels are contiguous and match the
 /// texture's `ICON_MIPS`.
+/// Layers an icon array grows by when a reserved layer is first needed.
+const ICON_GROW_STEP: u32 = 16;
+
+/// The layer count to ALLOCATE for `count` icons, around two guesses of
+/// wgpu's GLES backend, which cannot see our explicit D2Array view dimension
+/// and guesses the texture's kind from its layer count:
+/// - ONE layer is a plain 2D texture, and the `texture_2d_array` sampler
+///   reads black — the OPTIONS bar's array with a single notification avatar
+///   showed a black square on the GL machines (MacBook, 2026-10-04);
+/// - 6 layers is a Cube, and a multiple of 6 above it a CubeArray — the
+///   transient "app icons go black" bug on the GL-backend Haswell (Golem
+///   #42; the count shifts with app/pending counts, so icons rendered fine
+///   until a rescan hit a multiple of 6).
+///
+/// A pad layer dodges each; harmless on Vulkan.
+fn icon_layers(count: usize) -> u32 {
+    let layers = count.max(2) as u32;
+    if layers == 6 || (layers > 6 && layers.is_multiple_of(6)) {
+        layers + 1
+    } else {
+        layers
+    }
+}
+
 fn write_icon_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, chain: &[u8]) {
     let mut offset = 0usize;
     let mut size = ICON_SIZE;
