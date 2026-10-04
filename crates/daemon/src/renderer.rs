@@ -116,6 +116,35 @@ struct SharedGpu {
     queue: wgpu::Queue,
 }
 
+/// How many measured widths are kept before the table starts over.
+const MEASURED_CAP: usize = 2048;
+
+thread_local! {
+    /// Text widths already measured (see [`Renderer::measure_text`]), and the
+    /// scratch string their keys are built in.
+    static MEASURED: std::cell::RefCell<(std::collections::HashMap<String, f32>, String)> =
+        std::cell::RefCell::new((std::collections::HashMap::new(), String::new()));
+}
+
+/// A label shaped for a frame and kept for the next ones: the OPTIONS bar's
+/// labels are all "volatile" (uncached — their text can change at any time),
+/// so every one of them was shaped again on every frame, ten per frame
+/// through a whole box animation in which none of them changed.
+struct VolatileLabel {
+    buffer: TextBuffer,
+    /// The width it was shaped within (physical px)…
+    max_w: f32,
+    /// …and whether the whole text fit on one line of `line_w` px: then the
+    /// same buffer is right for any bound at least that wide.
+    fits: bool,
+    line_w: f32,
+    /// The last frame that drew it.
+    used: u64,
+}
+
+/// Frames an unused volatile label is kept for (a blink, a list scrolled back).
+const VOLATILE_KEEP: u64 = 90;
+
 type SharedFonts = std::rc::Rc<std::cell::RefCell<FontSystem>>;
 type SharedSwash = std::rc::Rc<std::cell::RefCell<SwashCache>>;
 
@@ -254,6 +283,9 @@ pub struct Renderer {
     /// Shaped label buffers, keyed by label text; invalidated when a
     /// new app set arrives via [`Renderer::set_icons`].
     label_cache: std::collections::HashMap<String, TextBuffer>,
+    /// Shaped uncached labels, reused while their text stays the same.
+    volatile: std::collections::HashMap<String, VolatileLabel>,
+    frame_no: u64,
     /// Accumulated render time — only advances while frames are drawn, so
     /// there are no phase jumps when the dock hides and reappears.
     anim_time: f32,
@@ -1105,6 +1137,8 @@ impl Renderer {
             text_atlas,
             text_renderer,
             label_cache: std::collections::HashMap::new(),
+            volatile: std::collections::HashMap::new(),
+            frame_no: 0,
             anim_time: 0.0,
             last_render: None,
         })
@@ -1307,6 +1341,7 @@ impl Renderer {
             // pills while the uncached clock was right (Max, 2026-09-30: "the
             // macbook options are oversized").
             self.label_cache.clear();
+            self.volatile.clear();
         }
     }
 
@@ -1330,20 +1365,48 @@ impl Renderer {
             return 0.0;
         }
         let _perf = crate::perf::MEASURE.time();
-        let mut font_system = self.font_system.borrow_mut();
-        let mut buffer = TextBuffer::new(&mut font_system, Metrics::new(font_px, font_px * 1.3));
-        let (fam, weight) = resolve_family(family);
-        buffer.set_text(
-            &mut font_system,
-            text,
-            Attrs::new().family(fam).weight(weight),
-            Shaping::Advanced,
-        );
-        buffer.shape_until_scroll(&mut font_system, false);
-        buffer
-            .layout_runs()
-            .map(|run| run.line_w)
-            .fold(0.0, f32::max)
+        // Measured once per (text, size, family): the dock measured the word
+        // "Search" on every frame it drew — a fresh buffer, shaped, ~150 µs
+        // on the Acer, 8 % of a launcher frame (2026-10-04). The answer only
+        // depends on the fonts, which are the same for every renderer.
+        MEASURED.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let (map, key) = &mut *cache;
+            key.clear();
+            use std::fmt::Write as _;
+            let _ = write!(
+                key,
+                "{}\u{1}{}\u{1}{text}",
+                font_px.to_bits(),
+                family.unwrap_or("")
+            );
+            if let Some(&w) = map.get(key.as_str()) {
+                return w;
+            }
+            crate::perf::SHAPE.hit();
+            let mut font_system = self.font_system.borrow_mut();
+            let mut buffer =
+                TextBuffer::new(&mut font_system, Metrics::new(font_px, font_px * 1.3));
+            let (fam, weight) = resolve_family(family);
+            buffer.set_text(
+                &mut font_system,
+                text,
+                Attrs::new().family(fam).weight(weight),
+                Shaping::Advanced,
+            );
+            buffer.shape_until_scroll(&mut font_system, false);
+            let w = buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0, f32::max);
+            // Live text (a query, a clock) makes new keys for ever: start
+            // over rather than grow.
+            if map.len() >= MEASURED_CAP {
+                map.clear();
+            }
+            map.insert(key.clone(), w);
+            w
+        })
     }
 
     /// Overwrite one icon texture-array layer (a dynamic package icon in
@@ -1574,8 +1637,17 @@ impl Renderer {
             buffer.shape_until_scroll(font_system, false);
             buffer
         };
-        let mut fresh: Vec<TextBuffer> = Vec::new();
-        let mut fresh_of: Vec<Option<usize>> = Vec::with_capacity(all_labels.len());
+        self.frame_no += 1;
+        let frame_no = self.frame_no;
+        // Volatile labels nobody drew for a while are forgotten.
+        if self.volatile.len() > 512 {
+            self.volatile.retain(|_, v| v.used + 1 >= frame_no);
+        } else {
+            self.volatile
+                .retain(|_, v| v.used + VOLATILE_KEEP >= frame_no);
+        }
+        // Where each label's shaped buffer lives: (volatile?, key).
+        let mut shaped: Vec<(bool, String)> = Vec::with_capacity(all_labels.len());
         let font_system = self.font_system.clone();
         let mut font_system = font_system.borrow_mut();
         let swash = self.swash.clone();
@@ -1583,13 +1655,39 @@ impl Renderer {
         for (label, _) in &all_labels {
             if label.cache {
                 let key = label_key(label);
-                self.label_cache
-                    .entry(key)
-                    .or_insert_with(|| shape(&mut font_system, label));
-                fresh_of.push(None);
+                if !self.label_cache.contains_key(&key) {
+                    let buffer = shape(&mut font_system, label);
+                    self.label_cache.insert(key.clone(), buffer);
+                }
+                shaped.push((false, key));
             } else {
-                fresh.push(shape(&mut font_system, label));
-                fresh_of.push(Some(fresh.len() - 1));
+                let key = volatile_key(label);
+                let want_w = label.max_w * scale;
+                match self.volatile.get_mut(&key) {
+                    Some(v) if v.max_w == want_w || (v.fits && want_w >= v.line_w) => {
+                        v.used = frame_no;
+                    }
+                    _ => {
+                        let buffer = shape(&mut font_system, label);
+                        let laid_out: usize = buffer
+                            .lines
+                            .iter()
+                            .map(|l| l.layout_opt().as_ref().map_or(0, Vec::len))
+                            .sum();
+                        let line_w = buffer.layout_runs().next().map_or(0.0, |run| run.line_w);
+                        self.volatile.insert(
+                            key.clone(),
+                            VolatileLabel {
+                                buffer,
+                                max_w: want_w,
+                                fits: laid_out <= 1,
+                                line_w,
+                                used: frame_no,
+                            },
+                        );
+                    }
+                }
+                shaped.push((true, key));
             }
         }
 
@@ -1602,14 +1700,16 @@ impl Renderer {
         let mut text_buffers: Vec<(&TextBuffer, (f32, f32), TextBounds, glyphon::Color)> =
             Vec::new();
         for (i, (label, clip)) in all_labels.iter().enumerate() {
-            let buffer = match fresh_of[i] {
-                Some(fi) => &fresh[fi],
-                None => {
-                    let key = label_key(label);
-                    match self.label_cache.get(&key) {
-                        Some(buffer) => buffer,
-                        None => continue,
-                    }
+            let (volatile, key) = &shaped[i];
+            let buffer = if *volatile {
+                match self.volatile.get(key) {
+                    Some(v) => &v.buffer,
+                    None => continue,
+                }
+            } else {
+                match self.label_cache.get(key) {
+                    Some(buffer) => buffer,
+                    None => continue,
                 }
             };
             // Measure the shaped line; center about the anchor when
@@ -2031,6 +2131,18 @@ fn resolve_family(family: Option<&str>) -> (Family<'_>, Weight) {
         Some(name) => (Family::Name(name), Weight::NORMAL),
         None => (Family::SansSerif, Weight::NORMAL),
     }
+}
+
+/// Cache key for a volatile label: everything its shaping depends on but the
+/// width bound (see [`VolatileLabel`]).
+fn volatile_key(label: &crate::content::Label) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{}\u{1}{}",
+        label.text,
+        label.font_px.to_bits(),
+        label.line_px.to_bits(),
+        label.family.unwrap_or("")
+    )
 }
 
 /// Cache key for a shaped label. Includes the FAMILY as well as the text and
