@@ -71,6 +71,31 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+thread_local! {
+    /// The same replies, PARSED — a turn that asks for the window list four
+    /// times reads one parse. Emptied with [`SNAPSHOT`].
+    static PARSED: std::cell::RefCell<std::collections::HashMap<String, Json>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// A parsed reply, shared between the callers of one turn.
+type Json = std::rc::Rc<serde_json::Value>;
+
+/// A read-only query's reply as JSON (`None`: no compositor, or not JSON).
+/// Every `j/…` reader goes through here.
+fn reply_json(cmd: &str) -> Option<Json> {
+    if let Some(hit) = PARSED.with(|p| p.borrow().get(cmd).cloned()) {
+        return Some(hit);
+    }
+    let value: Json = std::rc::Rc::new(serde_json::from_str(&request(cmd).ok()?).ok()?);
+    // Only where the raw reply is kept for the turn too (the event loop's
+    // thread): elsewhere nothing would ever empty this map.
+    if SNAPSHOT.with(|s| s.borrow().is_some()) {
+        PARSED.with(|p| p.borrow_mut().insert(cmd.to_owned(), value.clone()));
+    }
+    Some(value)
+}
+
 /// Make this thread (the event loop's) keep a per-turn snapshot of the
 /// compositor's read-only replies. Pair with [`snapshot_reset`] after every
 /// turn of the loop.
@@ -87,6 +112,7 @@ pub fn snapshot_reset() {
             map.clear();
         }
     });
+    PARSED.with(|p| p.borrow_mut().clear());
 }
 
 /// One-shot request over Hyprland's control socket (`j/` = JSON reply).
@@ -274,10 +300,7 @@ impl LayoutWindow {
 /// that has to look at a whole workspace at once costs one round trip rather
 /// than one per window.
 pub fn layout_windows() -> Vec<LayoutWindow> {
-    let Ok(raw) = request("j/clients") else {
-        return Vec::new();
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Some(clients) = reply_json("j/clients") else {
         return Vec::new();
     };
     clients
@@ -400,10 +423,7 @@ pub fn active_fullscreen_internal() -> i64 {
 /// pass once it has settled — the honest two-beat, rather than pseudotiling to
 /// a fraction of the wrong rectangle.
 pub fn set_window_mode(target: WindowMode) -> bool {
-    let Ok(raw) = request("j/activewindow") else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Some(json) = reply_json("j/activewindow") else {
         return false;
     };
     let Some(addr) = json["address"]
@@ -576,14 +596,14 @@ pub fn close_window(addr: &str) {
 
 /// Address (`0x…`) of the currently-focused window, if any.
 pub fn active_window() -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let json = reply_json("j/activewindow")?;
     json["address"].as_str().map(str::to_owned)
 }
 
 /// The focused window's address and the workspace it is on, in one read — what
 /// the per-workspace focus memory records (see [`crate::focus_cycle`]).
 pub fn active_focus() -> Option<(String, i64)> {
-    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let json = reply_json("j/activewindow")?;
     let addr = json["address"]
         .as_str()
         .filter(|a| !a.is_empty() && *a != "0x0")?
@@ -596,7 +616,7 @@ pub fn active_focus() -> Option<(String, i64)> {
 /// ourselves — trustworthy precisely when nothing is focused, because then
 /// nothing has arrived to displace the history.
 pub fn last_focused_on(ws: i64) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    let json = reply_json("j/clients")?;
     json.as_array()?
         .iter()
         .filter(|c| c["workspace"]["id"].as_i64() == Some(ws))
@@ -610,10 +630,7 @@ pub fn last_focused_on(ws: i64) -> Option<String> {
 /// restoring focus to a remembered window that may since have been closed or
 /// dragged somewhere else.
 pub fn window_is_on(addr: &str, ws: i64) -> bool {
-    let Ok(raw) = request("j/clients") else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Some(json) = reply_json("j/clients") else {
         return false;
     };
     json.as_array().is_some_and(|cs| {
@@ -627,7 +644,7 @@ pub fn window_is_on(addr: &str, ws: i64) -> bool {
 /// OPTIONS window pill and the fullscreen auto-hide. `None` when nothing is
 /// focused (empty workspace).
 pub fn active_window_info() -> Option<(String, String, bool)> {
-    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let json = reply_json("j/activewindow")?;
     let address = json["address"].as_str()?.to_owned();
     if address.is_empty() || address == "0x0" {
         return None;
@@ -643,7 +660,7 @@ pub fn active_window_info() -> Option<(String, String, bool)> {
 /// The focused window's app class and title — the clipboard OPTION's
 /// "copied/pasted from where" metadata. `None` when nothing is focused.
 pub fn active_window_where() -> Option<(String, String)> {
-    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let json = reply_json("j/activewindow")?;
     let address = json["address"].as_str()?;
     if address.is_empty() || address == "0x0" {
         return None;
@@ -669,7 +686,7 @@ pub struct WsWindow {
 /// focused window's address — one `clients` read, the focus cycle's
 /// snapshot.
 pub fn workspace_windows() -> Option<(Vec<WsWindow>, Option<String>)> {
-    let json: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    let json = reply_json("j/clients")?;
     let mut windows = Vec::new();
     let mut focused = None;
     for w in json.as_array()? {
@@ -720,7 +737,7 @@ pub fn focus_window_direct(addr: &str) -> anyhow::Result<()> {
 /// (`(x, y, w, h)`) — the space `grim -g` expects — for a window snapshot.
 /// `None` if no real window is focused or it reports a zero size.
 pub fn active_window_geom() -> Option<(i32, i32, i32, i32)> {
-    let json: serde_json::Value = serde_json::from_str(&request("j/activewindow").ok()?).ok()?;
+    let json = reply_json("j/activewindow")?;
     let address = json["address"].as_str()?;
     if address.is_empty() || address == "0x0" {
         return None;
@@ -818,10 +835,7 @@ pub struct ClientGeometry {
 
 /// Every mapped window's geometry (one `j/clients` read).
 pub fn client_geometries() -> Vec<ClientGeometry> {
-    let Ok(raw) = request("j/clients") else {
-        return Vec::new();
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Some(clients) = reply_json("j/clients") else {
         return Vec::new();
     };
     let pair = |v: &serde_json::Value| {
@@ -867,10 +881,7 @@ pub const MINIMIZED_WS: &str = "special:minimized";
 
 /// Whether `addr` is parked on [`MINIMIZED_WS`] (one `j/clients` read).
 pub fn is_minimized(addr: &str) -> bool {
-    let Ok(raw) = request("j/clients") else {
-        return false;
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Some(clients) = reply_json("j/clients") else {
         return false;
     };
     clients.as_array().into_iter().flatten().any(|c| {
@@ -890,10 +901,7 @@ pub struct ParkedWindow {
 
 /// Every window parked on [`MINIMIZED_WS`].
 pub fn minimized_windows() -> Vec<ParkedWindow> {
-    let Ok(raw) = request("j/clients") else {
-        return Vec::new();
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Some(clients) = reply_json("j/clients") else {
         return Vec::new();
     };
     clients
@@ -923,7 +931,7 @@ pub fn minimized_windows() -> Vec<ParkedWindow> {
 
 /// The active workspace's id and its most-recent window address, if any.
 pub fn active_workspace() -> Option<(i64, Option<String>)> {
-    let ws: serde_json::Value = serde_json::from_str(&request("j/activeworkspace").ok()?).ok()?;
+    let ws = reply_json("j/activeworkspace")?;
     let id = ws["id"].as_i64()?;
     let last = ws["lastwindow"]
         .as_str()
@@ -946,7 +954,7 @@ pub fn active_workspace() -> Option<(i64, Option<String>)> {
 /// `None` when the compositor cannot be reached; callers keep their last
 /// answer rather than claiming the workspace emptied.
 pub fn active_workspace_is_empty() -> Option<bool> {
-    let ws: serde_json::Value = serde_json::from_str(&request("j/activeworkspace").ok()?).ok()?;
+    let ws = reply_json("j/activeworkspace")?;
     Some(ws["windows"].as_i64()? == 0)
 }
 
@@ -957,10 +965,7 @@ pub fn active_workspace_is_empty() -> Option<bool> {
 /// plain browser — a `false` return means no such window is open, so the caller
 /// can launch the webapp instead.
 pub fn focus_exact_class(class: &str) -> bool {
-    let Ok(reply) = request("j/clients") else {
-        return false;
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+    let Some(clients) = reply_json("j/clients") else {
         return false;
     };
     let empty = Vec::new();
@@ -1016,10 +1021,7 @@ pub fn is_browser_class(class: &str) -> bool {
 /// front. Returns whether one was found; `false` means no browser is open yet
 /// (a cold launch will focus its own new window).
 pub fn focus_browser() -> bool {
-    let Ok(reply) = request("j/clients") else {
-        return false;
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+    let Some(clients) = reply_json("j/clients") else {
         return false;
     };
     let empty = Vec::new();
@@ -1053,7 +1055,7 @@ pub fn focus_browser() -> bool {
 /// a detour target for [`focus_window`]. Restricted to the same
 /// workspace so the bounce never triggers a workspace switch.
 fn same_workspace_neighbor(addr: &str) -> Option<String> {
-    let clients: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    let clients = reply_json("j/clients")?;
     let arr = clients.as_array()?;
     let ws = arr
         .iter()
@@ -1337,7 +1339,7 @@ const WINDOW_TOP_INSET: f64 = 4.0;
 /// down by a top gap) is still read at the right row.
 pub fn top_fill(bar_h_logical: f64) -> Option<TopFill> {
     let mon = focused_monitor().ok()?;
-    let clients: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    let clients = reply_json("j/clients")?;
     let usable_top = mon.y + bar_h_logical;
 
     // Tiled (non-floating), mapped, visible, non-fullscreen windows on the
@@ -1394,7 +1396,7 @@ const WINDOW_BOTTOM_INSET: f64 = 4.0;
 /// backdrop.
 pub fn bottom_fill() -> Option<BottomFill> {
     let mon = focused_monitor().ok()?;
-    let clients: serde_json::Value = serde_json::from_str(&request("j/clients").ok()?).ok()?;
+    let clients = reply_json("j/clients")?;
     // Unlike the bar, the dock reserves NO exclusive zone (an auto-hide
     // overlay, floating over whatever's there) — so a flush window tiles all
     // the way to the real screen edge, not to `screen_bottom - dock_height`.
@@ -1446,10 +1448,7 @@ pub struct RunningWindow {
 /// running app can activate the most-recently-used window first.
 /// Empty (not an error) when Hyprland is unreachable.
 pub fn running_windows() -> Vec<RunningWindow> {
-    let Ok(reply) = request("j/clients") else {
-        return Vec::new();
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+    let Some(clients) = reply_json("j/clients") else {
         return Vec::new();
     };
     let active = active_window();
@@ -1510,7 +1509,7 @@ pub fn monitors_json() -> Option<serde_json::Value> {
 
 /// Where the pointer is, in the compositor's global logical coordinates.
 pub fn cursor_pos() -> Option<(f64, f64)> {
-    let json: serde_json::Value = serde_json::from_str(&request("j/cursorpos").ok()?).ok()?;
+    let json = reply_json("j/cursorpos")?;
     Some((json["x"].as_f64()?, json["y"].as_f64()?))
 }
 
@@ -1911,10 +1910,7 @@ pub struct AnimLeaf {
 /// restoring is then exact by construction and cannot go stale the day those
 /// curves are retuned.
 pub fn snapshot_animations() -> Vec<AnimLeaf> {
-    let Ok(raw) = request("j/animations") else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Some(v) = reply_json("j/animations") else {
         return Vec::new();
     };
     // `j/animations` is `[[leaves…], [beziers…]]`.
@@ -2247,10 +2243,7 @@ pub struct WindowState {
 /// socket round-trips (~50ms of blocking) between the click and the first frame
 /// of the tile animation. One read keeps the swap feeling immediate.
 pub fn window_states() -> std::collections::HashMap<String, WindowState> {
-    let Ok(reply) = request("j/clients") else {
-        return std::collections::HashMap::new();
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+    let Some(clients) = reply_json("j/clients") else {
         return std::collections::HashMap::new();
     };
     clients
@@ -2414,10 +2407,7 @@ pub struct StageTask {
 /// `clients` read (~16ms measured). Empty (not an error) if Hyprland is
 /// unreachable, so the mode degrades to "nothing to show" instead of failing.
 pub fn stage_tasks() -> Vec<StageTask> {
-    let Ok(reply) = request("j/clients") else {
-        return Vec::new();
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+    let Some(clients) = reply_json("j/clients") else {
         return Vec::new();
     };
     let mut out: Vec<StageTask> = clients
@@ -2452,10 +2442,7 @@ pub fn stage_tasks() -> Vec<StageTask> {
 /// Whether `addr` is still a live mapped window — the check before focusing a
 /// remembered address (the anchor) that may have been closed meanwhile.
 pub fn window_exists(addr: &str) -> bool {
-    let Ok(reply) = request("j/clients") else {
-        return false;
-    };
-    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&reply) else {
+    let Some(clients) = reply_json("j/clients") else {
         return false;
     };
     clients

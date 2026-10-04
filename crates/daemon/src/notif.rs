@@ -2768,21 +2768,7 @@ impl App {
     }
 
     fn schedule_notif_frame(&mut self) {
-        if self.notif.frame_pending {
-            return;
-        }
-        self.notif.frame_pending = true;
-        if self.notif.last.is_none() {
-            self.notif.last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.notif.frame_pending = false;
-                app.tick_notif();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.notif.frame_pending, &mut a.notif.last), App::tick_notif);
     }
 
     /// Advance both morph progresses one frame; width, crossfade, and height all

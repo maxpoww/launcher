@@ -64,14 +64,41 @@ Bug found on the way (fixed, the one visible change): **notification avatars
 were black squares on every GL machine** (MacBook, ASUS). A one-layer texture
 array is a plain 2D texture to wgpu's GL backend. Padded to two layers.
 
+## Round 2 (same day)
+
+On top of `main` with the modules work (`cb7c07c`), same method, baseline =
+that commit's own build:
+
+- **Pipelines, font system, glyph-image cache** built once for all surfaces
+  (was once per renderer). RSS after the same exercise 125 → 94 MB; first
+  adapter → all surfaces up 3.6 → 2.7 s cold.
+- **Icon array grows on demand** (GPU-side copy, steps of 16) instead of
+  reserving 113 empty layers. Dock GPU memory at rest 190 → 160 MB; it
+  grows back toward the old size only once thumbnails or minimized windows
+  need the far layers.
+- **`reply_json`**: 26 Hyprland readers share one parse per query per turn.
+- **`schedule_tick`**: the nine identical frame schedulers are one (−100
+  lines).
+
+Verified on the Acer: 8 states + Recycle Bin box pixel-identical, the 14
+deep scenarios (suspend, scale, fullscreen, overview/spread, stage, minimize,
+workspaces, lock, notifications, clipboard, dpms, dock kill, compositor
+crash), window memory (move/close/reopen). GL path (MacBook): launcher,
+minimized thumbnail and icons after a growth are correct.
+
+Looked at and deliberately NOT merged: the 14 XDG path lookups (they differ
+in empty-variable and fallback handling — a merge can move a path for no
+gain) and the duplicated ease/lerp helpers (the copies skip `reduce_motion`;
+unifying them changes behaviour for reduce-motion users — a decision).
+
 ## Still duplicated — candidates, in the order I would take them
 
 | # | What | Gain | Risk |
 |---|---|---|---|
 | 1 | The 800 ms zone poll exists only because float moves emit no Hyprland event. The plugin already sees drags: one "geometry changed" verb from it removes the last idle timer (5.6 requests/s → 0). | idle → ~0 | plugin code (a crash there is the session) |
-| 2 | The dock's icon array reserves 113 empty layers (~39 MB of GPU memory): file thumbnails, minimized windows, search hits. Grow on demand. | −30 MB | medium (layer indices) |
-| 3 | Pipelines, shaders, glyph atlas and font system are still built once per renderer on the shared device. Share them. | faster start, a few MB | medium |
-| 4 | `j/clients` is parsed by hand in 17 places, `j/activewindow` in 8 (`hypr.rs`). One typed snapshot struct, callers become filters. | −250 lines | low, but a wide diff |
+| 2 | ~~Icon array reserve~~ — done in round 2. | | |
+| 3 | ~~Pipelines, font system~~ — done in round 2 (the glyph ATLAS is still per renderer). | | |
+| 4 | ~~Hyprland readers~~ — one shared parse in round 2; typed structs instead of `serde_json::Value` remain possible. | | |
 | 5 | Media (1 s) and Bluetooth (3 s) are polled over D-Bus; both have signals. | brain idle → ~0 | medium (progress bar timing) |
 | 6 | `schedule_*_frame` is copied 9 times; XDG path helpers 14 times; `lerp` ×3; the exp-approach ease ×5 (the copies skip `reduce_motion` — an accessibility bug). | simpler | low |
 | 7 | The OPTIONS surface is always 510 px tall for a 28 px bar: its swapchain and scene texture are ~18× the visible strip. | −30 MB | high (surface sizing is a non-negotiable) |

@@ -4500,21 +4500,7 @@ impl App {
     }
 
     pub(crate) fn schedule_clip_frame(&mut self) {
-        if self.clip.frame_pending {
-            return;
-        }
-        self.clip.frame_pending = true;
-        if self.clip.last.is_none() {
-            self.clip.last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.clip.frame_pending = false;
-                app.tick_clip();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.clip.frame_pending, &mut a.clip.last), App::tick_clip);
     }
 
     /// Advance the peek morph one frame; the pill width and preview fade derive

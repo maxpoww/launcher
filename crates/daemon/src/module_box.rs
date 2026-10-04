@@ -13,9 +13,8 @@
 //! time — only what sits under the divider differs. Split this way on
 //! 2026-09-13, when the empty-space module asked for the second box.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use calloop::timer::{TimeoutAction, Timer};
 
 use crate::animation::{ease_toward, settle_t, MORPH_RATE, SETTLE_PX};
 use crate::content::{Label, Rect, RectInst, Scene};
@@ -57,21 +56,7 @@ impl App {
     }
 
     fn schedule_module_box_frame(&mut self) {
-        if self.module_box_frame_pending {
-            return;
-        }
-        self.module_box_frame_pending = true;
-        if self.module_box_last.is_none() {
-            self.module_box_last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.module_box_frame_pending = false;
-                app.tick_module_box();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.module_box_frame_pending, &mut a.module_box_last), App::tick_module_box);
     }
 
     fn tick_module_box(&mut self) {

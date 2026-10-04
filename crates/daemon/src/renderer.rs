@@ -116,7 +116,59 @@ struct SharedGpu {
     queue: wgpu::Queue,
 }
 
+type SharedFonts = std::rc::Rc<std::cell::RefCell<FontSystem>>;
+type SharedSwash = std::rc::Rc<std::cell::RefCell<SwashCache>>;
+
 thread_local! {
+    static SHARED_TEXT: std::cell::RefCell<Option<(SharedFonts, SharedSwash)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The one font system (and glyph-image cache) every renderer shapes and
+/// rasterises with. Each renderer used to build its own: the monospace faces
+/// parsed three times at start, and the same strings shaped and rasterised
+/// into three separate caches (the panel's pills are drawn by the dock AND
+/// by the OPTIONS bar).
+fn shared_text() -> (SharedFonts, SharedSwash) {
+    SHARED_TEXT.with(|t| {
+        t.borrow_mut()
+            .get_or_insert_with(|| {
+                let fonts = FontSystem::new_with_locale_and_db(
+                    crate::font_index::locale(),
+                    crate::font_index::database(),
+                );
+                (
+                    std::rc::Rc::new(std::cell::RefCell::new(fonts)),
+                    std::rc::Rc::new(std::cell::RefCell::new(SwashCache::new())),
+                )
+            })
+            .clone()
+    })
+}
+
+/// Everything a renderer draws WITH that does not depend on its surface's
+/// size: built once on the shared device for one surface format.
+#[derive(Clone)]
+struct Pipelines {
+    format: wgpu::TextureFormat,
+    globals_layout: wgpu::BindGroupLayout,
+    shadow_pipeline: wgpu::RenderPipeline,
+    rect_pipeline: wgpu::RenderPipeline,
+    icon_pipeline: wgpu::RenderPipeline,
+    icon_bind_layout: wgpu::BindGroupLayout,
+    icon_sampler: wgpu::Sampler,
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_layout: wgpu::BindGroupLayout,
+    blit_sampler: wgpu::Sampler,
+    box_backdrop_pipeline: wgpu::RenderPipeline,
+    box_erase_pipeline: wgpu::RenderPipeline,
+    blur_pipeline_h: wgpu::RenderPipeline,
+    blur_pipeline_v: wgpu::RenderPipeline,
+}
+
+thread_local! {
+    static SHARED_PIPELINES: std::cell::RefCell<Option<Pipelines>> =
+        const { std::cell::RefCell::new(None) };
     /// Renderers live on the event loop's thread; so does the GPU they share.
     static SHARED_GPU: std::cell::RefCell<Option<SharedGpu>> =
         const { std::cell::RefCell::new(None) };
@@ -188,9 +240,14 @@ pub struct Renderer {
     /// dynamic package icons; layer count includes the reserved tail.
     icon_texture: Option<wgpu::Texture>,
     icon_layer_count: u32,
+    /// The most layers the array may grow to (its content + the reserved
+    /// tail).
+    icon_layer_cap: u32,
 
-    font_system: FontSystem,
-    swash: SwashCache,
+    /// The shell's ONE font system and glyph-image cache (see
+    /// [`shared_text`]): the same on every renderer.
+    font_system: SharedFonts,
+    swash: SharedSwash,
     text_viewport: Viewport,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
@@ -305,8 +362,8 @@ impl Renderer {
             );
             Some((surface, g.adapter, g.device, g.queue))
         });
-        let (surface, adapter, device, queue) = if let Some(reuse) = reuse {
-            reuse
+        let (surface, adapter, device, queue, on_shared_gpu) = if let Some(reuse) = reuse {
+            (reuse.0, reuse.1, reuse.2, reuse.3, true)
         } else {
             const ATTEMPTS: [(wgpu::Backends, bool, &str); 3] = [
                 // What we want: a real GPU on Vulkan. Vulkan ALONE: asking for
@@ -427,7 +484,7 @@ impl Renderer {
             .context("wgpu device request failed")?;
             let live_instance =
                 _live_instance.ok_or_else(|| anyhow!("the chosen adapter has no instance"))?;
-            SHARED_GPU.with(|g| {
+            let shared = SHARED_GPU.with(|g| {
                 let mut g = g.borrow_mut();
                 // A renderer that could not use the shared device keeps its
                 // own; the shared one stays what the others draw on.
@@ -438,9 +495,12 @@ impl Renderer {
                         device: device.clone(),
                         queue: queue.clone(),
                     });
+                    true
+                } else {
+                    false
                 }
             });
-            (surface, adapter, device, queue)
+            (surface, adapter, device, queue, shared)
         };
         let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
         // Only a software adapter gets the fixed throttle: every frame there
@@ -527,19 +587,454 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("waverunner.globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        // Shaders, pipelines, layouts and samplers: built ONCE per GPU device
+        // and format ([`Pipelines`]); every later renderer on the shared
+        // device clones the handles instead of compiling the same five
+        // shaders and eight pipelines again.
+        let format = config.format;
+        let cached = SHARED_PIPELINES
+            .with(|p| p.borrow().clone())
+            .filter(|p| on_shared_gpu && p.format == format);
+        let pipes = match cached {
+            Some(pipes) => pipes,
+            None => {
+                let globals_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("waverunner.globals"),
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        }],
+                    });
+                let blend = wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                };
+                let target = [Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })];
+
+                // Top-edge shadow pipeline (instanced gradient bands). Shares the
+                // globals bind group and premultiplied blend target with the rects.
+                let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("waverunner.edge_shadow"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        include_str!("shaders/edge_shadow.wgsl").into(),
+                    ),
+                });
+                let shadow_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("waverunner.shadow"),
+                        bind_group_layouts: &[&globals_layout],
+                        push_constant_ranges: &[],
+                    });
+                let shadow_pipeline =
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("waverunner.shadow"),
+                        layout: Some(&shadow_layout),
+                        vertex: wgpu::VertexState {
+                            module: &shadow_shader,
+                            entry_point: Some("vs_main"),
+                            compilation_options: Default::default(),
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<ShadowInstance>() as u64,
+                                step_mode: wgpu::VertexStepMode::Instance,
+                                attributes: &wgpu::vertex_attr_array![
+                                    0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
+                                    3 => Float32, 4 => Float32, 5 => Float32x4
+                                ],
+                            }],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shadow_shader,
+                            entry_point: Some("fs_main"),
+                            compilation_options: Default::default(),
+                            targets: &target,
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleStrip,
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                        cache: None,
+                    });
+
+                // Rounded-rect pipeline (instanced SDF quads).
+                let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("waverunner.rounded_rect"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        include_str!("shaders/rounded_rect.wgsl").into(),
+                    ),
+                });
+                let rect_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("waverunner.rect"),
+                    bind_group_layouts: &[&globals_layout],
+                    push_constant_ranges: &[],
+                });
+                let rect_pipeline =
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("waverunner.rect"),
+                        layout: Some(&rect_layout),
+                        vertex: wgpu::VertexState {
+                            module: &rect_shader,
+                            entry_point: Some("vs_main"),
+                            compilation_options: Default::default(),
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<RectInstance>() as u64,
+                                step_mode: wgpu::VertexStepMode::Instance,
+                                attributes: &wgpu::vertex_attr_array![
+                                    0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
+                                    4 => Float32, 5 => Float32
+                                ],
+                            }],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &rect_shader,
+                            entry_point: Some("fs_main"),
+                            compilation_options: Default::default(),
+                            targets: &target,
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleStrip,
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                        cache: None,
+                    });
+
+                // Icon pipeline (instanced textured quads over a texture array).
+                let icon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("waverunner.icon"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("shaders/icon.wgsl").into()),
+                });
+                let icon_bind_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("waverunner.icons"),
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float {
+                                        filterable: true,
+                                    },
+                                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                                count: None,
+                            },
+                        ],
+                    });
+                let icon_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("waverunner.icon"),
+                    bind_group_layouts: &[&globals_layout, &icon_bind_layout],
+                    push_constant_ranges: &[],
+                });
+                let icon_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("waverunner.icon"),
+                    layout: Some(&icon_layout),
+                    vertex: wgpu::VertexState {
+                        module: &icon_shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<IconInstance>() as u64,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &wgpu::vertex_attr_array![
+                                0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32,
+                                5 => Float32x4
+                            ],
+                        }],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &icon_shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &target,
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                });
+                let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("waverunner.icons"),
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    // Trilinear across the mip chain so minified icons (the small
+                    // size level, and magnification transitions) stay clean.
+                    mipmap_filter: wgpu::FilterMode::Linear,
+                    ..Default::default()
+                });
+
+                // Blit pipeline: copies the offscreen scene texture to the screen
+                // (and, later, samples the blurred copy for the box backdrop).
+                let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("waverunner.blit"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+                });
+                let blit_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("waverunner.blit"),
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float {
+                                        filterable: true,
+                                    },
+                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                                count: None,
+                            },
+                        ],
+                    });
+                let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("waverunner.blit"),
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    ..Default::default()
+                });
+                let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("waverunner.blit"),
+                    bind_group_layouts: &[&blit_layout],
+                    push_constant_ranges: &[],
+                });
+                // Replace blend: write the (premultiplied) source pixels verbatim.
+                let blit_target = [Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })];
+                let blit_pipeline =
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("waverunner.blit"),
+                        layout: Some(&blit_pl),
+                        vertex: wgpu::VertexState {
+                            module: &blit_shader,
+                            entry_point: Some("vs_main"),
+                            compilation_options: Default::default(),
+                            buffers: &[],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &blit_shader,
+                            entry_point: Some("fs_main"),
+                            compilation_options: Default::default(),
+                            targets: &blit_target,
+                        }),
+                        primitive: wgpu::PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                        cache: None,
+                    });
+                // Box frosted backdrop: samples/blurs the scene texture over the box
+                // region, premultiplied "over" blend (same as the scene pipelines).
+                let backdrop_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("waverunner.box-backdrop"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        include_str!("shaders/box_backdrop.wgsl").into(),
+                    ),
+                });
+                let backdrop_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("waverunner.box-backdrop"),
+                    bind_group_layouts: &[&blit_layout],
+                    push_constant_ranges: &[],
+                });
+                let box_backdrop_pipeline =
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("waverunner.box-backdrop"),
+                        layout: Some(&backdrop_pl),
+                        vertex: wgpu::VertexState {
+                            module: &backdrop_shader,
+                            entry_point: Some("vs_main"),
+                            compilation_options: Default::default(),
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
+                                step_mode: wgpu::VertexStepMode::Instance,
+                                attributes: &wgpu::vertex_attr_array![
+                                    0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
+                                ],
+                            }],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &backdrop_shader,
+                            entry_point: Some("fs_main"),
+                            compilation_options: Default::default(),
+                            targets: &target,
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleStrip,
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                        cache: None,
+                    });
+
+                // Box erase: multiplies the box region by (1 - coverage) so the
+                // backdrop fill replaces the sharp base rather than stacking on it.
+                let erase_blend = wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Zero,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Zero,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                };
+                let erase_target = [Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(erase_blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })];
+                let box_erase_pipeline =
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("waverunner.box-erase"),
+                        layout: Some(&backdrop_pl),
+                        vertex: wgpu::VertexState {
+                            module: &backdrop_shader,
+                            entry_point: Some("vs_main"),
+                            compilation_options: Default::default(),
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
+                                step_mode: wgpu::VertexStepMode::Instance,
+                                attributes: &wgpu::vertex_attr_array![
+                                    0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
+                                ],
+                            }],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &backdrop_shader,
+                            entry_point: Some("fs_erase"),
+                            compilation_options: Default::default(),
+                            targets: &erase_target,
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleStrip,
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                        cache: None,
+                    });
+
+                let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("waverunner.blur"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
+                });
+                // Replace-blend (overwrite the target); both passes share the layout.
+                let blur_target = [Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })];
+                let make_blur_pipeline = |entry: &str| {
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("waverunner.blur"),
+                        layout: Some(&blit_pl),
+                        vertex: wgpu::VertexState {
+                            module: &blur_shader,
+                            entry_point: Some("vs_main"),
+                            compilation_options: Default::default(),
+                            buffers: &[],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &blur_shader,
+                            entry_point: Some(entry),
+                            compilation_options: Default::default(),
+                            targets: &blur_target,
+                        }),
+                        primitive: wgpu::PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                        cache: None,
+                    })
+                };
+                let blur_pipeline_h = make_blur_pipeline("fs_horizontal");
+                let blur_pipeline_v = make_blur_pipeline("fs_vertical");
+                let built = Pipelines {
+                    format,
+                    globals_layout,
+                    shadow_pipeline,
+                    rect_pipeline,
+                    icon_pipeline,
+                    icon_bind_layout,
+                    icon_sampler,
+                    blit_pipeline,
+                    blit_layout,
+                    blit_sampler,
+                    box_backdrop_pipeline,
+                    box_erase_pipeline,
+                    blur_pipeline_h,
+                    blur_pipeline_v,
+                };
+                if on_shared_gpu {
+                    SHARED_PIPELINES.with(|p| *p.borrow_mut() = Some(built.clone()));
+                }
+                built
+            }
+        };
+        let Pipelines {
+            format: _,
+            globals_layout,
+            shadow_pipeline,
+            rect_pipeline,
+            icon_pipeline,
+            icon_bind_layout,
+            icon_sampler,
+            blit_pipeline,
+            blit_layout,
+            blit_sampler,
+            box_backdrop_pipeline,
+            box_erase_pipeline,
+            blur_pipeline_h,
+            blur_pipeline_v,
+        } = pipes;
         let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("waverunner.globals"),
             layout: &globals_layout,
@@ -549,246 +1044,6 @@ impl Renderer {
             }],
         });
 
-        let blend = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-        };
-        let target = [Some(wgpu::ColorTargetState {
-            format: config.format,
-            blend: Some(blend),
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-
-        // Top-edge shadow pipeline (instanced gradient bands). Shares the
-        // globals bind group and premultiplied blend target with the rects.
-        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("waverunner.edge_shadow"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/edge_shadow.wgsl").into()),
-        });
-        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("waverunner.shadow"),
-            bind_group_layouts: &[&globals_layout],
-            push_constant_ranges: &[],
-        });
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waverunner.shadow"),
-            layout: Some(&shadow_layout),
-            vertex: wgpu::VertexState {
-                module: &shadow_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ShadowInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
-                        3 => Float32, 4 => Float32, 5 => Float32x4
-                    ],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shadow_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &target,
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        // Rounded-rect pipeline (instanced SDF quads).
-        let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("waverunner.rounded_rect"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/rounded_rect.wgsl").into()),
-        });
-        let rect_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("waverunner.rect"),
-            bind_group_layouts: &[&globals_layout],
-            push_constant_ranges: &[],
-        });
-        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waverunner.rect"),
-            layout: Some(&rect_layout),
-            vertex: wgpu::VertexState {
-                module: &rect_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<RectInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
-                        4 => Float32, 5 => Float32
-                    ],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &rect_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &target,
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        // Icon pipeline (instanced textured quads over a texture array).
-        let icon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("waverunner.icon"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/icon.wgsl").into()),
-        });
-        let icon_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("waverunner.icons"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let icon_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("waverunner.icon"),
-            bind_group_layouts: &[&globals_layout, &icon_bind_layout],
-            push_constant_ranges: &[],
-        });
-        let icon_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waverunner.icon"),
-            layout: Some(&icon_layout),
-            vertex: wgpu::VertexState {
-                module: &icon_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<IconInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32,
-                        5 => Float32x4
-                    ],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &icon_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &target,
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("waverunner.icons"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            // Trilinear across the mip chain so minified icons (the small
-            // size level, and magnification transitions) stay clean.
-            mipmap_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        // Blit pipeline: copies the offscreen scene texture to the screen
-        // (and, later, samples the blurred copy for the box backdrop).
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("waverunner.blit"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
-        });
-        let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("waverunner.blit"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("waverunner.blit"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("waverunner.blit"),
-            bind_group_layouts: &[&blit_layout],
-            push_constant_ranges: &[],
-        });
-        // Replace blend: write the (premultiplied) source pixels verbatim.
-        let blit_target = [Some(wgpu::ColorTargetState {
-            format: config.format,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waverunner.blit"),
-            layout: Some(&blit_pl),
-            vertex: wgpu::VertexState {
-                module: &blit_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blit_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &blit_target,
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
         let (scene_tex, scene_view, blit_bind) = make_scene_target(
             &device,
             config.format,
@@ -798,144 +1053,11 @@ impl Renderer {
             &blit_sampler,
         );
 
-        // Box frosted backdrop: samples/blurs the scene texture over the box
-        // region, premultiplied "over" blend (same as the scene pipelines).
-        let backdrop_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("waverunner.box-backdrop"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/box_backdrop.wgsl").into()),
-        });
-        let backdrop_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("waverunner.box-backdrop"),
-            bind_group_layouts: &[&blit_layout],
-            push_constant_ranges: &[],
-        });
-        let box_backdrop_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("waverunner.box-backdrop"),
-                layout: Some(&backdrop_pl),
-                vertex: wgpu::VertexState {
-                    module: &backdrop_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![
-                            0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
-                        ],
-                    }],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &backdrop_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &target,
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
-
-        // Box erase: multiplies the box region by (1 - coverage) so the
-        // backdrop fill replaces the sharp base rather than stacking on it.
-        let erase_blend = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::Zero,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::Zero,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-        };
-        let erase_target = [Some(wgpu::ColorTargetState {
-            format: config.format,
-            blend: Some(erase_blend),
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        let box_erase_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waverunner.box-erase"),
-            layout: Some(&backdrop_pl),
-            vertex: wgpu::VertexState {
-                module: &backdrop_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
-                    ],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &backdrop_shader,
-                entry_point: Some("fs_erase"),
-                compilation_options: Default::default(),
-                targets: &erase_target,
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("waverunner.blur"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
-        });
-        // Replace-blend (overwrite the target); both passes share the layout.
-        let blur_target = [Some(wgpu::ColorTargetState {
-            format: config.format,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        let make_blur_pipeline = |entry: &str| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("waverunner.blur"),
-                layout: Some(&blit_pl),
-                vertex: wgpu::VertexState {
-                    module: &blur_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &blur_shader,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    targets: &blur_target,
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            })
-        };
-        let blur_pipeline_h = make_blur_pipeline("fs_horizontal");
-        let blur_pipeline_v = make_blur_pipeline("fs_vertical");
-
         // Text stack (glyphon).
         // One font database for every renderer, remembered between runs
         // (crate::font_index): the cold scan was the slowest part of a start
         // on a spinning disk.
-        let font_system = FontSystem::new_with_locale_and_db(
-            crate::font_index::locale(),
-            crate::font_index::database(),
-        );
-        let swash = SwashCache::new();
+        let (font_system, swash) = shared_text();
         let text_cache = TextCache::new(&device);
         let text_viewport = Viewport::new(&device, &text_cache);
         let mut text_atlas = TextAtlas::new(&device, &queue, &text_cache, format);
@@ -976,6 +1098,7 @@ impl Renderer {
             icon_bind: None,
             icon_texture: None,
             icon_layer_count: 0,
+            icon_layer_cap: 0,
             font_system,
             swash,
             text_viewport,
@@ -1071,24 +1194,22 @@ impl Renderer {
         reserved: usize,
         chains: impl Iterator<Item = &'a Vec<u8>>,
     ) {
-        // Never ONE layer: the same GLES guess (below) makes a one-layer
-        // array a plain 2D texture, the `texture_2d_array` sampler reads
-        // black — the OPTIONS bar's array with a single notification avatar
-        // showed a black square on the GL machines (MacBook, found by the
-        // night's pixel diff, 2026-10-04). A second, empty layer costs 349 KB.
-        let mut layers = (count + reserved).max(2) as u32;
-        // wgpu's GLES backend cannot see our explicit D2Array view dimension
-        // and GUESSES it from the layer count: depth==6 → Cube, depth>6 &&
-        // depth%6==0 → CubeArray. When our icon atlas lands on 6 or a
-        // multiple of 6 layers it gets bound as a cubemap and the sampler
-        // reads black — the transient "app icons go black" bug on the
-        // GL-backend Haswell (Golem #42; the count shifts with app/pending
-        // counts, so icons render fine until a rescan hits a multiple of 6).
-        // One empty pad layer dodges every bad count; harmless on Vulkan.
-        if layers == 6 || (layers > 6 && layers.is_multiple_of(6)) {
-            layers += 1;
+        // The RESERVED layers are not allocated up front: they are the
+        // dock's slots for search hits, pending installs, file thumbnails and
+        // minimized windows — 113 layers, ~39 MB of GPU memory, mostly never
+        // written. The array is made for what it holds and grows when a
+        // reserved layer is first written ([`Self::update_icon_layer`]).
+        let layers = icon_layers(count);
+        self.icon_layer_cap = icon_layers(count + reserved);
+        let texture = self.create_icon_texture(layers);
+        for (i, chain) in chains.enumerate() {
+            write_icon_chain(&self.queue, &texture, i as u32, chain);
         }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        self.bind_icon_texture(texture, layers);
+    }
+
+    fn create_icon_texture(&self, layers: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("waverunner.icons"),
             size: wgpu::Extent3d {
                 width: ICON_SIZE,
@@ -1099,12 +1220,14 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
-        });
-        for (i, chain) in chains.enumerate() {
-            write_icon_chain(&self.queue, &texture, i as u32, chain);
-        }
+        })
+    }
+
+    fn bind_icon_texture(&mut self, texture: wgpu::Texture, layers: u32) {
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -1125,6 +1248,44 @@ impl Renderer {
         }));
         self.icon_layer_count = layers;
         self.icon_texture = Some(texture);
+    }
+
+    /// Make the icon array hold at least `need` layers (within its cap),
+    /// keeping what is in it: the old layers are copied on the GPU.
+    fn grow_icon_array(&mut self, need: u32) {
+        let Some(old) = self.icon_texture.take() else {
+            return;
+        };
+        let had = self.icon_layer_count;
+        // A step at a time, not a layer at a time: one copy per burst of
+        // new thumbnails rather than one per thumbnail.
+        let layers = icon_layers(need.max(had + ICON_GROW_STEP) as usize).min(self.icon_layer_cap);
+        let texture = self.create_icon_texture(layers);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("waverunner.icons-grow"),
+            });
+        for mip in 0..ICON_MIPS {
+            let size = (ICON_SIZE >> mip).max(1);
+            let at = |texture| wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: mip,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            };
+            encoder.copy_texture_to_texture(
+                at(&old),
+                at(&texture),
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: had,
+                },
+            );
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.bind_icon_texture(texture, layers);
     }
 
     /// Width in pixels of `text` shaped at `font_px` — the same family
@@ -1168,16 +1329,16 @@ impl Renderer {
         if text.is_empty() {
             return 0.0;
         }
-        let mut buffer =
-            TextBuffer::new(&mut self.font_system, Metrics::new(font_px, font_px * 1.3));
+        let mut font_system = self.font_system.borrow_mut();
+        let mut buffer = TextBuffer::new(&mut font_system, Metrics::new(font_px, font_px * 1.3));
         let (fam, weight) = resolve_family(family);
         buffer.set_text(
-            &mut self.font_system,
+            &mut font_system,
             text,
             Attrs::new().family(fam).weight(weight),
             Shaping::Advanced,
         );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.shape_until_scroll(&mut font_system, false);
         buffer
             .layout_runs()
             .map(|run| run.line_w)
@@ -1188,12 +1349,18 @@ impl Renderer {
     /// the reserved tail of the array). Out-of-range layers and missing
     /// textures are ignored — a rescan re-uploads shortly anyway.
     pub fn update_icon_layer(&mut self, layer: u32, pixels: &[u8]) {
+        if self.icon_texture.is_none() {
+            return;
+        }
+        if layer >= self.icon_layer_cap || pixels.len() != ICON_CHAIN_BYTES {
+            return;
+        }
+        if layer >= self.icon_layer_count {
+            self.grow_icon_array(layer + 1);
+        }
         let Some(texture) = &self.icon_texture else {
             return;
         };
-        if layer >= self.icon_layer_count || pixels.len() != ICON_CHAIN_BYTES {
-            return;
-        }
         write_icon_chain(&self.queue, texture, layer, pixels);
     }
 
@@ -1406,16 +1573,19 @@ impl Renderer {
         };
         let mut fresh: Vec<TextBuffer> = Vec::new();
         let mut fresh_of: Vec<Option<usize>> = Vec::with_capacity(all_labels.len());
+        let font_system = self.font_system.clone();
+        let mut font_system = font_system.borrow_mut();
+        let swash = self.swash.clone();
+        let mut swash = swash.borrow_mut();
         for (label, _) in &all_labels {
             if label.cache {
                 let key = label_key(label);
-                if !self.label_cache.contains_key(&key) {
-                    let buffer = shape(&mut self.font_system, label);
-                    self.label_cache.insert(key, buffer);
-                }
+                self.label_cache
+                    .entry(key)
+                    .or_insert_with(|| shape(&mut font_system, label));
                 fresh_of.push(None);
             } else {
-                fresh.push(shape(&mut self.font_system, label));
+                fresh.push(shape(&mut font_system, label));
                 fresh_of.push(Some(fresh.len() - 1));
             }
         }
@@ -1495,11 +1665,11 @@ impl Renderer {
             .prepare(
                 &self.device,
                 &self.queue,
-                &mut self.font_system,
+                &mut font_system,
                 &mut self.text_atlas,
                 &self.text_viewport,
                 areas,
-                &mut self.swash,
+                &mut swash,
             )
             .context("glyphon prepare failed")?;
 
@@ -1756,6 +1926,30 @@ impl Renderer {
 /// `write_texture` per mip level. Chains are produced by
 /// [`crate::apps::with_mips`], so the levels are contiguous and match the
 /// texture's `ICON_MIPS`.
+/// Layers an icon array grows by when a reserved layer is first needed.
+const ICON_GROW_STEP: u32 = 16;
+
+/// The layer count to ALLOCATE for `count` icons, around two guesses of
+/// wgpu's GLES backend, which cannot see our explicit D2Array view dimension
+/// and guesses the texture's kind from its layer count:
+/// - ONE layer is a plain 2D texture, and the `texture_2d_array` sampler
+///   reads black — the OPTIONS bar's array with a single notification avatar
+///   showed a black square on the GL machines (MacBook, 2026-10-04);
+/// - 6 layers is a Cube, and a multiple of 6 above it a CubeArray — the
+///   transient "app icons go black" bug on the GL-backend Haswell (Golem
+///   #42; the count shifts with app/pending counts, so icons rendered fine
+///   until a rescan hit a multiple of 6).
+///
+/// A pad layer dodges each; harmless on Vulkan.
+fn icon_layers(count: usize) -> u32 {
+    let layers = count.max(2) as u32;
+    if layers == 6 || (layers > 6 && layers.is_multiple_of(6)) {
+        layers + 1
+    } else {
+        layers
+    }
+}
+
 fn write_icon_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, chain: &[u8]) {
     let mut offset = 0usize;
     let mut size = ICON_SIZE;
