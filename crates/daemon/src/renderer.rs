@@ -170,12 +170,11 @@ pub struct Renderer {
     /// Separable-Gaussian blur ping-pong: scene → `blur_a` (horizontal) →
     /// `blur_b` (vertical); the box backdrop samples `blur_b`. Rebuilt on
     /// resize.
-    blur_a_tex: wgpu::Texture,
-    blur_a_view: wgpu::TextureView,
-    blur_a_bind: wgpu::BindGroup,
-    blur_b_tex: wgpu::Texture,
-    blur_b_view: wgpu::TextureView,
-    blur_b_bind: wgpu::BindGroup,
+    ///
+    /// Only while a box is open: two full-surface textures per renderer sat
+    /// allocated for the life of the session, on surfaces (OPTIONS bar,
+    /// deck) whose scenes never open a box at all.
+    blur: Option<BlurTargets>,
     blur_pipeline_h: wgpu::RenderPipeline,
     blur_pipeline_v: wgpu::RenderPipeline,
 
@@ -202,6 +201,14 @@ pub struct Renderer {
     /// there are no phase jumps when the dock hides and reappears.
     anim_time: f32,
     last_render: Option<std::time::Instant>,
+}
+
+/// The blur ping-pong pair (see [`Renderer::blur`]).
+struct BlurTargets {
+    a_view: wgpu::TextureView,
+    a_bind: wgpu::BindGroup,
+    b_view: wgpu::TextureView,
+    b_bind: wgpu::BindGroup,
 }
 
 /// Build the offscreen scene colour target (texture + view + blit bind
@@ -880,23 +887,6 @@ impl Renderer {
             cache: None,
         });
 
-        // Separable-Gaussian blur ping-pong targets (frost the box backdrop).
-        let (blur_a_tex, blur_a_view, blur_a_bind) = make_scene_target(
-            &device,
-            config.format,
-            width,
-            height,
-            &blit_layout,
-            &blit_sampler,
-        );
-        let (blur_b_tex, blur_b_view, blur_b_bind) = make_scene_target(
-            &device,
-            config.format,
-            width,
-            height,
-            &blit_layout,
-            &blit_sampler,
-        );
         let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("waverunner.blur"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
@@ -973,12 +963,7 @@ impl Renderer {
             blit_bind,
             box_backdrop_pipeline,
             box_erase_pipeline,
-            blur_a_tex,
-            blur_a_view,
-            blur_a_bind,
-            blur_b_tex,
-            blur_b_view,
-            blur_b_bind,
+            blur: None,
             blur_pipeline_h,
             blur_pipeline_v,
             icon_pipeline,
@@ -1021,14 +1006,9 @@ impl Renderer {
         self.scene_tex = tex;
         self.scene_view = view;
         self.blit_bind = bind;
-        let (tex, view, bind) = rebuild(&self.device);
-        self.blur_a_tex = tex;
-        self.blur_a_view = view;
-        self.blur_a_bind = bind;
-        let (tex, view, bind) = rebuild(&self.device);
-        self.blur_b_tex = tex;
-        self.blur_b_view = view;
-        self.blur_b_bind = bind;
+        // The blur pair is rebuilt at the new size by the next frame that
+        // needs it.
+        self.blur = None;
     }
 
     /// Upload the icon texture array delivered by the indexer thread.
@@ -1608,18 +1588,41 @@ impl Renderer {
 
         // Blur passes (only when a box is open): scene → blur_a (horizontal)
         // → blur_b (vertical). Separable Gaussian for a smooth frost.
-        if backdrop_buf.is_some() {
+        if backdrop_buf.is_none() {
+            self.blur = None;
+        } else if self.blur.is_none() {
+            let (w, h) = (self.config.width, self.config.height);
+            let make = || {
+                make_scene_target(
+                    &self.device,
+                    self.config.format,
+                    w,
+                    h,
+                    &self.blit_layout,
+                    &self.blit_sampler,
+                )
+            };
+            let (_, a_view, a_bind) = make();
+            let (_, b_view, b_bind) = make();
+            self.blur = Some(BlurTargets {
+                a_view,
+                a_bind,
+                b_view,
+                b_bind,
+            });
+        }
+        if let Some(blur) = &self.blur {
             for (target_view, pipeline, src_bind, label) in [
                 (
-                    &self.blur_a_view,
+                    &blur.a_view,
                     &self.blur_pipeline_h,
                     &self.blit_bind,
                     "waverunner.blur-h",
                 ),
                 (
-                    &self.blur_b_view,
+                    &blur.b_view,
                     &self.blur_pipeline_v,
-                    &self.blur_a_bind,
+                    &blur.a_bind,
                     "waverunner.blur-v",
                 ),
             ] {
@@ -1667,9 +1670,9 @@ impl Renderer {
             // Frosted backdrop: erase the box region, then fill it with the
             // blurred (blur_b) scene — together a mix(base, blurred), so the
             // box keeps the base's translucency instead of going opaque.
-            if let Some(backdrop_buf) = &backdrop_buf {
+            if let (Some(backdrop_buf), Some(blur)) = (&backdrop_buf, &self.blur) {
                 pass.set_vertex_buffer(0, backdrop_buf.slice(..));
-                pass.set_bind_group(0, &self.blur_b_bind, &[]);
+                pass.set_bind_group(0, &blur.b_bind, &[]);
                 pass.set_pipeline(&self.box_erase_pipeline);
                 pass.draw(0..4, 0..1);
                 pass.set_pipeline(&self.box_backdrop_pipeline);
