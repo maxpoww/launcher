@@ -770,21 +770,7 @@ impl App {
     }
 
     fn schedule_stats_frame(&mut self) {
-        if self.stats.frame_pending {
-            return;
-        }
-        self.stats.frame_pending = true;
-        if self.stats.last.is_none() {
-            self.stats.last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.stats.frame_pending = false;
-                app.tick_stats();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.stats.frame_pending, &mut a.stats.last), App::tick_stats);
     }
 
     /// Advance the slide one frame — the same rate, and a settle measured

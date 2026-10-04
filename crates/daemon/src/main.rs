@@ -3136,6 +3136,32 @@ impl App {
 
     /// Queue the next reveal frame — 8 ms, the same cadence every other morph
     /// on this bar runs at, so the slide reads as the same material (§3).
+    /// The frame clock behind every OPTION animation: at most one pending
+    /// 8 ms timer per clock, which clears the flag and runs `tick`. `clock`
+    /// names the animation's own `frame_pending` flag and `last` instant
+    /// (seeded here so the first tick has a `dt`). Nine identical copies of
+    /// this lived beside their animations until 2026-10-04.
+    pub(crate) fn schedule_tick(
+        &mut self,
+        clock: fn(&mut App) -> (&mut bool, &mut Option<Instant>),
+        tick: fn(&mut App),
+    ) {
+        let (pending, last) = clock(self);
+        if *pending {
+            return;
+        }
+        *pending = true;
+        if last.is_none() {
+            *last = Some(Instant::now());
+        }
+        let timer = Timer::from_duration(Duration::from_millis(8));
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            *clock(app).0 = false;
+            tick(app);
+            TimeoutAction::Drop
+        });
+    }
+
     fn schedule_cava_frame(&mut self) {
         if self.cava_frame_pending {
             return;

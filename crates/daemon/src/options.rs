@@ -4725,21 +4725,7 @@ impl App {
     }
 
     fn schedule_options_show_frame(&mut self) {
-        if self.options_show.frame_pending {
-            return;
-        }
-        self.options_show.frame_pending = true;
-        if self.options_show.last.is_none() {
-            self.options_show.last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.options_show.frame_pending = false;
-                app.tick_options_show();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.options_show.frame_pending, &mut a.options_show.last), App::tick_options_show);
     }
 
     /// One frame of the bar's fade.
@@ -5595,21 +5581,7 @@ impl App {
     }
 
     fn schedule_options_lead_frame(&mut self) {
-        if self.options_lead.frame_pending {
-            return;
-        }
-        self.options_lead.frame_pending = true;
-        if self.options_lead.last.is_none() {
-            self.options_lead.last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.options_lead.frame_pending = false;
-                app.tick_options_lead();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.options_lead.frame_pending, &mut a.options_lead.last), App::tick_options_lead);
     }
 
     /// One frame of the ease home. The held group (if any) is skipped — its
@@ -5668,21 +5640,7 @@ impl App {
     }
 
     fn schedule_options_title_frame(&mut self) {
-        if self.options_title_meta.frame_pending {
-            return;
-        }
-        self.options_title_meta.frame_pending = true;
-        if self.options_title_meta.last.is_none() {
-            self.options_title_meta.last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.options_title_meta.frame_pending = false;
-                app.tick_options_title();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.options_title_meta.frame_pending, &mut a.options_title_meta.last), App::tick_options_title);
     }
 
     fn tick_options_title(&mut self) {
@@ -5741,21 +5699,7 @@ impl App {
     }
 
     fn schedule_options_ctrl_frame(&mut self) {
-        if self.options_ctrl.frame_pending {
-            return;
-        }
-        self.options_ctrl.frame_pending = true;
-        if self.options_ctrl.last.is_none() {
-            self.options_ctrl.last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.options_ctrl.frame_pending = false;
-                app.tick_options_ctrl();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.options_ctrl.frame_pending, &mut a.options_ctrl.last), App::tick_options_ctrl);
     }
 
     /// Advance the control-button reveal one frame and keep frames coming until
@@ -5880,21 +5824,7 @@ impl App {
     }
 
     fn schedule_options_clock_frame(&mut self) {
-        if self.options_clock_meta.frame_pending {
-            return;
-        }
-        self.options_clock_meta.frame_pending = true;
-        if self.options_clock_meta.last.is_none() {
-            self.options_clock_meta.last = Some(Instant::now());
-        }
-        let timer = Timer::from_duration(Duration::from_millis(8));
-        let _ = self
-            .loop_handle
-            .insert_source(timer, |_, _, app: &mut App| {
-                app.options_clock_meta.frame_pending = false;
-                app.tick_options_clock_meta();
-                TimeoutAction::Drop
-            });
+        self.schedule_tick(|a| (&mut a.options_clock_meta.frame_pending, &mut a.options_clock_meta.last), App::tick_options_clock_meta);
     }
 
     /// Advance the clock↔date metamorphosis one frame; the pill width and the
