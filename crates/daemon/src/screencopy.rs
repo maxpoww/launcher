@@ -1080,6 +1080,12 @@ impl App {
         if self.options_poll_pending || !self.config.options.enabled || self.screencopy.is_none() {
             return;
         }
+        // The zone poll (800 ms, whenever intellihide is on — the default)
+        // already re-evaluates both surfaces on every tick; a second timer
+        // doing the same 100 ms faster only doubled the idle work.
+        if self.zone_poll_running {
+            return;
+        }
         self.options_poll_pending = true;
         let timer = Timer::from_duration(POLL);
         let _ = self

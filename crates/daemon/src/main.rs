@@ -464,6 +464,7 @@ fn main() -> anyhow::Result<()> {
         capture_from_poll: false,
         capture_sampled: None,
         capture_trail_due: false,
+        zone_poll_running: false,
         options_burst_pending: false,
         options_capture_failing: false,
         screencopy,
@@ -985,9 +986,13 @@ fn main() -> anyhow::Result<()> {
                 // event); the bar colour-match runs its own self-healing poll
                 // (started from `reeval_options_bar`).
                 if app.config.input.intellihide {
-                    if let Err(e) = event_loop.handle().insert_source(
+                    match event_loop.handle().insert_source(
                         Timer::from_duration(ZONE_POLL_INTERVAL),
                         |_, _, app: &mut App| {
+                            // The colour-match's safety net rides this tick
+                            // (see `schedule_options_poll`): reap a capture
+                            // whose events never came, then re-evaluate.
+                            app.reap_stalled_capture();
                             // A timer, not news: the colour captures it
                             // starts may wait for the screen to change.
                             app.capture_from_poll = true;
@@ -996,7 +1001,10 @@ fn main() -> anyhow::Result<()> {
                             TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
                         },
                     ) {
-                        warn!("zone poll timer failed ({e}); intellihide is event-driven only");
+                        Ok(_) => app.zone_poll_running = true,
+                        Err(e) => {
+                            warn!("zone poll timer failed ({e}); intellihide is event-driven only")
+                        }
                     }
                 }
             }
@@ -1150,6 +1158,9 @@ pub struct App {
     /// A patient capture has delivered since the last immediate one: the
     /// screen was changing, and its last frame may not have been sampled.
     capture_trail_due: bool,
+    /// The steady zone poll is installed (intellihide): it re-evaluates the
+    /// colour-match on every tick, so the colour poll does not run as well.
+    zone_poll_running: bool,
     /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
     /// follow-up capture after a sample changed a colour).
     options_burst_pending: bool,
