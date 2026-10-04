@@ -1,0 +1,109 @@
+diff -ru a/wgpu-hal/src/lib.rs b/wgpu-hal/src/lib.rs
+--- a/wgpu-hal/src/lib.rs	2026-10-04 20:31:30.912724482 +0000
++++ b/wgpu-hal/src/lib.rs	2026-10-04 20:32:08.719398268 +0000
+@@ -203,6 +203,8 @@
+ //! [wiki-debug]: https://github.com/gfx-rs/wgpu/wiki/Debugging-wgpu-Applications
+ 
+ #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
++// GOLEM: a path dependency is not lint-capped; this lint is newer than the crate.
++#![allow(unknown_lints, mismatched_lifetime_syntaxes)]
+ #![allow(
+     // this happens on the GL backend, where it is both thread safe and non-thread safe in the same code.
+     clippy::arc_with_non_send_sync,
+@@ -250,6 +252,39 @@
+ pub mod vulkan;
+ 
+ pub mod auxil;
++
++/// GOLEM (waverunner): the part of the image the NEXT `present` changed.
++///
++/// wgpu has no way to say it, so every present told the compositor the whole
++/// surface had changed — and Hyprland re-blurred everything behind
++/// waverunner's (large, mostly transparent) layer surfaces on every frame of
++/// every animation. The renderer leaves the rectangles here right before it
++/// presents; the Vulkan backend hands them to `VK_KHR_incremental_present`
++/// (Mesa turns them into `wl_surface.damage_buffer`). Nothing set: the whole
++/// image, as before.
++pub mod present_damage {
++    use parking_lot::Mutex;
++
++    /// `[x, y, width, height]` in image pixels, origin top-left.
++    pub type Rect = [i32; 4];
++
++    static NEXT: Mutex<Option<Vec<Rect>>> = Mutex::new(None);
++
++    /// Say what the next present (on any surface) changed. An empty list
++    /// means "nothing set" — the whole image.
++    pub fn set_next(rects: Vec<Rect>) {
++        *NEXT.lock() = (!rects.is_empty()).then_some(rects);
++    }
++
++    /// Forget a damage that was set for a present that did not happen.
++    pub fn clear() {
++        *NEXT.lock() = None;
++    }
++
++    pub(crate) fn take() -> Option<Vec<Rect>> {
++        NEXT.lock().take()
++    }
++}
+ pub mod api {
+     #[cfg(dx12)]
+     pub use super::dx12::Api as Dx12;
+diff -ru a/wgpu-hal/src/vulkan/adapter.rs b/wgpu-hal/src/vulkan/adapter.rs
+--- a/wgpu-hal/src/vulkan/adapter.rs	2026-10-04 20:31:30.913181800 +0000
++++ b/wgpu-hal/src/vulkan/adapter.rs	2026-10-04 20:32:08.710413022 +0000
+@@ -901,6 +901,12 @@
+         // Require `VK_KHR_swapchain`
+         extensions.push(khr::swapchain::NAME);
+ 
++        // GOLEM: optional `VK_KHR_incremental_present`, so a present can say
++        // which part of the image changed (see `crate::present_damage`).
++        if self.supports_extension(khr::incremental_present::NAME) {
++            extensions.push(khr::incremental_present::NAME);
++        }
++
+         if self.device_api_version < vk::API_VERSION_1_1 {
+             // Require either `VK_KHR_maintenance1` or `VK_AMD_negative_viewport_height`
+             if self.supports_extension(khr::maintenance1::NAME) {
+diff -ru a/wgpu-hal/src/vulkan/mod.rs b/wgpu-hal/src/vulkan/mod.rs
+--- a/wgpu-hal/src/vulkan/mod.rs	2026-10-04 20:31:30.913634496 +0000
++++ b/wgpu-hal/src/vulkan/mod.rs	2026-10-04 20:32:08.710803230 +0000
+@@ -1295,6 +1295,37 @@
+             .image_indices(&image_indices)
+             .wait_semaphores(swapchain_semaphores.get_present_wait_semaphores());
+ 
++        // GOLEM: the damage the renderer left for this present, if any (see
++        // `crate::present_damage`).
++        let damage: Vec<vk::RectLayerKHR> = crate::present_damage::take()
++            .filter(|_| {
++                self.device
++                    .enabled_extensions
++                    .contains(&khr::incremental_present::NAME)
++            })
++            .map(|rects| {
++                rects
++                    .iter()
++                    .filter(|r| r[2] > 0 && r[3] > 0)
++                    .map(|r| vk::RectLayerKHR {
++                        offset: vk::Offset2D { x: r[0], y: r[1] },
++                        extent: vk::Extent2D {
++                            width: r[2] as u32,
++                            height: r[3] as u32,
++                        },
++                        layer: 0,
++                    })
++                    .collect()
++            })
++            .unwrap_or_default();
++        let regions = [vk::PresentRegionKHR::default().rectangles(&damage)];
++        let mut present_regions = vk::PresentRegionsKHR::default().regions(&regions);
++        let vk_info = if damage.is_empty() {
++            vk_info
++        } else {
++            vk_info.push_next(&mut present_regions)
++        };
++
+         let mut display_timing;
+         let present_times;
+         let vk_info = if let Some(present_time) = ssc.next_present_time.take() {

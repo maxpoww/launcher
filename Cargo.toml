@@ -8,6 +8,8 @@ members = [
     "crates/options-engine",
     "crates/options-notify",
 ]
+# Vendored crates carry their own lints and tests; they are not ours to check.
+exclude = ["third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -42,3 +44,8 @@ options-notify = { path = "crates/options-notify" }
 [profile.release]
 lto = "thin"
 strip = true
+
+# wgpu-hal 24.0.4 with ONE addition: a present can say what part of the image
+# changed (third_party/README.md, third_party/wgpu-hal.patch).
+[patch.crates-io]
+wgpu-hal = { path = "third_party/wgpu-hal" }

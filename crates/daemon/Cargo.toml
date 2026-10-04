@@ -43,6 +43,8 @@ wayland-backend = { version = "0.3", features = ["client_system"] }
 calloop = "0.13"
 calloop-wayland-source = "0.3"
 wgpu = "24"
+# Only for `wgpu_hal::present_damage` (the vendored copy: third_party/).
+wgpu-hal = "24"
 raw-window-handle = "0.6"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
