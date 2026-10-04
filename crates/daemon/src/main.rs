@@ -26,6 +26,7 @@ mod deck_thumbs;
 mod dict;
 mod display;
 mod dragging;
+mod drives;
 mod emoji;
 mod emoji_table;
 mod files;

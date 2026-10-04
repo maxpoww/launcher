@@ -301,8 +301,8 @@ pub(crate) struct Layout {
 #[derive(Debug, Clone, PartialEq)]
 enum FieldKind {
     Search,
-    /// The name of an app to open on the fast graphics card.
-    FastApp,
+    /// Something a machine page asked for (`gear_pages.rs`).
+    Page(crate::gear_pages::PField),
     Password {
         ssid: String,
         hidden: bool,
@@ -3004,9 +3004,9 @@ impl App {
                 });
                 self.close_gear_field();
             }
-            FieldKind::FastApp => {
-                self.pages_add_fast_app(&text);
+            FieldKind::Page(what) => {
                 self.close_gear_field();
+                self.pages_field_submit(what, f.text);
             }
             FieldKind::HiddenSsid => {
                 if text.is_empty() {
@@ -3076,14 +3076,21 @@ impl App {
         self.schedule_stats_frame();
     }
 
-    /// The field that asks which app opens on the fast graphics card.
-    pub(crate) fn gear_ask_app(&mut self) {
+    /// Ask a machine page's question in the footer field.
+    pub(crate) fn gear_ask(
+        &mut self,
+        what: crate::gear_pages::PField,
+        prompt: &str,
+        glyph: &'static str,
+        secret: bool,
+        text: String,
+    ) {
         self.open_gear_field(Field {
-            kind: FieldKind::FastApp,
-            text: String::new(),
-            prompt: "Name of the app".into(),
-            glyph: G_SEARCH,
-            secret: false,
+            kind: FieldKind::Page(what),
+            text,
+            prompt: prompt.to_owned(),
+            glyph,
+            secret,
             show: false,
         });
     }

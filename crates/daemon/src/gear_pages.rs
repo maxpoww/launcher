@@ -16,6 +16,7 @@ use std::process::{Child, Command, Stdio};
 
 use tracing::{info, warn};
 
+use crate::drives::{DriveCommand, DriveEvent, DriveHandle, Target};
 use crate::gear::{btn, Extra, Hit, Item, PageKind, Tone, Trail, View};
 use crate::sys::{
     AppUse, Disk, Drive, Junk, Live, Machine, SysCommand, SysEvent, SysHandle, SysPage,
@@ -45,6 +46,8 @@ const G_MORE: &str = "\u{f141}";
 const G_CHECK: &str = "\u{f00c}";
 const G_PLUS: &str = "\u{f067}";
 const G_WINDOW: &str = "\u{f2d0}";
+const G_FILM: &str = "\u{f008}";
+const G_PENCIL: &str = "\u{f040}";
 
 /// How many samples the processor and graphics graphs hold.
 pub(crate) const HIST_LEN: usize = 48;
@@ -100,7 +103,20 @@ pub(crate) enum SysHit {
     DoClean,
     Drive(usize),
     OpenDrive(usize),
-    Eject(String),
+    Eject(usize),
+    ExtMount(usize),
+    ExtCheck(usize),
+    ExtRename(usize),
+    ExtUnlock(usize),
+    ExtFormat(usize),
+    FormatFor(Target),
+    FormatLock,
+    FormatThorough,
+    FormatName,
+    AskFormat,
+    DoFormat,
+    CheckUpdates,
+    Video,
     AskErase,
     DoErase,
     StopErase,
@@ -117,6 +133,8 @@ enum PView {
     Folder(usize),
     Clean,
     Drive(usize),
+    Format(usize),
+    Video,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -149,11 +167,37 @@ pub(crate) struct PagesState {
     saver_from: Option<String>,
     /// Held while the lid is set to do nothing.
     lid_guard: Option<Child>,
+    drives: Option<DriveHandle>,
+    /// What is being done to a plugged-in drive right now.
+    drive_busy: Option<&'static str>,
+    /// How the last act on a drive ended, when it is worth a line.
+    drive_note: Option<(String, bool)>,
+    format: FormatDraft,
+}
+
+/// What the format view has been told so far.
+#[derive(Debug, Clone, Default)]
+struct FormatDraft {
+    name: String,
+    target: Target,
+    lock: bool,
+    thorough: bool,
+    password: String,
+}
+
+/// What a footer field on these pages is asking for.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PField {
+    FastApp,
+    DriveName(usize),
+    DrivePassword(usize),
+    FormatName,
+    FormatPassword,
 }
 
 impl PagesState {
     pub(crate) fn pins_box(&self) -> bool {
-        self.cleaning || matches!(self.erase, Erase::Running(_))
+        self.cleaning || self.drive_busy.is_some() || matches!(self.erase, Erase::Running(_))
     }
 }
 
@@ -631,6 +675,8 @@ impl App {
             (PView::Folder(i), _) => self.folder_view(*i),
             (PView::Clean, _) => self.clean_view(),
             (PView::Drive(i), _) => self.drive_view(*i),
+            (PView::Format(i), _) => self.format_view(*i),
+            (PView::Video, _) => self.video_view(),
             (PView::List, PageKind::Gear) => self.machine_view(),
             (PView::List, PageKind::Disk) => self.disk_view(),
             (PView::List, PageKind::Cpu) => self.cpu_view(),
@@ -1102,11 +1148,11 @@ impl App {
                 "Up to date",
                 p.live
                     .last_update_secs
-                    .map_or("Checks once a day".to_owned(), |s| {
-                        format!("Checked {} ago", span_text(s / 60))
+                    .map_or("Click to check now".to_owned(), |s| {
+                        format!("Checked {} ago. Click to check now", span_text(s / 60))
                     }),
                 Tone::Normal,
-                Hit::None,
+                sys(SysHit::CheckUpdates),
             )
         };
         let mut items = vec![
@@ -1279,6 +1325,24 @@ impl App {
                 Tone::Normal,
             ));
         }
+        if !p.machine.video.is_empty() {
+            let on_card = p.machine.video.iter().filter(|(_, ok)| *ok).count();
+            items.push(row_with(
+                row(
+                    Some(G_FILM),
+                    "Video playback",
+                    if on_card > 0 {
+                        "Decoded by the graphics card"
+                    } else {
+                        "Decoded by the processor"
+                    },
+                ),
+                sys(SysHit::Video),
+                Some((sys(SysHit::Video), G_MORE)),
+                Trail::None,
+                Tone::Normal,
+            ));
+        }
         let light = crate::display::GolemSettings::load().light_effects;
         items.push(head("Looks"));
         items.push(Item::Choice {
@@ -1435,22 +1499,15 @@ impl App {
             let kind = if x.rotational { "spinning disk" } else { "SSD" };
             if x.removable {
                 items.push(row_with(
-                    row(
-                        Some(G_USB),
-                        x.name.clone(),
-                        match x.free {
-                            Some(f) => format!("{} of {} free", size_text(f), size_text(x.size)),
-                            None => size_text(x.size),
-                        },
-                    ),
-                    if x.mount.is_some() {
-                        sys(SysHit::OpenDrive(i))
-                    } else {
-                        Hit::None
-                    },
-                    Some((sys(SysHit::Eject(x.dev.clone())), G_EJECT)),
+                    row(Some(G_USB), x.name.clone(), self.ext_status(x)),
+                    sys(SysHit::Drive(i)),
+                    Some((sys(SysHit::Eject(i)), G_EJECT)),
                     Trail::None,
-                    Tone::Normal,
+                    if p.drive_busy.is_some() {
+                        Tone::Busy
+                    } else {
+                        Tone::Normal
+                    },
                 ));
             } else {
                 let bad = x.failing == Some(true);
@@ -1552,7 +1609,12 @@ impl App {
             extra: Extra::None,
             rename: None,
         }];
-        for (j, bytes) in &p.disk.junk {
+        for (j, bytes) in p
+            .disk
+            .junk
+            .iter()
+            .filter(|(j, _)| *j != Junk::System || p.machine.has_system_clean)
+        {
             let (name, hint) = match j {
                 Junk::Trash => ("Trash", "Files you already threw away"),
                 Junk::Caches => ("App caches and thumbnails", "Apps rebuild them as needed"),
@@ -1561,6 +1623,10 @@ impl App {
                 }
                 Junk::Browser => ("Browser cache", "Pages load a little slower once"),
                 Junk::Store => ("Unused system files", "What no system version still needs"),
+                Junk::System => (
+                    "Old system versions and logs",
+                    "Keeps the last two, so you can still go back",
+                ),
             };
             items.push(Item::Toggle {
                 hit: sys(SysHit::Junk(*j)),
@@ -1615,8 +1681,11 @@ impl App {
     fn drive_view(&self, i: usize) -> View {
         let p = &self.gear.pages;
         let Some(x) = p.disk.drives.get(i) else {
-            return back_only(Vec::new());
+            return back_only(vec![Item::Empty("It was unplugged".into())]);
         };
+        if x.removable {
+            return self.ext_view(i, x);
+        }
         let mut items = vec![Item::Card {
             glyph: G_DISK,
             title: x.name.clone(),
@@ -1811,7 +1880,13 @@ impl App {
                 self.settings.gpu_fast.retain(|a| *a != id);
                 self.settings.save();
             }
-            SysHit::FastAdd => self.gear_ask_app(),
+            SysHit::FastAdd => self.gear_ask(
+                PField::FastApp,
+                "Name of the app",
+                G_PLUS,
+                false,
+                String::new(),
+            ),
             SysHit::Effects(light) => {
                 let mut s = crate::display::GolemSettings::load();
                 s.set_light_effects(light);
@@ -1878,7 +1953,6 @@ impl App {
                     self.set_stats_box(false);
                 }
             }
-            SysHit::Eject(dev) => self.sys_send(SysCommand::Eject(dev)),
             SysHit::AskErase => {
                 let hours = self
                     .gear
@@ -1905,6 +1979,7 @@ impl App {
                 self.sys_send(SysCommand::Erase(false));
                 self.update_stats_reveal();
             }
+            other => self.drive_click(other),
         }
     }
 
@@ -1916,7 +1991,7 @@ impl App {
     }
 
     /// The app named in the field joins the ones opened on the fast card.
-    pub(crate) fn pages_add_fast_app(&mut self, name: &str) {
+    fn pages_add_fast_app(&mut self, name: &str) {
         let q = name.trim().to_lowercase();
         if q.is_empty() {
             return;
@@ -1954,6 +2029,17 @@ impl App {
             "drive" => PView::Drive(0),
             "folder" => PView::Folder(0),
             "card" => PView::Card(0),
+            "video" => PView::Video,
+            "ext" | "format" => {
+                let Some(i) = self.gear.pages.disk.drives.iter().position(|d| d.removable) else {
+                    return false;
+                };
+                if what == "ext" {
+                    PView::Drive(i)
+                } else {
+                    PView::Format(i)
+                }
+            }
             "app" => match self.gear.pages.live.apps.iter().find(|a| !a.system) {
                 Some(a) => PView::App(a.key.clone()),
                 None => return false,
@@ -2037,5 +2123,513 @@ mod tests {
         assert_eq!(health_word(88), "Good");
         assert_eq!(health_word(70), "Worn");
         assert_eq!(health_word(40), "Needs replacing");
+    }
+}
+
+/// How a file system is named to a person, and who can read it.
+fn format_words(fstype: &str) -> &'static str {
+    match fstype {
+        "exfat" => "exFAT · any computer",
+        "vfat" => "FAT · any computer",
+        "ext4" | "ext3" | "ext2" => "ext4 · this system",
+        "ntfs" | "ntfs3" => "NTFS · Windows",
+        "btrfs" => "Btrfs · this system",
+        "" => "Not formatted",
+        _ => "Another format",
+    }
+}
+
+fn target_words(t: Target) -> (&'static str, &'static str) {
+    match t {
+        Target::Any => (
+            "Any computer",
+            "exFAT. Windows, Mac, phones, TVs and this one",
+        ),
+        Target::Golem => ("This system", "ext4. Linux only. It can be locked"),
+        Target::Windows => ("Windows", "NTFS. For a drive that lives on Windows"),
+    }
+}
+
+impl App {
+    fn drive_send(&mut self, what: &'static str, cmd: DriveCommand) {
+        if self.gear.pages.drives.is_none() {
+            let (tx, rx) = calloop::channel::channel::<DriveEvent>();
+            let _ = self.loop_handle.insert_source(rx, |ev, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(DriveEvent::Done { what, problem }) = ev {
+                    let p = &mut app.gear.pages;
+                    p.drive_busy = None;
+                    p.drive_note = match (what, problem) {
+                        (_, Some(problem)) => Some((problem, false)),
+                        ("check", None) => Some(("No problems found".to_owned(), true)),
+                        _ => None,
+                    };
+                    // A formatted or ejected drive is not the one the view was
+                    // opened on any more.
+                    if matches!(what, "eject" | "format") {
+                        p.view = PView::List;
+                    }
+                    app.sys_send(SysCommand::Refresh);
+                    app.update_stats_reveal();
+                    app.gear_changed();
+                }
+            });
+            self.gear.pages.drives = Some(crate::drives::spawn(tx));
+        }
+        self.gear.pages.drive_busy = Some(what);
+        self.gear.pages.drive_note = None;
+        if let Some(h) = &self.gear.pages.drives {
+            h.send(cmd);
+        }
+    }
+
+    /// A plugged-in drive's one line: what is happening to it, or how full.
+    fn ext_status(&self, x: &Drive) -> String {
+        if let Some(busy) = self.gear.pages.drive_busy {
+            return busy.to_owned();
+        }
+        match &x.vol {
+            Some(v) if v.locked => "Locked. Click to unlock".to_owned(),
+            Some(v) => match (&v.mount, v.used, v.size) {
+                (Some(_), Some(used), Some(size)) => {
+                    format!(
+                        "{} of {} free",
+                        size_text(size.saturating_sub(used)),
+                        size_text(size)
+                    )
+                }
+                _ => "Plugged in, not in use".to_owned(),
+            },
+            None => format!("{} · not formatted", size_text(x.size)),
+        }
+    }
+
+    fn ext_view(&self, i: usize, x: &Drive) -> View {
+        let p = &self.gear.pages;
+        let vol = x.vol.as_ref();
+        let mounted = vol.is_some_and(|v| v.mount.is_some());
+        let locked = vol.is_some_and(|v| v.locked);
+        let mut strip = vec![btn(Hit::Back, G_BACK)];
+        if mounted {
+            strip.push(btn(sys(SysHit::OpenDrive(i)), G_FOLDER));
+        }
+        strip.push(btn(sys(SysHit::Eject(i)), G_EJECT));
+        let meter = match vol.and_then(|v| v.used.zip(v.size)) {
+            Some((used, size)) if mounted && size > 0 => Extra::Meter(
+                (used.saturating_mul(100) / size).min(100) as u8,
+                format!("{} used", size_text(used)),
+            ),
+            _ => Extra::None,
+        };
+        let mut items = vec![Item::Card {
+            glyph: G_USB,
+            title: x.name.clone(),
+            sub: self.ext_status(x),
+            extra: meter,
+            rename: (vol.is_some() && !locked).then(|| sys(SysHit::ExtRename(i))),
+        }];
+        if let Some((note, good)) = &p.drive_note {
+            items.push(row_with(
+                row(None, note.clone(), ""),
+                Hit::None,
+                None,
+                Trail::None,
+                if *good { Tone::Normal } else { Tone::Warn },
+            ));
+        }
+        let kind = match x.tran.as_str() {
+            "usb" => "USB drive",
+            "mmc" => "Memory card",
+            _ => "Drive",
+        };
+        items.push(kv("Kind", format!("{kind} · {}", size_text(x.size))));
+        items.push(kv(
+            "Format",
+            match vol {
+                Some(v) if v.encrypted => "Locked with a password".to_owned(),
+                Some(v) => format_words(&v.fstype).to_owned(),
+                None => "Not formatted".to_owned(),
+            },
+        ));
+        let act = |tile, title: &str, sub: &str, hit: SysHit| {
+            row_with(
+                row(Some(tile), title, sub),
+                sys(hit),
+                None,
+                Trail::None,
+                Tone::Normal,
+            )
+        };
+        if locked {
+            items.push(act(
+                G_LOCK,
+                "Unlock",
+                "Asks for its password",
+                SysHit::ExtUnlock(i),
+            ));
+        } else if vol.is_some() {
+            items.push(if mounted {
+                act(
+                    G_FOLDER,
+                    "Stop using it",
+                    "Unmounts it. It stays plugged in",
+                    SysHit::ExtMount(i),
+                )
+            } else {
+                act(
+                    G_FOLDER,
+                    "Use it",
+                    "Mounts it so its files can be opened",
+                    SysHit::ExtMount(i),
+                )
+            });
+            items.push(act(
+                G_CHECK,
+                "Check for errors",
+                "Finds and repairs damage",
+                SysHit::ExtCheck(i),
+            ));
+        }
+        items.push(act(
+            G_BOLT,
+            "Format",
+            "Erases everything on it",
+            SysHit::ExtFormat(i),
+        ));
+        items.push(act(
+            G_EJECT,
+            "Eject",
+            "Safe to unplug after",
+            SysHit::Eject(i),
+        ));
+        View {
+            strip,
+            items,
+            sheet_from: Some(1),
+            ..View::default()
+        }
+    }
+
+    fn format_view(&self, i: usize) -> View {
+        let p = &self.gear.pages;
+        let Some(x) = p.disk.drives.get(i) else {
+            return back_only(vec![Item::Empty("It was unplugged".into())]);
+        };
+        let f = &p.format;
+        let mut items = vec![
+            Item::Card {
+                glyph: G_USB,
+                title: format!("Format {}", x.name),
+                sub: "Erases everything on it".into(),
+                extra: Extra::None,
+                rename: None,
+            },
+            Item::Kv {
+                hit: Some(sys(SysHit::FormatName)),
+                key: "Name".into(),
+                value: if f.name.is_empty() {
+                    "Untitled".into()
+                } else {
+                    f.name.clone()
+                },
+            },
+            Item::Choice {
+                key: "For".into(),
+                opts: [Target::Any, Target::Golem, Target::Windows]
+                    .into_iter()
+                    .map(|t| {
+                        (
+                            sys(SysHit::FormatFor(t)),
+                            target_words(t).0.to_owned(),
+                            t == f.target,
+                        )
+                    })
+                    .collect(),
+            },
+            Item::Note(target_words(f.target).1.into()),
+        ];
+        if f.target == Target::Golem {
+            items.push(Item::Toggle {
+                hit: sys(SysHit::FormatLock),
+                label: "Lock with a password".into(),
+                hint: "Asks for it every time the drive is plugged in".into(),
+                on: f.lock,
+            });
+        }
+        items.push(Item::Toggle {
+            hit: sys(SysHit::FormatThorough),
+            label: "Erase thoroughly".into(),
+            hint: "Writes over every part first. Much slower".into(),
+            on: f.thorough,
+        });
+        items.push(row_with(
+            row(
+                Some(G_BOLT),
+                "Format now",
+                if f.thorough {
+                    "Takes a long time on a big drive"
+                } else {
+                    "A few seconds"
+                },
+            ),
+            sys(SysHit::AskFormat),
+            None,
+            Trail::None,
+            Tone::Normal,
+        ));
+        back_only(items)
+    }
+
+    fn video_view(&self) -> View {
+        let mut items = vec![Item::Card {
+            glyph: G_FILM,
+            title: "Video playback".into(),
+            sub: "What the graphics card decodes".into(),
+            extra: Extra::None,
+            rename: None,
+        }];
+        for (codec, on_card) in &self.gear.pages.machine.video {
+            items.push(kv(
+                codec,
+                if *on_card {
+                    "Graphics card"
+                } else {
+                    "Processor"
+                },
+            ));
+        }
+        items.push(Item::Note(
+            "On the card, video keeps the fans quiet.".into(),
+        ));
+        back_only(items)
+    }
+
+    /// The names every volume of a drive goes by, for acts that stop using it.
+    fn ext_parts(x: &Drive) -> (Vec<String>, Option<String>) {
+        match &x.vol {
+            Some(v) => (
+                vec![v.fs_dev().to_owned()],
+                (v.encrypted && !v.locked).then(|| v.part.clone()),
+            ),
+            None => (Vec::new(), None),
+        }
+    }
+
+    fn drive_click(&mut self, hit: SysHit) {
+        let drive = |app: &App, i: usize| app.gear.pages.disk.drives.get(i).cloned();
+        match hit {
+            SysHit::Eject(i) => {
+                if let Some(x) = drive(self, i) {
+                    let (volumes, locked_part) = Self::ext_parts(&x);
+                    self.drive_send(
+                        "Ejecting…",
+                        DriveCommand::Eject {
+                            drive: x.kname,
+                            volumes,
+                            locked_part,
+                        },
+                    );
+                }
+            }
+            SysHit::ExtMount(i) => {
+                if let Some(v) = drive(self, i).and_then(|x| x.vol) {
+                    let dev = v.fs_dev().to_owned();
+                    if v.mount.is_some() {
+                        self.drive_send("Stopping…", DriveCommand::Unmount(dev));
+                    } else {
+                        self.drive_send("Starting…", DriveCommand::Mount(dev));
+                    }
+                }
+            }
+            SysHit::ExtCheck(i) => {
+                if let Some(v) = drive(self, i).and_then(|x| x.vol) {
+                    self.drive_send(
+                        "Checking…",
+                        DriveCommand::Check {
+                            volume: v.fs_dev().to_owned(),
+                            mounted: v.mount.is_some(),
+                        },
+                    );
+                }
+            }
+            SysHit::ExtRename(i) => {
+                let label = drive(self, i)
+                    .and_then(|x| x.vol)
+                    .map(|v| v.label)
+                    .unwrap_or_default();
+                self.gear_ask(
+                    PField::DriveName(i),
+                    "New name for this drive",
+                    G_PENCIL,
+                    false,
+                    label,
+                );
+            }
+            SysHit::ExtUnlock(i) => {
+                self.gear_ask(
+                    PField::DrivePassword(i),
+                    "Password for this drive",
+                    G_LOCK,
+                    true,
+                    String::new(),
+                );
+            }
+            SysHit::ExtFormat(i) => {
+                let x = drive(self, i);
+                self.gear.pages.format = FormatDraft {
+                    name: x.and_then(|x| x.vol).map(|v| v.label).unwrap_or_default(),
+                    ..FormatDraft::default()
+                };
+                self.page_view(PView::Format(i));
+            }
+            SysHit::FormatFor(t) => {
+                let f = &mut self.gear.pages.format;
+                f.target = t;
+                if t != Target::Golem {
+                    f.lock = false;
+                }
+            }
+            SysHit::FormatLock => self.gear.pages.format.lock = !self.gear.pages.format.lock,
+            SysHit::FormatThorough => {
+                self.gear.pages.format.thorough = !self.gear.pages.format.thorough;
+            }
+            SysHit::FormatName => {
+                let name = self.gear.pages.format.name.clone();
+                self.gear_ask(
+                    PField::FormatName,
+                    "Name for the drive",
+                    G_PENCIL,
+                    false,
+                    name,
+                );
+            }
+            SysHit::AskFormat => {
+                let f = &self.gear.pages.format;
+                // A locked drive needs its password before the question.
+                if f.lock && f.password.chars().count() < 8 {
+                    self.gear_ask(
+                        PField::FormatPassword,
+                        "Password, 8 characters or more",
+                        G_LOCK,
+                        true,
+                        String::new(),
+                    );
+                    return;
+                }
+                self.ask_format();
+            }
+            SysHit::DoFormat => {
+                let PView::Format(i) = self.gear.pages.view else {
+                    return;
+                };
+                if let Some(x) = drive(self, i) {
+                    let f = self.gear.pages.format.clone();
+                    let (volumes, locked_part) = Self::ext_parts(&x);
+                    self.gear.pages.format.password.clear();
+                    self.page_view(PView::Drive(i));
+                    self.drive_send(
+                        "Formatting…",
+                        DriveCommand::Format {
+                            drive: x.kname,
+                            volumes,
+                            locked_part,
+                            name: if f.name.trim().is_empty() {
+                                "Untitled".into()
+                            } else {
+                                f.name.trim().to_owned()
+                            },
+                            target: f.target,
+                            password: (f.lock && f.target == Target::Golem).then_some(f.password),
+                            thorough: f.thorough,
+                        },
+                    );
+                }
+            }
+            SysHit::CheckUpdates => {
+                // The system's own updater, started now. It is the system's to
+                // allow; the row turns to "Updating now…" when it runs.
+                run_detached(
+                    "systemctl",
+                    vec![
+                        "start".into(),
+                        "--no-block".into(),
+                        "golem-autoupdate.service".into(),
+                    ],
+                );
+            }
+            SysHit::Video => self.page_view(PView::Video),
+            _ => {}
+        }
+    }
+
+    fn ask_format(&mut self) {
+        let PView::Format(i) = self.gear.pages.view else {
+            return;
+        };
+        let name = self
+            .gear
+            .pages
+            .disk
+            .drives
+            .get(i)
+            .map(|x| x.name.clone())
+            .unwrap_or_default();
+        self.gear_arm(
+            &format!("Erase everything on {name}? Click again"),
+            sys(SysHit::DoFormat),
+        );
+    }
+
+    /// The footer field of a machine page was confirmed with `text`.
+    pub(crate) fn pages_field_submit(&mut self, what: PField, text: String) {
+        let trimmed = text.trim().to_owned();
+        match what {
+            PField::FastApp => self.pages_add_fast_app(&trimmed),
+            PField::DriveName(i) => {
+                let vol = self
+                    .gear
+                    .pages
+                    .disk
+                    .drives
+                    .get(i)
+                    .and_then(|x| x.vol.clone());
+                if let (Some(v), false) = (vol, trimmed.is_empty()) {
+                    self.drive_send(
+                        "Renaming…",
+                        DriveCommand::Rename {
+                            volume: v.fs_dev().to_owned(),
+                            label: trimmed,
+                            mounted: v.mount.is_some(),
+                        },
+                    );
+                }
+            }
+            PField::DrivePassword(i) => {
+                let part = self
+                    .gear
+                    .pages
+                    .disk
+                    .drives
+                    .get(i)
+                    .and_then(|x| x.vol.as_ref())
+                    .map(|v| v.part.clone());
+                if let (Some(part), false) = (part, text.is_empty()) {
+                    self.drive_send(
+                        "Unlocking…",
+                        DriveCommand::Unlock {
+                            part,
+                            password: text,
+                        },
+                    );
+                }
+            }
+            PField::FormatName => self.gear.pages.format.name = trimmed,
+            PField::FormatPassword => {
+                if text.chars().count() >= 8 {
+                    self.gear.pages.format.password = text;
+                    self.ask_format();
+                }
+            }
+        }
+        self.gear_changed();
     }
 }

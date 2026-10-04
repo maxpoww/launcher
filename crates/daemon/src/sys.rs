@@ -30,6 +30,9 @@ const MEASURE_FRESH: Duration = Duration::from_secs(300);
 /// left with a full drive under it.
 const ERASE_HEADROOM: u64 = 2 * 1024 * 1024 * 1024;
 const ERASE_CHUNK: usize = 8 * 1024 * 1024;
+/// The system's own cleaner: old system versions and old logs, as root (a
+/// Golem unit the owner may start).
+pub(crate) const SYSTEM_CLEAN_UNIT: &str = "golem-clean-system.service";
 
 /// The pages this worker feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +57,11 @@ pub(crate) struct Machine {
     pub(crate) cards: Vec<Card>,
     /// `powerprofilesctl` is there to ask.
     pub(crate) has_profiles: bool,
+    /// Golem's own system cleaner (old versions, old logs) is installed.
+    pub(crate) has_system_clean: bool,
+    /// What the graphics card can decode, when the probe is installed:
+    /// `(codec, on the card)`.
+    pub(crate) video: Vec<(&'static str, bool)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -133,15 +141,53 @@ pub(crate) enum Junk {
     Caches,
     Browser,
     Store,
+    /// Old system versions and old logs (the system's own cleaner).
+    System,
 }
 
 impl Junk {
-    pub(crate) const ALL: [Junk; 4] = [Junk::Trash, Junk::Caches, Junk::Browser, Junk::Store];
+    pub(crate) const ALL: [Junk; 5] = [
+        Junk::Trash,
+        Junk::Caches,
+        Junk::Browser,
+        Junk::Store,
+        Junk::System,
+    ];
+}
+
+/// The part of a plugged-in drive a person uses: its one volume.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Volume {
+    /// Kernel name of the partition (or of the whole drive when it has no
+    /// table).
+    pub(crate) part: String,
+    /// Kernel name of the unlocked device inside an encrypted partition.
+    pub(crate) inside: Option<String>,
+    /// The file system ("exfat", "ext4", "ntfs", "vfat"); empty while locked.
+    pub(crate) fstype: String,
+    pub(crate) label: String,
+    pub(crate) mount: Option<String>,
+    pub(crate) used: Option<u64>,
+    pub(crate) size: Option<u64>,
+    pub(crate) encrypted: bool,
+    pub(crate) locked: bool,
+}
+
+impl Volume {
+    /// The device that holds the file system (what is mounted and renamed).
+    pub(crate) fn fs_dev(&self) -> &str {
+        self.inside.as_deref().unwrap_or(&self.part)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Drive {
     pub(crate) dev: String,
+    /// Kernel name (`sdb`).
+    pub(crate) kname: String,
+    /// How it is plugged in ("usb", "sata", "nvme").
+    pub(crate) tran: String,
+    pub(crate) vol: Option<Volume>,
     pub(crate) name: String,
     pub(crate) size: u64,
     pub(crate) rotational: bool,
@@ -183,7 +229,8 @@ pub(crate) enum SysCommand {
     ChargeLimit(bool),
     Clean(Vec<Junk>),
     Erase(bool),
-    Eject(String),
+    /// Read the drives again now (one was just changed).
+    Refresh,
 }
 
 #[derive(Debug)]
@@ -307,10 +354,7 @@ fn run(events: &Sender<SysEvent>, rx: &mpsc::Receiver<SysCommand>) {
                         .spawn(move || erase_free_space(&events, &stop, rotational));
                 }
             }
-            Some(SysCommand::Eject(dev)) => {
-                eject(&dev);
-                disk_dirty = true;
-            }
+            Some(SysCommand::Refresh) => disk_dirty = true,
             None => {}
         }
         if let Ok(m) = mrx.try_recv() {
@@ -427,7 +471,29 @@ fn read_machine() -> Machine {
         os,
         cards: read_cards(),
         has_profiles: out_of("powerprofilesctl", &["get"]).is_some(),
+        has_system_clean: out_of("systemctl", &["cat", SYSTEM_CLEAN_UNIT]).is_some(),
+        video: out_of("vainfo", &[])
+            .map(|s| parse_video(&s))
+            .unwrap_or_default(),
     }
+}
+
+/// Which codecs the card decodes, out of `vainfo`'s profile list.
+pub(crate) fn parse_video(vainfo: &str) -> Vec<(&'static str, bool)> {
+    let decodes = |profile: &str| {
+        vainfo
+            .lines()
+            .any(|l| l.contains(profile) && l.contains("VAEntrypointVLD"))
+    };
+    [
+        ("H.264", "VAProfileH264"),
+        ("HEVC", "VAProfileHEVC"),
+        ("VP9", "VAProfileVP9"),
+        ("AV1", "VAProfileAV1"),
+    ]
+    .into_iter()
+    .map(|(name, profile)| (name, decodes(profile)))
+    .collect()
 }
 
 /// "Intel(R) Core(TM) i7-13700H CPU @ 2.40GHz" → "Intel Core i7-13700H".
@@ -1025,6 +1091,7 @@ fn read_disk(measure: Option<&Measure>) -> Disk {
             (Junk::Browser, Some(m.browser)),
             // Unknown until it is done: finding what is unused IS the work.
             (Junk::Store, None),
+            (Junk::System, None),
         ];
     }
     disk
@@ -1041,7 +1108,7 @@ fn read_drives() -> Vec<Drive> {
             "-J",
             "-b",
             "-o",
-            "NAME,TYPE,SIZE,ROTA,RM,HOTPLUG,MODEL,VENDOR,TRAN,MOUNTPOINTS,LABEL,FSAVAIL",
+            "NAME,KNAME,TYPE,SIZE,ROTA,RM,HOTPLUG,MODEL,VENDOR,TRAN,MOUNTPOINTS,LABEL,FSAVAIL,FSTYPE,FSUSED,FSSIZE",
         ],
     ) else {
         return Vec::new();
@@ -1108,7 +1175,11 @@ pub(crate) fn parse_drives(json: &serde_json::Value) -> Vec<Drive> {
             .iter()
             .find(|(m, _)| !m.starts_with("/boot") && m != "[SWAP]")
             .cloned();
+        let vol = removable.then(|| volume_of(d, &num)).flatten();
         out.push(Drive {
+            kname: d["kname"].as_str().unwrap_or(name).to_owned(),
+            tran: d["tran"].as_str().unwrap_or("").to_owned(),
+            vol,
             dev: format!("/dev/{name}"),
             name: if removable && !label.is_empty() {
                 label
@@ -1128,6 +1199,67 @@ pub(crate) fn parse_drives(json: &serde_json::Value) -> Vec<Drive> {
     }
     out.sort_by_key(|d| (!d.system, d.removable, d.dev.clone()));
     out
+}
+
+/// The volume a person uses on a plugged-in drive: its encrypted partition if
+/// it has one, else its biggest partition with a file system, else the drive
+/// itself when it was formatted without a table.
+fn volume_of(
+    drive: &serde_json::Value,
+    num: &impl Fn(&serde_json::Value) -> Option<u64>,
+) -> Option<Volume> {
+    let kname = |n: &serde_json::Value| {
+        n["kname"]
+            .as_str()
+            .or(n["name"].as_str())
+            .unwrap_or("")
+            .to_owned()
+    };
+    let fill = |v: &mut Volume, n: &serde_json::Value| {
+        v.fstype = n["fstype"].as_str().unwrap_or("").to_owned();
+        v.label = n["label"].as_str().unwrap_or("").to_owned();
+        v.mount = n["mountpoints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|m| m.as_str().map(str::to_owned));
+        v.used = num(&n["fsused"]);
+        v.size = num(&n["fssize"]);
+    };
+    let mut nodes: Vec<&serde_json::Value> =
+        drive["children"].as_array().into_iter().flatten().collect();
+    nodes.push(drive);
+    let has_fs = |n: &&&serde_json::Value| {
+        n["fstype"]
+            .as_str()
+            .is_some_and(|f| !f.is_empty() && f != "swap")
+    };
+    let pick = nodes
+        .iter()
+        .find(|n| n["fstype"].as_str() == Some("crypto_LUKS"))
+        .or_else(|| {
+            nodes
+                .iter()
+                .filter(has_fs)
+                .max_by_key(|n| num(&n["size"]).unwrap_or(0))
+        })?;
+    let mut v = Volume {
+        part: kname(pick),
+        ..Volume::default()
+    };
+    if pick["fstype"].as_str() == Some("crypto_LUKS") {
+        v.encrypted = true;
+        match pick["children"].as_array().and_then(|c| c.first()) {
+            Some(inner) => {
+                v.inside = Some(kname(inner));
+                fill(&mut v, inner);
+            }
+            None => v.locked = true,
+        }
+    } else {
+        fill(&mut v, pick);
+    }
+    Some(v)
 }
 
 /// A drive's own health report, through udisks (which may read it without
@@ -1189,24 +1321,15 @@ pub(crate) fn parse_health(text: &str, d: &mut Drive) {
     }
 }
 
-fn eject(dev: &str) {
-    // Every mounted partition first, then the drive's power.
-    if let Some(out) = out_of("lsblk", &["-ln", "-o", "PATH,MOUNTPOINT", dev]) {
-        for line in out.lines() {
-            let mut f = line.split_whitespace();
-            if let (Some(part), Some(_)) = (f.next(), f.next()) {
-                run_quiet("udisksctl", &["unmount", "-b", part]);
-            }
-        }
-    }
-    run_quiet("udisksctl", &["power-off", "-b", dev]);
-}
-
 /// Remove what was chosen. Nothing here touches a file a person made.
 fn clean(what: &[Junk]) {
     let home = home();
     let cache = home.join(".cache");
-    for j in what {
+    // The system's cleaner first: the store pass after it then finds what the
+    // removed versions were holding.
+    let mut what: Vec<Junk> = what.to_vec();
+    what.sort_by_key(|j| *j != Junk::System);
+    for j in &what {
         match j {
             Junk::Trash => {
                 if let Err(e) = crate::trash::Trash::home().empty() {
@@ -1230,6 +1353,7 @@ fn clean(what: &[Junk]) {
             // What no system version still uses. Old versions themselves are
             // the system's to remove (it keeps the recent ones by its own rule).
             Junk::Store => run_quiet("nix-collect-garbage", &[]),
+            Junk::System => run_quiet("systemctl", &["start", SYSTEM_CLEAN_UNIT]),
         }
     }
 }
@@ -1405,7 +1529,8 @@ mod tests {
                 { "name": "nvme0n1p2", "type": "part", "mountpoints": ["/nix/store", "/"], "fsavail": 300_000_000_000u64 } ] },
             { "name": "sda", "type": "disk", "size": 32_000_000_000u64, "rota": true, "rm": true,
               "hotplug": true, "model": "Ultra", "vendor": "SanDisk ", "tran": "usb", "mountpoints": [null],
-              "children": [ { "name": "sda1", "type": "part", "label": "PHOTOS",
+              "children": [ { "name": "sda1", "kname": "sda1", "type": "part", "label": "PHOTOS", "size": 31_000_000_000u64,
+                              "fstype": "exfat", "fsused": 20_000_000_000u64, "fssize": 32_000_000_000u64,
                               "mountpoints": ["/run/media/max/PHOTOS"], "fsavail": 12_000_000_000u64 } ] },
             { "name": "zram0", "type": "disk", "size": 8_000_000_000u64, "mountpoints": ["[SWAP]"] }
         ]});
@@ -1417,6 +1542,54 @@ mod tests {
         assert!(d[1].removable && !d[1].system);
         assert_eq!(d[1].name, "PHOTOS", "a stick goes by its label");
         assert_eq!(d[1].mount.as_deref(), Some("/run/media/max/PHOTOS"));
+        let v = d[1].vol.as_ref().expect("a stick has a volume");
+        assert_eq!(
+            (v.part.as_str(), v.fstype.as_str(), v.label.as_str()),
+            ("sda1", "exfat", "PHOTOS")
+        );
+        assert_eq!(v.used, Some(20_000_000_000));
+        assert!(!v.encrypted && !v.locked && v.fs_dev() == "sda1");
+        assert!(
+            d[0].vol.is_none(),
+            "the system's drive is not a volume to act on"
+        );
+    }
+
+    #[test]
+    fn a_locked_stick_is_told_from_an_unlocked_one() {
+        let stick = |children: serde_json::Value| {
+            serde_json::json!({ "blockdevices": [
+                { "name": "sdb", "kname": "sdb", "type": "disk", "size": 64_000_000_000u64, "rm": true, "tran": "usb",
+                  "mountpoints": [null],
+                  "children": [ { "name": "sdb1", "kname": "sdb1", "type": "part", "size": 63_000_000_000u64,
+                                  "fstype": "crypto_LUKS", "mountpoints": [null], "children": children } ] } ]})
+        };
+        let locked = parse_drives(&stick(serde_json::json!([])));
+        let v = locked[0].vol.as_ref().expect("volume");
+        assert!(v.encrypted && v.locked && v.mount.is_none());
+        let open = parse_drives(&stick(serde_json::json!([
+            { "name": "luks-1234", "kname": "dm-0", "type": "crypt", "fstype": "ext4", "label": "Backups",
+              "mountpoints": ["/run/media/max/Backups"], "fsused": 1_000u64, "fssize": 60_000_000_000u64 } ])));
+        let v = open[0].vol.as_ref().expect("volume");
+        assert!(v.encrypted && !v.locked);
+        assert_eq!(
+            (v.part.as_str(), v.fs_dev(), v.label.as_str()),
+            ("sdb1", "dm-0", "Backups")
+        );
+    }
+
+    #[test]
+    fn the_cards_decoders_are_read_from_the_probe() {
+        let out = "      VAProfileH264Main               :	VAEntrypointVLD\n      VAProfileH264Main               :	VAEntrypointEncSlice\n      VAProfileHEVCMain               :	VAEntrypointVLD\n      VAProfileVP9Profile0            :	VAEntrypointVLD\n      VAProfileAV1Profile0            :	VAEntrypointEncSlice\n";
+        assert_eq!(
+            parse_video(out),
+            [
+                ("H.264", true),
+                ("HEVC", true),
+                ("VP9", true),
+                ("AV1", false)
+            ]
+        );
     }
 
     #[test]
