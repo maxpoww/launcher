@@ -82,7 +82,7 @@ fn spawn_brain(
                 }
             };
             rt.block_on(async move {
-                let engine = Engine::start();
+                let engine = Engine::start_shell();
                 // The Mind must outlive the loop (its Drop aborts the decide
                 // task), so bind it here for the whole block.
                 let mind = Mind::new(&engine, daemon_tuning());

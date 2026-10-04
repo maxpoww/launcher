@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_shm;
-use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
     self, ZwlrScreencopyFrameV1,
 };
@@ -58,6 +58,20 @@ const POLL: Duration = Duration::from_millis(700);
 /// each capture, so the worst case is this value plus one round-trip
 /// rather than this value plus a poll period.
 const CAPTURE_STALL: Duration = Duration::from_millis(600);
+
+/// The stall limit of a PATIENT capture — one that asked the compositor to
+/// deliver only when the screen has changed (`copy_with_damage`), so it is
+/// supposed to sit for as long as nothing moves. It is only replaced after
+/// this long in case its events were lost: re-arming one is free.
+const PATIENT_STALL: Duration = Duration::from_secs(60);
+
+/// Poll ticks without a sentinel after one came straight back (a busy
+/// screen).
+const SENTINEL_SKIP: u8 = 3;
+
+/// How long a patient capture must have waited for the screen to count as
+/// quiet again (see the trailing sample in [`App::start_options_capture`]).
+const TRAIL_QUIET: Duration = Duration::from_millis(250);
 
 /// Quick follow-up re-evaluation after a sample actually changed a
 /// colour: the screen was probably still moving when that capture read
@@ -186,6 +200,9 @@ pub(crate) struct Capture {
     copied: bool,
     /// When this capture was requested, for the [`CAPTURE_STALL`] reaper.
     started: std::time::Instant,
+    /// Deliver only once the screen has changed (see
+    /// [`App::start_options_capture`]).
+    patient: bool,
 }
 
 impl App {
@@ -344,9 +361,7 @@ impl App {
         let had_match = self.dock_bar_matched.take().is_some();
         if let Ok(mon) = hypr::focused_monitor() {
             if let Some(output) = self.output_by_name(&mon.name) {
-                let sample_y = ((mon.h - GAP_ROW_UP) * mon.scale.max(0.1))
-                    .round()
-                    .max(1.0) as u32;
+                let sample_y = ((mon.h - GAP_ROW_UP) * mon.scale.max(0.1)).round().max(1.0) as u32;
                 if had_match {
                     self.draw();
                 }
@@ -460,11 +475,14 @@ impl App {
     /// Drop a capture that is past [`CAPTURE_STALL`] — its events are never
     /// coming, and it would otherwise hold the one in-flight slot forever.
     pub(crate) fn reap_stalled_capture(&mut self) {
-        if self
-            .capture
-            .as_ref()
-            .is_some_and(|c| c.started.elapsed() > CAPTURE_STALL)
-        {
+        if self.capture.as_ref().is_some_and(|c| {
+            c.started.elapsed()
+                > if c.patient {
+                    PATIENT_STALL
+                } else {
+                    CAPTURE_STALL
+                }
+        }) {
             debug!("options: capture stalled; reaping");
             self.abort_capture();
         }
@@ -489,14 +507,25 @@ impl App {
     /// Begin capturing the focused output (one capture at a time — bar and
     /// dock rows are both read out of it via `target.samples`).
     pub(crate) fn start_options_capture(&mut self) {
+        self.start_capture(false);
+    }
+
+    /// Arm the sentinel: a capture of the rows just sampled that the
+    /// compositor delivers only when the screen changes (see
+    /// [`Self::start_capture`]). Not while the screen is busy
+    /// (`sentinel_skip`): there the poll's own cadence is the cheaper one.
+    fn arm_sentinel(&mut self) {
+        if self.sentinel_skip == 0 && !self.options_paused() {
+            self.start_capture(true);
+        }
+    }
+
+    fn start_capture(&mut self, sentinel: bool) {
         // Before concluding a capture is already in flight, make sure it is
         // alive: a zombie blocks every future sample, so waiting for a poll
         // tick to notice it is exactly the window in which a colour switch
         // looks stuck. Any event-driven re-evaluation clears it here.
         self.reap_stalled_capture();
-        if self.capture.is_some() {
-            return;
-        }
         let Some(mgr) = self.screencopy.clone() else {
             return;
         };
@@ -505,6 +534,51 @@ impl App {
         };
         let output = target.output.clone();
         let samples = target.samples.clone();
+        // PATIENT or not.
+        //
+        // The resample poll used to capture the whole output every 700 ms for
+        // as long as the session lived, and Hyprland damages — redraws — the
+        // ENTIRE monitor for a capture: an idle desktop was repainted and read
+        // back forever (night audit, 2026-10-04). The poll's job is to notice
+        // a colour that changed with no layout event, and a colour cannot
+        // change unless the screen is redrawn. `copy_with_damage` asks for
+        // exactly that: the frame is delivered with the next one the
+        // compositor draws anyway.
+        //
+        // Hyprland's fine print (ScreenshareFrame.cpp): the first frame of a
+        // screen-share session is always forced (`scheduleFrame` +
+        // `damageMonitor`), with or without damage, and a session counts as
+        // over 500 ms after its last frame. So a patient capture only waits
+        // if it is asked for right after another one delivered. That is the
+        // SENTINEL ([`Self::arm_sentinel`]): armed the moment a capture has
+        // been read, it sits until the screen really changes. At rest there is
+        // one sentinel waiting and no other work at all.
+        //
+        // Everything else captures at once and takes over from a waiting
+        // sentinel: a layout event, new rows, the settle burst — and the
+        // TRAILING sample: a sentinel delivers the first frame drawn after it
+        // was armed, so the last frame of a burst of changes can fall between
+        // two of them; after one has delivered, the first poll tick that
+        // finds the next still waiting (the screen has gone quiet) samples at
+        // once.
+        let patient =
+            sentinel && mgr.version() >= 2 && self.capture_sampled.as_ref() == Some(&samples);
+        if sentinel && !patient {
+            return;
+        }
+        if let Some(cap) = self.capture.as_ref() {
+            if !cap.patient || patient {
+                return;
+            }
+            let quiet = cap.started.elapsed() >= TRAIL_QUIET;
+            if self.capture_from_poll && !(quiet && self.capture_trail_due) {
+                return; // a tick, and the sentinel is doing its job
+            }
+            self.abort_capture();
+        }
+        if !patient {
+            self.capture_trail_due = false;
+        }
         // Declare the capture as ours BEFORE asking for it: Hyprland announces
         // every screencopy session on its event socket, and the OPTIONS Mind
         // would otherwise surface "Screen is being shared" for the bar's own
@@ -523,6 +597,7 @@ impl App {
             samples,
             copied: false,
             started: std::time::Instant::now(),
+            patient,
         });
     }
 
@@ -579,7 +654,11 @@ impl App {
             &self.qh,
         );
         if let Some(cap) = self.capture.as_mut() {
-            cap.frame.copy(&buffer);
+            if cap.patient {
+                cap.frame.copy_with_damage(&buffer);
+            } else {
+                cap.frame.copy(&buffer);
+            }
             cap.buffer = Some(buffer);
             cap.width = width;
             cap.height = height;
@@ -597,6 +676,16 @@ impl App {
             return;
         };
         self.options_capture_failing = false;
+        self.capture_sampled = Some(cap.samples.clone());
+        if cap.patient {
+            self.capture_trail_due = true;
+            // A sentinel that came straight back: the screen is busy (a
+            // video, an animation). Keeping one armed there would capture
+            // every frame, so the next few samples are the poll's.
+            if cap.started.elapsed() < TRAIL_QUIET {
+                self.sentinel_skip = SENTINEL_SKIP;
+            }
+        }
         let mut bar_changed = false;
         let mut dock_changed = false;
         for &(slot, sample_y) in &cap.samples {
@@ -657,6 +746,8 @@ impl App {
         if bar_changed || dock_changed {
             self.arm_settle_burst();
         }
+        // …and from here on, wait for the screen to change.
+        self.arm_sentinel();
     }
 
     /// Re-evaluate both surfaces after [`SETTLE_BURST`] — the quick
@@ -984,7 +1075,10 @@ impl App {
             return None;
         }
         let (mr, mg, mb) = ((rsum / n) as u8, (gsum / n) as u8, (bsum / n) as u8);
-        debug!("{}: colour-match edge = #{mr:02x}{mg:02x}{mb:02x}", slot.tag());
+        debug!(
+            "{}: colour-match edge = #{mr:02x}{mg:02x}{mb:02x}",
+            slot.tag()
+        );
         // The captured bytes are sRGB-encoded (display values), but the
         // swapchain is an sRGB surface that re-encodes shader output — so we
         // must hand it the *linear* colour, or it comes out doubly-brightened
@@ -1024,6 +1118,12 @@ impl App {
         if self.options_poll_pending || !self.config.options.enabled || self.screencopy.is_none() {
             return;
         }
+        // The zone poll (800 ms, whenever intellihide is on — the default)
+        // already re-evaluates both surfaces on every tick; a second timer
+        // doing the same 100 ms faster only doubled the idle work.
+        if self.zone_poll_running {
+            return;
+        }
         self.options_poll_pending = true;
         let timer = Timer::from_duration(POLL);
         let _ = self
@@ -1036,8 +1136,13 @@ impl App {
                 // `start_options_capture` reaps too — this is the net for
                 // the case where no want survives to get that far.
                 app.reap_stalled_capture();
+                // Captures started from here may be patient ones (see
+                // `start_options_capture`).
+                app.capture_from_poll = true;
+                app.sentinel_skip = app.sentinel_skip.saturating_sub(1);
                 app.reeval_options_bar();
                 app.reeval_dock_bar();
+                app.capture_from_poll = false;
                 TimeoutAction::Drop
             });
     }

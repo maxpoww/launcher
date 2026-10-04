@@ -36,6 +36,27 @@ impl Engine {
         Self::start_with(default_collectors())
     }
 
+    /// Start the engine with only the collectors the shell DRAWS from: the
+    /// focused window and window list (window pill, playing box), metrics,
+    /// battery and network (gear readout, battery alarm), media and audio
+    /// (now-playing cluster, volume), Bluetooth (readout).
+    ///
+    /// The other seven (git, bridge, selection, deploy, notifications,
+    /// downloads, daylight) feed fields nothing on screen reads — the night
+    /// audit of 2026-10-04 followed every `ContextState` field to its
+    /// consumer — and each costs a timer, a child process or a `/proc` sweep
+    /// for the whole session. They stay in the crate ([`Engine::start`]) for
+    /// the day a provider asks for them.
+    pub fn start_shell() -> Self {
+        Self::start_with(vec![
+            Box::new(crate::collectors::hyprland::HyprlandCollector::new()),
+            Box::new(crate::collectors::system::SystemCollector::metrics_only()),
+            Box::new(crate::collectors::media::MediaCollector::new()),
+            Box::new(crate::collectors::audio::AudioCollector::new()),
+            Box::new(crate::collectors::bluetooth::BluetoothCollector::new()),
+        ])
+    }
+
     /// Start the engine with a custom set of collectors (used by tests, and by
     /// callers who want to select layers). Must be called within a runtime.
     pub fn start_with(collectors: Vec<Box<dyn Collector>>) -> Self {
@@ -143,7 +164,10 @@ async fn aggregate(mut rx: mpsc::Receiver<Update>, tx: watch::Sender<ContextStat
 /// The player's own `state` wins over the stream's when both exist. A paused
 /// MPRIS player may still hold an `idle` stream open, and the app's declaration
 /// of what it is doing beats our inference from whether bytes are flowing.
-fn merge_playing(mpris: &[crate::state::Playing], streams: &[crate::state::Playing]) -> Vec<crate::state::Playing> {
+fn merge_playing(
+    mpris: &[crate::state::Playing],
+    streams: &[crate::state::Playing],
+) -> Vec<crate::state::Playing> {
     let mut out: Vec<crate::state::Playing> = Vec::with_capacity(mpris.len() + streams.len());
     for p in mpris {
         let mut merged = p.clone();

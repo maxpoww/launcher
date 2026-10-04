@@ -25,7 +25,11 @@ use crate::state::{
     AudioSink, AudioState, ContextState, Layer, PlaybackState, Playing, PlayingSource,
 };
 
+/// The probe interval when there is no `pw-mon` to say when (tool missing,
+/// or it died): polling is then the only clock.
 const POLL: Duration = Duration::from_secs(2);
+/// The safety-net interval while `pw-mon` is watching.
+const HEARTBEAT: Duration = Duration::from_secs(60);
 /// How long to let a burst of PipeWire events settle before reading. One user
 /// action changes several objects, and each would otherwise cost its own dump.
 const SETTLE: Duration = Duration::from_millis(60);
@@ -80,11 +84,14 @@ impl Collector for AudioCollector {
             // rather than up to [`POLL`] later. `None` if the tool is missing —
             // the timer below is then the only clock, exactly as before.
             let mut changes = watch_pipewire();
+            // Whether the probe about to run is a confirming one (see below).
+            let mut confirming = false;
             loop {
                 // ONE dump, read three ways. Before finding #83 this same
                 // subprocess ran every two seconds and only the mic answer was
                 // kept; the output streams and the sink inventory were parsed
                 // away and dropped. They were never expensive — they were free.
+                let mut changed = false;
                 let dump = read_dump().await;
                 let (volume, muted) = read_sink_volume().await.unwrap_or((0, false));
                 let state = AudioState {
@@ -94,6 +101,7 @@ impl Collector for AudioCollector {
                 };
                 if last.as_ref() != Some(&state) {
                     last = Some(state.clone());
+                    changed = true;
                     if tx
                         .send(Update::Delta(Layer::Hardware, ContextDelta::Audio(state)))
                         .await
@@ -107,6 +115,7 @@ impl Collector for AudioCollector {
                     let streams = output_streams_from_dump(raw);
                     if last_streams.as_ref() != Some(&streams) {
                         last_streams = Some(streams.clone());
+                        changed = true;
                         if tx
                             .send(Update::Delta(
                                 Layer::Hardware,
@@ -121,6 +130,7 @@ impl Collector for AudioCollector {
                     let sinks = sinks_from_dump(raw, volume, muted);
                     if last_sinks.as_ref() != Some(&sinks) {
                         last_sinks = Some(sinks.clone());
+                        changed = true;
                         if tx
                             .send(Update::Delta(Layer::Hardware, ContextDelta::Outputs(sinks)))
                             .await
@@ -130,19 +140,28 @@ impl Collector for AudioCollector {
                         }
                     }
                 }
-                // Wait for the world to change, or for the heartbeat.
+                // Wait for the world to change.
                 //
-                // The heartbeat stays because `pw-mon` is a signal, not a
-                // guarantee: it can die, it can be absent, and a missed event
-                // would otherwise freeze this layer until something else
-                // happened. Event-driven when it can be, polled when it must.
+                // With `pw-mon` alive the layer is EVENT-driven: at rest it
+                // runs no probe at all. (It used to probe every two seconds
+                // regardless — two processes forked, a ~100 KB dump read a
+                // line at a time: 590 wakeups a second on an idle laptop,
+                // night audit 2026-10-04.) A slow heartbeat stays as the net
+                // under a `pw-mon` that stopped talking without dying.
                 //
                 // Each signal carries the instant it was seen, so the probes'
                 // own echo can be told from real change and dropped — see
-                // [`SELF_ECHO`]. The heartbeat deadline is absolute: echoes are
-                // skipped without ever postponing it.
+                // [`SELF_ECHO`]. Real change can share that window, so an
+                // event dropped as echo earns ONE confirming probe once the
+                // window closes. A confirming probe that found nothing new
+                // earns no further one (its echo is only its own), which is
+                // what keeps this from being the closed loop again.
                 let echo_until = Instant::now() + SELF_ECHO;
-                let heartbeat = tokio::time::Instant::now() + POLL;
+                let poll = if changes.is_some() { HEARTBEAT } else { POLL };
+                let heartbeat = tokio::time::Instant::now() + poll;
+                let may_confirm = changed || !confirming;
+                let mut confirm = false;
+                confirming = false;
                 let mut watcher_died = false;
                 if let Some(rx) = changes.as_mut() {
                     loop {
@@ -154,8 +173,12 @@ impl Collector for AudioCollector {
                                     watcher_died = true;
                                     break;
                                 }
-                                // Our own probes, still echoing back. Not news.
-                                Some(seen) if seen < echo_until => continue,
+                                // Our own probes, still echoing back — or real
+                                // change hiding among them.
+                                Some(seen) if seen < echo_until => {
+                                    confirm = may_confirm;
+                                    continue;
+                                }
                                 Some(_) => {
                                     // Let the burst that follows one action —
                                     // PipeWire emits several objects per change
@@ -166,6 +189,14 @@ impl Collector for AudioCollector {
                                     break;
                                 }
                             },
+                            () = tokio::time::sleep_until(echo_until.into()), if confirm => {
+                                // The echo has passed: drop what is left of it
+                                // and look once more.
+                                tokio::time::sleep(SETTLE).await;
+                                while rx.try_recv().is_ok() {}
+                                confirming = true;
+                                break;
+                            }
                             () = tokio::time::sleep_until(heartbeat) => break,
                         }
                     }

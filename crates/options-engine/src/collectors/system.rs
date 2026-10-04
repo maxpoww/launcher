@@ -18,12 +18,30 @@ use crate::state::{ContextState, Layer, NetworkLink, NetworkState, SystemMetrics
 /// plenty and keeps this well clear of the high-frequency layers.
 const POLL: Duration = Duration::from_secs(3);
 
-#[derive(Default)]
-pub struct SystemCollector;
+pub struct SystemCollector {
+    /// Also sense what is HAPPENING on the machine — a camera or a recorder
+    /// in use, the trash, a network that is down, a backlight. Each is a
+    /// sweep (`/proc/*/comm`, `/proc/*/fd`, a directory) every tick.
+    presence: bool,
+}
+
+impl Default for SystemCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SystemCollector {
     pub fn new() -> Self {
-        Self
+        Self { presence: true }
+    }
+
+    /// Only the numbers: CPU, memory, disk, GPU, battery, network. The shell
+    /// draws these and nothing else from this layer; the presence sweeps cost
+    /// ~700 syscalls a tick on an idle laptop for fields nothing read (night
+    /// audit, 2026-10-04).
+    pub fn metrics_only() -> Self {
+        Self { presence: false }
     }
 }
 
@@ -39,6 +57,7 @@ impl Collector for SystemCollector {
         _ctx: watch::Receiver<ContextState>,
         tx: mpsc::Sender<Update>,
     ) -> CollectorFuture {
+        let presence = self.presence;
         Box::pin(async move {
             // Previous (total, idle) jiffies for the CPU delta.
             let mut prev_cpu: Option<(u64, u64)> = None;
@@ -69,13 +88,13 @@ impl Collector for SystemCollector {
                     battery_pct,
                     is_charging,
                     on_ac,
-                    has_backlight: has_backlight(),
-                    is_camera_active: camera_in_use(),
-                    is_network_down: network_down(),
-                    is_recording: recorder_running(),
+                    has_backlight: presence && has_backlight(),
+                    is_camera_active: presence && camera_in_use(),
+                    is_network_down: presence && network_down(),
+                    is_recording: presence && recorder_running(),
                     disk_usage_pct: home_disk_usage_pct(),
                     gpu_usage_pct: gpu.sample(),
-                    trash_has_items: trash_has_items(),
+                    trash_has_items: presence && trash_has_items(),
                     trash_bytes: 0, // filled below only when it matters
                 };
                 // The bounded trash sweep (up to ~2000 stats) is only worth
@@ -119,7 +138,10 @@ impl Collector for SystemCollector {
                     prev_net = None;
                 }
                 if tx
-                    .send(Update::Delta(Layer::Hardware, ContextDelta::Network(network)))
+                    .send(Update::Delta(
+                        Layer::Hardware,
+                        ContextDelta::Network(network),
+                    ))
                     .await
                     .is_err()
                 {
@@ -207,8 +229,8 @@ fn read_network() -> NetworkState {
         if name == "lo" {
             continue;
         }
-        let up = std::fs::read_to_string(e.path().join("operstate"))
-            .is_ok_and(|s| s.trim() == "up");
+        let up =
+            std::fs::read_to_string(e.path().join("operstate")).is_ok_and(|s| s.trim() == "up");
         if !up {
             continue;
         }
@@ -667,8 +689,16 @@ mod battery_gauge_tests {
     fn a_sane_gauge_is_believed() {
         let d = std::env::temp_dir().join(format!("golem-batt-{}", std::process::id()));
         let b = d.join("sane");
-        fake(&b, &[("type", "Battery\n"), ("capacity", "84\n"), ("status", "Discharging\n"),
-                   ("energy_full", "38840000\n"), ("energy_full_design", "45730000\n")]);
+        fake(
+            &b,
+            &[
+                ("type", "Battery\n"),
+                ("capacity", "84\n"),
+                ("status", "Discharging\n"),
+                ("energy_full", "38840000\n"),
+                ("energy_full_design", "45730000\n"),
+            ],
+        );
         assert_eq!(battery_in(&b), Some((84, false)));
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -678,16 +708,39 @@ mod battery_gauge_tests {
         let d = std::env::temp_dir().join(format!("golem-batt-mac-{}", std::process::id()));
         let b = d.join("smc");
         // The 2013 MacBook Air, verbatim (2026-09-30).
-        fake(&b, &[("type", "Battery\n"), ("capacity", "1\n"), ("status", "Full\n"),
-                   ("charge_full", "60425000\n"), ("charge_full_design", "7000000\n")]);
+        fake(
+            &b,
+            &[
+                ("type", "Battery\n"),
+                ("capacity", "1\n"),
+                ("status", "Full\n"),
+                ("charge_full", "60425000\n"),
+                ("charge_full_design", "7000000\n"),
+            ],
+        );
         assert_eq!(battery_in(&b), None);
         // Either contradiction alone is enough.
         let c = d.join("full-but-empty");
-        fake(&c, &[("type", "Battery\n"), ("capacity", "3\n"), ("status", "Full\n")]);
+        fake(
+            &c,
+            &[
+                ("type", "Battery\n"),
+                ("capacity", "3\n"),
+                ("status", "Full\n"),
+            ],
+        );
         assert_eq!(battery_in(&c), None);
         let e = d.join("over-design");
-        fake(&e, &[("type", "Battery\n"), ("capacity", "60\n"), ("status", "Discharging\n"),
-                   ("charge_full", "20000\n"), ("charge_full_design", "10000\n")]);
+        fake(
+            &e,
+            &[
+                ("type", "Battery\n"),
+                ("capacity", "60\n"),
+                ("status", "Discharging\n"),
+                ("charge_full", "20000\n"),
+                ("charge_full_design", "10000\n"),
+            ],
+        );
         assert_eq!(battery_in(&e), None);
         let _ = std::fs::remove_dir_all(&d);
     }

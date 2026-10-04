@@ -13,7 +13,8 @@
 //! speaker when its window pid appears anywhere in a sounding stream's chain.
 //!
 //! One `pw-dump` per [`POLL`], **only while the stage is up**, on this
-//! dedicated thread — the mode costs nothing when it is not running.
+//! dedicated thread — parked otherwise, so the mode costs nothing when it is
+//! not running.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -33,12 +34,19 @@ pub struct Stream {
 /// Handle to the poller thread.
 pub struct DeckAudio {
     active: Arc<AtomicBool>,
+    /// The poller, parked while the stage is down.
+    thread: Option<std::thread::Thread>,
 }
 
 impl DeckAudio {
     /// Start or stop polling. Idempotent; the thread notices within a beat.
     pub fn set_active(&self, on: bool) {
         self.active.store(on, Ordering::Relaxed);
+        if on {
+            if let Some(t) = &self.thread {
+                t.unpark();
+            }
+        }
     }
 }
 
@@ -54,7 +62,10 @@ pub fn spawn(results: Sender<Vec<Stream>>) -> DeckAudio {
             loop {
                 if !flag.load(Ordering::Relaxed) {
                     last_empty = true;
-                    std::thread::sleep(POLL);
+                    // Asleep until the stage comes up (`set_active` unparks):
+                    // it used to wake every second for the whole session to
+                    // look at the flag. A spurious wake just looks again.
+                    std::thread::park();
                     continue;
                 }
                 let streams = sample();
@@ -68,10 +79,14 @@ pub fn spawn(results: Sender<Vec<Stream>>) -> DeckAudio {
                 std::thread::sleep(POLL);
             }
         });
-    if let Err(e) = spawned {
-        warn!("cannot spawn deck audio thread: {e}");
-    }
-    DeckAudio { active }
+    let thread = match spawned {
+        Ok(handle) => Some(handle.thread().clone()),
+        Err(e) => {
+            warn!("cannot spawn deck audio thread: {e}");
+            None
+        }
+    };
+    DeckAudio { active, thread }
 }
 
 /// One `pw-dump` → the audibly sounding streams. A muted stream is silence and

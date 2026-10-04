@@ -28,6 +28,7 @@ mod emoji;
 mod emoji_table;
 mod files;
 mod focus_cycle;
+mod font_index;
 mod fractional;
 mod frame;
 mod groups;
@@ -461,6 +462,11 @@ fn main() -> anyhow::Result<()> {
         options_match: None,
         capture: None,
         options_poll_pending: false,
+        capture_from_poll: false,
+        capture_sampled: None,
+        capture_trail_due: false,
+        zone_poll_running: false,
+        sentinel_skip: 0,
         options_burst_pending: false,
         options_capture_failing: false,
         screencopy,
@@ -984,14 +990,26 @@ fn main() -> anyhow::Result<()> {
                 // event); the bar colour-match runs its own self-healing poll
                 // (started from `reeval_options_bar`).
                 if app.config.input.intellihide {
-                    if let Err(e) = event_loop.handle().insert_source(
+                    match event_loop.handle().insert_source(
                         Timer::from_duration(ZONE_POLL_INTERVAL),
                         |_, _, app: &mut App| {
+                            // The colour-match's safety net rides this tick
+                            // (see `schedule_options_poll`): reap a capture
+                            // whose events never came, then re-evaluate.
+                            app.reap_stalled_capture();
+                            // A timer, not news: the colour captures it
+                            // starts may wait for the screen to change.
+                            app.capture_from_poll = true;
+                            app.sentinel_skip = app.sentinel_skip.saturating_sub(1);
                             app.on_layout_changed();
+                            app.capture_from_poll = false;
                             TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
                         },
                     ) {
-                        warn!("zone poll timer failed ({e}); intellihide is event-driven only");
+                        Ok(_) => app.zone_poll_running = true,
+                        Err(e) => {
+                            warn!("zone poll timer failed ({e}); intellihide is event-driven only")
+                        }
                     }
                 }
             }
@@ -1051,10 +1069,13 @@ fn main() -> anyhow::Result<()> {
     stage::recover_if_stranded();
 
     info!("daemon up; try: waverunner-ctl toggle");
+    // One view of the compositor per turn of the loop (hypr::SNAPSHOT).
+    hypr::snapshot_enable();
     while !app.exit {
         event_loop
             .dispatch(None, &mut app)
             .context("event loop dispatch")?;
+        hypr::snapshot_reset();
     }
     info!("layer surface closed, exiting");
     Ok(())
@@ -1134,6 +1155,20 @@ pub struct App {
     capture: Option<screencopy::Capture>,
     /// Whether a resample timer is already queued.
     options_poll_pending: bool,
+    /// The resample poll is the caller of the capture being started (it may
+    /// then be a patient one — `screencopy::App::start_options_capture`).
+    capture_from_poll: bool,
+    /// The rows of the last capture that delivered.
+    capture_sampled: Option<Vec<(screencopy::Slot, u32)>>,
+    /// A patient capture has delivered since the last immediate one: the
+    /// screen was changing, and its last frame may not have been sampled.
+    capture_trail_due: bool,
+    /// The steady zone poll is installed (intellihide): it re-evaluates the
+    /// colour-match on every tick, so the colour poll does not run as well.
+    zone_poll_running: bool,
+    /// Poll ticks left before a sentinel capture is armed again (the screen
+    /// was busy — `screencopy::App::arm_sentinel`).
+    sentinel_skip: u8,
     /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
     /// follow-up capture after a sample changed a colour).
     options_burst_pending: bool,
@@ -5336,7 +5371,21 @@ impl App {
             SurfaceKind::Deck => (&self.deck_fscale, self.config.options.render_scale),
         };
         let fallback = fallback.max(1) as f32;
-        fs.as_ref().map_or(fallback, |f| f.scale_or(fallback))
+        let scale = fs.as_ref().map_or(fallback, |f| f.scale_or(fallback));
+        // Never a framebuffer past the device's texture limit: at a 300 %
+        // screen the dock asked for 8640×2991 and wgpu panicked in
+        // Surface::configure (MacBook, 2026-10-03). Past the cap the
+        // compositor's viewport stretches a slightly softer buffer instead.
+        let (w, h) = match kind {
+            SurfaceKind::Dock => self.buffer_size,
+            SurfaceKind::Options => self.options_size,
+            SurfaceKind::Deck => self.deck_size,
+        };
+        let long = w.max(h);
+        if long == 0 {
+            return scale;
+        }
+        scale.min(renderer::MAX_TEXTURE_SIDE as f32 / long as f32)
     }
 
     /// The compositor changed a surface's preferred scale (first report, or
