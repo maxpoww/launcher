@@ -63,7 +63,11 @@ const CAPTURE_STALL: Duration = Duration::from_millis(600);
 /// deliver only when the screen has changed (`copy_with_damage`), so it is
 /// supposed to sit for as long as nothing moves. It is only replaced after
 /// this long in case its events were lost: re-arming one is free.
-const PATIENT_STALL: Duration = Duration::from_secs(10);
+const PATIENT_STALL: Duration = Duration::from_secs(60);
+
+/// Poll ticks without a sentinel after one came straight back (a busy
+/// screen).
+const SENTINEL_SKIP: u8 = 3;
 
 /// How long a patient capture must have waited for the screen to count as
 /// quiet again (see the trailing sample in [`App::start_options_capture`]).
@@ -503,6 +507,20 @@ impl App {
     /// Begin capturing the focused output (one capture at a time — bar and
     /// dock rows are both read out of it via `target.samples`).
     pub(crate) fn start_options_capture(&mut self) {
+        self.start_capture(false);
+    }
+
+    /// Arm the sentinel: a capture of the rows just sampled that the
+    /// compositor delivers only when the screen changes (see
+    /// [`Self::start_capture`]). Not while the screen is busy
+    /// (`sentinel_skip`): there the poll's own cadence is the cheaper one.
+    fn arm_sentinel(&mut self) {
+        if self.sentinel_skip == 0 && !self.options_paused() {
+            self.start_capture(true);
+        }
+    }
+
+    fn start_capture(&mut self, sentinel: bool) {
         // Before concluding a capture is already in flight, make sure it is
         // alive: a zombie blocks every future sample, so waiting for a poll
         // tick to notice it is exactly the window in which a colour switch
@@ -516,33 +534,45 @@ impl App {
         };
         let output = target.output.clone();
         let samples = target.samples.clone();
-        // PATIENT or not. The resample poll used to capture the whole output
-        // every 700 ms for as long as the session lived, and a plain `copy`
-        // makes Hyprland damage — redraw — the entire monitor each time: an
-        // idle desktop was repainted and read back forever (night audit,
-        // 2026-10-04). The poll's job is to notice a colour that changed with
-        // no layout event, and a colour cannot change unless the screen is
-        // redrawn. So when the poll asks again for rows it has ALREADY
-        // sampled, the capture is taken with `copy_with_damage`: the
-        // compositor delivers it with the next frame it draws anyway, and at
-        // rest that is never. Everything else — a layout event, new rows, the
-        // settle burst — still captures at once, and takes over from a
-        // patient capture that is still waiting.
+        // PATIENT or not.
         //
-        // The trailing sample: a patient capture delivers the FIRST frame
-        // drawn after it was armed, so when the screen changes for a while
-        // and then stops, the last frame can fall between two of them. After
-        // a patient capture has delivered, the first poll that finds the next
-        // one still waiting (the screen has gone quiet) samples at once.
-        let mut patient = self.capture_from_poll
-            && mgr.version() >= 2
-            && self.capture_sampled.as_ref() == Some(&samples);
+        // The resample poll used to capture the whole output every 700 ms for
+        // as long as the session lived, and Hyprland damages — redraws — the
+        // ENTIRE monitor for a capture: an idle desktop was repainted and read
+        // back forever (night audit, 2026-10-04). The poll's job is to notice
+        // a colour that changed with no layout event, and a colour cannot
+        // change unless the screen is redrawn. `copy_with_damage` asks for
+        // exactly that: the frame is delivered with the next one the
+        // compositor draws anyway.
+        //
+        // Hyprland's fine print (ScreenshareFrame.cpp): the first frame of a
+        // screen-share session is always forced (`scheduleFrame` +
+        // `damageMonitor`), with or without damage, and a session counts as
+        // over 500 ms after its last frame. So a patient capture only waits
+        // if it is asked for right after another one delivered. That is the
+        // SENTINEL ([`Self::arm_sentinel`]): armed the moment a capture has
+        // been read, it sits until the screen really changes. At rest there is
+        // one sentinel waiting and no other work at all.
+        //
+        // Everything else captures at once and takes over from a waiting
+        // sentinel: a layout event, new rows, the settle burst — and the
+        // TRAILING sample: a sentinel delivers the first frame drawn after it
+        // was armed, so the last frame of a burst of changes can fall between
+        // two of them; after one has delivered, the first poll tick that
+        // finds the next still waiting (the screen has gone quiet) samples at
+        // once.
+        let patient =
+            sentinel && mgr.version() >= 2 && self.capture_sampled.as_ref() == Some(&samples);
+        if sentinel && !patient {
+            return;
+        }
         if let Some(cap) = self.capture.as_ref() {
-            let quiet = cap.patient && cap.started.elapsed() >= TRAIL_QUIET;
-            if patient && quiet && self.capture_trail_due {
-                patient = false;
-            } else if !cap.patient || patient {
+            if !cap.patient || patient {
                 return;
+            }
+            let quiet = cap.started.elapsed() >= TRAIL_QUIET;
+            if self.capture_from_poll && !(quiet && self.capture_trail_due) {
+                return; // a tick, and the sentinel is doing its job
             }
             self.abort_capture();
         }
@@ -649,6 +679,12 @@ impl App {
         self.capture_sampled = Some(cap.samples.clone());
         if cap.patient {
             self.capture_trail_due = true;
+            // A sentinel that came straight back: the screen is busy (a
+            // video, an animation). Keeping one armed there would capture
+            // every frame, so the next few samples are the poll's.
+            if cap.started.elapsed() < TRAIL_QUIET {
+                self.sentinel_skip = SENTINEL_SKIP;
+            }
         }
         let mut bar_changed = false;
         let mut dock_changed = false;
@@ -710,6 +746,8 @@ impl App {
         if bar_changed || dock_changed {
             self.arm_settle_burst();
         }
+        // …and from here on, wait for the screen to change.
+        self.arm_sentinel();
     }
 
     /// Re-evaluate both surfaces after [`SETTLE_BURST`] — the quick
@@ -1101,6 +1139,7 @@ impl App {
                 // Captures started from here may be patient ones (see
                 // `start_options_capture`).
                 app.capture_from_poll = true;
+                app.sentinel_skip = app.sentinel_skip.saturating_sub(1);
                 app.reeval_options_bar();
                 app.reeval_dock_bar();
                 app.capture_from_poll = false;

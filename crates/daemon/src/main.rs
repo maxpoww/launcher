@@ -465,6 +465,7 @@ fn main() -> anyhow::Result<()> {
         capture_sampled: None,
         capture_trail_due: false,
         zone_poll_running: false,
+        sentinel_skip: 0,
         options_burst_pending: false,
         options_capture_failing: false,
         screencopy,
@@ -996,6 +997,7 @@ fn main() -> anyhow::Result<()> {
                             // A timer, not news: the colour captures it
                             // starts may wait for the screen to change.
                             app.capture_from_poll = true;
+                            app.sentinel_skip = app.sentinel_skip.saturating_sub(1);
                             app.on_layout_changed();
                             app.capture_from_poll = false;
                             TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
@@ -1161,6 +1163,9 @@ pub struct App {
     /// The steady zone poll is installed (intellihide): it re-evaluates the
     /// colour-match on every tick, so the colour poll does not run as well.
     zone_poll_running: bool,
+    /// Poll ticks left before a sentinel capture is armed again (the screen
+    /// was busy — `screencopy::App::arm_sentinel`).
+    sentinel_skip: u8,
     /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
     /// follow-up capture after a sample changed a colour).
     options_burst_pending: bool,
