@@ -5103,6 +5103,7 @@ impl App {
                     self.update_cava_reveal(); // tuck the cava children back
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
                     self.update_clip_hit(); // drop any clip row hover (ptr gone)
+                    self.update_gear_hit(); // and the gear page's
                     self.draw_options();
                     // Revealed in fullscreen: conceal again shortly after leave.
                     if self.options_fullscreen {
@@ -5401,7 +5402,8 @@ impl App {
         // redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
         let clip_hit_changed = self.update_clip_hit();
-        if changed || hit_changed || clip_hit_changed {
+        let gear_hit_changed = self.update_gear_hit();
+        if changed || hit_changed || clip_hit_changed || gear_hit_changed {
             self.draw_options();
         }
     }
@@ -6590,6 +6592,10 @@ impl App {
             self.clip_box_right_click();
             return;
         }
+        // A row on the gear's Wi-Fi or Bluetooth page: its details.
+        if self.options_hover == Some(PillId::SettingsStats) && self.gear_right_click() {
+            return;
+        }
         // The sunset prompt's "not now": a right-click anywhere on the asking
         // module resolves it for this offer (the Mind re-offers next sunset).
         if self.sunset_prompt_shown()
@@ -6653,6 +6659,7 @@ impl App {
             Some(PillId::Settings) => Shape::Pointer,
             Some(PillId::SettingsStats) => match self.options_ptr {
                 Some((px, py)) if self.stats_page_at(px, py).is_some() => Shape::Pointer,
+                _ if self.gear_hit_clickable() => Shape::Pointer,
                 _ => Shape::Default,
             },
             // The small clipboard pill is clickable (paste) → pointer.

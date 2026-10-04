@@ -20,6 +20,17 @@ pub(crate) struct Settings {
     /// Golem as a **floating** window manager instead of a tiling one
     /// (Max, 2026-09-13, page 1's first setting).
     pub(crate) floating: bool,
+    /// Airplane mode: Wi-Fi and Bluetooth both off, by the owner's hand. Kept
+    /// so the two pages can say why they are empty and put both back at once.
+    pub(crate) airplane: bool,
+    /// The hotspot this computer offers (the gear's Wi-Fi page). An empty name
+    /// means the machine's own; the password is made up the first time the
+    /// hotspot page is opened.
+    pub(crate) hotspot_name: String,
+    pub(crate) hotspot_pass: String,
+    pub(crate) hotspot_5ghz: bool,
+    /// Take files that paired Bluetooth devices send (into Downloads).
+    pub(crate) bt_receive: bool,
 }
 
 impl Settings {
@@ -28,7 +39,7 @@ impl Settings {
         crate::persist::read_json(&crate::persist::data_path("settings.json")).unwrap_or_default()
     }
 
-    fn save(&self) {
+    pub(crate) fn save(&self) {
         crate::persist::write_json(
             "settings",
             &crate::persist::data_path("settings.json"),

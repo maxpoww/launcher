@@ -24,6 +24,9 @@ options-notify = { workspace = true }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 futures-util = "0.3"
+# The gear's Wi-Fi page shares a network as a QR code a phone camera can
+# read (pure Rust, no image feature: the modules are drawn as rects).
+qrcode = { version = "0.14", default-features = false }
 
 smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
 wayland-client = "0.31"

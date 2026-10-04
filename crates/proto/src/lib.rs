@@ -89,6 +89,12 @@ pub enum Command {
     /// reading in the order they are drawn). The pointer-free way to exercise
     /// the pages.
     DebugStats(Option<usize>),
+    /// Drive the gear box's Wi-Fi / Bluetooth page without a pointer:
+    /// `open <net|bt>` (and hold it open), `close`, `state`, `detail [name]`,
+    /// `share`, `hotspot`, `files`, `back`, `password <network>`,
+    /// `type <text>`, `scroll <n>`, and two pictures that change nothing:
+    /// `pair` (the pairing view) and `fake-off` (the radios-off page).
+    DebugGear(String),
     /// Golem as a floating window manager instead of a tiling one: `on`, `off`
     /// or `toggle` (empty = toggle). The gear's page-1 switch sends the same
     /// thing; a verb so it can be bound to a key and driven without a pointer.
@@ -241,6 +247,7 @@ impl fmt::Display for Command {
             Command::DebugModuleBox => f.write_str("debug-module-box"),
             Command::DebugStats(None) => f.write_str("debug-stats"),
             Command::DebugStats(Some(p)) => write!(f, "debug-stats {p}"),
+            Command::DebugGear(a) => write!(f, "debug-gear {a}"),
             Command::FloatMode(m) => write!(f, "float-mode {m}"),
             Command::ControlPanel => f.write_str("control-panel"),
             Command::Modules(name) if name.is_empty() => f.write_str("modules"),
@@ -302,6 +309,7 @@ impl FromStr for Command {
             ),
             ("debug-query", Command::DebugQuery as fn(String) -> Command),
             ("debug-emoji", Command::DebugEmoji as fn(String) -> Command),
+            ("debug-gear", Command::DebugGear as fn(String) -> Command),
             ("stage-show", Command::StageShow as fn(String) -> Command),
             // Before its own prefix: `stage-swipe` would otherwise be tried
             // against `stage-swipe-end …` first. (It declines — the remainder
@@ -398,6 +406,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-sunset",
     "debug-module-box",
     "debug-stats",
+    "debug-gear <open net|open bt|close|state|detail|share|hotspot|files|back|password|type|scroll|pair|fake-off>",
     "options-trigger <id>",
     "control-panel",
     "modules [name]",
@@ -511,6 +520,7 @@ mod tests {
                 | Command::DebugSunset
                 | Command::DebugModuleBox
                 | Command::DebugStats(_)
+                | Command::DebugGear(_)
                 | Command::FloatMode(_)
                 | Command::ControlPanel
                 | Command::Modules(_)
@@ -560,6 +570,7 @@ mod tests {
             Command::DebugSunset,
         Command::DebugModuleBox,
         Command::DebugStats(None),
+        Command::DebugGear("detail".into()),
         Command::FloatMode(String::new()),
         Command::ControlPanel,
         Command::Modules(String::new()),

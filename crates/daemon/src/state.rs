@@ -198,6 +198,7 @@ impl UiState {
             | Command::DebugSunset
             | Command::DebugModuleBox
             | Command::DebugStats(_)
+            | Command::DebugGear(_)
             | Command::FloatMode(_)
             | Command::ControlPanel
             | Command::Modules(_)

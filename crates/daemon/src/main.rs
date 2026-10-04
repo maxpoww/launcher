@@ -15,6 +15,8 @@ mod apps;
 mod battery;
 mod boxes;
 mod brain;
+mod bt;
+mod bt_files;
 mod clip_source;
 mod clipboard;
 mod content;
@@ -30,6 +32,7 @@ mod files;
 mod focus_cycle;
 mod font_index;
 mod fractional;
+mod gear;
 mod frame;
 mod groups;
 mod hypr;
@@ -41,6 +44,7 @@ mod launch;
 mod managed;
 mod managed_webapps;
 mod minimized;
+mod net;
 mod nix;
 mod nub_drag;
 // Notification OPTION data plane: a D-Bus worker that mirrors the options-notify
@@ -702,6 +706,7 @@ fn main() -> anyhow::Result<()> {
         module_shown: None,
         module_debug: None,
         stats: stats::StatsState::default(),
+        gear: gear::GearState::default(),
         sunset_acted: false,
         sunset_recalled: false,
         module_box_open: false,
@@ -1027,6 +1032,7 @@ fn main() -> anyhow::Result<()> {
     // which forgets it when it restarts, while the store still remembers
     // (`settings.rs`).
     app.reassert_floating_mode();
+    app.gear_startup();
     // Each app's remembered window place rides its own rule (`window_memory`).
     app.reassert_place_rules();
 
@@ -1817,6 +1823,8 @@ pub struct App {
     /// The settings gear's hover child: CPU/RAM/DISK/BATTERY sliding out from
     /// behind it, the clipboard peek mirrored (see `stats.rs`).
     stats: stats::StatsState,
+    /// The gear box's pages with content (Wi-Fi, Bluetooth) — see `gear.rs`.
+    gear: gear::GearState,
     /// Whether the user already resolved the sunset offer (clicked [turn on] /
     /// dismissed), so it stays down until the Mind withdraws and re-offers it.
     sunset_acted: bool,
@@ -2870,6 +2878,11 @@ impl App {
                     }
                     None => info!("debug-stats: {}", self.toggle_stats_debug()),
                 }
+                return;
+            }
+            Command::DebugGear(what) => {
+                let done = self.gear_debug(&what);
+                info!("debug-gear: {done}");
                 return;
             }
             Command::DebugModuleBox => {
@@ -5608,6 +5621,16 @@ impl App {
             self.clip_key(keysym, utf8);
             return;
         }
+        // The gear box's Wi-Fi and Bluetooth pages hold it the same way: a
+        // password, a search, a new name.
+        if self.gear_wants_keys() {
+            if self.modifiers.ctrl && matches!(keysym, Keysym::v | Keysym::V) {
+                self.paste();
+            } else if !self.modifiers.ctrl {
+                self.gear_key(keysym, utf8);
+            }
+            return;
+        }
         // Ctrl+Plus/Minus cycles icon size through 4 levels.
         if self.modifiers.ctrl {
             match keysym {
@@ -5795,6 +5818,10 @@ impl App {
         info!("paste: {} chars", text.chars().count());
         let printable: String = text.chars().filter(|c| !c.is_control()).collect();
         if printable.is_empty() {
+            return;
+        }
+        if self.gear_wants_keys() {
+            self.gear_type(&printable);
             return;
         }
         self.search.open = true;

@@ -19,6 +19,7 @@ use calloop::timer::{TimeoutAction, Timer};
 
 use crate::animation::{ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SETTLE_PX};
 use crate::content::{Label, Rect, RectInst, Scene};
+use crate::gear::PageKind;
 use crate::options::{PillId, BOND_GAP, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
 use crate::App;
 use options_engine::NetworkLink;
@@ -454,7 +455,15 @@ impl App {
     /// The panel's full height: the bar's one drawer height. Empty for now —
     /// Max is choosing what goes in it.
     fn stats_box_h(&self) -> f32 {
-        self.options_box_drawer_h().max(self.options_pill_h())
+        // A page with nothing to list (a radio switched off) is a shorter
+        // box; the page eases that height itself.
+        let page_h = self.gear.box_h();
+        let h = if page_h > 0.0 {
+            page_h
+        } else {
+            self.options_box_drawer_h()
+        };
+        h.max(self.options_pill_h())
     }
 
     /// How far the panel has grown, 0 (the row) → 1 (open). Read by the pill
@@ -550,8 +559,11 @@ impl App {
         }
         self.stats.page = page;
         if self.stats.open {
-            // Already open: just turn the page. No animation to run, but the
-            // panel has to be redrawn with its new contents.
+            // Already open: just turn the page. The page may need things of
+            // its own (its worker, the keyboard), and the panel has to be
+            // redrawn with its new contents.
+            self.gear_sync();
+            self.schedule_stats_frame();
             self.draw_options();
         } else {
             self.set_stats_box(true);
@@ -574,6 +586,7 @@ impl App {
             self.stats.reveal = true;
         }
         self.stats.last = None;
+        self.gear_sync();
         self.measure_stats();
         self.schedule_stats_frame();
         self.sync_options_input();
@@ -599,6 +612,14 @@ impl App {
         // the row, so the gesture that brings it out is the one that drags its
         // contents up into view — and pushing back down puts it away.
         let opening = delta < 0.0;
+        // A page with a list in it travels that list; it is put away by
+        // leaving, by Escape, or by its own reading's button.
+        if self.stats.open
+            && matches!(self.stats_page_kind(), PageKind::Net | PageKind::Bt)
+        {
+            self.gear_axis(delta);
+            return;
+        }
         if self.stats.open {
             if !opening {
                 self.set_stats_box(false);
@@ -708,7 +729,7 @@ impl App {
                 self.measure_stats();
                 self.schedule_stats_frame();
             }
-        } else if self.stats.reveal && self.stats.hold_deadline.is_none() {
+        } else if self.stats.reveal && self.stats.hold_deadline.is_none() && !self.gear_pins_box() {
             // The panel folds with the row when the hand leaves, like every
             // other box on this bar — a visit ends when you go.
             self.schedule_stats_collapse(LEAVE_HOLD);
@@ -758,10 +779,16 @@ impl App {
                 // came back to.
                 if app.stats.hold_deadline == Some(at) {
                     app.stats.hold_deadline = None;
+                    // A password half typed, a pairing under way: the page
+                    // re-arms this itself when that is over.
+                    if app.gear_pins_box() {
+                        return TimeoutAction::Drop;
+                    }
                     app.stats.reveal = false;
                     app.stats.open = false;
                     app.stats.scroll_accum = 0.0;
                     app.stats.last = None;
+                    app.gear_sync();
                     app.schedule_stats_frame();
                     app.sync_options_input();
                 }
@@ -769,7 +796,7 @@ impl App {
             });
     }
 
-    fn schedule_stats_frame(&mut self) {
+    pub(crate) fn schedule_stats_frame(&mut self) {
         if self.stats.frame_pending {
             return;
         }
@@ -822,6 +849,7 @@ impl App {
         );
         self.stats.e = e;
         moving |= box_moving;
+        moving |= self.gear_tick(dt);
         self.draw_options();
         if moving {
             self.schedule_stats_frame();
@@ -985,8 +1013,13 @@ impl App {
         // symbol to number is identical in every couple.
         let gap = PAIR_GAP * s;
         let columns = self.stats_columns(rect);
+        // With the box open, the reading whose page is showing stays at full
+        // strength and the others step back, so the row says which page this is.
+        let open_e = self.stats.e.clamp(0.0, 1.0);
+        let page = self.stats_page();
         for (i, r) in readings.iter().enumerate() {
             let Some(col) = columns.get(i) else { break };
+            let a = if page == i + 2 { a } else { a * lerp(1.0, 0.6, open_e) };
             let pair_x = col.x;
             let (icon_w, value_w) = self.stats_pair_w(i, r, s);
             let icon_px = ICON_PX * r.icon.scale * s;
@@ -1037,6 +1070,11 @@ impl App {
             }
         }
         let e = self.stats_open_t();
+        // The pages with real content draw themselves (`gear.rs`).
+        if e > 0.01 && matches!(self.stats_page_kind(), PageKind::Net | PageKind::Bt) {
+            self.push_gear_page(scene, a * e);
+            return;
+        }
         // Page 1 is the gear's own, and it has its first real setting on it;
         // the rest still say only their number.
         if e > 0.01 && self.stats_page() == 1 {
@@ -1154,6 +1192,9 @@ impl App {
     /// A press inside the open panel: page 1's switch is the only thing on any
     /// page that takes one. Returns whether it was consumed.
     pub(crate) fn stats_panel_click(&mut self, px: f32, py: f32) -> bool {
+        if self.gear_press() {
+            return true;
+        }
         if self.stats_open_t() < 0.5 || self.stats_page() != 1 {
             return false;
         }

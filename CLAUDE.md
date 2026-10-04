@@ -206,4 +206,16 @@ The big daemon files are cohesive but long — go straight to the function:
   snapping, then the still fades out (`wp_alpha_modifier_v1`). The still's size at the NEW scale
   is committed just before the change so it never shows magnified. Any failure → the change is
   made bare; the still cannot outlive 2 s. `App::dissolve(output, new_scale, then)`.
+- `gear.rs` — the gear box's pages with content: **Wi-Fi** and **Bluetooth** (the readout's
+  first two readings). A page is a `View` (rows, cards, key/value lines, round buttons); ONE
+  layout (`gear_layout`) places it and both the draw (`push_gear_page`) and the hit-test walk
+  it. The footer stretches into a field for a password, a search or a rename, and the box
+  holds the keyboard while one of these pages is open (`gear_sync` — also starts/stops the
+  workers' polling; every path that closes the box must reach it). Backends, each a worker
+  thread spawned on first use, polling only while its page is on screen:
+  `net.rs` (NetworkManager through **`nmcli`**: list, join, forget, hotspot, manual address),
+  `bt.rs` (BlueZ on the system bus, with its own pairing agent; the sound side through
+  **`pw-dump`**/**`wpctl`**), `bt_files.rs` (OBEX on the session bus: send through the desktop
+  portal's file picker, receive into Downloads; results go out as notifications).
+  Pointer-free: `waverunner-ctl debug-gear <open net|open bt|close|detail|hotspot|files|…>`.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

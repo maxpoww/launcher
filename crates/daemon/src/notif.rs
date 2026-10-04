@@ -2959,7 +2959,9 @@ fn push_notif_grid_rect(scene: &mut Scene, content: Rect, rect: RectInst) {
 /// The box's content-scissored grid (creating it, clipped to `content`, on first
 /// use) — shared by the card avatars and monogram tiles so both clip alike.
 fn notif_grid(scene: &mut Scene, content: Rect) -> &mut GridContent {
-    if scene.grids.is_empty() {
+    // By clip, not "the only grid": the gear box's pages ride a grid of
+    // their own, and the avatars must not end up scissored to its list.
+    if scene.grids.last().map(|g| g.clip) != Some(content) {
         scene.grids.push(GridContent {
             clip: content,
             ..Default::default()
