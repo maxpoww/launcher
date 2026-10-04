@@ -29,6 +29,11 @@ impl Counter {
         self.calls.fetch_add(1, Relaxed);
     }
 
+    /// Add `n` to the count.
+    pub(crate) fn add(&self, n: u64) {
+        self.calls.fetch_add(n, Relaxed);
+    }
+
     /// Count one occurrence and the time until the guard drops.
     pub(crate) fn time(&self) -> Timed<'_> {
         Timed {
@@ -86,6 +91,20 @@ pub(crate) static CAPTURE_FORCED: Counter = Counter::new();
 /// A capture whose sample moved a colour.
 pub(crate) static COLOR_CHANGED: Counter = Counter::new();
 
+/// Frames whose damage was worked out (see `crate::damage`), the pixels they
+/// damaged, the pixels of their surfaces, how many showed exactly what the
+/// frame before did (those were not drawn), and the rectangles presented.
+pub(crate) static DAMAGE_FRAMES: Counter = Counter::new();
+pub(crate) static DAMAGE_PX: Counter = Counter::new();
+pub(crate) static SURFACE_PX: Counter = Counter::new();
+pub(crate) static DAMAGE_NONE: Counter = Counter::new();
+pub(crate) static DAMAGE_RECTS: Counter = Counter::new();
+/// `WAVERUNNER_DAMAGE_CHECK=1`: frames read back and compared, those with
+/// pixels that changed OUTSIDE their damage, and how many such pixels.
+pub(crate) static DAMAGE_CHECKED: Counter = Counter::new();
+pub(crate) static DAMAGE_MISSED: Counter = Counter::new();
+pub(crate) static DAMAGE_MISSED_PX: Counter = Counter::new();
+
 /// Every counter since the last report, as one line; resets them.
 pub(crate) fn report() -> String {
     let timed = |name: &str, c: &Counter| {
@@ -106,6 +125,27 @@ pub(crate) fn report() -> String {
         count("sentinel", &CAPTURE_SENTINEL),
         count("forced", &CAPTURE_FORCED),
         count("colour-changes", &COLOR_CHANGED),
+        damage(),
     ]
     .join(" | ")
+}
+
+fn damage() -> String {
+    let frames = DAMAGE_FRAMES.take().0;
+    let (px, of) = (DAMAGE_PX.take().0, SURFACE_PX.take().0);
+    let none = DAMAGE_NONE.take().0;
+    let pct = if of > 0 {
+        px as f64 * 100.0 / of as f64
+    } else {
+        0.0
+    };
+    let rects = DAMAGE_RECTS.take().0 as f64 / frames.max(1) as f64;
+    let mut line =
+        format!("damage {pct:.1}% over {frames} frames ({none} skipped, {rects:.1} rects)");
+    let checked = DAMAGE_CHECKED.take().0;
+    let (missed, missed_px) = (DAMAGE_MISSED.take().0, DAMAGE_MISSED_PX.take().0);
+    if checked > 0 {
+        line += &format!(" | damage-check {checked} frames, {missed} wrong ({missed_px} px)");
+    }
+    line
 }

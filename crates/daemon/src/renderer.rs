@@ -203,6 +203,17 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// What [`Renderer::render`] did with a frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Frame {
+    /// Drawn and presented (the present commits the surface).
+    Presented,
+    /// It shows exactly what the last presented frame does, so nothing was
+    /// drawn and the surface was NOT committed: a frame request made for it
+    /// still needs a commit to reach the compositor.
+    Unchanged,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -290,6 +301,185 @@ pub struct Renderer {
     /// there are no phase jumps when the dock hides and reappears.
     anim_time: f32,
     last_render: Option<std::time::Instant>,
+
+    /// Work out what each frame changed (see [`crate::damage`]): a frame
+    /// that changed nothing is not drawn at all. Off with
+    /// `WAVERUNNER_FULL_DAMAGE=1` (every frame drawn, presented whole).
+    track_damage: bool,
+    /// …and say so in the present: the Vulkan backend only (it is the one
+    /// that can pass it on).
+    present_damage: bool,
+    /// The tiles of the frame last presented. `None` until one is, and after
+    /// anything that makes the next image new as a whole (a resize, a scale
+    /// change, a rebuilt swapchain): that present damages everything.
+    damage_prev: Option<crate::damage::TileMap>,
+    /// The map the next frame is worked out in (the allocation is reused).
+    damage_cur: crate::damage::TileMap,
+    /// What an icon draw's pixels depend on besides its instance: the array
+    /// it samples (`icon_epoch`, bumped when the array is replaced) and the
+    /// layer's own content (`icon_layer_gen`, bumped when it is rewritten).
+    icon_epoch: u64,
+    icon_layer_gen: Vec<u32>,
+    /// `WAVERUNNER_DAMAGE_CHECK=1` (see [`DamageCheck`]).
+    damage_check: Option<DamageCheck>,
+}
+
+/// The damage, verified: with `WAVERUNNER_DAMAGE_CHECK=1` every frame is
+/// composed into a texture of its own, read back and compared with the frame
+/// before. A pixel that changed outside the frame's damage would have stayed
+/// stale on screen — it is logged and counted (`debug-perf`). Slow (a
+/// readback per frame); for test runs.
+#[derive(Default)]
+struct DamageCheck {
+    target: Option<CheckTarget>,
+    /// The previous frame's pixels, rows tightly packed, and its size.
+    prev: Vec<u8>,
+    prev_size: (u32, u32),
+}
+
+struct CheckTarget {
+    width: u32,
+    height: u32,
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+    buf: wgpu::Buffer,
+    /// Bytes per row in `buf` (wgpu pads rows to 256).
+    stride: u32,
+}
+
+/// What a draw's pixels depend on besides its own instance data — the
+/// uniforms its shader reads. Folded into its hash (see [`crate::damage`]).
+struct FrameDeps {
+    /// Every rect and icon fades with the scene's alpha.
+    fade: u64,
+    /// The glass material's edge lights move with time and the pointer.
+    lights: u64,
+    /// The banner blister takes its neck from the globals (when it is on).
+    neck: Option<u64>,
+    /// Icons: the corner shape, the array and its layers.
+    icons: u64,
+}
+
+/// The glass material's lights (rounded_rect.wgsl: the iridescent rim within
+/// 30 px of the edge, the pointer's edge reflection falling off as
+/// exp(-d²/100)) reach this far in from a glass rect's edges, logical px.
+/// Beyond it — 0.06·exp(-20) — the material is the instance's alone.
+const GLASS_LIGHT_BAND: f32 = 45.0;
+
+const KIND_SHADOW: u64 = 1;
+const KIND_RECT: u64 = 2;
+const KIND_ICON: u64 = 3;
+const KIND_BACKDROP: u64 = 4;
+const KIND_LABEL: u64 = 5;
+
+/// A grid's clip as the scissor rectangle it is drawn under (physical px:
+/// x, y, width, height), or `None` when nothing of it is on the surface.
+fn scissor_of(clip: &crate::content::Rect, scale: f32, w: u32, h: u32) -> Option<[u32; 4]> {
+    // Scissor rects address the physical framebuffer; the clip is logical,
+    // so scale it up.
+    let sx = ((clip.x.max(0.0) * scale) as u32).min(w);
+    let sy = ((clip.y.max(0.0) * scale) as u32).min(h);
+    let sw = ((clip.w * scale) as u32).min(w - sx);
+    let sh = (((clip.y + clip.h) * scale).min(h as f32) as u32).saturating_sub(sy);
+    (sw != 0 && sh != 0).then_some([sx, sy, sw, sh])
+}
+
+/// A pixel box cut to a scissor rectangle.
+fn cut(b: [f32; 4], clip: Option<[u32; 4]>) -> [f32; 4] {
+    match clip {
+        Some([sx, sy, sw, sh]) => [
+            b[0].max(sx as f32),
+            b[1].max(sy as f32),
+            b[2].min((sx + sw) as f32),
+            b[3].min((sy + sh) as f32),
+        ],
+        None => b,
+    }
+}
+
+fn clip_hash(h: u64, clip: Option<[u32; 4]>) -> u64 {
+    match clip {
+        Some(c) => crate::damage::hash_bytes(h, bytemuck::bytes_of(&c)),
+        None => h,
+    }
+}
+
+fn mark_shadow(tiles: &mut crate::damage::TileMap, s: &ShadowInstance, scale: f32) {
+    // edge_shadow.wgsl: the quad is the rect grown by `blur + 2`; it reads
+    // no uniform but the screen size.
+    let m = s.blur + 2.0;
+    tiles.mark(
+        [
+            (s.rect_min[0] - m) * scale,
+            (s.rect_min[1] - m) * scale,
+            (s.rect_max[0] + m) * scale,
+            (s.rect_max[1] + m) * scale,
+        ],
+        crate::damage::hash_bytes(KIND_SHADOW, bytemuck::bytes_of(s)),
+    );
+}
+
+fn mark_rect(
+    tiles: &mut crate::damage::TileMap,
+    r: &RectInstance,
+    clip: Option<[u32; 4]>,
+    scale: f32,
+    deps: &FrameDeps,
+) {
+    // rounded_rect.wgsl: the quad is the rect grown by 1 px.
+    let b = cut(
+        [
+            (r.rect_min[0] - 1.0) * scale,
+            (r.rect_min[1] - 1.0) * scale,
+            (r.rect_max[0] + 1.0) * scale,
+            (r.rect_max[1] + 1.0) * scale,
+        ],
+        clip,
+    );
+    let h = clip_hash(
+        crate::damage::hash_bytes(deps.fade ^ KIND_RECT, bytemuck::bytes_of(r)),
+        clip,
+    );
+    // The shader's own three ways, in its order: the blister (needs the
+    // neck), a solid fill, the glass material.
+    match deps.neck {
+        Some(neck) if (r.glass - 2.0).abs() < 0.5 => tiles.mark(b, crate::damage::mix(h, neck)),
+        _ if r.glass < 0.5 => tiles.mark(b, h),
+        _ => {
+            let band = GLASS_LIGHT_BAND;
+            let inner = [
+                (r.rect_min[0] + band) * scale,
+                (r.rect_min[1] + band) * scale,
+                (r.rect_max[0] - band) * scale,
+                (r.rect_max[1] - band) * scale,
+            ];
+            tiles.mark_split(b, inner, h, crate::damage::mix(h, deps.lights));
+        }
+    }
+}
+
+fn mark_icon(
+    tiles: &mut crate::damage::TileMap,
+    i: &IconInstance,
+    clip: Option<[u32; 4]>,
+    scale: f32,
+    deps: &FrameDeps,
+    layer_gen: &[u32],
+) {
+    // icon.wgsl: the quad is the rect itself.
+    let b = cut(
+        [
+            i.rect_min[0] * scale,
+            i.rect_min[1] * scale,
+            i.rect_max[0] * scale,
+            i.rect_max[1] * scale,
+        ],
+        clip,
+    );
+    let gen = layer_gen.get(i.layer as usize).copied().unwrap_or(0);
+    let h = crate::damage::hash_bytes(deps.icons ^ KIND_ICON, bytemuck::bytes_of(i));
+    tiles.mark(b, clip_hash(crate::damage::mix(h, u64::from(gen)), clip));
 }
 
 /// The blur ping-pong pair (see [`Renderer::blur`]).
@@ -340,6 +530,66 @@ fn make_scene_target(
         ],
     });
     (tex, view, bind)
+}
+
+/// The damage check's frame: a colour target like the scene's that can also
+/// be copied out, and the buffer it is copied into.
+fn make_check_target(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+) -> CheckTarget {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("waverunner.damage-check"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("waverunner.damage-check"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let stride = (width.max(1) * 4).div_ceil(align) * align;
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("waverunner.damage-check"),
+        size: u64::from(stride) * u64::from(height.max(1)),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    CheckTarget {
+        width,
+        height,
+        tex,
+        view,
+        bind,
+        buf,
+        stride,
+    }
 }
 
 impl Renderer {
@@ -560,6 +810,10 @@ impl Renderer {
         // hardware adapter is paced by the GPU; a fast GPU finishes each frame
         // long before the next, so pacing costs it nothing.
         let pace_by_gpu = !software;
+        // Only the Vulkan backend can pass a present's damage on (see
+        // `third_party/wgpu-hal`); on GL every present still says "all of it".
+        let track_damage = std::env::var_os("WAVERUNNER_FULL_DAMAGE").is_none();
+        let present_damage = track_damage && adapter.get_info().backend == wgpu::Backend::Vulkan;
 
         let caps = surface.get_capabilities(&adapter);
         // Transparency requires a premultiplied compositing mode.
@@ -1141,6 +1395,14 @@ impl Renderer {
             frame_no: 0,
             anim_time: 0.0,
             last_render: None,
+            track_damage,
+            present_damage,
+            damage_prev: None,
+            damage_cur: crate::damage::TileMap::default(),
+            icon_epoch: 0,
+            icon_layer_gen: Vec::new(),
+            damage_check: std::env::var_os("WAVERUNNER_DAMAGE_CHECK")
+                .map(|_| DamageCheck::default()),
         })
     }
 
@@ -1153,6 +1415,7 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.damage_prev = None;
         let rebuild = |dev: &wgpu::Device| {
             make_scene_target(
                 dev,
@@ -1235,6 +1498,9 @@ impl Renderer {
         // reserved layer is first written ([`Self::update_icon_layer`]).
         let layers = icon_layers(count);
         self.icon_layer_cap = icon_layers(count + reserved);
+        // A new array: every icon draw may show something else now.
+        self.icon_epoch += 1;
+        self.icon_layer_gen.clear();
         let texture = self.create_icon_texture(layers);
         for (i, chain) in chains.enumerate() {
             write_icon_chain(&self.queue, &texture, i as u32, chain);
@@ -1342,6 +1608,7 @@ impl Renderer {
             // macbook options are oversized").
             self.label_cache.clear();
             self.volatile.clear();
+            self.damage_prev = None;
         }
     }
 
@@ -1426,6 +1693,12 @@ impl Renderer {
             return;
         };
         write_icon_chain(&self.queue, texture, layer, pixels);
+        // The layer shows something else: its draws must damage.
+        let at = layer as usize;
+        if self.icon_layer_gen.len() <= at {
+            self.icon_layer_gen.resize(at + 1, 0);
+        }
+        self.icon_layer_gen[at] = self.icon_layer_gen[at].wrapping_add(1);
     }
 
     /// Render one frame of the given scene.
@@ -1440,37 +1713,8 @@ impl Renderer {
         cursor: Option<(f32, f32)>,
         squircle: f32,
         thumb_base: u32,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Frame> {
         let _perf = crate::perf::RENDER.time();
-        let frame = match self.surface.get_current_texture() {
-            Ok(frame) => frame,
-            // Timeout is recovered the same way as Lost/Outdated: a fresh
-            // swapchain. On AMD (RADV) under Hyprland's explicit sync, the
-            // compositor can drop our buffers without signalling their release
-            // (seen when a system switch finished, thinkpad 2026-09-29). The
-            // first acquire then times out, and every later acquire on that
-            // swapchain spins inside Mesa's release wait forever: the main
-            // loop is wedged at ~70% of a core, IPC stops answering, install
-            // tiles freeze on "Installing…". Reconfiguring drops the stranded
-            // images, so the next acquire gets a new one.
-            Err(
-                e @ (wgpu::SurfaceError::Lost
-                | wgpu::SurfaceError::Outdated
-                | wgpu::SurfaceError::Timeout),
-            ) => {
-                if matches!(e, wgpu::SurfaceError::Timeout) {
-                    tracing::warn!("swapchain acquire timed out; recreating it");
-                }
-                self.surface.configure(&self.device, &self.config);
-                self.surface
-                    .get_current_texture()
-                    .context("swapchain unrecoverable after reconfigure")?
-            }
-            Err(e) => return Err(anyhow!("get_current_texture: {e}")),
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         // `w`/`h` are the physical framebuffer size; the scene is authored in
         // logical px. Geometry pipelines map `px / screen → NDC`, so feeding a
         // *logical* `screen` while the framebuffer is physical scales all
@@ -1493,20 +1737,6 @@ impl Renderer {
         self.anim_time += dt;
 
         let cursor_px = cursor.map(|(x, y)| [x, y]).unwrap_or([-9999.0, -9999.0]);
-
-        self.queue.write_buffer(
-            &self.globals_buf,
-            0,
-            bytemuck::bytes_of(&Globals {
-                screen: [lw, lh],
-                alpha: scene.alpha.clamp(0.0, 1.0),
-                time: self.anim_time,
-                cursor: cursor_px,
-                squircle,
-                thumb_base: thumb_base as f32,
-                neck: scene.neck.unwrap_or([-9999.0, 0.0, 0.0, 0.0]),
-            }),
-        );
 
         // Instance buffers: unclipped ranges first, then one scissored
         // range per section grid.
@@ -1542,47 +1772,6 @@ impl Renderer {
         let o0 = icons.len() as u32;
         icons.extend(scene.overlay.iter().map(icon_instance));
         let overlay_range = o0..icons.len() as u32;
-        let rect_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("waverunner.rects"),
-                contents: bytemuck::cast_slice(&rects),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        // `create_buffer_init` rejects empty contents; only build the shadow
-        // buffer when there is at least one band to draw.
-        let shadow_buf = (!shadows.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("waverunner.shadows"),
-                    contents: bytemuck::cast_slice(&shadows),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
-        let icon_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("waverunner.icon-instances"),
-                contents: bytemuck::cast_slice(&icons),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        // One-instance buffer for the box's frosted backdrop (only when a
-        // box is open).
-        let backdrop_buf = scene.box_rect.map(|(r, radius)| {
-            let inst = BoxBackdropInstance {
-                rect_min: [r.x, r.y],
-                rect_max: [r.x + r.w, r.y + r.h],
-                radius,
-                screen: [lw, lh],
-                _pad: 0.0,
-            };
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("waverunner.box-backdrop"),
-                    contents: bytemuck::bytes_of(&inst),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
 
         // Shape the visible labels and hand them to glyphon.
         let alpha = scene.alpha.clamp(0.0, 1.0);
@@ -1699,6 +1888,9 @@ impl Renderer {
         );
         let mut text_buffers: Vec<(&TextBuffer, (f32, f32), TextBounds, glyphon::Color)> =
             Vec::new();
+        // Where each label's ink can fall and what it shows, for the damage.
+        let track_damage = self.track_damage;
+        let mut label_marks: Vec<([f32; 4], u64)> = Vec::new();
         for (i, (label, clip)) in all_labels.iter().enumerate() {
             let (volatile, key) = &shaped[i];
             let buffer = if *volatile {
@@ -1744,8 +1936,265 @@ impl Renderer {
                 None if label.dim => dim_rgba,
                 None => text_rgba,
             };
+            if track_damage {
+                // Every glyph's ink lies around its origin on the baseline:
+                // a font size to each side and below, one and a half above
+                // (overhangs, accents, an emoji's bitmap) — and never outside
+                // the label's clip. Stacked marks carry their own offsets.
+                let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for run in buffer.layout_runs() {
+                    for g in run.glyphs {
+                        let f = g.font_size;
+                        let ox = left + g.x + f * g.x_offset;
+                        let oy = top + run.line_y + g.y - f * g.y_offset;
+                        x0 = x0.min(ox - f);
+                        x1 = x1.max(ox + g.w + f);
+                        y0 = y0.min(oy - 1.5 * f);
+                        y1 = y1.max(oy + f);
+                    }
+                }
+                if x1 > x0 {
+                    use crate::damage::hash_bytes;
+                    let mut hash = hash_bytes(KIND_LABEL, label.text.as_bytes());
+                    hash = hash_bytes(hash, label.family.unwrap_or("").as_bytes());
+                    hash = hash_bytes(
+                        hash,
+                        bytemuck::bytes_of(&[
+                            label.font_px * scale,
+                            label.line_px * scale,
+                            label.max_w * scale,
+                            left,
+                            top,
+                        ]),
+                    );
+                    hash = hash_bytes(
+                        hash,
+                        bytemuck::bytes_of(&[
+                            bounds.left,
+                            bounds.top,
+                            bounds.right,
+                            bounds.bottom,
+                            col.0 as i32,
+                        ]),
+                    );
+                    label_marks.push((
+                        [
+                            x0.max(bounds.left as f32),
+                            y0.max(bounds.top as f32),
+                            x1.min(bounds.right as f32),
+                            y1.min(bounds.bottom as f32),
+                        ],
+                        hash,
+                    ));
+                }
+            }
             text_buffers.push((buffer, (left, top), bounds, col));
         }
+
+        // Grids before `split` are the base scene (offscreen, blurred behind
+        // the box); from `split` on is the box overlay (composited on top).
+        let split = scene
+            .blur_split
+            .unwrap_or(grid_ranges.len())
+            .min(grid_ranges.len());
+
+        // What this frame shows, tile by tile, in draw order — and from it
+        // what changed since the frame before (see `crate::damage`).
+        // `None`: everything.
+        let mut damage: Option<Vec<crate::damage::Rect>> = None;
+        let mut frame_tiles: Option<crate::damage::TileMap> = None;
+        if track_damage {
+            use crate::damage::{hash_bytes, mix};
+            let mut tiles = std::mem::take(&mut self.damage_cur);
+            tiles.reset(w, h);
+            let fade = u64::from(alpha.to_bits());
+            let deps = FrameDeps {
+                fade,
+                lights: hash_bytes(
+                    fade,
+                    bytemuck::bytes_of(&[self.anim_time, cursor_px[0], cursor_px[1]]),
+                ),
+                neck: scene
+                    .neck
+                    .filter(|n| n[0] > -9000.0)
+                    .map(|n| hash_bytes(fade, bytemuck::bytes_of(&n))),
+                icons: mix(
+                    hash_bytes(fade, bytemuck::bytes_of(&[squircle, thumb_base as f32])),
+                    self.icon_epoch,
+                ),
+            };
+            let gens = &self.icon_layer_gen;
+            let grid = |tiles: &mut crate::damage::TileMap,
+                        (clip, rect_range, icon_range): &(
+                crate::content::Rect,
+                std::ops::Range<u32>,
+                std::ops::Range<u32>,
+            )| {
+                let Some(clip) = scissor_of(clip, scale, w, h) else {
+                    return;
+                };
+                for r in &rects[rect_range.start as usize..rect_range.end as usize] {
+                    mark_rect(tiles, r, Some(clip), scale, &deps);
+                }
+                for i in &icons[icon_range.start as usize..icon_range.end as usize] {
+                    mark_icon(tiles, i, Some(clip), scale, &deps, gens);
+                }
+            };
+            for s in &shadows[..n_shadows as usize] {
+                mark_shadow(&mut tiles, s, scale);
+            }
+            for r in &rects[..n_rects_unclipped as usize] {
+                mark_rect(&mut tiles, r, None, scale, &deps);
+            }
+            for s in &shadows[n_shadows as usize..] {
+                mark_shadow(&mut tiles, s, scale);
+            }
+            if self.icon_bind.is_some() {
+                for i in &icons[..n_icons_unclipped as usize] {
+                    mark_icon(&mut tiles, i, None, scale, &deps, gens);
+                }
+            }
+            for g in &grid_ranges[..split] {
+                grid(&mut tiles, g);
+            }
+            // The frosted box shows a blur of everything under it: it
+            // depends on the whole base scene.
+            if let Some((r, radius)) = scene.box_rect {
+                let base = tiles.digest();
+                tiles.mark(
+                    [
+                        r.x * scale,
+                        r.y * scale,
+                        (r.x + r.w) * scale,
+                        (r.y + r.h) * scale,
+                    ],
+                    mix(
+                        hash_bytes(
+                            KIND_BACKDROP,
+                            bytemuck::bytes_of(&[r.x, r.y, r.w, r.h, radius]),
+                        ),
+                        base,
+                    ),
+                );
+            }
+            for g in &grid_ranges[split..] {
+                grid(&mut tiles, g);
+            }
+            for (b, hash) in &label_marks {
+                tiles.mark(*b, *hash);
+            }
+            for i in &icons[overlay_range.start as usize..overlay_range.end as usize] {
+                mark_icon(&mut tiles, i, None, scale, &deps, gens);
+            }
+            damage = match &self.damage_prev {
+                Some(prev) if prev.same_size(&tiles) => Some(tiles.changed(prev)),
+                _ => None,
+            };
+            frame_tiles = Some(tiles);
+        }
+
+        // It shows exactly what the last presented frame does: nothing to
+        // draw, nothing to present. (The damage check draws it anyway: an
+        // unchanged frame must come out pixel for pixel the same.)
+        if matches!(&damage, Some(d) if d.is_empty()) && self.damage_check.is_none() {
+            crate::perf::DAMAGE_FRAMES.hit();
+            crate::perf::DAMAGE_NONE.hit();
+            crate::perf::SURFACE_PX.add(u64::from(w) * u64::from(h));
+            if let Some(tiles) = frame_tiles {
+                self.damage_cur = tiles;
+            }
+            return Ok(Frame::Unchanged);
+        }
+
+        let frame = match self.surface.get_current_texture() {
+            Ok(frame) => frame,
+            // Timeout is recovered the same way as Lost/Outdated: a fresh
+            // swapchain. On AMD (RADV) under Hyprland's explicit sync, the
+            // compositor can drop our buffers without signalling their release
+            // (seen when a system switch finished, thinkpad 2026-09-29). The
+            // first acquire then times out, and every later acquire on that
+            // swapchain spins inside Mesa's release wait forever: the main
+            // loop is wedged at ~70% of a core, IPC stops answering, install
+            // tiles freeze on "Installing…". Reconfiguring drops the stranded
+            // images, so the next acquire gets a new one.
+            Err(
+                e @ (wgpu::SurfaceError::Lost
+                | wgpu::SurfaceError::Outdated
+                | wgpu::SurfaceError::Timeout),
+            ) => {
+                if matches!(e, wgpu::SurfaceError::Timeout) {
+                    tracing::warn!("swapchain acquire timed out; recreating it");
+                }
+                self.surface.configure(&self.device, &self.config);
+                // A new swapchain: its first image is new as a whole.
+                self.damage_prev = None;
+                damage = None;
+                self.surface
+                    .get_current_texture()
+                    .context("swapchain unrecoverable after reconfigure")?
+            }
+            Err(e) => return Err(anyhow!("get_current_texture: {e}")),
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.queue.write_buffer(
+            &self.globals_buf,
+            0,
+            bytemuck::bytes_of(&Globals {
+                screen: [lw, lh],
+                alpha: scene.alpha.clamp(0.0, 1.0),
+                time: self.anim_time,
+                cursor: cursor_px,
+                squircle,
+                thumb_base: thumb_base as f32,
+                neck: scene.neck.unwrap_or([-9999.0, 0.0, 0.0, 0.0]),
+            }),
+        );
+
+        let rect_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("waverunner.rects"),
+                contents: bytemuck::cast_slice(&rects),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        // `create_buffer_init` rejects empty contents; only build the shadow
+        // buffer when there is at least one band to draw.
+        let shadow_buf = (!shadows.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("waverunner.shadows"),
+                    contents: bytemuck::cast_slice(&shadows),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let icon_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("waverunner.icon-instances"),
+                contents: bytemuck::cast_slice(&icons),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        // One-instance buffer for the box's frosted backdrop (only when a
+        // box is open).
+        let backdrop_buf = scene.box_rect.map(|(r, radius)| {
+            let inst = BoxBackdropInstance {
+                rect_min: [r.x, r.y],
+                rect_max: [r.x + r.w, r.y + r.h],
+                radius,
+                screen: [lw, lh],
+                _pad: 0.0,
+            };
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("waverunner.box-backdrop"),
+                    contents: bytemuck::bytes_of(&inst),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+
         self.text_viewport.update(
             &self.queue,
             Resolution {
@@ -1776,12 +2225,20 @@ impl Renderer {
             )
             .context("glyphon prepare failed")?;
 
-        // Grids before `split` are the base scene (offscreen, blurred behind
-        // the box); from `split` on is the box overlay (composited on top).
-        let split = scene
-            .blur_split
-            .unwrap_or(grid_ranges.len())
-            .min(grid_ranges.len());
+        // The damage check composes the frame into a texture it can read.
+        if let Some(check) = &mut self.damage_check {
+            if !matches!(&check.target, Some(t) if t.width == w && t.height == h) {
+                check.target = Some(make_check_target(
+                    &self.device,
+                    self.config.format,
+                    w,
+                    h,
+                    &self.blit_layout,
+                    &self.blit_sampler,
+                ));
+            }
+        }
+        let check_target = self.damage_check.as_ref().and_then(|c| c.target.as_ref());
 
         let mut encoder = self
             .device
@@ -1841,15 +2298,9 @@ impl Renderer {
             // under its own scissor rect. The box overlay (grids from
             // `split` on) is held back for pass 2 so it draws over the blur.
             for (clip, rect_range, icon_range) in &grid_ranges[..split] {
-                // Scissor rects address the physical framebuffer; the clip is
-                // logical, so scale it up.
-                let sx = ((clip.x.max(0.0) * scale) as u32).min(w);
-                let sy = ((clip.y.max(0.0) * scale) as u32).min(h);
-                let sw = ((clip.w * scale) as u32).min(w - sx);
-                let sh = (((clip.y + clip.h) * scale).min(h as f32) as u32).saturating_sub(sy);
-                if sw == 0 || sh == 0 {
+                let Some([sx, sy, sw, sh]) = scissor_of(clip, scale, w, h) else {
                     continue;
-                }
+                };
                 pass.set_scissor_rect(sx, sy, sw, sh);
                 if !rect_range.is_empty() {
                     pass.set_pipeline(&self.rect_pipeline);
@@ -1934,7 +2385,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("waverunner.composite"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: check_target.map_or(&view, |t| &t.view),
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -1965,13 +2416,9 @@ impl Renderer {
             // Same scissored grid draw as the base grids.
             pass.set_bind_group(0, &self.globals_bind, &[]);
             for (clip, rect_range, icon_range) in &grid_ranges[split..] {
-                let sx = ((clip.x.max(0.0) * scale) as u32).min(w);
-                let sy = ((clip.y.max(0.0) * scale) as u32).min(h);
-                let sw = ((clip.w * scale) as u32).min(w - sx);
-                let sh = (((clip.y + clip.h) * scale).min(h as f32) as u32).saturating_sub(sy);
-                if sw == 0 || sh == 0 {
+                let Some([sx, sy, sw, sh]) = scissor_of(clip, scale, w, h) else {
                     continue;
-                }
+                };
                 pass.set_scissor_rect(sx, sy, sw, sh);
                 if !rect_range.is_empty() {
                     pass.set_pipeline(&self.rect_pipeline);
@@ -2010,6 +2457,46 @@ impl Renderer {
             }
         }
 
+        if let Some(t) = check_target {
+            // The checked frame goes to the screen unchanged, and into a
+            // buffer to be compared.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("waverunner.damage-check"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, &t.bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            encoder.copy_texture_to_buffer(
+                t.tex.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &t.buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(t.stride),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         if self.pace_by_gpu {
             use std::sync::atomic::Ordering;
@@ -2018,9 +2505,107 @@ impl Renderer {
             self.queue
                 .on_submitted_work_done(move || busy.store(false, Ordering::Release));
         }
+        if track_damage {
+            let area = |r: &crate::damage::Rect| r[2] as u64 * r[3] as u64;
+            let full = u64::from(w) * u64::from(h);
+            crate::perf::DAMAGE_FRAMES.hit();
+            crate::perf::SURFACE_PX.add(full);
+            crate::perf::DAMAGE_PX.add(damage.as_ref().map_or(full, |d| d.iter().map(area).sum()));
+            if matches!(&damage, Some(d) if d.is_empty()) {
+                crate::perf::DAMAGE_NONE.hit();
+            }
+            crate::perf::DAMAGE_RECTS.add(damage.as_ref().map_or(1, |d| d.len() as u64));
+        }
+        if self.damage_check.is_some() {
+            self.check_damage(w, h, damage.as_deref());
+        }
+        if self.present_damage {
+            match damage {
+                Some(rects) => wgpu_hal::present_damage::set_next(rects),
+                None => wgpu_hal::present_damage::clear(),
+            }
+        }
         frame.present();
+        if let Some(tiles) = frame_tiles {
+            if let Some(old) = self.damage_prev.replace(tiles) {
+                self.damage_cur = old;
+            }
+        }
         self.text_atlas.trim();
-        Ok(())
+        Ok(Frame::Presented)
+    }
+
+    /// `WAVERUNNER_DAMAGE_CHECK`: read the frame just submitted back and
+    /// compare it with the one before; every pixel that differs must lie in
+    /// `damage` (`None` = the whole surface).
+    fn check_damage(&mut self, w: u32, h: u32, damage: Option<&[crate::damage::Rect]>) {
+        let Some(check) = &mut self.damage_check else {
+            return;
+        };
+        let Some(t) = &check.target else {
+            return;
+        };
+        let slice = t.buf.slice(..);
+        let mapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = mapped.clone();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            done.store(r.is_ok(), std::sync::atomic::Ordering::Release);
+        });
+        let _ = self.device.poll(wgpu::Maintain::Wait);
+        if !mapped.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::warn!("damage check: the frame could not be read back");
+            return;
+        }
+        let row = w as usize * 4;
+        let stride = t.stride as usize;
+        {
+            let data = slice.get_mapped_range();
+            crate::perf::DAMAGE_CHECKED.hit();
+            if check.prev_size == (w, h) && check.prev.len() == row * h as usize {
+                // Changed pixels outside the damage: how many, and their box.
+                let (mut wrong, mut changed) = (0u64, 0u64);
+                let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, -1, -1);
+                for y in 0..h as usize {
+                    let cur = &data[y * stride..y * stride + row];
+                    let old = &check.prev[y * row..(y + 1) * row];
+                    if cur == old {
+                        continue;
+                    }
+                    for x in 0..w as usize {
+                        if cur[x * 4..x * 4 + 4] == old[x * 4..x * 4 + 4] {
+                            continue;
+                        }
+                        changed += 1;
+                        let (px, py) = (x as i32, y as i32);
+                        if damage.is_some_and(|d| !crate::damage::covers(d, px, py)) {
+                            wrong += 1;
+                            x0 = x0.min(px);
+                            y0 = y0.min(py);
+                            x1 = x1.max(px);
+                            y1 = y1.max(py);
+                        }
+                    }
+                }
+                if wrong > 0 {
+                    crate::perf::DAMAGE_MISSED.hit();
+                    crate::perf::DAMAGE_MISSED_PX.add(wrong);
+                    tracing::warn!(
+                        "damage check: frame {} ({w}x{h}): {wrong} of {changed} changed px lie outside the damage, within x {x0}..={x1} y {y0}..={y1}; damage {:?}",
+                        self.frame_no,
+                        damage
+                    );
+                }
+            }
+            check.prev.clear();
+            check.prev.reserve(row * h as usize);
+            for y in 0..h as usize {
+                check
+                    .prev
+                    .extend_from_slice(&data[y * stride..y * stride + row]);
+            }
+            check.prev_size = (w, h);
+        }
+        t.buf.unmap();
     }
 }
 

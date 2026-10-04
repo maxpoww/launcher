@@ -20,6 +20,7 @@ mod bt_files;
 mod clip_source;
 mod clipboard;
 mod content;
+mod damage;
 mod deck;
 mod deck_audio;
 mod deck_thumbs;

@@ -1395,14 +1395,18 @@ impl App {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        if let Err(e) = renderer.render(
+        match renderer.render(
             &scene,
             dock_ink,
             self.pointer_pos,
             self.config.theme.icon_squircle,
             thumb_base,
         ) {
-            error!("render failed: {e:#}");
+            // Nothing was presented, so nothing committed the frame request
+            // made above.
+            Ok(crate::renderer::Frame::Unchanged) => self.layer.wl_surface().commit(),
+            Ok(crate::renderer::Frame::Presented) => {}
+            Err(e) => error!("render failed: {e:#}"),
         }
         if (search_animating && self.search.expand != search_target) || lift_animating || fit_animating {
             self.dirty = true;
@@ -1533,7 +1537,8 @@ impl App {
                     alpha: 1.0,
                     ..Default::default()
                 };
-                let _ = renderer.render(&scene, [0.0; 4], None, 0.0, 0);
+                let frame = renderer.render(&scene, [0.0; 4], None, 0.0, 0);
+                self.commit_unchanged_options(frame.ok());
             }
             return;
         }
@@ -1600,8 +1605,19 @@ impl App {
         // sunset module wears the dock's liquid-glass material, and its
         // cursor-tracked edge reflection is part of the material. Everything
         // else on this surface is glass: 0.0, so nothing else changes.
-        if let Err(e) = renderer.render(&scene, text_rgba, self.options_ptr, squircle, 0) {
-            error!("options render failed: {e:#}");
+        match renderer.render(&scene, text_rgba, self.options_ptr, squircle, 0) {
+            Ok(frame) => self.commit_unchanged_options(Some(frame)),
+            Err(e) => error!("options render failed: {e:#}"),
+        }
+    }
+
+    /// A frame that changed nothing was not presented, so nothing committed
+    /// the frame request `draw_options` made for it: commit it here.
+    fn commit_unchanged_options(&self, frame: Option<crate::renderer::Frame>) {
+        if frame == Some(crate::renderer::Frame::Unchanged) {
+            if let Some(layer) = self.options_layer.as_ref() {
+                layer.wl_surface().commit();
+            }
         }
     }
 }
