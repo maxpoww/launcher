@@ -91,6 +91,122 @@ in empty-variable and fallback handling — a merge can move a path for no
 gain) and the duplicated ease/lerp helpers (the copies skip `reduce_motion`;
 unifying them changes behaviour for reduce-motion users — a decision).
 
+## Round 3 (2026-10-04/05) — performance
+
+Brief (Max): "study the unification, and improve it. optimize it. we want
+higher performance." Same rules: no UI/UX change, the Acer as the test
+machine, nothing on `main` without his go. Branch `unify-3`; the Hyprland
+side is Golem's branch `layer-damage`.
+
+This round measured first. The daemon got always-on counters
+(`waverunner-ctl debug-perf`: frames per surface, shapes, Hyprland requests,
+captures, damage) and a scripted workload runner (`tools/unify-check/work.sh`)
+that reads, per workload: dock and Hyprland CPU, each one's GPU time (the
+kernel's per-client `drm-engine-render`), whole-GPU busy (i915 PMU) and
+instructions (CPU seconds lie when the governor changes the clock).
+
+### What the measurements showed
+
+1. **Surfaces drew above the display's rate.** The OPTIONS bar rendered 125
+   frames a second (its animations tick on 8 ms timers and every state change
+   drew), the dock ~95 (a draw outside a frame callback asked for a second
+   callback, and from then on both drew). → one render per compositor frame.
+2. **Text was shaped again every frame**: every label of the OPTIONS bar is
+   "uncached" (its text may change), ~10 a frame through a whole animation in
+   which none changed, and `measure_text("Search")` ran every dock frame. →
+   shaped once, kept while the text stays (13 607 → 347 shapes for 12 boxes).
+3. **Every screen capture made Hyprland redraw the whole output** (2–3 a
+   second through any animation, 8 ms of its CPU and 18 ms of GPU each). →
+   one frame object is held inside the capture session and asked to deliver
+   when wanted; nothing is forced, nothing at rest. Unasked samples also wait
+   for the shell's own drawing to rest (150 ms; never more than 2.4 s): a
+   capture still costs ~16 ms of GPU on the Acer — a whole frame.
+4. **Hyprland's GPU time was 5–6× the dock's own, and two thirds of it was
+   blur under our surfaces.** Every frame went out as "all of it changed", and
+   our surfaces are far larger than what they draw (OPTIONS: 510 px tall for a
+   28 px bar; the dock's holds the whole launcher: 83 % of the screen).
+   → `damage.rs`: the surface is cut into 32 px tiles; every draw folds a hash
+   of everything its pixels depend on into the tiles it can touch; the tiles
+   that differ from the last presented frame are the damage (2–28 % of the
+   surface). A frame in which no tile differs is not drawn at all (13–25 % of
+   the OPTIONS and deck frames of a box or stage animation).
+   wgpu has no API for present damage, so a patched copy of `wgpu-hal`
+   (`third_party/`, ~200 lines) passes it on: `VK_KHR_incremental_present` on
+   Vulkan, `eglSwapBuffersWithDamage` on GL.
+
+### What Hyprland needed (three patches, Golem `hyprland-patches/`)
+
+- **layer-commit-damage** — stock damages a layer surface's WHOLE box on
+  every commit, whatever the client says. Without this patch item 4 changes
+  nothing.
+- **keep-work-buffers** (`debug:invalidate_work_buffers`, off by default now)
+  — stock invalidates its render buffers after every frame and clears each
+  one whole at its next use: three full-screen clears a frame whatever the
+  damage, and on Intel before gen 9 three full-screen resolves on top (~4 ms
+  of GPU a frame on the Acer). This one is for the whole desktop, not just
+  the shell.
+- **screenshare-region-session** — an upstream bug found on the way: on any
+  monitor whose scale is not 1, EVERY frame of a region capture creates a new
+  session that is never freed (the lookup compares a logical box with a
+  scaled one). Each forces a full redraw, announces a screencast start and
+  stop, and stays in a list that every texture draw walks. `wf-recorder`
+  always captures by region: on the Acer one 11 s recording left Hyprland
+  12 % dearer per frame for the rest of its life, three left it 37 % dearer,
+  about eight 2–3×. With the patch: flat, and 16 announcements instead of 485.
+
+Looked at and NOT kept: scissoring the blur's stencil clear (2–4 %),
+`render:use_shader_blur_blend` (a third less blur cost, but it draws
+differently), fewer damage rectangles (the average is already 1.0).
+
+### Results (Acer E5-573, HD 5500, 1366×768, blur on)
+
+Before = round 2 on stock Hyprland; after = `unify-3` on the patched one.
+Seconds of CPU/GPU for the same scripted workload.
+
+| workload | dock CPU | Hyprland CPU | Hyprland GPU | all GPU | GPU busy |
+|---|---|---|---|---|---|
+| 12 OPTIONS boxes | 2.01 → 0.70 | 1.36 → 0.85 | 6.12 → 2.71 | −55 % | 21 → 10 % |
+| launcher ×5 | 2.91 → 1.78 | 1.68 → 1.61 | 10.06 → 5.66 | −37 % | 52 → 33 % |
+| settings panel ×4 | 3.74 → 1.99 | 1.61 → 1.31 | 8.29 → 4.88 | −39 % | 68 → 43 % |
+| pointer over the dock | 0.84 → 0.33 | 0.75 → 0.38 | 3.49 → 1.18 | −59 % | 45 → 22 % |
+| typing a search | 1.09 → 0.82 | 0.48 → 0.49 | 2.77 → 1.73 | −30 % | 36 → 26 % |
+| fast launch ×5 | 0.33 → 0.19 | 0.27 → 0.23 | 1.32 → 0.89 | −29 % | 12 → 8 % |
+| stage ×3 | 1.73 → 1.40 | 1.47 → 1.35 | 4.40 → 3.42 | −23 % | 15 → 12 % |
+
+Frames drawn for the same animations: OPTIONS 1318 → 637 (12 boxes), dock
+1161 → 1037 (launcher), 1374 → 866 (panel). Captures: ~70 (46 forced) → 39
+(none forced); at rest 5 per 30 s → 0. The GL path, forced on the Acer:
+Hyprland GPU −36 % to −66 % between full and real damage.
+
+### How round 3 was verified
+
+- **The damage, pixel by pixel**: `WAVERUNNER_DAMAGE_CHECK=1` composes every
+  frame into a texture of its own, reads it back and compares it with the
+  frame before; a pixel that changed outside the frame's damage (or at all,
+  in a frame that would have been skipped) is logged and counted. All
+  workloads, the gear pages and the 14 deep scenarios, Vulkan and GL, scale
+  0.67 and 1: 0 wrong pixels in ~15 000 frames.
+- **The real screen**: a screenshot proves nothing here (taking one makes
+  Hyprland redraw everything). `kms.sh` grabs the scanout buffer itself
+  (`ffmpeg -f kmsgrab`, de-tiled by `detile.py`) after a run of partial
+  frames, then again after a forced full redraw. Identical in every still
+  scenario, on Vulkan and GL. The method was proven first by breaking the
+  damage on purpose: 20 000+ stale pixels.
+- End-state screenshots against round 2 (clock digits only), the bar still
+  follows a window's colour in ~0.1 s, the recording leak test, clippy, 358
+  tests.
+- `WAVERUNNER_FULL_DAMAGE=1` turns damage tracking and frame skipping off.
+
+Not verified (no such machine in my hands): Iris Xe/anv at 3200×2000 scale
+1.25 with VRR at 165 Hz (the dev box), NVIDIA, AMD, two monitors, the ASUS
+and the MacBook themselves (their GL path ran on the Acer).
+
+Two things learned about measuring: the compositor started by path (not
+through `/run/wrappers`) is not SCHED_RR and the governor then halves its
+clock — compare instructions, or `chrt` it; and a screen RECORDER on this
+Hyprland changes what the compositor draws (see the third patch), so it
+cannot be the witness for damage.
+
 ## Still duplicated — candidates, in the order I would take them
 
 | # | What | Gain | Risk |
@@ -104,6 +220,9 @@ unifying them changes behaviour for reduce-motion users — a decision).
 | 7 | The OPTIONS surface is always 510 px tall for a 28 px bar: its swapchain and scene texture are ~18× the visible strip. | −30 MB | high (surface sizing is a non-negotiable) |
 | 8 | Plugin and daemon both sample the window-top colour (plugin from the texture, daemon by screen capture); four capture flows in the plugin; the minimized set lives in three places. | simpler | plugin code |
 | 9 | Initrd activation runs two cold Perl scripts (~4 s on the Acer); the desktop waits for NetworkManager behind the splash (~8 s). See Golem `work/parity.md`. | boot | visual handoff |
+| 10 | A screen capture still costs ~16 ms of GPU on the Acer (Hyprland re-renders what changed, draws the whole output through a colour-management shader and reads all of it back, whatever region is asked). The plugin already reads the window-top colour from the texture (item 8): if it handed the samples over, the shell would capture nothing at all. | no capture hitches, −10–20 % GPU in animations | plugin code |
+| 11 | The settings panel draws at 60 fps for as long as it is open (its pills drift, by design): ~45 % GPU busy on the Acer just standing there. Drawing the drift at 30 fps would halve it. | panel idle ÷2 | a look decision (Max) |
+| 12 | The dock still draws every frame into an offscreen texture and blits it, also when no box is open (the texture exists for the box's frost). Drawing straight to the swapchain then saves a full-surface pass. | dock GPU −20–30 % | medium |
 
 ## Overkill for 1.0 — decisions for Max
 
