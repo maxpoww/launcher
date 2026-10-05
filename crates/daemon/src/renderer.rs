@@ -2467,60 +2467,12 @@ impl Renderer {
                 draw_overlay(&mut pass)?;
             }
         }
-        if let Some((twin, scene_view, scene_bind)) = two_step {
-            // The same frame, the two-step way, to be compared.
-            draw_base(&mut clear_pass(
-                &mut encoder,
-                scene_view,
-                "waverunner.check-scene",
-            ));
-            {
-                let mut pass = clear_pass(&mut encoder, &twin.view, "waverunner.check-composite");
-                pass.set_pipeline(&self.blit_pipeline);
-                pass.set_bind_group(0, scene_bind, &[]);
-                pass.draw(0..3, 0..1);
-                draw_overlay(&mut pass)?;
-            }
-            encoder.copy_texture_to_buffer(
-                twin.tex.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &twin.buf,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(twin.stride),
-                        rows_per_image: Some(h),
-                    },
-                },
-                wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-
-        if let Some(t) = check_target {
-            // The checked frame goes to the screen unchanged, and into a
-            // buffer to be compared.
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("waverunner.damage-check"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pass.set_pipeline(&self.blit_pipeline);
-                pass.set_bind_group(0, &t.bind, &[]);
-                pass.draw(0..3, 0..1);
-            }
+        // The damage check's copies are taken BEFORE anything samples the
+        // texture they come from: on the GL backend (Mesa, the Broadwell
+        // laptop) a texture read back after a pass had sampled it came out
+        // with a few stale pixels around the last thing drawn — in the copy
+        // only, the screen was right.
+        let read_back = |encoder: &mut wgpu::CommandEncoder, t: &CheckTarget| {
             encoder.copy_texture_to_buffer(
                 t.tex.as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
@@ -2537,6 +2489,32 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
             );
+        };
+        if let Some(t) = check_target {
+            read_back(&mut encoder, t);
+        }
+        if let Some((twin, scene_view, scene_bind)) = two_step {
+            // The same frame, the two-step way, to be compared.
+            draw_base(&mut clear_pass(
+                &mut encoder,
+                scene_view,
+                "waverunner.check-scene",
+            ));
+            {
+                let mut pass = clear_pass(&mut encoder, &twin.view, "waverunner.check-composite");
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, scene_bind, &[]);
+                pass.draw(0..3, 0..1);
+                draw_overlay(&mut pass)?;
+            }
+            read_back(&mut encoder, twin);
+        }
+        if let Some(t) = check_target {
+            // The checked frame goes to the screen unchanged.
+            let mut pass = clear_pass(&mut encoder, &view, "waverunner.damage-check");
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &t.bind, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -2635,25 +2613,34 @@ impl Renderer {
                 if ok.load(std::sync::atomic::Ordering::Acquire) {
                     {
                         let other = twin_slice.get_mapped_range();
-                        let differ = (0..h as usize)
-                            .map(|y| {
-                                let a = &data[y * stride..y * stride + row];
-                                let b = &other[y * stride..y * stride + row];
-                                if a == b {
-                                    0
-                                } else {
-                                    a.chunks_exact(4)
-                                        .zip(b.chunks_exact(4))
-                                        .filter(|(p, q)| p != q)
-                                        .count() as u64
+                        // How many pixels differ, by how much at most, and where.
+                        let (mut differ, mut worst) = (0u64, 0u8);
+                        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+                        for y in 0..h as usize {
+                            let a = &data[y * stride..y * stride + row];
+                            let b = &other[y * stride..y * stride + row];
+                            if a == b {
+                                continue;
+                            }
+                            for (x, (p, q)) in a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate()
+                            {
+                                if p == q {
+                                    continue;
                                 }
-                            })
-                            .sum::<u64>();
+                                differ += 1;
+                                worst = p
+                                    .iter()
+                                    .zip(q)
+                                    .map(|(c, d)| c.abs_diff(*d))
+                                    .fold(worst, u8::max);
+                                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                            }
+                        }
                         crate::perf::PATHS_CHECKED.hit();
                         if differ > 0 {
                             crate::perf::PATHS_DIFFER.hit();
                             tracing::warn!(
-                                "path check: frame {} ({w}x{h}): {differ} px differ between the one-pass and the two-step frame",
+                                "path check: frame {} ({w}x{h}): {differ} px differ between the one-pass and the two-step frame, by at most {worst}/255, within x {x0}..={x1} y {y0}..={y1}",
                                 self.frame_no
                             );
                         }
