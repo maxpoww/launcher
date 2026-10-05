@@ -549,8 +549,10 @@ fn item_zones(item: &Item, r: Rect, s: f32) -> Vec<(Hit, Rect)> {
         }
         Item::Kv { hit: Some(h), .. } => vec![(h.clone(), r)],
         Item::Toggle { hit, .. } => vec![(hit.clone(), r)],
-        Item::Choice { opts, .. } => {
-            let mut x = r.x + (ROW_PAD_X + KV_KEY_W + 10.0) * s;
+        Item::Choice { key, opts } => {
+            // The key takes the room its word needs, not a fixed column: on a
+            // narrow box that is what lets every pill stay on the one line.
+            let mut x = r.x + ROW_PAD_X * s + choice_key_w(key, s);
             let h = CHOICE_PILL_H * s;
             opts.iter()
                 .map(|(hit, label, _)| {
@@ -580,6 +582,11 @@ fn item_zones(item: &Item, r: Rect, s: f32) -> Vec<(Hit, Rect)> {
         }
         _ => Vec::new(),
     }
+}
+
+/// How much of a choice row its key takes, with the gap after it.
+fn choice_key_w(key: &str, s: f32) -> f32 {
+    (est_w(key, FONT_PX * s) * 1.1 + 14.0 * s).min((KV_KEY_W + 10.0) * s)
 }
 
 /// A row's corner control: where the trail sits, a little larger to press.
@@ -2379,7 +2386,7 @@ impl App {
                         scene,
                         key.clone(),
                         (r.x + ROW_PAD_X * s, r.y + (r.h - px.1) / 2.0),
-                        KV_KEY_W * s,
+                        choice_key_w(key, s),
                         px,
                         [ink[0], ink[1], ink[2], ink[3] * 0.55],
                         false,

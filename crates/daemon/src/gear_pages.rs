@@ -959,65 +959,11 @@ impl App {
             items.push(Item::Toggle {
                 hit: sys(SysHit::Awake),
                 label: "Keep awake".into(),
-                hint: "No dimming and no sleep until you turn it off".into(),
+                hint: "No dimming, no sleep".into(),
                 on: Self::caffeine_path().exists(),
             });
         }
-        if let Some(base) = idle_base_text() {
-            let (base_screen, base_sleep) = idle_base(&base);
-            let pills = |base: Option<u32>,
-                         picked: Option<u32>,
-                         stops: [u32; 2],
-                         hit: fn(u32) -> SysHit| {
-                let current = picked.or(base);
-                let mut secs: Vec<u32> = stops.into_iter().chain(base).collect();
-                secs.sort_unstable();
-                secs.dedup();
-                secs.push(0);
-                secs.into_iter()
-                    .map(|s| {
-                        let label = if s == 0 {
-                            "Never".to_owned()
-                        } else {
-                            span_text(u64::from(s / 60))
-                        };
-                        (sys(hit(s)), label, current == Some(s))
-                    })
-                    .collect::<Vec<_>>()
-            };
-            if base_screen.is_some() {
-                items.push(Item::Choice {
-                    key: "Screen off".into(),
-                    opts: pills(
-                        base_screen,
-                        self.settings.screen_off_secs,
-                        [120, 900],
-                        SysHit::ScreenOff,
-                    ),
-                });
-            }
-            if base_sleep.is_some() {
-                items.push(Item::Choice {
-                    key: "Sleep".into(),
-                    opts: pills(
-                        base_sleep,
-                        self.settings.sleep_secs,
-                        [1800, 3600],
-                        SysHit::SleepAfter,
-                    ),
-                });
-            }
-        }
-        if std::path::Path::new("/proc/acpi/button/lid").exists() {
-            let nothing = self.settings.lid_nothing;
-            items.push(Item::Choice {
-                key: "Lid closed".into(),
-                opts: vec![
-                    (sys(SysHit::Lid(false)), "Sleep".into(), !nothing),
-                    (sys(SysHit::Lid(true)), "Nothing".into(), nothing),
-                ],
-            });
-        }
+        items.extend(self.idle_rows());
         if b.design_wh > 1.0 {
             let health = (100.0 * b.full_wh / b.design_wh).round().clamp(0.0, 100.0) as u8;
             items.push(row_with(
@@ -1046,6 +992,68 @@ impl App {
             zebra: true,
             ..View::default()
         }
+    }
+
+    /// When the screen goes dark, when the computer sleeps, what the lid does:
+    /// on the battery page, or on the gear's own where a machine has none.
+    fn idle_rows(&self) -> Vec<Item> {
+        let mut items = Vec::new();
+        if let Some(base) = idle_base_text() {
+            let (base_screen, base_sleep) = idle_base(&base);
+            let pills = |base: Option<u32>,
+                         picked: Option<u32>,
+                         stops: [u32; 2],
+                         hit: fn(u32) -> SysHit| {
+                let current = picked.or(base);
+                let mut secs: Vec<u32> = stops.into_iter().chain(base).collect();
+                secs.sort_unstable();
+                secs.dedup();
+                secs.push(0);
+                secs.into_iter()
+                    .map(|s| {
+                        let label = if s == 0 {
+                            "Never".to_owned()
+                        } else {
+                            span_text(u64::from(s / 60))
+                        };
+                        (sys(hit(s)), label, current == Some(s))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if base_screen.is_some() {
+                items.push(Item::Choice {
+                    key: "Screen".into(),
+                    opts: pills(
+                        base_screen,
+                        self.settings.screen_off_secs,
+                        [120, 900],
+                        SysHit::ScreenOff,
+                    ),
+                });
+            }
+            if base_sleep.is_some() {
+                items.push(Item::Choice {
+                    key: "Sleep".into(),
+                    opts: pills(
+                        base_sleep,
+                        self.settings.sleep_secs,
+                        [1800, 3600],
+                        SysHit::SleepAfter,
+                    ),
+                });
+            }
+        }
+        if std::path::Path::new("/proc/acpi/button/lid").exists() {
+            let nothing = self.settings.lid_nothing;
+            items.push(Item::Choice {
+                key: "Lid".into(),
+                opts: vec![
+                    (sys(SysHit::Lid(false)), "Sleep".into(), !nothing),
+                    (sys(SysHit::Lid(true)), "Nothing".into(), nothing),
+                ],
+            });
+        }
+        items
     }
 
     fn health_view(&self) -> View {
@@ -1149,7 +1157,7 @@ impl App {
                 p.live
                     .last_update_secs
                     .map_or("Click to check now".to_owned(), |s| {
-                        format!("Checked {} ago. Click to check now", span_text(s / 60))
+                        format!("Checked {} ago", span_text(s / 60))
                     }),
                 Tone::Normal,
                 sys(SysHit::CheckUpdates),
@@ -1164,7 +1172,9 @@ impl App {
                     } else {
                         m.host.clone()
                     },
-                    format!("{} · on for {on_for}", m.os),
+                    // "Golem 26.05 (Yarara)": the release's own name is for the
+                    // details view; the row has room for the version.
+                    format!("{} · up {on_for}", m.os.split(" (").next().unwrap_or(&m.os)),
                 ),
                 sys(SysHit::About),
                 Some((sys(SysHit::About), G_MORE)),
@@ -1193,9 +1203,12 @@ impl App {
             items.push(Item::Toggle {
                 hit: sys(SysHit::Awake),
                 label: "Keep awake".into(),
-                hint: "No dimming and no sleep until you turn it off".into(),
+                hint: "No dimming, no sleep".into(),
                 on: Self::caffeine_path().exists(),
             });
+        }
+        if self.stats_page_for(PageKind::Battery).is_none() {
+            items.extend(self.idle_rows());
         }
         items.push(Item::Toggle {
             hit: Hit::Airplane,
@@ -1204,11 +1217,7 @@ impl App {
             on: self.settings.airplane,
         });
         items.push(row_with(
-            row(
-                Some(G_COG),
-                "All settings",
-                "Screen, sound, keyboard and the rest",
-            ),
+            row(Some(G_COG), "All settings", "Screen, sound and the rest"),
             sys(SysHit::AllSettings),
             None,
             Trail::None,
@@ -2166,10 +2175,36 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_act_is_told_in_plain_words() {
+        assert_eq!(
+            plain_problem("Failed to activate device: Incorrect passphrase."),
+            "Wrong password"
+        );
+        assert!(plain_problem("Input/output error while writing").contains("stopped responding"));
+        assert_eq!(plain_problem("something else"), "something else");
+    }
+
+    #[test]
     fn battery_health_has_three_words() {
         assert_eq!(health_word(88), "Good");
         assert_eq!(health_word(70), "Worn");
         assert_eq!(health_word(40), "Needs replacing");
+    }
+}
+
+/// The disk service's reason, in a person's words where we know the case.
+fn plain_problem(reason: &str) -> &str {
+    let r = reason.to_lowercase();
+    if r.contains("passphrase") {
+        "Wrong password"
+    } else if r.contains("input/output") || r.contains("timed out") {
+        "The drive stopped responding. It may be failing"
+    } else if r.contains("no such interface") {
+        "Nothing readable inside. Format it"
+    } else if r.contains("not authorized") {
+        "This system does not allow it"
+    } else {
+        reason
     }
 }
 
@@ -2188,11 +2223,8 @@ fn format_words(fstype: &str) -> &'static str {
 
 fn target_words(t: Target) -> (&'static str, &'static str) {
     match t {
-        Target::Any => (
-            "Any computer",
-            "exFAT. Windows, Mac, phones, TVs and this one",
-        ),
-        Target::Golem => ("This system", "ext4. Linux only. It can be locked"),
+        Target::Any => ("Anywhere", "exFAT. Windows, Mac, phones, TVs and this one"),
+        Target::Golem => ("Golem", "ext4. Linux only. It can be locked"),
         Target::Windows => ("Windows", "NTFS. For a drive that lives on Windows"),
     }
 }
@@ -2206,7 +2238,7 @@ impl App {
                     let p = &mut app.gear.pages;
                     p.drive_busy = None;
                     p.drive_note = match (what, problem) {
-                        (_, Some(problem)) => Some((problem, false)),
+                        (_, Some(problem)) => Some((plain_problem(&problem).to_owned(), false)),
                         ("check", None) => Some(("No problems found".to_owned(), true)),
                         _ => None,
                     };
@@ -2276,7 +2308,11 @@ impl App {
         }];
         if let Some((note, good)) = &p.drive_note {
             items.push(row_with(
-                row(None, note.clone(), ""),
+                if *good {
+                    row(None, note.clone(), "")
+                } else {
+                    row(None, "That did not work", note.clone())
+                },
                 Hit::None,
                 None,
                 Trail::None,
@@ -2325,7 +2361,7 @@ impl App {
                 act(
                     G_FOLDER,
                     "Use it",
-                    "Mounts it so its files can be opened",
+                    "Mounts it to open its files",
                     SysHit::ExtMount(i),
                 )
             });
@@ -2398,14 +2434,14 @@ impl App {
             items.push(Item::Toggle {
                 hit: sys(SysHit::FormatLock),
                 label: "Lock with a password".into(),
-                hint: "Asks for it every time the drive is plugged in".into(),
+                hint: "Asked each time it is plugged in".into(),
                 on: f.lock,
             });
         }
         items.push(Item::Toggle {
             hit: sys(SysHit::FormatThorough),
             label: "Erase thoroughly".into(),
-            hint: "Writes over every part first. Much slower".into(),
+            hint: "Writes over everything first. Slow".into(),
             on: f.thorough,
         });
         items.push(row_with(
