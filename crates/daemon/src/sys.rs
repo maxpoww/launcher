@@ -1370,6 +1370,22 @@ fn remove_tree(path: &Path) {
     }
 }
 
+fn erase_file() -> PathBuf {
+    home().join(".golem-erase.tmp")
+}
+
+/// Remove the file of an erase that never finished (the dock was stopped
+/// while it ran).
+pub(crate) fn remove_erase_leftover() {
+    let path = erase_file();
+    if path.exists() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => warn!("sys: removed the leftover of an unfinished erase"),
+            Err(e) => warn!("sys: cannot remove {}: {e}", path.display()),
+        }
+    }
+}
+
 /// Write over the home drive's empty space, then give it back. On a spinning
 /// disk that is what makes deleted files unreadable; an SSD is told to drop
 /// them instead (a trim), which needs the system's own permission.
@@ -1384,7 +1400,7 @@ fn erase_free_space(events: &Sender<SysEvent>, stop: &AtomicBool, rotational: bo
         let _ = events.send(SysEvent::Erase { pct: None, ok });
         return;
     }
-    let path = home().join(".golem-erase.tmp");
+    let path = erase_file();
     let start_free = fs_free(&home());
     let goal = start_free.saturating_sub(ERASE_HEADROOM);
     let zeros = vec![0u8; ERASE_CHUNK];

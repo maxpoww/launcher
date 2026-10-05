@@ -3530,7 +3530,11 @@ impl App {
             "state" => {
                 let n = self.gear.net_snap.aps.len();
                 let d = self.gear.bt_snap.devices.len();
-                return format!("{n} networks, {d} devices, page {:?}", self.gear_page());
+                return format!(
+                    "{n} networks, {d} devices, page {:?}, apps {}",
+                    self.gear_page(),
+                    self.pages_debug_apps()
+                );
             }
             "detail" => {
                 let hit = match self.gear_page() {

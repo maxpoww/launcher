@@ -573,6 +573,9 @@ impl App {
     /// Put the owner's standing choices back after a start: the idle times
     /// and the lid.
     pub(crate) fn pages_startup(&mut self) {
+        // An erase the dock did not live to finish leaves its file behind,
+        // holding the very space it was writing over.
+        crate::sys::remove_erase_leftover();
         if self.settings.screen_off_secs.is_some() || self.settings.sleep_secs.is_some() {
             self.apply_idle();
         }
@@ -1655,7 +1658,7 @@ impl App {
                 },
                 if p.cleaning {
                     String::new()
-                } else if p.freed.is_some() && chosen == 0 {
+                } else if p.freed.is_some() && chosen < 1024 * 1024 {
                     "Nothing left to clean".to_owned()
                 } else if any {
                     format!("Frees {} or more", size_text(chosen))
@@ -1834,7 +1837,7 @@ impl App {
             SysHit::AskKill(key) => {
                 let name = self.app(&key).map(|a| self.app_name(a)).unwrap_or_default();
                 self.gear_arm(
-                    &format!("Force quit {name}? Unsaved work is lost. Click again"),
+                    &format!("Force quit {name}? Click again"),
                     sys(SysHit::DoKill(key)),
                 );
             }
@@ -2064,6 +2067,10 @@ impl App {
             ("sleepafter", _) => SysHit::SleepAfter(secs),
             ("updates", _) => SysHit::CheckUpdates,
             ("erase", _) => SysHit::AskErase,
+            ("stop-erase", _) => SysHit::StopErase,
+            ("app-close", _) => SysHit::AppClose(arg.to_owned()),
+            ("app-kill", _) => SysHit::AskKill(arg.to_owned()),
+            ("system-tasks", _) => SysHit::SystemTasks,
             ("clean", _) => SysHit::AskClean,
             ("junk", _) => SysHit::Junk(match arg {
                 "trash" => Junk::Trash,
@@ -2076,6 +2083,19 @@ impl App {
         };
         self.gear_click(Hit::Sys(hit));
         true
+    }
+
+    /// The open apps as the pages know them, for the debug verb's `state`.
+    pub(crate) fn pages_debug_apps(&self) -> String {
+        self.gear
+            .pages
+            .live
+            .apps
+            .iter()
+            .filter(|a| !a.system)
+            .map(|a| format!("{}({} win, {} proc)", a.key, a.windows.len(), a.pids.len()))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// `debug-gear page <what>`: reach a details view without a pointer.
