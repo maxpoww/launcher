@@ -1,6 +1,97 @@
+diff -ru a/wgpu-hal/src/gles/egl.rs b/wgpu-hal/src/gles/egl.rs
+--- a/wgpu-hal/src/gles/egl.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/wgpu-hal/src/gles/egl.rs	2026-10-05 06:13:52.348546337 +0000
+@@ -1161,6 +1161,37 @@
+ unsafe impl Send for Surface {}
+ unsafe impl Sync for Surface {}
+ 
++/// GOLEM: `eglSwapBuffersWithDamage{KHR,EXT}`.
++type SwapWithDamage = unsafe extern "system" fn(
++    khronos_egl::EGLDisplay,
++    khronos_egl::EGLSurface,
++    *const khronos_egl::Int,
++    khronos_egl::Int,
++) -> khronos_egl::Boolean;
++
++/// GOLEM: the display's swap-with-damage entry point, looked up once (the
++/// shell has one EGL display); `None` when the display has neither extension.
++fn swap_with_damage(egl: &EglContext) -> Option<SwapWithDamage> {
++    static SWAP: std::sync::OnceLock<Option<SwapWithDamage>> = std::sync::OnceLock::new();
++    *SWAP.get_or_init(|| {
++        let extensions = egl
++            .instance
++            .query_string(Some(egl.display), khronos_egl::EXTENSIONS)
++            .ok()?
++            .to_string_lossy();
++        let name = if extensions.contains("EGL_KHR_swap_buffers_with_damage") {
++            "eglSwapBuffersWithDamageKHR"
++        } else if extensions.contains("EGL_EXT_swap_buffers_with_damage") {
++            "eglSwapBuffersWithDamageEXT"
++        } else {
++            return None;
++        };
++        let addr = egl.instance.get_proc_address(name)?;
++        // The pointer is that function's, by the extension's definition.
++        Some(unsafe { std::mem::transmute::<extern "system" fn(), SwapWithDamage>(addr) })
++    })
++}
++
+ impl Surface {
+     pub(super) unsafe fn present(
+         &self,
+@@ -1220,14 +1251,41 @@
+ 
+         unsafe { gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None) };
+ 
+-        self.egl
+-            .instance
+-            .swap_buffers(self.egl.display, sc.surface)
+-            .map_err(|e| {
+-                log::error!("swap_buffers failed: {}", e);
+-                crate::SurfaceError::Lost
+-                // TODO: should we unset the current context here?
+-            })?;
++        // GOLEM: the damage the renderer left for this present, if any (see
++        // `crate::present_damage`), handed to EGL_KHR_swap_buffers_with_damage
++        // (Mesa turns it into `wl_surface.damage_buffer`). EGL's rectangles
++        // have their origin at the BOTTOM left.
++        let damage: Vec<khronos_egl::Int> = crate::present_damage::take()
++            .map(|rects| {
++                let height = sc.extent.height as i32;
++                rects
++                    .iter()
++                    .filter(|r| r[2] > 0 && r[3] > 0)
++                    .flat_map(|r| [r[0], height - r[1] - r[3], r[2], r[3]])
++                    .collect()
++            })
++            .unwrap_or_default();
++        let swapped_with_damage = !damage.is_empty()
++            && swap_with_damage(&self.egl).is_some_and(|swap| {
++                (unsafe {
++                    swap(
++                        self.egl.display.as_ptr(),
++                        sc.surface.as_ptr(),
++                        damage.as_ptr(),
++                        (damage.len() / 4) as khronos_egl::Int,
++                    )
++                }) == khronos_egl::TRUE
++            });
++        if !swapped_with_damage {
++            self.egl
++                .instance
++                .swap_buffers(self.egl.display, sc.surface)
++                .map_err(|e| {
++                    log::error!("swap_buffers failed: {}", e);
++                    crate::SurfaceError::Lost
++                    // TODO: should we unset the current context here?
++                })?;
++        }
+         self.egl
+             .instance
+             .make_current(self.egl.display, None, None, None)
 diff -ru a/wgpu-hal/src/lib.rs b/wgpu-hal/src/lib.rs
---- a/wgpu-hal/src/lib.rs	2026-10-04 20:31:30.912724482 +0000
-+++ b/wgpu-hal/src/lib.rs	2026-10-04 20:32:08.719398268 +0000
+--- a/wgpu-hal/src/lib.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/wgpu-hal/src/lib.rs	2026-10-05 06:13:52.349603107 +0000
 @@ -203,6 +203,8 @@
  //! [wiki-debug]: https://github.com/gfx-rs/wgpu/wiki/Debugging-wgpu-Applications
  
@@ -21,9 +112,9 @@ diff -ru a/wgpu-hal/src/lib.rs b/wgpu-hal/src/lib.rs
 +/// surface had changed — and Hyprland re-blurred everything behind
 +/// waverunner's (large, mostly transparent) layer surfaces on every frame of
 +/// every animation. The renderer leaves the rectangles here right before it
-+/// presents; the Vulkan backend hands them to `VK_KHR_incremental_present`
-+/// (Mesa turns them into `wl_surface.damage_buffer`). Nothing set: the whole
-+/// image, as before.
++/// presents; the Vulkan backend hands them to `VK_KHR_incremental_present`,
++/// the GL one to `EGL_KHR_swap_buffers_with_damage` (Mesa turns both into
++/// `wl_surface.damage_buffer`). Nothing set: the whole image, as before.
 +pub mod present_damage {
 +    use parking_lot::Mutex;
 +
@@ -51,8 +142,8 @@ diff -ru a/wgpu-hal/src/lib.rs b/wgpu-hal/src/lib.rs
      #[cfg(dx12)]
      pub use super::dx12::Api as Dx12;
 diff -ru a/wgpu-hal/src/vulkan/adapter.rs b/wgpu-hal/src/vulkan/adapter.rs
---- a/wgpu-hal/src/vulkan/adapter.rs	2026-10-04 20:31:30.913181800 +0000
-+++ b/wgpu-hal/src/vulkan/adapter.rs	2026-10-04 20:32:08.710413022 +0000
+--- a/wgpu-hal/src/vulkan/adapter.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/wgpu-hal/src/vulkan/adapter.rs	2026-10-05 06:12:13.565031083 +0000
 @@ -901,6 +901,12 @@
          // Require `VK_KHR_swapchain`
          extensions.push(khr::swapchain::NAME);
@@ -67,8 +158,8 @@ diff -ru a/wgpu-hal/src/vulkan/adapter.rs b/wgpu-hal/src/vulkan/adapter.rs
              // Require either `VK_KHR_maintenance1` or `VK_AMD_negative_viewport_height`
              if self.supports_extension(khr::maintenance1::NAME) {
 diff -ru a/wgpu-hal/src/vulkan/mod.rs b/wgpu-hal/src/vulkan/mod.rs
---- a/wgpu-hal/src/vulkan/mod.rs	2026-10-04 20:31:30.913634496 +0000
-+++ b/wgpu-hal/src/vulkan/mod.rs	2026-10-04 20:32:08.710803230 +0000
+--- a/wgpu-hal/src/vulkan/mod.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/wgpu-hal/src/vulkan/mod.rs	2026-10-05 06:12:13.565437568 +0000
 @@ -1295,6 +1295,37 @@
              .image_indices(&image_indices)
              .wait_semaphores(swapchain_semaphores.get_present_wait_semaphores());

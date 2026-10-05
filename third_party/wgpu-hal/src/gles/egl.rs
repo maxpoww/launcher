@@ -1161,6 +1161,37 @@ pub struct Surface {
 unsafe impl Send for Surface {}
 unsafe impl Sync for Surface {}
 
+/// GOLEM: `eglSwapBuffersWithDamage{KHR,EXT}`.
+type SwapWithDamage = unsafe extern "system" fn(
+    khronos_egl::EGLDisplay,
+    khronos_egl::EGLSurface,
+    *const khronos_egl::Int,
+    khronos_egl::Int,
+) -> khronos_egl::Boolean;
+
+/// GOLEM: the display's swap-with-damage entry point, looked up once (the
+/// shell has one EGL display); `None` when the display has neither extension.
+fn swap_with_damage(egl: &EglContext) -> Option<SwapWithDamage> {
+    static SWAP: std::sync::OnceLock<Option<SwapWithDamage>> = std::sync::OnceLock::new();
+    *SWAP.get_or_init(|| {
+        let extensions = egl
+            .instance
+            .query_string(Some(egl.display), khronos_egl::EXTENSIONS)
+            .ok()?
+            .to_string_lossy();
+        let name = if extensions.contains("EGL_KHR_swap_buffers_with_damage") {
+            "eglSwapBuffersWithDamageKHR"
+        } else if extensions.contains("EGL_EXT_swap_buffers_with_damage") {
+            "eglSwapBuffersWithDamageEXT"
+        } else {
+            return None;
+        };
+        let addr = egl.instance.get_proc_address(name)?;
+        // The pointer is that function's, by the extension's definition.
+        Some(unsafe { std::mem::transmute::<extern "system" fn(), SwapWithDamage>(addr) })
+    })
+}
+
 impl Surface {
     pub(super) unsafe fn present(
         &self,
@@ -1220,14 +1251,41 @@ impl Surface {
 
         unsafe { gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None) };
 
-        self.egl
-            .instance
-            .swap_buffers(self.egl.display, sc.surface)
-            .map_err(|e| {
-                log::error!("swap_buffers failed: {}", e);
-                crate::SurfaceError::Lost
-                // TODO: should we unset the current context here?
-            })?;
+        // GOLEM: the damage the renderer left for this present, if any (see
+        // `crate::present_damage`), handed to EGL_KHR_swap_buffers_with_damage
+        // (Mesa turns it into `wl_surface.damage_buffer`). EGL's rectangles
+        // have their origin at the BOTTOM left.
+        let damage: Vec<khronos_egl::Int> = crate::present_damage::take()
+            .map(|rects| {
+                let height = sc.extent.height as i32;
+                rects
+                    .iter()
+                    .filter(|r| r[2] > 0 && r[3] > 0)
+                    .flat_map(|r| [r[0], height - r[1] - r[3], r[2], r[3]])
+                    .collect()
+            })
+            .unwrap_or_default();
+        let swapped_with_damage = !damage.is_empty()
+            && swap_with_damage(&self.egl).is_some_and(|swap| {
+                (unsafe {
+                    swap(
+                        self.egl.display.as_ptr(),
+                        sc.surface.as_ptr(),
+                        damage.as_ptr(),
+                        (damage.len() / 4) as khronos_egl::Int,
+                    )
+                }) == khronos_egl::TRUE
+            });
+        if !swapped_with_damage {
+            self.egl
+                .instance
+                .swap_buffers(self.egl.display, sc.surface)
+                .map_err(|e| {
+                    log::error!("swap_buffers failed: {}", e);
+                    crate::SurfaceError::Lost
+                    // TODO: should we unset the current context here?
+                })?;
+        }
         self.egl
             .instance
             .make_current(self.egl.display, None, None, None)

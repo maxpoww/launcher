@@ -314,8 +314,8 @@ pub struct Renderer {
     /// that changed nothing is not drawn at all. Off with
     /// `WAVERUNNER_FULL_DAMAGE=1` (every frame drawn, presented whole).
     track_damage: bool,
-    /// …and say so in the present: the Vulkan backend only (it is the one
-    /// that can pass it on).
+    /// …and say so in the present (the Vulkan and GL backends can pass it
+    /// on).
     present_damage: bool,
     /// The tiles of the frame last presented. `None` until one is, and after
     /// anything that makes the next image new as a whole (a resize, a scale
@@ -818,10 +818,14 @@ impl Renderer {
         // hardware adapter is paced by the GPU; a fast GPU finishes each frame
         // long before the next, so pacing costs it nothing.
         let pace_by_gpu = !software;
-        // Only the Vulkan backend can pass a present's damage on (see
-        // `third_party/wgpu-hal`); on GL every present still says "all of it".
+        // The Vulkan and GL backends can pass a present's damage on (see
+        // `third_party/wgpu-hal`).
         let track_damage = std::env::var_os("WAVERUNNER_FULL_DAMAGE").is_none();
-        let present_damage = track_damage && adapter.get_info().backend == wgpu::Backend::Vulkan;
+        let present_damage = track_damage
+            && matches!(
+                adapter.get_info().backend,
+                wgpu::Backend::Vulkan | wgpu::Backend::Gl
+            );
 
         let caps = surface.get_capabilities(&adapter);
         // Transparency requires a premultiplied compositing mode.

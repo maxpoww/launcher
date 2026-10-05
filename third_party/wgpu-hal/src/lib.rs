@@ -259,9 +259,9 @@ pub mod auxil;
 /// surface had changed — and Hyprland re-blurred everything behind
 /// waverunner's (large, mostly transparent) layer surfaces on every frame of
 /// every animation. The renderer leaves the rectangles here right before it
-/// presents; the Vulkan backend hands them to `VK_KHR_incremental_present`
-/// (Mesa turns them into `wl_surface.damage_buffer`). Nothing set: the whole
-/// image, as before.
+/// presents; the Vulkan backend hands them to `VK_KHR_incremental_present`,
+/// the GL one to `EGL_KHR_swap_buffers_with_damage` (Mesa turns both into
+/// `wl_surface.damage_buffer`). Nothing set: the whole image, as before.
 pub mod present_damage {
     use parking_lot::Mutex;
 

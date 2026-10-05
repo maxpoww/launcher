@@ -12,17 +12,20 @@ what they draw, and Hyprland redrew — and blurred again — everything behind
 them per frame. See `crates/daemon/src/damage.rs` and
 `docs/unify-audit-2026-10-04.md` (round 3).
 
-**What changed** (`wgpu-hal.patch`, ~100 lines, three files):
+**What changed** (`wgpu-hal.patch`, ~200 lines, four files):
 
 - `src/lib.rs` — `present_damage::{set_next, clear}`: the renderer leaves the
   rectangles of the next present there.
 - `src/vulkan/adapter.rs` — enables `VK_KHR_incremental_present` when the
   driver has it.
 - `src/vulkan/mod.rs` — `Queue::present` chains `VkPresentRegionsKHR` with
-  those rectangles (Mesa turns them into `wl_surface.damage_buffer`).
+  those rectangles.
+- `src/gles/egl.rs` — `Surface::present` swaps with
+  `eglSwapBuffersWithDamage{KHR,EXT}` when the display has it (rectangles
+  flipped: EGL's origin is the bottom left).
 
-Without the extension, or when nothing is set, a present is exactly stock.
-The GL backend is untouched (it still presents full damage).
+Mesa turns both into `wl_surface.damage_buffer`. Without the extension, or
+when nothing is set, a present is exactly stock.
 
 **To update wgpu** (the copy must match the `wgpu-hal` version `wgpu` wants):
 
