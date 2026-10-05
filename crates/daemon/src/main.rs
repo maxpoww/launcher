@@ -22,7 +22,6 @@ mod clipboard;
 mod content;
 mod damage;
 mod deck;
-mod deck_audio;
 mod deck_thumbs;
 mod dict;
 mod display;
@@ -379,10 +378,6 @@ fn main() -> anyhow::Result<()> {
     let (deck_thumb_tx, deck_thumb_rx) = channel::channel::<deck_thumbs::Event>();
     let deck_thumbs = deck_thumbs::spawn(deck_thumb_tx);
 
-    // STAGE deck audio badges: polled off-loop, only while the mode is up.
-    let (deck_audio_tx, deck_audio_rx) = channel::channel::<Vec<deck_audio::Stream>>();
-    let deck_audio = deck_audio::spawn(deck_audio_tx);
-
     // File thumbnails arrive from their own worker as they render.
     let (thumb_tx, thumb_rx) = channel::channel::<thumbs::Event>();
     let thumbs = thumbs::spawn(thumb_tx);
@@ -540,7 +535,6 @@ fn main() -> anyhow::Result<()> {
         deck_last_frame: None,
         deck_frame_pending: false,
         deck_thumbs,
-        deck_audio,
         deck_audio_map: HashSet::new(),
         deck_thumb_layer: HashMap::new(),
         deck_desk_counts: HashMap::new(),
@@ -891,15 +885,6 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("registering deck thumbs channel: {e}"))?;
-
-    event_loop
-        .handle()
-        .insert_source(deck_audio_rx, |event, _, app| {
-            if let channel::Event::Msg(streams) = event {
-                app.on_deck_audio(streams);
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("registering deck audio channel: {e}"))?;
 
     event_loop
         .handle()
@@ -1312,9 +1297,8 @@ pub struct App {
     deck_frame_pending: bool,
     /// The off-loop window-thumbnail capturer for the deck.
     deck_thumbs: deck_thumbs::DeckThumbs,
-    /// The audio poller (runs only while staged) and its latest answer:
-    /// window pid → (PipeWire node to mute, currently muted).
-    deck_audio: deck_audio::DeckAudio,
+    /// The deck tiles (by key) wearing the speaker badge: those whose task
+    /// can be heard (see `deck_sounding`).
     deck_audio_map: HashSet<String>,
     /// Thumbnail texture layers on the deck's renderer, by tile key (a window
     /// address, or `ws-N` for a desk), plus the chains themselves (kept so a new
@@ -2609,10 +2593,7 @@ impl App {
                     self.handle_command(Command::Hide);
                 }
                 // The deck follows the mode: tiles on entering, empty and
-                // click-through on leaving. So does the audio poller — the
-                // speaker badges cost a pw-dump a second, which only the mode
-                // may spend.
-                self.deck_audio.set_active(self.stage.is_on());
+                // click-through on leaving. So do the speaker badges.
                 if !self.stage.is_on() {
                     self.deck_audio_map.clear();
                 }
@@ -3611,7 +3592,15 @@ impl App {
         // Compared by reference, not by cloning both sides: this runs on every
         // brain update, which is often.
         let playing_changed = self.brain.as_ref().is_none_or(|c| c.playing != ctx.playing);
+        let sounding_changed = self
+            .brain
+            .as_ref()
+            .is_none_or(|c| c.sounding_pids != ctx.sounding_pids);
         self.brain = Some(ctx);
+        if sounding_changed {
+            // The stage deck's speaker badges.
+            self.sync_deck_audio();
+        }
         // The gear's readout is live while it is out: its numbers ARE this
         // snapshot, so a new one is a new reading to draw. Nothing else on the
         // bar watches `metrics`, so without this the CPU figure would freeze at

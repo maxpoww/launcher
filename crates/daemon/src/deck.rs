@@ -435,6 +435,32 @@ fn desk_tile(ws: i64, tasks: &[crate::hypr::StageTask]) -> Tile {
     }
 }
 
+/// `pid` plus every parent above it, from `/proc/<pid>/stat` — bounded, and
+/// robust against comm fields containing spaces or parens (parse after the
+/// LAST `)`).
+fn ancestry(pid: i64) -> Vec<i64> {
+    let mut chain = Vec::with_capacity(6);
+    let mut cur = pid;
+    for _ in 0..12 {
+        if cur <= 1 {
+            break;
+        }
+        chain.push(cur);
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{cur}/stat")) else {
+            break;
+        };
+        let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else {
+            break;
+        };
+        // rest = " S ppid pgrp ..." — field 2 after the split.
+        let Some(ppid) = rest.split_whitespace().nth(1).and_then(|p| p.parse().ok()) else {
+            break;
+        };
+        cur = ppid;
+    }
+    chain
+}
+
 /// Fraction of the remaining distance to cover this frame for a move that
 /// should take about `dur` seconds. Applied to what is *left* each tick, so the
 /// motion is frame-rate independent — fast off the mark, soft on arrival, which
@@ -628,6 +654,9 @@ impl App {
         self.deck_desk_counts = counts;
         self.deck_thumbs
             .request_many(missing, self.deck_tile_aspect());
+        // The speakers follow the tiles (a task that arrived may be the one
+        // that is playing).
+        self.deck_audio_map = self.deck_sounding();
         self.draw_deck();
     }
 
@@ -731,15 +760,34 @@ impl App {
         self.stage_switch_to_index(i);
     }
 
-    /// A fresh audio sample arrived: a tile sounds when its window pid appears
-    /// in any sounding stream's process ancestry. Pure status — no
+    /// The tiles that wear the speaker: a tile sounds when its window pid
+    /// appears in any sounding stream's process ancestry. Pure status — no
     /// attribution gymnastics, no click behaviour. (Windows sharing one
     /// process — Chrome webapps — light up together; that is the honest limit
     /// of what the pid can say, and an indicator can afford it where a button
     /// could not.)
-    pub(crate) fn on_deck_audio(&mut self, streams: Vec<crate::deck_audio::Stream>) {
-        let sounding: std::collections::HashSet<String> = self
-            .deck
+    ///
+    /// WHO is sounding comes from the Brain's audio sensor
+    /// (`ContextState::sounding_pids`: running, unmuted output streams), which
+    /// hears of a change from PipeWire itself. The deck used to ask on its
+    /// own, a `pw-dump` every second while the stage was up — and each one
+    /// set the Brain's sensor off twice: 17 % of a core for as long as the
+    /// mode was on (Acer, round 3).
+    fn deck_sounding(&self) -> std::collections::HashSet<String> {
+        // The pid on a stream is rarely the pid on the window: a browser
+        // plays from a child of the process that owns the window. So each
+        // stream stands for its whole ancestry.
+        let chains: Vec<Vec<i64>> = self
+            .brain
+            .as_ref()
+            .map(|ctx| {
+                ctx.sounding_pids
+                    .iter()
+                    .map(|pid| ancestry(i64::from(*pid)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.deck
             .tiles
             .iter()
             // A desk sounds when anything on it does — the indicator answers
@@ -747,10 +795,18 @@ impl App {
             .filter(|t| {
                 t.pids
                     .iter()
-                    .any(|pid| streams.iter().any(|s| s.ancestors.contains(pid)))
+                    .any(|pid| chains.iter().any(|c| c.contains(pid)))
             })
             .map(|t| t.key.clone())
-            .collect();
+            .collect()
+    }
+
+    /// The sounding processes changed: move the speakers, if the deck is up.
+    pub(crate) fn sync_deck_audio(&mut self) {
+        if !self.stage.is_on() {
+            return;
+        }
+        let sounding = self.deck_sounding();
         if sounding != self.deck_audio_map {
             self.deck_audio_map = sounding;
             self.draw_deck();
