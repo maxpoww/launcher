@@ -104,6 +104,10 @@ pub(crate) static DAMAGE_RECTS: Counter = Counter::new();
 pub(crate) static DAMAGE_CHECKED: Counter = Counter::new();
 pub(crate) static DAMAGE_MISSED: Counter = Counter::new();
 pub(crate) static DAMAGE_MISSED_PX: Counter = Counter::new();
+/// `WAVERUNNER_DAMAGE_CHECK=paths`: frames drawn both ways (straight into
+/// the target, and offscreen then copied), and those that came out different.
+pub(crate) static PATHS_CHECKED: Counter = Counter::new();
+pub(crate) static PATHS_DIFFER: Counter = Counter::new();
 
 /// Every counter since the last report, as one line; resets them.
 pub(crate) fn report() -> String {
@@ -146,6 +150,10 @@ fn damage() -> String {
     let (missed, missed_px) = (DAMAGE_MISSED.take().0, DAMAGE_MISSED_PX.take().0);
     if checked > 0 {
         line += &format!(" | damage-check {checked} frames, {missed} wrong ({missed_px} px)");
+    }
+    let (paths, differ) = (PATHS_CHECKED.take().0, PATHS_DIFFER.take().0);
+    if paths > 0 {
+        line += &format!(" | path-check {paths} frames, {differ} differ");
     }
     line
 }

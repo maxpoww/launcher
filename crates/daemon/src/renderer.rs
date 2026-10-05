@@ -250,31 +250,26 @@ pub struct Renderer {
     shadow_pipeline: wgpu::RenderPipeline,
     rect_pipeline: wgpu::RenderPipeline,
 
-    /// Offscreen colour target the scene is rendered into, then blitted to
-    /// the swapchain — so the box can sample a blurred copy of it (frosted
-    /// glass). Same size/format as the swapchain; rebuilt on resize.
-    scene_tex: wgpu::Texture,
-    scene_view: wgpu::TextureView,
-    /// Fullscreen textured-quad pipeline (copies `scene_tex` to the screen).
+    /// Fullscreen textured-quad pipeline (copies the offscreen scene to the
+    /// screen, see [`FrostTargets`]).
     blit_pipeline: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     blit_sampler: wgpu::Sampler,
-    /// Bind group over `scene_view` for the blit; rebuilt on resize.
-    blit_bind: wgpu::BindGroup,
     /// Frosted-glass backdrop for the open box: samples the blurred scene
     /// over the box region (shares `blit_layout`).
     box_backdrop_pipeline: wgpu::RenderPipeline,
     /// Clears the box region to transparent (× (1−coverage)) before the
     /// backdrop fill, so the frost replaces the base instead of stacking.
     box_erase_pipeline: wgpu::RenderPipeline,
-    /// Separable-Gaussian blur ping-pong: scene → `blur_a` (horizontal) →
-    /// `blur_b` (vertical); the box backdrop samples `blur_b`. Rebuilt on
-    /// resize.
+    /// The three full-surface textures a frosted box needs (see
+    /// [`FrostTargets`]) — only while a box is open. A frame without one is
+    /// drawn straight into the swapchain image.
     ///
-    /// Only while a box is open: two full-surface textures per renderer sat
-    /// allocated for the life of the session, on surfaces (OPTIONS bar,
+    /// They used to exist for the life of every renderer, and every frame of
+    /// every surface was drawn into the offscreen one and copied across: two
+    /// full-surface passes for a hover on the dock, on surfaces (OPTIONS bar,
     /// deck) whose scenes never open a box at all.
-    blur: Option<BlurTargets>,
+    frost: Option<FrostTargets>,
     blur_pipeline_h: wgpu::RenderPipeline,
     blur_pipeline_v: wgpu::RenderPipeline,
 
@@ -343,6 +338,14 @@ struct DamageCheck {
     /// The previous frame's pixels, rows tightly packed, and its size.
     prev: Vec<u8>,
     prev_size: (u32, u32),
+    /// `WAVERUNNER_DAMAGE_CHECK=paths`: a frame drawn straight into its
+    /// target is ALSO drawn the two-step way (offscreen, then copied across,
+    /// as every frame was before round 3) into `two_step`, and the two must
+    /// come out the same, pixel for pixel.
+    paths: bool,
+    two_step: Option<(CheckTarget, wgpu::TextureView, wgpu::BindGroup)>,
+    /// Whether this frame has a two-step twin to compare.
+    twin: bool,
 }
 
 struct CheckTarget {
@@ -490,16 +493,43 @@ fn mark_icon(
     tiles.mark(b, clip_hash(crate::damage::mix(h, u64::from(gen)), clip));
 }
 
-/// The blur ping-pong pair (see [`Renderer::blur`]).
-struct BlurTargets {
+/// What the open box's frosted glass is made from (see [`Renderer::frost`]):
+/// the base scene, drawn offscreen so it can be sampled, and the separable
+/// Gaussian's ping-pong pair — scene → `a` (horizontal) → `b` (vertical); the
+/// box's backdrop samples `b`. Same size and format as the swapchain.
+struct FrostTargets {
+    scene_view: wgpu::TextureView,
+    scene_bind: wgpu::BindGroup,
     a_view: wgpu::TextureView,
     a_bind: wgpu::BindGroup,
     b_view: wgpu::TextureView,
     b_bind: wgpu::BindGroup,
 }
 
-/// Build the offscreen scene colour target (texture + view + blit bind
-/// group) at `width`×`height`. Called at init and on every resize.
+/// Begin a pass that clears `view` to transparent.
+fn clear_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    label: &'static str,
+) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    })
+}
+
+/// Build one full-surface colour target (texture + view + a bind group to
+/// sample it with) at `width`×`height`: the offscreen scene, or a blur target.
 fn make_scene_target(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -1342,15 +1372,6 @@ impl Renderer {
             }],
         });
 
-        let (scene_tex, scene_view, blit_bind) = make_scene_target(
-            &device,
-            config.format,
-            width,
-            height,
-            &blit_layout,
-            &blit_sampler,
-        );
-
         // Text stack (glyphon).
         // One font database for every renderer, remembered between runs
         // (crate::font_index): the cold scan was the slowest part of a start
@@ -1379,15 +1400,12 @@ impl Renderer {
             globals_bind,
             shadow_pipeline,
             rect_pipeline,
-            scene_tex,
-            scene_view,
             blit_pipeline,
             blit_layout,
             blit_sampler,
-            blit_bind,
             box_backdrop_pipeline,
             box_erase_pipeline,
-            blur: None,
+            frost: None,
             blur_pipeline_h,
             blur_pipeline_v,
             icon_pipeline,
@@ -1413,8 +1431,10 @@ impl Renderer {
             damage_cur: crate::damage::TileMap::default(),
             icon_epoch: 0,
             icon_layer_gen: Vec::new(),
-            damage_check: std::env::var_os("WAVERUNNER_DAMAGE_CHECK")
-                .map(|_| DamageCheck::default()),
+            damage_check: std::env::var_os("WAVERUNNER_DAMAGE_CHECK").map(|v| DamageCheck {
+                paths: v == "paths",
+                ..DamageCheck::default()
+            }),
         })
     }
 
@@ -1428,23 +1448,9 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.damage_prev = None;
-        let rebuild = |dev: &wgpu::Device| {
-            make_scene_target(
-                dev,
-                self.config.format,
-                width,
-                height,
-                &self.blit_layout,
-                &self.blit_sampler,
-            )
-        };
-        let (tex, view, bind) = rebuild(&self.device);
-        self.scene_tex = tex;
-        self.scene_view = view;
-        self.blit_bind = bind;
-        // The blur pair is rebuilt at the new size by the next frame that
-        // needs it.
-        self.blur = None;
+        // The frost targets are rebuilt at the new size by the next frame
+        // that needs them.
+        self.frost = None;
     }
 
     /// Upload the icon texture array delivered by the indexer thread.
@@ -2239,41 +2245,101 @@ impl Renderer {
 
         // The damage check composes the frame into a texture it can read.
         if let Some(check) = &mut self.damage_check {
-            if !matches!(&check.target, Some(t) if t.width == w && t.height == h) {
-                check.target = Some(make_check_target(
+            let make = || {
+                make_check_target(
                     &self.device,
                     self.config.format,
                     w,
                     h,
                     &self.blit_layout,
                     &self.blit_sampler,
-                ));
+                )
+            };
+            if !matches!(&check.target, Some(t) if t.width == w && t.height == h) {
+                check.target = Some(make());
+            }
+            check.twin = check.paths && backdrop_buf.is_none();
+            if check.twin
+                && !matches!(&check.two_step, Some((t, ..)) if t.width == w && t.height == h)
+            {
+                let (_, scene_view, scene_bind) = make_scene_target(
+                    &self.device,
+                    self.config.format,
+                    w,
+                    h,
+                    &self.blit_layout,
+                    &self.blit_sampler,
+                );
+                check.two_step = Some((make(), scene_view, scene_bind));
             }
         }
         let check_target = self.damage_check.as_ref().and_then(|c| c.target.as_ref());
+        let two_step = self
+            .damage_check
+            .as_ref()
+            .filter(|c| c.twin)
+            .and_then(|c| c.two_step.as_ref());
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("waverunner.frame"),
+        // A frame with a frosted box is drawn in two steps (the base scene
+        // offscreen, so the box can sample a blurred copy of it); every other
+        // frame goes straight into its target.
+        if backdrop_buf.is_none() {
+            self.frost = None;
+        } else if self.frost.is_none() {
+            let make = || {
+                make_scene_target(
+                    &self.device,
+                    self.config.format,
+                    w,
+                    h,
+                    &self.blit_layout,
+                    &self.blit_sampler,
+                )
+            };
+            let (_, scene_view, scene_bind) = make();
+            let (_, a_view, a_bind) = make();
+            let (_, b_view, b_bind) = make();
+            self.frost = Some(FrostTargets {
+                scene_view,
+                scene_bind,
+                a_view,
+                a_bind,
+                b_view,
+                b_bind,
             });
-        {
-            // Pass 1: the whole scene into the offscreen texture (so the
-            // box can later sample a blurred copy of it).
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("waverunner.scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scene_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+        }
+        let target = check_target.map_or(&view, |t| &t.view);
+
+        // Scissored grid draws: rects, then icons, per grid.
+        let draw_grids = |pass: &mut wgpu::RenderPass<'_>,
+                          grids: &[(
+            crate::content::Rect,
+            std::ops::Range<u32>,
+            std::ops::Range<u32>,
+        )]| {
+            for (clip, rect_range, icon_range) in grids {
+                let Some([sx, sy, sw, sh]) = scissor_of(clip, scale, w, h) else {
+                    continue;
+                };
+                pass.set_scissor_rect(sx, sy, sw, sh);
+                if !rect_range.is_empty() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, rect_buf.slice(..));
+                    pass.draw(0..4, rect_range.clone());
+                }
+                if !icon_range.is_empty() {
+                    if let Some(icon_bind) = &self.icon_bind {
+                        pass.set_pipeline(&self.icon_pipeline);
+                        pass.set_bind_group(1, icon_bind, &[]);
+                        pass.set_vertex_buffer(0, icon_buf.slice(..));
+                        pass.draw(0..4, icon_range.clone());
+                    }
+                }
+            }
+            pass.set_scissor_rect(0, 0, w, h);
+        };
+        // The base scene: everything a box would frost.
+        let draw_base = |pass: &mut wgpu::RenderPass<'_>| {
             pass.set_bind_group(0, &self.globals_bind, &[]);
 
             // Behind everything: the dock's soft top-edge shadow.
@@ -2307,152 +2373,20 @@ impl Renderer {
             }
 
             // Base section grids (everything before the box overlay), each
-            // under its own scissor rect. The box overlay (grids from
-            // `split` on) is held back for pass 2 so it draws over the blur.
-            for (clip, rect_range, icon_range) in &grid_ranges[..split] {
-                let Some([sx, sy, sw, sh]) = scissor_of(clip, scale, w, h) else {
-                    continue;
-                };
-                pass.set_scissor_rect(sx, sy, sw, sh);
-                if !rect_range.is_empty() {
-                    pass.set_pipeline(&self.rect_pipeline);
-                    pass.set_vertex_buffer(0, rect_buf.slice(..));
-                    pass.draw(0..4, rect_range.clone());
-                }
-                if !icon_range.is_empty() {
-                    if let Some(icon_bind) = &self.icon_bind {
-                        pass.set_pipeline(&self.icon_pipeline);
-                        pass.set_bind_group(1, icon_bind, &[]);
-                        pass.set_vertex_buffer(0, icon_buf.slice(..));
-                        pass.draw(0..4, icon_range.clone());
-                    }
-                }
-            }
-            pass.set_scissor_rect(0, 0, w, h);
-        }
-
-        // Blur passes (only when a box is open): scene → blur_a (horizontal)
-        // → blur_b (vertical). Separable Gaussian for a smooth frost.
-        if backdrop_buf.is_none() {
-            self.blur = None;
-        } else if self.blur.is_none() {
-            let (w, h) = (self.config.width, self.config.height);
-            let make = || {
-                make_scene_target(
-                    &self.device,
-                    self.config.format,
-                    w,
-                    h,
-                    &self.blit_layout,
-                    &self.blit_sampler,
-                )
-            };
-            let (_, a_view, a_bind) = make();
-            let (_, b_view, b_bind) = make();
-            self.blur = Some(BlurTargets {
-                a_view,
-                a_bind,
-                b_view,
-                b_bind,
-            });
-        }
-        if let Some(blur) = &self.blur {
-            for (target_view, pipeline, src_bind, label) in [
-                (
-                    &blur.a_view,
-                    &self.blur_pipeline_h,
-                    &self.blit_bind,
-                    "waverunner.blur-h",
-                ),
-                (
-                    &blur.b_view,
-                    &self.blur_pipeline_v,
-                    &blur.a_bind,
-                    "waverunner.blur-v",
-                ),
-            ] {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(label),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, src_bind, &[]);
-                pass.draw(0..3, 0..1);
-            }
-        }
-
-        {
-            // Pass 2: blit the offscreen base scene onto the swapchain, then
-            // draw the box overlay (and all text + the drag ghost) over it.
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("waverunner.composite"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: check_target.map_or(&view, |t| &t.view),
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.blit_pipeline);
-            pass.set_bind_group(0, &self.blit_bind, &[]);
-            pass.draw(0..3, 0..1);
-
-            // Frosted backdrop: erase the box region, then fill it with the
-            // blurred (blur_b) scene — together a mix(base, blurred), so the
-            // box keeps the base's translucency instead of going opaque.
-            if let (Some(backdrop_buf), Some(blur)) = (&backdrop_buf, &self.blur) {
-                pass.set_vertex_buffer(0, backdrop_buf.slice(..));
-                pass.set_bind_group(0, &blur.b_bind, &[]);
-                pass.set_pipeline(&self.box_erase_pipeline);
-                pass.draw(0..4, 0..1);
-                pass.set_pipeline(&self.box_backdrop_pipeline);
-                pass.draw(0..4, 0..1);
-            }
-
-            // The box overlay: panel + members, over the frosted backdrop.
-            // Same scissored grid draw as the base grids.
+            // under its own scissor rect.
+            draw_grids(pass, &grid_ranges[..split]);
+        };
+        // What goes over it: the box's panel and members (the grids from
+        // `split` on), all text, the drag ghost.
+        let draw_overlay = |pass: &mut wgpu::RenderPass<'_>| -> anyhow::Result<()> {
             pass.set_bind_group(0, &self.globals_bind, &[]);
-            for (clip, rect_range, icon_range) in &grid_ranges[split..] {
-                let Some([sx, sy, sw, sh]) = scissor_of(clip, scale, w, h) else {
-                    continue;
-                };
-                pass.set_scissor_rect(sx, sy, sw, sh);
-                if !rect_range.is_empty() {
-                    pass.set_pipeline(&self.rect_pipeline);
-                    pass.set_vertex_buffer(0, rect_buf.slice(..));
-                    pass.draw(0..4, rect_range.clone());
-                }
-                if !icon_range.is_empty() {
-                    if let Some(icon_bind) = &self.icon_bind {
-                        pass.set_pipeline(&self.icon_pipeline);
-                        pass.set_bind_group(1, icon_bind, &[]);
-                        pass.set_vertex_buffer(0, icon_buf.slice(..));
-                        pass.draw(0..4, icon_range.clone());
-                    }
-                }
-            }
-            pass.set_scissor_rect(0, 0, w, h);
+            draw_grids(pass, &grid_ranges[split..]);
 
             // Text renders unscissored: every TextArea carries its own clip
             // bounds, so labels outside the grid still show.
             if !text_buffers.is_empty() {
                 self.text_renderer
-                    .render(&self.text_atlas, &self.text_viewport, &mut pass)
+                    .render(&self.text_atlas, &self.text_viewport, pass)
                     .context("glyphon render failed")?;
             }
 
@@ -2467,6 +2401,101 @@ impl Renderer {
                     pass.draw(0..4, overlay_range.clone());
                 }
             }
+            Ok(())
+        };
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("waverunner.frame"),
+            });
+        match (&self.frost, &backdrop_buf) {
+            (Some(frost), Some(backdrop_buf)) => {
+                // Pass 1: the base scene into the offscreen texture.
+                draw_base(&mut clear_pass(
+                    &mut encoder,
+                    &frost.scene_view,
+                    "waverunner.scene",
+                ));
+
+                // Blur passes: scene → a (horizontal) → b (vertical).
+                // Separable Gaussian for a smooth frost.
+                for (target_view, pipeline, src_bind, label) in [
+                    (
+                        &frost.a_view,
+                        &self.blur_pipeline_h,
+                        &frost.scene_bind,
+                        "waverunner.blur-h",
+                    ),
+                    (
+                        &frost.b_view,
+                        &self.blur_pipeline_v,
+                        &frost.a_bind,
+                        "waverunner.blur-v",
+                    ),
+                ] {
+                    let mut pass = clear_pass(&mut encoder, target_view, label);
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, src_bind, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+
+                // Pass 2: the base scene onto the target, the frosted box over
+                // it, then the overlay.
+                let mut pass = clear_pass(&mut encoder, target, "waverunner.composite");
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, &frost.scene_bind, &[]);
+                pass.draw(0..3, 0..1);
+
+                // Frosted backdrop: erase the box region, then fill it with the
+                // blurred (b) scene — together a mix(base, blurred), so the box
+                // keeps the base's translucency instead of going opaque.
+                pass.set_vertex_buffer(0, backdrop_buf.slice(..));
+                pass.set_bind_group(0, &frost.b_bind, &[]);
+                pass.set_pipeline(&self.box_erase_pipeline);
+                pass.draw(0..4, 0..1);
+                pass.set_pipeline(&self.box_backdrop_pipeline);
+                pass.draw(0..4, 0..1);
+
+                draw_overlay(&mut pass)?;
+            }
+            _ => {
+                // No box: one pass, straight into the target.
+                let mut pass = clear_pass(&mut encoder, target, "waverunner.frame");
+                draw_base(&mut pass);
+                draw_overlay(&mut pass)?;
+            }
+        }
+        if let Some((twin, scene_view, scene_bind)) = two_step {
+            // The same frame, the two-step way, to be compared.
+            draw_base(&mut clear_pass(
+                &mut encoder,
+                scene_view,
+                "waverunner.check-scene",
+            ));
+            {
+                let mut pass = clear_pass(&mut encoder, &twin.view, "waverunner.check-composite");
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, scene_bind, &[]);
+                pass.draw(0..3, 0..1);
+                draw_overlay(&mut pass)?;
+            }
+            encoder.copy_texture_to_buffer(
+                twin.tex.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &twin.buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(twin.stride),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
 
         if let Some(t) = check_target {
@@ -2574,6 +2603,44 @@ impl Renderer {
         {
             let data = slice.get_mapped_range();
             crate::perf::DAMAGE_CHECKED.hit();
+            // The two-step twin of a frame drawn straight into its target.
+            if let Some((twin, ..)) = check.two_step.as_ref().filter(|_| check.twin) {
+                let twin_slice = twin.buf.slice(..);
+                let ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let done = ok.clone();
+                twin_slice.map_async(wgpu::MapMode::Read, move |r| {
+                    done.store(r.is_ok(), std::sync::atomic::Ordering::Release);
+                });
+                let _ = self.device.poll(wgpu::Maintain::Wait);
+                if ok.load(std::sync::atomic::Ordering::Acquire) {
+                    {
+                        let other = twin_slice.get_mapped_range();
+                        let differ = (0..h as usize)
+                            .map(|y| {
+                                let a = &data[y * stride..y * stride + row];
+                                let b = &other[y * stride..y * stride + row];
+                                if a == b {
+                                    0
+                                } else {
+                                    a.chunks_exact(4)
+                                        .zip(b.chunks_exact(4))
+                                        .filter(|(p, q)| p != q)
+                                        .count() as u64
+                                }
+                            })
+                            .sum::<u64>();
+                        crate::perf::PATHS_CHECKED.hit();
+                        if differ > 0 {
+                            crate::perf::PATHS_DIFFER.hit();
+                            tracing::warn!(
+                                "path check: frame {} ({w}x{h}): {differ} px differ between the one-pass and the two-step frame",
+                                self.frame_no
+                            );
+                        }
+                    }
+                    twin.buf.unmap();
+                }
+            }
             if check.prev_size == (w, h) && check.prev.len() == row * h as usize {
                 // Changed pixels outside the damage: how many, and their box.
                 let (mut wrong, mut changed) = (0u64, 0u64);
