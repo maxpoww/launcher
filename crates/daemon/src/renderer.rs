@@ -151,6 +151,14 @@ type SharedSwash = std::rc::Rc<std::cell::RefCell<SwashCache>>;
 thread_local! {
     static SHARED_TEXT: std::cell::RefCell<Option<(SharedFonts, SharedSwash)>> =
         const { std::cell::RefCell::new(None) };
+    /// When a surface of the shell last presented a frame.
+    static LAST_PRESENT: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// When the shell itself last changed the screen (any surface's last present).
+pub(crate) fn last_present() -> Option<std::time::Instant> {
+    LAST_PRESENT.with(std::cell::Cell::get)
 }
 
 /// The one font system (and glyph-image cache) every renderer shapes and
@@ -2526,6 +2534,7 @@ impl Renderer {
             }
         }
         frame.present();
+        LAST_PRESENT.with(|t| t.set(Some(now)));
         if let Some(tiles) = frame_tiles {
             if let Some(old) = self.damage_prev.replace(tiles) {
                 self.damage_cur = old;

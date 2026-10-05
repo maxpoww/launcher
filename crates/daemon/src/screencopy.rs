@@ -71,6 +71,20 @@ const SENTINEL_STALL: Duration = Duration::from_secs(300);
 /// maximized browser) when the screen keeps changing.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(800);
 
+/// An unasked sample waits for the shell's own drawing to rest this long…
+///
+/// A capture is not free even when nothing is forced: the compositor redraws
+/// what changed since the last one and copies the whole output out — 16 ms
+/// of GPU on the Acer, a whole frame's budget. At [`SAMPLE_INTERVAL`] through
+/// every animation of ours that was a late frame every 0.8 s, for a sample
+/// of a backdrop that our own animation was the only thing changing.
+const OWN_REST: Duration = Duration::from_millis(150);
+
+/// …but never longer than this after the last one: a backdrop that changes
+/// under a long animation of ours (a video behind an open launcher) is still
+/// followed, at this pace instead of [`SAMPLE_INTERVAL`].
+const OWN_DEFER_MAX: Duration = Duration::from_millis(2400);
+
 /// The least time between two samples that something DID ask for (an event
 /// storm must not become a capture storm).
 const DEMAND_FLOOR: Duration = Duration::from_millis(40);
@@ -597,7 +611,16 @@ impl App {
             Some(Stage::AwaitBuffer | Stage::Shared) => {}
             Some(Stage::Primed) => {
                 let due = match self.capture_demand {
-                    Demand::Idle => self.capture_next_at,
+                    // Unasked: when the interval has passed AND the shell's
+                    // own drawing has rested (see [`OWN_REST`]).
+                    Demand::Idle => match (self.capture_next_at, crate::renderer::last_present()) {
+                        (Some(at), Some(drawn)) => {
+                            let rested = drawn + OWN_REST;
+                            let latest = self.capture_delivered.map_or(at, |t| t + OWN_DEFER_MAX);
+                            Some(at.max(rested.min(latest)))
+                        }
+                        (at, _) => at,
+                    },
                     Demand::Fresh | Demand::Must => {
                         self.capture_delivered.map(|t| t + DEMAND_FLOOR)
                     }
