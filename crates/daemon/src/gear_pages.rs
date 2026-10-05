@@ -1634,7 +1634,7 @@ impl App {
                 Junk::Store => ("Unused system files", "What no system version still needs"),
                 Junk::System => (
                     "Old system versions and logs",
-                    "Keeps the last two, so you can still go back",
+                    "Keeps the last two versions",
                 ),
             };
             items.push(Item::Toggle {
@@ -1655,6 +1655,8 @@ impl App {
                 },
                 if p.cleaning {
                     String::new()
+                } else if p.freed.is_some() && chosen == 0 {
+                    "Nothing left to clean".to_owned()
                 } else if any {
                     format!("Frees {} or more", size_text(chosen))
                 } else {
