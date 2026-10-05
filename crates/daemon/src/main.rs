@@ -596,6 +596,7 @@ fn main() -> anyhow::Result<()> {
         frame_pending: false,
         draw_forced: false,
         options_frame_pending: false,
+        options_frame_staged: false,
         options_frame_asked: None,
         options_dirty: false,
         dirty: false,
@@ -1435,8 +1436,10 @@ pub struct App {
     draw_forced: bool,
     /// The OPTIONS bar's frame pacing (see `draw_options`): a callback is
     /// out since `options_frame_asked`; `options_dirty` = a draw was asked
-    /// for meanwhile.
+    /// for meanwhile. `options_frame_staged` = a frame request is on the
+    /// surface, to go with the next commit.
     options_frame_pending: bool,
+    options_frame_staged: bool,
     options_frame_asked: Option<Instant>,
     options_dirty: bool,
     /// Scene changed since the last draw; the pending frame callback

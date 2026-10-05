@@ -1518,8 +1518,13 @@ impl App {
             // nothing ever waits on a callback that is not coming.
             self.options_frame_asked = Some(Instant::now());
         } else if let Some(layer) = self.options_layer.as_ref() {
-            let surface = layer.wl_surface();
-            surface.frame(&self.qh, surface.clone());
+            // (A request left on the surface by a draw that changed nothing
+            // serves this one.)
+            if !self.options_frame_staged {
+                let surface = layer.wl_surface();
+                surface.frame(&self.qh, surface.clone());
+                self.options_frame_staged = true;
+            }
             self.options_frame_pending = true;
             self.options_frame_asked = Some(Instant::now());
         }
@@ -1540,7 +1545,7 @@ impl App {
                 };
                 let frame =
                     renderer.render(&scene, [0.0; 4], None, 0.0, 0, self.options_visible.as_mut());
-                self.commit_unchanged_options(frame.ok());
+                self.options_frame_drawn(frame.ok());
             }
             return;
         }
@@ -1615,18 +1620,33 @@ impl App {
             0,
             self.options_visible.as_mut(),
         ) {
-            Ok(frame) => self.commit_unchanged_options(Some(frame)),
+            Ok(frame) => self.options_frame_drawn(Some(frame)),
             Err(e) => error!("options render failed: {e:#}"),
         }
     }
 
-    /// A frame that changed nothing was not presented, so nothing committed
-    /// the frame request `draw_options` made for it: commit it here.
-    fn commit_unchanged_options(&self, frame: Option<crate::renderer::Frame>) {
-        if frame == Some(crate::renderer::Frame::Unchanged) {
-            if let Some(layer) = self.options_layer.as_ref() {
-                layer.wl_surface().commit();
-            }
+    /// What became of the frame request `draw_options` made.
+    ///
+    /// A frame that was presented took the request with it, and its callback
+    /// paces the next draw. A frame that changed NOTHING was not presented,
+    /// and nothing is committed for it either: the request stays on the
+    /// surface for the next frame that shows something, and no callback is
+    /// waited for.
+    ///
+    /// (It used to be committed on its own, to get the callback. To Hyprland
+    /// a commit that asks for a frame is a frame to produce, damage or none —
+    /// and a frame produced is what a waiting screen capture is delivered on.
+    /// So with a player on the bus, whose position moves every second while
+    /// the bar shows the same thing, the bar woke the compositor and the
+    /// colour sampler once a second for nothing: 17 full-screen captures in
+    /// 15 s on the Acer, round 3.)
+    fn options_frame_drawn(&mut self, frame: Option<crate::renderer::Frame>) {
+        match frame {
+            Some(crate::renderer::Frame::Presented) => self.options_frame_staged = false,
+            Some(crate::renderer::Frame::Unchanged) => self.options_frame_pending = false,
+            // Not drawn: the callback is not coming, and the next draw waits
+            // out FRAME_OVERDUE as for any that is late.
+            None => {}
         }
     }
 }
