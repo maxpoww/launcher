@@ -2218,6 +2218,7 @@ fn format_words(fstype: &str) -> &'static str {
         "ext4" | "ext3" | "ext2" => "ext4 · this system",
         "ntfs" | "ntfs3" => "NTFS · Windows",
         "btrfs" => "Btrfs · this system",
+        "iso9660" | "udf" => "A disc image · startup stick",
         "" => "Not formatted",
         _ => "Another format",
     }
@@ -2244,9 +2245,9 @@ impl App {
                         ("check", None) => Some(("No problems found".to_owned(), true)),
                         _ => None,
                     };
-                    // A formatted or ejected drive is not the one the view was
-                    // opened on any more.
-                    if matches!(what, "eject" | "format") {
+                    // An ejected drive is gone; a formatted one is still the
+                    // drive the view was opened on.
+                    if what == "eject" {
                         p.view = PView::List;
                     }
                     app.sys_send(SysCommand::Refresh);
@@ -2356,7 +2357,7 @@ impl App {
                 act(
                     G_FOLDER,
                     "Stop using it",
-                    "Unmounts it. It stays plugged in",
+                    "It stays plugged in",
                     SysHit::ExtMount(i),
                 )
             } else {
@@ -2452,6 +2453,8 @@ impl App {
                 "Format now",
                 if f.thorough {
                     "Takes a long time on a big drive"
+                } else if f.lock {
+                    "Under a minute"
                 } else {
                     "A few seconds"
                 },
@@ -2658,10 +2661,7 @@ impl App {
             .get(i)
             .map(|x| x.name.clone())
             .unwrap_or_default();
-        self.gear_arm(
-            &format!("Erase everything on {name}? Click again"),
-            sys(SysHit::DoFormat),
-        );
+        self.gear_arm(&format!("Erase {name}? Click again"), sys(SysHit::DoFormat));
     }
 
     /// The footer field of a machine page was confirmed with `text`.
