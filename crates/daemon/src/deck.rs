@@ -674,7 +674,14 @@ impl App {
             // squircle 12 matches the system rounding_power, so a thumbnail quad
             // picks up the tile's corners; thumb_base MAX keeps that mask on
             // (layers at or above it would opt out of it).
-            if let Err(e) = renderer.render(&scene, [1.0, 1.0, 1.0, 1.0], None, 12.0, u32::MAX) {
+            if let Err(e) = renderer.render(
+                &scene,
+                [1.0, 1.0, 1.0, 1.0],
+                None,
+                12.0,
+                u32::MAX,
+                self.deck_visible.as_mut(),
+            ) {
                 tracing::warn!("deck render failed: {e:#}");
             }
         }

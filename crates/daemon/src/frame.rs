@@ -1401,6 +1401,7 @@ impl App {
             self.pointer_pos,
             self.config.theme.icon_squircle,
             thumb_base,
+            self.dock_visible.as_mut(),
         ) {
             // Nothing was presented, so nothing committed the frame request
             // made above.
@@ -1537,7 +1538,8 @@ impl App {
                     alpha: 1.0,
                     ..Default::default()
                 };
-                let frame = renderer.render(&scene, [0.0; 4], None, 0.0, 0);
+                let frame =
+                    renderer.render(&scene, [0.0; 4], None, 0.0, 0, self.options_visible.as_mut());
                 self.commit_unchanged_options(frame.ok());
             }
             return;
@@ -1605,7 +1607,14 @@ impl App {
         // sunset module wears the dock's liquid-glass material, and its
         // cursor-tracked edge reflection is part of the material. Everything
         // else on this surface is glass: 0.0, so nothing else changes.
-        match renderer.render(&scene, text_rgba, self.options_ptr, squircle, 0) {
+        match renderer.render(
+            &scene,
+            text_rgba,
+            self.options_ptr,
+            squircle,
+            0,
+            self.options_visible.as_mut(),
+        ) {
             Ok(frame) => self.commit_unchanged_options(Some(frame)),
             Err(e) => error!("options render failed: {e:#}"),
         }

@@ -1731,6 +1731,7 @@ impl Renderer {
         cursor: Option<(f32, f32)>,
         squircle: f32,
         thumb_base: u32,
+        mut visible: Option<&mut crate::visible::SurfaceVisible>,
     ) -> anyhow::Result<Frame> {
         let _perf = crate::perf::RENDER.time();
         // `w`/`h` are the physical framebuffer size; the scene is authored in
@@ -2557,8 +2558,20 @@ impl Renderer {
             }
             crate::perf::DAMAGE_RECTS.add(damage.as_ref().map_or(1, |d| d.len() as u64));
         }
+        // Where this frame has anything to show: the compositor draws the
+        // surface, and blurs behind it, nowhere else (see `crate::visible`).
+        // Set here, with nothing fallible left before the present: its commit
+        // carries the region and the frame together.
+        if let (Some(visible), Some(tiles)) = (visible.as_deref_mut(), &frame_tiles) {
+            visible.set(&tiles.drawn());
+        }
         if self.damage_check.is_some() {
-            self.check_damage(w, h, damage.as_deref());
+            self.check_damage(
+                w,
+                h,
+                damage.as_deref(),
+                visible.as_deref().and_then(|v| v.sent()),
+            );
         }
         if self.present_damage {
             match damage {
@@ -2579,8 +2592,15 @@ impl Renderer {
 
     /// `WAVERUNNER_DAMAGE_CHECK`: read the frame just submitted back and
     /// compare it with the one before; every pixel that differs must lie in
-    /// `damage` (`None` = the whole surface).
-    fn check_damage(&mut self, w: u32, h: u32, damage: Option<&[crate::damage::Rect]>) {
+    /// `damage` (`None` = the whole surface), and every pixel that is not
+    /// transparent in `visible` (`None` = no region was given).
+    fn check_damage(
+        &mut self,
+        w: u32,
+        h: u32,
+        damage: Option<&[crate::damage::Rect]>,
+        visible: Option<&[crate::damage::Rect]>,
+    ) {
         let Some(check) = &mut self.damage_check else {
             return;
         };
@@ -2673,6 +2693,30 @@ impl Renderer {
                         "damage check: frame {} ({w}x{h}): {wrong} of {changed} changed px lie outside the damage, within x {x0}..={x1} y {y0}..={y1}; damage {:?}",
                         self.frame_no,
                         damage
+                    );
+                }
+            }
+            if let Some(visible) = visible {
+                // Drawn pixels the compositor was told nothing is at.
+                let mut outside = 0u64;
+                for y in 0..h as usize {
+                    let cur = &data[y * stride..y * stride + row];
+                    if cur.iter().all(|b| *b == 0) {
+                        continue;
+                    }
+                    for (x, px) in cur.chunks_exact(4).enumerate() {
+                        if px != [0, 0, 0, 0] && !crate::damage::covers(visible, x as i32, y as i32)
+                        {
+                            outside += 1;
+                        }
+                    }
+                }
+                if outside > 0 {
+                    crate::perf::VISIBLE_MISSED.hit();
+                    tracing::warn!(
+                        "visible-region check: frame {} ({w}x{h}): {outside} drawn px lie outside the region {:?}",
+                        self.frame_no,
+                        visible
                     );
                 }
             }

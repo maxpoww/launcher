@@ -93,6 +93,7 @@ mod residue;
 mod transition;
 mod trash;
 mod usage;
+mod visible;
 mod webapps;
 mod window_memory;
 mod fast_launch;
@@ -309,6 +310,21 @@ fn main() -> anyhow::Result<()> {
         f.attach(l.wl_surface(), fractional::SurfaceKind::Deck, &qh)
     });
 
+    // Where each surface has anything to show (visible.rs), when the
+    // compositor takes the hint.
+    let visible_regions = visible::VisibleRegions::bind(&globals, compositor.wl_compositor(), &qh);
+    let dock_visible = visible_regions
+        .as_ref()
+        .map(|v| v.attach(layer.wl_surface(), &qh));
+    let options_visible = visible_regions
+        .as_ref()
+        .zip(options_layer.as_ref())
+        .map(|(v, l)| v.attach(l.wl_surface(), &qh));
+    let deck_visible = visible_regions
+        .as_ref()
+        .zip(deck_layer.as_ref())
+        .map(|(v, l)| v.attach(l.wl_surface(), &qh));
+
     // wlr-screencopy + shm for the smart-gaps colour-match. Both optional:
     // without them (or without Hyprland IPC) the bar just never matches.
     let shm = Shm::bind(&globals, &qh).ok();
@@ -490,6 +506,9 @@ fn main() -> anyhow::Result<()> {
         relative_pointer_manager,
         pointer_gestures,
         dock_fscale,
+        dock_visible,
+        options_visible,
+        deck_visible,
         options_fscale,
         deck_fscale,
         swipe_gesture: None,
@@ -1116,6 +1135,11 @@ pub struct App {
     /// Fractional-scale state per surface (see `fractional.rs`); `None` when
     /// the compositor lacks the protocols (integer `render_scale` path).
     dock_fscale: Option<fractional::SurfaceScale>,
+    /// Each surface's visible region (see `visible.rs`); `None` without the
+    /// protocol.
+    pub(crate) dock_visible: Option<visible::SurfaceVisible>,
+    pub(crate) options_visible: Option<visible::SurfaceVisible>,
+    pub(crate) deck_visible: Option<visible::SurfaceVisible>,
     options_fscale: Option<fractional::SurfaceScale>,
     deck_fscale: Option<fractional::SurfaceScale>,
     /// The "OPTIONS" topbar surface (a near-transparent top-edge strip), its

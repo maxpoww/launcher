@@ -108,6 +108,11 @@ pub(crate) static DAMAGE_MISSED_PX: Counter = Counter::new();
 /// the target, and offscreen then copied), and those that came out different.
 pub(crate) static PATHS_CHECKED: Counter = Counter::new();
 pub(crate) static PATHS_DIFFER: Counter = Counter::new();
+/// Visible regions sent to the compositor (see `crate::visible`).
+pub(crate) static VISIBLE_SET: Counter = Counter::new();
+/// The damage check: frames with drawn pixels OUTSIDE the visible region
+/// the compositor was given (see `crate::visible`) — it would not show them.
+pub(crate) static VISIBLE_MISSED: Counter = Counter::new();
 
 /// Every counter since the last report, as one line; resets them.
 pub(crate) fn report() -> String {
@@ -144,12 +149,18 @@ fn damage() -> String {
         0.0
     };
     let rects = DAMAGE_RECTS.take().0 as f64 / frames.max(1) as f64;
-    let mut line =
-        format!("damage {pct:.1}% over {frames} frames ({none} skipped, {rects:.1} rects)");
+    let mut line = format!(
+        "damage {pct:.1}% over {frames} frames ({none} skipped, {rects:.1} rects, {} regions)",
+        VISIBLE_SET.take().0
+    );
     let checked = DAMAGE_CHECKED.take().0;
     let (missed, missed_px) = (DAMAGE_MISSED.take().0, DAMAGE_MISSED_PX.take().0);
     if checked > 0 {
         line += &format!(" | damage-check {checked} frames, {missed} wrong ({missed_px} px)");
+    }
+    let clipped = VISIBLE_MISSED.take().0;
+    if checked > 0 {
+        line += &format!(", {clipped} outside the visible region");
     }
     let (paths, differ) = (PATHS_CHECKED.take().0, PATHS_DIFFER.take().0);
     if paths > 0 {

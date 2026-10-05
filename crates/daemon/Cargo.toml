@@ -40,6 +40,9 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable", "stagi
 # client_system: back the connection with libwayland so we can hand raw
 # wl_display/wl_surface pointers to wgpu.
 wayland-backend = { version = "0.3", features = ["client_system"] }
+# hyprland-surface-v1 (the visible region, see src/visible.rs) is not in any
+# protocols crate: its client code is generated from the XML in protocols/.
+wayland-scanner = "0.31"
 calloop = "0.13"
 calloop-wayland-source = "0.3"
 wgpu = "24"

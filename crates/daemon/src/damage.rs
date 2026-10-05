@@ -157,6 +157,17 @@ impl TileMap {
     /// The tiles that differ from `prev` (the same surface, one frame
     /// earlier), as few rectangles. Empty: the two frames show the same.
     pub(crate) fn changed(&self, prev: &TileMap) -> Vec<Rect> {
+        self.rects(|i| self.tiles[i] != prev.tiles[i])
+    }
+
+    /// The tiles anything was drawn in, as few rectangles. Empty: the frame
+    /// draws nothing.
+    pub(crate) fn drawn(&self) -> Vec<Rect> {
+        self.rects(|i| self.tiles[i] != 0)
+    }
+
+    /// The tiles `wanted` picks (by index), as few rectangles.
+    fn rects(&self, wanted: impl Fn(usize) -> bool) -> Vec<Rect> {
         let mut out: Vec<Rect> = Vec::new();
         // Runs of changed tiles still growing downward: (col0, col1, row0),
         // col1 exclusive.
@@ -167,16 +178,14 @@ impl TileMap {
             runs.clear();
             if row < self.rows {
                 let at = row as usize * cols;
-                let a = &self.tiles[at..at + cols];
-                let b = &prev.tiles[at..at + cols];
                 let mut col = 0;
                 while col < cols {
-                    if a[col] == b[col] {
+                    if !wanted(at + col) {
                         col += 1;
                         continue;
                     }
                     let start = col;
-                    while col < cols && a[col] != b[col] {
+                    while col < cols && wanted(at + col) {
                         col += 1;
                     }
                     runs.push((start as u32, col as u32));
@@ -326,6 +335,18 @@ mod tests {
             a.mark([at, at, at + 8.0, at + 8.0], 1);
         }
         assert_eq!(a.changed(&b), vec![[0, 0, 19 * 64 + 32, 19 * 64 + 32]]);
+    }
+
+    #[test]
+    fn drawn_is_where_anything_was_marked() {
+        let mut a = map(320, 96);
+        assert!(a.drawn().is_empty());
+        // A bar across the top and a box hanging from it.
+        a.mark([0.0, 0.0, 320.0, 20.0], 1);
+        a.mark([70.0, 20.0, 150.0, 90.0], 2);
+        let mut got = a.drawn();
+        got.sort();
+        assert_eq!(got, vec![[0, 0, 320, 32], [64, 32, 96, 64]]);
     }
 
     #[test]
