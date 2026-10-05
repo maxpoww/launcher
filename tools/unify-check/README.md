@@ -14,7 +14,6 @@ See `docs/unify-audit-2026-10-04.md`.
 - `capcount.sh [s]` — screen captures at rest (Hyprland `screencast` events).
 - `vis.sh` / `visrun.sh <tag>` — screenshots of 8 shell states; diff two tags
   with ImageMagick `compare -fuzz 3%`.
-- `boxtest.sh <tag>` — opens the Recycle Bin box with a virtual click (wlrctl).
 - `colortest.sh` / `ctrun.sh <tag>` — the bar follows a tiled terminal whose
   background changes with no layout event.
 - `rescan.sh`, `soak.sh` / `soakrun.sh <tag>`, `audiotest.sh`, `coldstart.sh`.
@@ -48,6 +47,40 @@ See `docs/unify-audit-2026-10-04.md`.
   n screen recordings; its screencast announcements per recording.
 - `ctlat.sh <tag>` — how soon the bar follows a window's colour.
 - `tracehypr.sh on|off` — restart the session with `HYPRLAND_TRACE=1`.
+- `kmscmp2.sh <tagA> <tagB>` — the real screen in the same still states
+  under two builds or settings.
+- `foreign.sh <tag> [one|all]` — what the shell's blurred layers cost while
+  ANOTHER app draws (a terminal scrolling), with their blur rule on and off.
+- `video.sh <tag> [s]` — a windowed 30 fps video under a resting shell:
+  Hyprland CPU/GPU, GPU busy, captures taken.
+- `boxtest.sh <tag>` — the Recycle Bin box (the frosted, two-step path) by a
+  virtual click; needs something in the trash.
+- `stageshot.sh <tag>` — the settled deck, three states, for old-against-new.
+- `dockprof.sh <workload>` — where the dock's main thread goes (perf sampling).
+- `threadcpu.sh <workload>` — CPU per thread of the dock AND of the helper
+  processes it starts, with a whole-process profile.
+- `steady.sh [s] [states…]` — every RESTING state of the shell, entered, left
+  alone and measured (CPU, helpers, Hyprland, GPU busy, frames, processes
+  started). `FULL=1` adds the daemon's counters and what was started.
+- `stageidle.sh [s]` / `idlespawn.sh [s]` — stage mode, and the plain
+  desktop, at rest: dock + helpers + PipeWire, processes started and by whom.
+- `whodraws.sh <state> [s]` — captures woken in a resting state (run the dock
+  with `RUST_LOG=info,waverunner::screencopy=debug`).
+- `badge.sh <tag>` — the deck's speaker badge through a player starting, a
+  one-second sound, a mute, an unmute, the end; photographs each step and
+  times every probe. Needs a PulseAudio-API player (`mpv --ao=pulse`): a
+  native PipeWire stream names no process.
+- `audiowatch.sh` — the audio sensor after outside changes (volume, mute,
+  default sink, a client that changes nothing) and with its watcher killed.
+- `leak2.sh` — which kind of recording leaves the compositor slower.
+
+Debug switches of the dock (set them with `swapdock.sh … ENV=VALUE`):
+`WAVERUNNER_DAMAGE_CHECK=1|paths`, `WAVERUNNER_FULL_DAMAGE=1`,
+`WAVERUNNER_NO_VISIBLE_REGION=1`, `WAVERUNNER_NO_SAMPLER=1`,
+`VK_DRIVER_FILES=/nonexistent.json` (forces the GL backend).
+
+Always wrap a remote test in `timeout`: a player started without the
+session's D-Bus address hung an ssh for minutes (mpv's MPRIS script).
 
 Do NOT put uprobes on the live compositor by raw address (`perf probe -x …
 0x…`): it took the Acer's session down once. Sampling (`perf record`) and
