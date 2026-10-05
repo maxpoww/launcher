@@ -49,6 +49,8 @@ pub enum ContextDelta {
     /// (`engine::merge_playing`): neither source is sufficient alone, and
     /// whichever lands second must not erase the first.
     AudioStreams(Vec<Playing>),
+    /// The pids of the output streams that are running and not muted.
+    Sounding(Vec<u32>),
     /// The audio output inventory: every sink with its own volume and mute.
     Outputs(Vec<AudioSink>),
     /// Merged app-internal context from the shell/editor/browser bridges.

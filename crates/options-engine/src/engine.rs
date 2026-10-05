@@ -210,6 +210,7 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
             state.audio_streams = s;
             state.playing = merge_playing(&state.mpris_players, &state.audio_streams);
         }
+        ContextDelta::Sounding(p) => state.sounding_pids = p,
         ContextDelta::Outputs(o) => state.outputs = o,
         ContextDelta::AppInternal(a) => state.app_internal = a,
         ContextDelta::Selection(s) => state.selection = s,

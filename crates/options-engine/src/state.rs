@@ -522,6 +522,13 @@ pub struct ContextState {
     /// [`playing`](Self::playing) instead.
     #[serde(default)]
     pub audio_streams: Vec<Playing>,
+    /// The processes that can be HEARD right now: the pid of every
+    /// application stream that is running and not muted (its own mute — a
+    /// muted tab is silence). Sorted, each pid once. What the stage deck's
+    /// speaker badge shows; [`playing`](Self::playing) cannot say it, a
+    /// stream there has no mute.
+    #[serde(default)]
+    pub sounding_pids: Vec<u32>,
     /// Every audio output device, with its own volume and mute.
     #[serde(default)]
     pub outputs: Vec<AudioSink>,
