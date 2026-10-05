@@ -1375,6 +1375,15 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for App {
             }
             zwlr_screencopy_frame_v1::Event::Ready { .. } => app.options_capture_ready(),
             zwlr_screencopy_frame_v1::Event::Failed => app.options_capture_failed(),
+            // What the screen changed in, to wake this capture (with
+            // `RUST_LOG=info,waverunner::screencopy=debug`): the way to find
+            // out WHO keeps a resting screen drawing.
+            zwlr_screencopy_frame_v1::Event::Damage {
+                x,
+                y,
+                width,
+                height,
+            } => tracing::debug!("capture woken by damage {width}x{height} at {x},{y}"),
             _ => {}
         }
     }

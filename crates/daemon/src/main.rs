@@ -327,8 +327,10 @@ fn main() -> anyhow::Result<()> {
     // wlr-screencopy + shm for the smart-gaps colour-match. Both optional:
     // without them (or without Hyprland IPC) the bar just never matches.
     let shm = Shm::bind(&globals, &qh).ok();
-    let screencopy = options_layer
-        .is_some()
+    // (`WAVERUNNER_NO_SAMPLER=1` leaves it off: the way to measure what the
+    // sampler costs.)
+    let sampler_on = std::env::var_os("WAVERUNNER_NO_SAMPLER").is_none();
+    let screencopy = (options_layer.is_some() && sampler_on)
         .then(|| {
             globals
                 .bind::<ZwlrScreencopyManagerV1, App, _>(&qh, 1..=3, ())
