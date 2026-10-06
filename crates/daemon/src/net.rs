@@ -388,6 +388,11 @@ fn execute(cmd: NetCommand, events: &Sender<NetEvent>, profiles: &mut HashMap<St
                 }
             } else {
                 let _ = nmcli(&["con", "down", "id", HOTSPOT_PROFILE]);
+                // Gone, not just down: "connect this device" below takes the
+                // profile used last, and that was the hotspot — it came
+                // straight back up and the switch never went off (ASUS,
+                // 2026-10-06). It is made anew each time it is switched on.
+                let _ = nmcli(&["con", "delete", "id", HOTSPOT_PROFILE]);
                 if let Some(dev) = wifi_device() {
                     let _ = nmcli(&["dev", "connect", &dev]);
                 }
