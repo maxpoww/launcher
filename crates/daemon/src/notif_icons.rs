@@ -29,6 +29,10 @@ pub struct Request {
     pub key: String,
     pub icon: String,
     pub name: String,
+    /// Rasterize as a bare file-type carrier (no plate, like the dock's
+    /// `asset-*` icons) instead of a plated app tile. The desktop asks for
+    /// its folder and file-type icons this way.
+    pub unplated: bool,
 }
 
 /// A finished resolution: the same `key`, and the mip chain if a *real* icon
@@ -51,11 +55,12 @@ impl NotifIcons {
     }
 }
 
-/// Spawn the resolver thread with its own [`IconLoader`] for `icon_theme`.
-pub fn spawn(icon_theme: String, results: Sender<Resolved>) -> NotifIcons {
+/// Spawn a resolver thread (named `thread_name`) with its own [`IconLoader`]
+/// for `icon_theme`. The notification cards and the desktop each run one.
+pub fn spawn(thread_name: &str, icon_theme: String, results: Sender<Resolved>) -> NotifIcons {
     let (requests, rx) = mpsc::channel::<Request>();
     let spawned = std::thread::Builder::new()
-        .name("waverunner-notif-icons".into())
+        .name(thread_name.to_owned())
         .spawn(move || {
             let mut loader = IconLoader::new(icon_theme);
             while let Ok(req) = rx.recv() {
@@ -72,7 +77,7 @@ pub fn spawn(icon_theme: String, results: Sender<Resolved>) -> NotifIcons {
             }
         });
     if let Err(e) = spawned {
-        warn!("cannot spawn notif-icon resolver thread: {e}");
+        warn!("cannot spawn icon resolver thread {thread_name}: {e}");
     }
     NotifIcons { requests }
 }
@@ -83,9 +88,15 @@ fn resolve(loader: &mut IconLoader, req: &Request) -> Option<Vec<u8>> {
     // A synthetic entry carries just what `icon_for` reads: the icon name/path
     // (for resolution) and a name (for the placeholder we then reject). The
     // `id` keys the loader's in-memory raster cache, so distinct sources with
-    // the same themed icon still share correctly.
+    // the same themed icon still share correctly. An `asset-` id is what
+    // makes the loader skip the plate (see `IconLoader::icon_for`).
+    let id = if req.unplated {
+        format!("asset-{}", req.icon)
+    } else {
+        format!("notif:{}", req.icon)
+    };
     let entry = AppEntry {
-        id: format!("notif:{}", req.icon),
+        id,
         name: req.name.clone(),
         description: None,
         exec: String::new(),

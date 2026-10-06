@@ -34,6 +34,7 @@ pub enum SurfaceKind {
     Dock,
     Options,
     Deck,
+    Desktop,
 }
 
 /// The two globals, bound only when the compositor offers both.
@@ -103,6 +104,7 @@ impl Dispatch<WpFractionalScaleV1, SurfaceKind> for App {
                 SurfaceKind::Dock => app.dock_fscale.as_mut(),
                 SurfaceKind::Options => app.options_fscale.as_mut(),
                 SurfaceKind::Deck => app.deck_fscale.as_mut(),
+                SurfaceKind::Desktop => app.desktop_fscale.as_mut(),
             };
             let Some(slot) = slot else {
                 return;

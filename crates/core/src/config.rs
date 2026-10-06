@@ -45,8 +45,32 @@ pub struct Config {
     pub launch: LaunchConfig,
     /// The "OPTIONS" topbar — a reserved strip at the top of the screen.
     pub options: OptionsConfig,
+    /// The desktop: `~/Desktop` drawn as icons behind the windows.
+    pub desktop: DesktopConfig,
     /// Accessibility intents (reduce motion / reduce transparency).
     pub accessibility: AccessibilityConfig,
+}
+
+/// The desktop: a layer-shell surface under the windows (above the
+/// wallpaper) showing the files in `~/Desktop` as icons, the way macOS and
+/// Windows do. Read-only for now: a click opens the file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DesktopConfig {
+    /// Whether the desktop surface is created at all.
+    pub enabled: bool,
+    /// Integer supersampling factor, matching [`WindowConfig::render_scale`]
+    /// (the fallback when the compositor offers no fractional scale).
+    pub render_scale: u32,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            render_scale: 2,
+        }
+    }
 }
 
 /// Accessibility intents. One system-wide setting writes these alongside
@@ -489,6 +513,15 @@ mod tests {
     #[test]
     fn unknown_keys_are_rejected() {
         assert!(toml::from_str::<Config>("[window]\nwdith = 800\n").is_err());
+    }
+
+    #[test]
+    fn desktop_defaults_on_and_parses() {
+        let c = Config::default();
+        assert!(c.desktop.enabled);
+        let c: Config = toml::from_str("[desktop]\nenabled = false\n").unwrap();
+        assert!(!c.desktop.enabled);
+        assert_eq!(c.desktop.render_scale, DesktopConfig::default().render_scale);
     }
 
     #[test]

@@ -77,32 +77,10 @@ impl DesktopIndex {
                 seen.insert(id);
                 continue;
             }
-            let Some(exec) = entry.exec() else {
+            let Some(app) = app_entry(&entry, &locales) else {
                 continue;
             };
-            let exec = strip_field_codes(exec);
-            if exec.is_empty() {
-                continue;
-            }
-            let name = entry
-                .name(&locales)
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| id.clone());
-            let description = entry
-                .comment(&locales)
-                .or_else(|| entry.generic_name(&locales))
-                .map(|d| d.to_string());
-
-            entries.push(AppEntry {
-                name,
-                description,
-                exec,
-                icon: entry.icon().map(str::to_string),
-                startup_wm_class: entry.startup_wm_class().map(str::to_string),
-                needs_terminal: entry.terminal(),
-                path: Some(entry.path.clone()),
-                id: id.clone(),
-            });
+            entries.push(app);
             seen.insert(id);
         }
 
@@ -115,6 +93,48 @@ impl DesktopIndex {
     pub fn names(&self) -> Vec<&str> {
         self.entries.iter().map(|e| e.name.as_str()).collect()
     }
+}
+
+/// Read one `.desktop` file on its own — a launcher sitting on the desktop,
+/// outside the application dirs. `None` when it is not a launchable
+/// application entry (not an entry at all, another type, no `Exec=`).
+/// `NoDisplay`/`Hidden` are not honoured here: those hide an app from
+/// menus, and a file the owner put on their desktop is not a menu.
+pub fn parse_desktop_file(path: &std::path::Path) -> Option<AppEntry> {
+    let locales = get_languages_from_env();
+    let entry = DesktopEntry::from_path(path.to_path_buf(), Some(&locales)).ok()?;
+    if entry.type_().is_some_and(|t| t != "Application") {
+        return None;
+    }
+    app_entry(&entry, &locales)
+}
+
+/// The launchable application an entry describes, or `None` without a
+/// usable `Exec=`.
+fn app_entry(entry: &DesktopEntry, locales: &[String]) -> Option<AppEntry> {
+    let id = entry.id().to_string();
+    let exec = strip_field_codes(entry.exec()?);
+    if exec.is_empty() {
+        return None;
+    }
+    let name = entry
+        .name(locales)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| id.clone());
+    let description = entry
+        .comment(locales)
+        .or_else(|| entry.generic_name(locales))
+        .map(|d| d.to_string());
+    Some(AppEntry {
+        name,
+        description,
+        exec,
+        icon: entry.icon().map(str::to_string),
+        startup_wm_class: entry.startup_wm_class().map(str::to_string),
+        needs_terminal: entry.terminal(),
+        path: Some(entry.path.clone()),
+        id,
+    })
 }
 
 /// Remove `%f`-style field codes from an `Exec=` line, per the desktop
@@ -185,6 +205,26 @@ mod tests {
         assert_eq!(index.names(), vec!["Alpha", "Zed"]);
         assert_eq!(index.entries[0].icon.as_deref(), Some("alpha-icon"));
         assert_eq!(index.entries[1].exec, "zed");
+    }
+
+    #[test]
+    fn parses_one_desktop_file_on_its_own() {
+        let apps = write_apps_dir(&[
+            (
+                "pwa.desktop",
+                "[Desktop Entry]\nType=Application\nName=Mail\nExec=seam -golem-app mail %U\nIcon=mail-icon\nNoDisplay=true\n",
+            ),
+            ("link.desktop", "[Desktop Entry]\nType=Link\nName=Site\nURL=https://x\n"),
+            ("notes.txt", "just text\n"),
+        ]);
+        let pwa = parse_desktop_file(&apps.join("pwa.desktop")).expect("an application");
+        // NoDisplay hides from menus, not from the owner's own desktop.
+        assert_eq!(pwa.name, "Mail");
+        assert_eq!(pwa.exec, "seam -golem-app mail");
+        assert_eq!(pwa.icon.as_deref(), Some("mail-icon"));
+        assert!(parse_desktop_file(&apps.join("link.desktop")).is_none());
+        assert!(parse_desktop_file(&apps.join("notes.txt")).is_none());
+        std::fs::remove_dir_all(apps.parent().unwrap()).ok();
     }
 
     #[test]

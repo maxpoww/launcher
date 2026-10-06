@@ -1116,6 +1116,7 @@ impl App {
                     key: icon.clone(),
                     icon: icon.clone(),
                     name: String::new(),
+                    unplated: false,
                 });
             }
             self.notif_icon_pending.insert(icon);

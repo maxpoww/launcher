@@ -23,6 +23,7 @@ mod content;
 mod damage;
 mod deck;
 mod deck_thumbs;
+mod desktop;
 mod dict;
 mod display;
 mod dragging;
@@ -296,6 +297,17 @@ fn main() -> anyhow::Result<()> {
         config.options.render_scale.max(1),
     ));
 
+    // The DESKTOP: `~/Desktop` as icons behind the windows, on its own
+    // surface under them. Its renderer and listing arrive on first configure.
+    let desktop_layer = config.desktop.enabled.then(|| {
+        surface::create_desktop_surface(
+            &compositor,
+            &layer_shell,
+            &qh,
+            config.desktop.render_scale.max(1),
+        )
+    });
+
     // Draw each surface at the output's real scale (fractional.rs), when the
     // compositor offers it; otherwise the integer render_scale path above.
     let fractional = fractional::Fractional::bind(&globals, &qh);
@@ -308,6 +320,10 @@ fn main() -> anyhow::Result<()> {
     let deck_fscale = fractional.as_ref().zip(deck_layer.as_ref()).map(|(f, l)| {
         f.attach(l.wl_surface(), fractional::SurfaceKind::Deck, &qh)
     });
+    let desktop_fscale = fractional
+        .as_ref()
+        .zip(desktop_layer.as_ref())
+        .map(|(f, l)| f.attach(l.wl_surface(), fractional::SurfaceKind::Desktop, &qh));
 
     // Where each surface has anything to show (visible.rs), when the
     // compositor takes the hint.
@@ -322,6 +338,10 @@ fn main() -> anyhow::Result<()> {
     let deck_visible = visible_regions
         .as_ref()
         .zip(deck_layer.as_ref())
+        .map(|(v, l)| v.attach(l.wl_surface(), &qh));
+    let desktop_visible = visible_regions
+        .as_ref()
+        .zip(desktop_layer.as_ref())
         .map(|(v, l)| v.attach(l.wl_surface(), &qh));
 
     // wlr-screencopy + shm for the smart-gaps colour-match. Both optional:
@@ -439,7 +459,28 @@ fn main() -> anyhow::Result<()> {
     let (notif_icons_handle, notif_icon_rx) = if config.options.enabled {
         let (tx, rx) = channel::channel::<notif_icons::Resolved>();
         (
-            Some(notif_icons::spawn(config.theme.icon_theme.clone(), tx)),
+            Some(notif_icons::spawn(
+                "waverunner-notif-icons",
+                config.theme.icon_theme.clone(),
+                tx,
+            )),
+            Some(rx),
+        )
+    } else {
+        (None, None)
+    };
+
+    // The desktop's icon resolver: folder, file-type and launcher icons for
+    // the icons behind the windows, rasterized off the loop into the desktop
+    // surface's own texture array.
+    let (desktop_icons, desktop_icon_rx) = if desktop_layer.is_some() {
+        let (tx, rx) = channel::channel::<notif_icons::Resolved>();
+        (
+            Some(notif_icons::spawn(
+                "waverunner-desktop-icons",
+                config.theme.icon_theme.clone(),
+                tx,
+            )),
             Some(rx),
         )
     } else {
@@ -548,6 +589,15 @@ fn main() -> anyhow::Result<()> {
         deck_thumb_chains: Vec::new(),
         deck_icon_capacity: 0,
         deck_ptr: None,
+        desktop_layer,
+        desktop_renderer: None,
+        desktop_size: (0, 0),
+        desktop_fscale,
+        desktop_visible,
+        desktop: desktop::Desktop::default(),
+        desktop_icons,
+        desktop_frame_pending: false,
+        desktop_dirty: false,
         frecency: focus_cycle::Frecency::default(),
         focus_walk: None,
         walk_focus_pending: None,
@@ -953,6 +1003,17 @@ fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("registering notif-icon channel: {e}"))?;
     }
 
+    if let Some(desktop_icon_rx) = desktop_icon_rx {
+        event_loop
+            .handle()
+            .insert_source(desktop_icon_rx, |event, _, app| {
+                if let channel::Event::Msg(res) = event {
+                    app.on_desktop_icon(res);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("registering desktop-icon channel: {e}"))?;
+    }
+
     if let Some(dict_rx) = dict_rx {
         event_loop
             .handle()
@@ -982,6 +1043,29 @@ fn main() -> anyhow::Result<()> {
                 })
         {
             warn!("cannot watch application dirs for live reload: {e}");
+        }
+    }
+
+    // The desktop follows its folder: a file saved to, dropped into or
+    // removed from ~/Desktop shows up (or goes) without a restart. Same
+    // level-triggered inotify on the one loop.
+    if app.desktop_layer.is_some() {
+        let dir = desktop::desktop_dir();
+        if let Some(watch_fd) = apps::watch_dirs(std::slice::from_ref(&dir)) {
+            let source = Generic::new(watch_fd, Interest::READ, Mode::Level);
+            if let Err(e) =
+                event_loop
+                    .handle()
+                    .insert_source(source, |_readiness, fd, app: &mut App| {
+                        apps::drain_inotify(fd.as_fd());
+                        app.reload_desktop();
+                        Ok(PostAction::Continue)
+                    })
+            {
+                warn!("cannot watch the desktop folder for live reload: {e}");
+            }
+        } else {
+            warn!("cannot watch {}: desktop icons will not follow changes", dir.display());
         }
     }
 
@@ -1332,6 +1416,23 @@ pub struct App {
     /// When the last gesture committed, so its own late messages cannot be read
     /// as the start of another one.
     deck_swipe_ended: std::time::Instant,
+    /// The DESKTOP: `~/Desktop` as icons on a surface under the windows, with
+    /// its own renderer (built on first configure) — see `desktop`. `None`
+    /// when disabled, or after the compositor closed it.
+    desktop_layer: Option<LayerSurface>,
+    desktop_renderer: Option<Renderer>,
+    /// The desktop surface's logical size.
+    desktop_size: (u32, u32),
+    desktop_fscale: Option<fractional::SurfaceScale>,
+    desktop_visible: Option<visible::SurfaceVisible>,
+    /// The items, their cells and icon layers, hover and press.
+    desktop: desktop::Desktop,
+    /// The desktop's off-loop icon resolver (its own `IconLoader`).
+    desktop_icons: Option<notif_icons::NotifIcons>,
+    /// One desktop frame callback in flight at a time; a draw asked for
+    /// meanwhile waits for it (`desktop_dirty`).
+    desktop_frame_pending: bool,
+    desktop_dirty: bool,
     /// Decaying focus-frequency scores driving the usage-aware focus cycle
     /// (clicking the current-task pill; see `focus_cycle`).
     frecency: focus_cycle::Frecency,
@@ -2235,7 +2336,7 @@ const MAG_SLEEP_AFTER_DROP: Duration = Duration::from_secs(1);
 const EXPAND_BLEED_COOLDOWN: Duration = Duration::from_millis(300);
 
 /// Linux evdev code for the left mouse button.
-const BTN_LEFT: u32 = 0x110;
+pub(crate) const BTN_LEFT: u32 = 0x110;
 
 /// Linux evdev code for the right mouse button.
 const BTN_RIGHT: u32 = 0x111;
@@ -2926,6 +3027,11 @@ impl App {
             Command::DebugGear(what) => {
                 let done = self.gear_debug(&what);
                 info!("debug-gear: {done}");
+                return;
+            }
+            Command::DebugDesktop(what) => {
+                let done = self.desktop_debug(&what);
+                info!("debug-desktop: {done}");
                 return;
             }
             Command::DebugModuleBox => {
@@ -5462,6 +5568,7 @@ impl App {
             SurfaceKind::Dock => (&self.dock_fscale, self.config.window.render_scale),
             SurfaceKind::Options => (&self.options_fscale, self.config.options.render_scale),
             SurfaceKind::Deck => (&self.deck_fscale, self.config.options.render_scale),
+            SurfaceKind::Desktop => (&self.desktop_fscale, self.config.desktop.render_scale),
         };
         let fallback = fallback.max(1) as f32;
         let scale = fs.as_ref().map_or(fallback, |f| f.scale_or(fallback));
@@ -5473,6 +5580,7 @@ impl App {
             SurfaceKind::Dock => self.buffer_size,
             SurfaceKind::Options => self.options_size,
             SurfaceKind::Deck => self.deck_size,
+            SurfaceKind::Desktop => self.desktop_size,
         };
         let long = w.max(h);
         if long == 0 {
@@ -5492,6 +5600,11 @@ impl App {
             SurfaceKind::Dock => (self.buffer_size, self.renderer.as_mut(), &self.dock_fscale),
             SurfaceKind::Options => (self.options_size, self.options_renderer.as_mut(), &self.options_fscale),
             SurfaceKind::Deck => (self.deck_size, self.deck_renderer.as_mut(), &self.deck_fscale),
+            SurfaceKind::Desktop => (
+                self.desktop_size,
+                self.desktop_renderer.as_mut(),
+                &self.desktop_fscale,
+            ),
         };
         let (w, h) = size;
         let Some(renderer) = renderer else {
@@ -5512,6 +5625,11 @@ impl App {
             }
             SurfaceKind::Options => self.draw_options(),
             SurfaceKind::Deck => self.draw_deck(),
+            SurfaceKind::Desktop => {
+                // The cell grid is sized in logical px, so only the pixels
+                // change — but the input region is re-sent with the draw.
+                self.relayout_desktop();
+            }
         }
     }
 
@@ -6009,6 +6127,18 @@ impl CompositorHandler for App {
             }
             return;
         }
+        // The desktop's: likewise, one frame in flight at a time.
+        if self
+            .desktop_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            self.desktop_frame_pending = false;
+            if self.desktop_dirty {
+                self.draw_desktop();
+            }
+            return;
+        }
         self.frame_pending = false;
         if self.ui.is_animating() || self.bounce.is_some() || self.dirty {
             self.draw();
@@ -6065,6 +6195,19 @@ impl LayerShellHandler for App {
             self.dissolve_end();
             return;
         }
+        // The desktop's surface closed under us (its output went): let it
+        // go. The shell carries on without icons rather than exiting with
+        // the dock — they are not what the session depends on.
+        if self
+            .desktop_layer
+            .as_ref()
+            .is_some_and(|d| d.wl_surface() == layer.wl_surface())
+        {
+            warn!("desktop surface closed by the compositor; desktop icons are off");
+            self.desktop_layer = None;
+            self.desktop_renderer = None;
+            return;
+        }
         self.exit = true;
     }
 
@@ -6097,6 +6240,14 @@ impl LayerShellHandler for App {
             .is_some_and(|d| d.wl_surface() == layer.wl_surface())
         {
             self.configure_deck(configure);
+            return;
+        }
+        if self
+            .desktop_layer
+            .as_ref()
+            .is_some_and(|d| d.wl_surface() == layer.wl_surface())
+        {
+            self.configure_desktop(configure);
             return;
         }
         let (mut width, mut height) = configure.new_size;
@@ -6482,6 +6633,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         }
         if app.pointer_surface == options::PointerSurface::Deck {
             app.deck_pointer(event);
+            return;
+        }
+        if app.pointer_surface == options::PointerSurface::Desktop {
+            app.desktop_pointer(event);
             return;
         }
         if app.pointer_surface == options::PointerSurface::Options {

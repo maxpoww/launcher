@@ -136,6 +136,46 @@ pub fn create_top_surface(
     layer
 }
 
+/// Create and commit the DESKTOP surface: the icons behind the windows.
+///
+/// On the `Bottom` layer, not `Background`: the wallpaper (swww) lives on
+/// Background, and within one layer the compositor stacks by map order, so a
+/// wallpaper daemon that (re)started after us would cover the icons. Bottom
+/// is above every wallpaper and below every window, whatever the order.
+///
+/// Anchored to all four edges with a 0×0 size: the compositor hands back the
+/// whole output less the exclusive zones (the OPTIONS bar), so icons never
+/// sit under the bar. Reserves nothing itself. Input starts empty and is
+/// opened over the icons only (`App::sync_desktop_input`), so the wallpaper
+/// between them stays untouched by us.
+pub fn create_desktop_surface(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<App>,
+    render_scale: u32,
+) -> LayerSurface {
+    let surface = compositor.create_surface(qh);
+    let layer = layer_shell.create_layer_surface(
+        qh,
+        surface,
+        Layer::Bottom,
+        Some("waverunner-desktop"),
+        None, // the compositor picks the active output
+    );
+    layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+    layer.set_size(0, 0);
+    layer.set_exclusive_zone(0);
+    layer.wl_surface().set_buffer_scale(render_scale as i32);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    if let Ok(region) = Region::new(compositor) {
+        layer
+            .wl_surface()
+            .set_input_region(Some(region.wl_region()));
+    }
+    layer.commit();
+    layer
+}
+
 /// Set a layer surface's pointer input region to the union of `rects`
 /// (logical `x, y, w, h`). An empty slice makes the whole surface
 /// click-through.

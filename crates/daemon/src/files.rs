@@ -165,6 +165,7 @@ impl App {
                 self.placeholders[i] = false;
             }
         }
+        self.desktop_on_audio_only(&path);
         self.audio_paths.insert(path);
         self.schedule_frame();
     }
@@ -195,6 +196,8 @@ impl App {
                 self.placeholders[i] = false;
             }
         }
+        // The desktop shows the same file's picture, on its own surface.
+        self.desktop_on_thumb(&path, &pixels);
         self.thumb_map.insert(path, (slot, pixels));
         self.schedule_frame();
     }

@@ -101,6 +101,10 @@ pub enum Command {
     /// `page <about|health|clean|drive|ext|format|folder|card|video|app|system>`,
     /// `do <control> [value]` to press one, then `confirm` / `enter`.
     DebugGear(String),
+    /// Drive the desktop (the icons behind the windows) without a pointer:
+    /// alone, log every item and where it sits; `reload` re-reads the folder;
+    /// `open <n>` opens item n; `hover <x> <y>` draws the pointer there.
+    DebugDesktop(String),
     /// Golem as a floating window manager instead of a tiling one: `on`, `off`
     /// or `toggle` (empty = toggle). The gear's page-1 switch sends the same
     /// thing; a verb so it can be bound to a key and driven without a pointer.
@@ -255,6 +259,8 @@ impl fmt::Display for Command {
             Command::DebugStats(None) => f.write_str("debug-stats"),
             Command::DebugStats(Some(p)) => write!(f, "debug-stats {p}"),
             Command::DebugGear(a) => write!(f, "debug-gear {a}"),
+            Command::DebugDesktop(a) if a.is_empty() => f.write_str("debug-desktop"),
+            Command::DebugDesktop(a) => write!(f, "debug-desktop {a}"),
             Command::FloatMode(m) => write!(f, "float-mode {m}"),
             Command::ControlPanel => f.write_str("control-panel"),
             Command::Modules(name) if name.is_empty() => f.write_str("modules"),
@@ -317,6 +323,7 @@ impl FromStr for Command {
             ("debug-query", Command::DebugQuery as fn(String) -> Command),
             ("debug-emoji", Command::DebugEmoji as fn(String) -> Command),
             ("debug-gear", Command::DebugGear as fn(String) -> Command),
+            ("debug-desktop", Command::DebugDesktop as fn(String) -> Command),
             ("stage-show", Command::StageShow as fn(String) -> Command),
             // Before its own prefix: `stage-swipe` would otherwise be tried
             // against `stage-swipe-end …` first. (It declines — the remainder
@@ -416,6 +423,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-module-box",
     "debug-stats",
     "debug-gear <open net|open bt|close|state|detail|share|hotspot|files|back|password|type|scroll|pair|fake-off>",
+    "debug-desktop [reload|open <n>|hover <x> <y>]",
     "options-trigger <id>",
     "control-panel",
     "modules [name]",
@@ -531,6 +539,7 @@ mod tests {
                 | Command::DebugModuleBox
                 | Command::DebugStats(_)
                 | Command::DebugGear(_)
+                | Command::DebugDesktop(_)
                 | Command::FloatMode(_)
                 | Command::ControlPanel
                 | Command::Modules(_)
@@ -582,6 +591,8 @@ mod tests {
         Command::DebugModuleBox,
         Command::DebugStats(None),
         Command::DebugGear("detail".into()),
+        Command::DebugDesktop(String::new()),
+        Command::DebugDesktop("open 0".into()),
         Command::FloatMode(String::new()),
         Command::ControlPanel,
         Command::Modules(String::new()),

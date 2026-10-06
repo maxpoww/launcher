@@ -305,12 +305,21 @@ fn application_dirs() -> Vec<std::path::PathBuf> {
 /// [`drain_inotify`]. Returns `None` if inotify is unavailable or no
 /// application directory could be watched — live reload then simply stays off.
 pub fn watch_application_dirs() -> Option<std::os::fd::OwnedFd> {
+    watch_dirs(&application_dirs())
+}
+
+/// Start watching `dirs` for entries added, removed, renamed or rewritten,
+/// and return the inotify descriptor (non-blocking, level-triggered readable
+/// on any change). Register it as a calloop source and drain it with
+/// [`drain_inotify`]. `None` if inotify is unavailable or none of the
+/// directories could be watched.
+pub fn watch_dirs(dirs: &[std::path::PathBuf]) -> Option<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
     // SAFETY: inotify_init1 returns a fresh fd (or -1); nothing else owns it.
     let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
     if fd < 0 {
-        warn!("inotify_init1 failed; live launcher reload disabled");
+        warn!("inotify_init1 failed; live reload disabled");
         return None;
     }
     // SAFETY: `fd` is a valid, freshly created descriptor we now take ownership of.
@@ -321,7 +330,7 @@ pub fn watch_application_dirs() -> Option<std::os::fd::OwnedFd> {
         | libc::IN_MOVED_FROM
         | libc::IN_CLOSE_WRITE;
     let mut watched = 0u32;
-    for dir in application_dirs() {
+    for dir in dirs {
         let Ok(cpath) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
             continue;
         };
@@ -338,9 +347,9 @@ pub fn watch_application_dirs() -> Option<std::os::fd::OwnedFd> {
 }
 
 /// Drain all pending events from an inotify descriptor created by
-/// [`watch_application_dirs`]. The event contents are irrelevant — any event
-/// means the application directories changed — so we only clear the queue so
-/// the level-triggered source goes quiet until the next change.
+/// [`watch_dirs`]. The event contents are irrelevant — any event means the
+/// watched directories changed — so we only clear the queue so the
+/// level-triggered source goes quiet until the next change.
 pub fn drain_inotify(fd: std::os::fd::BorrowedFd<'_>) {
     use std::os::fd::AsRawFd;
     let raw = fd.as_raw_fd();

@@ -482,9 +482,9 @@ const MIN_TILE_PAD: f32 = 8.0;
 const MIN_BADGE_FRAC: f32 = 0.45;
 const MIN_BADGE_INSET: f32 = 2.0;
 /// Peak scale of a grid icon under the cursor.
-const GRID_MAGNIFY: f32 = 1.22;
+pub(crate) const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
-const GRID_MAG_RADIUS: f32 = 95.0;
+pub(crate) const GRID_MAG_RADIUS: f32 = 95.0;
 
 /// Cosine ease from 1.0 at `d == 0` to 0.0 at `d >= radius`.
 pub(crate) fn falloff(d: f32, radius: f32) -> f32 {
@@ -522,7 +522,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// Truncate a label to fit within `max_w` pixels, appending "…" when
 /// the text is longer. Uses an average-character-width estimate (0.52×
 /// font size) rather than shaping — close enough for app names.
-fn truncate_label(text: &str, max_w: f32, font_px: f32) -> String {
+pub(crate) fn truncate_label(text: &str, max_w: f32, font_px: f32) -> String {
     let avg_char_w = font_px * 0.52;
     let max_chars = (max_w / avg_char_w) as usize;
     if text.chars().count() <= max_chars {

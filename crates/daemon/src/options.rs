@@ -901,6 +901,8 @@ pub(crate) enum PointerSurface {
     Options,
     /// The STAGE deck strip on the bottom edge (see [`crate::deck`]).
     Deck,
+    /// The desktop icons behind the windows (see [`crate::desktop`]).
+    Desktop,
 }
 
 /// The pill modules currently on the bar.
@@ -4991,6 +4993,12 @@ impl App {
             .is_some_and(|l| l.wl_surface() == surface)
         {
             PointerSurface::Deck
+        } else if self
+            .desktop_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            PointerSurface::Desktop
         } else {
             PointerSurface::Dock
         }
