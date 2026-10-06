@@ -853,6 +853,10 @@ impl App {
     /// being opened (receiving files is an agent that has to exist).
     pub(crate) fn gear_startup(&mut self) {
         self.pages_startup();
+        // The pairing agent exists from the start: a pairing begun on a phone
+        // or another computer has to find someone to ask, page open or not.
+        // (The worker only waits; it polls nothing until its page is shown.)
+        self.ensure_bt();
         if self.settings.bt_receive {
             self.files_send(FileCommand::Receive(true));
         }
@@ -962,10 +966,12 @@ impl App {
                 self.gear.bt_view = BtView::Pair(path);
                 self.gear.pair = Some((code, true));
                 self.gear.view_t = 0.0;
+                self.show_pairing();
             }
             BtEvent::PairShow { path, code } => {
                 self.gear.bt_view = BtView::Pair(path);
                 self.gear.pair = Some((code, false));
+                self.show_pairing();
             }
             BtEvent::Done { path, ok } => {
                 debug!("bt: {path} done (ok: {ok})");
@@ -983,6 +989,20 @@ impl App {
             BtEvent::Audio(a) => self.gear.bt_audio = Some(a),
         }
         self.gear_changed();
+    }
+
+    /// A pairing asks something of the person: the Bluetooth page comes up
+    /// with the question, wherever they are — the other device started it,
+    /// so nobody opened this page (it stays up while the question stands).
+    fn show_pairing(&mut self) {
+        if self.gear_page() == Some(PageKind::Bt) && self.stats.open {
+            return;
+        }
+        if let Some(page) = self.stats_page_for(PageKind::Bt) {
+            self.stats.reveal = true;
+            self.stats_open_page(page);
+            self.gear_show_view();
+        }
     }
 
     /// Something the page shows has changed: redraw it if it is on screen.

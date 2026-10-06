@@ -289,6 +289,14 @@ async fn session(
     {
         debug!("bt: RegisterAgent: {e}");
     }
+    // The one that is asked when ANOTHER device starts a pairing with this
+    // computer: without it the request went to whoever registered first.
+    if let Err(e) = manager
+        .call::<_, _, ()>("RequestDefaultAgent", &(&agent_path,))
+        .await
+    {
+        debug!("bt: RequestDefaultAgent: {e}");
+    }
     let mut adapter: Option<String> = None;
     loop {
         let cmd = if *watch {
