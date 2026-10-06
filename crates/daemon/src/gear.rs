@@ -962,16 +962,19 @@ impl App {
                     }
                 }
             }
+            // (The page is brought up first: opening it starts at its list.)
             BtEvent::PairConfirm { path, code } => {
+                self.show_pairing();
                 self.gear.bt_view = BtView::Pair(path);
                 self.gear.pair = Some((code, true));
                 self.gear.view_t = 0.0;
-                self.show_pairing();
+                self.gear_show_view();
             }
             BtEvent::PairShow { path, code } => {
+                self.show_pairing();
                 self.gear.bt_view = BtView::Pair(path);
                 self.gear.pair = Some((code, false));
-                self.show_pairing();
+                self.gear_show_view();
             }
             BtEvent::Done { path, ok } => {
                 debug!("bt: {path} done (ok: {ok})");
@@ -1001,7 +1004,6 @@ impl App {
         if let Some(page) = self.stats_page_for(PageKind::Bt) {
             self.stats.reveal = true;
             self.stats_open_page(page);
-            self.gear_show_view();
         }
     }
 
