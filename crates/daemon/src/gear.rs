@@ -3442,7 +3442,18 @@ impl App {
                     return;
                 }
             }
-            Hit::PairYes => self.bt_send(BtCommand::PairAnswer(true)),
+            Hit::PairYes => {
+                self.bt_send(BtCommand::PairAnswer(true));
+                // A pairing the OTHER device began has no call of ours to end
+                // it: the question is answered, so it goes (it stayed up, box
+                // held open, on the MacBook that accepted, 2026-10-06).
+                if self.gear.bt_busy.is_none() {
+                    self.gear.pair = None;
+                    self.gear.bt_view = BtView::List;
+                    self.gear_show_view();
+                    self.update_stats_reveal();
+                }
+            }
             Hit::PairNo => {
                 self.bt_send(BtCommand::PairAnswer(false));
                 self.gear.bt_busy = None;
