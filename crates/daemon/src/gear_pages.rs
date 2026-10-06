@@ -2133,6 +2133,40 @@ impl App {
     }
 }
 
+/// `name` cut to what a file system's label can hold. A name one letter too
+/// long failed the whole format at its last step — after a thorough erase,
+/// half an hour in (the PNY stick, 2026-10-06: "Label for exFAT filesystem is
+/// too long").
+fn fit_label(name: &str, fstype: &str) -> String {
+    match fstype {
+        // 11 UTF-16 units (exFAT as the tools here make it; FAT's own limit).
+        "exfat" | "vfat" => {
+            let mut out = String::new();
+            let mut units = 0;
+            for c in name.chars() {
+                units += c.len_utf16();
+                if units > 11 {
+                    break;
+                }
+                out.push(c);
+            }
+            out
+        }
+        // 16 bytes.
+        "ext4" | "ext3" | "ext2" => {
+            let mut end = name.len().min(16);
+            while !name.is_char_boundary(end) {
+                end -= 1;
+            }
+            name[..end].to_owned()
+        }
+        // NTFS: 32 characters.
+        _ => name.chars().take(32).collect(),
+    }
+    .trim()
+    .to_owned()
+}
+
 fn health_word(pct: u8) -> &'static str {
     match pct {
         80..=u8::MAX => "Good",
@@ -2146,6 +2180,19 @@ mod tests {
     use super::*;
 
     const BASE: &str = "general {\n  lock_cmd=/nix/store/x-golem-lock\n}\n\nlistener {\n  on-timeout=/nix/store/x-golem-lock\n  timeout=300\n}\n\nlistener {\n  on-resume=/nix/store/y-golem-dpms on\n  on-timeout=/nix/store/y-golem-dpms off\n  timeout=360\n}\n\nlistener {\n  on-timeout=/nix/store/z-golem-idle-suspend\n  timeout=900\n}\n";
+
+    #[test]
+    fn a_drive_name_is_cut_to_what_its_file_system_holds() {
+        assert_eq!(fit_label("GEARXGEARWIN", "exfat"), "GEARXGEARWI");
+        assert_eq!(fit_label("short", "exfat"), "short");
+        assert_eq!(
+            fit_label("ñandú ñandú ñandú", "ext4").len(),
+            15,
+            "cut on a character, not inside one"
+        );
+        assert_eq!(fit_label(&"x".repeat(40), "ntfs").chars().count(), 32);
+        assert_eq!(fit_label("ten chars  and", "vfat"), "ten chars");
+    }
 
     #[test]
     fn the_idle_steps_are_read_from_the_systems_own_config() {
@@ -2640,11 +2687,18 @@ impl App {
                             drive: x.kname,
                             volumes,
                             locked_part,
-                            name: if f.name.trim().is_empty() {
-                                "Untitled".into()
-                            } else {
-                                f.name.trim().to_owned()
-                            },
+                            name: fit_label(
+                                if f.name.trim().is_empty() {
+                                    "Untitled"
+                                } else {
+                                    f.name.trim()
+                                },
+                                match f.target {
+                                    Target::Any => "exfat",
+                                    Target::Golem => "ext4",
+                                    Target::Windows => "ntfs",
+                                },
+                            ),
                             target: f.target,
                             password: (f.lock && f.target == Target::Golem).then_some(f.password),
                             thorough: f.thorough,
@@ -2702,7 +2756,7 @@ impl App {
                         "Renaming…",
                         DriveCommand::Rename {
                             volume: v.fs_dev().to_owned(),
-                            label: trimmed,
+                            label: fit_label(&trimmed, &v.fstype),
                             mounted: v.mount.is_some(),
                         },
                     );

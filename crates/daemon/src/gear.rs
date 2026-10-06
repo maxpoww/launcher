@@ -368,6 +368,9 @@ pub(crate) struct GearState {
     show_pw: bool,
     qr: Option<Vec<Vec<bool>>>,
     bt_busy: Option<String>,
+    /// Whether that device was connected when the action began: what the
+    /// action is called, and how its end is recognised.
+    bt_busy_was: bool,
     /// The number a pairing shows, and whether it waits for a yes.
     pair: Option<(String, bool)>,
     field: Option<Field>,
@@ -821,6 +824,10 @@ impl App {
                         FileEvent::Progress { address, text } => {
                             app.gear.sending = Some((address, text));
                         }
+                        FileEvent::ReceiveFailed => {
+                            app.settings.bt_receive = false;
+                            app.settings.save();
+                        }
                         FileEvent::Done { address } => {
                             if app
                                 .gear
@@ -940,6 +947,16 @@ impl App {
                     return;
                 }
                 self.gear.bt_snap = s;
+                // The link is what was asked for: the action is over, whether
+                // or not BlueZ has answered the call yet (a Connect to a
+                // computer stays unanswered long after it is connected, and
+                // the page read "Disconnecting…" all that time).
+                if let Some(path) = self.gear.bt_busy.clone() {
+                    let now = self.bt_dev(&path).map(|d| d.connected);
+                    if self.gear.pair.is_none() && now.is_some_and(|c| c != self.gear.bt_busy_was) {
+                        self.gear.bt_busy = None;
+                    }
+                }
             }
             BtEvent::PairConfirm { path, code } => {
                 self.gear.bt_view = BtView::Pair(path);
@@ -1507,7 +1524,7 @@ impl App {
             let (glyph, _) = bt_kind(&d.icon);
             let (sub, tone) = if busy(d) {
                 (
-                    if d.connected {
+                    if g.bt_busy_was {
                         "Disconnecting…"
                     } else {
                         "Connecting…"
@@ -1615,7 +1632,7 @@ impl App {
         };
         let (glyph, kind) = bt_kind(&d.icon);
         let state = if g.bt_busy.as_deref() == Some(path) {
-            if d.connected {
+            if g.bt_busy_was {
                 "Disconnecting…"
             } else {
                 "Connecting…"
@@ -3451,6 +3468,7 @@ impl App {
             return;
         };
         self.gear.bt_busy = Some(path.clone());
+        self.gear.bt_busy_was = d.connected;
         self.bt_send(if d.connected {
             BtCommand::Disconnect(path)
         } else if d.paired {
@@ -3592,9 +3610,143 @@ impl App {
                     self.gear_changed();
                 }
             }
+            // What the open page says, as text: every item with its index,
+            // so a script can check a page and `click` any control on it.
+            "dump" => return self.gear_dump(),
+            // `click 3` / `click 3.1` (a choice's option) / `click strip 0` /
+            // `click footer 1` / `click more 3` (a row's corner control).
+            "click" => {
+                let view = self.gear_view();
+                let (kind, rest) = arg.split_once(' ').unwrap_or(("item", arg));
+                let (a, b) = rest.split_once('.').unwrap_or((rest, ""));
+                let (i, j) = (
+                    a.parse::<usize>().unwrap_or(usize::MAX),
+                    b.parse::<usize>().unwrap_or(0),
+                );
+                let hit = match kind {
+                    "strip" => view.strip.get(i).map(|b| b.hit.clone()),
+                    "footer" => view.footer.get(i).map(|b| b.hit.clone()),
+                    "more" => match view.items.get(i) {
+                        Some(Item::Row {
+                            more: Some((h, _)), ..
+                        }) => Some(h.clone()),
+                        _ => None,
+                    },
+                    _ => match view.items.get(i) {
+                        Some(Item::Row { hit, .. } | Item::Toggle { hit, .. }) => Some(hit.clone()),
+                        Some(Item::Kv { hit, .. }) => hit.clone(),
+                        Some(Item::Card { rename, .. }) => rename.clone(),
+                        Some(Item::Choice { opts, .. }) => opts.get(j).map(|o| o.0.clone()),
+                        _ => None,
+                    },
+                };
+                match hit {
+                    Some(h) if h != Hit::None => {
+                        let said = format!("click {h:?}");
+                        self.gear_click(h);
+                        return said;
+                    }
+                    _ => return format!("nothing to click at: {arg}"),
+                }
+            }
             _ => return format!("unknown: {what}"),
         }
         format!("{verb} done")
+    }
+
+    /// `debug-gear dump`: the open page as lines of text.
+    fn gear_dump(&self) -> String {
+        let view = self.gear_view();
+        let mut out = format!("page {:?}", self.gear_page());
+        let btns = |bs: &[Btn]| {
+            bs.iter()
+                .map(|b| format!("{:?}{}", b.hit, if b.lit { "*" } else { "" }))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if !view.strip.is_empty() {
+            out += &format!("\n  strip: {}", btns(&view.strip));
+        }
+        for (i, it) in view.items.iter().enumerate() {
+            let line = match it {
+                Item::Row {
+                    hit,
+                    more,
+                    title,
+                    sub,
+                    tone,
+                    trail,
+                    sel,
+                    ..
+                } => format!(
+                    "row [{title}] [{sub}] {trail:?} {tone:?}{} -> {hit:?}{}",
+                    if *sel { " sel" } else { "" },
+                    more.as_ref()
+                        .map(|m| format!(" (more {:?})", m.0))
+                        .unwrap_or_default()
+                ),
+                Item::Heading { text, busy } => {
+                    format!("heading [{text}]{}", if *busy { " busy" } else { "" })
+                }
+                Item::Card {
+                    title,
+                    sub,
+                    extra,
+                    rename,
+                    ..
+                } => {
+                    let extra = match extra {
+                        Extra::Qr(_, line) => format!("Qr({line})"),
+                        other => format!("{other:?}"),
+                    };
+                    format!("card [{title}] [{sub}] {extra} rename={rename:?}")
+                }
+                Item::Kv { hit, key, value } => format!("kv [{key}] = [{value}] -> {hit:?}"),
+                Item::Toggle {
+                    hit,
+                    label,
+                    hint,
+                    on,
+                } => format!("toggle [{label}] [{hint}] on={on} -> {hit:?}"),
+                Item::Choice { key, opts } => format!(
+                    "choice [{key}] {}",
+                    opts.iter()
+                        .map(|(h, l, on)| format!("{l}{}={h:?}", if *on { "*" } else { "" }))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ),
+                Item::Empty(t) => format!("empty [{t}]"),
+                Item::Note(t) => format!("note [{t}]"),
+                Item::Graph(v) => format!("graph {} points", v.len()),
+                Item::Cores(v) => format!("cores {}", v.len()),
+                Item::Bar(v) => format!(
+                    "bar {}",
+                    v.iter()
+                        .map(|(l, w, _)| format!("{l}:{w:.0}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            };
+            out += &format!("\n  {i}: {line}");
+        }
+        if !view.footer.is_empty() {
+            out += &format!("\n  footer: {}", btns(&view.footer));
+        }
+        if let Some(f) = &self.gear.field {
+            out += &format!(
+                "\n  field [{}] text [{}]",
+                f.prompt,
+                if f.secret && !f.show {
+                    "•".repeat(f.text.chars().count())
+                } else {
+                    f.text.clone()
+                }
+            );
+        }
+        if let Some((line, hit)) = &self.gear.arm {
+            out += &format!("\n  armed [{line}] -> {hit:?}");
+        }
+        out
     }
 }
 

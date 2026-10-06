@@ -46,6 +46,9 @@ pub(crate) enum FileEvent {
     Progress { address: String, text: String },
     /// The transfer to `address` is over (sent, failed or cancelled).
     Done { address: String },
+    /// Receiving could not be switched on (another program already answers
+    /// for incoming files): the switch goes back.
+    ReceiveFailed,
 }
 
 pub(crate) struct FileHandle {
@@ -106,7 +109,18 @@ fn run_worker(events: &Sender<FileEvent>, mut commands: mpsc::UnboundedReceiver<
                 FileCommand::Receive(on) if on != receiving => {
                     match set_receiving(&conn, on).await {
                         Ok(()) => receiving = on,
-                        Err(e) => warn!("bt files: receive {on}: {e}"),
+                        Err(e) => {
+                            warn!("bt files: receive {on}: {e}");
+                            if on {
+                                notify(
+                                    &conn,
+                                    "Cannot receive files",
+                                    "Another program on this computer already takes Bluetooth files",
+                                )
+                                .await;
+                                let _ = events.send(FileEvent::ReceiveFailed);
+                            }
+                        }
                     }
                 }
                 FileCommand::Receive(_) => {}

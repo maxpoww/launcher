@@ -498,18 +498,21 @@ fn send_detail(
         ]) {
             let mut dns = Vec::new();
             for line in out.lines() {
-                let f = split_terse(line);
-                let (Some(k), Some(v)) = (f.first(), f.get(1)) else {
+                // `key:value`, one per line — and here nmcli does NOT escape
+                // the colons of the value (a hardware address came out as its
+                // first two digits when split like a table row).
+                let Some((k, v)) = line.split_once(':') else {
                     continue;
                 };
+                let v = v.trim().replace("\\:", ":");
                 if k.starts_with("GENERAL.HWADDR") {
                     d.mac = v.to_lowercase();
                 } else if k.starts_with("IP4.ADDRESS") && (d.ip.is_empty() || !d.manual) {
-                    d.ip = v.clone();
+                    d.ip = v;
                 } else if k.starts_with("IP4.GATEWAY") && !v.is_empty() {
-                    d.gateway = v.clone();
+                    d.gateway = v;
                 } else if k.starts_with("IP4.DNS") {
-                    dns.push(v.clone());
+                    dns.push(v);
                 }
             }
             if !dns.is_empty() {
