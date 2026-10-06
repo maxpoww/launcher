@@ -362,7 +362,23 @@ async fn dispatch(
     };
     match cmd {
         BtCommand::Watch(on) => *watch = on,
-        BtCommand::Power(on) => adapter_set("Powered", on).await,
+        BtCommand::Power(on) => {
+            if on {
+                // A radio switched off by a key, by airplane mode elsewhere or
+                // by another program is BLOCKED, and BlueZ then refuses to
+                // power it ("setting Powered failed"): lift the block first.
+                // The session's user may (the device node is theirs).
+                let lifted = tokio::process::Command::new("rfkill")
+                    .args(["unblock", "bluetooth"])
+                    .status()
+                    .await;
+                if let Err(e) = lifted {
+                    debug!("bt: rfkill unblock: {e}");
+                }
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+            adapter_set("Powered", on).await;
+        }
         BtCommand::Discoverable(on) => adapter_set("Discoverable", on).await,
         BtCommand::Scan(on) => {
             if let Some(a) = adapter {
