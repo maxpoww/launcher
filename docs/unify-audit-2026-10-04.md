@@ -315,6 +315,40 @@ Things learned about measuring:
   (`perf stat -e sched:sched_process_exec`) and the children's time.
 - Leaving a state alone and measuring it found more than any animation did.
 
+### Round 3 on the dev box (2026-10-06): the one regression, and the fix
+
+Deployed on the dev box (Iris Xe, anv, 3200×2000 at 1.25, 165 Hz VRR, blur)
+Max found OPTIONS "slow, and choppy". Measured with the gear box opened by
+script (`debug-gear open net` / `close`, `tools/unify-check/options-anim.sh`)
+and `debug-perf`: **7–9 OPTIONS frames per animation**, where the same dock
+with `WAVERUNNER_FULL_DAMAGE=1` drew 40–90. VRR off, `debug:damage_tracking
+0`, blur off, the visible region off, the sampler off: no change.
+`WAYLAND_DEBUG=1` showed it: during the animation the surface presented
+every **100 ms exactly** (`FRAME_OVERDUE`), made no frame request and got no
+callback.
+
+The cause was two round-3 changes meeting: (1) "a frame that changed nothing
+is not committed" left its `wl_surface.frame` request on the surface ("the
+next frame that shows something serves it"); the request then rode on the
+bar's next *bare* commit (an input-region update). (2) The
+`layer-commit-damage` patch no longer damages a layer's whole box on a bare
+commit — and a layer gets its frame callbacks only when it is drawn (Hyprland
+sends frame events to the workspace's *windows* when nothing is damaged;
+layers go through the surface pass). Stock answered bare commits by drawing
+the whole layer every time. So the bar waited on a callback that could not
+come until something else damaged it, and drew at the overdue fallback. At
+165 Hz two consecutive frames are identical far more often than at 60 Hz,
+which is why the laptops never showed it.
+
+Fix, both sides: the renderer takes a `before_present` hook and the frame
+request is made **in the commit that presents** (dock, OPTIONS bar, deck —
+no request is ever left waiting on a bare commit; a frame that presents
+nothing while an animation runs ticks on an 8 ms timer instead), and the
+compositor patch damages the whole box again for a commit without damage
+that carries frame callbacks (stock behaviour for exactly that case). After
+the dock fix alone: 60–92 frames per animation, every present with its
+request, callback latency median 4.9 ms.
+
 ## Still duplicated — candidates, in the order I would take them
 
 | # | What | Gain | Risk |

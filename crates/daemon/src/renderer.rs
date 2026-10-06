@@ -217,8 +217,8 @@ pub enum Frame {
     /// Drawn and presented (the present commits the surface).
     Presented,
     /// It shows exactly what the last presented frame does, so nothing was
-    /// drawn and the surface was NOT committed: a frame request made for it
-    /// still needs a commit to reach the compositor.
+    /// drawn, the surface was NOT committed, and no frame request was made
+    /// (`before_present` did not run): no callback is coming for it.
     Unchanged,
 }
 
@@ -1724,6 +1724,9 @@ impl Renderer {
     /// `cursor` is the pointer position in surface pixels, used for the
     /// glass cursor-spotlight effect; `None` when the pointer is outside
     /// the surface.
+    // One knob per surface-level concern; a struct for them would be read at
+    // every call site for what is a line each here.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         scene: &Scene,
@@ -1732,6 +1735,7 @@ impl Renderer {
         squircle: f32,
         thumb_base: u32,
         mut visible: Option<&mut crate::visible::SurfaceVisible>,
+        before_present: &mut dyn FnMut(),
     ) -> anyhow::Result<Frame> {
         let _perf = crate::perf::RENDER.time();
         // `w`/`h` are the physical framebuffer size; the scene is authored in
@@ -2557,6 +2561,14 @@ impl Renderer {
                 None => wgpu_hal::present_damage::clear(),
             }
         }
+        // The caller's frame request goes here, in the commit the present
+        // makes. A `wl_surface.frame` is double-buffered state: made before a
+        // render that then changes nothing, it waited on the surface for a
+        // bare commit — which a compositor that damages only what a commit
+        // changed does not draw, and a layer is answered only when drawn. The
+        // OPTIONS bar sat on such a request through whole animations and drew
+        // at the 100 ms overdue fallback (dev box, 165 Hz, 2026-10-06).
+        before_present();
         frame.present();
         LAST_PRESENT.with(|t| t.set(Some(now)));
         if let Some(tiles) = frame_tiles {

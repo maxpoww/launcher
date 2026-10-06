@@ -86,3 +86,5 @@ Do NOT put uprobes on the live compositor by raw address (`perf probe -x …
 0x…`): it took the Acer's session down once. Sampling (`perf record`) and
 `perf annotate` are enough and safe.
 
+
+- `options-anim.sh` — frames per OPTIONS box animation on the dev box (dock restarted with extra env, gear box opened/closed by script, `debug-perf` per phase). The 2026-10-06 frame-request regression read 7–9 here, 60–90 fixed.

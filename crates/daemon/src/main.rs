@@ -536,6 +536,7 @@ fn main() -> anyhow::Result<()> {
         deck: deck::Deck::default(),
         deck_last_frame: None,
         deck_frame_pending: false,
+        deck_tick_timer: false,
         deck_thumbs,
         deck_audio_map: HashSet::new(),
         deck_thumb_layer: HashMap::new(),
@@ -598,7 +599,6 @@ fn main() -> anyhow::Result<()> {
         frame_pending: false,
         draw_forced: false,
         options_frame_pending: false,
-        options_frame_staged: false,
         options_frame_asked: None,
         options_dirty: false,
         dirty: false,
@@ -1298,6 +1298,9 @@ pub struct App {
     /// Whether a deck frame callback is already in flight, so a burst of
     /// redraws does not stack callbacks.
     deck_frame_pending: bool,
+    /// A timer is armed to draw the deck again (a frame that presented
+    /// nothing gets no callback; its tweens tick on this instead).
+    deck_tick_timer: bool,
     /// The off-loop window-thumbnail capturer for the deck.
     deck_thumbs: deck_thumbs::DeckThumbs,
     /// The deck tiles (by key) wearing the speaker badge: those whose task
@@ -1441,7 +1444,6 @@ pub struct App {
     /// for meanwhile. `options_frame_staged` = a frame request is on the
     /// surface, to go with the next commit.
     options_frame_pending: bool,
-    options_frame_staged: bool,
     options_frame_asked: Option<Instant>,
     options_dirty: bool,
     /// Scene changed since the last draw; the pending frame callback

@@ -4,8 +4,9 @@
 
 use std::time::{Duration, Instant};
 
-use smithay_client_toolkit::shell::wlr_layer::LayerSurfaceConfigure;
+use smithay_client_toolkit::shell::wlr_layer::{LayerSurface, LayerSurfaceConfigure};
 use smithay_client_toolkit::shell::WaylandSurface;
+use wayland_client::QueueHandle;
 use tracing::error;
 
 use crate::install::FAIL_FLASH;
@@ -35,6 +36,9 @@ const CONTROLS_GAP: f32 = 10.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
 /// pacing, see `Renderer::gpu_ready`).
 const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
+/// A frame that presented nothing gets no frame callback; an animation still
+/// in flight draws again after this instead.
+const UNCHANGED_RETRY: Duration = Duration::from_millis(8);
 
 /// How long a surface waits for its frame callback before it draws without
 /// one (see `draw_options`). Far above any healthy frame time.
@@ -579,12 +583,8 @@ impl App {
 
         self.dirty = false;
 
-        // Never a second callback while one is out (see the top of `draw`).
-        if !self.frame_pending {
-            let wl_surface = self.layer.wl_surface();
-            wl_surface.frame(&self.qh, wl_surface.clone());
-            self.frame_pending = true;
-        }
+        // The frame request is made by the renderer right before it presents
+        // (`before_present` below): a frame that changes nothing makes none.
 
         let bounce = self.bounce_offset();
         let layout = self.current_layout();
@@ -1395,20 +1395,30 @@ impl App {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        match renderer.render(
+        let (layer, qh, frame_pending) = (&self.layer, &self.qh, &mut self.frame_pending);
+        let unchanged = match renderer.render(
             &scene,
             dock_ink,
             self.pointer_pos,
             self.config.theme.icon_squircle,
             thumb_base,
             self.dock_visible.as_mut(),
+            // Never a second callback while one is out (see the top of `draw`).
+            &mut || {
+                if !*frame_pending {
+                    let wl_surface = layer.wl_surface();
+                    wl_surface.frame(qh, wl_surface.clone());
+                    *frame_pending = true;
+                }
+            },
         ) {
-            // Nothing was presented, so nothing committed the frame request
-            // made above.
-            Ok(crate::renderer::Frame::Unchanged) => self.layer.wl_surface().commit(),
-            Ok(crate::renderer::Frame::Presented) => {}
-            Err(e) => error!("render failed: {e:#}"),
-        }
+            Ok(crate::renderer::Frame::Unchanged) => true,
+            Ok(crate::renderer::Frame::Presented) => false,
+            Err(e) => {
+                error!("render failed: {e:#}");
+                false
+            }
+        };
         if (search_animating && self.search.expand != search_target) || lift_animating || fit_animating {
             self.dirty = true;
         }
@@ -1430,6 +1440,35 @@ impl App {
         // Pending jelly impulses waiting on their delay timers.
         if self.jelly.has_pending() || self.box_jelly.has_pending() {
             self.dirty = true;
+        }
+        // Nothing presented → no frame callback is coming for this frame. An
+        // animation still in flight ticks on a short timer instead; a bare
+        // commit asking for a callback is not answered by a compositor that
+        // damages only what a commit changed (see `Renderer::render`).
+        if unchanged && (self.ui.is_animating() || self.bounce.is_some() || self.dirty) {
+            self.redraw_soon();
+        }
+    }
+
+    /// Draw again shortly, on a timer: for a frame that presented nothing
+    /// (so no frame callback is coming) while an animation is still in flight.
+    fn redraw_soon(&mut self) {
+        if self.soft_frame_timer {
+            return;
+        }
+        let timer = calloop::timer::Timer::from_duration(UNCHANGED_RETRY);
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.soft_frame_timer = false;
+                app.draw();
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
+        if armed {
+            self.soft_frame_timer = true;
+        } else {
+            error!("redraw timer failed to arm; the animation waits for input");
         }
     }
 
@@ -1517,17 +1556,10 @@ impl App {
             // stalled): draw anyway, at most once per FRAME_OVERDUE, so
             // nothing ever waits on a callback that is not coming.
             self.options_frame_asked = Some(Instant::now());
-        } else if let Some(layer) = self.options_layer.as_ref() {
-            // (A request left on the surface by a draw that changed nothing
-            // serves this one.)
-            if !self.options_frame_staged {
-                let surface = layer.wl_surface();
-                surface.frame(&self.qh, surface.clone());
-                self.options_frame_staged = true;
-            }
-            self.options_frame_pending = true;
-            self.options_frame_asked = Some(Instant::now());
         }
+        // The frame request is made by the renderer right before it presents
+        // (`ask_frame`, below): a frame that changes nothing makes none, so no
+        // request is ever left waiting on a bare commit.
         self.options_dirty = false;
         let _perf = crate::perf::OPTIONS_DRAW.time();
         // Concealed in fullscreen: render an empty (transparent) frame so the
@@ -1543,8 +1575,18 @@ impl App {
                     alpha: 1.0,
                     ..Default::default()
                 };
-                let frame =
-                    renderer.render(&scene, [0.0; 4], None, 0.0, 0, self.options_visible.as_mut());
+                let (layer, qh) = (self.options_layer.as_ref(), &self.qh);
+                let (pending, asked) =
+                    (&mut self.options_frame_pending, &mut self.options_frame_asked);
+                let frame = renderer.render(
+                    &scene,
+                    [0.0; 4],
+                    None,
+                    0.0,
+                    0,
+                    self.options_visible.as_mut(),
+                    &mut || ask_frame(layer, qh, pending, asked),
+                );
                 self.options_frame_drawn(frame.ok());
             }
             return;
@@ -1612,6 +1654,8 @@ impl App {
         // sunset module wears the dock's liquid-glass material, and its
         // cursor-tracked edge reflection is part of the material. Everything
         // else on this surface is glass: 0.0, so nothing else changes.
+        let (layer, qh) = (self.options_layer.as_ref(), &self.qh);
+        let (pending, asked) = (&mut self.options_frame_pending, &mut self.options_frame_asked);
         match renderer.render(
             &scene,
             text_rgba,
@@ -1619,19 +1663,20 @@ impl App {
             squircle,
             0,
             self.options_visible.as_mut(),
+            &mut || ask_frame(layer, qh, pending, asked),
         ) {
             Ok(frame) => self.options_frame_drawn(Some(frame)),
             Err(e) => error!("options render failed: {e:#}"),
         }
     }
 
-    /// What became of the frame request `draw_options` made.
+    /// What became of the OPTIONS frame.
     ///
-    /// A frame that was presented took the request with it, and its callback
-    /// paces the next draw. A frame that changed NOTHING was not presented,
-    /// and nothing is committed for it either: the request stays on the
-    /// surface for the next frame that shows something, and no callback is
-    /// waited for.
+    /// A frame that was presented made its frame request in the same commit
+    /// (`ask_frame`), and its callback paces the next draw. A frame that
+    /// changed NOTHING was not presented, nothing is committed for it, and no
+    /// request was made: no callback is waited for, and the OPTION
+    /// animations' own timers bring the next draw.
     ///
     /// (It used to be committed on its own, to get the callback. To Hyprland
     /// a commit that asks for a frame is a frame to produce, damage or none —
@@ -1642,11 +1687,29 @@ impl App {
     /// 15 s on the Acer, round 3.)
     fn options_frame_drawn(&mut self, frame: Option<crate::renderer::Frame>) {
         match frame {
-            Some(crate::renderer::Frame::Presented) => self.options_frame_staged = false,
+            Some(crate::renderer::Frame::Presented) => {}
             Some(crate::renderer::Frame::Unchanged) => self.options_frame_pending = false,
             // Not drawn: the callback is not coming, and the next draw waits
             // out FRAME_OVERDUE as for any that is late.
             None => {}
         }
+    }
+}
+
+/// The OPTIONS bar's frame request, made by the renderer in the commit that
+/// presents a frame — never before a render, which may change nothing and
+/// present nothing (then the request would wait on a bare commit the
+/// compositor need not draw).
+fn ask_frame(
+    layer: Option<&LayerSurface>,
+    qh: &QueueHandle<App>,
+    pending: &mut bool,
+    asked: &mut Option<Instant>,
+) {
+    if let Some(layer) = layer {
+        let surface = layer.wl_surface();
+        surface.frame(qh, surface.clone());
+        *pending = true;
+        *asked = Some(Instant::now());
     }
 }

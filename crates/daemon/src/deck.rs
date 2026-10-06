@@ -699,40 +699,67 @@ impl App {
         }
 
         let scene = self.deck_scene();
+        let mut presented = false;
         if let Some(renderer) = self.deck_renderer.as_mut() {
             // squircle 12 matches the system rounding_power, so a thumbnail quad
             // picks up the tile's corners; thumb_base MAX keeps that mask on
             // (layers at or above it would opt out of it).
-            if let Err(e) = renderer.render(
+            let (layer, qh, pending) = (
+                self.deck_layer.as_ref(),
+                &self.qh,
+                &mut self.deck_frame_pending,
+            );
+            match renderer.render(
                 &scene,
                 [1.0, 1.0, 1.0, 1.0],
                 None,
                 12.0,
                 u32::MAX,
                 self.deck_visible.as_mut(),
+                // The frame request rides on the commit that presents; one
+                // callback out at a time (the tile tweens are dt-based, so
+                // motion is frame-rate independent).
+                &mut || {
+                    if let (Some(layer), false) = (layer, *pending) {
+                        let surface = layer.wl_surface();
+                        surface.frame(qh, surface.clone());
+                        *pending = true;
+                    }
+                },
             ) {
-                tracing::warn!("deck render failed: {e:#}");
+                Ok(crate::renderer::Frame::Presented) => presented = true,
+                Ok(crate::renderer::Frame::Unchanged) => {}
+                Err(e) => tracing::warn!("deck render failed: {e:#}"),
             }
         }
-        if busy {
-            self.schedule_deck_frame();
-        } else {
+        if !busy {
             self.deck_last_frame = None;
+        } else if !presented && !self.deck_frame_pending {
+            // Still moving, but this frame changed nothing, so nothing was
+            // presented and no callback is coming: tick on a timer. (A bare
+            // commit with a frame request is not answered by a compositor that
+            // damages only what a commit changed.)
+            self.schedule_deck_tick();
         }
     }
 
-    /// Ask the compositor for another deck frame (the tile tweens are dt-based,
-    /// so motion is frame-rate independent).
-    fn schedule_deck_frame(&mut self) {
-        if self.deck_frame_pending {
+    /// Draw the deck again shortly, for a frame that presented nothing while
+    /// its tweens still move.
+    fn schedule_deck_tick(&mut self) {
+        if self.deck_tick_timer {
             return;
         }
-        if let Some(layer) = self.deck_layer.as_ref() {
-            layer
-                .wl_surface()
-                .frame(&self.qh, layer.wl_surface().clone());
-            layer.wl_surface().commit();
-            self.deck_frame_pending = true;
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(8));
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.deck_tick_timer = false;
+                app.draw_deck();
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
+        if armed {
+            self.deck_tick_timer = true;
         }
     }
 
