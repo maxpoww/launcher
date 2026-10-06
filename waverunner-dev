@@ -20,9 +20,17 @@
 # profile keeps alive. The flake stays the source of truth — every successful
 # resolve refreshes both, and stale profile generations are pruned so old
 # closures don't pile up on disk.
+#
+# ...and a resolve that needs the network can also HANG: on 2026-10-06 the
+# dev box came up without a shell for ten minutes — the daemon's download of
+# one small path, started 3 s after login with the link still coming up,
+# stalled, and nix's stalled-download timeout is five minutes (then retries).
+# The cache exists for exactly this case, so neither nix call below may hold
+# the shell longer than a few seconds: past that, the cache serves.
 STATE="$HOME/.local/state/waverunner"
 mkdir -p "$STATE"
-LDP="$(nix develop --profile "$STATE/devshell" /home/max/launcher \
+WAIT=25
+LDP="$(timeout $WAIT nix develop --profile "$STATE/devshell" /home/max/launcher \
         --command sh -c 'printf %s "$LD_LIBRARY_PATH"' 2>/dev/null)"
 if [ -n "$LDP" ]; then
   printf %s "$LDP" > "$STATE/ld-library-path"
@@ -44,7 +52,7 @@ fi
 # out-link (same GC lesson as above); if the build fails (offline boot) the
 # out-link from the last success still serves, and only with neither does the
 # daemon fall back to ~/.local/share/waverunner/.
-DICTS="$(nix build --out-link "$STATE/dictionaries" --print-out-paths /home/max/launcher#dictionaries 2>/dev/null)"
+DICTS="$(timeout $WAIT nix build --out-link "$STATE/dictionaries" --print-out-paths /home/max/launcher#dictionaries 2>/dev/null)"
 [ -z "$DICTS" ] && [ -e "$STATE/dictionaries" ] && DICTS="$STATE/dictionaries"
 if [ -n "$DICTS" ]; then
   export WAVERUNNER_DICT="$DICTS/share/waverunner/dictionary.json"
