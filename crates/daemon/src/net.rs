@@ -335,23 +335,49 @@ fn execute(cmd: NetCommand, events: &Sender<NetEvent>, profiles: &mut HashMap<St
             if on {
                 let Some(dev) = wifi_device() else { return };
                 let band = if band5 { "a" } else { "bg" };
-                if let Err(e) = nmcli(&[
-                    "-w",
-                    "20",
-                    "dev",
+                // The profile is made here rather than by `nmcli dev wifi
+                // hotspot`: that one advertises WPA2 and WPA3 together, and
+                // older cards cannot even associate with it (the MacBook's
+                // Broadcom: "Association request to the driver failed",
+                // 2026-10-06). Plain WPA2 is what every device joins.
+                let _ = nmcli(&["con", "delete", "id", HOTSPOT_PROFILE]);
+                let made = nmcli(&[
+                    "con",
+                    "add",
+                    "type",
                     "wifi",
-                    "hotspot",
                     "ifname",
                     &dev,
                     "con-name",
                     HOTSPOT_PROFILE,
+                    "autoconnect",
+                    "no",
                     "ssid",
                     &name,
-                    "band",
+                    "802-11-wireless.mode",
+                    "ap",
+                    "802-11-wireless.band",
                     band,
-                    "password",
+                    "ipv4.method",
+                    "shared",
+                    "ipv6.method",
+                    "disabled",
+                    "wifi-sec.key-mgmt",
+                    "wpa-psk",
+                    "wifi-sec.proto",
+                    "rsn",
+                    "wifi-sec.pairwise",
+                    "ccmp",
+                    "wifi-sec.group",
+                    "ccmp",
+                    "wifi-sec.pmf",
+                    "disable",
+                    "wifi-sec.psk",
                     &password,
-                ]) {
+                ]);
+                if let Err(e) =
+                    made.and_then(|_| nmcli(&["-w", "20", "con", "up", "id", HOTSPOT_PROFILE]))
+                {
                     // Some cards say they can be an access point and then
                     // cannot (Broadcom's `wl`, measured on the MacBook Air).
                     warn!("net: hotspot failed: {e}");

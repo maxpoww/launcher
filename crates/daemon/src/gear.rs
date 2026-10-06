@@ -360,6 +360,8 @@ pub(crate) struct GearState {
     /// last attempt was refused for its password.
     net_busy: Option<String>,
     net_err: Option<String>,
+    /// Whether that failure was the password (else: it could not connect).
+    net_err_password: bool,
     net_scanning: bool,
     hs_busy: bool,
     /// Why sharing did not start, as a title and a line under it.
@@ -916,6 +918,7 @@ impl App {
                 info!("net: could not join {ssid:?} (wrong password: {wrong_password})");
                 self.gear.net_busy = None;
                 self.gear.net_err = Some(ssid.clone());
+                self.gear.net_err_password = wrong_password;
                 if wrong_password && self.gear_page() == Some(PageKind::Net) {
                     self.gear.net_view = NetView::List;
                     self.open_gear_field(password_field(ssid, false));
@@ -1150,7 +1153,15 @@ impl App {
             let (sub, tone) = if g.net_busy.as_deref() == Some(ap.ssid.as_str()) {
                 ("Connecting…".to_owned(), Tone::Busy)
             } else if g.net_err.as_deref() == Some(ap.ssid.as_str()) && !ap.active {
-                ("Wrong password. Try again".to_owned(), Tone::Warn)
+                (
+                    if g.net_err_password {
+                        "Wrong password. Try again"
+                    } else {
+                        "Could not connect. Try again"
+                    }
+                    .to_owned(),
+                    Tone::Warn,
+                )
             } else if ap.active && snap.portal {
                 (
                     "Sign-in needed. Click to open the page".to_owned(),
@@ -3035,6 +3046,7 @@ impl App {
                 // cannot be right, so it is refused here without a round trip.
                 if f.text.chars().count() < 8 {
                     self.gear.net_err = Some(ssid);
+                    self.gear.net_err_password = true;
                     if let Some(f) = &mut self.gear.field {
                         f.text.clear();
                     }
