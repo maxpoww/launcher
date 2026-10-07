@@ -606,6 +606,7 @@ fn main() -> anyhow::Result<()> {
         desktop_icons,
         desktop_frame_pending: false,
         desktop_dirty: false,
+        desktop_last_frame: None,
         desktop_dnd_offer: None,
         frecency: focus_cycle::Frecency::default(),
         focus_walk: None,
@@ -1442,6 +1443,9 @@ pub struct App {
     /// meanwhile waits for it (`desktop_dirty`).
     desktop_frame_pending: bool,
     desktop_dirty: bool,
+    /// When the desktop last drew while something of its was easing (the
+    /// icons fading in or out), for dt; `None` at rest.
+    desktop_last_frame: Option<Instant>,
     /// Another app's drag hovering the desktop (its offer, kept until the
     /// drop is read and finished).
     desktop_dnd_offer: Option<DragOffer>,
@@ -2351,7 +2355,7 @@ const EXPAND_BLEED_COOLDOWN: Duration = Duration::from_millis(300);
 pub(crate) const BTN_LEFT: u32 = 0x110;
 
 /// Linux evdev code for the right mouse button.
-const BTN_RIGHT: u32 = 0x111;
+pub(crate) const BTN_RIGHT: u32 = 0x111;
 
 /// Linux evdev code for the middle mouse button — the Linux-native
 /// "open a new instance" gesture (the dock is pointer-only, so a

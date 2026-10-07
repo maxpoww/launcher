@@ -302,6 +302,12 @@ pub(crate) struct Desktop {
     pub selected: HashSet<String>,
     /// A rubber band being drawn: where it started and where it is.
     pub band: Option<((f32, f32), (f32, f32))>,
+    /// The icons are put away (a click on bare wallpaper toggles it); the
+    /// files stay. Kept in the settings store.
+    pub hidden: bool,
+    /// How much of the icons is on screen, 0..1, easing toward `hidden`'s
+    /// opposite: they fade rather than blink.
+    pub shown: f32,
     /// A drag hovering one of our surfaces (another app's, or ours).
     pub dnd: Option<DndIn>,
     /// Icon pixels by key, kept so a new renderer or a reallocated array can
@@ -858,8 +864,12 @@ impl Desktop {
         changed
     }
 
-    /// The item under `pos`, if any.
+    /// The item under `pos`, if any (none while the icons are put away:
+    /// what cannot be seen cannot be hit).
     pub(crate) fn hit(&self, pos: (f32, f32)) -> Option<usize> {
+        if self.hidden {
+            return None;
+        }
         let slot = self.grid.slot_at(pos)?;
         self.slots.iter().position(|s| *s == Some(slot))
     }
@@ -943,6 +953,8 @@ impl App {
         }
         if first {
             self.desktop.remembered = load_remembered();
+            self.desktop.hidden = self.settings.desktop_hidden;
+            self.desktop.shown = if self.desktop.hidden { 0.0 } else { 1.0 };
             self.reload_desktop();
         } else {
             self.relayout_desktop();
@@ -1134,6 +1146,21 @@ impl App {
         }
     }
 
+    /// Put the icons away, or bring them back: they fade over a few
+    /// frames. Whatever was selected or being banded is let go of.
+    pub(crate) fn desktop_toggle_hidden(&mut self) {
+        self.desktop.hidden = !self.desktop.hidden;
+        self.desktop.selected.clear();
+        self.desktop.band = None;
+        self.settings.desktop_hidden = self.desktop.hidden;
+        self.settings.save();
+        info!(
+            "desktop: icons {}",
+            if self.desktop.hidden { "put away" } else { "back" }
+        );
+        self.request_desktop_draw();
+    }
+
     /// Draw now, or once the frame in flight has been shown.
     fn request_desktop_draw(&mut self) {
         if self.desktop_frame_pending {
@@ -1150,6 +1177,19 @@ impl App {
             return;
         }
         self.desktop_dirty = false;
+        // The icons fade in or out toward where `hidden` says, dt-based like
+        // every ease in the daemon; while they move, the frame callback
+        // brings the next frame.
+        let now = std::time::Instant::now();
+        let dt = self
+            .desktop_last_frame
+            .map(|l| now.duration_since(l).as_secs_f32().min(0.1))
+            .unwrap_or(0.0);
+        let target = if self.desktop.hidden { 0.0 } else { 1.0 };
+        let (shown, moving) =
+            crate::animation::ease_toward(self.desktop.shown, target, dt, 14.0, 0.004);
+        self.desktop.shown = shown;
+        self.desktop_last_frame = moving.then_some(now);
         let has_icon: Vec<bool> = (0..self.desktop.items.len())
             .map(|i| self.desktop.has_icon(i))
             .collect();
@@ -1181,7 +1221,7 @@ impl App {
                 })
             })
             .collect();
-        let scene = scene(
+        let mut scene = scene(
             &self.desktop.items,
             &self.desktop.slots,
             &self.desktop.grid,
@@ -1194,6 +1234,7 @@ impl App {
                 band,
             },
         );
+        scene.alpha = shown;
         let (layer, qh, pending) = (
             self.desktop_layer.as_ref(),
             &self.qh,
@@ -1218,6 +1259,9 @@ impl App {
             },
         ) {
             warn!("desktop render failed: {e:#}");
+        }
+        if moving {
+            self.desktop_dirty = true; // the fade's next frame
         }
     }
 
@@ -1289,11 +1333,9 @@ impl App {
                         match press.item {
                             // A click on an item opens it.
                             Some(i) if under == Some(i) => self.desktop_activate(i),
-                            // A click on bare wallpaper clears the selection.
-                            None if !self.desktop.selected.is_empty() => {
-                                self.desktop.selected.clear();
-                                self.request_desktop_draw();
-                            }
+                            // A click on bare wallpaper puts the icons away,
+                            // or brings them back (Max, 2026-10-07).
+                            None => self.desktop_toggle_hidden(),
                             _ => {}
                         }
                     }
@@ -1321,11 +1363,14 @@ impl App {
                 if (x - px).hypot(y - py) >= DRAG_START {
                     match press.item {
                         Some(i) => self.desktop_lift(i, press.at, press.serial),
-                        None => {
+                        // No band over put-away icons: there is nothing to
+                        // select, and the release will bring them back.
+                        None if !self.desktop.hidden => {
                             self.desktop.band = Some((press.at, (x, y)));
                             self.desktop.selected.clear();
                             self.request_desktop_draw();
                         }
+                        None => {}
                     }
                 }
             }
@@ -1828,6 +1873,20 @@ impl App {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
         }
+        match what.trim() {
+            "hide" | "show" | "toggle" => {
+                let want_hidden = match what.trim() {
+                    "hide" => true,
+                    "show" => false,
+                    _ => !self.desktop.hidden,
+                };
+                if want_hidden != self.desktop.hidden {
+                    self.desktop_toggle_hidden();
+                }
+                return format!("icons {}", if self.desktop.hidden { "put away" } else { "shown" });
+            }
+            _ => {}
+        }
         if let Some(rest) = what.strip_prefix("select") {
             // `select 0 2 5` selects those; `select` alone clears.
             let picked: Vec<usize> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
@@ -1937,7 +1996,7 @@ impl App {
                 self.relayout_desktop();
                 "forgot every position".to_owned()
             }
-            _ => "debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row> <uri…>|forget]"
+            _ => "debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row> <uri…>|select <n…>|band <x0> <y0> <x1> <y1>|hide|show|toggle|forget]"
                 .to_owned(),
         }
     }

@@ -41,6 +41,9 @@ pub(crate) struct Settings {
     pub(crate) lid_nothing: bool,
     /// Apps (desktop ids) that are opened on the fast graphics card.
     pub(crate) gpu_fast: Vec<String>,
+    /// The desktop's icons are put away (a click on bare wallpaper toggles
+    /// it — Max, 2026-10-07); the files stay where they are.
+    pub(crate) desktop_hidden: bool,
 }
 
 impl Settings {

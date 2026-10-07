@@ -426,7 +426,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-module-box",
     "debug-stats",
     "debug-gear <open net|open bt|close|state|detail|share|hotspot|files|back|password|type|scroll|pair|fake-off>",
-    "debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row> <uri…>|forget]",
+    "debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row> <uri…>|select <n…>|band <x0> <y0> <x1> <y1>|hide|show|toggle|forget]",
     "options-trigger <id>",
     "control-panel",
     "modules [name]",
