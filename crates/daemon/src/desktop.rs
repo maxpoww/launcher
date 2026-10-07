@@ -244,11 +244,22 @@ impl Drop for DragIcon {
     }
 }
 
-/// A drag in progress: the item in hand, as a Wayland drag of ours. The
+/// A press of the left button, until it is a click or a drag.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Press {
+    /// The item under it, or none for bare wallpaper.
+    pub item: Option<usize>,
+    pub at: (f32, f32),
+    pub serial: u32,
+}
+
+/// A drag in progress: the items in hand, as a Wayland drag of ours. The
 /// compositor owns the pointer from here; where it is comes back to us as
 /// `wl_data_device` enter/motion on whichever of our surfaces it crosses.
 pub(crate) struct Drag {
-    pub item: usize,
+    /// The one grabbed first, then the rest of the selection it belonged
+    /// to (they travel together and land keeping their arrangement).
+    pub items: Vec<usize>,
     /// The dock was hidden when the icon was lifted, and came up for the
     /// drag (so the bin is there to drop on): it goes back down after.
     pub dock_raised: bool,
@@ -282,10 +293,15 @@ pub(crate) struct Desktop {
     pub remembered: HashMap<String, Slot>,
     /// Pointer position on the surface, while it is over it.
     pub ptr: Option<(f32, f32)>,
-    /// The item the left button went down on, where, and the press's
-    /// serial, until it comes up (a click) or the pointer travels (a drag).
-    pub press: Option<(usize, (f32, f32), u32)>,
+    /// The left button is down: on which item (none: bare wallpaper),
+    /// where, with which serial — until it comes up (a click) or the
+    /// pointer travels (a drag of the item, or a rubber band).
+    pub press: Option<Press>,
     pub drag: Option<Drag>,
+    /// The selected items, by path (so a reload keeps them).
+    pub selected: HashSet<String>,
+    /// A rubber band being drawn: where it started and where it is.
+    pub band: Option<((f32, f32), (f32, f32))>,
     /// A drag hovering one of our surfaces (another app's, or ours).
     pub dnd: Option<DndIn>,
     /// Icon pixels by key, kept so a new renderer or a reallocated array can
@@ -446,14 +462,88 @@ pub(crate) fn file_uri(path: &str) -> String {
     format!("file://{}", crate::trash::encode_path(Path::new(path)))
 }
 
-/// What a drag out carries for `mime`: the file's URI list, or its path as
-/// text; nothing for a type we never offered.
-pub(crate) fn drag_payload(path: &str, mime: &str) -> Option<String> {
+/// What a drag out carries for `mime`: the files' URI list, or their paths
+/// as text (one per line); nothing for a type we never offered.
+pub(crate) fn drag_payload(paths: &[&str], mime: &str) -> Option<String> {
     match mime {
-        URI_LIST => Some(format!("{}\r\n", file_uri(path))),
-        PLAIN_TEXT => Some(path.to_owned()),
+        URI_LIST => Some(paths.iter().map(|p| format!("{}\r\n", file_uri(p))).collect()),
+        PLAIN_TEXT => Some(paths.join("\n")),
         _ => None,
     }
+}
+
+/// The rectangle between two corners, whichever way they were dragged.
+pub(crate) fn band_rect((x0, y0): (f32, f32), (x1, y1): (f32, f32)) -> Rect {
+    Rect::new(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+}
+
+fn intersects(a: &Rect, b: &Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+/// The items whose icon or name the band touches.
+pub(crate) fn band_hits(grid: &Grid, slots: &[Option<Slot>], icon_scale: f32, band: &Rect) -> Vec<usize> {
+    slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|s| (i, grid.rect(s))))
+        .filter(|(_, cell)| {
+            let icon = icon_rect(cell, icon_scale);
+            let body = Rect::new(icon.x, icon.y, icon.w, icon.h + LABEL_GAP + LABEL_LINE_PX);
+            intersects(&body, band)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Cells for a group let go together: the grabbed one at `anchor`, each
+/// other one at its old offset from the grabbed one — or, where that is off
+/// the grid or taken, the free cell nearest to it. `offsets[i]` is item i's
+/// (column, row) distance from the grabbed item; `taken` holds every cell
+/// the group did not own.
+pub(crate) fn place_group(
+    grid: &Grid,
+    anchor: Slot,
+    offsets: &[(i32, i32)],
+    taken: &HashSet<Slot>,
+) -> Vec<Option<Slot>> {
+    let mut taken = taken.clone();
+    let mut out = Vec::with_capacity(offsets.len());
+    for (dc, dr) in offsets {
+        let want = (anchor.0 as i32 + dc, anchor.1 as i32 + dr);
+        let slot = if want.0 >= 0 && want.1 >= 0 {
+            let s = (want.0 as usize, want.1 as usize);
+            if grid.contains(s) && !taken.contains(&s) {
+                Some(s)
+            } else {
+                let r = grid.rect((
+                    (want.0.max(0) as usize).min(grid.cols - 1),
+                    (want.1.max(0) as usize).min(grid.rows - 1),
+                ));
+                grid.nearest_free((r.x + r.w / 2.0, r.y + r.h / 2.0), &taken)
+            }
+        } else {
+            let r = grid.rect((0, 0));
+            grid.nearest_free((r.x + r.w / 2.0, r.y + r.h / 2.0), &taken)
+        };
+        if let Some(s) = slot {
+            taken.insert(s);
+        }
+        out.push(slot);
+    }
+    out
+}
+
+/// The wash behind a selected item: one soft rounded band around its icon
+/// and name (the mockup's look, 2026-10-07).
+const SEL_WASH: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
+const SEL_RADIUS: f32 = 10.0;
+/// The rubber band: a faint fill and a hairline.
+const BAND_FILL: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+const BAND_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.38];
+
+fn sel_rect(cell: &Rect) -> Rect {
+    Rect::new(cell.x + 10.0, cell.y + 4.0, cell.w - 20.0, cell.h - 10.0)
 }
 
 /// Premultiplied RGBA pixels (the icon rasters) into `wl_shm` ARGB8888 —
@@ -672,11 +762,24 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
     }
 }
 
+/// What one frame shows besides the placed items.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Live<'a> {
+    /// The items in hand: their cells are left empty (the compositor
+    /// carries the picture under the pointer).
+    pub in_hand: &'a [usize],
+    /// Which items are selected (washed).
+    pub selected: &'a [bool],
+    /// A rubber band being drawn.
+    pub band: Option<Rect>,
+}
+
 /// One frame of the desktop: every placed item in its cell (its icon where
 /// the picture has arrived — `has_icon[i]` — and its fitted name,
-/// `names[i]`), except the one `in_hand` (the compositor carries its
-/// picture under the pointer). A hovering drag shows nothing: where it
-/// will land is not pointed out (Max, 2026-10-07: "we don't need that").
+/// `names[i]`), a wash behind each selected one, except those in hand; and
+/// the rubber band, if one is being drawn. A hovering drag shows nothing:
+/// where it will land is not pointed out (Max, 2026-10-07: "we don't need
+/// that").
 pub(crate) fn scene(
     items: &[Item],
     slots: &[Option<Slot>],
@@ -684,20 +787,29 @@ pub(crate) fn scene(
     names: &[String],
     has_icon: &[bool],
     icon_scale: f32,
-    in_hand: Option<usize>,
+    live: Live,
 ) -> Scene {
     let mut scene = Scene {
         alpha: 1.0,
         ..Default::default()
     };
     for (i, item) in items.iter().enumerate() {
-        if in_hand == Some(i) {
+        if live.in_hand.contains(&i) {
             continue;
         }
         let Some(slot) = slots.get(i).copied().flatten() else {
             continue;
         };
         let cell = grid.rect(slot);
+        if live.selected.get(i).copied().unwrap_or(false) {
+            scene.rects.push(crate::content::RectInst {
+                rect: sel_rect(&cell),
+                radius: SEL_RADIUS,
+                color: SEL_WASH,
+                glass: 0.0,
+                border: 0.0,
+            });
+        }
         push_tile(
             &mut scene,
             &Tile {
@@ -710,6 +822,18 @@ pub(crate) fn scene(
                 overlay: false,
             },
         );
+    }
+    // The rubber band, over the icons: a faint fill and a hairline.
+    if let Some(band) = live.band {
+        for (color, border) in [(BAND_FILL, 0.0), (BAND_LINE, 1.0)] {
+            scene.rects.push(crate::content::RectInst {
+                rect: band,
+                radius: 3.0,
+                color,
+                glass: 0.0,
+                border,
+            });
+        }
     }
     scene
 }
@@ -854,19 +978,24 @@ impl App {
                 self.thumbs.request(&item.path);
             }
         }
-        // A drag survives a reload only if its item is still there, in the
-        // same place in the list.
+        // A drag survives a reload only if its items are all still there,
+        // in the same places in the list.
         if let Some(d) = self.desktop.drag.as_ref() {
-            let same = self
-                .desktop
-                .items
-                .get(d.item)
-                .zip(items.get(d.item))
-                .is_some_and(|(a, b)| a.path == b.path);
+            let same = d.items.iter().all(|&i| {
+                self.desktop
+                    .items
+                    .get(i)
+                    .zip(items.get(i))
+                    .is_some_and(|(a, b)| a.path == b.path)
+            });
             if !same {
                 self.desktop_drag_end(false);
             }
         }
+        // The selection follows the files; one that left is no longer
+        // selected.
+        let present: HashSet<&str> = items.iter().map(|it| it.path.as_str()).collect();
+        self.desktop.selected.retain(|p| present.contains(p.as_str()));
         self.desktop.items = items;
         // Drop the pictures nothing wears any more (a thumbnail is ~350 KB).
         let worn: HashSet<&str> = self.desktop.items.iter().map(|it| it.icon.as_str()).collect();
@@ -1025,7 +1154,19 @@ impl App {
             .map(|i| self.desktop.has_icon(i))
             .collect();
         let icon_scale = self.icon_scale();
-        let in_hand = self.desktop.drag.as_ref().map(|d| d.item);
+        let in_hand: Vec<usize> = self
+            .desktop
+            .drag
+            .as_ref()
+            .map(|d| d.items.clone())
+            .unwrap_or_default();
+        let selected: Vec<bool> = self
+            .desktop
+            .items
+            .iter()
+            .map(|it| self.desktop.selected.contains(&it.path))
+            .collect();
+        let band = self.desktop.band.map(|(a, b)| band_rect(a, b));
         let Some(renderer) = self.desktop_renderer.as_mut() else {
             return;
         };
@@ -1047,7 +1188,11 @@ impl App {
             &names,
             &has_icon,
             icon_scale,
-            in_hand,
+            Live {
+                in_hand: &in_hand,
+                selected: &selected,
+                band,
+            },
         );
         let (layer, qh, pending) = (
             self.desktop_layer.as_ref(),
@@ -1103,6 +1248,9 @@ impl App {
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.desktop.press = None;
                 self.desktop.ptr = None;
+                if self.desktop.band.take().is_some() {
+                    self.request_desktop_draw();
+                }
             }
             wl_pointer::Event::Button {
                 serial,
@@ -1111,16 +1259,42 @@ impl App {
                 ..
             } if button == crate::BTN_LEFT => match state {
                 wl_pointer::ButtonState::Pressed => {
-                    self.desktop.press = self
-                        .desktop
-                        .ptr
-                        .and_then(|p| self.desktop.hit(p).map(|i| (i, p, serial)));
+                    let Some(at) = self.desktop.ptr else {
+                        return;
+                    };
+                    let item = self.desktop.hit(at);
+                    // A press on an item outside the selection makes it the
+                    // selection (so a drag of it takes it alone); on one
+                    // inside, the selection stands (the drag takes them all).
+                    if let Some(i) = item {
+                        let path = &self.desktop.items[i].path;
+                        if !self.desktop.selected.contains(path) {
+                            self.desktop.selected.clear();
+                            self.desktop.selected.insert(path.clone());
+                            self.request_desktop_draw();
+                        }
+                    }
+                    self.desktop.press = Some(Press { item, at, serial });
                 }
                 wl_pointer::ButtonState::Released => {
-                    if let Some((i, _, _)) = self.desktop.press.take() {
+                    let press = self.desktop.press.take();
+                    if self.desktop.band.take().is_some() {
+                        // The band's selection stands; the band itself goes.
+                        self.request_desktop_draw();
+                    } else if let Some(press) = press {
+                        if self.desktop.drag.is_some() {
+                            return;
+                        }
                         let under = self.desktop.ptr.and_then(|p| self.desktop.hit(p));
-                        if under == Some(i) && self.desktop.drag.is_none() {
-                            self.desktop_activate(i);
+                        match press.item {
+                            // A click on an item opens it.
+                            Some(i) if under == Some(i) => self.desktop_activate(i),
+                            // A click on bare wallpaper clears the selection.
+                            None if !self.desktop.selected.is_empty() => {
+                                self.desktop.selected.clear();
+                                self.request_desktop_draw();
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1131,13 +1305,28 @@ impl App {
     }
 
     /// The pointer moved over the desktop: a press that has travelled far
-    /// enough becomes a drag.
+    /// enough becomes a drag of the item under it, or — from bare
+    /// wallpaper — a rubber band selecting what it touches.
     fn desktop_motion(&mut self, x: f32, y: f32) {
         self.desktop.ptr = Some((x, y));
-        if self.desktop.drag.is_none() {
-            if let Some((i, (px, py), serial)) = self.desktop.press {
+        if let Some((from, _)) = self.desktop.band {
+            self.desktop.band = Some((from, (x, y)));
+            let band = band_rect(from, (x, y));
+            let hits = band_hits(&self.desktop.grid, &self.desktop.slots, self.icon_scale(), &band);
+            self.desktop.selected = hits.into_iter().map(|i| self.desktop.items[i].path.clone()).collect();
+            self.request_desktop_draw();
+        } else if self.desktop.drag.is_none() {
+            if let Some(press) = self.desktop.press {
+                let (px, py) = press.at;
                 if (x - px).hypot(y - py) >= DRAG_START {
-                    self.desktop_lift(i, (px, py), serial);
+                    match press.item {
+                        Some(i) => self.desktop_lift(i, press.at, press.serial),
+                        None => {
+                            self.desktop.band = Some((press.at, (x, y)));
+                            self.desktop.selected.clear();
+                            self.request_desktop_draw();
+                        }
+                    }
                 }
             }
         }
@@ -1182,9 +1371,27 @@ impl App {
             image.surface.commit();
         }
         let dock_raised = self.ui.target() == crate::state::Target::Hidden;
-        info!("desktop: {} in hand", self.desktop.items[i].name);
+        // The grabbed item first, then the rest of its selection.
+        let mut items = vec![i];
+        items.extend(
+            self.desktop
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(j, it)| *j != i && self.desktop.selected.contains(&it.path))
+                .map(|(j, _)| j),
+        );
+        info!(
+            "desktop: {} in hand{}",
+            self.desktop.items[i].name,
+            if items.len() > 1 {
+                format!(" with {} more", items.len() - 1)
+            } else {
+                String::new()
+            }
+        );
         self.desktop.drag = Some(Drag {
-            item: i,
+            items,
             dock_raised,
             source,
             _icon: image,
@@ -1254,13 +1461,60 @@ impl App {
         self.desktop.dnd.filter(|d| d.on_dock).map(|d| d.pos)
     }
 
+    /// Put a group let go on the desktop down: the grabbed one (`items[0]`)
+    /// in the free cell nearest `pos`, the others keeping their arrangement
+    /// around it where the cells allow; all remembered.
+    fn desktop_settle_group(&mut self, items: &[usize], pos: (f32, f32)) {
+        let Some(&first) = items.first() else {
+            return;
+        };
+        let taken: HashSet<Slot> = self
+            .desktop
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !items.contains(i))
+            .filter_map(|(_, s)| *s)
+            .collect();
+        let Some(anchor) = self.desktop.grid.nearest_free(pos, &taken) else {
+            return;
+        };
+        let Some(from) = self.desktop.slots[first] else {
+            return;
+        };
+        let offsets: Vec<(i32, i32)> = items
+            .iter()
+            .map(|&i| match self.desktop.slots[i] {
+                Some((c, r)) => (c as i32 - from.0 as i32, r as i32 - from.1 as i32),
+                None => (0, 0),
+            })
+            .collect();
+        let placed = place_group(&self.desktop.grid, anchor, &offsets, &taken);
+        for (&i, slot) in items.iter().zip(placed) {
+            if let Some(slot) = slot {
+                self.desktop.slots[i] = Some(slot);
+                self.desktop
+                    .remembered
+                    .insert(self.desktop.items[i].path.clone(), slot);
+                info!("desktop: {} → {slot:?}", self.desktop.items[i].name);
+            }
+        }
+        self.save_desktop_positions();
+    }
+
     /// Another app asked for the file in hand (or we did, over our own
     /// surfaces — nothing is read then). Written off the loop.
     pub(crate) fn desktop_send_drag(&mut self, mime: &str, pipe: smithay_client_toolkit::data_device_manager::WritePipe) {
         let Some(drag) = self.desktop.drag.as_ref() else {
             return;
         };
-        let Some(payload) = drag_payload(&self.desktop.items[drag.item].path, mime) else {
+        let paths: Vec<&str> = drag
+            .items
+            .iter()
+            .filter_map(|&i| self.desktop.items.get(i))
+            .map(|it| it.path.as_str())
+            .collect();
+        let Some(payload) = drag_payload(&paths, mime) else {
             warn!("desktop: {mime} asked of a drag that never offered it");
             return;
         };
@@ -1291,7 +1545,7 @@ impl App {
         };
         info!(
             "desktop: {} {} (action {:?})",
-            self.desktop.items.get(drag.item).map_or("?", |it| it.name.as_str()),
+            self.desktop.items.get(drag.items[0]).map_or("?", |it| it.name.as_str()),
             if done { "dropped" } else { "drag cancelled" },
             drag.action
         );
@@ -1383,7 +1637,7 @@ impl App {
     /// pleases) and lands in `desktop_dnd_received`.
     pub(crate) fn desktop_dnd_drop(&mut self) {
         if let Some(drag) = self.desktop.drag.as_ref() {
-            let item = drag.item;
+            let items = drag.items.clone();
             let Some(offer) = self.desktop_dnd_offer.take() else {
                 return;
             };
@@ -1392,14 +1646,16 @@ impl App {
             };
             if at.on_dock {
                 if self.dropped_on_trash(&self.current_layout(), at.pos) {
-                    let path = self.desktop.items[item].path.clone();
-                    info!("desktop: {} → Recycle Bin", self.desktop.items[item].name);
-                    self.desktop.remembered.remove(&path);
-                    self.trash_file(&path); // the folder watch takes it off the desktop
+                    for &i in &items {
+                        let path = self.desktop.items[i].path.clone();
+                        info!("desktop: {} → Recycle Bin", self.desktop.items[i].name);
+                        self.desktop.remembered.remove(&path);
+                        self.desktop.selected.remove(&path);
+                        self.trash_file(&path); // the folder watch takes it off the desktop
+                    }
                 }
-            } else if let Some(slot) = self.desktop.settle(item, at.pos) {
-                info!("desktop: {} → {slot:?}", self.desktop.items[item].name);
-                self.save_desktop_positions();
+            } else {
+                self.desktop_settle_group(&items, at.pos);
             }
             offer.finish(); // → our source's `dnd_finished` → `desktop_drag_end`
             return;
@@ -1546,6 +1802,11 @@ impl App {
     /// Open item `i`: a launcher runs, anything else opens in its app (a
     /// folder in the file manager) through `xdg-open`.
     pub(crate) fn desktop_activate(&mut self, i: usize) {
+        // Opening is the end of a selection: no wash stays behind.
+        if !self.desktop.selected.is_empty() {
+            self.desktop.selected.clear();
+            self.request_desktop_draw();
+        }
         let Some(item) = self.desktop.items.get(i) else {
             return;
         };
@@ -1566,6 +1827,36 @@ impl App {
     pub(crate) fn desktop_debug(&mut self, what: &str) -> String {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
+        }
+        if let Some(rest) = what.strip_prefix("select") {
+            // `select 0 2 5` selects those; `select` alone clears.
+            let picked: Vec<usize> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+            self.desktop.selected = picked
+                .iter()
+                .filter_map(|&i| self.desktop.items.get(i))
+                .map(|it| it.path.clone())
+                .collect();
+            self.request_desktop_draw();
+            return format!("{} selected", self.desktop.selected.len());
+        }
+        if let Some(rest) = what.strip_prefix("band ") {
+            // `band x0 y0 x1 y1` draws a rubber band there (and selects what
+            // it touches), as a drag from bare wallpaper would; `band` alone
+            // is not a verb — the next pointer event ends it anyway.
+            let n: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+            let [x0, y0, x1, y1] = n[..] else {
+                return "band <x0> <y0> <x1> <y1>".to_owned();
+            };
+            self.desktop.band = Some(((x0, y0), (x1, y1)));
+            let hits = band_hits(
+                &self.desktop.grid,
+                &self.desktop.slots,
+                self.icon_scale(),
+                &band_rect((x0, y0), (x1, y1)),
+            );
+            self.desktop.selected = hits.iter().map(|&i| self.desktop.items[i].path.clone()).collect();
+            self.request_desktop_draw();
+            return format!("band over {} item(s)", hits.len());
         }
         if let Some(rest) = what.strip_prefix("import ") {
             let mut w = rest.split_whitespace();
@@ -1866,7 +2157,8 @@ mod tests {
         let g = Grid::new(1000.0, 400.0, 1.0);
         let slots = vec![Some((0, 0)), Some((0, 1)), None];
         let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
-        let s = scene(&items, &slots, &g, &names, &[true, false, true], 1.0, None);
+        let quiet = Live::default();
+        let s = scene(&items, &slots, &g, &names, &[true, false, true], 1.0, quiet);
         assert!(s.rects.is_empty(), "nothing but icons and names");
         // a has its icon; b's has not arrived; c has no cell at all.
         assert_eq!(s.icons.len(), 1);
@@ -1881,12 +2173,72 @@ mod tests {
         assert!((s.icons[0].rect.x - (cell.x + (cell.w - GRID_ICON) / 2.0)).abs() < 1e-4);
         // In hand: its cell is left empty (the compositor carries the
         // picture); nothing of it is drawn.
-        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, Some(0));
+        let live = Live {
+            in_hand: &[0],
+            selected: &[],
+            band: None,
+        };
+        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
         assert!(s.overlay.is_empty());
         assert!(s.rects.is_empty(), "no wash for a hovering drag either");
         assert_eq!(s.icons.len(), 1, "only b stays in the grid");
         assert_eq!(s.icons[0].layer, 1);
         assert_eq!(s.labels.len(), 2, "b's two labels; a's are gone with it");
+        // Selected: one wash behind b, inside its cell; a band on top.
+        let band = Rect::new(5.0, 5.0, 200.0, 150.0);
+        let live = Live {
+            in_hand: &[],
+            selected: &[false, true, false],
+            band: Some(band),
+        };
+        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
+        assert_eq!(s.rects.len(), 3, "the wash, the band's fill and its line");
+        let cell = g.rect((0, 1));
+        assert_eq!(s.rects[0].rect, sel_rect(&cell));
+        assert!(s.rects[0].rect.x > cell.x && s.rects[0].rect.y > cell.y);
+        assert_eq!(s.rects[1].rect, band);
+        assert_eq!(s.rects[2].border, 1.0);
+    }
+
+    #[test]
+    fn a_rubber_band_selects_what_it_touches_either_way_round() {
+        let g = Grid::new(1000.0, 400.0, 1.0);
+        let slots = vec![Some((0, 0)), Some((0, 1)), Some((1, 0))];
+        // Dragged up-left to down-right, or the reverse: the same rectangle.
+        let a = band_rect((20.0, 20.0), (60.0, 60.0));
+        let b = band_rect((60.0, 60.0), (20.0, 20.0));
+        assert_eq!(a, b);
+        assert_eq!(a, Rect::new(20.0, 20.0, 40.0, 40.0));
+        // Touching the first icon only.
+        assert_eq!(band_hits(&g, &slots, 1.0, &a), vec![0]);
+        // Across two columns, through the names of the first row.
+        let wide = band_rect((20.0, 80.0), (200.0, 90.0));
+        assert_eq!(band_hits(&g, &slots, 1.0, &wide), vec![0, 2]);
+        // In the margin: nothing.
+        let none = band_rect((0.0, 0.0), (5.0, 5.0));
+        assert!(band_hits(&g, &slots, 1.0, &none).is_empty());
+    }
+
+    #[test]
+    fn a_group_lands_keeping_its_arrangement_where_it_can() {
+        let g = Grid::new(240.0, 300.0, 1.0); // 2 × 3
+        // Grabbed item at offset (0,0), one below it, one to its right.
+        let offsets = [(0, 0), (0, 1), (1, 0)];
+        let placed = place_group(&g, (0, 0), &offsets, &HashSet::new());
+        assert_eq!(placed, vec![Some((0, 0)), Some((0, 1)), Some((1, 0))]);
+        // Anchored at the bottom-right: the one below would fall off the
+        // grid, the one to the right too — each takes the nearest free cell.
+        let placed = place_group(&g, (1, 2), &offsets, &HashSet::new());
+        assert_eq!(placed[0], Some((1, 2)));
+        assert_ne!(placed[1], None);
+        assert_ne!(placed[2], None);
+        assert_ne!(placed[1], placed[2]);
+        // A cell someone else holds is skipped for the nearest free one.
+        let taken: HashSet<Slot> = HashSet::from([(0, 1)]);
+        let placed = place_group(&g, (0, 0), &offsets, &taken);
+        assert_eq!(placed[0], Some((0, 0)));
+        assert_ne!(placed[1], Some((0, 1)));
+        assert_eq!(placed[2], Some((1, 0)));
     }
 
     #[test]
@@ -1894,11 +2246,17 @@ mod tests {
         let path = "/home/x/Holiday photos/ü.png";
         assert_eq!(file_uri(path), "file:///home/x/Holiday%20photos/%C3%BC.png");
         assert_eq!(
-            drag_payload(path, URI_LIST).as_deref(),
+            drag_payload(&[path], URI_LIST).as_deref(),
             Some("file:///home/x/Holiday%20photos/%C3%BC.png\r\n")
         );
-        assert_eq!(drag_payload(path, PLAIN_TEXT).as_deref(), Some(path));
-        assert_eq!(drag_payload(path, "image/png"), None);
+        assert_eq!(drag_payload(&[path], PLAIN_TEXT).as_deref(), Some(path));
+        assert_eq!(drag_payload(&[path], "image/png"), None);
+        // A group: one URI per line, paths one per line.
+        assert_eq!(
+            drag_payload(&["/a/b", "/c d"], URI_LIST).as_deref(),
+            Some("file:///a/b\r\nfile:///c%20d\r\n")
+        );
+        assert_eq!(drag_payload(&["/a/b", "/c d"], PLAIN_TEXT).as_deref(), Some("/a/b\n/c d"));
         // The round trip through the drop side.
         assert_eq!(uri_list_paths(&file_uri(path)), vec![PathBuf::from(path)]);
     }

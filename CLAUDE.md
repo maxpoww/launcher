@@ -253,7 +253,14 @@ The big daemon files are cohesive but long — go straight to the function:
   the folder reloads. Icons come from its own `notif_icons` worker (`unplated` for carriers);
   thumbnails ride the Files thumbnailer (`desktop_on_thumb`). `[desktop] enabled/render_scale`
   in config; `WAVERUNNER_DESKTOP_DIR` overrides the folder (test rigs). Pointer-free:
-  `waverunner-ctl debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row>
-  <uri…>|forget]`; the live daemon logs to `~/.local/state/waverunner/daemon.log`. Not yet:
-  selection, rename/new folder, per-output surfaces.
+  SELECTION: a press on bare wallpaper that travels draws a rubber band (`band_hits`: icons
+  + names it touches are selected, by path); a press on an unselected icon selects it alone;
+  a drag of a selected icon takes the whole selection (`Drag.items`, grabbed one first;
+  payload = all URIs; a drop on the desktop lands them keeping their arrangement via
+  `place_group`, on the bin trashes them all); a click on wallpaper clears, opening clears.
+  Selected items wear one soft wash (`sel_rect`, the mockup at ~/desktop-menu-mockup).
+  Pointer-free: `waverunner-ctl debug-desktop [reload|open <n>|move <n> <col> <row>|import
+  <col> <row> <uri…>|select <n…>|band <x0> <y0> <x1> <y1>|forget]`; the live daemon logs
+  to `~/.local/state/waverunner/daemon.log`. Not yet: the right-click menu (mocked, awaiting
+  Max), rename/new folder, per-output surfaces.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
