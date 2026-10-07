@@ -1354,6 +1354,28 @@ impl App {
                     self.desktop_begin_rename(i);
                 }
             }
+            Action::MoveToHome => {
+                // The selection leaves the desktop for the home folder (the
+                // clicked item is in it); a name already there gets its
+                // number. The folder watch takes the icons off.
+                let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                let paths: Vec<String> = self.desktop.selected.drain().collect();
+                for path in paths {
+                    let src = Path::new(&path);
+                    let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    let dest = unique_dest(&home, name);
+                    match bring(src, &dest) {
+                        Ok(()) => {
+                            info!("desktop: {} → {}", src.display(), dest.display());
+                            self.desktop.remembered.remove(&path);
+                        }
+                        Err(e) => warn!("desktop: cannot move {} home: {e}", src.display()),
+                    }
+                }
+                self.save_desktop_positions();
+            }
             Action::MoveToBin => {
                 // The selection goes (the clicked item is in it).
                 let paths: Vec<String> = self.desktop.selected.drain().collect();
