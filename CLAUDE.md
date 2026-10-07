@@ -234,19 +234,25 @@ The big daemon files are cohesive but long — go straight to the function:
   (`desktop.json`, path → [col,row]; `place` + `stick`), new files take the first free cell
   column-major and move nothing, `forget` re-flows. Draws the Files-section tile
   (carrier/thumbnail + one-line name, fitted by MEASURED width with "…", white on a dark
-  shadow); no hover magnification (Max). Click = open (`xdg-open` / the launcher's `Exec=`); a
-  press that travels ≥6px drags and drops into the nearest free cell — or onto the dock's
-  Recycle Bin (the dock is raised for the drag; `desktop_drag_dock_pos` maps to dock coords,
-  `frame.rs` arms `trash_react`/`trash_hover` from it) → `trash_file`. DROP TARGET: the daemon's
-  `wl_data_device` handlers (main.rs `DataDeviceHandler`) route a `text/uri-list` drag over the
-  desktop surface to `desktop_dnd_*`: accept Move|Copy, wash the landing cell, on drop read the
-  pipe on a thread → `import` (move via rename, else copy — a USB file stays on the stick; name
-  clashes get `name (2).ext` before the FIRST dot) and cluster the files around the drop point.
-  The input region is the WHOLE surface (a drop only reaches a surface through its input
-  region). inotify on the folder reloads. Icons come from its own `notif_icons` worker
-  (`unplated` for carriers); thumbnails ride the Files thumbnailer (`desktop_on_thumb`).
-  `[desktop] enabled/render_scale` in config; `WAVERUNNER_DESKTOP_DIR` overrides the folder
-  (test rigs). Pointer-free: `waverunner-ctl debug-desktop [reload|open <n>|move <n> <col>
-  <row>|import <col> <row> <uri…>|forget]`. Not yet: selection, drag OUT to other apps,
-  rename/new folder, per-output surfaces.
+  shadow); no hover magnification (Max). Click = open (`xdg-open` / the launcher's `Exec=`).
+  DRAG = a real Wayland drag of ours (`desktop_lift`: `DragSource` offering `text/uri-list` +
+  text, the icon raster on an shm surface as the drag image, `start_drag` with the press serial
+  — Hyprland ignores it): over the desktop the landing cell is washed and the drop settles
+  the item there (`desktop_dnd_drop`, own-drag branch); over the dock the bin reacts
+  (`desktop_drag_dock_pos` = the DnD motion on the dock surface; the dock is raised for the
+  drag) and a drop on it → `trash_file`; over any other app it arrives as a file
+  (`desktop_send_drag` writes the payload on a thread). `DataSourceHandler` (main.rs) ends it:
+  `dnd_finished`/`cancelled` → `desktop_drag_end`. DROP TARGET for other apps: the same
+  `DataDeviceHandler` routes a `text/uri-list` drag over the desktop to `desktop_dnd_enter`
+  (accept Move|Copy, wash), on drop read the pipe on a thread (`OwnedFd::from(pipe)`, NEVER
+  `into_raw_fd` — SCTK closes it) → `import` (move via rename, else copy — a USB file stays on
+  the stick; clashes get `name (2).ext` before the FIRST dot) and cluster the files around the
+  drop point; a `leave` right after `drop` is Hyprland's habit and is ignored. The input region
+  is the WHOLE surface (a drop only reaches a surface through its input region). inotify on
+  the folder reloads. Icons come from its own `notif_icons` worker (`unplated` for carriers);
+  thumbnails ride the Files thumbnailer (`desktop_on_thumb`). `[desktop] enabled/render_scale`
+  in config; `WAVERUNNER_DESKTOP_DIR` overrides the folder (test rigs). Pointer-free:
+  `waverunner-ctl debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row>
+  <uri…>|forget]`; the live daemon logs to `~/.local/state/waverunner/daemon.log`. Not yet:
+  selection, rename/new folder, per-output surfaces.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

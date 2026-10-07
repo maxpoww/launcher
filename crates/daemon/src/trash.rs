@@ -311,7 +311,7 @@ fn parse_trashinfo(text: &str) -> Option<(PathBuf, String)> {
 
 /// Percent-encode a path per the trash spec: every byte except the RFC 3986
 /// unreserved set (`A-Za-z0-9-._~`) is `%XX`-escaped, but `/` is left literal.
-fn encode_path(path: &Path) -> String {
+pub(crate) fn encode_path(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
     let mut out = String::with_capacity(bytes.len());

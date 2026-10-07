@@ -7099,7 +7099,8 @@ impl DataDeviceHandler for App {
             .desktop_layer
             .as_ref()
             .is_some_and(|l| l.wl_surface() == surface);
-        if !on_desktop {
+        let on_dock = self.layer.wl_surface() == surface;
+        if !on_desktop && !on_dock {
             return;
         }
         let offer = self
@@ -7108,7 +7109,7 @@ impl DataDeviceHandler for App {
             .filter(|d| d.inner() == device)
             .and_then(|d| d.data().drag_offer());
         if let Some(offer) = offer {
-            self.desktop_dnd_enter(offer);
+            self.desktop_dnd_enter(offer, on_dock);
         }
     }
 
@@ -7166,6 +7167,8 @@ impl DataOfferHandler for App {
     }
 }
 
+// The only source of ours is the desktop's drag of a file (see `desktop.rs`);
+// every event is checked against it.
 impl DataSourceHandler for App {
     fn accept_mime(
         &mut self,
@@ -7180,18 +7183,24 @@ impl DataSourceHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_data_source::WlDataSource,
-        _: String,
-        _: WritePipe,
+        source: &wl_data_source::WlDataSource,
+        mime: String,
+        pipe: WritePipe,
     ) {
+        if self.is_desktop_drag_source(source) {
+            self.desktop_send_drag(&mime, pipe);
+        }
     }
 
     fn cancelled(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_data_source::WlDataSource,
+        source: &wl_data_source::WlDataSource,
     ) {
+        if self.is_desktop_drag_source(source) {
+            self.desktop_drag_end(false);
+        }
     }
 
     fn dnd_dropped(
@@ -7206,17 +7215,33 @@ impl DataSourceHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_data_source::WlDataSource,
+        source: &wl_data_source::WlDataSource,
     ) {
+        if self.is_desktop_drag_source(source) {
+            self.desktop_drag_end(true);
+        }
     }
 
     fn action(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_data_source::WlDataSource,
-        _: DndAction,
+        source: &wl_data_source::WlDataSource,
+        action: DndAction,
     ) {
+        if self.is_desktop_drag_source(source) {
+            self.desktop_drag_action(action);
+        }
+    }
+}
+
+impl App {
+    /// Whether `source` is the desktop's drag in progress.
+    fn is_desktop_drag_source(&self, source: &wl_data_source::WlDataSource) -> bool {
+        self.desktop
+            .drag
+            .as_ref()
+            .is_some_and(|d| d.source.inner() == source)
     }
 }
 

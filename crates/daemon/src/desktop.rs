@@ -13,16 +13,18 @@
 //! (`.desktop` file) wears its app icon and name.
 //!
 //! A click opens an item (files and folders through `xdg-open`, a launcher
-//! through its `Exec=`). A press that travels drags the icon; it drops into
-//! the nearest free cell and stays there — or, let go over the dock's
-//! Recycle Bin (the dock comes up for the drag), goes to the trash. Files
-//! dragged in from any other app (a Wayland drop of `text/uri-list`:
-//! Nautilus, a browser's download…) are brought into the folder and placed
-//! at the cell they were dropped on — moved when they are on the same
-//! filesystem, copied otherwise (a file from a USB stick stays on it). The
-//! folder is watched so the icons follow it. No hover feedback beyond the
-//! cursor (Max, 2026-10-06: "we don't need magnification on the desktop").
-//! Nothing selects, renames or drags OUT to other apps yet.
+//! through its `Exec=`). A press that travels takes the icon into a real
+//! Wayland drag (our data device, the icon as the drag image): let go on
+//! the desktop it drops into the nearest free cell and stays there; on the
+//! dock's Recycle Bin (the dock comes up for the drag) it goes to the
+//! trash; on any other app it arrives there as a file (`text/uri-list`),
+//! moved or copied as that app decides. Files dragged in from any other
+//! app the same way are brought into the folder and placed at the cell they
+//! were dropped on — moved when they are on the same filesystem, copied
+//! otherwise (a file from a USB stick stays on it). The folder is watched
+//! so the icons follow it. No hover feedback beyond the cursor (Max,
+//! 2026-10-06: "we don't need magnification on the desktop"). Nothing
+//! selects or renames yet.
 //!
 //! Pointer-free: `waverunner-ctl debug-desktop [reload|open <n>|move <n>
 //! <col> <row>|import <col> <row> <uri…>|forget]`.
@@ -31,12 +33,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use smithay_client_toolkit::data_device_manager::data_offer::DragOffer;
+use smithay_client_toolkit::data_device_manager::data_source::DragSource;
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use smithay_client_toolkit::shell::WaylandSurface;
+use smithay_client_toolkit::shm::raw::RawPool;
 use tracing::{error, info, warn};
+use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_data_device_manager::DndAction;
-use wayland_client::protocol::wl_pointer;
-use wayland_client::WEnum;
+use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::protocol::{wl_pointer, wl_shm};
+use wayland_client::{Proxy, WEnum};
 
 use crate::content::{
     IconInst, Label, Rect, RectInst, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
@@ -45,8 +51,13 @@ use crate::content::{
 use crate::launch;
 use crate::App;
 
-/// The one drop type the desktop takes: a list of `file://` URIs.
+/// The one drop type the desktop takes, and the first it offers: a list of
+/// `file://` URIs. A drag out also offers the path as plain text, for a
+/// terminal or an editor.
 const URI_LIST: &str = "text/uri-list";
+const PLAIN_TEXT: &str = "text/plain;charset=utf-8";
+/// The icon raster's side (level 0 of a mip chain, see `apps::ICON_SIZE`).
+const ICON_PX: usize = crate::apps::ICON_SIZE as usize;
 
 /// Breathing room between the icons and the surface's edges.
 const MARGIN: f32 = 12.0;
@@ -223,21 +234,45 @@ pub(crate) fn stick(
     learned
 }
 
-/// A drag in progress: the item in hand, and where on its icon it was
-/// gripped (so it does not jump under the pointer).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// The drag image: the item's icon on a surface of its own that the
+/// compositor carries under the pointer. Gone with the drag.
+pub(crate) struct DragIcon {
+    surface: WlSurface,
+    _buffer: WlBuffer,
+    _pool: RawPool,
+}
+
+impl Drop for DragIcon {
+    fn drop(&mut self) {
+        self.surface.destroy();
+    }
+}
+
+/// A drag in progress: the item in hand, as a Wayland drag of ours. The
+/// compositor owns the pointer from here; where it is comes back to us as
+/// `wl_data_device` enter/motion on whichever of our surfaces it crosses.
 pub(crate) struct Drag {
     pub item: usize,
-    pub grip: (f32, f32),
     /// The dock was hidden when the icon was lifted, and came up for the
     /// drag (so the bin is there to drop on): it goes back down after.
     pub dock_raised: bool,
+    /// The source other apps read the file from; dropping it ends the drag
+    /// on the wire.
+    pub source: DragSource,
+    /// The drag image (none when the picture had not arrived), held for
+    /// the drag's life: dropping it destroys the surface.
+    pub _icon: Option<DragIcon>,
+    /// What the drop target chose to do with the file.
+    pub action: DndAction,
 }
 
-/// Another app's drag hovering the desktop: where its pointer is.
+/// A drag hovering one of our surfaces — another app's, or our own — and
+/// where its pointer is on that surface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct DndIn {
     pub pos: (f32, f32),
+    /// Over the DOCK (the bin), not the desktop.
+    pub on_dock: bool,
 }
 
 /// The desktop's state on the loop.
@@ -251,11 +286,11 @@ pub(crate) struct Desktop {
     pub remembered: HashMap<String, Slot>,
     /// Pointer position on the surface, while it is over it.
     pub ptr: Option<(f32, f32)>,
-    /// The item the left button went down on, and where, until it comes up
-    /// (a click) or the pointer travels (a drag).
-    pub press: Option<(usize, (f32, f32))>,
+    /// The item the left button went down on, where, and the press's
+    /// serial, until it comes up (a click) or the pointer travels (a drag).
+    pub press: Option<(usize, (f32, f32), u32)>,
     pub drag: Option<Drag>,
-    /// A drop from another app hovering us.
+    /// A drag hovering one of our surfaces (another app's, or ours).
     pub dnd: Option<DndIn>,
     /// Icon pixels by key, kept so a new renderer or a reallocated array can
     /// be refilled without asking again.
@@ -407,6 +442,39 @@ fn icon_request(key: &str) -> Option<crate::notif_icons::Request> {
             unplated: false,
         })
     }
+}
+
+/// A local path as a `file://` URI (percent-encoded), one line of a
+/// `text/uri-list`.
+pub(crate) fn file_uri(path: &str) -> String {
+    format!("file://{}", crate::trash::encode_path(Path::new(path)))
+}
+
+/// What a drag out carries for `mime`: the file's URI list, or its path as
+/// text; nothing for a type we never offered.
+pub(crate) fn drag_payload(path: &str, mime: &str) -> Option<String> {
+    match mime {
+        URI_LIST => Some(format!("{}\r\n", file_uri(path))),
+        PLAIN_TEXT => Some(path.to_owned()),
+        _ => None,
+    }
+}
+
+/// Premultiplied RGBA pixels (the icon rasters) into `wl_shm` ARGB8888 —
+/// little-endian B, G, R, A per pixel, alpha premultiplied as before.
+pub(crate) fn rgba_to_argb(src: &[u8], dst: &mut [u8]) {
+    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        d[0] = s[2];
+        d[1] = s[1];
+        d[2] = s[0];
+        d[3] = s[3];
+    }
+}
+
+/// The buffer scale that shows a 256 px icon raster at (about) the size
+/// the icon has on the desktop: integer, never below 1.
+pub(crate) fn icon_buffer_scale(icon_scale: f32) -> i32 {
+    ((ICON_PX as f32 / (GRID_ICON * icon_scale)).round() as i32).max(1)
 }
 
 /// The `file://` URIs of a `text/uri-list` (one per line, `#` comments
@@ -611,17 +679,17 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
 /// What one frame shows besides the placed items.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Live {
-    /// The item in hand and where its icon is.
-    pub drag: Option<(usize, Rect)>,
-    /// The cell a drop from another app would land in.
+    /// The item in hand: its cell is left empty (the compositor carries its
+    /// picture under the pointer).
+    pub in_hand: Option<usize>,
+    /// The cell a hovering drag would land in.
     pub drop_cell: Option<Rect>,
 }
 
 /// One frame of the desktop: every placed item in its cell (its icon where
 /// the picture has arrived — `has_icon[i]` — and its fitted name,
-/// `names[i]`), except the one in hand, drawn over everything with its icon
-/// at `live.drag`'s position; and the wash on the cell a drop would land
-/// in.
+/// `names[i]`), except the one in hand; and the wash on the cell a drop
+/// would land in.
 pub(crate) fn scene(
     items: &[Item],
     slots: &[Option<Slot>],
@@ -644,23 +712,24 @@ pub(crate) fn scene(
             border: 0.0,
         });
     }
-    let drag = live.drag;
     for (i, item) in items.iter().enumerate() {
+        if live.in_hand == Some(i) {
+            continue;
+        }
         let Some(slot) = slots.get(i).copied().flatten() else {
             continue;
         };
         let cell = grid.rect(slot);
-        let in_hand = drag.filter(|(d, _)| *d == i).map(|(_, at)| at);
         push_tile(
             &mut scene,
             &Tile {
                 item,
                 layer: i as u32,
-                icon: in_hand.unwrap_or_else(|| icon_rect(&cell, icon_scale)),
+                icon: icon_rect(&cell, icon_scale),
                 name: names.get(i).map_or(item.name.as_str(), String::as_str),
                 max_w: label_max_w(&cell),
                 has_icon: has_icon.get(i).copied().unwrap_or(false),
-                overlay: in_hand.is_some(),
+                overlay: false,
             },
         );
     }
@@ -712,18 +781,11 @@ impl Desktop {
         Some(slot)
     }
 
-    /// The icon rectangle of the item in hand, at the pointer.
-    fn drag_rect(&self, icon_scale: f32) -> Option<Rect> {
-        let drag = self.drag?;
-        let (px, py) = self.ptr?;
-        let size = GRID_ICON * icon_scale;
-        Some(Rect::new(px - drag.grip.0, py - drag.grip.1, size, size))
-    }
-
-    /// The cell a drop from another app at `pos` would land in: the free
-    /// one nearest the pointer.
+    /// The cell a drag hovering at `pos` would land in: the free one nearest
+    /// the pointer — our own item's cell counting as free for it.
     fn drop_slot(&self, pos: (f32, f32)) -> Option<Slot> {
-        self.grid.nearest_free(pos, &self.taken(None))
+        let own = self.drag.as_ref().map(|d| d.item);
+        self.grid.nearest_free(pos, &self.taken(own))
     }
 }
 
@@ -822,7 +884,7 @@ impl App {
         }
         // A drag survives a reload only if its item is still there, in the
         // same place in the list.
-        if let Some(d) = self.desktop.drag {
+        if let Some(d) = self.desktop.drag.as_ref() {
             let same = self
                 .desktop
                 .items
@@ -830,8 +892,7 @@ impl App {
                 .zip(items.get(d.item))
                 .is_some_and(|(a, b)| a.path == b.path);
             if !same {
-                self.desktop.drag = None;
-                self.desktop.press = None;
+                self.desktop_drag_end(false);
             }
         }
         self.desktop.items = items;
@@ -993,14 +1054,11 @@ impl App {
             .collect();
         let icon_scale = self.icon_scale();
         let live = Live {
-            drag: self
-                .desktop
-                .drag
-                .zip(self.desktop.drag_rect(icon_scale))
-                .map(|(d, r)| (d.item, r)),
+            in_hand: self.desktop.drag.as_ref().map(|d| d.item),
             drop_cell: self
                 .desktop
                 .dnd
+                .filter(|d| !d.on_dock)
                 .and_then(|d| self.desktop.drop_slot(d.pos))
                 .map(|s| self.desktop.grid.rect(s)),
         };
@@ -1076,16 +1134,14 @@ impl App {
                 ..
             } => self.desktop_motion(surface_x as f32, surface_y as f32),
             wl_pointer::Event::Leave { .. } => {
+                // (Also what the compositor sends the moment a drag of ours
+                // starts: the pointer is its from then on.)
                 self.pointer_surface = crate::options::PointerSurface::Dock;
-                // An icon in hand when the pointer goes is put down where it
-                // was last seen, not lost.
-                if self.desktop.drag.is_some() {
-                    self.desktop_drop();
-                }
                 self.desktop.press = None;
                 self.desktop.ptr = None;
             }
             wl_pointer::Event::Button {
+                serial,
                 button,
                 state: WEnum::Value(state),
                 ..
@@ -1094,15 +1150,12 @@ impl App {
                     self.desktop.press = self
                         .desktop
                         .ptr
-                        .and_then(|p| self.desktop.hit(p).map(|i| (i, p)));
+                        .and_then(|p| self.desktop.hit(p).map(|i| (i, p, serial)));
                 }
                 wl_pointer::ButtonState::Released => {
-                    let press = self.desktop.press.take();
-                    if self.desktop.drag.is_some() {
-                        self.desktop_drop();
-                    } else if let Some((i, _)) = press {
+                    if let Some((i, _, _)) = self.desktop.press.take() {
                         let under = self.desktop.ptr.and_then(|p| self.desktop.hit(p));
-                        if under == Some(i) {
+                        if under == Some(i) && self.desktop.drag.is_none() {
                             self.desktop_activate(i);
                         }
                     }
@@ -1113,34 +1166,65 @@ impl App {
         }
     }
 
-    /// The pointer moved over the desktop: an icon in hand follows it (and
-    /// the dock's bin watches it come); a press that has travelled far
+    /// The pointer moved over the desktop: a press that has travelled far
     /// enough becomes a drag.
     fn desktop_motion(&mut self, x: f32, y: f32) {
         self.desktop.ptr = Some((x, y));
-        if self.desktop.drag.is_some() {
-            self.request_desktop_draw();
-            self.schedule_frame(); // the bin's swell eases in the dock's frame
-        } else if let Some((i, (px, py))) = self.desktop.press {
-            if (x - px).hypot(y - py) >= DRAG_START {
-                self.desktop_lift(i, (px, py));
+        if self.desktop.drag.is_none() {
+            if let Some((i, (px, py), serial)) = self.desktop.press {
+                if (x - px).hypot(y - py) >= DRAG_START {
+                    self.desktop_lift(i, (px, py), serial);
+                }
             }
         }
         self.desktop_cursor();
     }
 
-    /// Take item `i` in hand, gripped where the press landed on its icon.
-    /// A hidden dock comes up: the bin is where a file is thrown away.
-    fn desktop_lift(&mut self, i: usize, at: (f32, f32)) {
+    /// Take item `i` in hand: start a Wayland drag of ours with the file on
+    /// offer and the icon as the drag image, gripped where the press landed
+    /// on it. A hidden dock comes up: the bin is where a file is thrown
+    /// away.
+    fn desktop_lift(&mut self, i: usize, at: (f32, f32), serial: u32) {
         let Some(slot) = self.desktop.slots.get(i).copied().flatten() else {
             return;
         };
-        let icon = icon_rect(&self.desktop.grid.rect(slot), self.icon_scale());
+        let (Some(manager), Some(device), Some(layer)) = (
+            self.data_device_manager.as_ref(),
+            self.data_device.as_ref(),
+            self.desktop_layer.as_ref(),
+        ) else {
+            warn!("desktop: no data device; icons cannot be dragged");
+            return;
+        };
+        self.desktop.press = None;
+        let icon_scale = self.icon_scale();
+        let icon = icon_rect(&self.desktop.grid.rect(slot), icon_scale);
+        let grip = (at.0 - icon.x, at.1 - icon.y);
+        let source = manager.create_drag_and_drop_source(
+            &self.qh,
+            [URI_LIST, PLAIN_TEXT],
+            DndAction::Move | DndAction::Copy,
+        );
+        let image = self.drag_icon(&self.desktop.items[i], grip, icon_scale);
+        source.start_drag(
+            device,
+            layer.wl_surface(),
+            image.as_ref().map(|d| &d.surface),
+            serial,
+        );
+        // The drag image is committed once it has its role: Hyprland maps
+        // it on the first commit that carries a texture.
+        if let Some(image) = image.as_ref() {
+            image.surface.commit();
+        }
         let dock_raised = self.ui.target() == crate::state::Target::Hidden;
+        info!("desktop: {} in hand", self.desktop.items[i].name);
         self.desktop.drag = Some(Drag {
             item: i,
-            grip: (at.0 - icon.x, at.1 - icon.y),
             dock_raised,
+            source,
+            _icon: image,
+            action: DndAction::empty(),
         });
         if dock_raised {
             self.handle_command(waverunner_proto::Command::Show);
@@ -1149,58 +1233,136 @@ impl App {
         self.request_desktop_draw();
     }
 
-    /// Where the pointer is in the DOCK surface's coordinates while an icon
-    /// is in hand — both surfaces end at the screen's bottom edge, so only
-    /// their heights differ. `None` when nothing is in hand.
-    pub(crate) fn desktop_drag_dock_pos(&self) -> Option<(f32, f32)> {
-        self.desktop.drag?;
-        let (x, y) = self.desktop.ptr?;
-        let (_, desktop_h) = self.desktop_size;
-        let (_, dock_h) = self.buffer_size;
-        Some((x, y - (desktop_h as f32 - dock_h as f32)))
+    /// The drag image for `item`: its picture (as the desktop draws it:
+    /// the carrier, the thumbnail, the launcher's tile) on a surface of its
+    /// own, scaled to about the icon's size on screen and offset so the
+    /// point gripped stays under the pointer. `None` without the picture
+    /// (the drag still happens; the compositor shows its own cursor).
+    fn drag_icon(&self, item: &Item, grip: (f32, f32), icon_scale: f32) -> Option<DragIcon> {
+        let chain = self.desktop.chains.get(&item.icon)?;
+        let shm = self.shm.as_ref()?;
+        let stride = ICON_PX * 4;
+        let len = stride * ICON_PX;
+        if chain.len() < len {
+            return None;
+        }
+        let mut pool = match RawPool::new(len, shm) {
+            Ok(pool) => pool,
+            Err(e) => {
+                warn!("desktop: no shm pool for the drag image ({e})");
+                return None;
+            }
+        };
+        rgba_to_argb(&chain[..len], &mut pool.mmap()[..len]);
+        let buffer = pool.create_buffer(
+            0,
+            ICON_PX as i32,
+            ICON_PX as i32,
+            stride as i32,
+            wl_shm::Format::Argb8888,
+            (),
+            &self.qh,
+        );
+        let surface = self.compositor.create_surface(&self.qh);
+        let scale = icon_buffer_scale(icon_scale);
+        surface.set_buffer_scale(scale);
+        // The hotspot: the surface sits at the pointer less the grip (in
+        // its own logical pixels).
+        let (gx, gy) = (-grip.0.round() as i32, -grip.1.round() as i32);
+        if surface.version() >= 5 {
+            surface.attach(Some(&buffer), 0, 0);
+            surface.offset(gx, gy);
+        } else {
+            surface.attach(Some(&buffer), gx, gy);
+        }
+        surface.damage_buffer(0, 0, ICON_PX as i32, ICON_PX as i32);
+        Some(DragIcon {
+            surface,
+            _buffer: buffer,
+            _pool: pool,
+        })
     }
 
-    /// Put the icon in hand down: on the dock's Recycle Bin, it goes to the
-    /// trash; anywhere else, into the free cell nearest to where its icon
-    /// is, remembered there.
-    fn desktop_drop(&mut self) {
-        let Some(drag) = self.desktop.drag else {
+    /// Where our own drag's pointer is in the DOCK surface's coordinates
+    /// (the bin watches it come); `None` when it is not over the dock.
+    pub(crate) fn desktop_drag_dock_pos(&self) -> Option<(f32, f32)> {
+        self.desktop.drag.as_ref()?;
+        self.desktop.dnd.filter(|d| d.on_dock).map(|d| d.pos)
+    }
+
+    /// Another app asked for the file in hand (or we did, over our own
+    /// surfaces — nothing is read then). Written off the loop.
+    pub(crate) fn desktop_send_drag(&mut self, mime: &str, pipe: smithay_client_toolkit::data_device_manager::WritePipe) {
+        let Some(drag) = self.desktop.drag.as_ref() else {
             return;
         };
-        let on_bin = self
-            .desktop_drag_dock_pos()
-            .is_some_and(|p| self.dropped_on_trash(&self.current_layout(), p));
-        self.desktop.drag = None;
-        if on_bin {
-            let path = self.desktop.items[drag.item].path.clone();
-            info!("desktop: {} → Recycle Bin", self.desktop.items[drag.item].name);
-            self.desktop.remembered.remove(&path);
-            self.trash_file(&path); // the folder watch takes it off the desktop
-        } else if let Some((px, py)) = self.desktop.ptr {
-            let size = GRID_ICON * self.icon_scale();
-            let centre = (px - drag.grip.0 + size / 2.0, py - drag.grip.1 + size / 2.0);
-            if let Some(slot) = self.desktop.settle(drag.item, centre) {
-                info!("desktop: {} → {slot:?}", self.desktop.items[drag.item].name);
-                self.save_desktop_positions();
+        let Some(payload) = drag_payload(&self.desktop.items[drag.item].path, mime) else {
+            warn!("desktop: {mime} asked of a drag that never offered it");
+            return;
+        };
+        let fd: std::os::fd::OwnedFd = pipe.into();
+        let mime = mime.to_owned();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut file = std::fs::File::from(fd);
+            if let Err(e) = file.write_all(payload.as_bytes()) {
+                warn!("desktop: writing the dragged file's {mime} failed: {e}");
             }
+        });
+    }
+
+    /// The drop target chose what to do with the file in hand.
+    pub(crate) fn desktop_drag_action(&mut self, action: DndAction) {
+        if let Some(drag) = self.desktop.drag.as_mut() {
+            drag.action = action;
         }
+    }
+
+    /// Our drag is over: dropped somewhere and done (`done`), or cancelled.
+    /// A drop elsewhere as a move takes the file with it — the folder watch
+    /// takes its icon off; a reload makes sure.
+    pub(crate) fn desktop_drag_end(&mut self, done: bool) {
+        let Some(drag) = self.desktop.drag.take() else {
+            return;
+        };
+        info!(
+            "desktop: {} {} (action {:?})",
+            self.desktop.items.get(drag.item).map_or("?", |it| it.name.as_str()),
+            if done { "dropped" } else { "drag cancelled" },
+            drag.action
+        );
         if drag.dock_raised {
             self.handle_command(waverunner_proto::Command::Hide);
         }
+        drop(drag); // the source and the drag image go with it
+        self.desktop.dnd = None;
+        self.desktop_dnd_offer = None;
         self.schedule_frame();
-        self.request_desktop_draw();
+        if done {
+            self.reload_desktop();
+        } else {
+            self.request_desktop_draw();
+        }
     }
 
-    /// Another app's drag came over the desktop: take it if it carries
-    /// files, as a move (or a copy, where a move is not possible).
-    pub(crate) fn desktop_dnd_enter(&mut self, offer: DragOffer) {
+    /// A drag came over the desktop (`on_dock` false) or the dock: our own
+    /// (the file in hand; accepted so the drop counts, nothing to read) or
+    /// another app's (taken on the desktop if it carries files, as a move
+    /// — or a copy, where a move is not possible; not on the dock).
+    pub(crate) fn desktop_dnd_enter(&mut self, offer: DragOffer, on_dock: bool) {
+        let own = self.desktop.drag.is_some();
         let mimes = offer.with_mime_types(|m| m.to_vec());
         let has_files = mimes.iter().any(|t| t == URI_LIST);
-        info!(
-            "desktop: a drag came over us at ({:.0},{:.0}) offering {mimes:?}, actions {:?}",
-            offer.x, offer.y, offer.source_actions
-        );
-        if !has_files {
+        if !own {
+            info!(
+                "desktop: a drag came over {} at ({:.0},{:.0}) offering {mimes:?}, actions {:?}",
+                if on_dock { "the dock" } else { "us" },
+                offer.x,
+                offer.y,
+                offer.source_actions
+            );
+        }
+        if !has_files || (on_dock && !own) {
             offer.accept_mime_type(offer.serial, None);
             return;
         }
@@ -1208,16 +1370,23 @@ impl App {
         offer.set_actions(DndAction::Move | DndAction::Copy, DndAction::Move);
         self.desktop.dnd = Some(DndIn {
             pos: (offer.x as f32, offer.y as f32),
+            on_dock,
         });
         self.desktop_dnd_offer = Some(offer);
+        self.schedule_frame();
         self.request_desktop_draw();
     }
 
-    /// The hovering drop moved: the wash follows the cell it would land in.
+    /// The hovering drag moved: the wash follows the cell it would land in
+    /// (or the bin watches it, over the dock).
     pub(crate) fn desktop_dnd_motion(&mut self, x: f32, y: f32) {
         if let Some(d) = self.desktop.dnd.as_mut() {
             d.pos = (x, y);
-            self.request_desktop_draw();
+            if d.on_dock {
+                self.schedule_frame();
+            } else {
+                self.request_desktop_draw();
+            }
         }
     }
 
@@ -1236,16 +1405,43 @@ impl App {
             return;
         }
         if self.desktop.dnd.take().is_some() {
-            info!("desktop: the drag left");
+            if self.desktop.drag.is_none() {
+                info!("desktop: the drag left");
+            }
             self.desktop_dnd_offer = None;
+            self.schedule_frame();
             self.request_desktop_draw();
         }
     }
 
-    /// Let go on the desktop: ask for the list of files. It is read off the
-    /// loop (the other app writes when it pleases) and lands in
-    /// `desktop_dnd_received`.
+    /// Let go on one of our surfaces. Our own file: into the cell under it
+    /// on the desktop, or the trash from the dock's bin — nothing to read,
+    /// the drop is just finished. Another app's: ask for the list of
+    /// files; it is read off the loop (the other app writes when it
+    /// pleases) and lands in `desktop_dnd_received`.
     pub(crate) fn desktop_dnd_drop(&mut self) {
+        if let Some(drag) = self.desktop.drag.as_ref() {
+            let item = drag.item;
+            let Some(offer) = self.desktop_dnd_offer.take() else {
+                return;
+            };
+            let Some(at) = self.desktop.dnd.take() else {
+                return;
+            };
+            if at.on_dock {
+                if self.dropped_on_trash(&self.current_layout(), at.pos) {
+                    let path = self.desktop.items[item].path.clone();
+                    info!("desktop: {} → Recycle Bin", self.desktop.items[item].name);
+                    self.desktop.remembered.remove(&path);
+                    self.trash_file(&path); // the folder watch takes it off the desktop
+                }
+            } else if let Some(slot) = self.desktop.settle(item, at.pos) {
+                info!("desktop: {} → {slot:?}", self.desktop.items[item].name);
+                self.save_desktop_positions();
+            }
+            offer.finish(); // → our source's `dnd_finished` → `desktop_drag_end`
+            return;
+        }
         // The live offer (the one kept since `enter` is a snapshot: its
         // position and selected action are as of then).
         let live = self
@@ -1721,26 +1917,51 @@ mod tests {
         let cell = g.rect((0, 0));
         assert_eq!(s.icons[0].rect, icon_rect(&cell, 1.0));
         assert!((s.icons[0].rect.x - (cell.x + (cell.w - GRID_ICON) / 2.0)).abs() < 1e-4);
-        // In hand: drawn over everything at the given rect, not in its cell.
-        let at = Rect::new(300.0, 200.0, GRID_ICON, GRID_ICON);
+        // In hand: its cell is left empty (the compositor carries the
+        // picture); nothing of it is drawn.
         let live = Live {
-            drag: Some((0, at)),
+            in_hand: Some(0),
             drop_cell: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
-        assert_eq!(s.overlay.len(), 1);
-        assert_eq!(s.overlay[0].rect, at);
+        assert!(s.overlay.is_empty());
         assert_eq!(s.icons.len(), 1, "only b stays in the grid");
         assert_eq!(s.icons[0].layer, 1);
-        assert_eq!(s.labels[1].pos.0, at.x + at.w / 2.0, "the name travels with it");
+        assert_eq!(s.labels.len(), 2, "b's two labels; a's are gone with it");
         // A drop hovering: its cell is washed, under everything.
         let live = Live {
-            drag: None,
+            in_hand: None,
             drop_cell: Some(g.rect((2, 1))),
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
         assert_eq!(s.rects.len(), 1);
         assert_eq!(s.rects[0].rect, g.rect((2, 1)));
+    }
+
+    #[test]
+    fn a_drag_out_offers_the_file_as_uri_list_and_as_text() {
+        let path = "/home/x/Holiday photos/ü.png";
+        assert_eq!(file_uri(path), "file:///home/x/Holiday%20photos/%C3%BC.png");
+        assert_eq!(
+            drag_payload(path, URI_LIST).as_deref(),
+            Some("file:///home/x/Holiday%20photos/%C3%BC.png\r\n")
+        );
+        assert_eq!(drag_payload(path, PLAIN_TEXT).as_deref(), Some(path));
+        assert_eq!(drag_payload(path, "image/png"), None);
+        // The round trip through the drop side.
+        assert_eq!(uri_list_paths(&file_uri(path)), vec![PathBuf::from(path)]);
+    }
+
+    #[test]
+    fn drag_image_pixels_swizzle_to_argb_and_scale_to_the_icon() {
+        let src = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let mut dst = [0u8; 8];
+        rgba_to_argb(&src, &mut dst);
+        assert_eq!(dst, [30, 20, 10, 40, 70, 60, 50, 80]);
+        // 256 px raster shown at 54 logical px → scale 5 (51 px); never 0.
+        assert_eq!(icon_buffer_scale(1.0), 5);
+        assert_eq!(icon_buffer_scale(1.65), 3);
+        assert_eq!(icon_buffer_scale(100.0), 1);
     }
 
     #[test]
