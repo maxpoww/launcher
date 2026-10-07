@@ -1569,8 +1569,11 @@ impl App {
         self.request_desktop_draw();
     }
 
-    /// Draw now, or once the frame in flight has been shown.
+    /// Draw now, or once the frame in flight has been shown. Every change
+    /// of state comes through here, so the pointer's shape is settled here
+    /// too (see `desktop_cursor`).
     fn request_desktop_draw(&mut self) {
+        self.desktop_cursor();
         if self.desktop_frame_pending {
             self.desktop_dirty = true;
         } else {
@@ -2387,7 +2390,13 @@ impl App {
     }
 
     /// A hand over an item, a fist around one in hand, the arrow between.
-    fn desktop_cursor(&mut self) {
+    /// The pointer's shape on the desktop (Max, 2026-10-07): the plain
+    /// arrow over wallpaper, files and launchers; the index over a FOLDER
+    /// and over a menu row; a crosshair while a rubber band is drawn; the
+    /// fist while an icon is in hand. Sent again after every change of
+    /// state, not only on motion — a shape left over from the last state
+    /// (the band's, the drag's) used to stay until the pointer moved.
+    pub(crate) fn desktop_cursor(&mut self) {
         let Some(device) = &self.cursor_device else {
             return;
         };
@@ -2397,9 +2406,17 @@ impl App {
             .as_ref()
             .zip(self.desktop.ptr)
             .is_some_and(|(m, p)| m.hit(p).is_some());
+        let over_folder = self
+            .desktop
+            .ptr
+            .and_then(|p| self.desktop.hit(p))
+            .and_then(|i| self.desktop.items.get(i))
+            .is_some_and(|it| it.kind == Kind::Folder);
         let shape = if self.desktop.drag.is_some() {
             Shape::Grabbing
-        } else if over_row || self.desktop.ptr.and_then(|p| self.desktop.hit(p)).is_some() {
+        } else if self.desktop.band.is_some() {
+            Shape::Crosshair
+        } else if over_row || (self.desktop.menu.is_none() && over_folder) {
             Shape::Pointer
         } else {
             Shape::Default
