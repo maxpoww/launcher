@@ -40,23 +40,37 @@ const PAD: f32 = 6.0;
 /// A row's height, and a rule's.
 const ROW_H: f32 = 30.0;
 const SEP_H: f32 = 11.0;
-/// Corners: the panel's and a row's hover band's.
-const RADIUS: f32 = 14.0;
-const ROW_RADIUS: f32 = 9.0;
+/// A row's hover band's corner; the panel's is the boxes' (`MenuPaint::radius`).
+const ROW_RADIUS: f32 = 7.0;
 /// Text: size and inset from the row's left edge.
 const FONT_PX: f32 = 13.0;
 const LINE_PX: f32 = 17.0;
 const TEXT_X: f32 = 10.0;
 /// How far from the pointer the panel's corner sits.
 const GAP: f32 = 6.0;
-/// Colours: the panel (the dock's dark glass, no blur of its own), a
-/// hovered row's band, a rule, the ink, the dim ink and the red.
-const PANEL: [f32; 4] = [22.0 / 255.0, 24.0 / 255.0, 28.0 / 255.0, 0.92];
-const HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.09];
-const HOVER_DANGER: [f32; 4] = [224.0 / 255.0, 82.0 / 255.0, 82.0 / 255.0, 0.16];
-const LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
-const INK: [f32; 4] = [238.0 / 255.0, 240.0 / 255.0, 234.0 / 255.0, 1.0];
+/// A resting row's ink sits a little under full, so a hovered row (full,
+/// bold) has somewhere to go — the boxes' rule.
+const REST_INK: f32 = 0.86;
+/// A rule between groups: the ink, faint.
+const LINE_INK: f32 = 0.14;
+/// The one colour of its own: a row that throws something away, and its
+/// hover band.
 const RED: [f32; 4] = [224.0 / 255.0, 82.0 / 255.0, 82.0 / 255.0, 1.0];
+const HOVER_DANGER: [f32; 4] = [224.0 / 255.0, 82.0 / 255.0, 82.0 / 255.0, 0.16];
+
+/// What the menu is painted with: the OPTIONS boxes' adaptive surface
+/// (`App::box_surface_at`), read where the menu is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MenuPaint {
+    /// The panel.
+    pub fill: [f32; 4],
+    /// Text that reads on it.
+    pub ink: [f32; 4],
+    /// A hovered row's band.
+    pub wash: [f32; 4],
+    /// The panel's corner.
+    pub radius: f32,
+}
 
 /// The rows for a right-click on an item (`on_item`) or on bare wallpaper.
 pub(crate) fn rows(on_item: bool) -> Vec<Row> {
@@ -148,11 +162,12 @@ impl Menu {
 
     /// Draw the menu over everything in `scene`: a grid of its own (grids
     /// paint after the icons), clipped to the panel.
-    pub fn push(&self, scene: &mut Scene) {
+    pub fn push(&self, scene: &mut Scene, paint: &MenuPaint) {
         let t = self.t.clamp(0.0, 1.0);
         // Its entrance: fading in while settling down from 4 px above.
         let lift = (1.0 - t) * -4.0;
         let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * t];
+        let ink_at = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * a];
         let panel = Rect::new(self.rect.x, self.rect.y + lift, self.rect.w, self.rect.h);
         let mut grid = GridContent {
             clip: panel,
@@ -160,8 +175,8 @@ impl Menu {
         };
         grid.rects.push(RectInst {
             rect: panel,
-            radius: RADIUS,
-            color: fade(PANEL),
+            radius: paint.radius,
+            color: fade(paint.fill),
             glass: 0.0,
             border: 0.0,
         });
@@ -171,20 +186,30 @@ impl Menu {
                 Row::Sep => grid.rects.push(RectInst {
                     rect: Rect::new(rect.x + 2.0, rect.y + (rect.h - 1.0) / 2.0, rect.w - 4.0, 1.0),
                     radius: 0.0,
-                    color: fade(LINE),
+                    color: fade(ink_at(LINE_INK)),
                     glass: 0.0,
                     border: 0.0,
                 }),
                 Row::Item { label, danger, .. } => {
-                    if self.hover == Some(i) {
+                    let hot = self.hover == Some(i);
+                    if hot {
                         grid.rects.push(RectInst {
                             rect,
                             radius: ROW_RADIUS,
-                            color: fade(if *danger { HOVER_DANGER } else { HOVER }),
+                            color: fade(if *danger { HOVER_DANGER } else { paint.wash }),
                             glass: 0.0,
                             border: 0.0,
                         });
                     }
+                    // Hover is weight and full strength, as in every box's
+                    // list: the colour itself does not move.
+                    let color = if *danger {
+                        RED
+                    } else if hot {
+                        ink_at(1.0)
+                    } else {
+                        ink_at(REST_INK)
+                    };
                     grid.labels.push(Label {
                         text: (*label).to_owned(),
                         pos: (rect.x + TEXT_X, rect.y + (rect.h - LINE_PX) / 2.0),
@@ -195,13 +220,12 @@ impl Menu {
                         dim: false,
                         cache: true,
                         clip: Some(panel),
-                        family: None,
-                        color: Some(fade(if *danger { RED } else { INK })),
+                        family: hot.then_some(FONT_BOLD),
+                        color: Some(fade(color)),
                     });
                 }
             }
         }
-        let _ = FONT_BOLD; // the rows are regular weight; the sentinel stays importable
         scene.grids.push(grid);
     }
 }
@@ -250,29 +274,41 @@ mod tests {
         assert_eq!(m.hit((5000.0, 5000.0)), None);
     }
 
+    const PAINT: MenuPaint = MenuPaint {
+        fill: [0.1, 0.1, 0.12, 0.9],
+        ink: [0.9, 0.9, 0.9, 1.0],
+        wash: [1.0, 1.0, 1.0, 0.1],
+        radius: 10.0,
+    };
+
     #[test]
     fn the_drawn_menu_is_one_grid_with_a_panel_a_hover_band_and_its_labels() {
         let mut m = Menu::open(Some(0), (0.0, 0.0), 1000.0, 800.0);
         m.t = 1.0;
         m.hover = Some(5);
         let mut scene = Scene::default();
-        m.push(&mut scene);
+        m.push(&mut scene, &PAINT);
         assert_eq!(scene.grids.len(), 1);
         let g = &scene.grids[0];
         assert_eq!(g.clip, m.rect);
         // The panel, two rules, one hover band.
         assert_eq!(g.rects.len(), 4);
         assert_eq!(g.rects[0].rect, m.rect);
+        assert_eq!(g.rects[0].color, PAINT.fill, "the boxes' fill");
+        assert_eq!(g.rects[0].radius, PAINT.radius);
         assert_eq!(g.rects[3].color, HOVER_DANGER, "the bin's band is red");
         assert_eq!(g.labels.len(), 4);
         assert_eq!(g.labels[3].text, "Move to bin");
         assert_eq!(g.labels[3].color, Some(RED));
+        assert_eq!(g.labels[3].family, Some(FONT_BOLD), "hovered: bold");
+        assert_eq!(g.labels[0].family, None);
+        assert!((g.labels[0].color.unwrap()[3] - REST_INK).abs() < 1e-5, "resting: the ink, a little under full");
         // Half-way in, everything is half as strong and 2 px above its place.
         m.t = 0.5;
         let mut scene = Scene::default();
-        m.push(&mut scene);
+        m.push(&mut scene, &PAINT);
         let g = &scene.grids[0];
-        assert!((g.rects[0].color[3] - PANEL[3] * 0.5).abs() < 1e-5);
+        assert!((g.rects[0].color[3] - PAINT.fill[3] * 0.5).abs() < 1e-5);
         assert!((g.rects[0].rect.y - (m.rect.y - 2.0)).abs() < 1e-5);
     }
 }

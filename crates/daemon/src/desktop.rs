@@ -49,7 +49,7 @@ use crate::content::{
     IconInst, Label, Rect, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
-use crate::desktop_menu::{Action, Menu};
+use crate::desktop_menu::{Action, Menu, MenuPaint};
 use crate::launch;
 use crate::App;
 
@@ -877,8 +877,9 @@ pub(crate) struct Live<'a> {
     pub selected: &'a [bool],
     /// A rubber band being drawn.
     pub band: Option<Rect>,
-    /// The menu that is up, drawn over everything.
-    pub menu: Option<&'a Menu>,
+    /// The menu that is up, drawn over everything, and what it is painted
+    /// with (the boxes' surface, read where it is).
+    pub menu: Option<(&'a Menu, MenuPaint)>,
     /// A name being typed: the item, the text, whether all of it is
     /// selected, and the text's measured width.
     pub rename: Option<(usize, &'a str, bool, f32)>,
@@ -968,7 +969,7 @@ pub(crate) fn scene(
                 max_w: label_max_w(&cell),
                 has_icon: has_icon.get(i).copied().unwrap_or(false),
                 overlay: false,
-                cover: live.menu.map(|m| m.rect),
+                cover: live.menu.map(|(m, _)| m.rect),
                 rename: live
                     .rename
                     .filter(|(r, ..)| *r == i)
@@ -989,8 +990,8 @@ pub(crate) fn scene(
         }
     }
     // The menu, over everything.
-    if let Some(menu) = live.menu {
-        menu.push(&mut scene);
+    if let Some((menu, paint)) = live.menu {
+        menu.push(&mut scene, &paint);
     }
     scene
 }
@@ -1604,6 +1605,18 @@ impl App {
             .map(|it| self.desktop.selected.contains(&it.path))
             .collect();
         let band = self.desktop.band.map(|(a, b)| band_rect(a, b));
+        // The menu wears the OPTIONS boxes' surface, read on its own side of
+        // the screen as every box's is (Max, 2026-10-07: "it should follow
+        // the colours of the BG as the dock and OPTIONS").
+        let menu_paint = self.desktop.menu.as_ref().map(|m| {
+            let (fill, ink) = self.box_surface_at(m.rect);
+            MenuPaint {
+                fill,
+                ink,
+                wash: self.options_hover_wash(),
+                radius: crate::clipboard::BOX_RADIUS,
+            }
+        });
         let Some(renderer) = self.desktop_renderer.as_mut() else {
             return;
         };
@@ -1635,7 +1648,7 @@ impl App {
                 carried,
                 selected: &selected,
                 band,
-                menu: self.desktop.menu.as_ref(),
+                menu: self.desktop.menu.as_ref().zip(menu_paint),
                 rename: rename_view,
             },
         );
