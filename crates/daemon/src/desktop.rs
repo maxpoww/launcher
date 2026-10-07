@@ -45,7 +45,7 @@ use wayland_client::protocol::{wl_pointer, wl_shm};
 use wayland_client::{Proxy, WEnum};
 
 use crate::content::{
-    IconInst, Label, Rect, RectInst, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
+    IconInst, Label, Rect, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
 use crate::launch;
@@ -81,10 +81,6 @@ const REMEMBERED_MAX: usize = 1000;
 /// wallpaper (white on a bright picture would otherwise vanish).
 const INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const INK_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
-/// The cell a drop from another app will land in, shown while it hovers:
-/// a faint rounded wash, the dock's hover-highlight idiom.
-const DROP_WASH: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
-const DROP_WASH_RADIUS: f32 = 12.0;
 /// Environment override of the folder, for a test rig that must not show
 /// the owner's real desktop.
 const DIR_ENV: &str = "WAVERUNNER_DESKTOP_DIR";
@@ -676,20 +672,11 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
     }
 }
 
-/// What one frame shows besides the placed items.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Live {
-    /// The item in hand: its cell is left empty (the compositor carries its
-    /// picture under the pointer).
-    pub in_hand: Option<usize>,
-    /// The cell a hovering drag would land in.
-    pub drop_cell: Option<Rect>,
-}
-
 /// One frame of the desktop: every placed item in its cell (its icon where
 /// the picture has arrived — `has_icon[i]` — and its fitted name,
-/// `names[i]`), except the one in hand; and the wash on the cell a drop
-/// would land in.
+/// `names[i]`), except the one `in_hand` (the compositor carries its
+/// picture under the pointer). A hovering drag shows nothing: where it
+/// will land is not pointed out (Max, 2026-10-07: "we don't need that").
 pub(crate) fn scene(
     items: &[Item],
     slots: &[Option<Slot>],
@@ -697,23 +684,14 @@ pub(crate) fn scene(
     names: &[String],
     has_icon: &[bool],
     icon_scale: f32,
-    live: Live,
+    in_hand: Option<usize>,
 ) -> Scene {
     let mut scene = Scene {
         alpha: 1.0,
         ..Default::default()
     };
-    if let Some(cell) = live.drop_cell {
-        scene.rects.push(RectInst {
-            rect: cell,
-            radius: DROP_WASH_RADIUS,
-            color: DROP_WASH,
-            glass: 0.0,
-            border: 0.0,
-        });
-    }
     for (i, item) in items.iter().enumerate() {
-        if live.in_hand == Some(i) {
+        if in_hand == Some(i) {
             continue;
         }
         let Some(slot) = slots.get(i).copied().flatten() else {
@@ -781,12 +759,6 @@ impl Desktop {
         Some(slot)
     }
 
-    /// The cell a drag hovering at `pos` would land in: the free one nearest
-    /// the pointer — our own item's cell counting as free for it.
-    fn drop_slot(&self, pos: (f32, f32)) -> Option<Slot> {
-        let own = self.drag.as_ref().map(|d| d.item);
-        self.grid.nearest_free(pos, &self.taken(own))
-    }
 }
 
 /// The positions store on disk: path → `[col, row]`.
@@ -1053,15 +1025,7 @@ impl App {
             .map(|i| self.desktop.has_icon(i))
             .collect();
         let icon_scale = self.icon_scale();
-        let live = Live {
-            in_hand: self.desktop.drag.as_ref().map(|d| d.item),
-            drop_cell: self
-                .desktop
-                .dnd
-                .filter(|d| !d.on_dock)
-                .and_then(|d| self.desktop.drop_slot(d.pos))
-                .map(|s| self.desktop.grid.rect(s)),
-        };
+        let in_hand = self.desktop.drag.as_ref().map(|d| d.item);
         let Some(renderer) = self.desktop_renderer.as_mut() else {
             return;
         };
@@ -1083,7 +1047,7 @@ impl App {
             &names,
             &has_icon,
             icon_scale,
-            live,
+            in_hand,
         );
         let (layer, qh, pending) = (
             self.desktop_layer.as_ref(),
@@ -1377,15 +1341,13 @@ impl App {
         self.request_desktop_draw();
     }
 
-    /// The hovering drag moved: the wash follows the cell it would land in
-    /// (or the bin watches it, over the dock).
+    /// The hovering drag moved: where it is decides the drop; over the dock
+    /// the bin watches it come. Nothing on the desktop is redrawn for it.
     pub(crate) fn desktop_dnd_motion(&mut self, x: f32, y: f32) {
         if let Some(d) = self.desktop.dnd.as_mut() {
             d.pos = (x, y);
             if d.on_dock {
                 self.schedule_frame();
-            } else {
-                self.request_desktop_draw();
             }
         }
     }
@@ -1904,8 +1866,8 @@ mod tests {
         let g = Grid::new(1000.0, 400.0, 1.0);
         let slots = vec![Some((0, 0)), Some((0, 1)), None];
         let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
-        let s = scene(&items, &slots, &g, &names, &[true, false, true], 1.0, Live::default());
-        assert!(s.rects.is_empty(), "no drop wash without a drop");
+        let s = scene(&items, &slots, &g, &names, &[true, false, true], 1.0, None);
+        assert!(s.rects.is_empty(), "nothing but icons and names");
         // a has its icon; b's has not arrived; c has no cell at all.
         assert_eq!(s.icons.len(), 1);
         assert_eq!(s.icons[0].layer, 0);
@@ -1919,23 +1881,12 @@ mod tests {
         assert!((s.icons[0].rect.x - (cell.x + (cell.w - GRID_ICON) / 2.0)).abs() < 1e-4);
         // In hand: its cell is left empty (the compositor carries the
         // picture); nothing of it is drawn.
-        let live = Live {
-            in_hand: Some(0),
-            drop_cell: None,
-        };
-        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
+        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, Some(0));
         assert!(s.overlay.is_empty());
+        assert!(s.rects.is_empty(), "no wash for a hovering drag either");
         assert_eq!(s.icons.len(), 1, "only b stays in the grid");
         assert_eq!(s.icons[0].layer, 1);
         assert_eq!(s.labels.len(), 2, "b's two labels; a's are gone with it");
-        // A drop hovering: its cell is washed, under everything.
-        let live = Live {
-            in_hand: None,
-            drop_cell: Some(g.rect((2, 1))),
-        };
-        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
-        assert_eq!(s.rects.len(), 1);
-        assert_eq!(s.rects[0].rect, g.rect((2, 1)));
     }
 
     #[test]

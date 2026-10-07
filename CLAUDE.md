@@ -237,14 +237,15 @@ The big daemon files are cohesive but long — go straight to the function:
   shadow); no hover magnification (Max). Click = open (`xdg-open` / the launcher's `Exec=`).
   DRAG = a real Wayland drag of ours (`desktop_lift`: `DragSource` offering `text/uri-list` +
   text, the icon raster on an shm surface as the drag image, `start_drag` with the press serial
-  — Hyprland ignores it): over the desktop the landing cell is washed and the drop settles
-  the item there (`desktop_dnd_drop`, own-drag branch); over the dock the bin reacts
+  — Hyprland ignores it): over the desktop nothing is shown (no landing-cell wash — Max) and
+  the drop settles the item in the free cell nearest the pointer (`desktop_dnd_drop`,
+  own-drag branch); over the dock the bin reacts
   (`desktop_drag_dock_pos` = the DnD motion on the dock surface; the dock is raised for the
   drag) and a drop on it → `trash_file`; over any other app it arrives as a file
   (`desktop_send_drag` writes the payload on a thread). `DataSourceHandler` (main.rs) ends it:
   `dnd_finished`/`cancelled` → `desktop_drag_end`. DROP TARGET for other apps: the same
   `DataDeviceHandler` routes a `text/uri-list` drag over the desktop to `desktop_dnd_enter`
-  (accept Move|Copy, wash), on drop read the pipe on a thread (`OwnedFd::from(pipe)`, NEVER
+  (accept Move|Copy), on drop read the pipe on a thread (`OwnedFd::from(pipe)`, NEVER
   `into_raw_fd` — SCTK closes it) → `import` (move via rename, else copy — a USB file stays on
   the stick; clashes get `name (2).ext` before the FIRST dot) and cluster the files around the
   drop point; a `leave` right after `drop` is Hyprland's habit and is ignored. The input region
