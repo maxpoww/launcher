@@ -38,7 +38,7 @@ use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::
 use smithay_client_toolkit::seat::keyboard::Keysym;
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::raw::RawPool;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_data_device_manager::DndAction;
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -1589,7 +1589,8 @@ impl App {
         // No thumbnail base: an item's layer is its index, and a thumbnail
         // simply replaces the carrier in it, so none is exempt from the
         // squircle. (Golem's theme has it off.)
-        if let Err(e) = renderer.render(
+        let mut presented = false;
+        match renderer.render(
             &scene,
             INK,
             None,
@@ -1604,10 +1605,42 @@ impl App {
                 }
             },
         ) {
-            warn!("desktop render failed: {e:#}");
+            Ok(crate::renderer::Frame::Presented) => presented = true,
+            Ok(crate::renderer::Frame::Unchanged) => {}
+            Err(e) => warn!("desktop render failed: {e:#}"),
         }
         if moving {
-            self.desktop_dirty = true; // the fade's next frame
+            // The ease's next frame: on the frame callback when this one
+            // was presented — or, when it changed nothing (the first frame
+            // of a fade has dt = 0, so nothing moves and nothing is
+            // committed, and no callback ever comes), on a timer. Without
+            // the timer the fade stalled at its first step until something
+            // else redrew the desktop (a rubber band did; a click did not —
+            // Max, 2026-10-07: "plain click won't do it").
+            self.desktop_dirty = true;
+            if !presented && !self.desktop_frame_pending {
+                self.schedule_desktop_tick();
+            }
+        }
+    }
+
+    /// Draw the desktop again shortly, for an easing frame that presented
+    /// nothing (and so gets no frame callback).
+    fn schedule_desktop_tick(&mut self) {
+        if self.desktop_tick_timer {
+            return;
+        }
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(8));
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.desktop_tick_timer = false;
+                app.draw_desktop();
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
+        if armed {
+            self.desktop_tick_timer = true;
         }
     }
 
@@ -1635,6 +1668,13 @@ impl App {
             wl_pointer::Event::Leave { .. } => {
                 // (Also what the compositor sends the moment a drag of ours
                 // starts: the pointer is its from then on.)
+                if self.desktop.press.is_some() || self.desktop.band.is_some() {
+                    debug!(
+                        "desktop: pointer left mid-press (press {:?}, band {})",
+                        self.desktop.press.map(|p| p.item),
+                        self.desktop.band.is_some()
+                    );
+                }
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.desktop.press = None;
                 self.desktop.ptr = None;
@@ -1663,8 +1703,17 @@ impl App {
             } if button == crate::BTN_LEFT => match state {
                 wl_pointer::ButtonState::Pressed => {
                     let Some(at) = self.desktop.ptr else {
+                        debug!("desktop: press with no pointer position (no enter yet); ignored");
                         return;
                     };
+                    debug!(
+                        "desktop: press at ({:.0},{:.0}) on {} (menu {}, hidden {})",
+                        at.0,
+                        at.1,
+                        self.desktop.hit(at).map_or("wallpaper".to_owned(), |i| self.desktop.items[i].name.clone()),
+                        self.desktop.menu.is_some(),
+                        self.desktop.hidden
+                    );
                     // While the menu is up, the left button is its: a press
                     // on a row arms it, one anywhere else just closes it
                     // (and is not a click on the desktop).
@@ -1709,6 +1758,13 @@ impl App {
                         return;
                     }
                     let press = self.desktop.press.take();
+                    debug!(
+                        "desktop: release at {:?}; press {:?}, band {}, drag {}",
+                        self.desktop.ptr,
+                        press.map(|p| (p.item, p.at)),
+                        self.desktop.band.is_some(),
+                        self.desktop.drag.is_some()
+                    );
                     if self.desktop.band.take().is_some() {
                         // The band's selection stands; the band itself goes.
                         self.request_desktop_draw();
@@ -1763,6 +1819,7 @@ impl App {
                         // No band over put-away icons: there is nothing to
                         // select, and the release will bring them back.
                         None if !self.desktop.hidden => {
+                            debug!("desktop: band from ({:.0},{:.0})", px, py);
                             self.desktop.band = Some((press.at, (x, y)));
                             self.desktop.selected.clear();
                             self.request_desktop_draw();

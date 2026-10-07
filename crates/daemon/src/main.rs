@@ -608,6 +608,7 @@ fn main() -> anyhow::Result<()> {
         desktop_frame_pending: false,
         desktop_dirty: false,
         desktop_last_frame: None,
+        desktop_tick_timer: false,
         desktop_dnd_offer: None,
         frecency: focus_cycle::Frecency::default(),
         focus_walk: None,
@@ -1447,6 +1448,9 @@ pub struct App {
     /// When the desktop last drew while something of its was easing (the
     /// icons fading in or out), for dt; `None` at rest.
     desktop_last_frame: Option<Instant>,
+    /// A timer is armed to draw the desktop again: an easing frame that
+    /// presented nothing gets no frame callback (see `draw_desktop`).
+    desktop_tick_timer: bool,
     /// Another app's drag hovering the desktop (its offer, kept until the
     /// drop is read and finished).
     desktop_dnd_offer: Option<DragOffer>,
