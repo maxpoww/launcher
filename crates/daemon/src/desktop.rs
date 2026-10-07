@@ -277,6 +277,10 @@ pub(crate) struct Drag {
     /// image sits at the pointer less this, and so do the rest of the
     /// group, drawn by us around it.
     pub grip: (f32, f32),
+    /// Where the pointer was when the icon was lifted: the group's place
+    /// until the drag's first motion, since the `enter` Hyprland sends
+    /// carries the surface's centre as its position, not the pointer's.
+    pub pos: (f32, f32),
     /// The dock was hidden when the icon was lifted, and came up for the
     /// drag (so the bin is there to drop on): it goes back down after.
     pub dock_raised: bool,
@@ -1947,6 +1951,7 @@ impl App {
         self.desktop.drag = Some(Drag {
             items,
             grip,
+            pos: self.desktop.ptr.unwrap_or(at),
             dock_raised,
             source,
             _icon: image,
@@ -2141,10 +2146,17 @@ impl App {
         }
         offer.accept_mime_type(offer.serial, Some(URI_LIST.to_owned()));
         offer.set_actions(DndAction::Move | DndAction::Copy, DndAction::Move);
-        self.desktop.dnd = Some(DndIn {
-            pos: (offer.x as f32, offer.y as f32),
-            on_dock,
-        });
+        // The enter's position is NOT the pointer's: Hyprland sends the
+        // surface's centre there (`updateDrag` in its DataDevice.cpp) and
+        // the real one with the first motion. Our own drag starts where
+        // the pointer was lifted (the group was drawn mid-screen for a
+        // moment otherwise — Max, 2026-10-07: "a ghost on another place");
+        // another app's is placed only by its motions and drop.
+        let pos = match self.desktop.drag.as_ref() {
+            Some(d) if !on_dock => d.pos,
+            _ => (offer.x as f32, offer.y as f32),
+        };
+        self.desktop.dnd = Some(DndIn { pos, on_dock });
         self.desktop_dnd_offer = Some(offer);
         self.schedule_frame();
         self.request_desktop_draw();
