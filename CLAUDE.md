@@ -264,7 +264,7 @@ The big daemon files are cohesive but long — go straight to the function:
   to `~/.local/state/waverunner/daemon.log`. HIDE/SHOW: a click on bare wallpaper toggles the
   icons (fade; `settings.desktop_hidden`). MENU (`desktop_menu.rs`, the approved mockup at
   ~/desktop-menu-mockup): right-click → `Menu::open` at the pointer (icon: Open · Open in
-  terminal · Rename · Move to Home · Move to bin; wallpaper: New folder · Clean up), drawn as a `GridContent`
+  terminal · Rename · ─ · Move to Home · Move to bin; wallpaper: New folder · Clean up), drawn as a `GridContent`
   so it paints over the icons (names under it are skipped), a left press on a row acts on
   release, elsewhere closes; `debug-desktop menu [n]` / `pick <row>`. RENAME in place: the name
   becomes a field (`Rename`, all-selected first key replaces); the desktop takes the keyboard

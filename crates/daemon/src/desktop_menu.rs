@@ -1,7 +1,7 @@
 //! The desktop's right-click menu (the mockup at `~/desktop-menu-mockup`,
 //! Max's "build the menu", 2026-10-07): a small panel of the dock's box
 //! material at the pointer, one band per row, no icons, no shortcut hints.
-//! On an icon: Open · Open in terminal · Rename · Move to Home · Move to bin. On bare
+//! On an icon: Open · Open in terminal · Rename · then Move to Home · Move to bin. On bare
 //! wallpaper: New folder · Clean up.
 //!
 //! Pure here: what the rows are, where they sit, which one is under a
@@ -82,8 +82,8 @@ pub(crate) fn rows(on_item: bool) -> Vec<Row> {
             Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
             Row::Sep,
             Row::Item { label: "Rename", action: Action::Rename, danger: false },
-            Row::Item { label: "Move to Home", action: Action::MoveToHome, danger: false },
             Row::Sep,
+            Row::Item { label: "Move to Home", action: Action::MoveToHome, danger: false },
             Row::Item { label: "Move to bin", action: Action::MoveToBin, danger: true },
         ]
     } else {
@@ -271,8 +271,9 @@ mod tests {
         assert_eq!(m.hit(mid(&rows[0])), Some(0));
         assert_eq!(m.action(0), Some(Action::Open));
         assert_eq!(m.hit(mid(&rows[2])), None, "the rule");
-        assert_eq!(m.hit(mid(&rows[4])), Some(4));
-        assert_eq!(m.action(4), Some(Action::MoveToHome));
+        assert_eq!(m.hit(mid(&rows[4])), None, "the second rule");
+        assert_eq!(m.hit(mid(&rows[5])), Some(5));
+        assert_eq!(m.action(5), Some(Action::MoveToHome));
         assert_eq!(m.hit(mid(&rows[6])), Some(6));
         assert_eq!(m.action(6), Some(Action::MoveToBin));
         assert_eq!(m.hit((m.rect.x + 1.0, m.rect.y + 1.0)), None, "the padding");
