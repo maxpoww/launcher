@@ -482,9 +482,9 @@ const MIN_TILE_PAD: f32 = 8.0;
 const MIN_BADGE_FRAC: f32 = 0.45;
 const MIN_BADGE_INSET: f32 = 2.0;
 /// Peak scale of a grid icon under the cursor.
-pub(crate) const GRID_MAGNIFY: f32 = 1.22;
+const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
-pub(crate) const GRID_MAG_RADIUS: f32 = 95.0;
+const GRID_MAG_RADIUS: f32 = 95.0;
 
 /// Cosine ease from 1.0 at `d == 0` to 0.0 at `d >= radius`.
 pub(crate) fn falloff(d: f32, radius: f32) -> f32 {

@@ -229,13 +229,17 @@ The big daemon files are cohesive but long — go straight to the function:
 - `desktop.rs` — the DESKTOP: `~/Desktop` as icons behind the windows (macOS/Windows style) on
   its own `Bottom`-layer surface (`surface::create_desktop_surface`; Bottom, not Background, so
   swww can never map over it) with its own renderer + icon array (layer = item index). Lists the
-  folder (folders first, case-insensitive; `.desktop` files are launchers with their app icon),
-  lays it out column-major from the top-left at the dock's icon scale, draws the Files-section
-  tile (carrier/thumbnail + one-line name, fitted by MEASURED width with "…", white on a dark
-  shadow) and magnifies under the pointer like the grid. Read-only: click = open (`xdg-open`
-  / the launcher's `Exec=`); inotify on the folder reloads. Icons come from its own
+  folder (folders first, case-insensitive; `.desktop` files are launchers with their app icon)
+  onto a cell `Grid` at the dock's icon scale: each file's cell is REMEMBERED in cell units
+  (`desktop.json`, path → [col,row]; `place` + `stick`), new files take the first free cell
+  column-major and move nothing, `forget` re-flows. Draws the Files-section tile
+  (carrier/thumbnail + one-line name, fitted by MEASURED width with "…", white on a dark
+  shadow); no hover magnification (Max). Click = open (`xdg-open` / the launcher's `Exec=`); a
+  press that travels ≥6px drags (input region opens to the whole surface meanwhile) and drops
+  into the nearest free cell. inotify on the folder reloads. Icons come from its own
   `notif_icons` worker (`unplated` for carriers); thumbnails ride the Files thumbnailer
   (`desktop_on_thumb`). `[desktop] enabled/render_scale` in config; `WAVERUNNER_DESKTOP_DIR`
   overrides the folder (test rigs). Pointer-free: `waverunner-ctl debug-desktop [reload|open
-  <n>|hover <x> <y>]`. Not yet: positions, selection, drag, rename, per-output surfaces.
+  <n>|move <n> <col> <row>|forget]`. Not yet: selection, drag out to/in from other apps or the
+  bin, rename/new folder, per-output surfaces.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
