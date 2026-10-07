@@ -1246,14 +1246,28 @@ impl App {
     /// loop (the other app writes when it pleases) and lands in
     /// `desktop_dnd_received`.
     pub(crate) fn desktop_dnd_drop(&mut self) {
-        let Some(offer) = self.desktop_dnd_offer.clone() else {
+        // The live offer (the one kept since `enter` is a snapshot: its
+        // position and selected action are as of then).
+        let live = self
+            .data_device
+            .as_ref()
+            .and_then(|d| d.data().drag_offer())
+            .filter(|o| o.dropped);
+        let Some(offer) = live.or_else(|| self.desktop_dnd_offer.clone()) else {
             info!("desktop: a drop with no drag over us; ignored");
             return;
         };
+        if self.desktop_dnd_offer.is_none() {
+            info!("desktop: a drop with no drag over us; ignored");
+            return;
+        }
         info!(
             "desktop: dropped at ({:.0},{:.0}), selected action {:?}; reading {URI_LIST}",
             offer.x, offer.y, offer.selected_action
         );
+        if let Some(d) = self.desktop.dnd.as_mut() {
+            d.pos = (offer.x as f32, offer.y as f32);
+        }
         let pipe = match offer.receive(URI_LIST.to_owned()) {
             Ok(pipe) => pipe,
             Err(e) => {
@@ -1262,15 +1276,19 @@ impl App {
                 return;
             }
         };
+        // Through `OwnedFd`, NOT `into_raw_fd`: SCTK 0.19's calloop-flavoured
+        // `ReadPipe::into_raw_fd` unwraps its inner fd, reads the number and
+        // drops the owner — the pipe is closed before the thread reads it,
+        // and every drop came back as 0 bytes (2026-10-07).
+        let fd: std::os::fd::OwnedFd = pipe.into();
         let (tx, rx) = calloop::channel::channel::<String>();
         std::thread::spawn(move || {
             use std::io::Read;
-            use std::os::fd::{FromRawFd, IntoRawFd};
-            // SAFETY: the pipe's read end is ours alone; `into_raw_fd` gives
-            // up its ownership to this File.
-            let mut file = unsafe { std::fs::File::from_raw_fd(pipe.into_raw_fd()) };
+            let mut file = std::fs::File::from(fd);
             let mut text = String::new();
-            let _ = file.read_to_string(&mut text);
+            if let Err(e) = file.read_to_string(&mut text) {
+                warn!("desktop: reading the drop's files failed: {e}");
+            }
             let _ = tx.send(text);
         });
         if self
