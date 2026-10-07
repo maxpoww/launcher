@@ -1194,7 +1194,12 @@ impl App {
     /// Another app's drag came over the desktop: take it if it carries
     /// files, as a move (or a copy, where a move is not possible).
     pub(crate) fn desktop_dnd_enter(&mut self, offer: DragOffer) {
-        let has_files = offer.with_mime_types(|m| m.iter().any(|t| t == URI_LIST));
+        let mimes = offer.with_mime_types(|m| m.to_vec());
+        let has_files = mimes.iter().any(|t| t == URI_LIST);
+        info!(
+            "desktop: a drag came over us at ({:.0},{:.0}) offering {mimes:?}, actions {:?}",
+            offer.x, offer.y, offer.source_actions
+        );
         if !has_files {
             offer.accept_mime_type(offer.serial, None);
             return;
@@ -1216,9 +1221,22 @@ impl App {
         }
     }
 
-    /// The drop left for elsewhere.
+    /// The drag left for elsewhere — unless it has just been DROPPED here:
+    /// Hyprland sends `leave` right after `drop` (`dropDrag` in its
+    /// DataDevice.cpp), while the files are still on their way through the
+    /// pipe. Throwing the offer away at that point lost the drop and left
+    /// the other app's drag unfinished (Nautilus stuck mid-drag, 2026-10-07).
     pub(crate) fn desktop_dnd_leave(&mut self) {
+        let dropped = self
+            .data_device
+            .as_ref()
+            .and_then(|d| d.data().drag_offer())
+            .is_some_and(|o| o.dropped);
+        if dropped {
+            return;
+        }
         if self.desktop.dnd.take().is_some() {
+            info!("desktop: the drag left");
             self.desktop_dnd_offer = None;
             self.request_desktop_draw();
         }
@@ -1229,13 +1247,18 @@ impl App {
     /// `desktop_dnd_received`.
     pub(crate) fn desktop_dnd_drop(&mut self) {
         let Some(offer) = self.desktop_dnd_offer.clone() else {
+            info!("desktop: a drop with no drag over us; ignored");
             return;
         };
+        info!(
+            "desktop: dropped at ({:.0},{:.0}), selected action {:?}; reading {URI_LIST}",
+            offer.x, offer.y, offer.selected_action
+        );
         let pipe = match offer.receive(URI_LIST.to_owned()) {
             Ok(pipe) => pipe,
             Err(e) => {
                 warn!("desktop: cannot receive the drop: {e}");
-                self.desktop_dnd_leave();
+                self.desktop_dnd_abandon();
                 return;
             }
         };
@@ -1260,20 +1283,39 @@ impl App {
             .is_err()
         {
             warn!("desktop: cannot wait for the drop's files");
-            self.desktop_dnd_leave();
+            self.desktop_dnd_abandon();
         }
     }
 
-    /// The dropped list arrived: bring the files in, the first at the cell
-    /// the drop was over, the rest in the free cells after it.
+    /// A drop that cannot be taken after all: the offer is destroyed (the
+    /// other app learns its drag was cancelled, and ends it) and the wash
+    /// goes.
+    fn desktop_dnd_abandon(&mut self) {
+        if let Some(offer) = self.desktop_dnd_offer.take() {
+            offer.destroy();
+        }
+        self.desktop.dnd = None;
+        self.request_desktop_draw();
+    }
+
+    /// The dropped list arrived: bring the files in, clustered around the
+    /// cell the drop was over, and tell the other app its drag is done.
     pub(crate) fn desktop_dnd_received(&mut self, list: &str) {
         let Some(offer) = self.desktop_dnd_offer.take() else {
+            warn!("desktop: the drop's files arrived after its drag was gone");
             return;
         };
         let at = self.desktop.dnd.take().map(|d| d.pos);
         let paths = uri_list_paths(list);
+        info!(
+            "desktop: the drop's list is {} bytes → {} file path(s): {paths:?}",
+            list.len(),
+            paths.len()
+        );
         let brought = import(&paths, &desktop_dir());
         self.desktop_place_brought(&brought, at);
+        // Done, whatever came of the files: the other app must always hear
+        // the end of its drag, or it stays mid-drag.
         offer.finish();
         self.reload_desktop();
     }

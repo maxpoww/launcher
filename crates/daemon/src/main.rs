@@ -24,6 +24,7 @@ mod damage;
 mod deck;
 mod deck_thumbs;
 mod desktop;
+mod logging;
 mod dict;
 mod display;
 mod dragging;
@@ -196,11 +197,18 @@ fn main() -> anyhow::Result<()> {
     // returning to the OS: the single biggest RAM lever for the 4 GB target.
     tune_allocator();
 
+    // Logs go to stderr AND a file of this session's: the daemon Hyprland
+    // starts at login has a stderr nobody can read (not the journal — found
+    // the hard way on 2026-10-07, chasing a drop that "got screwed" with
+    // nothing to read). `$WAVERUNNER_LOG` names the file; the default is
+    // `$XDG_STATE_HOME/waverunner/daemon.log`, truncated at every start.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "waverunner=info".into()),
         )
+        .with_ansi(false)
+        .with_writer(logging::Tee::open())
         .init();
 
     // Owner-only state dirs (clipboard text + notification bodies live
