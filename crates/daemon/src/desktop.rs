@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use smithay_client_toolkit::data_device_manager::data_offer::DragOffer;
 use smithay_client_toolkit::data_device_manager::data_source::DragSource;
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
+use smithay_client_toolkit::seat::keyboard::Keysym;
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::raw::RawPool;
 use tracing::{error, info, warn};
@@ -48,6 +49,7 @@ use crate::content::{
     IconInst, Label, Rect, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
+use crate::desktop_menu::{Action, Menu};
 use crate::launch;
 use crate::App;
 
@@ -244,6 +246,17 @@ impl Drop for DragIcon {
     }
 }
 
+/// An item's name being typed, in place: the desktop holds the keyboard
+/// for exactly this long (the mockup, 2026-10-07).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Rename {
+    pub item: usize,
+    pub text: String,
+    /// The whole name is selected (as it opens): the first key replaces
+    /// it, a Backspace clears it.
+    pub all: bool,
+}
+
 /// A press of the left button, until it is a click or a drag.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Press {
@@ -302,6 +315,10 @@ pub(crate) struct Desktop {
     pub selected: HashSet<String>,
     /// A rubber band being drawn: where it started and where it is.
     pub band: Option<((f32, f32), (f32, f32))>,
+    /// The right-click menu, while it is up.
+    pub menu: Option<Menu>,
+    /// An item's name being typed.
+    pub rename: Option<Rename>,
     /// The icons are put away (a click on bare wallpaper toggles it); the
     /// files stay. Kept in the settings store.
     pub hidden: bool,
@@ -722,7 +739,21 @@ struct Tile<'a> {
     has_icon: bool,
     /// Above everything — the one in hand.
     overlay: bool,
+    /// Something drawn over the icons (the menu): a name under it is left
+    /// out, since names are painted last of all and would show through.
+    cover: Option<Rect>,
+    /// This item's name is being typed: `(text, all selected, text width)`
+    /// — a field replaces the name.
+    rename: Option<(&'a str, bool, f32)>,
 }
+
+/// The name field while typing: its pad around the text, corner, colours.
+const FIELD_PAD_X: f32 = 7.0;
+const FIELD_PAD_Y: f32 = 2.0;
+const FIELD_RADIUS: f32 = 7.0;
+const FIELD_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
+const FIELD_RIM: [f32; 4] = [1.0, 1.0, 1.0, 0.18];
+const FIELD_SEL: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
 
 /// One tile — icon (if its picture has arrived) and shadowed name — into
 /// the scene.
@@ -751,6 +782,60 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
     }
     let cx = icon.x + icon.w / 2.0;
     let top = icon.y + icon.h + LABEL_GAP;
+    let name_rect = Rect::new(cx - tile.max_w / 2.0, top, tile.max_w, LABEL_LINE_PX + 1.0);
+    if tile.cover.is_some_and(|c| intersects(&c, &name_rect)) {
+        return;
+    }
+    if let Some((text, all, w)) = tile.rename {
+        // The field: a dark pill around the text (never narrower than the
+        // name's room), the text washed while it is all selected, a caret.
+        let inner_w = w.max(24.0);
+        let field = Rect::new(
+            cx - inner_w / 2.0 - FIELD_PAD_X,
+            top - FIELD_PAD_Y,
+            inner_w + 2.0 * FIELD_PAD_X,
+            LABEL_LINE_PX + 2.0 * FIELD_PAD_Y,
+        );
+        for (color, border) in [(FIELD_BG, 0.0), (FIELD_RIM, 1.0)] {
+            scene.rects.push(crate::content::RectInst {
+                rect: field,
+                radius: FIELD_RADIUS,
+                color,
+                glass: 0.0,
+                border,
+            });
+        }
+        if all && w > 0.0 {
+            scene.rects.push(crate::content::RectInst {
+                rect: Rect::new(cx - w / 2.0, top + 1.0, w, LABEL_LINE_PX - 2.0),
+                radius: 2.0,
+                color: FIELD_SEL,
+                glass: 0.0,
+                border: 0.0,
+            });
+        }
+        scene.rects.push(crate::content::RectInst {
+            rect: Rect::new(cx + w / 2.0 + 1.0, top + 2.0, 1.0, LABEL_LINE_PX - 4.0),
+            radius: 0.0,
+            color: INK,
+            glass: 0.0,
+            border: 0.0,
+        });
+        scene.labels.push(Label {
+            text: text.to_owned(),
+            pos: (cx, top),
+            max_w: inner_w + 2.0,
+            font_px: LABEL_FONT_PX,
+            line_px: LABEL_LINE_PX,
+            centered: true,
+            dim: false,
+            cache: false,
+            clip: None,
+            family: None,
+            color: Some(INK),
+        });
+        return;
+    }
     for (dy, color) in [(1.0, INK_SHADOW), (0.0, INK)] {
         scene.labels.push(Label {
             text: tile.name.to_owned(),
@@ -778,6 +863,11 @@ pub(crate) struct Live<'a> {
     pub selected: &'a [bool],
     /// A rubber band being drawn.
     pub band: Option<Rect>,
+    /// The menu that is up, drawn over everything.
+    pub menu: Option<&'a Menu>,
+    /// A name being typed: the item, the text, whether all of it is
+    /// selected, and the text's measured width.
+    pub rename: Option<(usize, &'a str, bool, f32)>,
 }
 
 /// One frame of the desktop: every placed item in its cell (its icon where
@@ -826,6 +916,11 @@ pub(crate) fn scene(
                 max_w: label_max_w(&cell),
                 has_icon: has_icon.get(i).copied().unwrap_or(false),
                 overlay: false,
+                cover: live.menu.map(|m| m.rect),
+                rename: live
+                    .rename
+                    .filter(|(r, ..)| *r == i)
+                    .map(|(_, text, all, w)| (text, all, w)),
             },
         );
     }
@@ -840,6 +935,10 @@ pub(crate) fn scene(
                 border,
             });
         }
+    }
+    // The menu, over everything.
+    if let Some(menu) = live.menu {
+        menu.push(&mut scene);
     }
     scene
 }
@@ -1146,6 +1245,240 @@ impl App {
         }
     }
 
+    /// Open the right-click menu at `at`: an item's (which becomes the
+    /// selection, unless it is in it already) or the wallpaper's.
+    pub(crate) fn desktop_open_menu(&mut self, at: (f32, f32)) {
+        let item = self.desktop.hit(at);
+        if let Some(i) = item {
+            let path = &self.desktop.items[i].path;
+            if !self.desktop.selected.contains(path) {
+                self.desktop.selected.clear();
+                self.desktop.selected.insert(path.clone());
+            }
+        }
+        self.desktop.press = None;
+        self.desktop.band = None;
+        let (w, h) = self.desktop_size;
+        let mut menu = Menu::open(item, at, w as f32, h as f32);
+        menu.hover = menu.hit(at);
+        self.desktop.menu = Some(menu);
+        self.request_desktop_draw();
+    }
+
+    /// A row of the menu was chosen.
+    fn desktop_menu_act(&mut self, action: Action, item: Option<usize>, at: (f32, f32)) {
+        match action {
+            Action::Open => {
+                if let Some(i) = item {
+                    self.desktop_activate(i);
+                }
+            }
+            Action::OpenTerminal => {
+                // The dock's right-click idiom on files: a terminal in the
+                // folder, or the file's folder.
+                let Some(it) = item.and_then(|i| self.desktop.items.get(i)) else {
+                    return;
+                };
+                let path = Path::new(&it.path);
+                let dir = if it.kind == Kind::Folder {
+                    path.to_path_buf()
+                } else {
+                    path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.to_path_buf())
+                };
+                let dir = dir.to_string_lossy().into_owned();
+                let exec = format!(
+                    "cd {} && exec {}",
+                    launch::shell_quote(&dir),
+                    self.config.launch.terminal
+                );
+                info!("desktop: terminal at {dir}");
+                if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
+                    error!("desktop: terminal launch failed: {e:#}");
+                }
+            }
+            Action::Rename => {
+                if let Some(i) = item {
+                    self.desktop_begin_rename(i);
+                }
+            }
+            Action::MoveToBin => {
+                // The selection goes (the clicked item is in it).
+                let paths: Vec<String> = self.desktop.selected.drain().collect();
+                for path in paths {
+                    if let Some(it) = self.desktop.items.iter().find(|it| it.path == path) {
+                        info!("desktop: {} → Recycle Bin", it.name);
+                    }
+                    self.desktop.remembered.remove(&path);
+                    self.trash_file(&path); // the folder watch takes it off the desktop
+                }
+            }
+            Action::NewFolder => self.desktop_new_folder(at),
+            Action::CleanUp => {
+                self.desktop.remembered.clear();
+                self.save_desktop_positions();
+                info!("desktop: cleaned up");
+                self.relayout_desktop();
+            }
+        }
+    }
+
+    /// A new, empty folder in the cell nearest `at`, named `untitled folder`
+    /// (then `untitled folder 2`…), its name opened for typing.
+    fn desktop_new_folder(&mut self, at: (f32, f32)) {
+        let dir = desktop_dir();
+        let path = (1..)
+            .map(|n| {
+                if n == 1 {
+                    dir.join("untitled folder")
+                } else {
+                    dir.join(format!("untitled folder {n}"))
+                }
+            })
+            .find(|p| !p.exists())
+            .unwrap_or_else(|| dir.join("untitled folder"));
+        if let Err(e) = std::fs::create_dir(&path) {
+            error!("desktop: cannot make {}: {e}", path.display());
+            return;
+        }
+        info!("desktop: new folder {}", path.display());
+        let key = path.to_string_lossy().into_owned();
+        if let Some(slot) = self.desktop.grid.nearest_free(at, &self.desktop.taken(None)) {
+            self.desktop.remembered.insert(key.clone(), slot);
+            self.save_desktop_positions();
+        }
+        self.reload_desktop();
+        if let Some(i) = self.desktop.items.iter().position(|it| it.path == key) {
+            self.desktop_begin_rename(i);
+        }
+    }
+
+    /// Open item `i`'s name for typing: the whole name selected, and the
+    /// keyboard ours — exclusively, for a layer on the Bottom layer is
+    /// given it on hover with that and never with `OnDemand` (no click
+    /// follows the menu's). It goes back the moment the name is settled.
+    fn desktop_begin_rename(&mut self, i: usize) {
+        let Some(it) = self.desktop.items.get(i) else {
+            return;
+        };
+        let Some(layer) = self.desktop_layer.as_ref() else {
+            return;
+        };
+        // A launcher is renamed by its file, not its `Name=`: what is typed
+        // is the file's new name.
+        let file_name = Path::new(&it.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| it.name.clone());
+        info!("desktop: renaming {file_name}");
+        self.desktop.selected.clear();
+        self.desktop.selected.insert(it.path.clone());
+        self.desktop.rename = Some(Rename {
+            item: i,
+            text: file_name,
+            all: true,
+        });
+        crate::surface::set_interactive(layer, true);
+        let _ = self.conn.flush();
+        self.cancel_keyboard_handback(crate::KbSurface::Desktop);
+        self.request_desktop_draw();
+    }
+
+    /// The name is settled: kept (`commit`, if it changed and is not taken)
+    /// or left as it was. The keyboard goes back to the window it came from.
+    pub(crate) fn desktop_end_rename(&mut self, commit: bool) {
+        let Some(rename) = self.desktop.rename.take() else {
+            return;
+        };
+        if self.desktop_layer.is_some() {
+            // Armed before the release: the compositor's `leave` completes it.
+            self.begin_keyboard_handback(crate::KbSurface::Desktop, None);
+            if let Some(layer) = self.desktop_layer.as_ref() {
+                crate::surface::set_interactive(layer, false);
+            }
+            let _ = self.conn.flush();
+        }
+        let renamed = commit && self.desktop_apply_rename(rename.item, rename.text.trim());
+        if renamed {
+            self.reload_desktop();
+        } else {
+            self.request_desktop_draw();
+        }
+    }
+
+    /// `fs::rename` item `i` to `name` in its folder, carrying its cell and
+    /// its selection to the new path. False when nothing was done.
+    fn desktop_apply_rename(&mut self, i: usize, name: &str) -> bool {
+        let Some(it) = self.desktop.items.get(i) else {
+            return false;
+        };
+        let old = PathBuf::from(&it.path);
+        let Some(dir) = old.parent() else {
+            return false;
+        };
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            warn!("desktop: {name:?} is not a name");
+            return false;
+        }
+        let new = dir.join(name);
+        if new == old {
+            return false;
+        }
+        if new.exists() {
+            warn!("desktop: {} exists; {} keeps its name", new.display(), old.display());
+            return false;
+        }
+        if let Err(e) = std::fs::rename(&old, &new) {
+            error!("desktop: cannot rename {} → {}: {e}", old.display(), new.display());
+            return false;
+        }
+        info!("desktop: {} → {}", old.display(), new.display());
+        let (old_key, new_key) = (it.path.clone(), new.to_string_lossy().into_owned());
+        if let Some(slot) = self.desktop.remembered.remove(&old_key) {
+            self.desktop.remembered.insert(new_key.clone(), slot);
+            self.save_desktop_positions();
+        }
+        if self.desktop.selected.remove(&old_key) {
+            self.desktop.selected.insert(new_key);
+        }
+        true
+    }
+
+    /// A key while a name is being typed: text goes in (the first key
+    /// replaces the selected name), Backspace takes out, Enter keeps,
+    /// Escape leaves the old name.
+    pub(crate) fn desktop_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        let Some(rename) = self.desktop.rename.as_mut() else {
+            return;
+        };
+        match keysym {
+            Keysym::Return | Keysym::KP_Enter => self.desktop_end_rename(true),
+            Keysym::Escape => self.desktop_end_rename(false),
+            Keysym::BackSpace => {
+                if rename.all {
+                    rename.text.clear();
+                    rename.all = false;
+                } else {
+                    rename.text.pop();
+                }
+                self.request_desktop_draw();
+            }
+            _ => {
+                let Some(s) = utf8.filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) else {
+                    return;
+                };
+                if self.modifiers.ctrl {
+                    return;
+                }
+                if rename.all {
+                    rename.text.clear();
+                    rename.all = false;
+                }
+                rename.text.push_str(s);
+                self.request_desktop_draw();
+            }
+        }
+    }
+
     /// Put the icons away, or bring them back: they fade over a few
     /// frames. Whatever was selected or being banded is let go of.
     pub(crate) fn desktop_toggle_hidden(&mut self) {
@@ -1186,9 +1519,15 @@ impl App {
             .map(|l| now.duration_since(l).as_secs_f32().min(0.1))
             .unwrap_or(0.0);
         let target = if self.desktop.hidden { 0.0 } else { 1.0 };
-        let (shown, moving) =
+        let (shown, mut moving) =
             crate::animation::ease_toward(self.desktop.shown, target, dt, 14.0, 0.004);
         self.desktop.shown = shown;
+        // The menu's entrance eases the same way.
+        if let Some(menu) = self.desktop.menu.as_mut() {
+            let (t, menu_moving) = crate::animation::ease_toward(menu.t, 1.0, dt, 20.0, 0.004);
+            menu.t = t;
+            moving |= menu_moving;
+        }
         self.desktop_last_frame = moving.then_some(now);
         let has_icon: Vec<bool> = (0..self.desktop.items.len())
             .map(|i| self.desktop.has_icon(i))
@@ -1210,6 +1549,11 @@ impl App {
         let Some(renderer) = self.desktop_renderer.as_mut() else {
             return;
         };
+        let rename_view = self
+            .desktop
+            .rename
+            .as_ref()
+            .map(|r| (r.item, r.text.as_str(), r.all, renderer.measure_text(&r.text, LABEL_FONT_PX, None)));
         let max_w = label_max_w(&self.desktop.grid.rect((0, 0)));
         let names: Vec<String> = self
             .desktop
@@ -1232,6 +1576,8 @@ impl App {
                 in_hand: &in_hand,
                 selected: &selected,
                 band,
+                menu: self.desktop.menu.as_ref(),
+                rename: rename_view,
             },
         );
         scene.alpha = shown;
@@ -1292,8 +1638,21 @@ impl App {
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.desktop.press = None;
                 self.desktop.ptr = None;
-                if self.desktop.band.take().is_some() {
+                // A menu left behind would hang under whatever took the
+                // pointer; it goes with it.
+                let gone = self.desktop.band.take().is_some() | self.desktop.menu.take().is_some();
+                if gone {
                     self.request_desktop_draw();
+                }
+            }
+            // The right button, let go: the menu for what is under it.
+            wl_pointer::Event::Button {
+                button,
+                state: WEnum::Value(wl_pointer::ButtonState::Released),
+                ..
+            } if button == crate::BTN_RIGHT => {
+                if let Some(at) = self.desktop.ptr {
+                    self.desktop_open_menu(at);
                 }
             }
             wl_pointer::Event::Button {
@@ -1306,6 +1665,19 @@ impl App {
                     let Some(at) = self.desktop.ptr else {
                         return;
                     };
+                    // While the menu is up, the left button is its: a press
+                    // on a row arms it, one anywhere else just closes it
+                    // (and is not a click on the desktop).
+                    if let Some(menu) = self.desktop.menu.as_mut() {
+                        match menu.hit(at) {
+                            Some(row) => menu.pressed = Some(row),
+                            None => {
+                                self.desktop.menu = None;
+                                self.request_desktop_draw();
+                            }
+                        }
+                        return;
+                    }
                     let item = self.desktop.hit(at);
                     // A press on an item outside the selection makes it the
                     // selection (so a drag of it takes it alone); on one
@@ -1321,6 +1693,21 @@ impl App {
                     self.desktop.press = Some(Press { item, at, serial });
                 }
                 wl_pointer::ButtonState::Released => {
+                    // A row pressed and released: its action, and the menu
+                    // goes.
+                    if let Some(menu) = self.desktop.menu.as_mut() {
+                        let pressed = menu.pressed.take();
+                        let under = self.desktop.ptr.and_then(|p| menu.hit(p));
+                        if let Some(row) = pressed.filter(|r| Some(*r) == under) {
+                            if let Some(action) = menu.action(row) {
+                                let (item, at) = (menu.item, menu.at);
+                                self.desktop.menu = None;
+                                self.desktop_menu_act(action, item, at);
+                                self.request_desktop_draw();
+                            }
+                        }
+                        return;
+                    }
                     let press = self.desktop.press.take();
                     if self.desktop.band.take().is_some() {
                         // The band's selection stands; the band itself goes.
@@ -1351,6 +1738,16 @@ impl App {
     /// wallpaper — a rubber band selecting what it touches.
     fn desktop_motion(&mut self, x: f32, y: f32) {
         self.desktop.ptr = Some((x, y));
+        if let Some(menu) = self.desktop.menu.as_mut() {
+            // The menu has the pointer: only its hover follows it.
+            let over = menu.hit((x, y));
+            if over != menu.hover {
+                menu.hover = over;
+                self.request_desktop_draw();
+            }
+            self.desktop_cursor();
+            return;
+        }
         if let Some((from, _)) = self.desktop.band {
             self.desktop.band = Some((from, (x, y)));
             let band = band_rect(from, (x, y));
@@ -1831,9 +2228,15 @@ impl App {
         let Some(device) = &self.cursor_device else {
             return;
         };
+        let over_row = self
+            .desktop
+            .menu
+            .as_ref()
+            .zip(self.desktop.ptr)
+            .is_some_and(|(m, p)| m.hit(p).is_some());
         let shape = if self.desktop.drag.is_some() {
             Shape::Grabbing
-        } else if self.desktop.ptr.and_then(|p| self.desktop.hit(p)).is_some() {
+        } else if over_row || self.desktop.ptr.and_then(|p| self.desktop.hit(p)).is_some() {
             Shape::Pointer
         } else {
             Shape::Default
@@ -1872,6 +2275,34 @@ impl App {
     pub(crate) fn desktop_debug(&mut self, what: &str) -> String {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
+        }
+        // `menu [n]`: the menu on item n (or the wallpaper's, mid-surface);
+        // `pick <row>`: choose that row of the open menu.
+        if let Some(rest) = what.strip_prefix("menu") {
+            let (w, h) = self.desktop_size;
+            let at = match rest.trim().parse::<usize>().ok().and_then(|i| self.desktop.slots.get(i).copied().flatten()) {
+                Some(slot) => {
+                    let r = icon_rect(&self.desktop.grid.rect(slot), self.icon_scale());
+                    (r.x + r.w / 2.0, r.y + r.h / 2.0)
+                }
+                None => (w as f32 / 2.0, h as f32 / 2.0),
+            };
+            self.desktop_open_menu(at);
+            let rows = self.desktop.menu.as_ref().map_or(0, |m| m.rows.len());
+            return format!("menu at ({:.0},{:.0}) with {rows} rows", at.0, at.1);
+        }
+        if let Some(rest) = what.strip_prefix("pick ") {
+            let Some(menu) = self.desktop.menu.take() else {
+                return "no menu is up".to_owned();
+            };
+            return match rest.trim().parse::<usize>().ok().and_then(|r| menu.action(r)) {
+                Some(action) => {
+                    self.desktop_menu_act(action, menu.item, menu.at);
+                    self.request_desktop_draw();
+                    format!("{action:?}")
+                }
+                None => "pick <row of an action>".to_owned(),
+            };
         }
         match what.trim() {
             "hide" | "show" | "toggle" => {
@@ -2236,6 +2667,8 @@ mod tests {
             in_hand: &[0],
             selected: &[],
             band: None,
+            menu: None,
+            rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
         assert!(s.overlay.is_empty());
@@ -2249,6 +2682,8 @@ mod tests {
             in_hand: &[],
             selected: &[false, true, false],
             band: Some(band),
+            menu: None,
+            rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
         assert_eq!(s.rects.len(), 3, "the wash, the band's fill and its line");

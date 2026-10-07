@@ -24,6 +24,7 @@ mod damage;
 mod deck;
 mod deck_thumbs;
 mod desktop;
+mod desktop_menu;
 mod logging;
 mod dict;
 mod display;
@@ -5818,6 +5819,11 @@ impl App {
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // A desktop icon's name being typed takes every key.
+        if self.desktop.rename.is_some() {
+            self.desktop_key(keysym, utf8);
+            return;
+        }
         // FAST LAUNCH holds the keyboard while its bubble is up.
         if self.fast.open {
             self.fast_key(keysym, utf8);
@@ -6414,6 +6420,8 @@ impl SeatHandler for App {
 pub(crate) enum KbSurface {
     Launcher,
     Options,
+    /// The desktop, while a name is being typed (see `desktop.rs`).
+    Desktop,
 }
 
 /// A keyboard hand-back in flight (see [`App::begin_keyboard_handback`]).
@@ -6455,6 +6463,21 @@ impl KeyboardHandler for App {
         // launcher losing it means what's handled below — the OPTIONS surface
         // releases its grab on every box close, which must not collapse an open
         // launcher or drop the window it means to hand focus back to.
+        // (And the desktop, while a name is typed on it.)
+        if self
+            .desktop_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            debug!("keyboard focus left the desktop");
+            // A name still being typed when the keyboard goes (a click on a
+            // window) keeps what was typed.
+            if self.desktop.rename.is_some() {
+                self.desktop_end_rename(true);
+            }
+            self.complete_keyboard_handback(KbSurface::Desktop);
+            return;
+        }
         if surface != self.layer.wl_surface() {
             debug!("keyboard focus left the OPTIONS surface");
             // The box's release, confirmed: the keyboard goes where it chose.

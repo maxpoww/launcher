@@ -261,6 +261,16 @@ The big daemon files are cohesive but long — go straight to the function:
   Selected items wear one soft wash (`sel_rect`, the mockup at ~/desktop-menu-mockup).
   Pointer-free: `waverunner-ctl debug-desktop [reload|open <n>|move <n> <col> <row>|import
   <col> <row> <uri…>|select <n…>|band <x0> <y0> <x1> <y1>|forget]`; the live daemon logs
-  to `~/.local/state/waverunner/daemon.log`. Not yet: the right-click menu (mocked, awaiting
-  Max), rename/new folder, per-output surfaces.
+  to `~/.local/state/waverunner/daemon.log`. HIDE/SHOW: a click on bare wallpaper toggles the
+  icons (fade; `settings.desktop_hidden`). MENU (`desktop_menu.rs`, the approved mockup at
+  ~/desktop-menu-mockup): right-click → `Menu::open` at the pointer (icon: Open · Open in
+  terminal · Rename · Move to bin; wallpaper: New folder · Clean up), drawn as a `GridContent`
+  so it paints over the icons (names under it are skipped), a left press on a row acts on
+  release, elsewhere closes; `debug-desktop menu [n]` / `pick <row>`. RENAME in place: the name
+  becomes a field (`Rename`, all-selected first key replaces); the desktop takes the keyboard
+  EXCLUSIVE for exactly that long (a Bottom layer gets it on hover with Exclusive, never via
+  OnDemand without a click) and `begin_keyboard_handback(KbSurface::Desktop)` returns it;
+  keys route first in `main.rs::handle_key_event` → `desktop_key`; a keyboard `leave` mid-name
+  keeps what was typed. New folder = "untitled folder" at the clicked cell → rename. Not yet:
+  per-output surfaces, Escape closing the menu (no keyboard while it is up).
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

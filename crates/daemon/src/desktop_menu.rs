@@ -1,0 +1,278 @@
+//! The desktop's right-click menu (the mockup at `~/desktop-menu-mockup`,
+//! Max's "build the menu", 2026-10-07): a small panel of the dock's box
+//! material at the pointer, one band per row, no icons, no shortcut hints.
+//! On an icon: Open · Open in terminal · Rename · Move to bin. On bare
+//! wallpaper: New folder · Clean up.
+//!
+//! Pure here: what the rows are, where they sit, which one is under a
+//! point, and how they are drawn into a [`Scene`]. The desktop (`desktop.rs`)
+//! opens and closes it and acts on a row.
+
+use crate::content::{GridContent, Label, Rect, RectInst, Scene, FONT_BOLD};
+
+/// What a row does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Action {
+    Open,
+    OpenTerminal,
+    Rename,
+    MoveToBin,
+    NewFolder,
+    CleanUp,
+}
+
+/// One row: an action, or a rule between groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Row {
+    Item {
+        label: &'static str,
+        action: Action,
+        /// Drawn in red: it throws something away.
+        danger: bool,
+    },
+    Sep,
+}
+
+/// The menu's width.
+pub(crate) const WIDTH: f32 = 192.0;
+/// Padding inside the panel, around the rows.
+const PAD: f32 = 6.0;
+/// A row's height, and a rule's.
+const ROW_H: f32 = 30.0;
+const SEP_H: f32 = 11.0;
+/// Corners: the panel's and a row's hover band's.
+const RADIUS: f32 = 14.0;
+const ROW_RADIUS: f32 = 9.0;
+/// Text: size and inset from the row's left edge.
+const FONT_PX: f32 = 13.0;
+const LINE_PX: f32 = 17.0;
+const TEXT_X: f32 = 10.0;
+/// How far from the pointer the panel's corner sits.
+const GAP: f32 = 6.0;
+/// Colours: the panel (the dock's dark glass, no blur of its own), a
+/// hovered row's band, a rule, the ink, the dim ink and the red.
+const PANEL: [f32; 4] = [22.0 / 255.0, 24.0 / 255.0, 28.0 / 255.0, 0.92];
+const HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.09];
+const HOVER_DANGER: [f32; 4] = [224.0 / 255.0, 82.0 / 255.0, 82.0 / 255.0, 0.16];
+const LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+const INK: [f32; 4] = [238.0 / 255.0, 240.0 / 255.0, 234.0 / 255.0, 1.0];
+const RED: [f32; 4] = [224.0 / 255.0, 82.0 / 255.0, 82.0 / 255.0, 1.0];
+
+/// The rows for a right-click on an item (`on_item`) or on bare wallpaper.
+pub(crate) fn rows(on_item: bool) -> Vec<Row> {
+    if on_item {
+        vec![
+            Row::Item { label: "Open", action: Action::Open, danger: false },
+            Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
+            Row::Sep,
+            Row::Item { label: "Rename", action: Action::Rename, danger: false },
+            Row::Sep,
+            Row::Item { label: "Move to bin", action: Action::MoveToBin, danger: true },
+        ]
+    } else {
+        vec![
+            Row::Item { label: "New folder", action: Action::NewFolder, danger: false },
+            Row::Sep,
+            Row::Item { label: "Clean up", action: Action::CleanUp, danger: false },
+        ]
+    }
+}
+
+/// A menu that is up.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Menu {
+    /// The item it was opened on, if any (the wallpaper's menu otherwise).
+    pub item: Option<usize>,
+    /// Where the pointer was: a new folder goes in that cell.
+    pub at: (f32, f32),
+    pub rows: Vec<Row>,
+    /// The panel, placed so it stays on the surface.
+    pub rect: Rect,
+    /// The row under the pointer.
+    pub hover: Option<usize>,
+    /// The row the left button went down on.
+    pub pressed: Option<usize>,
+    /// Its entrance, 0..1: it fades in and settles down a few pixels.
+    pub t: f32,
+}
+
+impl Menu {
+    /// A menu at `at` on a `w`×`h` surface: hanging to the right and below
+    /// the pointer, or flipped to stay on the surface.
+    pub fn open(item: Option<usize>, at: (f32, f32), w: f32, h: f32) -> Self {
+        let rows = rows(item.is_some());
+        let height = PAD * 2.0 + rows.iter().map(|r| row_h(*r)).sum::<f32>();
+        let x = if at.0 + GAP + WIDTH <= w { at.0 + GAP } else { (at.0 - GAP - WIDTH).max(0.0) };
+        let y = if at.1 + GAP + height <= h { at.1 + GAP } else { (at.1 - GAP - height).max(0.0) };
+        Self {
+            item,
+            at,
+            rows,
+            rect: Rect::new(x, y, WIDTH, height),
+            hover: None,
+            pressed: None,
+            t: 0.0,
+        }
+    }
+
+    /// Each row's rectangle, in order (rules included).
+    pub fn row_rects(&self) -> Vec<Rect> {
+        let mut y = self.rect.y + PAD;
+        self.rows
+            .iter()
+            .map(|r| {
+                let h = row_h(*r);
+                let rect = Rect::new(self.rect.x + PAD, y, WIDTH - 2.0 * PAD, h);
+                y += h;
+                rect
+            })
+            .collect()
+    }
+
+    /// The action row under `pos` (never a rule).
+    pub fn hit(&self, pos: (f32, f32)) -> Option<usize> {
+        self.row_rects()
+            .iter()
+            .enumerate()
+            .find(|(i, r)| r.contains(pos) && matches!(self.rows[*i], Row::Item { .. }))
+            .map(|(i, _)| i)
+    }
+
+    /// The action of row `i`.
+    pub fn action(&self, i: usize) -> Option<Action> {
+        match self.rows.get(i) {
+            Some(Row::Item { action, .. }) => Some(*action),
+            _ => None,
+        }
+    }
+
+    /// Draw the menu over everything in `scene`: a grid of its own (grids
+    /// paint after the icons), clipped to the panel.
+    pub fn push(&self, scene: &mut Scene) {
+        let t = self.t.clamp(0.0, 1.0);
+        // Its entrance: fading in while settling down from 4 px above.
+        let lift = (1.0 - t) * -4.0;
+        let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * t];
+        let panel = Rect::new(self.rect.x, self.rect.y + lift, self.rect.w, self.rect.h);
+        let mut grid = GridContent {
+            clip: panel,
+            ..Default::default()
+        };
+        grid.rects.push(RectInst {
+            rect: panel,
+            radius: RADIUS,
+            color: fade(PANEL),
+            glass: 0.0,
+            border: 0.0,
+        });
+        for (i, (row, rect)) in self.rows.iter().zip(self.row_rects()).enumerate() {
+            let rect = Rect::new(rect.x, rect.y + lift, rect.w, rect.h);
+            match row {
+                Row::Sep => grid.rects.push(RectInst {
+                    rect: Rect::new(rect.x + 2.0, rect.y + (rect.h - 1.0) / 2.0, rect.w - 4.0, 1.0),
+                    radius: 0.0,
+                    color: fade(LINE),
+                    glass: 0.0,
+                    border: 0.0,
+                }),
+                Row::Item { label, danger, .. } => {
+                    if self.hover == Some(i) {
+                        grid.rects.push(RectInst {
+                            rect,
+                            radius: ROW_RADIUS,
+                            color: fade(if *danger { HOVER_DANGER } else { HOVER }),
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                    }
+                    grid.labels.push(Label {
+                        text: (*label).to_owned(),
+                        pos: (rect.x + TEXT_X, rect.y + (rect.h - LINE_PX) / 2.0),
+                        max_w: rect.w - 2.0 * TEXT_X,
+                        font_px: FONT_PX,
+                        line_px: LINE_PX,
+                        centered: false,
+                        dim: false,
+                        cache: true,
+                        clip: Some(panel),
+                        family: None,
+                        color: Some(fade(if *danger { RED } else { INK })),
+                    });
+                }
+            }
+        }
+        let _ = FONT_BOLD; // the rows are regular weight; the sentinel stays importable
+        scene.grids.push(grid);
+    }
+}
+
+fn row_h(row: Row) -> f32 {
+    match row {
+        Row::Item { .. } => ROW_H,
+        Row::Sep => SEP_H,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_icon_menu_hangs_right_and_below_the_pointer_and_flips_at_the_edges() {
+        let m = Menu::open(Some(3), (100.0, 100.0), 1000.0, 800.0);
+        assert_eq!((m.rect.x, m.rect.y), (106.0, 106.0));
+        assert_eq!(m.rect.w, WIDTH);
+        // 4 rows + 2 rules, inside the padding.
+        assert_eq!(m.rect.h, PAD * 2.0 + 4.0 * ROW_H + 2.0 * SEP_H);
+        // Near the right and bottom edges it opens to the left and above.
+        let m = Menu::open(Some(3), (950.0, 780.0), 1000.0, 800.0);
+        assert_eq!(m.rect.x, 950.0 - GAP - WIDTH);
+        assert!(m.rect.y + m.rect.h <= 780.0 - GAP + 0.01);
+        // The wallpaper's menu is the short one.
+        let m = Menu::open(None, (10.0, 10.0), 1000.0, 800.0);
+        assert_eq!(m.rows.len(), 3);
+        assert_eq!(m.action(0), Some(Action::NewFolder));
+        assert_eq!(m.action(1), None, "a rule is not an action");
+        assert_eq!(m.action(2), Some(Action::CleanUp));
+    }
+
+    #[test]
+    fn hit_finds_rows_but_never_rules_or_the_padding() {
+        let m = Menu::open(Some(0), (0.0, 0.0), 1000.0, 800.0);
+        let rows = m.row_rects();
+        let mid = |r: &Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!(m.hit(mid(&rows[0])), Some(0));
+        assert_eq!(m.action(0), Some(Action::Open));
+        assert_eq!(m.hit(mid(&rows[2])), None, "the rule");
+        assert_eq!(m.hit(mid(&rows[5])), Some(5));
+        assert_eq!(m.action(5), Some(Action::MoveToBin));
+        assert_eq!(m.hit((m.rect.x + 1.0, m.rect.y + 1.0)), None, "the padding");
+        assert_eq!(m.hit((5000.0, 5000.0)), None);
+    }
+
+    #[test]
+    fn the_drawn_menu_is_one_grid_with_a_panel_a_hover_band_and_its_labels() {
+        let mut m = Menu::open(Some(0), (0.0, 0.0), 1000.0, 800.0);
+        m.t = 1.0;
+        m.hover = Some(5);
+        let mut scene = Scene::default();
+        m.push(&mut scene);
+        assert_eq!(scene.grids.len(), 1);
+        let g = &scene.grids[0];
+        assert_eq!(g.clip, m.rect);
+        // The panel, two rules, one hover band.
+        assert_eq!(g.rects.len(), 4);
+        assert_eq!(g.rects[0].rect, m.rect);
+        assert_eq!(g.rects[3].color, HOVER_DANGER, "the bin's band is red");
+        assert_eq!(g.labels.len(), 4);
+        assert_eq!(g.labels[3].text, "Move to bin");
+        assert_eq!(g.labels[3].color, Some(RED));
+        // Half-way in, everything is half as strong and 2 px above its place.
+        m.t = 0.5;
+        let mut scene = Scene::default();
+        m.push(&mut scene);
+        let g = &scene.grids[0];
+        assert!((g.rects[0].color[3] - PANEL[3] * 0.5).abs() < 1e-5);
+        assert!((g.rects[0].rect.y - (m.rect.y - 2.0)).abs() < 1e-5);
+    }
+}
