@@ -273,6 +273,10 @@ pub(crate) struct Drag {
     /// The one grabbed first, then the rest of the selection it belonged
     /// to (they travel together and land keeping their arrangement).
     pub items: Vec<usize>,
+    /// Where on the grabbed icon the press landed: the compositor's drag
+    /// image sits at the pointer less this, and so do the rest of the
+    /// group, drawn by us around it.
+    pub grip: (f32, f32),
     /// The dock was hidden when the icon was lifted, and came up for the
     /// drag (so the bin is there to drop on): it goes back down after.
     pub dock_raised: bool,
@@ -856,9 +860,15 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
 /// What one frame shows besides the placed items.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Live<'a> {
-    /// The items in hand: their cells are left empty (the compositor
-    /// carries the picture under the pointer).
+    /// The items in hand, the grabbed one first: their cells are left
+    /// empty. The compositor carries the grabbed one's picture under the
+    /// pointer; the rest travel with it, drawn here.
     pub in_hand: &'a [usize],
+    /// Where the grabbed icon is while the drag is over the desktop (its
+    /// top-left), so the group can be drawn around it; `None` when the
+    /// drag is elsewhere (over a window, the dock…), where the desktop is
+    /// covered anyway.
+    pub carried: Option<(f32, f32)>,
     /// Which items are selected (washed).
     pub selected: &'a [bool],
     /// A rubber band being drawn.
@@ -891,6 +901,44 @@ pub(crate) fn scene(
     };
     for (i, item) in items.iter().enumerate() {
         if live.in_hand.contains(&i) {
+            // In hand: drawn where it travels — at its old offset from the
+            // grabbed one, which sits at the pointer. The grabbed one's own
+            // picture is the compositor's drag image; only its name is
+            // drawn, under that image (Max, 2026-10-07: "only one moves,
+            // the others move invisible").
+            let (Some(origin), Some(&lead)) = (live.carried, live.in_hand.first()) else {
+                continue;
+            };
+            let (Some(slot), Some(lead_slot)) = (
+                slots.get(i).copied().flatten(),
+                slots.get(lead).copied().flatten(),
+            ) else {
+                continue;
+            };
+            let (own, lead_icon) = (
+                icon_rect(&grid.rect(slot), icon_scale),
+                icon_rect(&grid.rect(lead_slot), icon_scale),
+            );
+            let icon = Rect::new(
+                origin.0 + own.x - lead_icon.x,
+                origin.1 + own.y - lead_icon.y,
+                own.w,
+                own.h,
+            );
+            push_tile(
+                &mut scene,
+                &Tile {
+                    item,
+                    layer: i as u32,
+                    icon,
+                    name: names.get(i).map_or(item.name.as_str(), String::as_str),
+                    max_w: label_max_w(&grid.rect(slot)),
+                    has_icon: i != lead && has_icon.get(i).copied().unwrap_or(false),
+                    overlay: true,
+                    cover: None,
+                    rename: None,
+                },
+            );
             continue;
         }
         let Some(slot) = slots.get(i).copied().flatten() else {
@@ -1539,6 +1587,12 @@ impl App {
             .as_ref()
             .map(|d| d.items.clone())
             .unwrap_or_default();
+        let carried = self
+            .desktop
+            .drag
+            .as_ref()
+            .zip(self.desktop.dnd.filter(|d| !d.on_dock))
+            .map(|(d, at)| (at.pos.0 - d.grip.0, at.pos.1 - d.grip.1));
         let selected: Vec<bool> = self
             .desktop
             .items
@@ -1574,6 +1628,7 @@ impl App {
             icon_scale,
             Live {
                 in_hand: &in_hand,
+                carried,
                 selected: &selected,
                 band,
                 menu: self.desktop.menu.as_ref(),
@@ -1891,6 +1946,7 @@ impl App {
         );
         self.desktop.drag = Some(Drag {
             items,
+            grip,
             dock_raised,
             source,
             _icon: image,
@@ -2101,6 +2157,9 @@ impl App {
             d.pos = (x, y);
             if d.on_dock {
                 self.schedule_frame();
+            } else if self.desktop.drag.is_some() {
+                // Our own group travels with the pointer.
+                self.request_desktop_draw();
             }
         }
     }
@@ -2722,6 +2781,7 @@ mod tests {
         // picture); nothing of it is drawn.
         let live = Live {
             in_hand: &[0],
+            carried: None,
             selected: &[],
             band: None,
             menu: None,
@@ -2737,6 +2797,7 @@ mod tests {
         let band = Rect::new(5.0, 5.0, 200.0, 150.0);
         let live = Live {
             in_hand: &[],
+            carried: None,
             selected: &[false, true, false],
             band: Some(band),
             menu: None,
@@ -2749,6 +2810,46 @@ mod tests {
         assert!(s.rects[0].rect.x > cell.x && s.rects[0].rect.y > cell.y);
         assert_eq!(s.rects[1].rect, band);
         assert_eq!(s.rects[2].border, 1.0);
+    }
+
+    #[test]
+    fn a_group_in_hand_travels_around_the_grabbed_one_which_is_the_compositors() {
+        let items = vec![item("a"), item("b"), item("c")];
+        let g = Grid::new(1000.0, 400.0, 1.0);
+        let slots = vec![Some((0, 0)), Some((0, 1)), Some((1, 0))];
+        let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
+        // a grabbed, with b; the drag is over the desktop with a's icon at (300,200).
+        let live = Live {
+            in_hand: &[0, 1],
+            carried: Some((300.0, 200.0)),
+            selected: &[true, true, false],
+            band: None,
+            menu: None,
+            rename: None,
+        };
+        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
+        // b's icon travels, in the overlay, one cell below where a's is.
+        assert_eq!(s.overlay.len(), 1, "b's picture; a's is the compositor's");
+        assert_eq!(s.overlay[0].layer, 1);
+        assert!((s.overlay[0].rect.x - 300.0).abs() < 1e-4);
+        assert!((s.overlay[0].rect.y - (200.0 + CELL_H)).abs() < 1e-4);
+        // c stays in its cell; a and b carry their names (a's under the image).
+        assert_eq!(s.icons.len(), 1);
+        assert_eq!(s.icons[0].layer, 2);
+        assert_eq!(s.labels.len(), 6, "two labels each for a, b and c");
+        assert!(s.labels.iter().any(|l| l.text == "a" && (l.pos.0 - (300.0 + GRID_ICON / 2.0)).abs() < 1e-4));
+        // The drag elsewhere (over the dock): the group is simply not drawn.
+        let away = Live {
+            in_hand: &[0, 1],
+            carried: None,
+            selected: &[true, true, false],
+            band: None,
+            menu: None,
+            rename: None,
+        };
+        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, away);
+        assert!(s.overlay.is_empty());
+        assert_eq!(s.labels.len(), 2, "only c");
     }
 
     #[test]
