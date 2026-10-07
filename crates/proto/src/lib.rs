@@ -104,7 +104,9 @@ pub enum Command {
     /// Drive the desktop (the icons behind the windows) without a pointer:
     /// alone, log every item and its cell; `reload` re-reads the folder;
     /// `open <n>` opens item n; `move <n> <col> <row>` puts it in that cell
-    /// (or the free one nearest); `forget` drops every remembered position.
+    /// (or the free one nearest); `import <col> <row> <uri…>` brings those
+    /// files in as a drop on that cell; `forget` drops every remembered
+    /// position.
     DebugDesktop(String),
     /// Golem as a floating window manager instead of a tiling one: `on`, `off`
     /// or `toggle` (empty = toggle). The gear's page-1 switch sends the same
@@ -424,7 +426,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-module-box",
     "debug-stats",
     "debug-gear <open net|open bt|close|state|detail|share|hotspot|files|back|password|type|scroll|pair|fake-off>",
-    "debug-desktop [reload|open <n>|move <n> <col> <row>|forget]",
+    "debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row> <uri…>|forget]",
     "options-trigger <id>",
     "control-panel",
     "modules [name]",

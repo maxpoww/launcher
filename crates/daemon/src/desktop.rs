@@ -14,29 +14,39 @@
 //!
 //! A click opens an item (files and folders through `xdg-open`, a launcher
 //! through its `Exec=`). A press that travels drags the icon; it drops into
-//! the nearest free cell and stays there. The folder is watched so the
-//! icons follow it. No hover feedback beyond the cursor (Max, 2026-10-06:
-//! "we don't need magnification on the desktop"). Nothing selects, renames
-//! or leaves the surface yet.
+//! the nearest free cell and stays there — or, let go over the dock's
+//! Recycle Bin (the dock comes up for the drag), goes to the trash. Files
+//! dragged in from any other app (a Wayland drop of `text/uri-list`:
+//! Nautilus, a browser's download…) are brought into the folder and placed
+//! at the cell they were dropped on — moved when they are on the same
+//! filesystem, copied otherwise (a file from a USB stick stays on it). The
+//! folder is watched so the icons follow it. No hover feedback beyond the
+//! cursor (Max, 2026-10-06: "we don't need magnification on the desktop").
+//! Nothing selects, renames or drags OUT to other apps yet.
 //!
 //! Pointer-free: `waverunner-ctl debug-desktop [reload|open <n>|move <n>
-//! <col> <row>|forget]`.
+//! <col> <row>|import <col> <row> <uri…>|forget]`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use smithay_client_toolkit::data_device_manager::data_offer::DragOffer;
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use smithay_client_toolkit::shell::WaylandSurface;
 use tracing::{error, info, warn};
+use wayland_client::protocol::wl_data_device_manager::DndAction;
 use wayland_client::protocol::wl_pointer;
 use wayland_client::WEnum;
 
 use crate::content::{
-    IconInst, Label, Rect, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP, LABEL_FONT_PX,
-    LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
+    IconInst, Label, Rect, RectInst, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
+    LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
 use crate::launch;
 use crate::App;
+
+/// The one drop type the desktop takes: a list of `file://` URIs.
+const URI_LIST: &str = "text/uri-list";
 
 /// Breathing room between the icons and the surface's edges.
 const MARGIN: f32 = 12.0;
@@ -60,6 +70,10 @@ const REMEMBERED_MAX: usize = 1000;
 /// wallpaper (white on a bright picture would otherwise vanish).
 const INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const INK_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
+/// The cell a drop from another app will land in, shown while it hovers:
+/// a faint rounded wash, the dock's hover-highlight idiom.
+const DROP_WASH: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
+const DROP_WASH_RADIUS: f32 = 12.0;
 /// Environment override of the folder, for a test rig that must not show
 /// the owner's real desktop.
 const DIR_ENV: &str = "WAVERUNNER_DESKTOP_DIR";
@@ -215,6 +229,15 @@ pub(crate) fn stick(
 pub(crate) struct Drag {
     pub item: usize,
     pub grip: (f32, f32),
+    /// The dock was hidden when the icon was lifted, and came up for the
+    /// drag (so the bin is there to drop on): it goes back down after.
+    pub dock_raised: bool,
+}
+
+/// Another app's drag hovering the desktop: where its pointer is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DndIn {
+    pub pos: (f32, f32),
 }
 
 /// The desktop's state on the loop.
@@ -232,6 +255,8 @@ pub(crate) struct Desktop {
     /// (a click) or the pointer travels (a drag).
     pub press: Option<(usize, (f32, f32))>,
     pub drag: Option<Drag>,
+    /// A drop from another app hovering us.
+    pub dnd: Option<DndIn>,
     /// Icon pixels by key, kept so a new renderer or a reallocated array can
     /// be refilled without asking again.
     chains: HashMap<String, Vec<u8>>,
@@ -384,6 +409,101 @@ fn icon_request(key: &str) -> Option<crate::notif_icons::Request> {
     }
 }
 
+/// The `file://` URIs of a `text/uri-list` (one per line, `#` comments
+/// skipped, percent-decoded) as local paths; other schemes are not files
+/// and are left out.
+pub(crate) fn uri_list_paths(list: &str) -> Vec<PathBuf> {
+    list.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let rest = l.strip_prefix("file://")?;
+            // `file:///home/x` and `file://localhost/home/x` both name /home/x.
+            let path = match rest.find('/') {
+                Some(0) => rest,
+                Some(i) if &rest[..i] == "localhost" => &rest[i..],
+                _ => return None,
+            };
+            Some(PathBuf::from(crate::trash::decode_path(path)))
+        })
+        .collect()
+}
+
+/// A name for `name` that is not taken in `dir`: the name itself, else
+/// `name (2)`, `name (3)`… before the extension — the whole of it, so
+/// `a.tar.gz` becomes `a (2).tar.gz`.
+fn unique_dest(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.split_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    (2..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !p.exists())
+        .unwrap_or(first)
+}
+
+/// Copy a directory tree (symlinks followed).
+fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Bring `src` to `dest`: a move where one filesystem allows it, else a
+/// copy (a file from another volume stays there too — what a desktop does
+/// with a file from a stick).
+fn bring(src: &Path, dest: &Path) -> std::io::Result<()> {
+    if std::fs::rename(src, dest).is_ok() {
+        return Ok(());
+    }
+    if std::fs::metadata(src)?.is_dir() {
+        copy_tree(src, dest)
+    } else {
+        std::fs::copy(src, dest).map(|_| ())
+    }
+}
+
+/// Bring every file of `paths` into `dir` (one already there stays as it
+/// is); the paths they now have, in order.
+pub(crate) fn import(paths: &[PathBuf], dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for src in paths {
+        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if src.parent() == Some(dir) {
+            out.push(src.clone()); // already on the desktop: only its cell changes
+            continue;
+        }
+        if !src.exists() {
+            warn!("desktop: dropped {} does not exist", src.display());
+            continue;
+        }
+        let dest = unique_dest(dir, name);
+        match bring(src, &dest) {
+            Ok(()) => {
+                info!("desktop: {} → {}", src.display(), dest.display());
+                out.push(dest);
+            }
+            Err(e) => warn!("desktop: cannot bring {} in: {e}", src.display()),
+        }
+    }
+    out
+}
+
 /// The icon's square in its cell: the grid's icon, centred, under the
 /// cell's top padding.
 fn icon_rect(cell: &Rect, icon_scale: f32) -> Rect {
@@ -488,10 +608,20 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
     }
 }
 
+/// What one frame shows besides the placed items.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Live {
+    /// The item in hand and where its icon is.
+    pub drag: Option<(usize, Rect)>,
+    /// The cell a drop from another app would land in.
+    pub drop_cell: Option<Rect>,
+}
+
 /// One frame of the desktop: every placed item in its cell (its icon where
 /// the picture has arrived — `has_icon[i]` — and its fitted name,
 /// `names[i]`), except the one in hand, drawn over everything with its icon
-/// at `drag`'s position.
+/// at `live.drag`'s position; and the wash on the cell a drop would land
+/// in.
 pub(crate) fn scene(
     items: &[Item],
     slots: &[Option<Slot>],
@@ -499,12 +629,22 @@ pub(crate) fn scene(
     names: &[String],
     has_icon: &[bool],
     icon_scale: f32,
-    drag: Option<(usize, Rect)>,
+    live: Live,
 ) -> Scene {
     let mut scene = Scene {
         alpha: 1.0,
         ..Default::default()
     };
+    if let Some(cell) = live.drop_cell {
+        scene.rects.push(RectInst {
+            rect: cell,
+            radius: DROP_WASH_RADIUS,
+            color: DROP_WASH,
+            glass: 0.0,
+            border: 0.0,
+        });
+    }
+    let drag = live.drag;
     for (i, item) in items.iter().enumerate() {
         let Some(slot) = slots.get(i).copied().flatten() else {
             continue;
@@ -547,14 +687,6 @@ impl Desktop {
         changed
     }
 
-    /// The placed items' cells, with their indices.
-    fn cells(&self) -> impl Iterator<Item = (usize, Rect)> + '_ {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| s.map(|s| (i, self.grid.rect(s))))
-    }
-
     /// The item under `pos`, if any.
     pub(crate) fn hit(&self, pos: (f32, f32)) -> Option<usize> {
         let slot = self.grid.slot_at(pos)?;
@@ -586,6 +718,12 @@ impl Desktop {
         let (px, py) = self.ptr?;
         let size = GRID_ICON * icon_scale;
         Some(Rect::new(px - drag.grip.0, py - drag.grip.1, size, size))
+    }
+
+    /// The cell a drop from another app at `pos` would land in: the free
+    /// one nearest the pointer.
+    fn drop_slot(&self, pos: (f32, f32)) -> Option<Slot> {
+        self.grid.nearest_free(pos, &self.taken(None))
     }
 }
 
@@ -737,30 +875,17 @@ impl App {
         );
     }
 
-    /// The surface takes the pointer over the icons only — the wallpaper
-    /// between them is not ours to catch — except while an icon is in
-    /// hand, when the whole surface listens so the drag can cross it.
+    /// The whole surface takes the pointer. It used to be the icons' cells
+    /// only (the wallpaper between them "not ours to catch"), but a drop
+    /// from another app reaches a surface only through its input region —
+    /// a file let go on bare wallpaper would never have arrived. Nothing
+    /// but the wallpaper is under us, and a click on it does nothing.
     fn sync_desktop_input(&mut self) {
         let Some(layer) = self.desktop_layer.as_ref() else {
             return;
         };
-        let rects: Vec<(i32, i32, i32, i32)> = if self.desktop.drag.is_some() {
-            let (w, h) = self.desktop_size;
-            vec![(0, 0, w as i32, h as i32)]
-        } else {
-            self.desktop
-                .cells()
-                .map(|(_, c)| {
-                    (
-                        c.x.floor() as i32,
-                        c.y.floor() as i32,
-                        c.w.ceil() as i32,
-                        c.h.ceil() as i32,
-                    )
-                })
-                .collect()
-        };
-        crate::surface::set_input_rects(&self.compositor, layer, &rects);
+        let (w, h) = self.desktop_size;
+        crate::surface::set_input_rects(&self.compositor, layer, &[(0, 0, w as i32, h as i32)]);
     }
 
     /// Every item's picture into its layer (= its index): uploaded where
@@ -867,11 +992,18 @@ impl App {
             .map(|i| self.desktop.has_icon(i))
             .collect();
         let icon_scale = self.icon_scale();
-        let drag = self
-            .desktop
-            .drag
-            .zip(self.desktop.drag_rect(icon_scale))
-            .map(|(d, r)| (d.item, r));
+        let live = Live {
+            drag: self
+                .desktop
+                .drag
+                .zip(self.desktop.drag_rect(icon_scale))
+                .map(|(d, r)| (d.item, r)),
+            drop_cell: self
+                .desktop
+                .dnd
+                .and_then(|d| self.desktop.drop_slot(d.pos))
+                .map(|s| self.desktop.grid.rect(s)),
+        };
         let Some(renderer) = self.desktop_renderer.as_mut() else {
             return;
         };
@@ -893,7 +1025,7 @@ impl App {
             &names,
             &has_icon,
             icon_scale,
-            drag,
+            live,
         );
         let (layer, qh, pending) = (
             self.desktop_layer.as_ref(),
@@ -981,12 +1113,14 @@ impl App {
         }
     }
 
-    /// The pointer moved over the desktop: an icon in hand follows it; a
-    /// press that has travelled far enough becomes a drag.
+    /// The pointer moved over the desktop: an icon in hand follows it (and
+    /// the dock's bin watches it come); a press that has travelled far
+    /// enough becomes a drag.
     fn desktop_motion(&mut self, x: f32, y: f32) {
         self.desktop.ptr = Some((x, y));
         if self.desktop.drag.is_some() {
             self.request_desktop_draw();
+            self.schedule_frame(); // the bin's swell eases in the dock's frame
         } else if let Some((i, (px, py))) = self.desktop.press {
             if (x - px).hypot(y - py) >= DRAG_START {
                 self.desktop_lift(i, (px, py));
@@ -996,36 +1130,181 @@ impl App {
     }
 
     /// Take item `i` in hand, gripped where the press landed on its icon.
+    /// A hidden dock comes up: the bin is where a file is thrown away.
     fn desktop_lift(&mut self, i: usize, at: (f32, f32)) {
         let Some(slot) = self.desktop.slots.get(i).copied().flatten() else {
             return;
         };
         let icon = icon_rect(&self.desktop.grid.rect(slot), self.icon_scale());
+        let dock_raised = self.ui.target() == crate::state::Target::Hidden;
         self.desktop.drag = Some(Drag {
             item: i,
             grip: (at.0 - icon.x, at.1 - icon.y),
+            dock_raised,
         });
-        self.sync_desktop_input();
+        if dock_raised {
+            self.handle_command(waverunner_proto::Command::Show);
+        }
+        self.schedule_frame();
         self.request_desktop_draw();
     }
 
-    /// Put the icon in hand down: into the free cell nearest to where its
-    /// icon is, remembered there.
+    /// Where the pointer is in the DOCK surface's coordinates while an icon
+    /// is in hand — both surfaces end at the screen's bottom edge, so only
+    /// their heights differ. `None` when nothing is in hand.
+    pub(crate) fn desktop_drag_dock_pos(&self) -> Option<(f32, f32)> {
+        self.desktop.drag?;
+        let (x, y) = self.desktop.ptr?;
+        let (_, desktop_h) = self.desktop_size;
+        let (_, dock_h) = self.buffer_size;
+        Some((x, y - (desktop_h as f32 - dock_h as f32)))
+    }
+
+    /// Put the icon in hand down: on the dock's Recycle Bin, it goes to the
+    /// trash; anywhere else, into the free cell nearest to where its icon
+    /// is, remembered there.
     fn desktop_drop(&mut self) {
-        let Some(drag) = self.desktop.drag.take() else {
+        let Some(drag) = self.desktop.drag else {
             return;
         };
-        let icon_scale = self.icon_scale();
-        let size = GRID_ICON * icon_scale;
-        if let Some((px, py)) = self.desktop.ptr {
+        let on_bin = self
+            .desktop_drag_dock_pos()
+            .is_some_and(|p| self.dropped_on_trash(&self.current_layout(), p));
+        self.desktop.drag = None;
+        if on_bin {
+            let path = self.desktop.items[drag.item].path.clone();
+            info!("desktop: {} → Recycle Bin", self.desktop.items[drag.item].name);
+            self.desktop.remembered.remove(&path);
+            self.trash_file(&path); // the folder watch takes it off the desktop
+        } else if let Some((px, py)) = self.desktop.ptr {
+            let size = GRID_ICON * self.icon_scale();
             let centre = (px - drag.grip.0 + size / 2.0, py - drag.grip.1 + size / 2.0);
             if let Some(slot) = self.desktop.settle(drag.item, centre) {
                 info!("desktop: {} → {slot:?}", self.desktop.items[drag.item].name);
                 self.save_desktop_positions();
             }
         }
-        self.sync_desktop_input();
+        if drag.dock_raised {
+            self.handle_command(waverunner_proto::Command::Hide);
+        }
+        self.schedule_frame();
         self.request_desktop_draw();
+    }
+
+    /// Another app's drag came over the desktop: take it if it carries
+    /// files, as a move (or a copy, where a move is not possible).
+    pub(crate) fn desktop_dnd_enter(&mut self, offer: DragOffer) {
+        let has_files = offer.with_mime_types(|m| m.iter().any(|t| t == URI_LIST));
+        if !has_files {
+            offer.accept_mime_type(offer.serial, None);
+            return;
+        }
+        offer.accept_mime_type(offer.serial, Some(URI_LIST.to_owned()));
+        offer.set_actions(DndAction::Move | DndAction::Copy, DndAction::Move);
+        self.desktop.dnd = Some(DndIn {
+            pos: (offer.x as f32, offer.y as f32),
+        });
+        self.desktop_dnd_offer = Some(offer);
+        self.request_desktop_draw();
+    }
+
+    /// The hovering drop moved: the wash follows the cell it would land in.
+    pub(crate) fn desktop_dnd_motion(&mut self, x: f32, y: f32) {
+        if let Some(d) = self.desktop.dnd.as_mut() {
+            d.pos = (x, y);
+            self.request_desktop_draw();
+        }
+    }
+
+    /// The drop left for elsewhere.
+    pub(crate) fn desktop_dnd_leave(&mut self) {
+        if self.desktop.dnd.take().is_some() {
+            self.desktop_dnd_offer = None;
+            self.request_desktop_draw();
+        }
+    }
+
+    /// Let go on the desktop: ask for the list of files. It is read off the
+    /// loop (the other app writes when it pleases) and lands in
+    /// `desktop_dnd_received`.
+    pub(crate) fn desktop_dnd_drop(&mut self) {
+        let Some(offer) = self.desktop_dnd_offer.clone() else {
+            return;
+        };
+        let pipe = match offer.receive(URI_LIST.to_owned()) {
+            Ok(pipe) => pipe,
+            Err(e) => {
+                warn!("desktop: cannot receive the drop: {e}");
+                self.desktop_dnd_leave();
+                return;
+            }
+        };
+        let (tx, rx) = calloop::channel::channel::<String>();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            use std::os::fd::{FromRawFd, IntoRawFd};
+            // SAFETY: the pipe's read end is ours alone; `into_raw_fd` gives
+            // up its ownership to this File.
+            let mut file = unsafe { std::fs::File::from_raw_fd(pipe.into_raw_fd()) };
+            let mut text = String::new();
+            let _ = file.read_to_string(&mut text);
+            let _ = tx.send(text);
+        });
+        if self
+            .loop_handle
+            .insert_source(rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(text) = event {
+                    app.desktop_dnd_received(&text);
+                }
+            })
+            .is_err()
+        {
+            warn!("desktop: cannot wait for the drop's files");
+            self.desktop_dnd_leave();
+        }
+    }
+
+    /// The dropped list arrived: bring the files in, the first at the cell
+    /// the drop was over, the rest in the free cells after it.
+    pub(crate) fn desktop_dnd_received(&mut self, list: &str) {
+        let Some(offer) = self.desktop_dnd_offer.take() else {
+            return;
+        };
+        let at = self.desktop.dnd.take().map(|d| d.pos);
+        let paths = uri_list_paths(list);
+        let brought = import(&paths, &desktop_dir());
+        self.desktop_place_brought(&brought, at);
+        offer.finish();
+        self.reload_desktop();
+    }
+
+    /// Remember cells for files just brought in: each in the free cell
+    /// nearest `at`, so a handful dropped together lands as a cluster
+    /// around the drop point (without a point: the first free cells).
+    fn desktop_place_brought(&mut self, brought: &[PathBuf], at: Option<(f32, f32)>) {
+        let mut taken = self.desktop.taken(None);
+        for path in brought {
+            let key = path.to_string_lossy().into_owned();
+            // One already on the desktop frees its old cell first.
+            if let Some(i) = self.desktop.items.iter().position(|it| it.path == key) {
+                if let Some(s) = self.desktop.slots[i] {
+                    taken.remove(&s);
+                }
+            }
+            let grid = self.desktop.grid;
+            let slot = match at {
+                Some(p) => grid.nearest_free(p, &taken),
+                None => grid.slots().find(|s| !taken.contains(s)),
+            };
+            let Some(slot) = slot else {
+                break;
+            };
+            taken.insert(slot);
+            self.desktop.remembered.insert(key, slot);
+        }
+        if !brought.is_empty() {
+            self.save_desktop_positions();
+        }
     }
 
     /// A hand over an item, a fist around one in hand, the arrow between.
@@ -1064,10 +1343,27 @@ impl App {
 
     /// `debug-desktop` verb: the listing with its cells; `reload`; `open
     /// <n>`; `move <n> <col> <row>` (that cell, or the free one nearest
-    /// it); `forget` (every remembered position, the icons re-flow).
+    /// it); `import <col> <row> <uri…>` (as a drop of those files on that
+    /// cell); `forget` (every remembered position, the icons re-flow).
     pub(crate) fn desktop_debug(&mut self, what: &str) -> String {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
+        }
+        if let Some(rest) = what.strip_prefix("import ") {
+            let mut w = rest.split_whitespace();
+            let cell = w.next().and_then(|c| c.parse::<usize>().ok()).zip(
+                w.next().and_then(|r| r.parse::<usize>().ok()),
+            );
+            let Some((c, r)) = cell else {
+                return "import <col> <row> <uri…>".to_owned();
+            };
+            let list: String = w.map(|u| format!("{u}\n")).collect();
+            let rect = self.desktop.grid.rect((c, r));
+            let at = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+            let brought = import(&uri_list_paths(&list), &desktop_dir());
+            self.desktop_place_brought(&brought, Some(at));
+            self.reload_desktop();
+            return format!("brought {} file(s) in at ({c},{r})", brought.len());
         }
         let mut words = what.split_whitespace();
         match (words.next(), words.next(), words.next(), words.next()) {
@@ -1132,7 +1428,8 @@ impl App {
                 self.relayout_desktop();
                 "forgot every position".to_owned()
             }
-            _ => "debug-desktop [reload|open <n>|move <n> <col> <row>|forget]".to_owned(),
+            _ => "debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row> <uri…>|forget]"
+                .to_owned(),
         }
     }
 }
@@ -1351,7 +1648,8 @@ mod tests {
         let g = Grid::new(1000.0, 400.0, 1.0);
         let slots = vec![Some((0, 0)), Some((0, 1)), None];
         let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
-        let s = scene(&items, &slots, &g, &names, &[true, false, true], 1.0, None);
+        let s = scene(&items, &slots, &g, &names, &[true, false, true], 1.0, Live::default());
+        assert!(s.rects.is_empty(), "no drop wash without a drop");
         // a has its icon; b's has not arrived; c has no cell at all.
         assert_eq!(s.icons.len(), 1);
         assert_eq!(s.icons[0].layer, 0);
@@ -1365,12 +1663,78 @@ mod tests {
         assert!((s.icons[0].rect.x - (cell.x + (cell.w - GRID_ICON) / 2.0)).abs() < 1e-4);
         // In hand: drawn over everything at the given rect, not in its cell.
         let at = Rect::new(300.0, 200.0, GRID_ICON, GRID_ICON);
-        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, Some((0, at)));
+        let live = Live {
+            drag: Some((0, at)),
+            drop_cell: None,
+        };
+        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
         assert_eq!(s.overlay.len(), 1);
         assert_eq!(s.overlay[0].rect, at);
         assert_eq!(s.icons.len(), 1, "only b stays in the grid");
         assert_eq!(s.icons[0].layer, 1);
         assert_eq!(s.labels[1].pos.0, at.x + at.w / 2.0, "the name travels with it");
+        // A drop hovering: its cell is washed, under everything.
+        let live = Live {
+            drag: None,
+            drop_cell: Some(g.rect((2, 1))),
+        };
+        let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
+        assert_eq!(s.rects.len(), 1);
+        assert_eq!(s.rects[0].rect, g.rect((2, 1)));
+    }
+
+    #[test]
+    fn uri_lists_yield_local_paths_only_decoded() {
+        let list = "# a comment\r\nfile:///home/x/Holiday%20photos/a%20b.png\r\nfile://localhost/srv/c.txt\nhttps://example.com/x\nfile://otherhost/nope\n\n";
+        assert_eq!(
+            uri_list_paths(list),
+            vec![
+                PathBuf::from("/home/x/Holiday photos/a b.png"),
+                PathBuf::from("/srv/c.txt")
+            ]
+        );
+    }
+
+    #[test]
+    fn import_moves_in_renames_clashes_and_leaves_desktop_files_alone() {
+        let dir = make_dir(&[("taken.txt", "old")], &[]);
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("folder")).unwrap();
+        std::fs::write(src.join("folder/inner.txt"), "in").unwrap();
+        std::fs::write(src.join("taken.txt"), "new").unwrap();
+        std::fs::write(src.join("plain.md"), "md").unwrap();
+        let paths = vec![
+            src.join("taken.txt"),
+            src.join("plain.md"),
+            src.join("folder"),
+            dir.join("taken.txt"), // already on the desktop
+            src.join("missing.txt"),
+        ];
+        let brought = import(&paths, &dir);
+        assert_eq!(
+            brought,
+            vec![
+                dir.join("taken (2).txt"),
+                dir.join("plain.md"),
+                dir.join("folder"),
+                dir.join("taken.txt"),
+            ]
+        );
+        // Moved, not copied: the sources are gone; the clash kept both.
+        assert!(!src.join("plain.md").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("taken.txt")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(dir.join("taken (2).txt")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(dir.join("folder/inner.txt")).unwrap(), "in");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_dest_counts_before_the_extension() {
+        let dir = make_dir(&[("a.tar.gz", ""), ("a (2).tar.gz", ""), ("README", "")], &[]);
+        assert_eq!(unique_dest(&dir, "a.tar.gz"), dir.join("a (3).tar.gz"));
+        assert_eq!(unique_dest(&dir, "README"), dir.join("README (2)"));
+        assert_eq!(unique_dest(&dir, "fresh.txt"), dir.join("fresh.txt"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

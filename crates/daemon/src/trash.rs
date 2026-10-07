@@ -326,8 +326,9 @@ fn encode_path(path: &Path) -> String {
     out
 }
 
-/// Decode a percent-encoded `Path=` value back to raw bytes → an `OsString`.
-fn decode_path(s: &str) -> std::ffi::OsString {
+/// Decode a percent-encoded `Path=` value (or the path of a `file://` URI,
+/// which the desktop's drop target reads) back to raw bytes → an `OsString`.
+pub(crate) fn decode_path(s: &str) -> std::ffi::OsString {
     use std::os::unix::ffi::OsStringExt;
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());

@@ -598,6 +598,7 @@ fn main() -> anyhow::Result<()> {
         desktop_icons,
         desktop_frame_pending: false,
         desktop_dirty: false,
+        desktop_dnd_offer: None,
         frecency: focus_cycle::Frecency::default(),
         focus_walk: None,
         walk_focus_pending: None,
@@ -1433,6 +1434,9 @@ pub struct App {
     /// meanwhile waits for it (`desktop_dirty`).
     desktop_frame_pending: bool,
     desktop_dirty: bool,
+    /// Another app's drag hovering the desktop (its offer, kept until the
+    /// drop is read and finished).
+    desktop_dnd_offer: Option<DragOffer>,
     /// Decaying focus-frequency scores driving the usage-aware focus cycle
     /// (clicking the current-task pill; see `focus_cycle`).
     frecency: focus_cycle::Frecency,
@@ -7072,27 +7076,47 @@ impl ShmHandler for App {
 // every data-device / offer / source callback is a no-op — the paste
 // path pulls the current offer lazily instead of tracking events.
 impl DataDeviceHandler for App {
+    // Drags from other apps: the desktop takes files (see `desktop.rs`);
+    // no other surface of ours is a drop target.
     fn enter(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_data_device::WlDataDevice,
+        device: &wl_data_device::WlDataDevice,
         _: f64,
         _: f64,
-        _: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
     ) {
+        let on_desktop = self
+            .desktop_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface);
+        if !on_desktop {
+            return;
+        }
+        let offer = self
+            .data_device
+            .as_ref()
+            .filter(|d| d.inner() == device)
+            .and_then(|d| d.data().drag_offer());
+        if let Some(offer) = offer {
+            self.desktop_dnd_enter(offer);
+        }
     }
 
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {
+        self.desktop_dnd_leave();
+    }
 
     fn motion(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
-        _: f64,
-        _: f64,
+        x: f64,
+        y: f64,
     ) {
+        self.desktop_dnd_motion(x as f32, y as f32);
     }
 
     fn selection(
@@ -7110,6 +7134,7 @@ impl DataDeviceHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
     ) {
+        self.desktop_dnd_drop();
     }
 }
 

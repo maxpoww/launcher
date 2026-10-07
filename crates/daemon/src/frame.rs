@@ -984,15 +984,19 @@ impl App {
         // a box, or a file/dir is being dragged anywhere — inviting a drop
         // (apps uninstall; files go to the system trash). A package (install
         // gesture) or the bin itself don't arm it.
-        let trash_react_target = self.gesture.dragging.as_ref().is_some_and(|d| {
-            matches!(
-                self.kinds.get(d.entry_idx),
-                Some(apps::EntryKind::App | apps::EntryKind::Group | apps::EntryKind::File)
-            ) && self
-                .entries
-                .get(d.entry_idx)
-                .is_some_and(|e| !groups::is_trash(&e.id))
-        });
+        // A desktop icon in hand arms it too: the dock came up for that
+        // drag so the bin would be there (`desktop_lift`).
+        let desktop_drag = self.desktop_drag_dock_pos();
+        let trash_react_target = desktop_drag.is_some()
+            || self.gesture.dragging.as_ref().is_some_and(|d| {
+                matches!(
+                    self.kinds.get(d.entry_idx),
+                    Some(apps::EntryKind::App | apps::EntryKind::Group | apps::EntryKind::File)
+                ) && self
+                    .entries
+                    .get(d.entry_idx)
+                    .is_some_and(|e| !groups::is_trash(&e.id))
+            });
         let (v, moving) = animation::ease_toward(
             self.trash_react,
             if trash_react_target { 1.0 } else { 0.0 },
@@ -1008,12 +1012,13 @@ impl App {
         // it. Computed straight from the fold target (not `over_dock`, which is
         // App-only) so a dragged file/dir hovering the bin grows it too.
         let over_trash = trash_react_target
-            && self.gesture.dragging.as_ref().is_some_and(|d| {
-                self.dock_fold_target(&layout, d.pos)
-                    .and_then(|slot| self.dock_order.get(slot).copied())
-                    .and_then(|idx| self.entries.get(idx))
-                    .is_some_and(|e| groups::is_trash(&e.id))
-            });
+            && (desktop_drag.is_some_and(|p| self.dropped_on_trash(&layout, p))
+                || self.gesture.dragging.as_ref().is_some_and(|d| {
+                    self.dock_fold_target(&layout, d.pos)
+                        .and_then(|slot| self.dock_order.get(slot).copied())
+                        .and_then(|idx| self.entries.get(idx))
+                        .is_some_and(|e| groups::is_trash(&e.id))
+                }));
         let (hv, hv_moving) = animation::ease_toward(
             self.trash_hover,
             if over_trash { 1.0 } else { 0.0 },
