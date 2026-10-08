@@ -1380,7 +1380,7 @@ impl App {
             }
             Action::Properties => {
                 if let Some(i) = item {
-                    self.desktop_open_props(i, at);
+                    self.desktop_open_props(i, at, None);
                 }
             }
             Action::MoveToHome => {
@@ -1428,13 +1428,13 @@ impl App {
 
     /// Open the Properties box for item `i` by `at`. A folder's total size
     /// is walked off the loop and filled in when it comes back.
-    pub(crate) fn desktop_open_props(&mut self, i: usize, at: (f32, f32)) {
+    pub(crate) fn desktop_open_props(&mut self, i: usize, at: (f32, f32), menu: Option<Menu>) {
         let Some(item) = self.desktop.items.get(i) else {
             return;
         };
         let (w, h) = self.desktop_size;
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-        let props = Props::open(item, at, w as f32, h as f32, &home);
+        let props = Props::open(item, at, menu, w as f32, h as f32, &home);
         if item.kind == Kind::Folder {
             let path = item.path.clone();
             let (tx, rx) = calloop::channel::channel::<(String, u64, u64)>();
@@ -1666,7 +1666,7 @@ impl App {
             moving |= menu_moving;
         }
         if let Some(props) = self.desktop.props.as_mut() {
-            let (t, props_moving) = crate::animation::ease_toward(props.t, 1.0, dt, 20.0, 0.004);
+            let (t, props_moving) = crate::animation::ease_toward(props.t, 1.0, dt, 16.0, 0.004);
             props.t = t;
             moving |= props_moving;
         }
@@ -1887,9 +1887,19 @@ impl App {
                         self.desktop.menu.is_some(),
                         self.desktop.hidden
                     );
-                    // A press anywhere puts the Properties box away, and
-                    // is nothing more than that.
-                    if self.desktop.props.take().is_some() {
+                    // The Properties box: a press on Back turns it back into
+                    // the menu it grew out of; one anywhere else puts it
+                    // away, and is nothing more than that.
+                    if let Some(props) = self.desktop.props.take() {
+                        if props.back_rect().is_some_and(|r| r.contains(at)) {
+                            if let Some(mut menu) = props.back {
+                                menu.grow_from = Some(props.rect);
+                                menu.t = 0.0;
+                                menu.pressed = None;
+                                menu.hover = menu.hit(at);
+                                self.desktop.menu = Some(menu);
+                            }
+                        }
                         self.request_desktop_draw();
                         return;
                     }
@@ -1997,10 +2007,27 @@ impl App {
     fn desktop_motion(&mut self, x: f32, y: f32) {
         self.desktop.ptr = Some((x, y));
         if let Some(menu) = self.desktop.menu.as_mut() {
-            // The menu has the pointer: only its hover follows it.
+            // The menu has the pointer: only its hover follows it. Coming
+            // onto its last row, Properties, turns the menu into that box.
             let over = menu.hit((x, y));
             if over != menu.hover {
                 menu.hover = over;
+                let props = over.and_then(|r| menu.action(r)) == Some(Action::Properties);
+                if let (true, Some(i)) = (props, menu.item) {
+                    if let Some(menu) = self.desktop.menu.take() {
+                        self.desktop_open_props(i, (x, y), Some(menu));
+                    }
+                }
+                self.request_desktop_draw();
+            }
+            self.desktop_cursor();
+            return;
+        }
+        if let Some(props) = self.desktop.props.as_mut() {
+            // The Properties box: only its Back row answers the pointer.
+            let over = props.back_rect().is_some_and(|r| r.contains((x, y)));
+            if over != props.back_hover {
+                props.back_hover = over;
                 self.request_desktop_draw();
             }
             self.desktop_cursor();
@@ -2529,7 +2556,8 @@ impl App {
             .menu
             .as_ref()
             .zip(self.desktop.ptr)
-            .is_some_and(|(m, p)| m.hit(p).is_some());
+            .is_some_and(|(m, p)| m.hit(p).is_some())
+            || self.desktop.props.as_ref().is_some_and(|p| p.back_hover);
         let over_folder = self
             .desktop
             .ptr
@@ -2540,7 +2568,9 @@ impl App {
             Shape::Grabbing
         } else if self.desktop.band.is_some() {
             Shape::Crosshair
-        } else if over_row || (self.desktop.menu.is_none() && over_folder) {
+        } else if over_row
+            || (self.desktop.menu.is_none() && self.desktop.props.is_none() && over_folder)
+        {
             Shape::Pointer
         } else {
             Shape::Default
@@ -2604,7 +2634,7 @@ impl App {
             return match rest.trim().parse::<usize>().ok().and_then(|i| self.desktop.slots.get(i).copied().flatten().map(|s| (i, s))) {
                 Some((i, slot)) => {
                     let r = icon_rect(&self.desktop.grid.rect(slot), self.icon_scale());
-                    self.desktop_open_props(i, (r.x + r.w / 2.0, r.y + r.h / 2.0));
+                    self.desktop_open_props(i, (r.x + r.w / 2.0, r.y + r.h / 2.0), None);
                     format!("properties of {i}")
                 }
                 None => "props <n>".to_owned(),

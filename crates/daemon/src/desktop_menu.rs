@@ -1,7 +1,8 @@
 //! The desktop's right-click menu (the mockup at `~/desktop-menu-mockup`,
 //! Max's "build the menu", 2026-10-07): a small panel of the dock's box
 //! material at the pointer, one band per row, no icons, no shortcut hints.
-//! On an icon: Open · Open in terminal · Rename · Properties · then Move to Home · Move to bin. On bare
+//! On an icon: Open · Open in terminal · Rename · then Move to Home · Move to bin · then Properties (on hover the
+//! menu becomes the Properties box). On bare
 //! wallpaper: New folder · Clean up.
 //!
 //! Pure here: what the rows are, where they sit, which one is under a
@@ -84,10 +85,12 @@ pub(crate) fn rows(on_item: bool) -> Vec<Row> {
             Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
             Row::Sep,
             Row::Item { label: "Rename", action: Action::Rename, danger: false },
-            Row::Item { label: "Properties", action: Action::Properties, danger: false },
             Row::Sep,
             Row::Item { label: "Move to Home", action: Action::MoveToHome, danger: false },
             Row::Item { label: "Move to bin", action: Action::MoveToBin, danger: true },
+            Row::Sep,
+            // Last, and opened by HOVER: the menu turns into the box.
+            Row::Item { label: "Properties", action: Action::Properties, danger: false },
         ]
     } else {
         vec![
@@ -114,6 +117,8 @@ pub(crate) struct Menu {
     pub pressed: Option<usize>,
     /// Its entrance, 0..1: it fades in and settles down a few pixels.
     pub t: f32,
+    /// Coming back from the Properties box: the shape it shrinks from.
+    pub grow_from: Option<Rect>,
 }
 
 impl Menu {
@@ -132,6 +137,7 @@ impl Menu {
             hover: None,
             pressed: None,
             t: 0.0,
+            grow_from: None,
         }
     }
 
@@ -170,11 +176,16 @@ impl Menu {
     /// paint after the icons), clipped to the panel.
     pub fn push(&self, scene: &mut Scene, paint: &MenuPaint) {
         let t = self.t.clamp(0.0, 1.0);
-        // Its entrance: fading in while settling down from 4 px above.
-        let lift = (1.0 - t) * -4.0;
+        // Its entrance: fading in while settling down from 4 px above — or,
+        // back from the Properties box, that box's panel shrinking to ours.
+        let lift = if self.grow_from.is_some() { 0.0 } else { (1.0 - t) * -4.0 };
         let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * t];
         let ink_at = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * a];
-        let panel = Rect::new(self.rect.x, self.rect.y + lift, self.rect.w, self.rect.h);
+        let panel = match &self.grow_from {
+            Some(from) => crate::desktop_props::lerp_rect(from, &self.rect, t),
+            None => Rect::new(self.rect.x, self.rect.y + lift, self.rect.w, self.rect.h),
+        };
+        let panel_fill = if self.grow_from.is_some() { paint.fill } else { fade(paint.fill) };
         let mut grid = GridContent {
             clip: panel,
             ..Default::default()
@@ -182,7 +193,7 @@ impl Menu {
         grid.rects.push(RectInst {
             rect: panel,
             radius: paint.radius,
-            color: fade(paint.fill),
+            color: panel_fill,
             glass: 0.0,
             border: 0.0,
         });
@@ -252,8 +263,8 @@ mod tests {
         let m = Menu::open(Some(3), (100.0, 100.0), 1000.0, 800.0);
         assert_eq!((m.rect.x, m.rect.y), (106.0, 106.0));
         assert_eq!(m.rect.w, WIDTH);
-        // 6 rows + 2 rules, inside the padding.
-        assert_eq!(m.rect.h, PAD * 2.0 + 6.0 * ROW_H + 2.0 * SEP_H);
+        // 6 rows + 3 rules, inside the padding.
+        assert_eq!(m.rect.h, PAD * 2.0 + 6.0 * ROW_H + 3.0 * SEP_H);
         // Near the right and bottom edges it opens to the left and above.
         let m = Menu::open(Some(3), (950.0, 780.0), 1000.0, 800.0);
         assert_eq!(m.rect.x, 950.0 - GAP - WIDTH);
@@ -274,12 +285,13 @@ mod tests {
         assert_eq!(m.hit(mid(&rows[0])), Some(0));
         assert_eq!(m.action(0), Some(Action::Open));
         assert_eq!(m.hit(mid(&rows[2])), None, "the rule");
-        assert_eq!(m.action(4), Some(Action::Properties));
-        assert_eq!(m.hit(mid(&rows[5])), None, "the second rule");
+        assert_eq!(m.hit(mid(&rows[4])), None, "the second rule");
+        assert_eq!(m.hit(mid(&rows[5])), Some(5));
+        assert_eq!(m.action(5), Some(Action::MoveToHome));
         assert_eq!(m.hit(mid(&rows[6])), Some(6));
-        assert_eq!(m.action(6), Some(Action::MoveToHome));
-        assert_eq!(m.hit(mid(&rows[7])), Some(7));
-        assert_eq!(m.action(7), Some(Action::MoveToBin));
+        assert_eq!(m.action(6), Some(Action::MoveToBin));
+        assert_eq!(m.hit(mid(&rows[7])), None, "the third rule");
+        assert_eq!(m.action(8), Some(Action::Properties), "last");
         assert_eq!(m.hit((m.rect.x + 1.0, m.rect.y + 1.0)), None, "the padding");
         assert_eq!(m.hit((5000.0, 5000.0)), None);
     }
@@ -295,24 +307,24 @@ mod tests {
     fn the_drawn_menu_is_one_grid_with_a_panel_a_hover_band_and_its_labels() {
         let mut m = Menu::open(Some(0), (0.0, 0.0), 1000.0, 800.0);
         m.t = 1.0;
-        m.hover = Some(7);
+        m.hover = Some(6);
         let mut scene = Scene::default();
         m.push(&mut scene, &PAINT);
         assert_eq!(scene.grids.len(), 1);
         let g = &scene.grids[0];
         assert_eq!(g.clip, m.rect);
         // The panel, two rules, one hover band.
-        assert_eq!(g.rects.len(), 4);
+        assert_eq!(g.rects.len(), 5);
         assert_eq!(g.rects[0].rect, m.rect);
         assert_eq!(g.rects[0].color, PAINT.fill, "the boxes' fill");
         assert_eq!(g.rects[0].radius, PAINT.radius);
         assert_eq!(g.rects[3].color, HOVER_DANGER, "the bin's band is red");
         assert_eq!(g.labels.len(), 6);
-        assert_eq!(g.labels[3].text, "Properties");
-        assert_eq!(g.labels[4].text, "Move to Home");
-        assert_eq!(g.labels[5].text, "Move to bin");
-        assert_eq!(g.labels[5].color, Some(RED));
-        assert_eq!(g.labels[5].family, Some(FONT_BOLD), "hovered: bold");
+        assert_eq!(g.labels[3].text, "Move to Home");
+        assert_eq!(g.labels[4].text, "Move to bin");
+        assert_eq!(g.labels[4].color, Some(RED));
+        assert_eq!(g.labels[4].family, Some(FONT_BOLD), "hovered: bold");
+        assert_eq!(g.labels[5].text, "Properties");
         assert_eq!(g.labels[0].family, None);
         assert!((g.labels[0].color.unwrap()[3] - REST_INK).abs() < 1e-5, "resting: the ink, a little under full");
         // Half-way in, everything is half as strong and 2 px above its place.

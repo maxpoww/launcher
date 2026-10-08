@@ -264,7 +264,7 @@ The big daemon files are cohesive but long — go straight to the function:
   to `~/.local/state/waverunner/daemon.log`. HIDE/SHOW: a click on bare wallpaper toggles the
   icons (fade; `settings.desktop_hidden`). MENU (`desktop_menu.rs`, the approved mockup at
   ~/desktop-menu-mockup): right-click → `Menu::open` at the pointer (icon: Open · Open in
-  terminal · Rename · Properties · ─ · Move to Home · Move to bin; wallpaper: New folder · Clean up), drawn as a `GridContent`
+  terminal · Rename · ─ · Move to Home · Move to bin · ─ · Properties; wallpaper: New folder · Clean up), drawn as a `GridContent`
   so it paints over the icons (names under it are skipped), a left press on a row acts on
   release, elsewhere closes; `debug-desktop menu [n]` / `pick <row>`. RENAME in place: the name
   becomes a field (`Rename`, all-selected first key replaces); the desktop takes the keyboard
@@ -272,8 +272,10 @@ The big daemon files are cohesive but long — go straight to the function:
   OnDemand without a click) and `begin_keyboard_handback(KbSurface::Desktop)` returns it;
   keys route first in `main.rs::handle_key_event` → `desktop_key`; a keyboard `leave` mid-name
   keeps what was typed. New folder = "untitled folder" at the clicked cell → rename. PROPERTIES
-  (`desktop_props.rs`): a box in the same paint by the pointer — name, Kind, Contains, Size (a
-  folder's is walked on a thread, `folder_size`), Where, Modified, Created; any press or the
-  pointer leaving closes it; `debug-desktop props <n>`. Not yet:
+  (`desktop_props.rs`): the menu's LAST row, opened by HOVER — the menu becomes the box (the
+  panel lerps from the menu's rect, `grow_from`; `Props.back` keeps the menu, the `‹ Back` row
+  turns it back, any other press closes). Lines: Kind, Contains (folders/files/hidden), Size (a
+  folder's tree walked on a thread, `folder_size`), Dimensions (images), Link to, Where, Owner,
+  Access, Modified, Created, Opened. `debug-desktop props <n>` opens it without a menu. Not yet:
   per-output surfaces, Escape closing the menu (no keyboard while it is up).
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
