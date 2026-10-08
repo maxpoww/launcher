@@ -305,6 +305,15 @@ The big daemon files are cohesive but long — go straight to the function:
   A device connected WHILE the icons are away shows ALONE once (`Desktop::solo`, `Live::only`,
   fading by the same surface opacity — one group fades at a time); the next wallpaper click
   puts it away with the rest, the one after brings everything back.
+  HARDENING (2026-10-08 review): a `.desktop` file is a shortcut only when TRUSTED — executable,
+  or an installed app's own (same file name + Exec as an indexed entry, lifted in
+  `reload_desktop`); otherwise a plain file under its real name whose double click says so and
+  whose menu starts with "Allow to run" (`locked_shortcut`, `Action::AllowRun` = chmod u+x).
+  File work for a drop, a paste and Move to Home runs OFF the loop (`desktop_off_loop`); copies
+  refuse to go into themselves or round a link (`desktop_send::inside`, `copy_all`), a move takes
+  the original only after a successful `sync`. Folder changes are coalesced (`desktop_reload_soon`,
+  40 ms). At a reload, rename/menu/press are carried over BY PATH. A texture layer belongs to a
+  PICTURE key, not an item index (`Desktop::layer_of`, `Live::layers`).
 - `card/` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new). ONE
   card with ONE list; it sits inside a window (under the bar, on the right, `WIDTH` wide, 10 in
   from the edges), is turned on per window from the card button at the right end of the window's

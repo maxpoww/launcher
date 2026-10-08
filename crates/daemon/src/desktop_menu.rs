@@ -46,6 +46,8 @@ pub(crate) enum Action {
     MoveToBin,
     NewFolder,
     CleanUp,
+    /// A shortcut that came from elsewhere: let it run from now on.
+    AllowRun,
 }
 
 /// One row: an action, or a rule between groups.
@@ -245,6 +247,14 @@ impl Menu {
             ],
             h,
         );
+        self
+    }
+
+    /// On a shortcut that is not yet let run: that, first.
+    pub fn with_allow(mut self, h: f32) -> Self {
+        let mut rows = vec![Row::Item { label: "Allow to run", action: Action::AllowRun, danger: false }, Row::Sep];
+        rows.append(&mut self.rows);
+        self.set_rows(rows, h);
         self
     }
 

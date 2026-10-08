@@ -436,6 +436,8 @@ pub(crate) struct Desktop {
     /// The volume service has reported once: what it lists first was
     /// already plugged in, not just connected.
     pub mounts_seen: bool,
+    /// A reload is on its way (see `desktop_reload_soon`).
+    pub reload_pending: bool,
     /// A drag hovering one of our surfaces (another app's, or ours).
     pub dnd: Option<DndIn>,
     /// Icon pixels by key, kept so a new renderer or a reallocated array can
@@ -530,18 +532,16 @@ fn item_for(path: PathBuf, name: String, is_dir: bool) -> Item {
             exec: None,
         };
     }
-    if name.ends_with(".desktop") {
+    // A shortcut wears its app's name and icon and RUNS on a double click
+    // — only once it is trusted: marked executable (what "Allow to run"
+    // does, and what a shortcut made on this computer is), or an installed
+    // app's own (`App::reload_desktop` lifts those). Until then it is a
+    // file like any other, under its real name: a downloaded
+    // "Invoice.pdf" with a PDF's icon and a command of its own must not
+    // pass for a document.
+    if name.ends_with(".desktop") && is_executable(&path) {
         if let Some(app) = waverunner_core::index::parse_desktop_file(&path) {
-            return Item {
-                path: path_str,
-                name: app.name,
-                kind: Kind::Launcher,
-                icon: app
-                    .icon
-                    .map(|i| format!("app:{i}"))
-                    .unwrap_or_else(|| asset_key("asset-file")),
-                exec: Some((app.exec, app.needs_terminal)),
-            };
+            return launcher_item(path_str, app);
         }
     }
     let icon = asset_key(crate::files::file_asset_name(&name));
@@ -552,6 +552,33 @@ fn item_for(path: PathBuf, name: String, is_dir: bool) -> Item {
         icon,
         exec: None,
     }
+}
+
+/// A trusted shortcut's item.
+fn launcher_item(path: String, app: waverunner_core::index::AppEntry) -> Item {
+    Item {
+        path,
+        name: app.name,
+        kind: Kind::Launcher,
+        icon: app
+            .icon
+            .map(|i| format!("app:{i}"))
+            .unwrap_or_else(|| asset_key("asset-file")),
+        exec: Some((app.exec, app.needs_terminal)),
+    }
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+/// The shortcut an item WOULD be, were it let run: a `.desktop` file shown
+/// as a plain file because nothing vouches for it yet.
+pub(crate) fn locked_shortcut(item: &Item) -> Option<waverunner_core::index::AppEntry> {
+    (item.kind == Kind::File && item.path.ends_with(".desktop"))
+        .then(|| waverunner_core::index::parse_desktop_file(Path::new(&item.path)))
+        .flatten()
 }
 
 /// The icon key for one of the dock's file-type carriers (`asset-folder`,
@@ -954,6 +981,9 @@ pub(crate) struct Live<'a> {
     /// empty. The compositor carries the grabbed one's picture under the
     /// pointer; the rest travel with it, drawn here.
     pub in_hand: &'a [usize],
+    /// Each item's texture layer (see `Desktop::layer_of`); empty: its place
+    /// in the list.
+    pub layers: &'a [u32],
     /// Where the grabbed icon is while the drag is over the desktop (its
     /// top-left), so the group can be drawn around it; `None` when the
     /// drag is elsewhere (over a window, the dock…), where the desktop is
@@ -1025,7 +1055,7 @@ pub(crate) fn scene(
                 &mut scene,
                 &Tile {
                     item,
-                    layer: i as u32,
+                    layer: live.layers.get(i).copied().unwrap_or(i as u32),
                     icon,
                     name: names.get(i).map_or(item.name.as_str(), String::as_str),
                     max_w: label_max_w(&grid.rect(slot)),
@@ -1057,7 +1087,7 @@ pub(crate) fn scene(
             &mut scene,
             &Tile {
                 item,
-                layer: i as u32,
+                layer: live.layers.get(i).copied().unwrap_or(i as u32),
                 icon: icon_rect(&cell, icon_scale),
                 name: names.get(i).map_or(item.name.as_str(), String::as_str),
                 max_w: label_max_w(&cell),
@@ -1095,10 +1125,20 @@ pub(crate) fn scene(
 
 impl Desktop {
     /// Whether item `i`'s picture is in its texture layer.
-    fn has_icon(&self, i: usize) -> bool {
+    /// The texture layer holding item `i`'s picture, once it is there. A
+    /// layer belongs to a PICTURE, not to a place in the list: fifty folders
+    /// share one, and a file arriving (or a stick mounting, which goes in
+    /// front) moves no one's — it used to re-upload every icon after it.
+    fn layer_of(&self, i: usize) -> Option<u32> {
+        let key = self.items.get(i)?.icon.as_str();
         self.uploaded
-            .get(i)
-            .is_some_and(|u| u.as_deref() == Some(self.items[i].icon.as_str()))
+            .iter()
+            .position(|u| u.as_deref() == Some(key))
+            .map(|l| l as u32)
+    }
+
+    fn has_icon(&self, i: usize) -> bool {
+        self.layer_of(i).is_some()
     }
 
     /// Point every item for `path` at the picture under `key`.
@@ -1214,6 +1254,47 @@ impl App {
         }
     }
 
+    /// Do `job` off the loop (a copy takes as long as it takes, and the
+    /// whole shell waits on this thread) and `then` with what it gives,
+    /// back here.
+    fn desktop_off_loop<R: Send + 'static>(
+        &mut self,
+        job: impl FnOnce() -> R + Send + 'static,
+        mut then: impl FnMut(&mut App, R) + 'static,
+    ) {
+        let (tx, rx) = calloop::channel::channel::<R>();
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+        });
+        let waiting = self.loop_handle.insert_source(rx, move |event, _, app: &mut App| {
+            if let calloop::channel::Event::Msg(r) = event {
+                then(app, r);
+            }
+        });
+        if waiting.is_err() {
+            warn!("desktop: cannot wait for work done off the loop");
+        }
+    }
+
+    /// The folder changed: read it again in a moment — once for a burst
+    /// (a hundred files copied in said so two hundred times).
+    pub(crate) fn desktop_reload_soon(&mut self) {
+        if self.desktop.reload_pending {
+            return;
+        }
+        self.desktop.reload_pending = true;
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(40));
+        let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.desktop.reload_pending = false;
+            app.reload_desktop();
+            calloop::timer::TimeoutAction::Drop
+        });
+        if armed.is_err() {
+            self.desktop.reload_pending = false;
+            self.reload_desktop();
+        }
+    }
+
     /// Read the folder again and show what is there now. Pictures already
     /// in hand are kept; files that left take theirs with them.
     pub(crate) fn reload_desktop(&mut self) {
@@ -1238,6 +1319,20 @@ impl App {
             .collect();
         volumes.append(&mut items);
         let mut items = volumes;
+        // A shortcut that is an installed app's own (the same file name and
+        // the same command as one the dock indexed) is vouched for by that.
+        for item in items.iter_mut() {
+            let Some(app) = locked_shortcut(item) else {
+                continue;
+            };
+            let file = Path::new(&item.path).file_name().map(|n| n.to_os_string());
+            let installed = self.entries.iter().any(|e| {
+                e.exec == app.exec && e.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_os_string()) == file
+            });
+            if installed {
+                *item = launcher_item(item.path.clone(), app);
+            }
+        }
         // A file's own picture, where the Files section already has one;
         // otherwise ask the thumbnailer (its answer lands in
         // `desktop_on_thumb`). Audio-only "videos" keep the audio icon.
@@ -1389,15 +1484,27 @@ impl App {
     /// Every item's picture into its layer (= its index): uploaded where
     /// the pixels are in hand, asked of the resolver where not.
     fn sync_desktop_icons(&mut self) {
-        let count = self.desktop.items.len();
-        if count == 0 {
+        // The pictures worn now, each once, in the items' order.
+        let mut worn: Vec<String> = Vec::new();
+        for item in &self.desktop.items {
+            if !worn.contains(&item.icon) {
+                worn.push(item.icon.clone());
+            }
+        }
+        if worn.is_empty() {
             return;
         }
-        // Size the array for the items plus headroom, so a file arriving is
+        // A layer whose picture nothing wears any more is free again.
+        for held in self.desktop.uploaded.iter_mut() {
+            if held.as_ref().is_some_and(|k| !worn.contains(k)) {
+                *held = None;
+            }
+        }
+        // Size the array for the pictures plus headroom, so one arriving is
         // a single-layer write and not a reallocation — which also clears
         // the array, hence `uploaded` is forgotten with it.
-        if count as u32 > self.desktop.capacity {
-            self.desktop.capacity = count as u32 + LAYER_HEADROOM;
+        if worn.len() as u32 > self.desktop.capacity {
+            self.desktop.capacity = worn.len() as u32 + LAYER_HEADROOM;
             if let Some(r) = self.desktop_renderer.as_mut() {
                 r.alloc_icon_array(self.desktop.capacity);
             }
@@ -1407,15 +1514,15 @@ impl App {
             .uploaded
             .resize(self.desktop.capacity as usize, None);
         let mut asked = Vec::new();
-        for i in 0..count {
-            let key = self.desktop.items[i].icon.clone();
-            if self.desktop.uploaded[i].as_deref() == Some(key.as_str()) {
+        for key in worn {
+            if self.desktop.uploaded.iter().any(|u| u.as_deref() == Some(key.as_str())) {
                 continue;
             }
             if let Some(chain) = self.desktop.chains.get(&key) {
-                if let Some(r) = self.desktop_renderer.as_mut() {
-                    r.update_icon_layer(i as u32, chain);
-                    self.desktop.uploaded[i] = Some(key);
+                let free = self.desktop.uploaded.iter().position(Option::is_none);
+                if let (Some(layer), Some(r)) = (free, self.desktop_renderer.as_mut()) {
+                    r.update_icon_layer(layer as u32, chain);
+                    self.desktop.uploaded[layer] = Some(key);
                 }
             } else if !self.desktop.pending.contains(&key) && !self.desktop.missing.contains(&key)
             {
@@ -1457,6 +1564,12 @@ impl App {
         }
         let key = thumb_key(path);
         self.desktop.chains.insert(key.clone(), pixels.to_vec());
+        // (A picture taken anew for the same file: its layer is written again.)
+        for held in self.desktop.uploaded.iter_mut() {
+            if held.as_deref() == Some(key.as_str()) {
+                *held = None;
+            }
+        }
         self.desktop.repoint(path, &key);
         self.sync_desktop_icons();
         self.request_desktop_draw();
@@ -1494,6 +1607,13 @@ impl App {
             .is_some_and(|it| it.kind == Kind::Volume);
         if on_volume && !many {
             menu = menu.for_volume(h as f32);
+        }
+        // On a shortcut nothing vouches for: letting it run comes first.
+        let locked = item
+            .and_then(|i| self.desktop.items.get(i))
+            .is_some_and(|it| locked_shortcut(it).is_some());
+        if locked && !many {
+            menu = menu.with_allow(h as f32);
         }
         // On the wallpaper, with files on the clipboard: they can be put here.
         if item.is_none() && self.clipboard_files().is_some() {
@@ -1646,20 +1766,27 @@ impl App {
         let Some((paths, cut)) = self.clipboard_files() else {
             return;
         };
-        let (brought, failed) = crate::desktop_send::put(&paths, &desktop_dir(), cut);
-        info!(
-            "desktop: pasted {} ({}; {failed} failed)",
-            brought.len(),
-            if cut { "moved" } else { "copied" }
+        let dir = desktop_dir();
+        self.desktop_off_loop(
+            move || crate::desktop_send::put(&paths, &dir, cut),
+            move |app, (brought, failed)| {
+                info!(
+                    "desktop: pasted {} ({}; {failed} failed)",
+                    brought.len(),
+                    if cut { "moved" } else { "copied" }
+                );
+                app.desktop_place_brought(&brought, Some(at));
+                if cut {
+                    // The same files, where they are now, as a plain copy: a
+                    // second paste somewhere else must not look for what
+                    // has moved.
+                    let now: Vec<String> =
+                        brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                    app.serve_files(&now, false);
+                }
+                app.reload_desktop();
+            },
         );
-        self.desktop_place_brought(&brought, Some(at));
-        if cut {
-            // The same files, where they are now, as a plain copy: a second
-            // paste somewhere else must not look for what has moved.
-            let now: Vec<String> = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-            self.serve_files(&now, false);
-        }
-        self.reload_desktop();
     }
 
     /// A row of the menu was chosen.
@@ -1767,21 +1894,36 @@ impl App {
                 // (A plugged-in volume in the selection stays where it is.)
                 let paths: Vec<String> =
                     paths.into_iter().filter(|p| !self.desktop_is_volume(p)).collect();
-                for path in paths {
-                    let src = Path::new(&path);
-                    let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
-                        continue;
-                    };
-                    let dest = unique_dest(&home, name);
-                    match bring(src, &dest, true) {
-                        Ok(()) => {
-                            info!("desktop: {} → {}", src.display(), dest.display());
-                            self.desktop.remembered.remove(&path);
+                self.desktop_off_loop(
+                    move || {
+                        let mut moved = Vec::new();
+                        for path in paths {
+                            let src = Path::new(&path);
+                            let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+                                continue;
+                            };
+                            let dest = unique_dest(&home, name);
+                            // A move: across disks the copy must be whole
+                            // before the original goes (`put` sees to it).
+                            let (brought, _) =
+                                crate::desktop_send::put(&[src.to_path_buf()], &home, true);
+                            if brought.is_empty() {
+                                warn!("desktop: cannot move {} home", src.display());
+                            } else {
+                                info!("desktop: {} → {}", src.display(), dest.display());
+                                moved.push(path);
+                            }
                         }
-                        Err(e) => warn!("desktop: cannot move {} home: {e}", src.display()),
-                    }
-                }
-                self.save_desktop_positions();
+                        moved
+                    },
+                    |app, moved: Vec<String>| {
+                        for path in moved {
+                            app.desktop.remembered.remove(&path);
+                        }
+                        app.save_desktop_positions();
+                        app.reload_desktop();
+                    },
+                );
             }
             Action::MoveToBin => {
                 // The selection goes (the clicked item is in it).
@@ -1801,6 +1943,23 @@ impl App {
                 }
             }
             Action::NewFolder => self.desktop_new_folder(at),
+            Action::AllowRun => {
+                let Some(it) = item.and_then(|i| self.desktop.items.get(i)) else {
+                    return;
+                };
+                use std::os::unix::fs::PermissionsExt;
+                let path = Path::new(&it.path);
+                let allowed = std::fs::metadata(path).and_then(|m| {
+                    let mut perms = m.permissions();
+                    perms.set_mode(perms.mode() | 0o100);
+                    std::fs::set_permissions(path, perms)
+                });
+                match allowed {
+                    Ok(()) => info!("desktop: {} may run from now on", it.name),
+                    Err(e) => warn!("desktop: cannot let {} run: {e}", it.path),
+                }
+                self.reload_desktop();
+            }
             Action::CleanUp => {
                 self.desktop.remembered.clear();
                 self.save_desktop_positions();
@@ -2088,9 +2247,11 @@ impl App {
             moving |= props_moving;
         }
         self.desktop_last_frame = moving.then_some(now);
-        let has_icon: Vec<bool> = (0..self.desktop.items.len())
-            .map(|i| self.desktop.has_icon(i))
+        let layer_of: Vec<Option<u32>> = (0..self.desktop.items.len())
+            .map(|i| self.desktop.layer_of(i))
             .collect();
+        let has_icon: Vec<bool> = layer_of.iter().map(Option::is_some).collect();
+        let layers: Vec<u32> = layer_of.iter().map(|l| l.unwrap_or(0)).collect();
         let icon_scale = self.icon_scale();
         let in_hand: Vec<usize> = self
             .desktop
@@ -2167,6 +2328,7 @@ impl App {
             icon_scale,
             Live {
                 in_hand: &in_hand,
+                layers: &layers,
                 carried,
                 selected: &selected,
                 band,
@@ -2989,12 +3151,17 @@ impl App {
         // A move, unless the source only lets its files be copied (the
         // card's items stay on the card).
         let may_move = offer.source_actions.is_empty() || offer.source_actions.contains(DndAction::Move);
-        let brought = import(&paths, &desktop_dir(), may_move);
-        self.desktop_place_brought(&brought, Some(at));
-        // Done, whatever came of the files: the other app must always hear
-        // the end of its drag, or it stays mid-drag.
-        offer.finish();
-        self.reload_desktop();
+        let (dir, offer) = (desktop_dir(), offer.clone());
+        self.desktop_off_loop(
+            move || import(&paths, &dir, may_move),
+            move |app, brought| {
+                app.desktop_place_brought(&brought, Some(at));
+                // Done, whatever came of the files: the other app must
+                // always hear the end of its drag, or it stays mid-drag.
+                offer.finish();
+                app.reload_desktop();
+            },
+        );
     }
 
     /// Remember cells for files just brought in: each in the free cell
@@ -3061,8 +3228,7 @@ impl App {
             .menu
             .as_ref()
             .zip(self.desktop.ptr)
-            .is_some_and(|(m, p)| m.hit(p).is_some())
-            || self.desktop.props.as_ref().is_some_and(|p| p.back_hover);
+            .is_some_and(|(m, p)| m.hit(p).is_some());
         let over_folder = self
             .desktop
             .ptr
@@ -3102,6 +3268,16 @@ impl App {
         let Some(item) = self.desktop.items.get(i) else {
             return;
         };
+        if locked_shortcut(item).is_some() {
+            info!("desktop: {} is a shortcut not yet let run", item.name);
+            let body = format!(
+                "{} {}",
+                item.name,
+                crate::i18n::tr("is a shortcut from elsewhere. If you trust it: right-click → Allow to run.")
+            );
+            std::thread::spawn(move || crate::desktop_send_notify(&body));
+            return;
+        }
         let (exec, terminal) = match &item.exec {
             Some((exec, terminal)) => (exec.clone(), *terminal),
             // A plugged-in volume is asked of the FILE MANAGER by name (the
@@ -3499,6 +3675,20 @@ mod tests {
             ],
             &["Projects", "archive"],
         );
+        // Not marked executable, a shortcut is a file under its real name…
+        let locked = list(&dir);
+        let mail = locked.iter().find(|i| i.name == "mail.desktop").expect("shown as a file");
+        assert_eq!(mail.kind, Kind::File);
+        assert!(mail.exec.is_none());
+        assert!(locked_shortcut(mail).is_some(), "…that could be let run");
+        // …and once it is (Allow to run), it is the app's shortcut.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let f = dir.join("mail.desktop");
+            let mut perms = std::fs::metadata(&f).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&f, perms).unwrap();
+        }
         let items = list(&dir);
         std::fs::remove_dir_all(&dir).ok();
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
@@ -3553,6 +3743,7 @@ mod tests {
         // picture); nothing of it is drawn.
         let live = Live {
             in_hand: &[0],
+            layers: &[],
             carried: None,
             only: None,
             selected: &[],
@@ -3571,6 +3762,7 @@ mod tests {
         let band = Rect::new(5.0, 5.0, 200.0, 150.0);
         let live = Live {
             in_hand: &[],
+            layers: &[],
             carried: None,
             only: None,
             selected: &[false, true, false],
@@ -3597,6 +3789,7 @@ mod tests {
         // a grabbed, with b; the drag is over the desktop with a's icon at (300,200).
         let live = Live {
             in_hand: &[0, 1],
+            layers: &[],
             carried: Some((300.0, 200.0)),
             only: None,
             selected: &[true, true, false],
@@ -3619,6 +3812,7 @@ mod tests {
         // The drag elsewhere (over the dock): the group is simply not drawn.
         let away = Live {
             in_hand: &[0, 1],
+            layers: &[],
             carried: None,
             only: None,
             selected: &[true, true, false],

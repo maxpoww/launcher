@@ -24,7 +24,6 @@ const PAD: f32 = 16.0;
 /// The Back row (only when there is a menu to go back to).
 const BACK_H: f32 = 28.0;
 const BACK_GAP: f32 = 6.0;
-const BACK_RADIUS: f32 = 7.0;
 const TITLE_PX: f32 = 15.0;
 const TITLE_LINE: f32 = 20.0;
 const TITLE_GAP: f32 = 10.0;
@@ -56,8 +55,6 @@ pub(crate) struct Props {
     pub back: Option<Menu>,
     /// The shape it grows from (the menu's panel); `None`: it fades in.
     pub grow_from: Option<Rect>,
-    /// The pointer is on the Back row.
-    pub back_hover: bool,
 }
 
 /// `a` on its way to `b`.
@@ -104,6 +101,25 @@ fn file_kind(name: &str) -> String {
             format!("{what} ({})", ext.to_ascii_lowercase())
         }
         _ => what.to_owned(),
+    }
+}
+
+/// A size as people read it: "0 B", "9.8 KB", "2.4 MB", "1.2 GB". (The
+/// gear's formatter only knows MB and GB: a small file read "0 MB".)
+pub(crate) fn size_text(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let (mut value, mut unit) = (bytes as f64 / 1024.0, 0);
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
@@ -200,7 +216,7 @@ pub(crate) fn rows_for(item: &Item, home: &Path) -> Vec<(&'static str, String)> 
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             rows.push(("Kind", file_kind(&name)));
             if let Some(m) = &meta {
-                rows.push(("Size", crate::gear_pages::size_text(m.len())));
+                rows.push(("Size", size_text(m.len())));
             }
             if crate::files::file_asset_name(&name) == "asset-image" {
                 if let Ok((w, h)) = image::image_dimensions(path) {
@@ -282,7 +298,6 @@ impl Props {
             t: 0.0,
             grow_from: menu.as_ref().map(|m| m.rect),
             back: menu,
-            back_hover: false,
         }
     }
 
@@ -299,7 +314,7 @@ impl Props {
                 "Empty".to_owned()
             } else {
                 let n = if files == 1 { "1 file".to_owned() } else { format!("{files} files") };
-                format!("{}, {n} in all", crate::gear_pages::size_text(bytes))
+                format!("{}, {n} in all", size_text(bytes))
             };
         }
     }
@@ -348,23 +363,14 @@ impl Props {
             color: Some(color),
         };
         if let Some(back) = self.back_rect() {
-            if self.back_hover {
-                grid.rects.push(RectInst {
-                    rect: back,
-                    radius: BACK_RADIUS,
-                    color: fade(paint.wash),
-                    glass: 0.0,
-                    border: 0.0,
-                });
-            }
             grid.labels.push(label(
                 "‹  Back",
                 (back.x + 8.0, back.y + (BACK_H - LINE_PX) / 2.0),
                 back.w - 12.0,
                 FONT_PX,
                 LINE_PX,
-                self.back_hover,
-                ink_at(if self.back_hover { 1.0 } else { 0.86 }),
+                false,
+                ink_at(0.86),
             ));
             y += BACK_H + BACK_GAP;
         }
@@ -480,12 +486,10 @@ mod tests {
         assert_eq!(scene.grids[0].rects[0].rect, menu_rect);
         assert_eq!(scene.grids[0].rects[0].color[3], PAINT.fill[3]);
         p.t = 1.0;
-        p.back_hover = true;
         let mut scene = Scene::default();
         p.push(&mut scene, &PAINT);
         let g = &scene.grids[0];
         assert_eq!(g.rects[0].rect, p.rect);
-        assert_eq!(g.rects[1].rect, back, "the hovered Back row's band");
         assert_eq!(g.labels[0].text, "‹  Back");
         // Near the surface's edge it is pulled in to stay whole.
         let menu = Menu::open(Some(0), false, (900.0, 700.0), 1000.0, 800.0);
@@ -517,6 +521,9 @@ mod tests {
 
     #[test]
     fn small_words() {
+        assert_eq!(size_text(0), "0 B");
+        assert_eq!(size_text(2048), "2.0 KB");
+        assert_eq!(size_text(5 * 1024 * 1024), "5.0 MB");
         assert_eq!(contains_text(0, 0, 0), "Nothing");
         assert_eq!(contains_text(0, 1, 0), "1 file");
         assert_eq!(contains_text(2, 5, 3), "2 folders, 5 files (3 hidden)");

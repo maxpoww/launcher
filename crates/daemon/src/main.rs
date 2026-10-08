@@ -1105,7 +1105,7 @@ fn main() -> anyhow::Result<()> {
                     .handle()
                     .insert_source(source, |_readiness, fd, app: &mut App| {
                         apps::drain_inotify(fd.as_fd());
-                        app.reload_desktop();
+                        app.desktop_reload_soon();
                         Ok(PostAction::Continue)
                     })
             {
