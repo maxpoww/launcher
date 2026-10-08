@@ -274,7 +274,7 @@ The big daemon files are cohesive but long — go straight to the function:
   keeps what was typed. New folder = "untitled folder" at the clicked cell → rename. PROPERTIES
   (`desktop_props.rs`): the menu's LAST row, opened by HOVER — the menu becomes the box (the
   panel lerps from the menu's rect, `grow_from`; `Props.back` keeps the menu, the `‹ Back` row
-  turns it back, any other press closes). Lines: Kind, Contains (folders/files/hidden), Size (a
+  turns it back on hover or click, any other press closes). Lines: Kind, Contains (folders/files/hidden), Size (a
   folder's tree walked on a thread, `folder_size`), Dimensions (images), Link to, Where, Owner,
   Access, Modified, Created, Opened. `debug-desktop props <n>` opens it without a menu. Not yet:
   per-output surfaces, Escape closing the menu (no keyboard while it is up).

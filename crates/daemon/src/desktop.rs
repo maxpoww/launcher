@@ -1426,6 +1426,22 @@ impl App {
         }
     }
 
+    /// Turn the Properties box back into the menu it grew out of: the panel
+    /// shrinks to the menu's shape, the pointer at `at`.
+    fn desktop_props_back(&mut self, at: (f32, f32)) {
+        let Some(props) = self.desktop.props.take() else {
+            return;
+        };
+        if let Some(mut menu) = props.back {
+            menu.grow_from = Some(props.rect);
+            menu.t = 0.0;
+            menu.pressed = None;
+            menu.hover = menu.hit(at);
+            self.desktop.menu = Some(menu);
+        }
+        self.request_desktop_draw();
+    }
+
     /// Open the Properties box for item `i` by `at`. A folder's total size
     /// is walked off the loop and filled in when it comes back.
     pub(crate) fn desktop_open_props(&mut self, i: usize, at: (f32, f32), menu: Option<Menu>) {
@@ -1890,17 +1906,13 @@ impl App {
                     // The Properties box: a press on Back turns it back into
                     // the menu it grew out of; one anywhere else puts it
                     // away, and is nothing more than that.
-                    if let Some(props) = self.desktop.props.take() {
-                        if props.back_rect().is_some_and(|r| r.contains(at)) {
-                            if let Some(mut menu) = props.back {
-                                menu.grow_from = Some(props.rect);
-                                menu.t = 0.0;
-                                menu.pressed = None;
-                                menu.hover = menu.hit(at);
-                                self.desktop.menu = Some(menu);
-                            }
+                    if let Some(back) = self.desktop.props.as_ref().map(|p| p.back_rect()) {
+                        if back.is_some_and(|r| r.contains(at)) {
+                            self.desktop_props_back(at);
+                        } else {
+                            self.desktop.props = None;
+                            self.request_desktop_draw();
                         }
-                        self.request_desktop_draw();
                         return;
                     }
                     // While the menu is up, the left button is its: a press
@@ -2024,11 +2036,11 @@ impl App {
             return;
         }
         if let Some(props) = self.desktop.props.as_mut() {
-            // The Properties box: only its Back row answers the pointer.
-            let over = props.back_rect().is_some_and(|r| r.contains((x, y)));
-            if over != props.back_hover {
-                props.back_hover = over;
-                self.request_desktop_draw();
+            // The Properties box: only its Back row answers the pointer,
+            // and coming onto it is enough — as coming onto Properties was
+            // (Max, 2026-10-08: "make back work also on hover").
+            if props.back_rect().is_some_and(|r| r.contains((x, y))) {
+                self.desktop_props_back((x, y));
             }
             self.desktop_cursor();
             return;
