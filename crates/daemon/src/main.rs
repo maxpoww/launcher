@@ -28,6 +28,7 @@ mod desktop;
 mod desktop_menu;
 mod desktop_props;
 mod desktop_send;
+mod desktop_top;
 mod mounts;
 mod logging;
 mod dict;
@@ -321,6 +322,16 @@ fn main() -> anyhow::Result<()> {
         )
     });
 
+    // …and the surface its menus are drawn on, above the windows.
+    let desktop_top_layer = desktop_layer.as_ref().map(|_| {
+        surface::create_desktop_top_surface(
+            &compositor,
+            &layer_shell,
+            &qh,
+            config.desktop.render_scale.max(1),
+        )
+    });
+
     // The CARD: the shelf that rides the windows (`card.rs`). A surface
     // with nothing attached until a card is first summoned.
     card::declare_layer_rule();
@@ -370,6 +381,17 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .zip(desktop_layer.as_ref())
         .map(|(v, l)| v.attach(l.wl_surface(), &qh));
+    let desktop_top = desktop_top::Top {
+        fscale: fractional.as_ref().zip(desktop_top_layer.as_ref()).map(|(f, l)| {
+            f.attach(l.wl_surface(), fractional::SurfaceKind::DesktopTop, &qh)
+        }),
+        visible: visible_regions
+            .as_ref()
+            .zip(desktop_top_layer.as_ref())
+            .map(|(v, l)| v.attach(l.wl_surface(), &qh)),
+        layer: desktop_top_layer,
+        ..Default::default()
+    };
     let card_visible = visible_regions
         .as_ref()
         .zip(card_layer.as_ref())
@@ -620,6 +642,7 @@ fn main() -> anyhow::Result<()> {
         deck_thumb_chains: Vec::new(),
         deck_icon_capacity: 0,
         deck_ptr: None,
+        desktop_top,
         desktop_layer,
         desktop_renderer: None,
         desktop_size: (0, 0),
@@ -1480,6 +1503,8 @@ pub struct App {
     /// The DESKTOP: `~/Desktop` as icons on a surface under the windows, with
     /// its own renderer (built on first configure) — see `desktop`. `None`
     /// when disabled, or after the compositor closed it.
+    /// The surface the desktop's menus are drawn on, above the windows.
+    desktop_top: desktop_top::Top,
     desktop_layer: Option<LayerSurface>,
     desktop_renderer: Option<Renderer>,
     /// The desktop surface's logical size.
@@ -5705,6 +5730,7 @@ impl App {
             SurfaceKind::Options => (&self.options_fscale, self.config.options.render_scale),
             SurfaceKind::Deck => (&self.deck_fscale, self.config.options.render_scale),
             SurfaceKind::Desktop => (&self.desktop_fscale, self.config.desktop.render_scale),
+            SurfaceKind::DesktopTop => (&self.desktop_top.fscale, self.config.desktop.render_scale),
             SurfaceKind::Card => (&self.card_fscale, self.config.options.render_scale),
         };
         let fallback = fallback.max(1) as f32;
@@ -5718,6 +5744,7 @@ impl App {
             SurfaceKind::Options => self.options_size,
             SurfaceKind::Deck => self.deck_size,
             SurfaceKind::Desktop => self.desktop_size,
+            SurfaceKind::DesktopTop => self.desktop_top.size,
             SurfaceKind::Card => self.card_size,
         };
         let long = w.max(h);
@@ -5742,6 +5769,11 @@ impl App {
                 self.desktop_size,
                 self.desktop_renderer.as_mut(),
                 &self.desktop_fscale,
+            ),
+            SurfaceKind::DesktopTop => (
+                self.desktop_top.size,
+                self.desktop_top.renderer.as_mut(),
+                &self.desktop_top.fscale,
             ),
             SurfaceKind::Card => (self.card_size, self.card_renderer.as_mut(), &self.card_fscale),
         };
@@ -5769,6 +5801,7 @@ impl App {
                 // change — but the input region is re-sent with the draw.
                 self.relayout_desktop();
             }
+            SurfaceKind::DesktopTop => self.request_desktop_top_draw(),
             SurfaceKind::Card => self.request_card_draw(),
         }
     }
@@ -6284,6 +6317,19 @@ impl CompositorHandler for App {
             }
             return;
         }
+        // The desktop's menus', on their own surface.
+        if self
+            .desktop_top
+            .layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            self.desktop_top.frame_pending = false;
+            if self.desktop_top.dirty {
+                self.draw_desktop_top();
+            }
+            return;
+        }
         // The card's.
         if self
             .card_layer
@@ -6367,6 +6413,17 @@ impl LayerShellHandler for App {
             self.desktop_renderer = None;
             return;
         }
+        // Its menus' surface: without it they are drawn on the desktop.
+        if self
+            .desktop_top
+            .layer
+            .as_ref()
+            .is_some_and(|d| d.wl_surface() == layer.wl_surface())
+        {
+            warn!("desktop menu surface closed by the compositor");
+            self.desktop_top = desktop_top::Top::default();
+            return;
+        }
         // The card's surface likewise.
         if self
             .card_layer
@@ -6418,6 +6475,15 @@ impl LayerShellHandler for App {
             .is_some_and(|d| d.wl_surface() == layer.wl_surface())
         {
             self.configure_desktop(configure);
+            return;
+        }
+        if self
+            .desktop_top
+            .layer
+            .as_ref()
+            .is_some_and(|d| d.wl_surface() == layer.wl_surface())
+        {
+            self.configure_desktop_top(configure);
             return;
         }
         if self
@@ -6830,7 +6896,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
             app.deck_pointer(event);
             return;
         }
-        if app.pointer_surface == options::PointerSurface::Desktop {
+        if matches!(
+            app.pointer_surface,
+            options::PointerSurface::Desktop | options::PointerSurface::DesktopTop
+        ) {
             app.desktop_pointer(event);
             return;
         }

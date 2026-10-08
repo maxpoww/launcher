@@ -305,6 +305,12 @@ The big daemon files are cohesive but long — go straight to the function:
   A device connected WHILE the icons are away shows ALONE once (`Desktop::solo`, `Live::only`,
   fading by the same surface opacity — one group fades at a time); the next wallpaper click
   brings the others back beside it (at once, no fade: one surface opacity), the one after puts them all away.
+  MENUS ON TOP (`desktop_top.rs`): the menu and the Properties box are drawn on a SECOND layer
+  surface (`waverunner-desktop-menu`, Overlay, same anchors and size as the desktop's so points
+  agree) — the desktop is under the windows and its menus must not be. It takes the pointer over
+  the whole screen only while one is up (a click anywhere else, a window included, just closes
+  it); its pointer events go to `desktop_pointer` (`PointerSurface::DesktopTop`). Without it
+  (`desktop_top_ready` false) they are drawn on the desktop as before.
   HARDENING (2026-10-08 review): a `.desktop` file is a shortcut only when TRUSTED — executable,
   or an installed app's own (same file name + Exec as an indexed entry, lifted in
   `reload_desktop`); otherwise a plain file under its real name whose double click says so and

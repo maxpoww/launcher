@@ -35,6 +35,8 @@ pub enum SurfaceKind {
     Options,
     Deck,
     Desktop,
+    /// The desktop's menus, above the windows (`desktop_top.rs`).
+    DesktopTop,
     Card,
 }
 
@@ -106,6 +108,7 @@ impl Dispatch<WpFractionalScaleV1, SurfaceKind> for App {
                 SurfaceKind::Options => app.options_fscale.as_mut(),
                 SurfaceKind::Deck => app.deck_fscale.as_mut(),
                 SurfaceKind::Desktop => app.desktop_fscale.as_mut(),
+                SurfaceKind::DesktopTop => app.desktop_top.fscale.as_mut(),
                 SurfaceKind::Card => app.card_fscale.as_mut(),
             };
             let Some(slot) = slot else {

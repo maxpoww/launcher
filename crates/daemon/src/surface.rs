@@ -214,6 +214,39 @@ pub fn create_card_surface(
     layer
 }
 
+/// Create and commit the surface the desktop's MENUS are drawn on: the
+/// same place and size as the desktop's (anchored the same way, reserving
+/// nothing, so a point means the same on both), but on the Overlay layer —
+/// above every window. It paints nothing and takes no input until a menu
+/// is up (`desktop_top.rs`).
+pub fn create_desktop_top_surface(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<App>,
+    render_scale: u32,
+) -> LayerSurface {
+    let surface = compositor.create_surface(qh);
+    let layer = layer_shell.create_layer_surface(
+        qh,
+        surface,
+        Layer::Overlay,
+        Some("waverunner-desktop-menu"),
+        None,
+    );
+    layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+    layer.set_size(0, 0);
+    layer.set_exclusive_zone(0);
+    layer.wl_surface().set_buffer_scale(render_scale as i32);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    if let Ok(region) = Region::new(compositor) {
+        layer
+            .wl_surface()
+            .set_input_region(Some(region.wl_region()));
+    }
+    layer.commit();
+    layer
+}
+
 /// Set a layer surface's pointer input region to the union of `rects`
 /// (logical `x, y, w, h`). An empty slice makes the whole surface
 /// click-through.

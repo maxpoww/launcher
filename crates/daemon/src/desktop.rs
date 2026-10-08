@@ -2200,6 +2200,8 @@ impl App {
     /// too (see `desktop_cursor`).
     fn request_desktop_draw(&mut self) {
         self.desktop_cursor();
+        // (The menus' own surface follows every change too.)
+        self.request_desktop_top_draw();
         if self.desktop_frame_pending {
             self.desktop_dirty = true;
         } else {
@@ -2235,16 +2237,11 @@ impl App {
         if !self.desktop.solo_on && solo_t <= 0.0 {
             self.desktop.solo.clear();
         }
-        // The menu's entrance eases the same way.
-        if let Some(menu) = self.desktop.menu.as_mut() {
-            let (t, menu_moving) = crate::animation::ease_toward(menu.t, 1.0, dt, 20.0, 0.004);
-            menu.t = t;
-            moving |= menu_moving;
-        }
-        if let Some(props) = self.desktop.props.as_mut() {
-            let (t, props_moving) = crate::animation::ease_toward(props.t, 1.0, dt, 16.0, 0.004);
-            props.t = t;
-            moving |= props_moving;
+        // The menus live on their own surface above the windows
+        // (`desktop_top.rs`); only without it are they eased and drawn here.
+        let on_top = self.desktop_top_ready();
+        if !on_top {
+            moving |= self.desktop_ease_panels(dt);
         }
         self.desktop_last_frame = moving.then_some(now);
         let layer_of: Vec<Option<u32>> = (0..self.desktop.items.len())
@@ -2275,31 +2272,13 @@ impl App {
         // ONE group fades at a time, by the surface's own opacity: all the
         // icons (in or out), or — once they are away — the devices shown
         // alone. A menu or a box up over put-away icons must be seen whole.
-        let lit = self.desktop.menu.is_some() || self.desktop.props.is_some();
+        let lit = !on_top && (self.desktop.menu.is_some() || self.desktop.props.is_some());
         let all_group = !self.desktop.hidden || shown > 0.004;
         let only: Option<HashSet<String>> = (!all_group).then(|| self.desktop.solo.clone());
         let group_alpha = if all_group { shown } else { solo_t };
-        // The menu wears the OPTIONS boxes' surface, read on its own side of
-        // the screen as every box's is (Max, 2026-10-07: "it should follow
-        // the colours of the BG as the dock and OPTIONS").
-        let menu_paint = self.desktop.menu.as_ref().map(|m| {
-            let (fill, ink) = self.box_surface_at(m.rect);
-            MenuPaint {
-                fill,
-                ink,
-                wash: self.options_hover_wash(),
-                radius: crate::clipboard::BOX_RADIUS,
-            }
-        });
-        let props_paint = self.desktop.props.as_ref().map(|p| {
-            let (fill, ink) = self.box_surface_at(p.rect);
-            MenuPaint {
-                fill,
-                ink,
-                wash: self.options_hover_wash(),
-                radius: crate::clipboard::BOX_RADIUS,
-            }
-        });
+        let panel_paint = |rect: Option<Rect>| rect.filter(|_| !on_top).map(|r| self.desktop_panel_paint(r));
+        let menu_paint = panel_paint(self.desktop.menu.as_ref().map(|m| m.rect));
+        let props_paint = panel_paint(self.desktop.props.as_ref().map(|p| p.rect));
         let Some(renderer) = self.desktop_renderer.as_mut() else {
             return;
         };
@@ -2450,11 +2429,12 @@ impl App {
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.desktop.press = None;
                 self.desktop.ptr = None;
-                // A menu left behind would hang under whatever took the
-                // pointer; it goes with it.
+                // A menu drawn ON the desktop would hang under whatever took
+                // the pointer, and goes with it. On its own surface it takes
+                // the pointer itself (this very leave), and stays.
                 let gone = self.desktop.band.take().is_some()
-                    | self.desktop.menu.take().is_some()
-                    | self.desktop.props.take().is_some();
+                    | (!self.desktop_top_ready()
+                        && (self.desktop.menu.take().is_some() | self.desktop.props.take().is_some()));
                 if gone {
                     self.request_desktop_draw();
                 }
@@ -2465,7 +2445,14 @@ impl App {
                 state: WEnum::Value(wl_pointer::ButtonState::Released),
                 ..
             } if button == crate::BTN_RIGHT => {
-                if let Some(at) = self.desktop.ptr {
+                // With a menu up the pointer is on the menus' surface, which
+                // covers the windows too: a right-click there is not on the
+                // desktop — like any click off the menu, it only closes it.
+                if self.pointer_surface == crate::options::PointerSurface::DesktopTop {
+                    if self.desktop.menu.take().is_some() | self.desktop.props.take().is_some() {
+                        self.request_desktop_draw();
+                    }
+                } else if let Some(at) = self.desktop.ptr {
                     self.desktop_open_menu(at);
                 }
             }
@@ -3211,8 +3198,10 @@ impl App {
         // request from whichever client holds the pointer focus, and the
         // dock and the bar are this same client — a request sent from here
         // while the pointer is on them would redraw THEIR pointer.
-        if self.pointer_surface != crate::options::PointerSurface::Desktop
-            || self.desktop.ptr.is_none()
+        if !matches!(
+            self.pointer_surface,
+            crate::options::PointerSurface::Desktop | crate::options::PointerSurface::DesktopTop
+        ) || self.desktop.ptr.is_none()
         {
             return;
         }

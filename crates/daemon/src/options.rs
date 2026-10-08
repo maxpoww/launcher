@@ -903,6 +903,9 @@ pub(crate) enum PointerSurface {
     Deck,
     /// The desktop icons behind the windows (see [`crate::desktop`]).
     Desktop,
+    /// The desktop's menus, on their surface above the windows: the
+    /// desktop's own pointer handler takes these events too.
+    DesktopTop,
     /// The card on a window (see [`crate::card`]).
     Card,
 }
@@ -5003,6 +5006,13 @@ impl App {
             .is_some_and(|l| l.wl_surface() == surface)
         {
             PointerSurface::Desktop
+        } else if self
+            .desktop_top
+            .layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            PointerSurface::DesktopTop
         } else if self
             .card_layer
             .as_ref()
