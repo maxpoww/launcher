@@ -1217,14 +1217,7 @@ impl App {
         // which read as a hole in the glide (Max, 2026-10-08: *"i see a
         // 'hole' on the animation when the card cross the middle of the
         // window"*). Its window does not move while it slides.
-        let paint = {
-            let side = match self.card.spot {
-                Some(s) => Rect::new(s.x, s.y, s.w, s.h),
-                None => rect,
-            };
-            let (fill, ink) = self.box_surface_at(side);
-            Paint { fill, ink }
-        };
+        let paint = self.card_paint();
         let Some(renderer) = self.card_renderer.as_mut() else {
             return;
         };
@@ -1404,6 +1397,17 @@ impl App {
         if armed {
             self.card_tick_timer = true;
         }
+    }
+
+    /// The card's colours right now (the OPTIONS boxes' own, read on its
+    /// window's side of the screen).
+    pub(super) fn card_paint(&self) -> Paint {
+        let side = match self.card.spot {
+            Some(s) => Rect::new(s.x, s.y, s.w, s.h),
+            None => self.card.rect.unwrap_or_default(),
+        };
+        let (fill, ink) = self.box_surface_at(side);
+        Paint { fill, ink }
     }
 
     /// Route a pointer event on the card's surface.

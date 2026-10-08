@@ -1694,6 +1694,46 @@ impl Renderer {
         })
     }
 
+    /// Draw one line of `text` OFF the screen: `put(x, y, [r, g, b, a])` is
+    /// called for every pixel the glyphs cover (straight alpha; `x`, `y`
+    /// from the line's top-left corner), in the renderer's own fonts. For
+    /// a picture made on the CPU — a drag image (`card/view.rs`).
+    pub fn text_to_pixels(
+        &mut self,
+        text: &str,
+        font_px: f32,
+        family: Option<&str>,
+        color: [u8; 4],
+        put: &mut dyn FnMut(i32, i32, [u8; 4]),
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let mut font_system = self.font_system.borrow_mut();
+        let mut swash = self.swash.borrow_mut();
+        let mut buffer = TextBuffer::new(&mut font_system, Metrics::new(font_px, font_px * 1.3));
+        let (fam, weight) = resolve_family(family);
+        buffer.set_text(
+            &mut font_system,
+            text,
+            Attrs::new().family(fam).weight(weight),
+            Shaping::Advanced,
+        );
+        buffer.shape_until_scroll(&mut font_system, false);
+        buffer.draw(
+            &mut font_system,
+            &mut swash,
+            glyphon::Color::rgba(color[0], color[1], color[2], color[3]),
+            |x, y, w, h, c| {
+                for dy in 0..h as i32 {
+                    for dx in 0..w as i32 {
+                        put(x + dx, y + dy, [c.r(), c.g(), c.b(), c.a()]);
+                    }
+                }
+            },
+        );
+    }
+
     /// Overwrite one icon texture-array layer (a dynamic package icon in
     /// the reserved tail of the array). Out-of-range layers and missing
     /// textures are ignored — a rescan re-uploads shortly anyway.

@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use wayland_client::protocol::wl_data_device_manager::DndAction;
 
 use super::model::*;
+use super::view::tile_picture;
 use super::Drag;
 use crate::desktop::DragIcon;
 use crate::App;
@@ -66,18 +67,58 @@ pub(super) fn read_patiently(
 impl App {
     /// Take item `id` into a Wayland drag: any app it is let go on gets a
     /// copy of it.
+    /// The item as it stands in the list, as a drag image: seen all the way
+    /// (Max, 2026-10-08: *"when i grab a item it becomes invisible. i want
+    /// to see it all the time"*). `tile`: its box on the card's surface.
+    fn card_drag_picture(&mut self, item: &Item, tile: super::Rect) -> Option<DragIcon> {
+        let scale = self
+            .card_fscale
+            .as_ref()
+            .map_or(1.0, |fs| fs.scale_or(1.0))
+            .ceil()
+            .clamp(1.0, 3.0);
+        let paint = self.card_paint();
+        let renderer = self.card_renderer.as_mut()?;
+        let lines = self.card.lines.get(&item.id).map_or(&[][..], Vec::as_slice);
+        let thumb = item.path.as_ref().and_then(|p| self.card.chains.get(p));
+        let side = crate::apps::ICON_SIZE as usize;
+        let canvas = tile_picture(
+            item,
+            lines,
+            tile.w,
+            scale,
+            &paint,
+            thumb.map(|chain| &chain[..(side * side * 4).min(chain.len())]),
+            side,
+            &mut |canvas, line, px, family, ink, at| {
+                let ink8 = ink.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                let (ox, oy) = (at.0.round() as i32, at.1.round() as i32);
+                renderer.text_to_pixels(line, px, family, ink8, &mut |x, y, c| {
+                    let c = c.map(|v| v as f32 / 255.0);
+                    canvas.blend(ox + x, oy + y, c, 1.0);
+                });
+            },
+        );
+        let grip = match self.card.ptr {
+            Some((x, y)) => (
+                (x - tile.x).clamp(0.0, tile.w),
+                (y - tile.y).clamp(0.0, tile.h),
+            ),
+            None => (tile.w / 2.0, tile.h / 2.0),
+        };
+        self.drag_picture(&canvas.px, canvas.w, canvas.h, scale as i32, grip)
+    }
+
     pub(super) fn card_lift(&mut self, id: u64, serial: u32) {
         self.card.press = None;
         // Where it is picked up: the middle of its own box.
-        let from_y = self
-            .card
-            .tiles
-            .iter()
-            .find(|t| t.id == id)
-            .map_or(0.0, |t| t.rect.y + t.rect.h / 2.0);
+        let tile = self.card.tiles.iter().find(|t| t.id == id).map(|t| t.rect);
+        let from_y = tile.map_or(0.0, |r| r.y + r.h / 2.0);
         let Some(item) = self.card.item(id).cloned() else {
             return;
         };
+        // It travels as a picture of itself, held where it was grabbed.
+        let image = tile.and_then(|tile| self.card_drag_picture(&item, tile));
         let (Some(manager), Some(device), Some(layer)) = (
             self.data_device_manager.as_ref(),
             self.data_device.as_ref(),
@@ -88,12 +129,6 @@ impl App {
         };
         let source =
             manager.create_drag_and_drop_source(&self.qh, out_mimes(&item), DndAction::Copy);
-        // A picture travels as itself; anything else under the bare pointer.
-        let image = item
-            .path
-            .as_ref()
-            .and_then(|p| self.card.chains.get(p))
-            .and_then(|chain| self.drag_image(chain, (24.0, 24.0), self.icon_scale()));
         source.start_drag(
             device,
             layer.wl_surface(),

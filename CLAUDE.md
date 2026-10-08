@@ -342,7 +342,9 @@ The big daemon files are cohesive but long — go straight to the function:
     items; none local → the picture's pixels if offered, else the text), one `receive` at a time
     on a thread that gives up on an app silent for `DROP_PATIENCE` (`read_patiently`),
     `finish()`/`destroy()` always sent. DRAG OUT (`card_lift`): a real Wayland drag,
-    COPY only, the item stays. ORDER: a drag over the card — another app's or one of the card's
+    COPY only, the item stays. It is carried as a PICTURE OF ITSELF (`card_drag_picture`: the
+    tile drawn on the CPU — `view::tile_picture` on a `Canvas`, text through
+    `Renderer::text_to_pixels` — on an shm surface, `App::drag_picture`), held where grabbed. ORDER: a drag over the card — another app's or one of the card's
     own items — makes the list open a place where it would land (`Card::opening` →
     `view::insert_index`, judged where each item BELONGS; the items from there on ease down by
     `View::shifts`; the carried item is `View::hidden`); a drop of an own item is `Card::move_to`,
@@ -373,5 +375,5 @@ The big daemon files are cohesive but long — go straight to the function:
   Pointer-free: `waverunner-ctl card [toggle [addr]|all|add text <…>|add file <path>|remove
   <n>|clear|state|rate <speed> [accel]]`. Not built: a card button for Seam/staged windows (no
   Golem bar), drawing it in its window's place in the stack (it draws over a window overlapping
-  its own), a drag image for text, per-output.
+  its own), per-output.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

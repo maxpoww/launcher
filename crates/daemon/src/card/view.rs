@@ -373,6 +373,200 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     (scene, tiles, max_scroll)
 }
 
+/// A picture being made on the CPU: `w`×`h` pixels of premultiplied RGBA.
+pub(crate) struct Canvas {
+    pub w: usize,
+    pub h: usize,
+    pub px: Vec<u8>,
+}
+
+impl Canvas {
+    pub(super) fn new(w: usize, h: usize) -> Self {
+        Self {
+            w,
+            h,
+            px: vec![0; w * h * 4],
+        }
+    }
+
+    /// Lay `color` (straight alpha, 0..=1 each) over the pixel at (x, y),
+    /// thinned by `cover`.
+    pub(super) fn blend(&mut self, x: i32, y: i32, color: [f32; 4], cover: f32) {
+        if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
+            return;
+        }
+        let a = (color[3] * cover).clamp(0.0, 1.0);
+        if a <= 0.0 {
+            return;
+        }
+        let at = (y as usize * self.w + x as usize) * 4;
+        for (c, ink) in color.iter().enumerate().take(3) {
+            let under = self.px[at + c] as f32 / 255.0;
+            self.px[at + c] = ((ink * a + under * (1.0 - a)) * 255.0).round() as u8;
+        }
+        let under = self.px[at + 3] as f32 / 255.0;
+        self.px[at + 3] = ((a + under * (1.0 - a)) * 255.0).round() as u8;
+    }
+
+    /// Fill a rounded rectangle (pixels), its edge softened; with `stroke`
+    /// only a band of that width just inside the edge.
+    pub(super) fn round_rect(
+        &mut self,
+        r: Rect,
+        radius: f32,
+        color: [f32; 4],
+        stroke: Option<f32>,
+    ) {
+        let (x0, y0) = (r.x.floor() as i32, r.y.floor() as i32);
+        let (x1, y1) = ((r.x + r.w).ceil() as i32, (r.y + r.h).ceil() as i32);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let radius = radius.min(r.w / 2.0).min(r.h / 2.0);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                // Signed distance to the rounded box's edge (inside < 0).
+                let qx = ((x as f32 + 0.5) - cx).abs() - (r.w / 2.0 - radius);
+                let qy = ((y as f32 + 0.5) - cy).abs() - (r.h / 2.0 - radius);
+                let d = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
+                let mut cover = (0.5 - d).clamp(0.0, 1.0);
+                if let Some(width) = stroke {
+                    cover *= (d + width + 0.5).clamp(0.0, 1.0);
+                }
+                self.blend(x, y, color, cover);
+            }
+        }
+    }
+
+    /// Lay a square picture (`side`² premultiplied RGBA, the first level
+    /// of a mip chain) into `to`, scaled by its nearest pixels.
+    fn picture(&mut self, pixels: &[u8], side: usize, to: Rect, clip: Rect) {
+        if pixels.len() < side * side * 4 || to.w <= 0.0 || to.h <= 0.0 {
+            return;
+        }
+        let (x0, y0) = (
+            to.x.max(clip.x).floor() as i32,
+            to.y.max(clip.y).floor() as i32,
+        );
+        let x1 = (to.x + to.w).min(clip.x + clip.w).ceil() as i32;
+        let y1 = (to.y + to.h).min(clip.y + clip.h).ceil() as i32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let sx = (((x as f32 + 0.5 - to.x) / to.w) * side as f32) as usize;
+                let sy = (((y as f32 + 0.5 - to.y) / to.h) * side as f32) as usize;
+                if sx >= side || sy >= side {
+                    continue;
+                }
+                let at = (sy * side + sx) * 4;
+                let a = pixels[at + 3] as f32 / 255.0;
+                if a <= 0.0 {
+                    continue;
+                }
+                // (Premultiplied in the chain: back to straight for `blend`.)
+                let straight = |c: u8| (c as f32 / 255.0 / a).min(1.0);
+                self.blend(
+                    x,
+                    y,
+                    [
+                        straight(pixels[at]),
+                        straight(pixels[at + 1]),
+                        straight(pixels[at + 2]),
+                        a,
+                    ],
+                    1.0,
+                );
+            }
+        }
+    }
+}
+
+/// How `tile_picture` has a line drawn: canvas, line, font px, family,
+/// colour, top-left corner.
+pub(crate) type DrawText<'a> =
+    dyn FnMut(&mut Canvas, &str, f32, Option<&'static str>, [f32; 4], (f32, f32)) + 'a;
+
+/// An item as a PICTURE of itself: what is carried under the pointer when
+/// it is dragged (Max, 2026-10-08: *"when i grab a item it becomes
+/// invisible. i want to see it all the time"*) — its box as the card draws
+/// it, on a plate of the card's own colour, `width` logical px wide at
+/// `scale` buffer pixels each. `thumb`: a picture item's pixels. Text is
+/// drawn by `text(canvas, line, font_px, family, colour, (x, y))`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tile_picture(
+    item: &Item,
+    lines: &[String],
+    width: f32,
+    scale: f32,
+    paint: &Paint,
+    thumb: Option<&[u8]>,
+    thumb_side: usize,
+    text: &mut DrawText,
+) -> Canvas {
+    let bright = paint.bright();
+    let height = tile_height(item.kind, lines.len());
+    let s = |v: f32| v * scale;
+    // (Whole logical pixels: the buffer is shown at 1/`scale` of its size.)
+    let mut canvas = Canvas::new(s(width.round()) as usize, s(height.round()) as usize);
+    let whole = Rect::new(0.0, 0.0, canvas.w as f32, canvas.h as f32);
+    // The card's own colour underneath (solid: it is seen over anything),
+    // then the item's inset and rim, as in the list.
+    let plate = [paint.fill[0], paint.fill[1], paint.fill[2], 0.97];
+    canvas.round_rect(whole, s(TILE_RADIUS), plate, None);
+    let (inset, rim) = if bright {
+        ([0.0, 0.0, 0.0, 0.07], [0.0, 0.0, 0.0, 0.16])
+    } else {
+        ([0.0, 0.0, 0.0, 0.28], [1.0, 1.0, 1.0, 0.14])
+    };
+    canvas.round_rect(whole, s(TILE_RADIUS), inset, None);
+    canvas.round_rect(whole, s(TILE_RADIUS), rim, Some(s(1.0)));
+
+    let x = TILE_PAD_X;
+    let text_w = width - 2.0 * TILE_PAD_X;
+    let mut y = TILE_PAD_Y;
+    if let Some(word) = item.kind.word() {
+        text(
+            &mut canvas,
+            word,
+            s(KIND_PX),
+            None,
+            [ACCENT[0], ACCENT[1], ACCENT[2], 0.85],
+            (s(x), s(y)),
+        );
+        y += KIND_LINE;
+    }
+    if item.kind == Kind::Image {
+        let frame = Rect::new(s(x), s(y), s(text_w), s(PIC_H));
+        let fill = if bright {
+            [0.0, 0.0, 0.0, 0.08]
+        } else {
+            [0.0, 0.0, 0.0, 0.30]
+        };
+        canvas.round_rect(frame, s(PIC_RADIUS), fill, None);
+        if let Some(pixels) = thumb {
+            let side = if item.aspect > 1.0 {
+                (s(PIC_H) * item.aspect).min(frame.w)
+            } else {
+                s(PIC_H)
+            };
+            let to = Rect::new(
+                frame.x + (frame.w - side) / 2.0,
+                frame.y + (frame.h - side) / 2.0,
+                side,
+                side,
+            );
+            canvas.picture(pixels, thumb_side, to, frame);
+        }
+        y += PIC_H + PIC_GAP;
+    }
+    let family = (item.kind == Kind::Text).then_some(crate::options::NERD);
+    let ink = paint.ink_at(0.92);
+    for line in lines {
+        if !line.is_empty() {
+            text(&mut canvas, line, s(TEXT_PX), family, ink, (s(x), s(y)));
+        }
+        y += TEXT_LINE;
+    }
+    canvas
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +721,43 @@ mod tests {
         let carried = view(&none, Some(2));
         assert_eq!(carried.iter().map(|t| t.id).collect::<Vec<_>>(), [1, 3]);
         assert_eq!(carried[1].rect.y, rest[1].rect.y);
+    }
+
+    #[test]
+    fn a_dragged_item_is_a_picture_of_its_own_box() {
+        let item = text(1, "hello");
+        let mut asked = Vec::new();
+        let canvas = tile_picture(
+            &item,
+            &["hello".to_owned()],
+            200.0,
+            2.0,
+            &PAINT,
+            None,
+            0,
+            &mut |c, line, px, _, ink, at| {
+                asked.push((line.to_owned(), px, at));
+                c.blend(at.0 as i32, at.1 as i32, ink, 1.0);
+            },
+        );
+        // Its box, at two buffer pixels a logical one.
+        assert_eq!(canvas.w, 400);
+        assert_eq!(
+            canvas.h,
+            (tile_height(Kind::Text, 1) * 2.0).round() as usize
+        );
+        assert_eq!(
+            asked,
+            [(
+                "hello".to_owned(),
+                TEXT_PX * 2.0,
+                (TILE_PAD_X * 2.0, TILE_PAD_Y * 2.0)
+            )]
+        );
+        // The middle is the plate (solid enough to be seen over anything),
+        // the very corner is clear: the box is rounded.
+        let alpha = |x: usize, y: usize| canvas.px[(y * canvas.w + x) * 4 + 3];
+        assert!(alpha(200, canvas.h / 2) > 240);
+        assert_eq!(alpha(0, 0), 0);
     }
 }

@@ -2771,6 +2771,57 @@ impl App {
         self.drag_image(chain, grip, icon_scale)
     }
 
+    /// A drag image from ANY picture: `rgba` premultiplied, `w`×`h` buffer
+    /// pixels (both whole multiples of `scale`), shown at 1/`scale` of
+    /// that, gripped at `grip` (logical px from its top-left corner). The
+    /// card's items travel as pictures of themselves (`card/dnd.rs`).
+    pub(crate) fn drag_picture(
+        &self,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        scale: i32,
+        grip: (f32, f32),
+    ) -> Option<DragIcon> {
+        let shm = self.shm.as_ref()?;
+        let (stride, len) = (w * 4, w * h * 4);
+        if w == 0 || h == 0 || rgba.len() < len {
+            return None;
+        }
+        let mut pool = match RawPool::new(len, shm) {
+            Ok(pool) => pool,
+            Err(e) => {
+                warn!("no shm pool for the drag image ({e})");
+                return None;
+            }
+        };
+        rgba_to_argb(&rgba[..len], &mut pool.mmap()[..len]);
+        let buffer = pool.create_buffer(
+            0,
+            w as i32,
+            h as i32,
+            stride as i32,
+            wl_shm::Format::Argb8888,
+            (),
+            &self.qh,
+        );
+        let surface = self.compositor.create_surface(&self.qh);
+        surface.set_buffer_scale(scale.max(1));
+        let (gx, gy) = (-grip.0.round() as i32, -grip.1.round() as i32);
+        if surface.version() >= 5 {
+            surface.attach(Some(&buffer), 0, 0);
+            surface.offset(gx, gy);
+        } else {
+            surface.attach(Some(&buffer), gx, gy);
+        }
+        surface.damage_buffer(0, 0, w as i32, h as i32);
+        Some(DragIcon {
+            surface,
+            buffer,
+            _pool: pool,
+        })
+    }
+
     /// A drag image from a picture's pixels (`chain`: an `ICON_SIZE`² RGBA
     /// mip chain), gripped at `grip`. The card's pictures travel this way
     /// too (`card.rs`).
