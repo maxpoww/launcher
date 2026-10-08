@@ -58,8 +58,6 @@ const SLIDE_PER_SCROLL: f32 = 2.5;
 /// **40** (*"snappier, and also the hide animation"*) — down, or back up, in
 /// well under a tenth of a second. One rate for both ways.
 const UNROLL_RATE: f32 = 40.0;
-/// How long after its window is put down the card waits before it unrolls.
-const REVEAL_DELAY: std::time::Duration = std::time::Duration::from_millis(220);
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -248,9 +246,6 @@ pub(crate) struct Card {
     /// Its window is in hand (being moved or resized), since when: the
     /// card is away until the window is put down.
     lifted: Option<std::time::Instant>,
-    /// Counts the times its window was taken in hand, so a reveal waiting
-    /// out its delay knows the window was picked up again meanwhile.
-    lifts: u64,
     scroll: f32,
     max_scroll: f32,
     /// Show the newest item on the next draw.
@@ -1219,7 +1214,7 @@ impl App {
                         .lifted
                         .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(6))
                 {
-                    app.card_reveal_placed();
+                    app.card_window_placed(&host);
                     return calloop::timer::TimeoutAction::Drop;
                 }
                 if now != app.card.spot || now.is_none() {
@@ -1534,7 +1529,6 @@ impl App {
             return;
         }
         self.card.lifted = Some(std::time::Instant::now());
-        self.card.lifts += 1;
         self.card.shown = 0.0;
         self.card.press = None;
         self.sync_card_input();
@@ -1544,31 +1538,7 @@ impl App {
     /// The window was put down: the card comes back on it, at the same
     /// place relative to the window, unrolling as when it is summoned.
     pub(crate) fn card_window_placed(&mut self, addr: &str) {
-        if self.card.host.as_deref() != Some(addr) || self.card.lifted.is_none() {
-            return;
-        }
-        // Not at once: the window is let settle first (Max, 2026-10-08:
-        // *"i think we should delay the reveal a bit"*).
-        let lifts = self.card.lifts;
-        let timer = calloop::timer::Timer::from_duration(REVEAL_DELAY);
-        let waiting = self
-            .loop_handle
-            .insert_source(timer, move |_, _, app: &mut App| {
-                // Picked up again while it waited: that drop reveals it.
-                if app.card.lifts == lifts {
-                    app.card_reveal_placed();
-                }
-                calloop::timer::TimeoutAction::Drop
-            })
-            .is_ok();
-        if !waiting {
-            self.card_reveal_placed();
-        }
-    }
-
-    /// Bring the card back on the window that was put down.
-    fn card_reveal_placed(&mut self) {
-        if self.card.lifted.take().is_none() {
+        if self.card.host.as_deref() != Some(addr) || self.card.lifted.take().is_none() {
             return;
         }
         self.card.shown = 0.0;
