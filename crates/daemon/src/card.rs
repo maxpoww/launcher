@@ -78,7 +78,12 @@ const SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(220);
 /// quiet for [`FLING_QUIET`]. The card glides there at [`FLING_RATE`].
 const FLING_SCROLL: f32 = 40.0;
 const FLING_BRIEF: std::time::Duration = std::time::Duration::from_millis(170);
-const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(70);
+// 70 at first: the card slid with the flick, then stood still for that long
+// before it took off — it read as getting stuck half way (Max, 2026-10-08:
+// *"it feels like it gets stuck (slower) on the middle of the window"*). Now
+// as short as the gaps between scroll steps allow, and no wait at all where
+// the touchpad says the fingers lifted (`AxisStop`, over the card).
+const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(30);
 // 18 at first, then 36 (Max: *"make the jump to the side snappier"*), then 70
 // (*"snappier"*).
 const FLING_RATE: f32 = 70.0;
@@ -1577,6 +1582,12 @@ impl App {
                 }
                 _ => {}
             },
+            // The fingers left the touchpad: the sideways scroll is over
+            // now, with nothing to wait out.
+            wl_pointer::Event::AxisStop {
+                axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
+                ..
+            } => self.card_swipe_judge(),
             wl_pointer::Event::Axis {
                 axis: WEnum::Value(axis),
                 value,
@@ -1825,6 +1836,21 @@ impl App {
         self.request_card_draw();
     }
 
+    /// The sliding scroll has stopped: a brief one was a throw, and the
+    /// card glides to that side.
+    fn card_swipe_judge(&mut self) {
+        let Some(sw) = self.card.swipe.take() else {
+            return;
+        };
+        if let (Some(to_left), Some(spot)) = (sw.thrown(), self.card.spot) {
+            if self.card_present() {
+                self.card.glide = Some(fling_end(spot.w, to_left));
+                self.card_last_frame = None;
+                self.request_card_draw();
+            }
+        }
+    }
+
     /// Wait for the sliding scroll to stop, then judge it: a brief one was
     /// a throw, and the card glides to that side.
     fn card_swipe_wait(&mut self, wait: std::time::Duration) {
@@ -1838,16 +1864,7 @@ impl App {
                     Some(sw) if now - sw.last < FLING_QUIET => {
                         app.card_swipe_wait(FLING_QUIET - (now - sw.last));
                     }
-                    Some(sw) => {
-                        app.card.swipe = None;
-                        if let (Some(to_left), Some(spot)) = (sw.thrown(), app.card.spot) {
-                            if app.card_present() {
-                                app.card.glide = Some(fling_end(spot.w, to_left));
-                                app.card_last_frame = None;
-                                app.request_card_draw();
-                            }
-                        }
-                    }
+                    Some(_) => app.card_swipe_judge(),
                     None => {}
                 }
                 calloop::timer::TimeoutAction::Drop
