@@ -2916,10 +2916,12 @@ impl App {
                 self.toggle_fast_launch();
                 return;
             }
-            Command::WindowPlaced(_) => {
+            Command::WindowPlaced(addr) => {
                 if self.settings.floating {
                     self.track_windows();
                 }
+                // The card went away while its window was in hand.
+                self.card_window_placed(addr.trim());
                 return;
             }
             // The map has STARTED closing over a live stage: put the stage shape

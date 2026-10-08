@@ -243,6 +243,9 @@ pub(crate) struct Card {
     shown: f32,
     /// Rolling up for good: the window is let go when it is up.
     leaving: bool,
+    /// Its window is in hand (being moved or resized), since when: the
+    /// card is away until the window is put down.
+    lifted: Option<std::time::Instant>,
     scroll: f32,
     max_scroll: f32,
     /// Show the newest item on the next draw.
@@ -1025,6 +1028,7 @@ impl App {
     fn card_present(&self) -> bool {
         self.card.host.is_some()
             && !self.card.leaving
+            && self.card.lifted.is_none()
             && !self.overview_active
             && self
                 .card
@@ -1201,6 +1205,18 @@ impl App {
                     return calloop::timer::TimeoutAction::Drop;
                 };
                 let now = crate::hypr::window_spot(&host);
+                // A window "in hand" that has not moved for a long while:
+                // its being put down was never heard (the plugin went away
+                // mid-drag). The card comes back rather than staying lost.
+                if now == app.card.spot
+                    && app
+                        .card
+                        .lifted
+                        .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(6))
+                {
+                    app.card_window_placed(&host);
+                    return calloop::timer::TimeoutAction::Drop;
+                }
                 if now != app.card.spot || now.is_none() {
                     app.sync_card();
                 } else {
@@ -1501,6 +1517,33 @@ impl App {
         } else {
             self.card_cursor();
         }
+    }
+
+    /// The card's window was taken in hand — a move or a resize began (the
+    /// plugin watches the compositor's drag and says so): the card is gone
+    /// at once, with no roll-up (Max, 2026-10-08: *"make it hide instantly
+    /// when i move the window, and then come back when i drop the window…
+    /// we don't need it following the window"*).
+    pub(crate) fn card_window_lifted(&mut self, addr: &str) {
+        if self.card.host.as_deref() != Some(addr) || self.card.leaving {
+            return;
+        }
+        self.card.lifted = Some(std::time::Instant::now());
+        self.card.shown = 0.0;
+        self.card.press = None;
+        self.sync_card_input();
+        self.request_card_draw();
+    }
+
+    /// The window was put down: the card comes back on it, at the same
+    /// place relative to the window, unrolling as when it is summoned.
+    pub(crate) fn card_window_placed(&mut self, addr: &str) {
+        if self.card.host.as_deref() != Some(addr) || self.card.lifted.take().is_none() {
+            return;
+        }
+        self.card.shown = 0.0;
+        self.card_last_frame = None;
+        self.sync_card();
     }
 
     /// A scroll on the title bar of the card's window (the plugin hears it
@@ -1884,6 +1927,10 @@ impl App {
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
             "all" => self.card_toggle_all(),
+            "lifted" => {
+                self.card_window_lifted(rest);
+                String::new()
+            }
             "slide" => {
                 let mut parts = rest.split_whitespace();
                 match (
