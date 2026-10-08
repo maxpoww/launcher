@@ -53,6 +53,10 @@ const RADIUS: f32 = 10.0;
 const OVERHANG: f32 = 12.0;
 /// How far the card slides per unit of scroll on its window's title bar.
 const SLIDE_PER_SCROLL: f32 = 2.5;
+/// How fast the card unrolls (the ease's rate, per second): 11 at first,
+/// then doubled (Max, 2026-10-08: *"the reveal animation, make it snappier"*)
+/// — most of the way down in about a tenth of a second.
+const UNROLL_RATE: f32 = 22.0;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -1241,7 +1245,7 @@ impl App {
         let (shown, moving) = if !present && !self.card.leaving {
             (0.0, false)
         } else {
-            crate::animation::ease_toward(self.card.shown, target, dt, 11.0, 0.004)
+            crate::animation::ease_toward(self.card.shown, target, dt, UNROLL_RATE, 0.004)
         };
         self.card.shown = shown;
         self.card_last_frame = moving.then_some(now);
