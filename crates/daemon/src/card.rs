@@ -112,6 +112,9 @@ const TRAVEL_ACCEL: f32 = 60000.0;
 /// [`TRAVEL_CREEP`], so the ease has an end.
 const TRAVEL_BRAKE: f32 = 28.0;
 const TRAVEL_CREEP: f32 = 40.0;
+/// How long after a workspace swipe's fingers lift the card stays away: the
+/// compositor is still sliding the workspaces into place.
+const SWIPE_SETTLE: std::time::Duration = std::time::Duration::from_millis(320);
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -342,6 +345,9 @@ pub(crate) struct Card {
     /// Its window is in hand (being moved or resized), since when: the
     /// card is away until the window is put down.
     lifted: Option<std::time::Instant>,
+    /// Counts workspace swipes, so a return waiting for one to settle
+    /// knows another began meanwhile.
+    swipes: u64,
     /// The scroll that is sliding the card, measured for a throw.
     swipe: Option<Swipe>,
     /// The timer that judges the swipe once it stops is running.
@@ -1978,6 +1984,40 @@ impl App {
         }
     }
 
+    /// A workspace swipe began (the plugin hears the fingers land): the
+    /// card is gone at once — it is a layer, and would stand still over
+    /// windows sliding away under it.
+    pub(crate) fn card_swipe_away(&mut self) {
+        self.card.swipes += 1;
+        if let Some(host) = self.card.host.clone() {
+            self.card_window_lifted(&host);
+        }
+    }
+
+    /// The fingers left: once the slide has settled the card comes back,
+    /// if its window is still the one in front (`sync_card` decides).
+    pub(crate) fn card_swipe_back(&mut self) {
+        let swipes = self.card.swipes;
+        let timer = calloop::timer::Timer::from_duration(SWIPE_SETTLE);
+        let waiting = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                // Swiped again while it waited: that swipe brings it back.
+                if app.card.swipes == swipes {
+                    if let Some(host) = app.card.host.clone() {
+                        app.card_window_placed(&host);
+                    }
+                }
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
+        if !waiting {
+            if let Some(host) = self.card.host.clone() {
+                self.card_window_placed(&host);
+            }
+        }
+    }
+
     /// A scroll on the title bar of the card's window (the plugin hears it
     /// and sends it on): the card slides sideways by it, down or right
     /// taking it left as in the mockup, and stays where it is left —
@@ -2464,6 +2504,14 @@ impl App {
                 };
                 let (speed, accel) = self.card.pace.unwrap_or((TRAVEL_SPEED, TRAVEL_ACCEL));
                 format!("the card travels at {speed} px/s, gaining {accel} px/s²")
+            }
+            "away" => {
+                self.card_swipe_away();
+                String::new()
+            }
+            "back" => {
+                self.card_swipe_back();
+                String::new()
             }
             "lifted" => {
                 self.card_window_lifted(rest);

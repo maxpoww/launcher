@@ -310,7 +310,9 @@ The big daemon files are cohesive but long — go straight to the function:
   (`Press::Resize`; `WIDTH_MIN`..`WIDTH_MAX`; the text is re-wrapped as it goes); the width is the
   WINDOW's (`Card::widths`, by address), kept like its slid place (`geom`): both survive turning
   the card off and on, and go when the window closes (`card_window_closed`, from the
-  `closewindow` event). A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
+  `closewindow` event). A WORKSPACE SWIPE takes it away the same way: the plugin sends
+  `card away` when a 3/4-finger swipe begins on the desktop and `card back` when the fingers lift;
+  the card returns `SWIPE_SETTLE` later, if its window is still showing. A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
   the list, sideways slides the card — the way that travels `SCROLL_CLAIM` first takes it until
   the scroll is quiet for 220 ms; while it slides the card the input region is the whole surface
   (the card moves out from under the pointer and the scroll must keep arriving). A THROW (`Swipe::thrown`, judged when the sliding scroll STOPS —
