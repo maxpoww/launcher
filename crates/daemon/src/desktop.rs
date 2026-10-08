@@ -1883,8 +1883,14 @@ impl App {
                         match press.item {
                             // A click on an item opens it.
                             Some(i) if under == Some(i) => self.desktop_activate(i),
-                            // A click on bare wallpaper puts the icons away,
-                            // or brings them back (Max, 2026-10-07).
+                            // A click on bare wallpaper lets go of a
+                            // selection first; only with nothing selected
+                            // does it put the icons away, or bring them
+                            // back (Max, 2026-10-07/08).
+                            None if !self.desktop.selected.is_empty() => {
+                                self.desktop.selected.clear();
+                                self.request_desktop_draw();
+                            }
                             None => self.desktop_toggle_hidden(),
                             _ => {}
                         }
