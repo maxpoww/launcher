@@ -4273,6 +4273,10 @@ impl App {
             // asks the solitary-pseudo rule to look — see `refresh_window_mode`.
             self.refresh_window_mode();
         }
+        // Another window has the keyboard: the desktop lets go of its selection.
+        if self.options_active_addr != addr && addr.is_some() {
+            self.desktop_focus_moved();
+        }
         if self.options_active_addr != addr || self.options_title != title || class_changed {
             self.options_active_addr = addr;
             self.options_title = title;

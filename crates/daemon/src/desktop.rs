@@ -2177,6 +2177,24 @@ impl App {
         }
     }
 
+    /// A window was clicked (the keyboard went to another one): a click
+    /// anywhere else lets go of the desktop's selection, and a window is
+    /// anywhere else (Max, 2026-10-08). Not while our own things hold the
+    /// moment: an icon in hand on its way to that window, a name being
+    /// typed, a menu up.
+    pub(crate) fn desktop_focus_moved(&mut self) {
+        if self.desktop.selected.is_empty()
+            || self.desktop.drag.is_some()
+            || self.desktop.rename.is_some()
+            || self.desktop.menu.is_some()
+            || self.desktop.props.is_some()
+        {
+            return;
+        }
+        self.desktop.selected.clear();
+        self.request_desktop_draw();
+    }
+
     /// Put the icons away, or bring them back: they fade over a few
     /// frames. Whatever was selected or being banded is let go of.
     pub(crate) fn desktop_toggle_hidden(&mut self) {
@@ -2450,6 +2468,7 @@ impl App {
                 // desktop — like any click off the menu, it only closes it.
                 if self.pointer_surface == crate::options::PointerSurface::DesktopTop {
                     if self.desktop.menu.take().is_some() | self.desktop.props.take().is_some() {
+                        self.desktop.selected.clear();
                         self.request_desktop_draw();
                     }
                 } else if let Some(at) = self.desktop.ptr {
@@ -2483,6 +2502,7 @@ impl App {
                             self.desktop_props_back(at);
                         } else {
                             self.desktop.props = None;
+                            self.desktop.selected.clear();
                             self.request_desktop_draw();
                         }
                         return;
@@ -2494,7 +2514,10 @@ impl App {
                         match menu.hit(at) {
                             Some(row) => menu.pressed = Some(row),
                             None => {
+                                // The menu goes, and what it was for is
+                                // let go of with it (Max, 2026-10-08).
                                 self.desktop.menu = None;
+                                self.desktop.selected.clear();
                                 self.request_desktop_draw();
                             }
                         }
