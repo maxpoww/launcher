@@ -325,7 +325,8 @@ The big daemon files are cohesive but long — go straight to the function:
   - `dnd.rs` — DROP IN (`card_dnd_enter/drop/received`, routed by `DataDeviceHandler` when the
     drag is over the card's surface): the richest type first — `text/uri-list` (local paths →
     items; none local → the picture's pixels if offered, else the text), one `receive` at a time
-    on a thread, `finish()`/`destroy()` always sent. DRAG OUT (`card_lift`): a real Wayland drag,
+    on a thread that gives up on an app silent for `DROP_PATIENCE` (`read_patiently`),
+    `finish()`/`destroy()` always sent. DRAG OUT (`card_lift`): a real Wayland drag,
     COPY only, the item stays; the card refuses its own drag.
   - `mod.rs` — the state and everything on the loop. PER WINDOW (`Card::wins`, by address →
     `Win { on, place, width }`): all three last until the window closes (`card_window_closed`,

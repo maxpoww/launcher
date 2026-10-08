@@ -12,6 +12,57 @@ use super::Drag;
 use crate::desktop::DragIcon;
 use crate::App;
 
+/// How long the dragging app may go without sending anything before the
+/// drop is given up on. An app that takes the request and never writes (or
+/// never closes its end) used to leave the reading thread waiting for ever,
+/// and its own drag unfinished.
+const DROP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Read everything the other end of `fd` sends, up to `max` bytes — but
+/// wait no longer than `patience` for any one piece of it. `None`: it went
+/// quiet for that long (or the read failed) before it was done.
+pub(super) fn read_patiently(
+    fd: std::os::fd::OwnedFd,
+    max: u64,
+    patience: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let mut file = std::fs::File::from(fd);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let mut poll = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, for a descriptor this function owns.
+        let ready = unsafe { libc::poll(&mut poll, 1, patience.as_millis() as libc::c_int) };
+        if ready == 0 {
+            return None;
+        }
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        match file.read(&mut buf) {
+            Ok(0) => return Some(out),
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                if out.len() as u64 >= max {
+                    out.truncate(max as usize);
+                    return Some(out);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 impl App {
     /// Take item `id` into a Wayland drag: any app it is let go on gets a
     /// copy of it.
@@ -204,24 +255,21 @@ impl App {
         };
         // Through `OwnedFd`, never `into_raw_fd` (SCTK closes the pipe).
         let fd: std::os::fd::OwnedFd = pipe.into();
-        let (tx, rx) = calloop::channel::channel::<Vec<u8>>();
+        let (tx, rx) = calloop::channel::channel::<Option<Vec<u8>>>();
         std::thread::spawn(move || {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            if let Err(e) = std::fs::File::from(fd)
-                .take(DROP_MAX)
-                .read_to_end(&mut bytes)
-            {
-                warn!("card: reading the drop's {mime} failed: {e}");
+            let read = read_patiently(fd, DROP_MAX, DROP_PATIENCE);
+            if read.is_none() {
+                warn!("card: the dragging app never sent the drop's {mime}; given up on");
             }
-            let _ = tx.send(bytes);
+            let _ = tx.send(read);
         });
         if self
             .loop_handle
-            .insert_source(rx, move |event, _, app: &mut App| {
-                if let calloop::channel::Event::Msg(bytes) = event {
-                    app.card_dnd_received(mime, &bytes);
-                }
+            .insert_source(rx, move |event, _, app: &mut App| match event {
+                calloop::channel::Event::Msg(Some(bytes)) => app.card_dnd_received(mime, &bytes),
+                // It never came: the drag is told it is over, taken or not.
+                calloop::channel::Event::Msg(None) => app.card_dnd_end(false),
+                calloop::channel::Event::Closed => {}
             })
             .is_err()
         {
@@ -321,5 +369,53 @@ impl App {
         self.card.dnd_mimes.clear();
         self.card.dnd_hint = None;
         self.request_card_draw();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::time::{Duration, Instant};
+
+    fn pipe() -> (OwnedFd, std::fs::File) {
+        let mut fds = [0; 2];
+        // SAFETY: a plain pipe; both ends are owned from here on.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        unsafe {
+            (
+                OwnedFd::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        }
+    }
+
+    #[test]
+    fn a_drop_is_read_whole_when_the_other_end_sends_and_closes() {
+        let (read, mut write) = pipe();
+        write.write_all(b"file:///tmp/a.txt\r\n").unwrap();
+        drop(write);
+        assert_eq!(
+            read_patiently(read, 1024, Duration::from_secs(2)).as_deref(),
+            Some(&b"file:///tmp/a.txt\r\n"[..])
+        );
+        // No more than it may be.
+        let (read, mut write) = pipe();
+        write.write_all(b"0123456789").unwrap();
+        drop(write);
+        assert_eq!(
+            read_patiently(read, 4, Duration::from_secs(2)).as_deref(),
+            Some(&b"0123"[..])
+        );
+    }
+
+    #[test]
+    fn an_app_that_never_sends_is_given_up_on() {
+        // The other end stays open and silent: not for ever.
+        let (read, _write) = pipe();
+        let began = Instant::now();
+        assert_eq!(read_patiently(read, 1024, Duration::from_millis(60)), None);
+        assert!(began.elapsed() < Duration::from_secs(2));
     }
 }

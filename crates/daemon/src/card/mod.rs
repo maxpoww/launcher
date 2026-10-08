@@ -460,22 +460,22 @@ impl App {
             .into_iter()
             .filter(|(addr, _)| valid_addr(addr) && crate::hypr::window_exists(addr))
             .collect();
-        self.card_tell_bar("*", self.card.all);
-        let told: Vec<(String, bool)> = self
-            .card
-            .wins
-            .iter()
-            .filter_map(|(addr, win)| {
-                win.on
-                    .filter(|on| *on != self.card.all)
-                    .map(|on| (addr.clone(), on))
-            })
-            .collect();
-        for (addr, on) in told {
-            self.card_tell_bar(&addr, on);
-        }
+        self.card_tell_bars();
         if let Some(addr) = crate::hypr::active_window() {
             self.card_focus_changed(Some(&addr));
+        }
+    }
+
+    /// Tell every title bar where the card is on: all of them what the
+    /// master switch says, then each window that was told otherwise by
+    /// hand. At the dock's start, and when the plugin says it has just
+    /// loaded (`card bars`) — a reloaded plugin's buttons all read "off".
+    fn card_tell_bars(&self) {
+        self.card_tell_bar("*", self.card.all);
+        for (addr, win) in &self.card.wins {
+            if let Some(on) = win.on.filter(|on| *on != self.card.all) {
+                self.card_tell_bar(addr, on);
+            }
         }
     }
 
@@ -1674,6 +1674,11 @@ impl App {
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
             "all" => self.card_toggle_all(),
+            // The plugin has just (re)loaded: its bars know nothing.
+            "bars" => {
+                self.card_tell_bars();
+                String::new()
+            }
             "rate" => {
                 let mut parts = rest.split_whitespace().map(|p| p.parse::<f32>().ok());
                 self.card.pace = match (parts.next().flatten(), parts.next().flatten()) {
