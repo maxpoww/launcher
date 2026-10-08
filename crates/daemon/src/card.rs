@@ -54,9 +54,10 @@ const OVERHANG: f32 = 12.0;
 /// How far the card slides per unit of scroll on its window's title bar.
 const SLIDE_PER_SCROLL: f32 = 2.5;
 /// How fast the card unrolls (the ease's rate, per second): 11 at first,
-/// then doubled (Max, 2026-10-08: *"the reveal animation, make it snappier"*)
-/// — most of the way down in about a tenth of a second.
-const UNROLL_RATE: f32 = 22.0;
+/// then 22 (Max, 2026-10-08: *"the reveal animation, make it snappier"*), then
+/// **40** (*"snappier, and also the hide animation"*) — down, or back up, in
+/// well under a tenth of a second. One rate for both ways.
+const UNROLL_RATE: f32 = 40.0;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
