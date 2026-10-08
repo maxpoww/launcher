@@ -284,6 +284,15 @@ pub fn set_interactive(layer: &LayerSurface, interactive: bool) {
     layer.commit();
 }
 
+/// Keep the keyboard a surface already has, without the exclusive grab:
+/// "on demand". Hyprland pins the POINTER as well to an exclusive layer
+/// (every click anywhere goes to it), so exclusivity is only for the moment
+/// of taking the keyboard, or for a field being typed in.
+pub fn set_on_demand(layer: &LayerSurface) {
+    layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+    layer.commit();
+}
+
 /// Restrict pointer input to the bottom `extent` pixels of the surface.
 ///
 /// The surface is full popup size at all times (design decision #2), so

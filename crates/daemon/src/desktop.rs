@@ -2112,7 +2112,14 @@ impl App {
         // The keyboard goes back to the window it came from — unless the
         // desktop holds it anyway (a click on it): then it stays for the
         // shortcuts.
-        if self.desktop_layer.is_some() && !self.desktop.keys {
+        if self.desktop.keys {
+            // Kept, but no longer exclusively: an exclusive layer has the
+            // POINTER pinned to it too, and no window could be clicked.
+            if let Some(layer) = self.desktop_layer.as_ref() {
+                crate::surface::set_on_demand(layer);
+            }
+            let _ = self.conn.flush();
+        } else if self.desktop_layer.is_some() {
             // Armed before the release: the compositor's `leave` completes it.
             self.begin_keyboard_handback(crate::KbSurface::Desktop, None);
             if let Some(layer) = self.desktop_layer.as_ref() {
@@ -2204,14 +2211,19 @@ impl App {
 
     /// A click on the desktop gives it the keyboard, so the shortcuts a
     /// file manager has work on what is selected (Max, 2026-10-09: Ctrl+X/C/V
-    /// — and Delete, Enter, F2, the arrows, Escape, Ctrl+A).
+    /// — and Delete, Enter, F2, the arrows, Escape, Ctrl+A). It stays until
+    /// a window is clicked, as on any desktop.
     ///
-    /// EXCLUSIVELY, and given back by us: a surface that merely ASKS for the
-    /// keyboard (on-demand) is handed it by Hyprland whenever the pointer
-    /// crosses it, and wallpaper is crossed all the time. So it is taken at
-    /// a click and returned the moment the pointer has left the desktop
-    /// (`desktop_keys_check_soon`), a window opens or the space changes
-    /// (`desktop_drop_keys`) — keys typed at a window never land here.
+    /// How, on Hyprland: a layer that asks for the keyboard "on demand" is
+    /// given it whenever the pointer moves over it — so the desktop asks
+    /// for nothing at rest, or crossing wallpaper would take the typing
+    /// from a window. At a click it grabs the keyboard EXCLUSIVELY (that is
+    /// immediate), and the moment it has it (`desktop_keys_arrived`) drops
+    /// to on-demand: an exclusive layer has the pointer pinned to it too
+    /// (every click, anywhere, goes to it — the first cut of this trapped
+    /// the whole workspace). On-demand it keeps the keyboard until a click
+    /// gives it to a window (Golem focuses by click); the `leave` that
+    /// brings puts the desktop back to asking for nothing.
     pub(crate) fn desktop_take_keys(&mut self) {
         if self.desktop.keys {
             return;
@@ -2241,23 +2253,18 @@ impl App {
         let _ = self.conn.flush();
     }
 
-    /// The pointer left one of the desktop's two surfaces. If, a moment
-    /// later, it is on neither (a leave for the menus' surface is followed
-    /// at once by an enter on the other), the keyboard goes back.
-    fn desktop_keys_check_soon(&mut self) {
-        if !self.desktop.keys {
+    /// The keyboard has arrived on the desktop (the compositor's `enter`):
+    /// the exclusive grab that fetched it is let go at once, and the
+    /// keyboard kept "on demand" — it stays until a window is clicked,
+    /// while the pointer is free to go and click one.
+    pub(crate) fn desktop_keys_arrived(&mut self) {
+        if !self.desktop.keys || self.desktop.rename.is_some() {
             return;
         }
-        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(80));
-        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
-            let away = app.desktop.ptr.is_none()
-                && app.desktop.menu.is_none()
-                && app.desktop.props.is_none();
-            if away {
-                app.desktop_drop_keys();
-            }
-            calloop::timer::TimeoutAction::Drop
-        });
+        if let Some(layer) = self.desktop_layer.as_ref() {
+            crate::surface::set_on_demand(layer);
+        }
+        let _ = self.conn.flush();
     }
 
     /// A key while the desktop holds the keyboard: a file manager's
@@ -2615,7 +2622,6 @@ impl App {
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.desktop.press = None;
                 self.desktop.ptr = None;
-                self.desktop_keys_check_soon();
                 // A menu drawn ON the desktop would hang under whatever took
                 // the pointer, and goes with it. On its own surface it takes
                 // the pointer itself (this very leave), and stays.

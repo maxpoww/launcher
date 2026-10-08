@@ -6669,12 +6669,19 @@ impl KeyboardHandler for App {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _serial: u32,
         _raw: &[u32],
         _keysyms: &[Keysym],
     ) {
         debug!("keyboard focus gained");
+        if self
+            .desktop_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            self.desktop_keys_arrived();
+        }
     }
 
     fn leave(
