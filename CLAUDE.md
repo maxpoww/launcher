@@ -305,54 +305,53 @@ The big daemon files are cohesive but long — go straight to the function:
   A device connected WHILE the icons are away shows ALONE once (`Desktop::solo`, `Live::only`,
   fading by the same surface opacity — one group fades at a time); the next wallpaper click
   puts it away with the rest, the one after brings everything back.
-- `card.rs` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new).
-  ONE card with ONE list; it sits inside a window (under the bar, on the right, 420 wide (`WIDTH`), 10 in
-  from the edges) and is turned on per window (`card toggle [addr]` — sent by the card button at the right end of a floating window's title
-  bar, drawn by the waveview plugin, which we tell the state with `hl.plugin.waveview.card(addr,
-  on)`: `card_tell_bar`;
-  `card all` = the master switch: `Card::armed`). It follows the focus only onto windows it is on
-  for (`card_focus_changed`, called where `refresh_options_content` notices the focus moved) and
-  stays on its window otherwise; it unrolls from the top (`shown`, a clip — the card is whole
-  underneath). Its own `Top`-layer surface covers the output (`surface::create_card_surface`,
-  exclusive zone -1 so surface coordinates are the monitor's): the card is drawn where
-  `hypr::window_spot(addr)` says its window is and only its box is in the input region, so a
-  change of window is a redraw, never a resize; the renderer is built at the first summon.
-  SCAFFOLDING until the waveview plugin carries it: the window's place is re-read on layout
-  events and on a 250 ms poll while a card is up (`card_poll_arm`), so it trails a dragged window
-  and, being a layer, draws over any window overlapping its host. ITEMS (`card.json` in the data
-  dir): a text is kept whole; a file/folder/picture is kept as its PATH (not copied); a picture
-  that came as pixels is saved under `card/` and goes with its item. DROP IN
-  (`card_dnd_enter/drop/received`, routed by `DataDeviceHandler` when the drag is over the card's
-  surface — `card_dnd_active`): read the richest type first — `text/uri-list` (local paths →
-  items; none local → the picture's pixels if offered, named after the URL's end, else the text),
-  one `receive` at a time on a thread, `finish()`/`destroy()` always sent. DRAG OUT (`card_lift`):
-  a real Wayland drag, COPY only, the item stays; offers `out_mimes` (URI list, a picture's own
-  type served from the file, the path/text as text), `payload` answers each; the card refuses its
-  own drag. While its window is in hand (a move or a resize: the plugin sends `card lifted
-  <addr>` when the compositor's drag takes a window, `window-placed <addr>` when it lets go) the
-  card is simply away, and unrolls again where the window was put down (`card_window_lifted` /
-  `card_window_placed`); the OPTIONS pill's own window gestures say the same from `nub_drag.rs`
-  (the right-click drag and the pinch at their start and end; the scroll, which has no end, through
-  `card_window_nudged`: put down once quiet for 280 ms). WIDTH: a press within `GRIP` of either side edge resizes it
-  (`Press::Resize`; `WIDTH_MIN`..`WIDTH_MAX`; the text is re-wrapped as it goes); the width is the
-  WINDOW's (`Card::widths`, by address), kept like its slid place (`geom`): both survive turning
-  the card off and on, and go when the window closes (`card_window_closed`, from the
-  `closewindow` event). A WORKSPACE SWIPE takes it away the same way: the plugin sends
-  `card away` when a 3/4-finger swipe begins on the desktop and `card back` when the fingers lift;
-  the card returns `SWIPE_SETTLE` later, if its window is still showing. A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
-  the list, sideways slides the card — the way that travels `SCROLL_CLAIM` first takes it until
-  the scroll is quiet for 220 ms; while it slides the card the input region is the whole surface
-  (the card moves out from under the pointer and the scroll must keep arriving). A THROW (`Swipe::thrown`, judged when the sliding scroll STOPS —
-  `card_swipe_wait`): the whole run was brief (`FLING_BRIEF`), one way and at least `FLING_SCROLL`
-  → the card glides to that side OUTSIDE the window (`fling_end`); a long scroll never throws,
-  however fast. TRAVEL: scroll and throws only set the card's
-  place (`geom`); the card GOES there (`Card::at`, `travel` in `draw_card`) at no more than
-  `TRAVEL_SPEED`, gaining at most `TRAVEL_ACCEL` — one pace for following the fingers and for the
-  throw's run to the end (`card rate <speed> [accel]` tunes it live). A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
-  <delta>` → `card_slide`). A press on the card itself slides it sideways (no snapping; remembered per window as
-  a fraction of its width until the window closes); wheel scrolls; × on the hovered item
-  removes. Pictures ride the Files thumbnailer (`card_on_thumb`) into the card renderer's own
-  32-layer array. Pointer-free: `waverunner-ctl card [toggle|all|add text <…>|add file
-  <path>|remove <n>|clear|state]`. Not yet: the title-bar button + stacking + frame-exact follow
-  (plugin), a drag image for text, per-output.
+- `card/` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new). ONE
+  card with ONE list; it sits inside a window (under the bar, on the right, `WIDTH` wide, 10 in
+  from the edges), is turned on per window from the card button at the right end of the window's
+  title bar (drawn by the waveview plugin; it sends `card toggle <addr>`, we tell it the state
+  with `hl.plugin.waveview.card(addr, on)` — `card_tell_bar`), follows the focus only onto
+  windows it is on for and stays on its window otherwise, and unrolls from the top. Four files
+  plus drag-and-drop:
+  - `model.rs` — the items (`card.json` in the data dir): a text is kept whole; a
+    file/folder/picture is kept as its PATH (not copied); a picture that came as pixels is saved
+    under `card/` and goes with its item. `facts()` reads what a path is — on a THREAD
+    (`card_add_paths`): a folder is counted and a phone's storage is slow. `wrap`, the MIME
+    tables, `out_mimes`/`payload` for a drag out.
+  - `view.rs` — one frame as a `Scene` + the `Tile`s the pointer is tested against.
+  - `place.rs` — where on the window: `Place` (the distance from the NEARER side, so a resting or
+    thrown card is still exactly there when the window is resized — not a share of the width),
+    `card_rect` (edges on device pixels), `travel` (the capped pace: `TRAVEL_SPEED`/`ACCEL`/
+    `BRAKE`), `Swipe` (a run of sliding scroll; `thrown()` = brief, one way, far enough).
+  - `dnd.rs` — DROP IN (`card_dnd_enter/drop/received`, routed by `DataDeviceHandler` when the
+    drag is over the card's surface): the richest type first — `text/uri-list` (local paths →
+    items; none local → the picture's pixels if offered, else the text), one `receive` at a time
+    on a thread, `finish()`/`destroy()` always sent. DRAG OUT (`card_lift`): a real Wayland drag,
+    COPY only, the item stays; the card refuses its own drag.
+  - `mod.rs` — the state and everything on the loop. PER WINDOW (`Card::wins`, by address →
+    `Win { on, place, width }`): all three last until the window closes (`card_window_closed`,
+    from `closewindow`) and survive turning the card off and on; `Session` keeps them in the
+    runtime dir so a restarted DOCK finds them (`card_restore_session`; addresses are checked
+    with `valid_addr` + `window_exists`). AWAY (`Away` bits: `Drag` — the plugin's `card lifted
+    <addr>` / `window-placed <addr>`; `Nudge` — the OPTIONS pill's window gestures, from
+    `nub_drag.rs`; `Swipe` — the plugin's `card away` / `card back` around a workspace swipe):
+    the card is gone at once and back, unrolling, only when NO cause is left (`card_away` /
+    `card_back`). It does not follow a moving window. WAITS (`Wait`, one timer for all —
+    `card_wait(what, delay)` sets or pushes back a deadline, `card_waited` acts): the wheel
+    gesture's end, the pill scroll's end, the throw's judgement, the return after a swipe. THE
+    SURFACE: its own `Top` layer covering the output (`surface::create_card_surface`), ordered
+    UNDER the dock by a layer rule (`declare_layer_rule`); the card is drawn where
+    `hypr::window_spot` says its window is, only its box is in the input region; the renderer is
+    built at the first summon and PARKED (shrunk to 8 px) while there is no card anywhere. The
+    window's place is re-read on layout events and the plugin's notices; a 2 s poll runs only
+    while a card is showing (the safety net, and what ends a drag never reported over).
+    SIDEWAYS: a scroll on the title bar (`card slide <addr> <delta>`, every step as it comes) or
+    sideways over the card (`card_wheel`: one axis per gesture; while it slides, the whole
+    surface takes the pointer) sets the card's `Place`; the card TRAVELS there (`Card::at`). A
+    brief scroll that stops is a THROW: outside the window on that side. Edges resize it (`GRIP`,
+    `WIDTH_MIN..MAX`). Pictures ride the Files thumbnailer (`card_on_thumb`) into a 32-layer
+    array; one pushed out is forgotten and asked for again when next on screen.
+  Pointer-free: `waverunner-ctl card [toggle [addr]|all|add text <…>|add file <path>|remove
+  <n>|clear|state|rate <speed> [accel]]`. Not built: a card button for Seam/staged windows (no
+  Golem bar), drawing it in its window's place in the stack (it draws over a window overlapping
+  its own), a drag image for text, per-output.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
