@@ -66,6 +66,16 @@ const NUDGE_QUIET: std::time::Duration = std::time::Duration::from_millis(280);
 /// takes the gesture, and keeps it until the scroll has been quiet this long.
 const SCROLL_CLAIM: f32 = 5.0;
 const SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(220);
+/// A FLING: this much scroll one way inside [`FLING_WINDOW`] is not a slide
+/// but a throw — the card goes all the way to that end of its window (Max,
+/// 2026-10-08: *"a fast scroll sends the card to the end… just with a short
+/// fast scroll on the bar or on the card"*). It glides there at
+/// [`FLING_RATE`], and the rest of that scroll (a touchpad's coasting tail)
+/// is not read as more sliding for [`FLING_DEAF`].
+const FLING_SCROLL: f32 = 45.0;
+const FLING_WINDOW: std::time::Duration = std::time::Duration::from_millis(90);
+const FLING_RATE: f32 = 18.0;
+const FLING_DEAF: std::time::Duration = std::time::Duration::from_millis(450);
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -266,6 +276,14 @@ pub(crate) struct Card {
     /// Its window is in hand (being moved or resized), since when: the
     /// card is away until the window is put down.
     lifted: Option<std::time::Instant>,
+    /// The scroll that slides the card, measured for a fling: when the
+    /// current burst began and what it has added up to one way.
+    burst: Option<(std::time::Instant, f32)>,
+    /// A thrown card on its way: where its left edge (from its window's)
+    /// is going.
+    glide: Option<f32>,
+    /// Sliding scroll is not listened to until then (a fling's tail).
+    deaf_until: Option<std::time::Instant>,
     /// The scroll gesture over the card: which way took it (see
     /// [`SCROLL_CLAIM`]), what each way has travelled before one did, and
     /// until when it lasts.
@@ -333,6 +351,16 @@ pub(crate) fn card_rect(spot: &WindowSpot, fx: Option<f32>) -> Rect {
         WIDTH,
         (spot.h - 2.0 * INSET).round(),
     )
+}
+
+/// Where a thrown card comes to rest: inside its window, against the left
+/// side (`to_left`) or the right — its resting places, not the overhang.
+pub(crate) fn fling_end(window_w: f32, to_left: bool) -> f32 {
+    if to_left {
+        INSET.min((window_w - WIDTH) / 2.0)
+    } else {
+        (window_w - INSET - WIDTH).max((window_w - WIDTH) / 2.0)
+    }
 }
 
 /// How far the card's left edge may go from its window's: fully out on
@@ -1298,6 +1326,28 @@ impl App {
             crate::animation::ease_toward(self.card.shown, target, dt, UNROLL_RATE, 0.004)
         };
         self.card.shown = shown;
+        // A thrown card glides to its end, remembered there as if slid.
+        let mut moving = moving;
+        if let (Some(to), Some(spot), Some(host)) =
+            (self.card.glide, self.card.spot, self.card.host.clone())
+        {
+            let from = match (self.card.geom.get(&host), self.card.rect) {
+                (Some(fx), _) => fx * spot.w,
+                (None, Some(r)) => r.x - spot.x,
+                (None, None) => to,
+            };
+            let (left, gliding) = crate::animation::ease_toward(from, to, dt, FLING_RATE, 0.5);
+            if spot.w > 0.0 && present {
+                self.card.geom.insert(host, left / spot.w);
+                self.card.rect = Some(card_rect(&spot, Some(left / spot.w)));
+            }
+            if !gliding || !present {
+                self.card.glide = None;
+                self.sync_card_input();
+            } else {
+                moving = true;
+            }
+        }
         self.card_last_frame = moving.then_some(now);
         if self.card.leaving && shown <= 0.0 {
             self.card.leaving = false;
@@ -1716,6 +1766,28 @@ impl App {
         if spot.w <= 0.0 || matches!(self.card.press, Some(Press::Slide { .. })) {
             return;
         }
+        let now = std::time::Instant::now();
+        if self.card.deaf_until.is_some_and(|t| now < t) {
+            return;
+        }
+        // A burst of scroll one way: fast enough, it is a throw.
+        let burst = match self.card.burst {
+            Some((since, sum)) if now - since <= FLING_WINDOW && sum * delta > 0.0 => {
+                (since, sum + delta)
+            }
+            _ => (now, delta),
+        };
+        self.card.burst = Some(burst);
+        if burst.1.abs() >= FLING_SCROLL {
+            // (Scroll down or right takes the card left, as a slide does.)
+            self.card.glide = Some(fling_end(spot.w, burst.1 > 0.0));
+            self.card.burst = None;
+            self.card.deaf_until = Some(now + FLING_DEAF);
+            self.card_last_frame = None;
+            self.request_card_draw();
+            return;
+        }
+        self.card.glide = None;
         // From the remembered fraction, not the rounded box: small scrolls
         // must add up.
         let left = match self.card.geom.get(addr) {
@@ -2225,6 +2297,14 @@ mod tests {
         // Fully out on the left with a little air, and on the right.
         assert_eq!(card_rect(&s, Some(-5.0)).x, 100.0 - 320.0 - 12.0);
         assert_eq!(card_rect(&s, Some(5.0)).x, 100.0 + 900.0 + 12.0);
+    }
+
+    #[test]
+    fn a_thrown_card_rests_inside_its_window_at_either_side() {
+        assert_eq!(fling_end(900.0, true), 10.0);
+        assert_eq!(fling_end(900.0, false), 900.0 - 10.0 - 320.0);
+        // A window narrower than the card: both ends are the middle.
+        assert_eq!(fling_end(300.0, true), fling_end(300.0, false));
     }
 
     #[test]
