@@ -137,6 +137,10 @@ pub(crate) struct Grid {
     /// surface, so the air left of the first is the air right of the last
     /// (Max, 2026-10-08: "the grid is not symmetrical, it should be").
     pub x0: f32,
+    /// From one column's left edge to the next's: the cell's width plus
+    /// whatever air the closer side margins left over, shared between the
+    /// columns (Max, 2026-10-08: "closer to the edge, like half that air").
+    pub pitch: f32,
 }
 
 impl Grid {
@@ -147,19 +151,31 @@ impl Grid {
         let cw = GRID_CELL_W * icon_scale;
         let ch = CELL_H * icon_scale;
         let cols = (((w - 2.0 * MARGIN) / cw).floor() as usize).max(1);
+        // Centred, the columns would leave half the spare width on each
+        // side; the sides get half of THAT, and the rest goes between the
+        // columns, so the first and last still sit the same way from their
+        // edges.
+        let spare = (w - cols as f32 * cw).max(0.0);
+        let x0 = if cols > 1 { spare / 4.0 } else { spare / 2.0 };
+        let pitch = if cols > 1 {
+            (w - 2.0 * x0 - cw) / (cols - 1) as f32
+        } else {
+            cw
+        };
         Self {
             cols,
             rows: (((h - 2.0 * MARGIN) / ch).floor() as usize).max(1),
             cw,
             ch,
-            x0: ((w - cols as f32 * cw) / 2.0).max(0.0),
+            x0,
+            pitch,
         }
     }
 
     /// A cell's rectangle.
     pub fn rect(&self, (col, row): Slot) -> Rect {
         Rect::new(
-            self.x0 + col as f32 * self.cw,
+            self.x0 + col as f32 * self.pitch,
             MARGIN + row as f32 * self.ch,
             self.cw,
             self.ch,
@@ -172,12 +188,17 @@ impl Grid {
 
     /// The cell under a point, if it is on the grid.
     pub fn slot_at(&self, (x, y): (f32, f32)) -> Option<Slot> {
-        let (fx, fy) = ((x - self.x0) / self.cw, (y - MARGIN) / self.ch);
+        if self.pitch <= 0.0 {
+            return None;
+        }
+        let (fx, fy) = ((x - self.x0) / self.pitch, (y - MARGIN) / self.ch);
         if fx < 0.0 || fy < 0.0 {
             return None;
         }
         let slot = (fx as usize, fy as usize);
-        self.contains(slot).then_some(slot)
+        // (The sliver of air between two columns is no one's.)
+        let within = x - self.x0 - slot.0 as f32 * self.pitch < self.cw;
+        (within && self.contains(slot)).then_some(slot)
     }
 
     /// Every cell, column by column from the top-left — the order a file
@@ -3210,12 +3231,14 @@ mod tests {
         // Cells 104×92 at scale 1: a 1000×400 surface holds 9 columns × 4 rows.
         let g = Grid::new(1000.0, 400.0, 1.0);
         assert_eq!((g.cols, g.rows), (9, 4));
-        // 9 × 104 = 936 of 1000: the columns are centred, 32 px of air each side.
-        assert_eq!(g.x0, 32.0);
-        assert_eq!(g.rect((0, 0)), Rect::new(32.0, MARGIN, GRID_CELL_W, CELL_H));
+        // 9 × 104 = 936 of 1000: 64 spare. A quarter of it on each side (half
+        // of what centring would leave), the rest shared between the columns.
+        assert_eq!(g.x0, 16.0);
+        assert_eq!(g.rect((0, 0)), Rect::new(16.0, MARGIN, GRID_CELL_W, CELL_H));
         let last = g.rect((8, 0));
-        assert_eq!(1000.0 - (last.x + last.w), g.rect((0, 0)).x, "the same air on both sides");
-        assert_eq!(g.rect((1, 2)).x, 32.0 + GRID_CELL_W);
+        assert!((1000.0 - (last.x + last.w) - 16.0).abs() < 1e-3, "the same air on both sides");
+        assert!((g.pitch - (GRID_CELL_W + 4.0)).abs() < 1e-3);
+        assert!((g.rect((1, 2)).x - (16.0 + g.pitch)).abs() < 1e-3);
         assert_eq!(g.rect((1, 2)).y, MARGIN + 2.0 * CELL_H);
         // A surface too small for one cell still has one.
         assert_eq!(Grid::new(10.0, 10.0, 1.0).cols, 1);
@@ -3230,7 +3253,8 @@ mod tests {
     fn slot_at_finds_the_cell_under_a_point() {
         let g = Grid::new(1000.0, 400.0, 1.0);
         assert_eq!(g.slot_at((g.x0 + 1.0, MARGIN + 1.0)), Some((0, 0)));
-        assert_eq!(g.slot_at((g.x0 + GRID_CELL_W + 1.0, MARGIN + CELL_H + 1.0)), Some((1, 1)));
+        assert_eq!(g.slot_at((g.x0 + g.pitch + 1.0, MARGIN + CELL_H + 1.0)), Some((1, 1)));
+        assert_eq!(g.slot_at((g.x0 + GRID_CELL_W + 1.0, MARGIN + 1.0)), None, "between two columns");
         assert_eq!(g.slot_at((1.0, 1.0)), None, "in the margin");
         assert_eq!(g.slot_at((5000.0, 20.0)), None, "past the grid");
     }
@@ -3323,7 +3347,7 @@ mod tests {
         assert_eq!(d.hit((g.x0 + 1.0, MARGIN + 1.0)), Some(0));
         assert_eq!(d.hit((g.x0 + 1.0, MARGIN + CELL_H + 1.0)), Some(1));
         assert_eq!(d.hit((1.0, 1.0)), None);
-        assert_eq!(d.hit((g.x0 + GRID_CELL_W + 1.0, MARGIN + 1.0)), None);
+        assert_eq!(d.hit((g.x0 + g.pitch + 1.0, MARGIN + 1.0)), None);
     }
 
     fn make_dir(files: &[(&str, &str)], dirs: &[&str]) -> PathBuf {
