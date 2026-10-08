@@ -2611,9 +2611,10 @@ impl App {
                             // and fading them in would blink the device
                             // that is already there.
                             None if self.desktop.hidden && self.desktop.solo_on => {
-                                self.desktop_toggle_hidden();
+                                // (Set BEFORE the toggle draws: one frame
+                                // at the old zero opacity was the blink.)
                                 self.desktop.shown = 1.0;
-                                self.request_desktop_draw();
+                                self.desktop_toggle_hidden();
                             }
                             None => self.desktop_toggle_hidden(),
                             _ => {}
