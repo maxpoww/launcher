@@ -309,9 +309,10 @@ The big daemon files are cohesive but long — go straight to the function:
   `card_window_nudged`: put down once quiet for 280 ms). A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
   the list, sideways slides the card — the way that travels `SCROLL_CLAIM` first takes it until
   the scroll is quiet for 220 ms; while it slides the card the input region is the whole surface
-  (the card moves out from under the pointer and the scroll must keep arriving). A FAST scroll is a throw (`card_slide`: `FLING_SCROLL` one way inside
-  `FLING_WINDOW`): the card glides to that end of its window (`fling_end`: OUTSIDE the
-  window, beside it) and the scroll's tail is ignored for `FLING_DEAF`. A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
+  (the card moves out from under the pointer and the scroll must keep arriving). A THROW (`Swipe::thrown`, judged when the sliding scroll STOPS —
+  `card_swipe_wait`): the whole run was brief (`FLING_BRIEF`), one way and at least `FLING_SCROLL`
+  → the card glides to that side OUTSIDE the window (`fling_end`); a long scroll never throws,
+  however fast. A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
   <delta>` → `card_slide`). A press on the card itself slides it sideways (no snapping; remembered per window as
   a fraction of its width, forgotten when turned off there); wheel scrolls; × on the hovered item
   removes. Pictures ride the Files thumbnailer (`card_on_thumb`) into the card renderer's own

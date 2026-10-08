@@ -66,18 +66,20 @@ const NUDGE_QUIET: std::time::Duration = std::time::Duration::from_millis(280);
 /// takes the gesture, and keeps it until the scroll has been quiet this long.
 const SCROLL_CLAIM: f32 = 5.0;
 const SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(220);
-/// A FLING: this much scroll one way inside [`FLING_WINDOW`] is not a slide
-/// but a throw — the card goes all the way to that end of its window (Max,
-/// 2026-10-08: *"a fast scroll sends the card to the end… just with a short
-/// fast scroll on the bar or on the card"*). It glides there at
-/// [`FLING_RATE`], and the rest of that scroll (a touchpad's coasting tail)
-/// is not read as more sliding for [`FLING_DEAF`].
-// 45 at first: an ordinary slide kept throwing it (Max: *"too hard now to move
-// without throw it. make the throwing less sensitive"*) → 120.
-const FLING_SCROLL: f32 = 120.0;
-const FLING_WINDOW: std::time::Duration = std::time::Duration::from_millis(90);
+/// A THROW: a short, fast scroll that ends sends the card all the way to
+/// that side, outside its window (Max, 2026-10-08: *"a fast scroll sends the
+/// card to the end… just with a short fast scroll on the bar or on the
+/// card"*). It is judged when the scroll STOPS, by how brief it was — a flick
+/// is over in a moment, while moving the card fast by hand is a longer scroll
+/// however quick. (The first cut threw on speed alone, mid-scroll: *"too hard
+/// now to move without throw it"*, then *"i want to be able to move the card
+/// fast without throwing it"*.) So: the whole scroll lasted no longer than
+/// [`FLING_BRIEF`], covered at least [`FLING_SCROLL`], one way, and then went
+/// quiet for [`FLING_QUIET`]. The card glides there at [`FLING_RATE`].
+const FLING_SCROLL: f32 = 40.0;
+const FLING_BRIEF: std::time::Duration = std::time::Duration::from_millis(170);
+const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(70);
 const FLING_RATE: f32 = 18.0;
-const FLING_DEAF: std::time::Duration = std::time::Duration::from_millis(450);
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -223,6 +225,25 @@ enum Press {
     Slide { from_x: f32, left: f32, moved: bool },
 }
 
+/// One run of sliding scroll: when it began, when its last step came, what
+/// it adds up to, and whether it ever turned back.
+#[derive(Debug, Clone, Copy)]
+struct Swipe {
+    began: std::time::Instant,
+    last: std::time::Instant,
+    sum: f32,
+    turned: bool,
+}
+
+impl Swipe {
+    /// Whether, now that it has stopped, it was a throw — and which way
+    /// (`true`: the card goes left, as scroll down/right slides it).
+    fn thrown(&self) -> Option<bool> {
+        (!self.turned && self.last - self.began <= FLING_BRIEF && self.sum.abs() >= FLING_SCROLL)
+            .then_some(self.sum > 0.0)
+    }
+}
+
 /// A scroll gesture over the card.
 #[derive(Debug, Default)]
 struct Wheel {
@@ -278,14 +299,13 @@ pub(crate) struct Card {
     /// Its window is in hand (being moved or resized), since when: the
     /// card is away until the window is put down.
     lifted: Option<std::time::Instant>,
-    /// The scroll that slides the card, measured for a fling: when the
-    /// current burst began and what it has added up to one way.
-    burst: Option<(std::time::Instant, f32)>,
+    /// The scroll that is sliding the card, measured for a throw.
+    swipe: Option<Swipe>,
+    /// The timer that judges the swipe once it stops is running.
+    swipe_waiting: bool,
     /// A thrown card on its way: where its left edge (from its window's)
     /// is going.
     glide: Option<f32>,
-    /// Sliding scroll is not listened to until then (a fling's tail).
-    deaf_until: Option<std::time::Instant>,
     /// The scroll gesture over the card: which way took it (see
     /// [`SCROLL_CLAIM`]), what each way has travelled before one did, and
     /// until when it lasts.
@@ -1770,26 +1790,24 @@ impl App {
         if spot.w <= 0.0 || matches!(self.card.press, Some(Press::Slide { .. })) {
             return;
         }
+        // Measure the run for a throw: judged when it stops (`card_swipe_wait`).
         let now = std::time::Instant::now();
-        if self.card.deaf_until.is_some_and(|t| now < t) {
-            return;
-        }
-        // A burst of scroll one way: fast enough, it is a throw.
-        let burst = match self.card.burst {
-            Some((since, sum)) if now - since <= FLING_WINDOW && sum * delta > 0.0 => {
-                (since, sum + delta)
-            }
-            _ => (now, delta),
-        };
-        self.card.burst = Some(burst);
-        if burst.1.abs() >= FLING_SCROLL {
-            // (Scroll down or right takes the card left, as a slide does.)
-            self.card.glide = Some(fling_end(spot.w, burst.1 > 0.0));
-            self.card.burst = None;
-            self.card.deaf_until = Some(now + FLING_DEAF);
-            self.card_last_frame = None;
-            self.request_card_draw();
-            return;
+        self.card.swipe = Some(match self.card.swipe {
+            Some(sw) if now - sw.last <= FLING_QUIET => Swipe {
+                last: now,
+                sum: sw.sum + delta,
+                turned: sw.turned || sw.sum * delta < 0.0,
+                ..sw
+            },
+            _ => Swipe {
+                began: now,
+                last: now,
+                sum: delta,
+                turned: false,
+            },
+        });
+        if !self.card.swipe_waiting {
+            self.card_swipe_wait(FLING_QUIET);
         }
         self.card.glide = None;
         // From the remembered fraction, not the rounded box: small scrolls
@@ -1803,6 +1821,36 @@ impl App {
         self.card.rect = Some(card_rect(&spot, Some(fx)));
         self.sync_card_input();
         self.request_card_draw();
+    }
+
+    /// Wait for the sliding scroll to stop, then judge it: a brief one was
+    /// a throw, and the card glides to that side.
+    fn card_swipe_wait(&mut self, wait: std::time::Duration) {
+        let timer = calloop::timer::Timer::from_duration(wait);
+        self.card.swipe_waiting = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.card.swipe_waiting = false;
+                let now = std::time::Instant::now();
+                match app.card.swipe {
+                    Some(sw) if now - sw.last < FLING_QUIET => {
+                        app.card_swipe_wait(FLING_QUIET - (now - sw.last));
+                    }
+                    Some(sw) => {
+                        app.card.swipe = None;
+                        if let (Some(to_left), Some(spot)) = (sw.thrown(), app.card.spot) {
+                            if app.card_present() {
+                                app.card.glide = Some(fling_end(spot.w, to_left));
+                                app.card_last_frame = None;
+                                app.request_card_draw();
+                            }
+                        }
+                    }
+                    None => {}
+                }
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
     }
 
     /// The card was let go after a slide: it stays exactly there (no
@@ -2310,6 +2358,26 @@ mod tests {
         // Exactly as far as a slide by hand can take it.
         assert_eq!(fling_end(900.0, true), clamp_left(-9999.0, 900.0));
         assert_eq!(fling_end(900.0, false), clamp_left(9999.0, 900.0));
+    }
+
+    #[test]
+    fn only_a_brief_one_way_scroll_is_a_throw() {
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let swipe = |lasted: u64, sum: f32, turned: bool| Swipe {
+            began: t0,
+            last: t0 + ms(lasted),
+            sum,
+            turned,
+        };
+        // A flick: over in a moment.
+        assert_eq!(swipe(90, 80.0, false).thrown(), Some(true));
+        assert_eq!(swipe(90, -80.0, false).thrown(), Some(false));
+        // Moving the card fast by hand: much more scroll, but it lasts.
+        assert_eq!(swipe(600, 900.0, false).thrown(), None);
+        // A small nudge, and a scroll that turned back.
+        assert_eq!(swipe(60, 12.0, false).thrown(), None);
+        assert_eq!(swipe(90, 80.0, true).thrown(), None);
     }
 
     #[test]
