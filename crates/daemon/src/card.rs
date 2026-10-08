@@ -47,8 +47,9 @@ use crate::App;
 /// The card's width, and how far it sits in from its window's top, right
 /// and bottom edges (the mockup's 10). The width was the mockup's 320 until
 /// Max sized a card by hand and kept it (2026-10-08: *"i want the size the
-/// card is now on this window to be the default size of the card"* — 472).
-pub(crate) const WIDTH: f32 = 472.0;
+/// card is now on this window to be the default size of the card"* — 472;
+/// then *"is kind of big, lets make it 420px"*).
+pub(crate) const WIDTH: f32 = 420.0;
 /// The card's width can be changed by its side edges (Max, 2026-10-08: *"i
 /// want to resize the card width"*): a press within [`GRIP`] of either side
 /// takes that edge, between these limits (the first mockup's were 240–520).
