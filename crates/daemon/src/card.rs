@@ -1536,7 +1536,9 @@ impl App {
     }
 
     /// The window was put down: the card comes back on it, at the same
-    /// place relative to the window, unrolling as when it is summoned.
+    /// place relative to the window, unrolling as when it is summoned. At
+    /// once: a 220 ms wait before the reveal was tried and taken back the
+    /// same day (Max, 2026-10-08: *"i dont think we need the delay"*).
     pub(crate) fn card_window_placed(&mut self, addr: &str) {
         if self.card.host.as_deref() != Some(addr) || self.card.lifted.take().is_none() {
             return;
