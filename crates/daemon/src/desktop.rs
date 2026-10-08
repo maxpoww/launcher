@@ -338,6 +338,12 @@ pub(crate) struct Desktop {
     pub band: Option<((f32, f32), (f32, f32))>,
     /// The right-click menu, while it is up.
     pub menu: Option<Menu>,
+    /// What the menu's "Move to" page lists (`desktop_send.rs`), in the
+    /// order of its `SendTo(n)`: the sticks and phones, then the other
+    /// computers. `looking`: the devices have been asked for and not
+    /// answered yet.
+    pub targets: Vec<crate::desktop_send::Target>,
+    pub looking: bool,
     /// The Properties box, while it is up.
     pub props: Option<Props>,
     /// The last plain click on an item (its path, and when): a second one
@@ -1346,9 +1352,97 @@ impl App {
         // Several selected (the clicked one among them): the group's menu.
         let many = item.is_some() && self.desktop.selected.len() > 1;
         let mut menu = Menu::open(item, many, at, w as f32, h as f32);
+        // On the wallpaper, with files on the clipboard: they can be put here.
+        if item.is_none() && self.clipboard_files().is_some() {
+            menu = menu.with_paste(h as f32);
+        }
         menu.hover = menu.hit(at);
         self.desktop.menu = Some(menu);
         self.request_desktop_draw();
+    }
+
+    /// The selected items' paths (the item a menu was opened on is among
+    /// them), in the order they are on the desktop.
+    fn desktop_selected_paths(&self) -> Vec<String> {
+        self.desktop
+            .items
+            .iter()
+            .filter(|it| self.desktop.selected.contains(&it.path))
+            .map(|it| it.path.clone())
+            .collect()
+    }
+
+    /// Turn the menu to its "Move to" page: the sticks at once, the paired
+    /// devices when the service has answered (asked off the loop).
+    fn desktop_show_targets(&mut self) {
+        self.desktop.targets = crate::desktop_send::sticks();
+        self.desktop.looking = true;
+        self.desktop_fill_targets();
+        let (tx, rx) = calloop::channel::channel::<Vec<crate::desktop_send::Target>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::desktop_send::devices());
+        });
+        let waiting = self.loop_handle.insert_source(rx, |event, _, app: &mut App| {
+            if let calloop::channel::Event::Msg(devices) = event {
+                app.desktop.looking = false;
+                // The carried things stay with the sticks; computers last.
+                let (far, near): (Vec<_>, Vec<_>) = devices.into_iter().partition(|t| t.far);
+                app.desktop.targets.retain(|t| matches!(t.place, crate::desktop_send::Place::Stick(_)));
+                app.desktop.targets.extend(near);
+                app.desktop.targets.extend(far);
+                // Only if that page is still the one up.
+                if app.desktop.menu.as_ref().is_some_and(|m| m.targets) {
+                    app.desktop_fill_targets();
+                }
+            }
+        });
+        if waiting.is_err() {
+            self.desktop.looking = false;
+            self.desktop_fill_targets();
+        }
+    }
+
+    /// Write the "Move to" page from what is known now.
+    fn desktop_fill_targets(&mut self) {
+        let h = self.desktop_size.1 as f32;
+        let names = |far: bool| -> Vec<String> {
+            self.desktop
+                .targets
+                .iter()
+                .filter(|t| t.far == far)
+                .map(|t| t.name.clone())
+                .collect()
+        };
+        let (near, far) = (names(false), names(true));
+        let looking = self.desktop.looking;
+        let at = self.desktop.ptr;
+        if let Some(menu) = self.desktop.menu.as_mut() {
+            menu.show_targets(&near, &far, looking, h);
+            menu.hover = at.and_then(|p| menu.hit(p));
+        }
+        self.request_desktop_draw();
+    }
+
+    /// Put the clipboard's files on the desktop, around `at`: copied, or
+    /// moved if they were cut (once — a cut is spent by its paste).
+    fn desktop_paste(&mut self, at: (f32, f32)) {
+        let Some((paths, cut)) = self.clipboard_files() else {
+            return;
+        };
+        let (brought, failed) = crate::desktop_send::put(&paths, &desktop_dir(), cut);
+        info!(
+            "desktop: pasted {} ({}; {failed} failed)",
+            brought.len(),
+            if cut { "moved" } else { "copied" }
+        );
+        self.desktop_place_brought(&brought, Some(at));
+        if cut {
+            // The same files, where they are now, as a plain copy: a second
+            // paste somewhere else must not look for what has moved.
+            let now: Vec<String> = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            self.serve_files(&now, false);
+        }
+        self.reload_desktop();
     }
 
     /// A row of the menu was chosen.
@@ -1402,6 +1496,39 @@ impl App {
             Action::Properties => {
                 if let Some(i) = item {
                     self.desktop_open_props(i, at, None);
+                }
+            }
+            // (Turning the page is the release handler's: the menu stays up.)
+            Action::MoveTo | Action::Back => {}
+            Action::Cut | Action::Copy => {
+                let paths = self.desktop_selected_paths();
+                let cut = action == Action::Cut;
+                info!("desktop: {} {}", if cut { "cut" } else { "copied" }, paths.join(", "));
+                self.serve_files(&paths, cut);
+            }
+            Action::Paste => self.desktop_paste(at),
+            Action::SendTo(n) => {
+                let Some(target) = self.desktop.targets.get(n).cloned() else {
+                    return;
+                };
+                let paths: Vec<PathBuf> =
+                    self.desktop_selected_paths().into_iter().map(PathBuf::from).collect();
+                self.desktop.selected.clear();
+                info!("desktop: {} file(s) → {}", paths.len(), target.name);
+                // Off the loop: a copy to a stick takes as long as it takes.
+                let (tx, rx) = calloop::channel::channel::<String>();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::desktop_send::send(&paths, &target));
+                });
+                let waiting = self.loop_handle.insert_source(rx, |event, _, app: &mut App| {
+                    if let calloop::channel::Event::Msg(said) = event {
+                        info!("desktop: {said}");
+                        crate::desktop_send_notify(&said);
+                        app.reload_desktop();
+                    }
+                });
+                if waiting.is_err() {
+                    warn!("desktop: cannot wait for the files to be sent");
                 }
             }
             Action::MoveToHome => {
@@ -1971,6 +2098,23 @@ impl App {
                         let under = self.desktop.ptr.and_then(|p| menu.hit(p));
                         if let Some(row) = pressed.filter(|r| Some(*r) == under) {
                             if let Some(action) = menu.action(row) {
+                                // "Move to" and "Back" turn the page: the
+                                // menu stays up.
+                                match action {
+                                    Action::MoveTo => {
+                                        self.desktop_show_targets();
+                                        return;
+                                    }
+                                    Action::Back => {
+                                        let h = self.desktop_size.1 as f32;
+                                        let at = self.desktop.ptr;
+                                        menu.show_main(h);
+                                        menu.hover = at.and_then(|p| menu.hit(p));
+                                        self.request_desktop_draw();
+                                        return;
+                                    }
+                                    _ => {}
+                                }
                                 let (item, at) = (menu.item, menu.at);
                                 self.desktop.menu = None;
                                 self.desktop_menu_act(action, item, at);
@@ -2685,6 +2829,19 @@ impl App {
                 return "no menu is up".to_owned();
             };
             return match rest.trim().parse::<usize>().ok().and_then(|r| menu.action(r)) {
+                // The page turns and the menu stays, as under the pointer.
+                Some(Action::MoveTo) => {
+                    self.desktop.menu = Some(menu);
+                    self.desktop_show_targets();
+                    "MoveTo".to_owned()
+                }
+                Some(Action::Back) => {
+                    let mut menu = menu;
+                    menu.show_main(self.desktop_size.1 as f32);
+                    self.desktop.menu = Some(menu);
+                    self.request_desktop_draw();
+                    "Back".to_owned()
+                }
                 Some(action) => {
                     self.desktop_menu_act(action, menu.item, menu.at);
                     self.request_desktop_draw();

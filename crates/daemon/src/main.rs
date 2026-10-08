@@ -27,6 +27,7 @@ mod card;
 mod desktop;
 mod desktop_menu;
 mod desktop_props;
+mod desktop_send;
 mod logging;
 mod dict;
 mod display;
@@ -2415,6 +2416,36 @@ pub(crate) const BTN_LEFT: u32 = 0x110;
 
 /// Linux evdev code for the right mouse button.
 pub(crate) const BTN_RIGHT: u32 = 0x111;
+
+/// Tell the owner how a "Move to" from the desktop ended (a copy to a stick
+/// or a send to a phone finishes after the menu is long gone). Through the
+/// session's notification service; a failure to say it is only logged.
+pub(crate) fn desktop_send_notify(body: &str) {
+    let sent = std::process::Command::new("busctl")
+        .args([
+            "--user",
+            "call",
+            "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
+            "susssasa{sv}i",
+            "waverunner",
+            "0",
+            "folder",
+            i18n::tr("Desktop"),
+            body,
+            "0",
+            "0",
+            "6000",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if let Err(e) = sent {
+        tracing::debug!("desktop: cannot notify ({e})");
+    }
+}
 
 /// Linux evdev code for the middle mouse button — the Linux-native
 /// "open a new instance" gesture (the dock is pointer-only, so a

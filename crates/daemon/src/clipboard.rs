@@ -1556,6 +1556,31 @@ impl App {
         self.serve_clip(entry);
     }
 
+    /// Put files on the clipboard the way a file manager's Copy (or, with
+    /// `cut`, Cut) does: a paste in any file manager copies — or moves —
+    /// them. The desktop's menu does this (`desktop.rs`).
+    pub(crate) fn serve_files(&mut self, paths: &[String], cut: bool) {
+        let list = paths
+            .iter()
+            .map(|p| crate::desktop::file_uri(p))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(entry) = classify_files(&list, cut) {
+            self.serve_clip(entry);
+        }
+    }
+
+    /// The files on the clipboard, if that is what the newest clip is, and
+    /// whether they were CUT (a paste moves them).
+    pub(crate) fn clipboard_files(&self) -> Option<(Vec<std::path::PathBuf>, bool)> {
+        let entry = self.clip.history.first()?;
+        if entry.kind != ClipKind::Files {
+            return None;
+        }
+        let paths = crate::desktop::uri_list_paths(&entry.text);
+        (!paths.is_empty()).then_some((paths, entry.cut))
+    }
+
     /// Hand `entry` to our data-control source so it owns the selection with its
     /// full advertised type set, and remember it as the served clip.
     fn serve_clip(&mut self, entry: ClipEntry) {

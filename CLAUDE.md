@@ -264,7 +264,7 @@ The big daemon files are cohesive but long — go straight to the function:
   to `~/.local/state/waverunner/daemon.log`. HIDE/SHOW: a click on bare wallpaper toggles the
   icons (fade; `settings.desktop_hidden`). MENU (`desktop_menu.rs`, the approved mockup at
   ~/desktop-menu-mockup): right-click → `Menu::open` at the pointer (icon: Open · Open in
-  terminal · Rename · ─ · Move to Home · Move to bin · ─ · Properties; wallpaper: New folder · Clean up), drawn as a `GridContent`
+  terminal · Rename · ─ · Move to · Move to Home · Move to bin · ─ · Properties; wallpaper: [Paste ·] New folder · Clean up), drawn as a `GridContent`
   so it paints over the icons (names under it are skipped), a left press on a row acts on
   release, elsewhere closes; `debug-desktop menu [n]` / `pick <row>`. RENAME in place: the name
   becomes a field (`Rename`, all-selected first key replaces); the desktop takes the keyboard
@@ -277,7 +277,20 @@ The big daemon files are cohesive but long — go straight to the function:
   turns it back on hover or click, any other press closes). Lines: Kind, Contains (folders/files/hidden), Size (a
   folder's tree walked on a thread, `folder_size`), Dimensions (images), Link to, Where, Owner,
   Access, Modified, Created, Opened. `debug-desktop props <n>` opens it without a menu. Not yet:
-  per-output surfaces, Escape closing the menu (no keyboard while it is up).
+  per-output surfaces, Escape closing the menu (no keyboard while it is up). MOVE TO: that row
+  does not act, it turns the menu's PAGE (`Menu::show_targets`, the menu stays up; `‹ Back` →
+  `show_main`): Cut · Copy (`App::serve_files` puts the selection on the clipboard as a file
+  manager does, verb included) · the sticks and phones · the other computers. The lists are
+  `desktop_send.rs`: sticks = volumes mounted under `/run/media/<user>` or `/media` (read from
+  `/proc/mounts` at once; an unmounted stick is not listed), devices = KDE Connect's paired AND
+  reachable ones (`kdeconnect-cli -a --id-name-only`, asked on a thread — "Looking for devices…"
+  until it answers; a `desktop`/`laptop` type, read with `busctl`, goes in the second list).
+  `Action::SendTo(n)` indexes `Desktop::targets`; `desktop_send::send` runs on a thread: a stick
+  gets a MOVE (copy, then the original goes once it has arrived, then `sync -f`), a device a SEND
+  (`kdeconnect-cli --share`, the file stays; folders are skipped), and the outcome is a
+  notification (`desktop_send_notify`). PASTE (wallpaper menu, only when the newest clip is
+  files — `App::clipboard_files`): `desktop_send::put` copies them in, or moves them if they
+  were cut, around the click.
 - `card.rs` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new).
   ONE card with ONE list; it sits inside a window (under the bar, on the right, 320 wide, 10 in
   from the edges) and is turned on per window (`card toggle [addr]` — sent by the card button at the right end of a floating window's title
