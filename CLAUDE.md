@@ -305,7 +305,7 @@ The big daemon files are cohesive but long — go straight to the function:
   menu or a box up the surface stays lit and the files shrink + fade by themselves; `hit`
   answers for volumes only).
 - `card.rs` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new).
-  ONE card with ONE list; it sits inside a window (under the bar, on the right, 320 wide, 10 in
+  ONE card with ONE list; it sits inside a window (under the bar, on the right, 472 wide (`WIDTH`), 10 in
   from the edges) and is turned on per window (`card toggle [addr]` — sent by the card button at the right end of a floating window's title
   bar, drawn by the waveview plugin, which we tell the state with `hl.plugin.waveview.card(addr,
   on)`: `card_tell_bar`;

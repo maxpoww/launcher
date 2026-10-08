@@ -45,8 +45,10 @@ use crate::hypr::WindowSpot;
 use crate::App;
 
 /// The card's width, and how far it sits in from its window's top, right
-/// and bottom edges (the mockup's 320 and 10).
-pub(crate) const WIDTH: f32 = 320.0;
+/// and bottom edges (the mockup's 10). The width was the mockup's 320 until
+/// Max sized a card by hand and kept it (2026-10-08: *"i want the size the
+/// card is now on this window to be the default size of the card"* — 472).
+pub(crate) const WIDTH: f32 = 472.0;
 /// The card's width can be changed by its side edges (Max, 2026-10-08: *"i
 /// want to resize the card width"*): a press within [`GRIP`] of either side
 /// takes that edge, between these limits (the first mockup's were 240–520).
@@ -2647,7 +2649,7 @@ mod tests {
         let r = card_rect(&spot(), None, 1.0, WIDTH);
         assert_eq!(
             (r.x, r.y, r.w, r.h),
-            (100.0 + 900.0 - 10.0 - 320.0, 60.0, 320.0, 580.0)
+            (100.0 + 900.0 - 10.0 - WIDTH, 60.0, WIDTH, 580.0)
         );
     }
 
@@ -2658,14 +2660,14 @@ mod tests {
         // Fully out on the left with a little air, and on the right.
         assert_eq!(
             card_rect(&s, Some(-5.0), 1.0, WIDTH).x,
-            100.0 - 320.0 - 12.0
+            100.0 - WIDTH - 12.0
         );
         assert_eq!(card_rect(&s, Some(5.0), 1.0, WIDTH).x, 100.0 + 900.0 + 12.0);
     }
 
     #[test]
     fn a_thrown_card_rests_beside_its_window_on_either_side() {
-        assert_eq!(fling_end(900.0, true, WIDTH), -(320.0 + 12.0));
+        assert_eq!(fling_end(900.0, true, WIDTH), -(WIDTH + 12.0));
         assert_eq!(fling_end(900.0, false, WIDTH), 900.0 + 12.0);
         // Exactly as far as a slide by hand can take it.
         assert_eq!(
