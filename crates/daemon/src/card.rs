@@ -86,10 +86,9 @@ const FLING_BRIEF: std::time::Duration = std::time::Duration::from_millis(170);
 const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(30);
 // 18 at first, then 36 (Max: *"make the jump to the side snappier"*), then 70
 // (*"snappier"*).
-// ⚠ TEMPORARILY 3.5 (twenty times slower; ten and five were tried first), to
-// look at the glide: Max sees a "hole" as the card crosses the middle of the
-// window. Back to 70 after.
-const FLING_RATE: f32 = 3.5;
+// (`card rate <n>` changes it on the running dock, to look at the glide in
+// slow motion without a rebuild; it lasts until the dock restarts.)
+const FLING_RATE: f32 = 70.0;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -316,6 +315,8 @@ pub(crate) struct Card {
     /// A thrown card on its way: where its left edge (from its window's)
     /// is going.
     glide: Option<f32>,
+    /// The glide's rate, when `card rate` has set one for this run.
+    glide_rate: Option<f32>,
     /// The scroll gesture over the card: which way took it (see
     /// [`SCROLL_CLAIM`]), what each way has travelled before one did, and
     /// until when it lasts.
@@ -1370,7 +1371,13 @@ impl App {
                 (None, Some(r)) => r.x - spot.x,
                 (None, None) => to,
             };
-            let (left, gliding) = crate::animation::ease_toward(from, to, dt, FLING_RATE, 0.5);
+            let (left, gliding) = crate::animation::ease_toward(
+                from,
+                to,
+                dt,
+                self.card.glide_rate.unwrap_or(FLING_RATE),
+                0.5,
+            );
             if spot.w > 0.0 && present {
                 self.card.geom.insert(host, left / spot.w);
                 self.card.rect = Some(card_rect(&spot, Some(left / spot.w)));
@@ -2239,6 +2246,13 @@ impl App {
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
             "all" => self.card_toggle_all(),
+            "rate" => {
+                self.card.glide_rate = rest.parse::<f32>().ok().filter(|r| *r > 0.0);
+                format!(
+                    "a thrown card glides at rate {}",
+                    self.card.glide_rate.unwrap_or(FLING_RATE)
+                )
+            }
             "lifted" => {
                 self.card_window_lifted(rest);
                 String::new()
