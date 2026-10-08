@@ -426,8 +426,8 @@ pub(crate) struct Desktop {
     /// opposite: they fade rather than blink.
     pub shown: f32,
     /// Devices plugged in WHILE the icons were put away: they show alone,
-    /// once, until the next click on the wallpaper puts them away with the
-    /// rest (Max, 2026-10-08: "solo, but just once, when I connect them;
+    /// once, until the next click on the wallpaper brings the rest back
+    /// beside them (Max, 2026-10-08: "solo, but just once, when I connect them;
     /// after that they behave as the others").
     pub solo: HashSet<String>,
     pub solo_on: bool,
@@ -2604,10 +2604,15 @@ impl App {
                                 self.desktop.selected.clear();
                                 self.request_desktop_draw();
                             }
-                            // Devices shown alone go with the rest: they
-                            // were only announced.
+                            // With a device shown alone, the click brings
+                            // the others back to it; the next one puts
+                            // them all away (Max, 2026-10-08). The others
+                            // appear at once: the surface has ONE opacity,
+                            // and fading them in would blink the device
+                            // that is already there.
                             None if self.desktop.hidden && self.desktop.solo_on => {
-                                self.desktop.solo_on = false;
+                                self.desktop_toggle_hidden();
+                                self.desktop.shown = 1.0;
                                 self.request_desktop_draw();
                             }
                             None => self.desktop_toggle_hidden(),

@@ -304,7 +304,7 @@ The big daemon files are cohesive but long — go straight to the function:
   from the top-right). Hide/show is a FADE of the whole surface (`scene.alpha`), volumes included.
   A device connected WHILE the icons are away shows ALONE once (`Desktop::solo`, `Live::only`,
   fading by the same surface opacity — one group fades at a time); the next wallpaper click
-  puts it away with the rest, the one after brings everything back.
+  brings the others back beside it (at once, no fade: one surface opacity), the one after puts them all away.
   HARDENING (2026-10-08 review): a `.desktop` file is a shortcut only when TRUSTED — executable,
   or an installed app's own (same file name + Exec as an indexed entry, lifted in
   `reload_desktop`); otherwise a plain file under its real name whose double click says so and
