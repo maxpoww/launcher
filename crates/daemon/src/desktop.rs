@@ -270,14 +270,22 @@ pub(crate) fn place(
 
 /// Record every placed item's cell in `remembered`; whether anything new
 /// was learned (and the store needs writing).
+///
+/// A cell remembered OFF the grid is kept: the grid is only smaller for now
+/// (a resolution being tried, a bigger icon size) and the icon goes back
+/// when it grows again — "a scale change moves nothing".
 pub(crate) fn stick(
     items: &[Item],
     slots: &[Option<Slot>],
+    grid: &Grid,
     remembered: &mut HashMap<String, Slot>,
 ) -> bool {
     let mut learned = false;
     for (item, slot) in items.iter().zip(slots) {
         let Some(slot) = slot else { continue };
+        if remembered.get(&item.path).is_some_and(|r| !grid.contains(*r)) {
+            continue;
+        }
         if remembered.get(&item.path) != Some(slot) {
             remembered.insert(item.path.clone(), *slot);
             learned = true;
@@ -290,7 +298,7 @@ pub(crate) fn stick(
 /// compositor carries under the pointer. Gone with the drag.
 pub(crate) struct DragIcon {
     surface: WlSurface,
-    _buffer: WlBuffer,
+    buffer: WlBuffer,
     _pool: RawPool,
 }
 
@@ -304,6 +312,9 @@ impl DragIcon {
 impl Drop for DragIcon {
     fn drop(&mut self) {
         self.surface.destroy();
+        // A dropped proxy sends nothing: without this the compositor kept
+        // every drag's buffer for the daemon's life.
+        self.buffer.destroy();
     }
 }
 
@@ -710,52 +721,23 @@ pub(crate) fn uri_list_paths(list: &str) -> Vec<PathBuf> {
 /// `name (2)`, `name (3)`… before the extension — the whole of it, so
 /// `a.tar.gz` becomes `a (2).tar.gz`.
 fn unique_dest(dir: &Path, name: &str) -> PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
-    let (stem, ext) = match name.split_once('.') {
-        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
-        _ => (name, String::new()),
-    };
-    (2..)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !p.exists())
-        .unwrap_or(first)
+    crate::desktop_send::free_dest(dir, name)
 }
 
-/// Copy a directory tree (symlinks followed).
-fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dest)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let to = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_tree(&entry.path(), &to)?;
-        } else {
-            std::fs::copy(entry.path(), to)?;
-        }
-    }
-    Ok(())
-}
 
 /// Bring `src` to `dest`: a move where one filesystem allows it, else a
 /// copy (a file from another volume stays there too — what a desktop does
 /// with a file from a stick).
-fn bring(src: &Path, dest: &Path) -> std::io::Result<()> {
-    if std::fs::rename(src, dest).is_ok() {
+fn bring(src: &Path, dest: &Path, may_move: bool) -> std::io::Result<()> {
+    if may_move && std::fs::rename(src, dest).is_ok() {
         return Ok(());
     }
-    if std::fs::metadata(src)?.is_dir() {
-        copy_tree(src, dest)
-    } else {
-        std::fs::copy(src, dest).map(|_| ())
-    }
+    crate::desktop_send::copy_all(src, dest)
 }
 
 /// Bring every file of `paths` into `dir` (one already there stays as it
 /// is); the paths they now have, in order.
-pub(crate) fn import(paths: &[PathBuf], dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn import(paths: &[PathBuf], dir: &Path, may_move: bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for src in paths {
         let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
@@ -769,13 +751,25 @@ pub(crate) fn import(paths: &[PathBuf], dir: &Path) -> Vec<PathBuf> {
             warn!("desktop: dropped {} does not exist", src.display());
             continue;
         }
+        if crate::desktop_send::inside(dir, src) {
+            warn!("desktop: {} holds the desktop; it cannot be put on it", src.display());
+            continue;
+        }
         let dest = unique_dest(dir, name);
-        match bring(src, &dest) {
+        match bring(src, &dest, may_move) {
             Ok(()) => {
                 info!("desktop: {} → {}", src.display(), dest.display());
                 out.push(dest);
             }
-            Err(e) => warn!("desktop: cannot bring {} in: {e}", src.display()),
+            Err(e) => {
+                warn!("desktop: cannot bring {} in: {e}", src.display());
+                // Half a copy is worse than none.
+                let _ = if dest.is_dir() {
+                    std::fs::remove_dir_all(&dest)
+                } else {
+                    std::fs::remove_file(&dest)
+                };
+            }
         }
     }
     out
@@ -1256,8 +1250,10 @@ impl App {
                 continue;
             }
             let key = thumb_key(&item.path);
-            if let Some((_, pixels)) = self.thumb_map.get(&item.path) {
-                self.desktop.chains.insert(key.clone(), pixels.clone());
+            if !self.desktop.chains.contains_key(&key) {
+                if let Some((_, pixels)) = self.thumb_map.get(&item.path) {
+                    self.desktop.chains.insert(key.clone(), pixels.clone());
+                }
             }
             if self.desktop.chains.contains_key(&key) {
                 item.icon = key;
@@ -1283,7 +1279,60 @@ impl App {
         // selected.
         let present: HashSet<&str> = items.iter().map(|it| it.path.as_str()).collect();
         self.desktop.selected.retain(|p| present.contains(p.as_str()));
+        // Whatever is up holds an item by its PLACE in the list, and the list
+        // has just been made anew (a file arrived, a stick mounted: every
+        // place after it moved). Each is carried over by its path, or let go
+        // of if its file went — Enter in a rename must never name another.
+        let old_path = |i: usize| self.desktop.items.get(i).map(|it| it.path.clone());
+        let now_at = |path: Option<String>| path.and_then(|p| items.iter().position(|it| it.path == p));
+        let rename_to = self.desktop.rename.as_ref().map(|r| now_at(old_path(r.item)));
+        let menu_to = self
+            .desktop
+            .menu
+            .as_ref()
+            .and_then(|m| m.item)
+            .map(|i| now_at(old_path(i)));
+        let press_to = self
+            .desktop
+            .press
+            .and_then(|p| p.item)
+            .map(|i| now_at(old_path(i)));
+        let props_gone = self
+            .desktop
+            .props
+            .as_ref()
+            .is_some_and(|p| !items.iter().any(|it| it.path == p.path));
         self.desktop.items = items;
+        match rename_to {
+            Some(Some(i)) => {
+                if let Some(r) = self.desktop.rename.as_mut() {
+                    r.item = i;
+                }
+            }
+            Some(None) => self.desktop_end_rename(false),
+            None => {}
+        }
+        match menu_to {
+            Some(Some(i)) => {
+                if let Some(m) = self.desktop.menu.as_mut() {
+                    m.item = Some(i);
+                }
+            }
+            Some(None) => self.desktop.menu = None,
+            None => {}
+        }
+        match press_to {
+            Some(Some(i)) => {
+                if let Some(p) = self.desktop.press.as_mut() {
+                    p.item = Some(i);
+                }
+            }
+            Some(None) => self.desktop.press = None,
+            None => {}
+        }
+        if props_gone {
+            self.desktop.props = None;
+        }
         // Drop the pictures nothing wears any more (a thumbnail is ~350 KB).
         let worn: HashSet<&str> = self.desktop.items.iter().map(|it| it.icon.as_str()).collect();
         self.desktop.chains.retain(|k, _| worn.contains(k.as_str()));
@@ -1307,7 +1356,7 @@ impl App {
         }
         self.desktop.grid = Grid::new(w as f32, h as f32, self.icon_scale());
         self.desktop.slots = place(&self.desktop.items, &self.desktop.remembered, &self.desktop.grid);
-        if stick(&self.desktop.items, &self.desktop.slots, &mut self.desktop.remembered) {
+        if stick(&self.desktop.items, &self.desktop.slots, &self.desktop.grid, &mut self.desktop.remembered) {
             self.save_desktop_positions();
         }
         self.sync_desktop_input();
@@ -1687,6 +1736,10 @@ impl App {
                 };
                 let paths: Vec<PathBuf> =
                     self.desktop_selected_paths().into_iter().map(PathBuf::from).collect();
+                // (Only volumes were selected: nothing of the desktop's to send.)
+                if paths.is_empty() {
+                    return;
+                }
                 self.desktop.selected.clear();
                 info!("desktop: {} file(s) → {}", paths.len(), target.name);
                 // Off the loop: a copy to a stick takes as long as it takes.
@@ -1720,7 +1773,7 @@ impl App {
                         continue;
                     };
                     let dest = unique_dest(&home, name);
-                    match bring(src, &dest) {
+                    match bring(src, &dest, true) {
                         Ok(()) => {
                             info!("desktop: {} → {}", src.display(), dest.display());
                             self.desktop.remembered.remove(&path);
@@ -1806,6 +1859,11 @@ impl App {
     /// A new, empty folder in the cell nearest `at`, named `untitled folder`
     /// (then `untitled folder 2`…), its name opened for typing.
     fn desktop_new_folder(&mut self, at: (f32, f32)) {
+        // Its name is typed at once: with the icons put away the field
+        // would hold the keyboard unseen. They come back for it.
+        if self.desktop.hidden {
+            self.desktop_toggle_hidden();
+        }
         let dir = desktop_dir();
         let path = (1..)
             .map(|n| {
@@ -2186,6 +2244,20 @@ impl App {
     /// comes straight back up opens the item under it; one that travels
     /// takes the icon along and drops it where it is let go.
     pub(crate) fn desktop_pointer(&mut self, event: wl_pointer::Event) {
+        // A press anywhere settles a name being typed, keeping what was
+        // typed (the mockup's rule) — else the field stayed up, holding
+        // the keyboard, under whatever the click went on to do.
+        if self.desktop.rename.is_some()
+            && matches!(
+                event,
+                wl_pointer::Event::Button {
+                    state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                    ..
+                }
+            )
+        {
+            self.desktop_end_rename(true);
+        }
         match event {
             wl_pointer::Event::Enter {
                 serial,
@@ -2549,11 +2621,16 @@ impl App {
     /// too (`card.rs`).
     pub(crate) fn drag_image(&self, chain: &[u8], grip: (f32, f32), icon_scale: f32) -> Option<DragIcon> {
         let shm = self.shm.as_ref()?;
-        let stride = ICON_PX * 4;
-        let len = stride * ICON_PX;
-        if chain.len() < len {
+        if chain.len() < ICON_PX * ICON_PX * 4 {
             return None;
         }
+        // A buffer's size must be a whole multiple of its scale (the
+        // protocol says so, though Hyprland lets it pass): the picture sits
+        // in the middle of the next size up that is, on clear pixels.
+        let scale = icon_buffer_scale(icon_scale);
+        let side = ICON_PX.div_ceil(scale as usize) * scale as usize;
+        let (stride, pad) = (side * 4, (side - ICON_PX) / 2);
+        let len = stride * side;
         let mut pool = match RawPool::new(len, shm) {
             Ok(pool) => pool,
             Err(e) => {
@@ -2561,18 +2638,25 @@ impl App {
                 return None;
             }
         };
-        rgba_to_argb(&chain[..len], &mut pool.mmap()[..len]);
+        {
+            let mem = &mut pool.mmap()[..len];
+            mem.fill(0);
+            for y in 0..ICON_PX {
+                let from = y * ICON_PX * 4;
+                let to = (y + pad) * stride + pad * 4;
+                rgba_to_argb(&chain[from..from + ICON_PX * 4], &mut mem[to..to + ICON_PX * 4]);
+            }
+        }
         let buffer = pool.create_buffer(
             0,
-            ICON_PX as i32,
-            ICON_PX as i32,
+            side as i32,
+            side as i32,
             stride as i32,
             wl_shm::Format::Argb8888,
             (),
             &self.qh,
         );
         let surface = self.compositor.create_surface(&self.qh);
-        let scale = icon_buffer_scale(icon_scale);
         surface.set_buffer_scale(scale);
         // The hotspot: the surface sits at the pointer less the grip (in
         // its own logical pixels).
@@ -2583,10 +2667,10 @@ impl App {
         } else {
             surface.attach(Some(&buffer), gx, gy);
         }
-        surface.damage_buffer(0, 0, ICON_PX as i32, ICON_PX as i32);
+        surface.damage_buffer(0, 0, side as i32, side as i32);
         Some(DragIcon {
             surface,
-            _buffer: buffer,
+            buffer,
             _pool: pool,
         })
     }
@@ -2849,6 +2933,11 @@ impl App {
         // drops the owner — the pipe is closed before the thread reads it,
         // and every drop came back as 0 bytes (2026-10-07).
         let fd: std::os::fd::OwnedFd = pipe.into();
+        let dropped = offer.clone();
+        let at = (offer.x as f32, offer.y as f32);
+        // The drop is in hand; what hovers from here on is another drag's.
+        self.desktop_dnd_offer = None;
+        self.desktop.dnd = None;
         let (tx, rx) = calloop::channel::channel::<String>();
         std::thread::spawn(move || {
             use std::io::Read;
@@ -2861,15 +2950,19 @@ impl App {
         });
         if self
             .loop_handle
-            .insert_source(rx, |event, _, app: &mut App| {
+            .insert_source(rx, move |event, _, app: &mut App| {
                 if let calloop::channel::Event::Msg(text) = event {
-                    app.desktop_dnd_received(&text);
+                    // THIS drop's offer and place: by now another drag may
+                    // be over us, and finishing its offer would be a
+                    // protocol error.
+                    app.desktop_dnd_received(&text, &dropped, at);
                 }
             })
             .is_err()
         {
             warn!("desktop: cannot wait for the drop's files");
-            self.desktop_dnd_abandon();
+            offer.destroy();
+            self.request_desktop_draw();
         }
     }
 
@@ -2886,20 +2979,18 @@ impl App {
 
     /// The dropped list arrived: bring the files in, clustered around the
     /// cell the drop was over, and tell the other app its drag is done.
-    pub(crate) fn desktop_dnd_received(&mut self, list: &str) {
-        let Some(offer) = self.desktop_dnd_offer.take() else {
-            warn!("desktop: the drop's files arrived after its drag was gone");
-            return;
-        };
-        let at = self.desktop.dnd.take().map(|d| d.pos);
+    pub(crate) fn desktop_dnd_received(&mut self, list: &str, offer: &DragOffer, at: (f32, f32)) {
         let paths = uri_list_paths(list);
         info!(
             "desktop: the drop's list is {} bytes → {} file path(s): {paths:?}",
             list.len(),
             paths.len()
         );
-        let brought = import(&paths, &desktop_dir());
-        self.desktop_place_brought(&brought, at);
+        // A move, unless the source only lets its files be copied (the
+        // card's items stay on the card).
+        let may_move = offer.source_actions.is_empty() || offer.source_actions.contains(DndAction::Move);
+        let brought = import(&paths, &desktop_dir(), may_move);
+        self.desktop_place_brought(&brought, Some(at));
         // Done, whatever came of the files: the other app must always hear
         // the end of its drag, or it stays mid-drag.
         offer.finish();
@@ -3149,7 +3240,7 @@ impl App {
             let list: String = w.map(|u| format!("{u}\n")).collect();
             let rect = self.desktop.grid.rect((c, r));
             let at = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-            let brought = import(&uri_list_paths(&list), &desktop_dir());
+            let brought = import(&uri_list_paths(&list), &desktop_dir(), true);
             self.desktop_place_brought(&brought, Some(at));
             self.reload_desktop();
             return format!("brought {} file(s) in at ({c},{r})", brought.len());
@@ -3310,13 +3401,13 @@ mod tests {
         // First day: three files flow down the first column, and stick.
         let items = vec![item("b"), item("c"), item("d")];
         let slots = place(&items, &remembered, &g);
-        assert!(stick(&items, &slots, &mut remembered));
-        assert!(!stick(&items, &slots, &mut remembered), "nothing new the second time");
+        assert!(stick(&items, &slots, &g, &mut remembered));
+        assert!(!stick(&items, &slots, &g, &mut remembered), "nothing new the second time");
         // "a" sorts first — but b, c, d keep their cells; a takes the free one.
         let items = vec![item("a"), item("b"), item("c"), item("d")];
         let slots = place(&items, &remembered, &g);
         assert_eq!(slots, vec![Some((1, 0)), Some((0, 0)), Some((0, 1)), Some((0, 2))]);
-        assert!(stick(&items, &slots, &mut remembered), "a's cell is learned");
+        assert!(stick(&items, &slots, &g, &mut remembered), "a's cell is learned");
         // "c" leaves: its cell is free for the next arrival, no one shifts.
         let items = vec![item("a"), item("b"), item("d"), item("e")];
         let slots = place(&items, &remembered, &g);
@@ -3574,6 +3665,35 @@ mod tests {
     }
 
     #[test]
+    fn a_smaller_grid_does_not_overwrite_where_an_icon_lives() {
+        let big = Grid::new(1000.0, 400.0, 1.0); // 9 × 4
+        let small = Grid::new(240.0, 300.0, 1.0); // 2 × 3
+        let items = vec![item("a")];
+        let mut remembered = HashMap::from([("/d/a".to_owned(), (7, 3))]);
+        // For now it sits where there is room…
+        let slots = place(&items, &remembered, &small);
+        assert_eq!(slots, vec![Some((0, 0))]);
+        assert!(!stick(&items, &slots, &small, &mut remembered));
+        // …and its own cell is still known when the grid is itself again.
+        assert_eq!(remembered["/d/a"], (7, 3));
+        assert_eq!(place(&items, &remembered, &big), vec![Some((7, 3))]);
+    }
+
+    #[test]
+    fn a_dropped_folder_holding_the_desktop_is_refused_and_copy_only_keeps_the_source() {
+        let dir = make_dir(&[], &["home/Desktop", "elsewhere"]);
+        std::fs::write(dir.join("elsewhere/f.txt"), "f").unwrap();
+        let desk = dir.join("home/Desktop");
+        assert!(import(&[dir.join("home")], &desk, true).is_empty());
+        assert!(std::fs::read_dir(&desk).unwrap().next().is_none(), "nothing half-made");
+        // A source that only lets its files be copied keeps them.
+        let brought = import(&[dir.join("elsewhere/f.txt")], &desk, false);
+        assert_eq!(brought, vec![desk.join("f.txt")]);
+        assert!(dir.join("elsewhere/f.txt").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_rubber_band_selects_what_it_touches_either_way_round() {
         let g = Grid::new(1000.0, 400.0, 1.0);
         let slots = vec![Some((0, 0)), Some((0, 1)), Some((1, 0))];
@@ -3673,7 +3793,7 @@ mod tests {
             dir.join("taken.txt"), // already on the desktop
             src.join("missing.txt"),
         ];
-        let brought = import(&paths, &dir);
+        let brought = import(&paths, &dir, true);
         assert_eq!(
             brought,
             vec![

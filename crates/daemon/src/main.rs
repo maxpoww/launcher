@@ -6361,6 +6361,8 @@ impl LayerShellHandler for App {
             .is_some_and(|d| d.wl_surface() == layer.wl_surface())
         {
             warn!("desktop surface closed by the compositor; desktop icons are off");
+            // A name being typed goes with it, or every key would still be its.
+            self.desktop.rename = None;
             self.desktop_layer = None;
             self.desktop_renderer = None;
             return;

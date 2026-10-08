@@ -199,9 +199,15 @@ impl Trash {
     /// (collisions retry as `name.2`, `name.3`, …), then the file is moved in.
     pub fn trash(&self, path: &Path) -> io::Result<TrashItem> {
         self.ensure_dirs()?;
-        let abs = std::fs::canonicalize(path)
-            .or_else(|_| absolutize(path))
-            .unwrap_or_else(|_| path.to_path_buf());
+        // The FOLDER is made real, the name kept: resolving the whole path
+        // followed a symlink and binned what it pointed at, leaving the
+        // link behind (a shortcut on the desktop took the real folder).
+        let abs = match (path.parent().filter(|p| !p.as_os_str().is_empty()), path.file_name()) {
+            (Some(dir), Some(name)) => std::fs::canonicalize(dir).map(|d| d.join(name)),
+            _ => std::fs::canonicalize(path),
+        }
+        .or_else(|_| absolutize(path))
+        .unwrap_or_else(|_| path.to_path_buf());
         let base = abs
             .file_name()
             .and_then(|n| n.to_str())
@@ -400,6 +406,22 @@ mod tests {
         assert!(enc.contains("%20"), "space encoded");
         assert!(enc.starts_with("/home/max/"), "slashes kept literal");
         assert_eq!(PathBuf::from(decode_path(&enc)), p);
+    }
+
+    #[test]
+    fn binning_a_link_takes_the_link_not_what_it_points_at() {
+        let t = temp_trash();
+        let d = std::env::temp_dir().join(format!("wr-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("real")).unwrap();
+        fs::write(d.join("real/keep.txt"), b"keep").unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("shortcut")).unwrap();
+        let item = t.trash(&d.join("shortcut")).unwrap();
+        assert_eq!(item.display_name(), "shortcut");
+        assert!(d.join("real/keep.txt").exists(), "the real folder stays");
+        assert!(fs::symlink_metadata(d.join("shortcut")).is_err(), "the link went");
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&t.root);
     }
 
     #[test]

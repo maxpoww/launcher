@@ -178,7 +178,7 @@ pub(crate) fn devices() -> Vec<Target> {
 }
 
 /// A name for `name` that is not taken in `dir` (`a (2).txt`…).
-fn free_dest(dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn free_dest(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
         return first;
@@ -193,13 +193,42 @@ fn free_dest(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or(first)
 }
 
-fn copy_all(src: &Path, dest: &Path) -> std::io::Result<()> {
+/// Whether `dir` is `src` itself or lies inside it — a copy of `src` into
+/// `dir` would then copy into itself, level after level, until the disk is
+/// full (a folder holding the desktop dropped ON the desktop).
+pub(crate) fn inside(dir: &Path, src: &Path) -> bool {
+    match (std::fs::canonicalize(dir), std::fs::canonicalize(src)) {
+        (Ok(dir), Ok(src)) => dir.starts_with(src),
+        _ => false,
+    }
+}
+
+/// Copy a file, or a folder with all that is in it, to `dest`. Links are
+/// followed, but never round a loop: a folder already entered on this copy
+/// (a link back to an ancestor, Wine's `z:` → `/`) is refused.
+pub(crate) fn copy_all(src: &Path, dest: &Path) -> std::io::Result<()> {
+    if dest.parent().is_some_and(|d| inside(d, src)) {
+        return Err(std::io::Error::other("a folder cannot be copied into itself"));
+    }
+    copy_into(src, dest, &mut Vec::new())
+}
+
+fn copy_into(src: &Path, dest: &Path, entered: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if std::fs::metadata(src)?.is_dir() {
+        let real = std::fs::canonicalize(src)?;
+        if entered.contains(&real) {
+            return Err(std::io::Error::other(format!(
+                "{} links back into what is being copied",
+                src.display()
+            )));
+        }
+        entered.push(real);
         std::fs::create_dir_all(dest)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
-            copy_all(&entry.path(), &dest.join(entry.file_name()))?;
+            copy_into(&entry.path(), &dest.join(entry.file_name()), entered)?;
         }
+        entered.pop();
         Ok(())
     } else {
         // `fs::copy` also carries the file's permissions over, which a
@@ -225,6 +254,11 @@ pub(crate) fn put(paths: &[PathBuf], dir: &Path, take: bool) -> (Vec<PathBuf>, u
             failed += 1;
             continue;
         };
+        // Already there (a cut pasted where it was cut): it is left as it is.
+        if src.parent() == Some(dir) {
+            brought.push(src.clone());
+            continue;
+        }
         let dest = free_dest(dir, name);
         // A move within one filesystem is a rename; anything else is a
         // copy, and the original goes only when the copy is whole.
@@ -234,7 +268,22 @@ pub(crate) fn put(paths: &[PathBuf], dir: &Path, take: bool) -> (Vec<PathBuf>, u
         }
         match copy_all(src, &dest) {
             Ok(()) => {
-                if take {
+                // …and ON the other disk, not only in this one's memory: a
+                // stick pulled or a phone that ran out of room must not
+                // cost the original.
+                let landed = !take
+                    || Command::new("sync")
+                        .arg("-f")
+                        .arg(&dest)
+                        .status()
+                        .is_ok_and(|s| s.success());
+                if take && !landed {
+                    warn!(
+                        "desktop: {} could not be confirmed on the other side; the original stays",
+                        dest.display()
+                    );
+                }
+                if take && landed {
                     let gone = if src.is_dir() {
                         std::fs::remove_dir_all(src)
                     } else {
@@ -330,6 +379,33 @@ fn outcome(done: usize, failed: usize, verb: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_is_never_copied_into_itself_or_round_a_link() {
+        let d = std::env::temp_dir().join(format!("waverunner-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("home/Desktop")).unwrap();
+        std::fs::write(d.join("home/a.txt"), "a").unwrap();
+        // The desktop lies inside "home": home cannot be put on it.
+        assert!(inside(&d.join("home/Desktop"), &d.join("home")));
+        assert!(inside(&d.join("home"), &d.join("home")));
+        assert!(!inside(&d.join("home"), &d.join("home/Desktop")));
+        assert!(copy_all(&d.join("home"), &d.join("home/Desktop/home")).is_err());
+        assert!(!d.join("home/Desktop/home").exists(), "nothing was started");
+        // A link back to an ancestor ends the copy instead of spinning.
+        std::fs::create_dir_all(d.join("tree/sub")).unwrap();
+        std::os::unix::fs::symlink(d.join("tree"), d.join("tree/sub/up")).unwrap();
+        assert!(copy_all(&d.join("tree"), &d.join("out")).is_err());
+        // An honest tree copies whole; a cut pasted where it was is left be.
+        std::fs::create_dir_all(d.join("ok/in")).unwrap();
+        std::fs::write(d.join("ok/in/f"), "f").unwrap();
+        copy_all(&d.join("ok"), &d.join("ok2")).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("ok2/in/f")).unwrap(), "f");
+        let (brought, failed) = put(&[d.join("home/a.txt")], &d.join("home"), true);
+        assert_eq!((brought, failed), (vec![d.join("home/a.txt")], 0));
+        assert!(!d.join("home/a (2).txt").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
 
     #[test]
     fn a_phone_takes_files_in_its_first_storages_download() {
