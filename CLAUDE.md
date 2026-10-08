@@ -369,6 +369,9 @@ The big daemon files are cohesive but long — go straight to the function:
     SIDEWAYS: a scroll on the title bar (`card slide <addr> <delta>`, every step as it comes) or
     sideways over the card (`card_wheel`: one axis per gesture; while it slides, the whole
     surface takes the pointer) sets the card's `Place`; the card TRAVELS there (`Card::at`). A
+    CLICK on an item (press and release without carrying it off) = `card_paste`: the item goes
+    on the clipboard (text, or its file) and is pasted into the card's window (Ctrl+V;
+    Ctrl+Shift+V for `TERMINALS`). A
     brief scroll that stops is a THROW: outside the window on that side. Edges resize it (`GRIP`,
     `WIDTH_MIN..MAX`). Pictures ride the Files thumbnailer (`card_on_thumb`) into a 32-layer
     array; one pushed out is forgotten and asked for again when next on screen.

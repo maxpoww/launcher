@@ -92,6 +92,21 @@ const DROP_OPENING: f32 = 44.0;
 const SHIFT_RATE: f32 = 26.0;
 /// A press that travels this far takes the item (or the card) along.
 const DRAG_START: f32 = 6.0;
+/// A click's paste waits this long for the clipboard to be the item's (and
+/// longer when the card's window has to be given the keyboard first).
+const PASTE_SETTLE: u64 = 70;
+const PASTE_FOCUS: u64 = 160;
+/// Apps that paste with Ctrl+Shift+V (Ctrl+V is theirs to pass on).
+const TERMINALS: [&str; 8] = [
+    "foot",
+    "footclient",
+    "kitty",
+    "alacritty",
+    "org.wezfurlong.wezterm",
+    "com.mitchellh.ghostty",
+    "org.gnome.console",
+    "xterm",
+];
 
 /// Picture layers in the card's texture array; past it the oldest is
 /// reused.
@@ -801,6 +816,39 @@ impl App {
     }
 
     /// Take an item off the card (a picture of the card's own goes too).
+    /// A click on an item: it is copied and pasted into the card's window,
+    /// as Copy then Paste would do (Max, 2026-10-08: *"short click (not
+    /// grab) to paste the item as copy and paste will do"*). A text goes as
+    /// text, anything else as its file. It stays on the clipboard.
+    fn card_paste(&mut self, id: u64) {
+        let Some(item) = self.card.item(id).cloned() else {
+            return;
+        };
+        match &item.path {
+            Some(path) => self.serve_files(std::slice::from_ref(path), false),
+            None => self.serve_transient_text(&item.body),
+        }
+        // The paste is the keyboard's window's: the card's own first.
+        let host = self.card.host.clone();
+        let focused = crate::hypr::active_window();
+        let wait = match host {
+            Some(host) if focused.as_deref() != Some(host.as_str()) => {
+                crate::hypr::focus_window(&host);
+                PASTE_FOCUS
+            }
+            _ => PASTE_SETTLE,
+        };
+        info!(
+            "card: {:?} pasted",
+            item.body.chars().take(60).collect::<String>()
+        );
+        self.after_ms(wait, |_| {
+            let terminal = crate::hypr::active_window_where()
+                .is_some_and(|(class, _)| TERMINALS.contains(&class.to_lowercase().as_str()));
+            crate::hypr::send_shortcut_active(if terminal { "CTRL SHIFT" } else { "CTRL" }, "v");
+        });
+    }
+
     fn card_remove(&mut self, id: u64) {
         let Some(at) = self.card.items.iter().position(|it| it.id == id) else {
             return;
@@ -1476,6 +1524,8 @@ impl App {
                 }
                 wl_pointer::ButtonState::Released => {
                     match self.card.press.take() {
+                        // Pressed and let go without carrying it off: a click.
+                        Some(Press::Item { id, .. }) => self.card_paste(id),
                         Some(Press::Close(id)) => {
                             let still = self.card.ptr.and_then(|p| self.card.hit(p));
                             if still == Some((id, true)) {
