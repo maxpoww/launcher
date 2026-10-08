@@ -51,6 +51,20 @@ pub(super) const DANGER: [f32; 3] = [0.878, 0.322, 0.322];
 pub(crate) struct Tile {
     pub id: u64,
     pub rect: Rect,
+    /// How far down it is drawn from where it belongs: it has moved aside
+    /// to open a place for something being dragged in (`View::shifts`).
+    pub shift: f32,
+}
+
+/// Where something let go at height `y` on the card would land among
+/// `tiles`: before the first one whose middle is below `y` — judged where
+/// each BELONGS, not where it has moved aside to (or the opening would chase
+/// the pointer).
+pub(crate) fn insert_index(tiles: &[Tile], y: f32) -> usize {
+    tiles
+        .iter()
+        .filter(|t| t.rect.y - t.shift + t.rect.h / 2.0 < y)
+        .count()
 }
 
 impl Tile {
@@ -106,6 +120,11 @@ pub(crate) struct View<'a> {
     /// The item under the pointer, and whether the pointer is on its ×.
     pub hover: Option<(u64, bool)>,
     pub dnd_over: bool,
+    /// An item not drawn at all: it is in the hand, over the card.
+    pub hidden: Option<u64>,
+    /// How far each item is moved down right now, by id, to open a place
+    /// for what is being dragged in (eased by the caller).
+    pub shifts: &'a HashMap<u64, f32>,
     /// The pictures that have arrived: path → texture layer.
     pub slots: &'a HashMap<String, u32>,
     pub paint: Paint,
@@ -178,13 +197,24 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     };
     let tile_w = rect.w - 2.0 * LIST_PAD;
     let text_w = tile_w - 2.0 * TILE_PAD_X;
-    let heights: Vec<f32> = view
+    let shown_items: Vec<&Item> = view
         .items
+        .iter()
+        .filter(|it| Some(it.id) != view.hidden)
+        .collect();
+    let heights: Vec<f32> = shown_items
         .iter()
         .map(|it| tile_height(it.kind, view.lines.get(&it.id).map_or(1, Vec::len)))
         .collect();
-    let total =
-        2.0 * LIST_PAD + heights.iter().sum::<f32>() + GAP * heights.len().saturating_sub(1) as f32;
+    // (The opening for something dragged in is part of the list's length.)
+    let opening = shown_items
+        .iter()
+        .filter_map(|it| view.shifts.get(&it.id))
+        .fold(0.0f32, |a, s| a.max(*s));
+    let total = 2.0 * LIST_PAD
+        + heights.iter().sum::<f32>()
+        + GAP * heights.len().saturating_sub(1) as f32
+        + opening;
     let max_scroll = (total - rect.h).max(0.0);
     let scroll = view.scroll.clamp(0.0, max_scroll);
 
@@ -203,12 +233,14 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     } else {
         [0.0, 0.0, 0.0, 0.30]
     };
-    let mut tiles = Vec::with_capacity(view.items.len());
+    let mut tiles = Vec::with_capacity(shown_items.len());
     let mut y = rect.y + LIST_PAD - scroll;
-    for (item, h) in view.items.iter().zip(heights) {
+    for (item, h) in shown_items.iter().copied().zip(heights) {
+        let shift = view.shifts.get(&item.id).copied().unwrap_or(0.0);
         let tile = Tile {
             id: item.id,
-            rect: Rect::new(rect.x + LIST_PAD, y.round(), tile_w, h),
+            rect: Rect::new(rect.x + LIST_PAD, (y + shift).round(), tile_w, h),
+            shift,
         };
         y += h + GAP;
         tiles.push(tile);
@@ -385,6 +417,7 @@ mod tests {
             .map(|it| (it.id, vec![it.body.clone()]))
             .collect();
         let slots = HashMap::from([("/tmp/p.png".to_owned(), 4u32)]);
+        let shifts: HashMap<u64, f32> = HashMap::new();
         let rect = Rect::new(600.0, 60.0, WIDTH, 200.0);
         let view = |scroll: f32, shown: f32| View {
             rect,
@@ -394,6 +427,8 @@ mod tests {
             scroll,
             hover: Some((2, true)),
             dnd_over: false,
+            hidden: None,
+            shifts: &shifts,
             slots: &slots,
             paint: PAINT,
         };
@@ -425,6 +460,7 @@ mod tests {
         let items = vec![text(1, "a")];
         let lines = HashMap::from([(1, vec!["a".to_owned()])]);
         let slots = HashMap::new();
+        let shifts: HashMap<u64, f32> = HashMap::new();
         let rect = Rect::new(0.0, 0.0, WIDTH, 400.0);
         let (scene, _, _) = scene(&View {
             rect,
@@ -434,6 +470,8 @@ mod tests {
             scroll: 0.0,
             hover: None,
             dnd_over: true,
+            hidden: None,
+            shifts: &shifts,
             slots: &slots,
             paint: PAINT,
         });
@@ -441,5 +479,53 @@ mod tests {
         // The card under the clip is whole, and wears the drag's rim.
         assert_eq!(scene.grids[0].rects[0].rect.h, 400.0);
         assert_eq!(scene.grids[0].rects[1].color[..3], ACCENT);
+    }
+
+    #[test]
+    fn the_list_opens_a_place_where_a_drag_would_land() {
+        let items = vec![text(1, "a"), text(2, "b"), text(3, "c")];
+        let lines: HashMap<u64, Vec<String>> = items
+            .iter()
+            .map(|it| (it.id, vec![it.body.clone()]))
+            .collect();
+        let slots = HashMap::new();
+        let rect = Rect::new(0.0, 0.0, WIDTH, 600.0);
+        let view = |shifts: &HashMap<u64, f32>, hidden: Option<u64>| {
+            scene(&View {
+                rect,
+                shown: 1.0,
+                items: &items,
+                lines: &lines,
+                scroll: 0.0,
+                hover: None,
+                dnd_over: true,
+                hidden,
+                shifts,
+                slots: &slots,
+                paint: PAINT,
+            })
+            .1
+        };
+        let none = HashMap::new();
+        let rest = view(&none, None);
+        let h = tile_height(Kind::Text, 1);
+        // Above the first, between, and below the last.
+        assert_eq!(insert_index(&rest, rest[0].rect.y - 5.0), 0);
+        assert_eq!(insert_index(&rest, rest[0].rect.y + h + 2.0), 1);
+        assert_eq!(insert_index(&rest, rest[1].rect.y + h * 0.9), 2);
+        assert_eq!(insert_index(&rest, 590.0), 3);
+        // The second and third have moved down 40 to open a place before
+        // the second: they are DRAWN lower…
+        let shifts = HashMap::from([(2u64, 40.0f32), (3, 40.0)]);
+        let open = view(&shifts, None);
+        assert_eq!(open[0].rect.y, rest[0].rect.y);
+        assert_eq!(open[1].rect.y, rest[1].rect.y + 40.0);
+        // …but a pointer in the opening still lands before the second: it
+        // is judged where each belongs, so the opening does not run away.
+        assert_eq!(insert_index(&open, rest[1].rect.y + 10.0), 1);
+        // The item in the hand is not in the list while it is carried.
+        let carried = view(&none, Some(2));
+        assert_eq!(carried.iter().map(|t| t.id).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(carried[1].rect.y, rest[1].rect.y);
     }
 }

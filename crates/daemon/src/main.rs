@@ -7393,7 +7393,9 @@ impl DataDeviceHandler for App {
         x: f64,
         y: f64,
     ) {
-        if !self.card_dnd_active() {
+        if self.card_dnd_active() {
+            self.card_dnd_motion(x as f32, y as f32);
+        } else {
             self.desktop_dnd_motion(x as f32, y as f32);
         }
     }

@@ -68,6 +68,13 @@ impl App {
     /// copy of it.
     pub(super) fn card_lift(&mut self, id: u64, serial: u32) {
         self.card.press = None;
+        // Where it is picked up: the middle of its own box.
+        let from_y = self
+            .card
+            .tiles
+            .iter()
+            .find(|t| t.id == id)
+            .map_or(0.0, |t| t.rect.y + t.rect.h / 2.0);
         let Some(item) = self.card.item(id).cloned() else {
             return;
         };
@@ -102,6 +109,7 @@ impl App {
         );
         self.card.drag = Some(Drag {
             id,
+            from_y,
             source,
             _icon: image,
         });
@@ -157,8 +165,8 @@ impl App {
 
     /// A drag came over the card. Another app's (or a desktop icon's) is
     /// taken if it carries anything the card keeps (files, a picture, text)
-    /// — as a copy; the card's own is refused (an item does not land on
-    /// itself).
+    /// — as a copy. One of the card's OWN items is taken too: it is being
+    /// moved to another place in the list.
     pub(crate) fn card_dnd_enter(&mut self, offer: DragOffer) {
         let mimes = offer.with_mime_types(|m| m.to_vec());
         let own = self.card.drag.is_some();
@@ -175,17 +183,31 @@ impl App {
                 offer.source_actions
             );
         }
-        let Some(first) = first.filter(|_| !own) else {
+        let Some(first) = first else {
             offer.accept_mime_type(offer.serial, None);
             return;
         };
         offer.accept_mime_type(offer.serial, Some(first.to_owned()));
         offer.set_actions(DndAction::Copy | DndAction::Move, DndAction::Copy);
         self.card.dnd_over = true;
+        self.card.drop_own = own;
+        // (Where the pointer is comes with the first motion: the enter's
+        // own position is the surface's middle on this compositor. An
+        // item of ours starts where it was picked up.)
+        self.card.drop_y = self.card.drag.as_ref().filter(|_| own).map(|d| d.from_y);
         self.card.dnd_mimes = mimes;
         self.card.dnd_hint = None;
         self.card_dnd_offer = Some(offer);
         self.request_card_draw();
+    }
+
+    /// The drag over the card moved: the list opens a place where it would
+    /// land now.
+    pub(crate) fn card_dnd_motion(&mut self, _x: f32, y: f32) {
+        if self.card.dnd_over {
+            self.card.drop_y = Some(y);
+            self.request_card_draw();
+        }
     }
 
     /// Whether a drag is over the card (the data device's events are the
@@ -208,17 +230,40 @@ impl App {
         }
         if self.card_dnd_offer.take().is_some() {
             self.card.dnd_over = false;
+            self.card.drop_own = false;
+            self.card.drop_y = None;
             self.request_card_draw();
         }
     }
 
-    /// Let go on the card: read what it carries, the richest first — the
-    /// list of files; a picture's pixels; the text.
+    /// Let go on the card, at the place the list had opened. One of the
+    /// card's own items: it moves there, and that is all. Anything else:
+    /// read what it carries, the richest first — the list of files; a
+    /// picture's pixels; the text — and put it there.
     pub(crate) fn card_dnd_drop(&mut self) {
         if self.card_dnd_offer.is_none() {
             return;
         }
+        let index = self.card.opening().map(|(index, _)| index);
+        let own = self.card.drop_own;
         self.card.dnd_over = false;
+        self.card.drop_own = false;
+        self.card.drop_y = None;
+        // What is there now is where everything belongs: nothing eases
+        // back from a place that has just been filled.
+        self.card.shifts.clear();
+        if own {
+            if let (Some(id), Some(index)) = (self.card.drag.as_ref().map(|d| d.id), index) {
+                if self.card.move_to(id, index) {
+                    info!("card: an item moved to place {index}");
+                    self.card_save();
+                }
+            }
+            // → our source's `dnd_finished` → `card_drag_end`.
+            self.card_dnd_end(true);
+            return;
+        }
+        self.card.drop_index = index;
         self.request_card_draw();
         let first = if self.card.dnd_mimes.iter().any(|m| m == URI_LIST) {
             Some(URI_LIST)
@@ -289,7 +334,8 @@ impl App {
             let list = String::from_utf8_lossy(bytes).into_owned();
             let paths = crate::desktop::uri_list_paths(&list);
             if !paths.is_empty() {
-                self.card_add_paths(paths);
+                let at = self.card.drop_index.take();
+                self.card_add_paths_at(paths, at);
                 self.card_dnd_end(true);
                 return;
             }
@@ -302,7 +348,8 @@ impl App {
             } else if let Some(next) = text_mime(&self.card.dnd_mimes) {
                 self.card_dnd_read(next);
             } else {
-                self.card_add_text(&list);
+                let at = self.card.drop_index.take();
+                self.card_add_text_at(&list, at);
                 self.card_dnd_end(true);
             }
             return;
@@ -321,7 +368,8 @@ impl App {
             self.card_dnd_end(true);
             return;
         }
-        self.card_add_text(&String::from_utf8_lossy(bytes));
+        let at = self.card.drop_index.take();
+        self.card_add_text_at(&String::from_utf8_lossy(bytes), at);
         self.card_dnd_end(true);
     }
 
@@ -346,12 +394,14 @@ impl App {
             .unwrap_or_else(|| "picture".to_owned());
         let body = format!("{name} · {}", size_text(bytes.len() as u64));
         let aspect = aspect_of(&path);
+        let at = self.card.drop_index.take();
         self.card_push(
             Kind::Image,
             body,
             Some(path.to_string_lossy().into_owned()),
             true,
             aspect,
+            at,
         );
     }
 
@@ -366,6 +416,9 @@ impl App {
             }
         }
         self.card.dnd_over = false;
+        self.card.drop_own = false;
+        self.card.drop_y = None;
+        self.card.drop_index = None;
         self.card.dnd_mimes.clear();
         self.card.dnd_hint = None;
         self.request_card_draw();

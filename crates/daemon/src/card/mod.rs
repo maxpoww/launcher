@@ -85,6 +85,11 @@ const SWIPE_SETTLE: std::time::Duration = std::time::Duration::from_millis(130);
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
+/// How tall a place the list opens for something dragged in from outside
+/// (an item of the card's own gets a place its own height).
+const DROP_OPENING: f32 = 44.0;
+/// How fast the items move aside for it (the ease's rate, per second).
+const SHIFT_RATE: f32 = 26.0;
 /// A press that travels this far takes the item (or the card) along.
 const DRAG_START: f32 = 6.0;
 
@@ -145,6 +150,9 @@ struct Wheel {
 /// An item in hand: a Wayland drag of ours.
 pub(crate) struct Drag {
     pub id: u64,
+    /// How far down the surface it was picked up: where the list's
+    /// opening is until the drag's first motion says better.
+    pub from_y: f32,
     pub source: DragSource,
     _icon: Option<DragIcon>,
 }
@@ -244,8 +252,19 @@ pub(crate) struct Card {
     ptr: Option<(f32, f32)>,
     press: Option<Press>,
     pub drag: Option<Drag>,
-    /// Another app's drag is over the card.
+    /// A drag is over the card (another app's, or an item of ours).
     dnd_over: bool,
+    /// …and it is one of the card's own items, being moved to a new place.
+    drop_own: bool,
+    /// Where that drag's pointer is, down the surface (`None` until its
+    /// first motion: the compositor's `enter` does not say).
+    drop_y: Option<f32>,
+    /// The place in the list a drop just made is filling: what arrives
+    /// from it lands there, in order.
+    drop_index: Option<usize>,
+    /// How far each item has moved down to open a place for the drag,
+    /// by id, eased frame by frame (`view::View::shifts`).
+    shifts: HashMap<u64, f32>,
     dnd_mimes: Vec<String>,
     /// A name for a picture about to arrive as pixels (the end of its URL).
     dnd_hint: Option<String>,
@@ -346,6 +365,31 @@ impl Card {
 
     fn hidden(&self) -> bool {
         self.away != 0
+    }
+
+    /// Where the drag over the card would land in the list, and how tall
+    /// a place the list opens for it there.
+    fn opening(&self) -> Option<(usize, f32)> {
+        let y = self.drop_y.filter(|_| self.dnd_over)?;
+        let carried = self.drag.as_ref().filter(|_| self.drop_own).map(|d| d.id);
+        let height = carried
+            .and_then(|id| self.item(id))
+            .map_or(DROP_OPENING, |it| {
+                tile_height(it.kind, self.lines.get(&it.id).map_or(1, Vec::len))
+            });
+        Some((insert_index(&self.tiles, y), height + GAP))
+    }
+
+    /// Move item `id` to place `index` of the list as it reads WITHOUT it
+    /// (which is how it is shown while the item is carried).
+    fn move_to(&mut self, id: u64, index: usize) -> bool {
+        let Some(from) = self.items.iter().position(|it| it.id == id) else {
+            return false;
+        };
+        let item = self.items.remove(from);
+        let to = index.min(self.items.len());
+        self.items.insert(to, item);
+        from != to
     }
 
     /// The card goes away for `why`. Whether it was showing until now.
@@ -650,6 +694,7 @@ impl App {
         path: Option<String>,
         owned: bool,
         aspect: f32,
+        at: Option<usize>,
     ) {
         self.card_load();
         let id = self.card.next_id.max(1);
@@ -661,21 +706,33 @@ impl App {
             "card: + {kind:?} {:?}",
             body.chars().take(60).collect::<String>()
         );
-        self.card.items.push(Item {
-            id,
-            kind,
-            body,
-            path,
-            aspect,
-            owned,
-        });
-        self.card.to_bottom = true;
+        // At the place a drop chose, or at the end (the newest is at the
+        // bottom, and is scrolled to).
+        let end = self.card.items.len();
+        let at = at.map_or(end, |i| i.min(end));
+        self.card.items.insert(
+            at,
+            Item {
+                id,
+                kind,
+                body,
+                path,
+                aspect,
+                owned,
+            },
+        );
+        self.card.to_bottom = at == end;
         self.card_save();
         self.request_card_draw();
     }
 
     /// Put a text on the card.
     pub(crate) fn card_add_text(&mut self, text: &str) {
+        self.card_add_text_at(text, None);
+    }
+
+    /// …at place `at` of the list (`None`: the end).
+    fn card_add_text_at(&mut self, text: &str, at: Option<usize>) {
         // A run of blank lines is one (the mockup's rule).
         let mut body = String::new();
         let mut blank = 0;
@@ -694,7 +751,7 @@ impl App {
             body.push_str(line.trim_end());
         }
         if !body.is_empty() {
-            self.card_push(Kind::Text, body, None, false, 0.0);
+            self.card_push(Kind::Text, body, None, false, 0.0, at);
         }
     }
 
@@ -703,6 +760,11 @@ impl App {
     /// counted, and a phone's storage answers when it pleases), so they
     /// land a moment later, in order.
     pub(crate) fn card_add_paths(&mut self, paths: Vec<PathBuf>) {
+        self.card_add_paths_at(paths, None);
+    }
+
+    /// …from place `at` of the list on, in order (`None`: the end).
+    fn card_add_paths_at(&mut self, paths: Vec<PathBuf>, at: Option<usize>) {
         let (tx, rx) = calloop::channel::channel::<Vec<Facts>>();
         std::thread::spawn(move || {
             let found: Vec<Facts> = paths
@@ -719,10 +781,17 @@ impl App {
         });
         let waiting = self
             .loop_handle
-            .insert_source(rx, |event, _, app: &mut App| {
+            .insert_source(rx, move |event, _, app: &mut App| {
                 if let calloop::channel::Event::Msg(found) = event {
-                    for f in found {
-                        app.card_push(f.kind, f.body, Some(f.path), false, f.aspect);
+                    for (n, f) in found.into_iter().enumerate() {
+                        app.card_push(
+                            f.kind,
+                            f.body,
+                            Some(f.path),
+                            false,
+                            f.aspect,
+                            at.map(|i| i + n),
+                        );
                     }
                 }
             });
@@ -1186,6 +1255,44 @@ impl App {
             };
             self.card.lines.insert(item.id, lines);
         }
+        // The items move aside for a drag over the card: those from where
+        // it would land on go down by the place it needs, the rest stay —
+        // each easing to where it should be (Max, 2026-10-08: *"the items
+        // react to create spots"*).
+        let opening = self.card.opening();
+        let hidden = self
+            .card
+            .drag
+            .as_ref()
+            .filter(|_| self.card.dnd_over && self.card.drop_own)
+            .map(|d| d.id);
+        let mut shifting = false;
+        let ids: Vec<u64> = self
+            .card
+            .items
+            .iter()
+            .map(|it| it.id)
+            .filter(|id| Some(*id) != hidden)
+            .collect();
+        self.card.shifts.retain(|id, _| ids.contains(id));
+        for (n, id) in ids.iter().enumerate() {
+            let target = match opening {
+                Some((index, height)) if n >= index => height,
+                _ => 0.0,
+            };
+            let now_at = self.card.shifts.get(id).copied().unwrap_or(0.0);
+            let (to, going) = crate::animation::ease_toward(now_at, target, dt, SHIFT_RATE, 0.4);
+            shifting |= going;
+            if to == 0.0 {
+                self.card.shifts.remove(id);
+            } else {
+                self.card.shifts.insert(*id, to);
+            }
+        }
+        if shifting {
+            moving = true;
+            self.card_last_frame = Some(now);
+        }
         let hover = self.card.ptr.and_then(|p| self.card.hit(p));
         // A list that was showing its newest item keeps showing it when
         // the card's height changes under it (its window was resized).
@@ -1208,6 +1315,8 @@ impl App {
                 hover
             },
             dnd_over: self.card.dnd_over,
+            hidden,
+            shifts: &self.card.shifts,
             slots: &self.card.slots,
             paint,
         };
@@ -1674,6 +1783,26 @@ impl App {
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
             "all" => self.card_toggle_all(),
+            // `move <n> <place>`: item n to that place of the list, as a
+            // drag within the card does.
+            "move" => {
+                self.card_load();
+                let mut parts = rest.split_whitespace().map(|p| p.parse::<usize>().ok());
+                let (from, to) = (parts.next().flatten(), parts.next().flatten());
+                match from
+                    .and_then(|n| self.card.items.get(n))
+                    .map(|it| it.id)
+                    .zip(to)
+                {
+                    Some((id, to)) => {
+                        self.card.move_to(id, to);
+                        self.card_save();
+                        self.request_card_draw();
+                        "moved".to_owned()
+                    }
+                    None => "move <n> <place>".to_owned(),
+                }
+            }
             // The plugin has just (re)loaded: its bars know nothing.
             "bars" => {
                 self.card_tell_bars();
@@ -1819,6 +1948,34 @@ mod tests {
         card.host = Some("0x1".into());
         assert_eq!(card.width(), WIDTH);
         assert!(!card.armed("0x1"));
+    }
+
+    #[test]
+    fn an_item_moves_to_a_place_of_the_list_as_it_reads_without_it() {
+        let item = |id: u64| Item {
+            id,
+            kind: Kind::Text,
+            body: id.to_string(),
+            path: None,
+            aspect: 0.0,
+            owned: false,
+        };
+        let order = |c: &Card| c.items.iter().map(|it| it.id).collect::<Vec<_>>();
+        let mut card = Card {
+            items: (1..=4).map(item).collect(),
+            ..Default::default()
+        };
+        // Down: 1 carried, dropped after what reads as [2, 3, 4]'s second.
+        assert!(card.move_to(1, 2));
+        assert_eq!(order(&card), [2, 3, 1, 4]);
+        // Up, to the very top.
+        assert!(card.move_to(4, 0));
+        assert_eq!(order(&card), [4, 2, 3, 1]);
+        // Past the end is the end; back where it was is no move at all.
+        assert!(card.move_to(4, 99));
+        assert_eq!(order(&card), [2, 3, 1, 4]);
+        assert!(!card.move_to(3, 1));
+        assert!(!card.move_to(77, 0));
     }
 
     #[test]

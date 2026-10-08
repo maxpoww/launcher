@@ -342,7 +342,11 @@ The big daemon files are cohesive but long — go straight to the function:
     items; none local → the picture's pixels if offered, else the text), one `receive` at a time
     on a thread that gives up on an app silent for `DROP_PATIENCE` (`read_patiently`),
     `finish()`/`destroy()` always sent. DRAG OUT (`card_lift`): a real Wayland drag,
-    COPY only, the item stays; the card refuses its own drag.
+    COPY only, the item stays. ORDER: a drag over the card — another app's or one of the card's
+    own items — makes the list open a place where it would land (`Card::opening` →
+    `view::insert_index`, judged where each item BELONGS; the items from there on ease down by
+    `View::shifts`; the carried item is `View::hidden`); a drop of an own item is `Card::move_to`,
+    of anything else an insert at that place (`drop_index` → `card_push(…, at)`).
   - `mod.rs` — the state and everything on the loop. PER WINDOW (`Card::wins`, by address →
     `Win { on, place, width }`): all three last until the window closes (`card_window_closed`,
     from `closewindow`) and survive turning the card off and on; `Session` keeps them in the
