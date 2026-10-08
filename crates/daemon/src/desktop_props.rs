@@ -174,8 +174,8 @@ pub(crate) fn rows_for(item: &Item, home: &Path) -> Vec<(&'static str, String)> 
     let link = std::fs::read_link(path).ok();
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     match item.kind {
-        Kind::Folder => {
-            rows.push(("Kind", "Folder".to_owned()));
+        Kind::Folder | Kind::Volume => {
+            rows.push(("Kind", if item.kind == Kind::Volume { "Drive" } else { "Folder" }.to_owned()));
             let (mut folders, mut files, mut hidden) = (0usize, 0usize, 0usize);
             for e in std::fs::read_dir(path).into_iter().flatten().flatten() {
                 if e.file_name().to_string_lossy().starts_with('.') {

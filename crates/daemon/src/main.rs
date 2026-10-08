@@ -28,6 +28,7 @@ mod desktop;
 mod desktop_menu;
 mod desktop_props;
 mod desktop_send;
+mod mounts;
 mod logging;
 mod dict;
 mod display;
@@ -1111,6 +1112,20 @@ fn main() -> anyhow::Result<()> {
             }
         } else {
             warn!("cannot watch {}: desktop icons will not follow changes", dir.display());
+        }
+    }
+
+    // What is plugged in stands on the desktop: sticks and phones are
+    // mounted as they arrive (`mounts.rs`), and the list comes here.
+    if app.desktop_layer.is_some() {
+        let (mount_tx, mount_rx) = calloop::channel::channel::<Vec<mounts::Mounted>>();
+        mounts::spawn(mount_tx);
+        if let Err(e) = event_loop.handle().insert_source(mount_rx, |event, _, app: &mut App| {
+            if let calloop::channel::Event::Msg(list) = event {
+                app.on_mounts(list);
+            }
+        }) {
+            warn!("cannot hear about plugged-in drives: {e}");
         }
     }
 

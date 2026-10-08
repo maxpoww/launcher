@@ -102,6 +102,10 @@ pub(crate) enum Kind {
     File,
     /// A `.desktop` file: shows its app's name and icon, runs its `Exec=`.
     Launcher,
+    /// Something plugged in and mounted (a stick, a phone — `mounts.rs`):
+    /// its folder is elsewhere and it is NOT a file of the desktop's. It
+    /// opens like a folder; it is ejected, never renamed, moved or binned.
+    Volume,
 }
 
 /// One thing on the desktop.
@@ -344,6 +348,8 @@ pub(crate) struct Desktop {
     /// answered yet.
     pub targets: Vec<crate::desktop_send::Target>,
     pub looking: bool,
+    /// What is plugged in and mounted, standing on the desktop as icons.
+    pub volumes: Vec<crate::mounts::Mounted>,
     /// The Properties box, while it is up.
     pub props: Option<Props>,
     /// The last plain click on an item (its path, and when): a second one
@@ -1157,6 +1163,22 @@ impl App {
         }
         let dir = desktop_dir();
         let mut items = list(&dir);
+        // What is plugged in comes first (it takes the first free cells
+        // the first time; after that, wherever it was put).
+        let mut volumes: Vec<Item> = self
+            .desktop
+            .volumes
+            .iter()
+            .map(|v| Item {
+                path: v.path.to_string_lossy().into_owned(),
+                name: v.name.clone(),
+                kind: Kind::Volume,
+                icon: format!("asset:{}", if v.phone { "phone" } else { "drive-removable-media-usb" }),
+                exec: None,
+            })
+            .collect();
+        volumes.append(&mut items);
+        let mut items = volumes;
         // A file's own picture, where the Files section already has one;
         // otherwise ask the thumbnailer (its answer lands in
         // `desktop_on_thumb`). Audio-only "videos" keep the audio icon.
@@ -1352,6 +1374,13 @@ impl App {
         // Several selected (the clicked one among them): the group's menu.
         let many = item.is_some() && self.desktop.selected.len() > 1;
         let mut menu = Menu::open(item, many, at, w as f32, h as f32);
+        // On a plugged-in volume (alone): its own short menu.
+        let on_volume = item
+            .and_then(|i| self.desktop.items.get(i))
+            .is_some_and(|it| it.kind == Kind::Volume);
+        if on_volume && !many {
+            menu = menu.for_volume(h as f32);
+        }
         // On the wallpaper, with files on the clipboard: they can be put here.
         if item.is_none() && self.clipboard_files().is_some() {
             menu = menu.with_paste(h as f32);
@@ -1361,12 +1390,51 @@ impl App {
         self.request_desktop_draw();
     }
 
+    /// What is plugged in changed (`mounts.rs`): its icons follow.
+    pub(crate) fn on_mounts(&mut self, list: Vec<crate::mounts::Mounted>) {
+        info!(
+            "desktop: plugged in and mounted: {:?}",
+            list.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
+        );
+        // A volume that left takes its remembered cell with it: the same
+        // stick comes back to the first free cells, not to a stale one.
+        let gone: Vec<String> = self
+            .desktop
+            .volumes
+            .iter()
+            .filter(|v| !list.contains(v))
+            .map(|v| v.path.to_string_lossy().into_owned())
+            .collect();
+        for path in gone {
+            self.desktop.remembered.remove(&path);
+            self.desktop.selected.remove(&path);
+        }
+        self.desktop.volumes = list;
+        self.save_desktop_positions();
+        self.reload_desktop();
+    }
+
+    /// Whether `path` is a plugged-in volume's folder.
+    fn desktop_is_volume(&self, path: &str) -> bool {
+        self.desktop.volumes.iter().any(|v| v.path.as_os_str() == path)
+    }
+
+    /// Let the volume at `path` go.
+    fn desktop_eject(&mut self, path: &str) {
+        if let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path) {
+            info!("desktop: eject {}", v.name);
+            crate::mounts::eject(v.uri.clone(), v.name.clone());
+        }
+    }
+
     /// The selected items' paths (the item a menu was opened on is among
     /// them), in the order they are on the desktop.
     fn desktop_selected_paths(&self) -> Vec<String> {
         self.desktop
             .items
             .iter()
+            // Never a plugged-in volume: it is not a file to cut or send.
+            .filter(|it| it.kind != Kind::Volume)
             .filter(|it| self.desktop.selected.contains(&it.path))
             .map(|it| it.path.clone())
             .collect()
@@ -1472,7 +1540,7 @@ impl App {
                     return;
                 };
                 let path = Path::new(&it.path);
-                let dir = if it.kind == Kind::Folder {
+                let dir = if matches!(it.kind, Kind::Folder | Kind::Volume) {
                     path.to_path_buf()
                 } else {
                     path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.to_path_buf())
@@ -1507,6 +1575,12 @@ impl App {
                 self.serve_files(&paths, cut);
             }
             Action::Paste => self.desktop_paste(at),
+            Action::Eject => {
+                if let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) {
+                    self.desktop.selected.clear();
+                    self.desktop_eject(&path);
+                }
+            }
             Action::SendTo(n) => {
                 let Some(target) = self.desktop.targets.get(n).cloned() else {
                     return;
@@ -1537,6 +1611,9 @@ impl App {
                 // number. The folder watch takes the icons off.
                 let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
                 let paths: Vec<String> = self.desktop.selected.drain().collect();
+                // (A plugged-in volume in the selection stays where it is.)
+                let paths: Vec<String> =
+                    paths.into_iter().filter(|p| !self.desktop_is_volume(p)).collect();
                 for path in paths {
                     let src = Path::new(&path);
                     let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
@@ -1557,6 +1634,12 @@ impl App {
                 // The selection goes (the clicked item is in it).
                 let paths: Vec<String> = self.desktop.selected.drain().collect();
                 for path in paths {
+                    // A plugged-in volume dropped on the bin's row is let
+                    // go, never thrown away with all that is on it.
+                    if self.desktop_is_volume(&path) {
+                        self.desktop_eject(&path);
+                        continue;
+                    }
                     if let Some(it) = self.desktop.items.iter().find(|it| it.path == path) {
                         info!("desktop: {} → Recycle Bin", it.name);
                     }
@@ -2258,10 +2341,18 @@ impl App {
         let icon_scale = self.icon_scale();
         let icon = icon_rect(&self.desktop.grid.rect(slot), icon_scale);
         let grip = (at.0 - icon.x, at.1 - icon.y);
+        // A plugged-in volume in hand is only ever COPIED from: an app that
+        // took a move would empty the stick into itself.
+        let volume = self.desktop.items[i].kind == Kind::Volume
+            || self
+                .desktop
+                .items
+                .iter()
+                .any(|it| it.kind == Kind::Volume && self.desktop.selected.contains(&it.path));
         let source = manager.create_drag_and_drop_source(
             &self.qh,
             [URI_LIST, PLAIN_TEXT],
-            DndAction::Move | DndAction::Copy,
+            if volume { DndAction::Copy } else { DndAction::Move | DndAction::Copy },
         );
         let image = self.drag_icon(&self.desktop.items[i], grip, icon_scale);
         source.start_drag(
@@ -2572,6 +2663,13 @@ impl App {
                 if self.dropped_on_trash(&self.current_layout(), at.pos) {
                     for &i in &items {
                         let path = self.desktop.items[i].path.clone();
+                        // A volume dragged onto the bin is ejected (macOS's
+                        // gesture) — NEVER trashed with what is on it.
+                        if self.desktop.items[i].kind == Kind::Volume {
+                            self.desktop.selected.remove(&path);
+                            self.desktop_eject(&path);
+                            continue;
+                        }
                         info!("desktop: {} → Recycle Bin", self.desktop.items[i].name);
                         self.desktop.remembered.remove(&path);
                         self.desktop.selected.remove(&path);
@@ -2747,7 +2845,7 @@ impl App {
             .ptr
             .and_then(|p| self.desktop.hit(p))
             .and_then(|i| self.desktop.items.get(i))
-            .is_some_and(|it| it.kind == Kind::Folder);
+            .is_some_and(|it| matches!(it.kind, Kind::Folder | Kind::Volume));
         let shape = if self.desktop.drag.is_some() {
             Shape::Grabbing
         } else if self.desktop.band.is_some() {

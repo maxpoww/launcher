@@ -290,7 +290,16 @@ The big daemon files are cohesive but long — go straight to the function:
   (`kdeconnect-cli --share`, the file stays; folders are skipped), and the outcome is a
   notification (`desktop_send_notify`). PASTE (wallpaper menu, only when the newest clip is
   files — `App::clipboard_files`): `desktop_send::put` copies them in, or moves them if they
-  were cut, around the click.
+  were cut, around the click. PLUGGED-IN VOLUMES (`mounts.rs`): one worker follows the session's
+  volume service through `gio` (`gio mount -o` for changes, `-li` for what there is —
+  `parse_listing`) and MOUNTS every removable volume and phone (MTP/gphoto2/AFC) that wants
+  automounting, once per time it appears (so an eject is respected while the stick stays in);
+  the mounted list comes to `App::on_mounts` and each stands on the desktop as a `Kind::Volume`
+  item (path = the mount's folder: `/run/media/<user>/<label>`, or `$XDG_RUNTIME_DIR/gvfs/
+  mtp:host=…` for a phone — `mount_path`). A volume is NOT a file of the desktop's: its menu is
+  Open · Open in terminal · Eject (`Menu::for_volume`, `mounts::eject` = `gio mount -e`, else
+  `-u`); it is left out of Cut/Copy/Move to/Move to Home; on the bin (the row or a drag) it is
+  EJECTED, never trashed; a drag of it offers a copy only; its remembered cell goes when it does.
 - `card.rs` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new).
   ONE card with ONE list; it sits inside a window (under the bar, on the right, 320 wide, 10 in
   from the edges) and is turned on per window (`card toggle [addr]` — sent by the card button at the right end of a floating window's title

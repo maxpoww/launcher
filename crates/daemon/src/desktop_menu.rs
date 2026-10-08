@@ -39,6 +39,8 @@ pub(crate) enum Action {
     Paste,
     /// To the `n`th place of the page's list (`Menu::targets`).
     SendTo(usize),
+    /// A plugged-in volume (a stick, a phone): let it go.
+    Eject,
     /// Out of the desktop, into the home folder.
     MoveToHome,
     MoveToBin,
@@ -229,6 +231,21 @@ impl Menu {
         }
         self.targets = true;
         self.set_rows(rows, h);
+    }
+
+    /// The menu of a plugged-in volume standing on the desktop: it is not a
+    /// file of the desktop's — nothing renames, moves or bins it.
+    pub fn for_volume(mut self, h: f32) -> Self {
+        self.set_rows(
+            vec![
+                Row::Item { label: "Open", action: Action::Open, danger: false },
+                Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
+                Row::Sep,
+                Row::Item { label: "Eject", action: Action::Eject, danger: false },
+            ],
+            h,
+        );
+        self
     }
 
     /// Back to the first page.
@@ -464,6 +481,10 @@ mod tests {
         m.show_main(800.0);
         assert!(!m.targets);
         assert_eq!(m.action(0), Some(Action::Open));
+        // A volume's menu: open it or let it go, nothing else.
+        let m = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(800.0);
+        let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
+        assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject]);
         // The wallpaper's menu takes Paste on top when there is something.
         let m = Menu::open(None, false, (10.0, 10.0), 1000.0, 800.0).with_paste(800.0);
         assert_eq!(m.action(0), Some(Action::Paste));
