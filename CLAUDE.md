@@ -301,7 +301,8 @@ The big daemon files are cohesive but long — go straight to the function:
   one `receive` at a time on a thread, `finish()`/`destroy()` always sent. DRAG OUT (`card_lift`):
   a real Wayland drag, COPY only, the item stays; offers `out_mimes` (URI list, a picture's own
   type served from the file, the path/text as text), `payload` answers each; the card refuses its
-  own drag. A press on the card itself slides it sideways (no snapping; remembered per window as
+  own drag. A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
+  <delta>` → `card_slide`). A press on the card itself slides it sideways (no snapping; remembered per window as
   a fraction of its width, forgotten when turned off there); wheel scrolls; × on the hovered item
   removes. Pictures ride the Files thumbnailer (`card_on_thumb`) into the card renderer's own
   32-layer array. Pointer-free: `waverunner-ctl card [toggle|all|add text <…>|add file

@@ -51,6 +51,8 @@ const INSET: f32 = 10.0;
 const RADIUS: f32 = 10.0;
 /// How far past either side of its window the card may be slid.
 const OVERHANG: f32 = 12.0;
+/// How far the card slides per unit of scroll on its window's title bar.
+const SLIDE_PER_SCROLL: f32 = 2.5;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -1496,6 +1498,33 @@ impl App {
         }
     }
 
+    /// A scroll on the title bar of the card's window (the plugin hears it
+    /// and sends it on): the card slides sideways by it, down or right
+    /// taking it left as in the mockup, and stays where it is left —
+    /// remembered for this window like a slide by hand.
+    pub(crate) fn card_slide(&mut self, addr: &str, delta: f32) {
+        if self.card.host.as_deref() != Some(addr) || !self.card_present() {
+            return;
+        }
+        let (Some(rect), Some(spot)) = (self.card.rect, self.card.spot) else {
+            return;
+        };
+        if spot.w <= 0.0 || matches!(self.card.press, Some(Press::Slide { .. })) {
+            return;
+        }
+        // From the remembered fraction, not the rounded box: small scrolls
+        // must add up.
+        let left = match self.card.geom.get(addr) {
+            Some(fx) => fx * spot.w,
+            None => rect.x - spot.x,
+        };
+        let fx = clamp_left(left - delta * SLIDE_PER_SCROLL, spot.w) / spot.w;
+        self.card.geom.insert(addr.to_owned(), fx);
+        self.card.rect = Some(card_rect(&spot, Some(fx)));
+        self.sync_card_input();
+        self.request_card_draw();
+    }
+
     /// The card was let go after a slide: it stays exactly there (no
     /// snapping — the mockup's rule), remembered for this window.
     fn card_settle_slide(&mut self) {
@@ -1850,6 +1879,19 @@ impl App {
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
             "all" => self.card_toggle_all(),
+            "slide" => {
+                let mut parts = rest.split_whitespace();
+                match (
+                    parts.next(),
+                    parts.next().and_then(|d| d.parse::<f32>().ok()),
+                ) {
+                    (Some(addr), Some(delta)) if delta.is_finite() => {
+                        self.card_slide(addr, delta);
+                        String::new()
+                    }
+                    _ => "slide <addr> <delta>".to_owned(),
+                }
+            }
             "add" => match rest.split_once(' ') {
                 Some(("text", text)) => {
                     self.card_add_text(&text.replace("\\n", "\n"));

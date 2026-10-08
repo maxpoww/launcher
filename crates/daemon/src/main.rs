@@ -3111,7 +3111,10 @@ impl App {
             }
             Command::Card(what) => {
                 let done = self.card_command(&what);
-                info!("card: {done}");
+                // (A slide arrives many times a second and says nothing.)
+                if !done.is_empty() {
+                    info!("card: {done}");
+                }
                 return;
             }
             Command::DebugModuleBox => {
