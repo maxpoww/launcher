@@ -1343,7 +1343,9 @@ impl App {
         self.desktop.band = None;
         self.desktop.props = None;
         let (w, h) = self.desktop_size;
-        let mut menu = Menu::open(item, at, w as f32, h as f32);
+        // Several selected (the clicked one among them): the group's menu.
+        let many = item.is_some() && self.desktop.selected.len() > 1;
+        let mut menu = Menu::open(item, many, at, w as f32, h as f32);
         menu.hover = menu.hit(at);
         self.desktop.menu = Some(menu);
         self.request_desktop_draw();
@@ -1353,7 +1355,19 @@ impl App {
     fn desktop_menu_act(&mut self, action: Action, item: Option<usize>, at: (f32, f32)) {
         match action {
             Action::Open => {
-                if let Some(i) = item {
+                // The whole selection opens (the clicked item is in it).
+                let mut all: Vec<usize> = self
+                    .desktop
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, it)| self.desktop.selected.contains(&it.path))
+                    .map(|(i, _)| i)
+                    .collect();
+                if all.is_empty() {
+                    all.extend(item);
+                }
+                for i in all {
                     self.desktop_activate(i);
                 }
             }

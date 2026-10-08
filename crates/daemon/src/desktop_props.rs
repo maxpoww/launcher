@@ -466,7 +466,7 @@ mod tests {
         let dir = tmp("grown");
         let f = dir.join("Projects");
         std::fs::create_dir_all(&f).unwrap();
-        let menu = Menu::open(Some(0), (100.0, 100.0), 2000.0, 2000.0);
+        let menu = Menu::open(Some(0), false, (100.0, 100.0), 2000.0, 2000.0);
         let menu_rect = menu.rect;
         let mut p = Props::open(&folder_item(&f), (0.0, 0.0), Some(menu), 2000.0, 2000.0, &dir);
         // Its corner is the menu's; it is wider and has the Back row.
@@ -488,7 +488,7 @@ mod tests {
         assert_eq!(g.rects[1].rect, back, "the hovered Back row's band");
         assert_eq!(g.labels[0].text, "‹  Back");
         // Near the surface's edge it is pulled in to stay whole.
-        let menu = Menu::open(Some(0), (900.0, 700.0), 1000.0, 800.0);
+        let menu = Menu::open(Some(0), false, (900.0, 700.0), 1000.0, 800.0);
         let p = Props::open(&folder_item(&f), (0.0, 0.0), Some(menu), 1000.0, 800.0, &dir);
         assert!(p.rect.x + p.rect.w <= 1000.0 && p.rect.y + p.rect.h <= 800.0);
         std::fs::remove_dir_all(&dir).ok();

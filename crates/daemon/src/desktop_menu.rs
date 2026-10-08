@@ -78,8 +78,17 @@ pub(crate) struct MenuPaint {
 }
 
 /// The rows for a right-click on an item (`on_item`) or on bare wallpaper.
-pub(crate) fn rows(on_item: bool) -> Vec<Row> {
-    if on_item {
+/// `many`: the click was on one of SEVERAL selected items — only what makes
+/// sense for a group is offered (no terminal, no rename, no properties).
+pub(crate) fn rows(on_item: bool, many: bool) -> Vec<Row> {
+    if on_item && many {
+        vec![
+            Row::Item { label: "Open", action: Action::Open, danger: false },
+            Row::Sep,
+            Row::Item { label: "Move to Home", action: Action::MoveToHome, danger: false },
+            Row::Item { label: "Move to bin", action: Action::MoveToBin, danger: true },
+        ]
+    } else if on_item {
         vec![
             Row::Item { label: "Open", action: Action::Open, danger: false },
             Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
@@ -124,8 +133,8 @@ pub(crate) struct Menu {
 impl Menu {
     /// A menu at `at` on a `w`×`h` surface: hanging to the right and below
     /// the pointer, or flipped to stay on the surface.
-    pub fn open(item: Option<usize>, at: (f32, f32), w: f32, h: f32) -> Self {
-        let rows = rows(item.is_some());
+    pub fn open(item: Option<usize>, many: bool, at: (f32, f32), w: f32, h: f32) -> Self {
+        let rows = rows(item.is_some(), many);
         let height = PAD * 2.0 + rows.iter().map(|r| row_h(*r)).sum::<f32>();
         let x = if at.0 + GAP + WIDTH <= w { at.0 + GAP } else { (at.0 - GAP - WIDTH).max(0.0) };
         let y = if at.1 + GAP + height <= h { at.1 + GAP } else { (at.1 - GAP - height).max(0.0) };
@@ -260,17 +269,17 @@ mod tests {
 
     #[test]
     fn an_icon_menu_hangs_right_and_below_the_pointer_and_flips_at_the_edges() {
-        let m = Menu::open(Some(3), (100.0, 100.0), 1000.0, 800.0);
+        let m = Menu::open(Some(3), false, (100.0, 100.0), 1000.0, 800.0);
         assert_eq!((m.rect.x, m.rect.y), (106.0, 106.0));
         assert_eq!(m.rect.w, WIDTH);
         // 6 rows + 3 rules, inside the padding.
         assert_eq!(m.rect.h, PAD * 2.0 + 6.0 * ROW_H + 3.0 * SEP_H);
         // Near the right and bottom edges it opens to the left and above.
-        let m = Menu::open(Some(3), (950.0, 780.0), 1000.0, 800.0);
+        let m = Menu::open(Some(3), false, (950.0, 780.0), 1000.0, 800.0);
         assert_eq!(m.rect.x, 950.0 - GAP - WIDTH);
         assert!(m.rect.y + m.rect.h <= 780.0 - GAP + 0.01);
         // The wallpaper's menu is the short one.
-        let m = Menu::open(None, (10.0, 10.0), 1000.0, 800.0);
+        let m = Menu::open(None, false, (10.0, 10.0), 1000.0, 800.0);
         assert_eq!(m.rows.len(), 3);
         assert_eq!(m.action(0), Some(Action::NewFolder));
         assert_eq!(m.action(1), None, "a rule is not an action");
@@ -278,8 +287,15 @@ mod tests {
     }
 
     #[test]
+    fn several_selected_items_get_only_what_suits_a_group() {
+        let m = Menu::open(Some(1), true, (10.0, 10.0), 1000.0, 800.0);
+        let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
+        assert_eq!(actions, vec![Action::Open, Action::MoveToHome, Action::MoveToBin]);
+    }
+
+    #[test]
     fn hit_finds_rows_but_never_rules_or_the_padding() {
-        let m = Menu::open(Some(0), (0.0, 0.0), 1000.0, 800.0);
+        let m = Menu::open(Some(0), false, (0.0, 0.0), 1000.0, 800.0);
         let rows = m.row_rects();
         let mid = |r: &Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
         assert_eq!(m.hit(mid(&rows[0])), Some(0));
@@ -305,7 +321,7 @@ mod tests {
 
     #[test]
     fn the_drawn_menu_is_one_grid_with_a_panel_a_hover_band_and_its_labels() {
-        let mut m = Menu::open(Some(0), (0.0, 0.0), 1000.0, 800.0);
+        let mut m = Menu::open(Some(0), false, (0.0, 0.0), 1000.0, 800.0);
         m.t = 1.0;
         m.hover = Some(6);
         let mut scene = Scene::default();
