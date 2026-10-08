@@ -306,7 +306,9 @@ The big daemon files are cohesive but long — go straight to the function:
   card is simply away, and unrolls again where the window was put down (`card_window_lifted` /
   `card_window_placed`); the OPTIONS pill's own window gestures say the same from `nub_drag.rs`
   (the right-click drag and the pinch at their start and end; the scroll, which has no end, through
-  `card_window_nudged`: put down once quiet for 280 ms). A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
+  `card_window_nudged`: put down once quiet for 280 ms). WIDTH: a press within `GRIP` of either side edge resizes it
+  (`Press::Resize`; `WIDTH_MIN`..`WIDTH_MAX`; the text is re-wrapped as it goes); one width for the
+  card (`Card::width`), saved in `card.json`. A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
   the list, sideways slides the card — the way that travels `SCROLL_CLAIM` first takes it until
   the scroll is quiet for 220 ms; while it slides the card the input region is the whole surface
   (the card moves out from under the pointer and the scroll must keep arriving). A THROW (`Swipe::thrown`, judged when the sliding scroll STOPS —
