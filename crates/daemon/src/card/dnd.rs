@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use wayland_client::protocol::wl_data_device_manager::DndAction;
 
 use super::model::*;
-use super::view::tile_picture;
+use super::view::{tile_height, tile_picture, GAP};
 use super::Drag;
 use crate::desktop::DragIcon;
 use crate::App;
@@ -232,10 +232,33 @@ impl App {
         // own position is the surface's middle on this compositor. An
         // item of ours starts where it was picked up.)
         self.card.drop_y = self.card.drag.as_ref().filter(|_| own).map(|d| d.from_y);
+        if own {
+            self.card_carried_steps(1.0);
+        }
         self.card.dnd_mimes = mimes;
         self.card.dnd_hint = None;
         self.card_dnd_offer = Some(offer);
         self.request_card_draw();
+    }
+
+    /// An item of ours leaves the list as its drag comes over the card
+    /// (`way` 1) and stands in it again when the drag goes off (`way` -1).
+    /// The items under it keep standing exactly where they are at that
+    /// moment and EASE from there, instead of jumping by its height first
+    /// (Max, 2026-10-08: *"the one that is under it moves up instantly, it
+    /// looks bad"*).
+    fn card_carried_steps(&mut self, way: f32) {
+        let Some(id) = self.card.drag.as_ref().map(|d| d.id) else {
+            return;
+        };
+        let Some(at) = self.card.items.iter().position(|it| it.id == id) else {
+            return;
+        };
+        let lines = self.card.lines.get(&id).map_or(1, Vec::len);
+        let step = way * (tile_height(self.card.items[at].kind, lines) + GAP);
+        for it in &self.card.items[at + 1..] {
+            *self.card.shifts.entry(it.id).or_insert(0.0) += step;
+        }
     }
 
     /// The drag over the card moved: the list opens a place where it would
@@ -266,6 +289,9 @@ impl App {
             return;
         }
         if self.card_dnd_offer.take().is_some() {
+            if self.card.drop_own {
+                self.card_carried_steps(-1.0);
+            }
             self.card.dnd_over = false;
             self.card.drop_own = false;
             self.card.drop_y = None;
