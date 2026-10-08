@@ -234,7 +234,7 @@ The big daemon files are cohesive but long — go straight to the function:
   (`desktop.json`, path → [col,row]; `place` + `stick`), new files take the first free cell
   column-major and move nothing, `forget` re-flows. Draws the Files-section tile
   (carrier/thumbnail + one-line name, fitted by MEASURED width with "…", white on a dark
-  shadow); no hover magnification (Max). Click = open (`xdg-open` / the launcher's `Exec=`).
+  shadow); no hover magnification (Max). Click = select, DOUBLE click (400 ms) = open (`xdg-open` / the launcher's `Exec=`).
   DRAG = a real Wayland drag of ours (`desktop_lift`: `DragSource` offering `text/uri-list` +
   text, the icon raster on an shm surface as the drag image, `start_drag` with the press serial
   — Hyprland ignores it): over the desktop nothing is shown (no landing-cell wash — Max) and

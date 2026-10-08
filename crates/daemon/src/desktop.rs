@@ -73,6 +73,8 @@ const ITEMS_MAX: usize = 256;
 /// Headroom in the icon array, so a few files arriving are single-layer
 /// writes rather than a reallocation each.
 const LAYER_HEADROOM: u32 = 8;
+/// Two clicks on one item within this are a double click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// How far a press travels before it is a drag and not a click.
 const DRAG_START: f32 = 6.0;
 /// How long a sent pointer shape is trusted before it is sent again on the
@@ -328,6 +330,9 @@ pub(crate) struct Desktop {
     pub band: Option<((f32, f32), (f32, f32))>,
     /// The right-click menu, while it is up.
     pub menu: Option<Menu>,
+    /// The last plain click on an item (its path, and when): a second one
+    /// on the same item soon enough is a double click, which opens it.
+    pub last_click: Option<(String, std::time::Instant)>,
     /// When the pointer's shape was last sent: it is sent again after a
     /// while even when nothing changed on our side, because the waveview
     /// plugin paints its edge-resize arrows straight onto the pointer (not
@@ -1881,8 +1886,25 @@ impl App {
                         }
                         let under = self.desktop.ptr.and_then(|p| self.desktop.hit(p));
                         match press.item {
-                            // A click on an item opens it.
-                            Some(i) if under == Some(i) => self.desktop_activate(i),
+                            // A click on an item selects it, alone; a
+                            // second click on it soon after opens it
+                            // (Max, 2026-10-08: "one click select, double
+                            // click opens").
+                            Some(i) if under == Some(i) => {
+                                let path = self.desktop.items[i].path.clone();
+                                let now = std::time::Instant::now();
+                                let double = self.desktop.last_click.take().is_some_and(|(p, t)| {
+                                    p == path && now.duration_since(t) <= DOUBLE_CLICK
+                                });
+                                if double {
+                                    self.desktop_activate(i);
+                                } else {
+                                    self.desktop.last_click = Some((path.clone(), now));
+                                    self.desktop.selected.clear();
+                                    self.desktop.selected.insert(path);
+                                    self.request_desktop_draw();
+                                }
+                            }
                             // A click on bare wallpaper lets go of a
                             // selection first; only with nothing selected
                             // does it put the icons away, or bring them
