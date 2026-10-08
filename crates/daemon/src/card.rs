@@ -86,7 +86,9 @@ const FLING_BRIEF: std::time::Duration = std::time::Duration::from_millis(170);
 const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(30);
 // 18 at first, then 36 (Max: *"make the jump to the side snappier"*), then 70
 // (*"snappier"*).
-const FLING_RATE: f32 = 70.0;
+// ⚠ TEMPORARILY 7 (ten times slower), to look at the glide: Max sees a
+// "hole" as the card crosses the middle of the window. Back to 70 after.
+const FLING_RATE: f32 = 7.0;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
