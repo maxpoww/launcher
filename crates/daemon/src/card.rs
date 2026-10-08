@@ -75,7 +75,7 @@ const SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(220);
 /// now to move without throw it"*, then *"i want to be able to move the card
 /// fast without throwing it"*.) So: the whole scroll lasted no longer than
 /// [`FLING_BRIEF`], covered at least [`FLING_SCROLL`], one way, and then went
-/// quiet for [`FLING_QUIET`]. The card glides there at [`FLING_RATE`].
+/// quiet for [`FLING_QUIET`].
 const FLING_SCROLL: f32 = 40.0;
 const FLING_BRIEF: std::time::Duration = std::time::Duration::from_millis(170);
 // 70 at first: the card slid with the flick, then stood still for that long
@@ -84,11 +84,18 @@ const FLING_BRIEF: std::time::Duration = std::time::Duration::from_millis(170);
 // as short as the gaps between scroll steps allow, and no wait at all where
 // the touchpad says the fingers lifted (`AxisStop`, over the card).
 const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(30);
-// 18 at first, then 36 (Max: *"make the jump to the side snappier"*), then 70
-// (*"snappier"*).
-// (`card rate <n>` changes it on the running dock, to look at the glide in
-// slow motion without a rebuild; it lasts until the dock restarts.)
-const FLING_RATE: f32 = 70.0;
+/// HOW THE CARD TRAVELS sideways — every way it is moved by scroll, and a
+/// throw: it does not jump to where the scroll says, it GOES there, never
+/// faster than [`TRAVEL_SPEED`] and never gaining speed faster than
+/// [`TRAVEL_ACCEL`] (logical px/s and px/s²). A slow scroll it simply keeps
+/// up with. A flick it falls behind, and the throw that follows carries on
+/// at the same pace to the end — one motion, where the first cut slid at the
+/// fingers' speed and then switched to a glide of its own (Max, 2026-10-08:
+/// *"the sliding is not constant, like the first slide is fast because it
+/// catch the speed of my fingers… maybe setting a max acceleration"*).
+/// `card rate <speed> [accel]` changes both on the running dock.
+const TRAVEL_SPEED: f32 = 7000.0;
+const TRAVEL_ACCEL: f32 = 50000.0;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -312,11 +319,13 @@ pub(crate) struct Card {
     swipe: Option<Swipe>,
     /// The timer that judges the swipe once it stops is running.
     swipe_waiting: bool,
-    /// A thrown card on its way: where its left edge (from its window's)
-    /// is going.
-    glide: Option<f32>,
-    /// The glide's rate, when `card rate` has set one for this run.
-    glide_rate: Option<f32>,
+    /// The card on its way sideways: where its left edge (from its
+    /// window's) is right now, and how fast it is going. `None` at rest —
+    /// it is where `geom` says. See [`TRAVEL_SPEED`].
+    at: Option<f32>,
+    speed: f32,
+    /// The pace, when `card rate` has set one for this run: (speed, accel).
+    pace: Option<(f32, f32)>,
     /// The scroll gesture over the card: which way took it (see
     /// [`SCROLL_CLAIM`]), what each way has travelled before one did, and
     /// until when it lasts.
@@ -395,6 +404,23 @@ pub(crate) fn fling_end(window_w: f32, to_left: bool) -> f32 {
         -(WIDTH + OVERHANG)
     } else {
         window_w + OVERHANG
+    }
+}
+
+/// One frame of the card's travel from `at` toward `to`: the speed it has
+/// now gains at most `accel` and never passes `top`; it arrives exactly,
+/// and stops there. Returns where it is and its speed after `dt`.
+pub(crate) fn travel(at: f32, to: f32, speed: f32, dt: f32, top: f32, accel: f32) -> (f32, f32) {
+    let left = to - at;
+    if left.abs() < 0.5 {
+        return (to, 0.0);
+    }
+    let speed = (speed + accel * dt).min(top);
+    let step = speed * dt;
+    if step >= left.abs() {
+        (to, 0.0)
+    } else {
+        (at + step * left.signum(), speed)
     }
 }
 
@@ -1254,7 +1280,11 @@ impl App {
                 self.card.spot = Some(spot);
                 // A card being slid keeps to the pointer, not to memory.
                 if !matches!(self.card.press, Some(Press::Slide { .. })) {
-                    self.card.rect = Some(card_rect(&spot, self.card.geom.get(&host).copied()));
+                    let fx = match self.card.at {
+                        Some(at) if spot.w > 0.0 => Some(at / spot.w),
+                        _ => self.card.geom.get(&host).copied(),
+                    };
+                    self.card.rect = Some(card_rect(&spot, fx));
                 }
             }
         }
@@ -1361,31 +1391,26 @@ impl App {
             crate::animation::ease_toward(self.card.shown, target, dt, UNROLL_RATE, 0.004)
         };
         self.card.shown = shown;
-        // A thrown card glides to its end, remembered there as if slid.
+        // The card on its way sideways (see `TRAVEL_SPEED`).
         let mut moving = moving;
-        if let (Some(to), Some(spot), Some(host)) =
-            (self.card.glide, self.card.spot, self.card.host.clone())
+        if let (Some(at), Some(spot), Some(host)) =
+            (self.card.at, self.card.spot, self.card.host.clone())
         {
-            let from = match (self.card.geom.get(&host), self.card.rect) {
-                (Some(fx), _) => fx * spot.w,
-                (None, Some(r)) => r.x - spot.x,
-                (None, None) => to,
+            let to = match self.card.geom.get(&host) {
+                Some(fx) => fx * spot.w,
+                None => spot.w - INSET - WIDTH,
             };
-            let (left, gliding) = crate::animation::ease_toward(
-                from,
-                to,
-                dt,
-                self.card.glide_rate.unwrap_or(FLING_RATE),
-                0.5,
-            );
-            if spot.w > 0.0 && present {
-                self.card.geom.insert(host, left / spot.w);
-                self.card.rect = Some(card_rect(&spot, Some(left / spot.w)));
-            }
-            if !gliding || !present {
-                self.card.glide = None;
+            let (top, accel) = self.card.pace.unwrap_or((TRAVEL_SPEED, TRAVEL_ACCEL));
+            let (at, speed) = travel(at, to, self.card.speed, dt, top, accel);
+            self.card.speed = speed;
+            if at == to || !present || spot.w <= 0.0 {
+                self.card.at = None;
+                self.card.speed = 0.0;
+                self.card.rect = Some(card_rect(&spot, self.card.geom.get(&host).copied()));
                 self.sync_card_input();
             } else {
+                self.card.at = Some(at);
+                self.card.rect = Some(card_rect(&spot, Some(at / spot.w)));
                 moving = true;
             }
         }
@@ -1842,17 +1867,26 @@ impl App {
         if !self.card.swipe_waiting {
             self.card_swipe_wait(FLING_QUIET);
         }
-        self.card.glide = None;
-        // From the remembered fraction, not the rounded box: small scrolls
-        // must add up.
+        // Where the scroll says the card should be (from the remembered
+        // fraction, so small scrolls add up) — and the card sets off for it
+        // from where it is, at its own pace (`TRAVEL_SPEED`).
         let left = match self.card.geom.get(addr) {
             Some(fx) => fx * spot.w,
             None => rect.x - spot.x,
         };
         let fx = clamp_left(left - delta * SLIDE_PER_SCROLL, spot.w) / spot.w;
         self.card.geom.insert(addr.to_owned(), fx);
-        self.card.rect = Some(card_rect(&spot, Some(fx)));
-        self.sync_card_input();
+        self.card_set_off(rect.x - spot.x);
+    }
+
+    /// The card's place changed: it travels there from `from` (where it is
+    /// drawn now), unless it is already on its way.
+    fn card_set_off(&mut self, from: f32) {
+        if self.card.at.is_none() {
+            self.card.at = Some(from);
+            self.card.speed = 0.0;
+            self.card_last_frame = None;
+        }
         self.request_card_draw();
     }
 
@@ -1862,11 +1896,19 @@ impl App {
         let Some(sw) = self.card.swipe.take() else {
             return;
         };
-        if let (Some(to_left), Some(spot)) = (sw.thrown(), self.card.spot) {
-            if self.card_present() {
-                self.card.glide = Some(fling_end(spot.w, to_left));
-                self.card_last_frame = None;
-                self.request_card_draw();
+        if let (Some(to_left), Some(spot), Some(host), Some(rect)) = (
+            sw.thrown(),
+            self.card.spot,
+            self.card.host.clone(),
+            self.card.rect,
+        ) {
+            if self.card_present() && spot.w > 0.0 {
+                // Its place is the far side from now on; it carries on
+                // there at the pace it was already travelling.
+                self.card
+                    .geom
+                    .insert(host, fling_end(spot.w, to_left) / spot.w);
+                self.card_set_off(rect.x - spot.x);
             }
         }
     }
@@ -2247,11 +2289,15 @@ impl App {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
             "all" => self.card_toggle_all(),
             "rate" => {
-                self.card.glide_rate = rest.parse::<f32>().ok().filter(|r| *r > 0.0);
-                format!(
-                    "a thrown card glides at rate {}",
-                    self.card.glide_rate.unwrap_or(FLING_RATE)
-                )
+                let mut parts = rest.split_whitespace().map(|p| p.parse::<f32>().ok());
+                self.card.pace = match (parts.next().flatten(), parts.next().flatten()) {
+                    (Some(speed), accel) if speed > 0.0 => {
+                        Some((speed, accel.filter(|a| *a > 0.0).unwrap_or(TRAVEL_ACCEL)))
+                    }
+                    _ => None,
+                };
+                let (speed, accel) = self.card.pace.unwrap_or((TRAVEL_SPEED, TRAVEL_ACCEL));
+                format!("the card travels at {speed} px/s, gaining {accel} px/s²")
             }
             "lifted" => {
                 self.card_window_lifted(rest);
@@ -2404,6 +2450,25 @@ mod tests {
         // Exactly as far as a slide by hand can take it.
         assert_eq!(fling_end(900.0, true), clamp_left(-9999.0, 900.0));
         assert_eq!(fling_end(900.0, false), clamp_left(9999.0, 900.0));
+    }
+
+    #[test]
+    fn the_card_travels_at_a_capped_pace_and_arrives_exactly() {
+        // From rest it gains speed, no faster than the acceleration allows.
+        let (at, speed) = travel(0.0, 1000.0, 0.0, 0.01, 6000.0, 50_000.0);
+        assert_eq!(speed, 500.0);
+        assert_eq!(at, 5.0);
+        // At full pace it never goes faster, however far the place is.
+        let (at, speed) = travel(0.0, 100_000.0, 6000.0, 0.01, 6000.0, 50_000.0);
+        assert_eq!((at, speed), (60.0, 6000.0));
+        // It goes the other way just the same, and stops dead on arrival.
+        let (at, _) = travel(500.0, 0.0, 6000.0, 0.01, 6000.0, 50_000.0);
+        assert_eq!(at, 440.0);
+        assert_eq!(
+            travel(10.0, 0.0, 6000.0, 0.01, 6000.0, 50_000.0),
+            (0.0, 0.0)
+        );
+        assert_eq!(travel(7.2, 7.4, 300.0, 0.01, 6000.0, 50_000.0), (7.4, 0.0));
     }
 
     #[test]

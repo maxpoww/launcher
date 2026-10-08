@@ -312,7 +312,10 @@ The big daemon files are cohesive but long — go straight to the function:
   (the card moves out from under the pointer and the scroll must keep arriving). A THROW (`Swipe::thrown`, judged when the sliding scroll STOPS —
   `card_swipe_wait`): the whole run was brief (`FLING_BRIEF`), one way and at least `FLING_SCROLL`
   → the card glides to that side OUTSIDE the window (`fling_end`); a long scroll never throws,
-  however fast. A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
+  however fast. TRAVEL: scroll and throws only set the card's
+  place (`geom`); the card GOES there (`Card::at`, `travel` in `draw_card`) at no more than
+  `TRAVEL_SPEED`, gaining at most `TRAVEL_ACCEL` — one pace for following the fingers and for the
+  throw's run to the end (`card rate <speed> [accel]` tunes it live). A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
   <delta>` → `card_slide`). A press on the card itself slides it sideways (no snapping; remembered per window as
   a fraction of its width, forgotten when turned off there); wheel scrolls; × on the hovered item
   removes. Pictures ride the Files thumbnailer (`card_on_thumb`) into the card renderer's own
