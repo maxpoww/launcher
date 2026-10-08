@@ -96,6 +96,11 @@ const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(30);
 /// `card rate <speed> [accel]` changes both on the running dock.
 const TRAVEL_SPEED: f32 = 7000.0;
 const TRAVEL_ACCEL: f32 = 50000.0;
+/// How it settles: its speed is at most this many times the distance left
+/// (per second), so the last stretch eases in — and never less than
+/// [`TRAVEL_CREEP`], so the ease has an end.
+const TRAVEL_BRAKE: f32 = 32.0;
+const TRAVEL_CREEP: f32 = 40.0;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -382,16 +387,24 @@ impl Card {
 /// The card's box on a window at `spot`: inside it, under the bar, on the
 /// right — or with its left edge at `fx` of the window's width, where it
 /// was slid to.
-pub(crate) fn card_rect(spot: &WindowSpot, fx: Option<f32>) -> Rect {
+///
+/// Its edges land on whole pixels OF THE SCREEN (`scale` physical per
+/// logical), not on whole logical ones: at Golem's 1.6× a card travelling
+/// sideways stepped 1.6, 1.6, 3.2 pixels where it now steps evenly, and
+/// that unevenness was most of what made a slide look rough (Max,
+/// 2026-10-08: *"see if you can make the sliding smoother"*).
+pub(crate) fn card_rect(spot: &WindowSpot, fx: Option<f32>, scale: f32) -> Rect {
     let left = match fx {
         Some(fx) => clamp_left(fx * spot.w, spot.w),
         None => spot.w - INSET - WIDTH,
     };
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let snap = |v: f32| (v * scale).round() / scale;
     Rect::new(
-        (spot.x + left).round(),
-        (spot.y + INSET).round(),
+        snap(spot.x + left),
+        snap(spot.y + INSET),
         WIDTH,
-        (spot.h - 2.0 * INSET).round(),
+        snap(spot.h - 2.0 * INSET),
     )
 }
 
@@ -407,15 +420,23 @@ pub(crate) fn fling_end(window_w: f32, to_left: bool) -> f32 {
     }
 }
 
-/// One frame of the card's travel from `at` toward `to`: the speed it has
-/// now gains at most `accel` and never passes `top`; it arrives exactly,
-/// and stops there. Returns where it is and its speed after `dt`.
+/// One frame of the card's travel from `at` toward `to`. Its speed gains at
+/// most `accel`, never passes `top`, and comes down as the place nears —
+/// [`TRAVEL_BRAKE`] times the distance left — so it sets off and settles
+/// without a jolt, and a scroll it is following (a place that keeps moving a
+/// little ahead of it) is one even motion, not a string of starts and stops.
+/// It arrives exactly. Returns where it is and its speed after `dt`.
 pub(crate) fn travel(at: f32, to: f32, speed: f32, dt: f32, top: f32, accel: f32) -> (f32, f32) {
     let left = to - at;
-    if left.abs() < 0.5 {
+    if left.abs() < 0.3 {
         return (to, 0.0);
     }
-    let speed = (speed + accel * dt).min(top);
+    let want = (left.abs() * TRAVEL_BRAKE).clamp(TRAVEL_CREEP, top.max(TRAVEL_CREEP));
+    let speed = if want > speed {
+        (speed + accel * dt).min(want)
+    } else {
+        want
+    };
     let step = speed * dt;
     if step >= left.abs() {
         (to, 0.0)
@@ -821,7 +842,10 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 };
                 list.icons.push(IconInst {
                     rect: Rect::new(
-                        (frame.x + (frame.w - side) / 2.0).round(),
+                        // (Not rounded: the card's own edge is on a screen pixel,
+                        // and a picture rounded apart from it would jitter
+                        // against the card as it travels.)
+                        frame.x + (frame.w - side) / 2.0,
                         (frame.y + (frame.h - side) / 2.0).round(),
                         side,
                         side,
@@ -1284,7 +1308,8 @@ impl App {
                         Some(at) if spot.w > 0.0 => Some(at / spot.w),
                         _ => self.card.geom.get(&host).copied(),
                     };
-                    self.card.rect = Some(card_rect(&spot, fx));
+                    let scale = self.surface_scale(crate::fractional::SurfaceKind::Card);
+                    self.card.rect = Some(card_rect(&spot, fx, scale));
                 }
             }
         }
@@ -1406,11 +1431,19 @@ impl App {
             if at == to || !present || spot.w <= 0.0 {
                 self.card.at = None;
                 self.card.speed = 0.0;
-                self.card.rect = Some(card_rect(&spot, self.card.geom.get(&host).copied()));
+                self.card.rect = Some(card_rect(
+                    &spot,
+                    self.card.geom.get(&host).copied(),
+                    self.surface_scale(crate::fractional::SurfaceKind::Card),
+                ));
                 self.sync_card_input();
             } else {
                 self.card.at = Some(at);
-                self.card.rect = Some(card_rect(&spot, Some(at / spot.w)));
+                self.card.rect = Some(card_rect(
+                    &spot,
+                    Some(at / spot.w),
+                    self.surface_scale(crate::fractional::SurfaceKind::Card),
+                ));
                 moving = true;
             }
         }
@@ -2427,7 +2460,7 @@ mod tests {
 
     #[test]
     fn the_card_rests_inside_its_window_on_the_right() {
-        let r = card_rect(&spot(), None);
+        let r = card_rect(&spot(), None, 1.0);
         assert_eq!(
             (r.x, r.y, r.w, r.h),
             (100.0 + 900.0 - 10.0 - 320.0, 60.0, 320.0, 580.0)
@@ -2437,10 +2470,10 @@ mod tests {
     #[test]
     fn a_slid_card_keeps_its_fraction_and_may_hang_off_either_side() {
         let s = spot();
-        assert_eq!(card_rect(&s, Some(0.5)).x, 100.0 + 450.0);
+        assert_eq!(card_rect(&s, Some(0.5), 1.0).x, 100.0 + 450.0);
         // Fully out on the left with a little air, and on the right.
-        assert_eq!(card_rect(&s, Some(-5.0)).x, 100.0 - 320.0 - 12.0);
-        assert_eq!(card_rect(&s, Some(5.0)).x, 100.0 + 900.0 + 12.0);
+        assert_eq!(card_rect(&s, Some(-5.0), 1.0).x, 100.0 - 320.0 - 12.0);
+        assert_eq!(card_rect(&s, Some(5.0), 1.0).x, 100.0 + 900.0 + 12.0);
     }
 
     #[test]
@@ -2453,22 +2486,38 @@ mod tests {
     }
 
     #[test]
-    fn the_card_travels_at_a_capped_pace_and_arrives_exactly() {
+    fn the_card_travels_at_a_capped_pace_eases_in_and_arrives_exactly() {
         // From rest it gains speed, no faster than the acceleration allows.
-        let (at, speed) = travel(0.0, 1000.0, 0.0, 0.01, 6000.0, 50_000.0);
+        let (at, speed) = travel(0.0, 5000.0, 0.0, 0.01, 6000.0, 50_000.0);
         assert_eq!(speed, 500.0);
         assert_eq!(at, 5.0);
         // At full pace it never goes faster, however far the place is.
         let (at, speed) = travel(0.0, 100_000.0, 6000.0, 0.01, 6000.0, 50_000.0);
         assert_eq!((at, speed), (60.0, 6000.0));
-        // It goes the other way just the same, and stops dead on arrival.
+        // Near its place it slows: its speed is tied to the distance left.
+        let (_, speed) = travel(0.0, 50.0, 6000.0, 0.001, 6000.0, 50_000.0);
+        assert_eq!(speed, 50.0 * TRAVEL_BRAKE);
+        // …but never to nothing, and it stops dead on arrival, either way.
+        let (_, speed) = travel(0.0, 0.5, 0.0, 0.001, 6000.0, 1e9);
+        assert_eq!(speed, TRAVEL_CREEP);
+        assert_eq!(travel(0.2, 0.0, 6000.0, 0.01, 6000.0, 50_000.0), (0.0, 0.0));
         let (at, _) = travel(500.0, 0.0, 6000.0, 0.01, 6000.0, 50_000.0);
-        assert_eq!(at, 440.0);
-        assert_eq!(
-            travel(10.0, 0.0, 6000.0, 0.01, 6000.0, 50_000.0),
-            (0.0, 0.0)
-        );
-        assert_eq!(travel(7.2, 7.4, 300.0, 0.01, 6000.0, 50_000.0), (7.4, 0.0));
+        assert!(at < 500.0 && at > 0.0);
+    }
+
+    #[test]
+    fn the_cards_edges_land_on_whole_screen_pixels() {
+        let s = WindowSpot {
+            x: 100.3,
+            y: 50.0,
+            w: 900.0,
+            h: 600.0,
+            visible: true,
+        };
+        let r = card_rect(&s, Some(0.5), 1.6);
+        assert!(((r.x * 1.6) - (r.x * 1.6).round()).abs() < 1e-3);
+        // At 1× that is the whole logical pixel, as before.
+        assert_eq!(card_rect(&s, Some(0.5), 1.0).x, 550.0);
     }
 
     #[test]
