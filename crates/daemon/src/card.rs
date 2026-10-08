@@ -94,12 +94,15 @@ const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(30);
 /// *"the sliding is not constant, like the first slide is fast because it
 /// catch the speed of my fingers… maybe setting a max acceleration"*).
 /// `card rate <speed> [accel]` changes both on the running dock.
-const TRAVEL_SPEED: f32 = 7000.0;
-const TRAVEL_ACCEL: f32 = 50000.0;
+// 7000 / 50000 at first; then a higher top speed reached about as gently
+// (Max: *"make it faster but not snappy"*) — the trip is shorter, its start
+// and its landing are not sharper.
+const TRAVEL_SPEED: f32 = 12000.0;
+const TRAVEL_ACCEL: f32 = 60000.0;
 /// How it settles: its speed is at most this many times the distance left
 /// (per second), so the last stretch eases in — and never less than
 /// [`TRAVEL_CREEP`], so the ease has an end.
-const TRAVEL_BRAKE: f32 = 32.0;
+const TRAVEL_BRAKE: f32 = 28.0;
 const TRAVEL_CREEP: f32 = 40.0;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
