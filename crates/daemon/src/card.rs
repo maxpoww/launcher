@@ -50,7 +50,9 @@ pub(crate) const WIDTH: f32 = 320.0;
 /// The card's width can be changed by its side edges (Max, 2026-10-08: *"i
 /// want to resize the card width"*): a press within [`GRIP`] of either side
 /// takes that edge, between these limits (the first mockup's were 240–520).
-/// One width for the card, wherever it is; kept with the list.
+/// The width is the WINDOW's, like the place the card was slid to: each
+/// window has its own, and turning the card off there forgets it (*"the size
+/// is also per window and reset when i close it, as the position"*).
 const WIDTH_MIN: f32 = 240.0;
 const WIDTH_MAX: f32 = 640.0;
 const GRIP: f32 = 7.0;
@@ -219,9 +221,6 @@ pub(crate) struct Item {
 struct Saved {
     next_id: u64,
     items: Vec<Item>,
-    /// The card's width (0 = never changed: [`WIDTH`]).
-    #[serde(default)]
-    width: f32,
 }
 
 /// An item's box as last drawn, in surface coordinates.
@@ -334,8 +333,9 @@ pub(crate) struct Card {
     geom: HashMap<String, f32>,
     /// The card's box on the surface.
     rect: Option<Rect>,
-    /// Its width, once changed (0: [`WIDTH`]) — see [`Card::width`].
-    width: f32,
+    /// The width it was given on a window, by address; a window without
+    /// one has it [`WIDTH`] wide. Kept and forgotten with `geom`.
+    widths: HashMap<String, f32>,
     /// The unroll, 0 (away) to 1 (down).
     shown: f32,
     /// Rolling up for good: the window is let go when it is up.
@@ -386,13 +386,12 @@ pub(crate) struct Card {
 }
 
 impl Card {
-    /// How wide the card is.
+    /// How wide the card is on the window it is on.
     fn width(&self) -> f32 {
-        if self.width > 0.0 {
-            self.width.clamp(WIDTH_MIN, WIDTH_MAX)
-        } else {
-            WIDTH
-        }
+        self.host
+            .as_ref()
+            .and_then(|h| self.widths.get(h))
+            .map_or(WIDTH, |w| w.clamp(WIDTH_MIN, WIDTH_MAX))
     }
 
     /// The side edge under `pos` (`true`: the left one), if any.
@@ -1050,7 +1049,6 @@ impl App {
             .next_id
             .max(saved.items.iter().map(|it| it.id + 1).max().unwrap_or(1));
         self.card.items = saved.items;
-        self.card.width = saved.width;
         self.card.to_bottom = true;
         for path in self.card_pictures() {
             self.card_ask_picture(&path);
@@ -1064,7 +1062,6 @@ impl App {
             &Saved {
                 next_id: self.card.next_id,
                 items: self.card.items.clone(),
-                width: self.card.width,
             },
         );
     }
@@ -1252,6 +1249,7 @@ impl App {
             }
             // Turning it off here forgets where it was put here.
             self.card.geom.remove(&addr);
+            self.card.widths.remove(&addr);
             if self.card.host.as_deref() == Some(addr.as_str()) {
                 self.card_dismiss();
             }
@@ -1271,6 +1269,7 @@ impl App {
             self.card.armed.clear();
             self.card.off.clear();
             self.card.geom.clear();
+            self.card.widths.clear();
             self.card_tell_bar("*", false);
             self.card_dismiss();
             "off for every window".to_owned()
@@ -1310,7 +1309,12 @@ impl App {
     /// Bring the card onto `addr`: it unrolls there from the top.
     fn card_summon(&mut self, addr: &str) {
         self.card_load();
+        // The text is wrapped to the card's width, which is the window's.
+        let before = self.card.width();
         self.card.host = Some(addr.to_owned());
+        if self.card.width() != before {
+            self.card.lines.clear();
+        }
         self.card.leaving = false;
         self.card.shown = 0.0;
         self.card.spot = None;
@@ -1342,6 +1346,7 @@ impl App {
                 self.card.armed.remove(&host);
                 self.card.off.remove(&host);
                 self.card.geom.remove(&host);
+                self.card.widths.remove(&host);
                 self.card.host = None;
                 self.card.spot = None;
                 self.card.rect = None;
@@ -1852,7 +1857,9 @@ impl App {
                         if left_edge {
                             rect.x = spot.x + left + (width - to);
                         }
-                        self.card.width = to;
+                        if let Some(host) = self.card.host.clone() {
+                            self.card.widths.insert(host, to);
+                        }
                         // The text is wrapped to the width: wrap it again.
                         self.card.lines.clear();
                         self.card.at = None;
@@ -2064,8 +2071,8 @@ impl App {
             .is_ok();
     }
 
-    /// A side edge was let go: the card keeps its new width (for good, on
-    /// every window) and stays where it is on this one.
+    /// A side edge was let go: the card keeps its new width on this window
+    /// and stays where it is.
     fn card_settle_resize(&mut self) {
         if let (Some(host), Some(rect), Some(spot)) =
             (self.card.host.clone(), self.card.rect, self.card.spot)
@@ -2074,7 +2081,6 @@ impl App {
                 self.card.geom.insert(host, (rect.x - spot.x) / spot.w);
             }
         }
-        self.card_save();
         self.sync_card_input();
         self.request_card_draw();
     }
@@ -2661,11 +2667,18 @@ mod tests {
         assert_eq!(card.grip((103.0, 20.0)), None);
         // Never changed: the mockup's width; out of range: the limits.
         assert_eq!(card.width(), WIDTH);
-        let wide = Card {
-            width: 9999.0,
+        // Its width is the window's it is on, within the limits.
+        let mut wide = Card {
+            host: Some("0x1".into()),
             ..Default::default()
         };
+        wide.widths.insert("0x1".into(), 9999.0);
+        wide.widths.insert("0x2".into(), 400.0);
         assert_eq!(wide.width(), WIDTH_MAX);
+        wide.host = Some("0x2".into());
+        assert_eq!(wide.width(), 400.0);
+        wide.host = Some("0x3".into());
+        assert_eq!(wide.width(), WIDTH);
     }
 
     #[test]
@@ -2851,7 +2864,6 @@ mod tests {
     #[test]
     fn the_list_survives_the_disk() {
         let saved = Saved {
-            width: 400.0,
             next_id: 9,
             items: vec![text(1, "a\nb"), file(2, Kind::Folder, "/tmp/d")],
         };
@@ -2859,10 +2871,9 @@ mod tests {
         let back: Saved = serde_json::from_str(&json).unwrap();
         assert_eq!(back.items, saved.items);
         assert_eq!(back.next_id, 9);
-        assert_eq!(back.width, 400.0);
-        // A list saved before the card had a width of its own still reads.
-        let old: Saved = serde_json::from_str(r#"{"next_id":1,"items":[]}"#).unwrap();
-        assert_eq!(old.width, 0.0);
+        // (A list saved while the width was kept in it still reads.)
+        let old: Saved = serde_json::from_str(r#"{"next_id":1,"items":[],"width":400.0}"#).unwrap();
+        assert_eq!(old.next_id, 1);
         // A text has no path on disk at all.
         assert!(!json.contains("\"path\":null"));
     }
