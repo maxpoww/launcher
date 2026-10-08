@@ -323,6 +323,7 @@ fn main() -> anyhow::Result<()> {
 
     // The CARD: the shelf that rides the windows (`card.rs`). A surface
     // with nothing attached until a card is first summoned.
+    card::declare_layer_rule();
     let card_layer = Some(surface::create_card_surface(
         &compositor,
         &layer_shell,

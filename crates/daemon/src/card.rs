@@ -971,6 +971,21 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     (scene, tiles, max_scroll)
 }
 
+/// The card goes UNDER the dock (Max, 2026-10-08: *"i want the card to stay
+/// under the dock, now it stays ontop"*). Both are on the Top layer, where
+/// the compositor stacks by its `order` rule and then by who came first; the
+/// card's surface, mapped at its first summon, came last and so lay over the
+/// dock. A layer with the HIGHER order is drawn first — underneath (the
+/// renderer sorts each layer's surfaces by order, descending, and paints
+/// them in that sequence) — so the card gets an order above the dock's 0.
+/// A runtime rule: declared before the surface exists, and again whenever
+/// the compositor re-reads its config and forgets it (`hypr.rs`).
+pub(crate) fn declare_layer_rule() {
+    crate::hypr::eval(
+        "hl.layer_rule({ name = \"golem-card-under-dock\", match = { namespace = \"waverunner-card\" }, order = 1 })",
+    );
+}
+
 fn load() -> Saved {
     crate::persist::read_json(&crate::persist::data_path(ITEMS_FILE)).unwrap_or_default()
 }

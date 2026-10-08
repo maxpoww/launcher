@@ -1291,6 +1291,7 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                             app.reassert_floating_mode();
                             app.reassert_place_rules();
                             app.reassert_window_border();
+                            crate::card::declare_layer_rule();
                         }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());
