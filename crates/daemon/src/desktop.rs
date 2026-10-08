@@ -133,6 +133,10 @@ pub(crate) struct Grid {
     /// One cell's size.
     pub cw: f32,
     pub ch: f32,
+    /// Where the first column starts: the columns are CENTRED on the
+    /// surface, so the air left of the first is the air right of the last
+    /// (Max, 2026-10-08: "the grid is not symmetrical, it should be").
+    pub x0: f32,
 }
 
 impl Grid {
@@ -142,18 +146,20 @@ impl Grid {
     pub fn new(w: f32, h: f32, icon_scale: f32) -> Self {
         let cw = GRID_CELL_W * icon_scale;
         let ch = CELL_H * icon_scale;
+        let cols = (((w - 2.0 * MARGIN) / cw).floor() as usize).max(1);
         Self {
-            cols: (((w - 2.0 * MARGIN) / cw).floor() as usize).max(1),
+            cols,
             rows: (((h - 2.0 * MARGIN) / ch).floor() as usize).max(1),
             cw,
             ch,
+            x0: ((w - cols as f32 * cw) / 2.0).max(0.0),
         }
     }
 
     /// A cell's rectangle.
     pub fn rect(&self, (col, row): Slot) -> Rect {
         Rect::new(
-            MARGIN + col as f32 * self.cw,
+            self.x0 + col as f32 * self.cw,
             MARGIN + row as f32 * self.ch,
             self.cw,
             self.ch,
@@ -166,7 +172,7 @@ impl Grid {
 
     /// The cell under a point, if it is on the grid.
     pub fn slot_at(&self, (x, y): (f32, f32)) -> Option<Slot> {
-        let (fx, fy) = ((x - MARGIN) / self.cw, (y - MARGIN) / self.ch);
+        let (fx, fy) = ((x - self.x0) / self.cw, (y - MARGIN) / self.ch);
         if fx < 0.0 || fy < 0.0 {
             return None;
         }
@@ -3204,8 +3210,12 @@ mod tests {
         // Cells 104×92 at scale 1: a 1000×400 surface holds 9 columns × 4 rows.
         let g = Grid::new(1000.0, 400.0, 1.0);
         assert_eq!((g.cols, g.rows), (9, 4));
-        assert_eq!(g.rect((0, 0)), Rect::new(MARGIN, MARGIN, GRID_CELL_W, CELL_H));
-        assert_eq!(g.rect((1, 2)).x, MARGIN + GRID_CELL_W);
+        // 9 × 104 = 936 of 1000: the columns are centred, 32 px of air each side.
+        assert_eq!(g.x0, 32.0);
+        assert_eq!(g.rect((0, 0)), Rect::new(32.0, MARGIN, GRID_CELL_W, CELL_H));
+        let last = g.rect((8, 0));
+        assert_eq!(1000.0 - (last.x + last.w), g.rect((0, 0)).x, "the same air on both sides");
+        assert_eq!(g.rect((1, 2)).x, 32.0 + GRID_CELL_W);
         assert_eq!(g.rect((1, 2)).y, MARGIN + 2.0 * CELL_H);
         // A surface too small for one cell still has one.
         assert_eq!(Grid::new(10.0, 10.0, 1.0).cols, 1);
@@ -3219,8 +3229,8 @@ mod tests {
     #[test]
     fn slot_at_finds_the_cell_under_a_point() {
         let g = Grid::new(1000.0, 400.0, 1.0);
-        assert_eq!(g.slot_at((MARGIN + 1.0, MARGIN + 1.0)), Some((0, 0)));
-        assert_eq!(g.slot_at((MARGIN + GRID_CELL_W + 1.0, MARGIN + CELL_H + 1.0)), Some((1, 1)));
+        assert_eq!(g.slot_at((g.x0 + 1.0, MARGIN + 1.0)), Some((0, 0)));
+        assert_eq!(g.slot_at((g.x0 + GRID_CELL_W + 1.0, MARGIN + CELL_H + 1.0)), Some((1, 1)));
         assert_eq!(g.slot_at((1.0, 1.0)), None, "in the margin");
         assert_eq!(g.slot_at((5000.0, 20.0)), None, "past the grid");
     }
@@ -3310,10 +3320,10 @@ mod tests {
             slots: vec![Some((0, 0)), Some((0, 1)), Some((0, 2))],
             ..Default::default()
         };
-        assert_eq!(d.hit((MARGIN + 1.0, MARGIN + 1.0)), Some(0));
-        assert_eq!(d.hit((MARGIN + 1.0, MARGIN + CELL_H + 1.0)), Some(1));
+        assert_eq!(d.hit((g.x0 + 1.0, MARGIN + 1.0)), Some(0));
+        assert_eq!(d.hit((g.x0 + 1.0, MARGIN + CELL_H + 1.0)), Some(1));
         assert_eq!(d.hit((1.0, 1.0)), None);
-        assert_eq!(d.hit((MARGIN + GRID_CELL_W + 1.0, MARGIN + 1.0)), None);
+        assert_eq!(d.hit((g.x0 + GRID_CELL_W + 1.0, MARGIN + 1.0)), None);
     }
 
     fn make_dir(files: &[(&str, &str)], dirs: &[&str]) -> PathBuf {

@@ -230,7 +230,7 @@ The big daemon files are cohesive but long — go straight to the function:
   its own `Bottom`-layer surface (`surface::create_desktop_surface`; Bottom, not Background, so
   swww can never map over it) with its own renderer + icon array (layer = item index). Lists the
   folder (folders first, case-insensitive; `.desktop` files are launchers with their app icon)
-  onto a cell `Grid` at the dock's icon scale: each file's cell is REMEMBERED in cell units
+  onto a cell `Grid` at the dock's icon scale (columns CENTRED on the surface, `Grid::x0`, so both side margins are equal): each file's cell is REMEMBERED in cell units
   (`desktop.json`, path → [col,row]; `place` + `stick`), new files take the first free cell
   column-major and move nothing, `forget` re-flows. Draws the Files-section tile
   (carrier/thumbnail + one-line name, fitted by MEASURED width with "…", white on a dark
