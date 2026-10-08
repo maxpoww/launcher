@@ -25,6 +25,7 @@ mod deck;
 mod deck_thumbs;
 mod desktop;
 mod desktop_menu;
+mod desktop_props;
 mod logging;
 mod dict;
 mod display;

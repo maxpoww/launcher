@@ -50,6 +50,7 @@ use crate::content::{
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
 use crate::desktop_menu::{Action, Menu, MenuPaint};
+use crate::desktop_props::Props;
 use crate::launch;
 use crate::App;
 
@@ -330,6 +331,8 @@ pub(crate) struct Desktop {
     pub band: Option<((f32, f32), (f32, f32))>,
     /// The right-click menu, while it is up.
     pub menu: Option<Menu>,
+    /// The Properties box, while it is up.
+    pub props: Option<Props>,
     /// The last plain click on an item (its path, and when): a second one
     /// on the same item soon enough is a double click, which opens it.
     pub last_click: Option<(String, std::time::Instant)>,
@@ -895,6 +898,8 @@ pub(crate) struct Live<'a> {
     /// The menu that is up, drawn over everything, and what it is painted
     /// with (the boxes' surface, read where it is).
     pub menu: Option<(&'a Menu, MenuPaint)>,
+    /// The Properties box that is up, drawn the same way.
+    pub props: Option<(&'a Props, MenuPaint)>,
     /// A name being typed: the item, the text, whether all of it is
     /// selected, and the text's measured width.
     pub rename: Option<(usize, &'a str, bool, f32)>,
@@ -984,7 +989,7 @@ pub(crate) fn scene(
                 max_w: label_max_w(&cell),
                 has_icon: has_icon.get(i).copied().unwrap_or(false),
                 overlay: false,
-                cover: live.menu.map(|(m, _)| m.rect),
+                cover: live.menu.map(|(m, _)| m.rect).or(live.props.map(|(p, _)| p.rect)),
                 rename: live
                     .rename
                     .filter(|(r, ..)| *r == i)
@@ -1007,6 +1012,9 @@ pub(crate) fn scene(
     // The menu, over everything.
     if let Some((menu, paint)) = live.menu {
         menu.push(&mut scene, &paint);
+    }
+    if let Some((props, paint)) = live.props {
+        props.push(&mut scene, &paint);
     }
     scene
 }
@@ -1326,6 +1334,7 @@ impl App {
         }
         self.desktop.press = None;
         self.desktop.band = None;
+        self.desktop.props = None;
         let (w, h) = self.desktop_size;
         let mut menu = Menu::open(item, at, w as f32, h as f32);
         menu.hover = menu.hit(at);
@@ -1369,6 +1378,11 @@ impl App {
                     self.desktop_begin_rename(i);
                 }
             }
+            Action::Properties => {
+                if let Some(i) = item {
+                    self.desktop_open_props(i, at);
+                }
+            }
             Action::MoveToHome => {
                 // The selection leaves the desktop for the home folder (the
                 // clicked item is in it); a name already there gets its
@@ -1410,6 +1424,36 @@ impl App {
                 self.relayout_desktop();
             }
         }
+    }
+
+    /// Open the Properties box for item `i` by `at`. A folder's total size
+    /// is walked off the loop and filled in when it comes back.
+    pub(crate) fn desktop_open_props(&mut self, i: usize, at: (f32, f32)) {
+        let Some(item) = self.desktop.items.get(i) else {
+            return;
+        };
+        let (w, h) = self.desktop_size;
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let props = Props::open(item, at, w as f32, h as f32, &home);
+        if item.kind == Kind::Folder {
+            let path = item.path.clone();
+            let (tx, rx) = calloop::channel::channel::<(String, u64, u64)>();
+            std::thread::spawn(move || {
+                let (bytes, files) = crate::desktop_props::folder_size(Path::new(&path));
+                let _ = tx.send((path, bytes, files));
+            });
+            let _ = self.loop_handle.insert_source(rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg((path, bytes, files)) = event {
+                    if let Some(p) = app.desktop.props.as_mut().filter(|p| p.path == path) {
+                        p.set_size(bytes, files);
+                        app.request_desktop_draw();
+                    }
+                }
+            });
+        }
+        info!("desktop: properties of {}", props.title);
+        self.desktop.props = Some(props);
+        self.request_desktop_draw();
     }
 
     /// A new, empty folder in the cell nearest `at`, named `untitled folder`
@@ -1621,6 +1665,11 @@ impl App {
             menu.t = t;
             moving |= menu_moving;
         }
+        if let Some(props) = self.desktop.props.as_mut() {
+            let (t, props_moving) = crate::animation::ease_toward(props.t, 1.0, dt, 20.0, 0.004);
+            props.t = t;
+            moving |= props_moving;
+        }
         self.desktop_last_frame = moving.then_some(now);
         let has_icon: Vec<bool> = (0..self.desktop.items.len())
             .map(|i| self.desktop.has_icon(i))
@@ -1650,6 +1699,15 @@ impl App {
         // the colours of the BG as the dock and OPTIONS").
         let menu_paint = self.desktop.menu.as_ref().map(|m| {
             let (fill, ink) = self.box_surface_at(m.rect);
+            MenuPaint {
+                fill,
+                ink,
+                wash: self.options_hover_wash(),
+                radius: crate::clipboard::BOX_RADIUS,
+            }
+        });
+        let props_paint = self.desktop.props.as_ref().map(|p| {
+            let (fill, ink) = self.box_surface_at(p.rect);
             MenuPaint {
                 fill,
                 ink,
@@ -1689,6 +1747,7 @@ impl App {
                 selected: &selected,
                 band,
                 menu: self.desktop.menu.as_ref().zip(menu_paint),
+                props: self.desktop.props.as_ref().zip(props_paint),
                 rename: rename_view,
             },
         );
@@ -1792,7 +1851,9 @@ impl App {
                 self.desktop.ptr = None;
                 // A menu left behind would hang under whatever took the
                 // pointer; it goes with it.
-                let gone = self.desktop.band.take().is_some() | self.desktop.menu.take().is_some();
+                let gone = self.desktop.band.take().is_some()
+                    | self.desktop.menu.take().is_some()
+                    | self.desktop.props.take().is_some();
                 if gone {
                     self.request_desktop_draw();
                 }
@@ -1826,6 +1887,12 @@ impl App {
                         self.desktop.menu.is_some(),
                         self.desktop.hidden
                     );
+                    // A press anywhere puts the Properties box away, and
+                    // is nothing more than that.
+                    if self.desktop.props.take().is_some() {
+                        self.request_desktop_draw();
+                        return;
+                    }
                     // While the menu is up, the left button is its: a press
                     // on a row arms it, one anywhere else just closes it
                     // (and is not a click on the desktop).
@@ -2533,6 +2600,16 @@ impl App {
             let rows = self.desktop.menu.as_ref().map_or(0, |m| m.rows.len());
             return format!("menu at ({:.0},{:.0}) with {rows} rows", at.0, at.1);
         }
+        if let Some(rest) = what.strip_prefix("props ") {
+            return match rest.trim().parse::<usize>().ok().and_then(|i| self.desktop.slots.get(i).copied().flatten().map(|s| (i, s))) {
+                Some((i, slot)) => {
+                    let r = icon_rect(&self.desktop.grid.rect(slot), self.icon_scale());
+                    self.desktop_open_props(i, (r.x + r.w / 2.0, r.y + r.h / 2.0));
+                    format!("properties of {i}")
+                }
+                None => "props <n>".to_owned(),
+            };
+        }
         if let Some(rest) = what.strip_prefix("pick ") {
             let Some(menu) = self.desktop.menu.take() else {
                 return "no menu is up".to_owned();
@@ -2911,6 +2988,7 @@ mod tests {
             selected: &[],
             band: None,
             menu: None,
+            props: None,
             rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
@@ -2927,6 +3005,7 @@ mod tests {
             selected: &[false, true, false],
             band: Some(band),
             menu: None,
+            props: None,
             rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
@@ -2951,6 +3030,7 @@ mod tests {
             selected: &[true, true, false],
             band: None,
             menu: None,
+            props: None,
             rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
@@ -2971,6 +3051,7 @@ mod tests {
             selected: &[true, true, false],
             band: None,
             menu: None,
+            props: None,
             rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, away);
