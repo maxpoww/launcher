@@ -2881,6 +2881,20 @@ impl App {
         };
         let (exec, terminal) = match &item.exec {
             Some((exec, terminal)) => (exec.clone(), *terminal),
+            // A plugged-in volume is asked of the FILE MANAGER by name (the
+            // desktop's own FileManager1 service): `xdg-open` types a mount
+            // point as `inode/mount-point`, which nothing claims, and hands
+            // it to the browser (Max, 2026-10-08: *"now it opens on seam"*).
+            // `xdg-open` stays as the way out if no file manager answers.
+            None if item.kind == Kind::Volume => (
+                format!(
+                    "busctl --user call org.freedesktop.FileManager1 /org/freedesktop/FileManager1 \
+                     org.freedesktop.FileManager1 ShowFolders ass 1 {uri} '' || xdg-open {path}",
+                    uri = launch::shell_quote(&file_uri(&item.path)),
+                    path = launch::shell_quote(&item.path),
+                ),
+                false,
+            ),
             None => (format!("xdg-open {}", launch::shell_quote(&item.path)), false),
         };
         info!("desktop: open {} ({:?})", item.name, item.kind);
