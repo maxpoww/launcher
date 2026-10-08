@@ -75,6 +75,9 @@ const ITEMS_MAX: usize = 256;
 const LAYER_HEADROOM: u32 = 8;
 /// How far a press travels before it is a drag and not a click.
 const DRAG_START: f32 = 6.0;
+/// How long a sent pointer shape is trusted before it is sent again on the
+/// next motion (see `Desktop::cursor_sent`).
+const CURSOR_REFRESH: std::time::Duration = std::time::Duration::from_millis(120);
 /// Remembered positions kept for files that are not on the desktop any
 /// more (a file away for a moment keeps its place); past this the absent
 /// ones are forgotten.
@@ -325,6 +328,13 @@ pub(crate) struct Desktop {
     pub band: Option<((f32, f32), (f32, f32))>,
     /// The right-click menu, while it is up.
     pub menu: Option<Menu>,
+    /// When the pointer's shape was last sent: it is sent again after a
+    /// while even when nothing changed on our side, because the waveview
+    /// plugin paints its edge-resize arrows straight onto the pointer (not
+    /// through the protocol) and does not always take them off when the
+    /// pointer comes onto the desktop — our cached "already the arrow" then
+    /// kept a stale shape for good (Max, 2026-10-08: "still stuck").
+    pub cursor_sent: Option<std::time::Instant>,
     /// An item's name being typed.
     pub rename: Option<Rename>,
     /// The icons are put away (a click on bare wallpaper toggles it); the
@@ -2397,9 +2407,28 @@ impl App {
     /// state, not only on motion — a shape left over from the last state
     /// (the band's, the drag's) used to stay until the pointer moved.
     pub(crate) fn desktop_cursor(&mut self) {
+        // Only while the pointer is on the desktop: Hyprland applies a shape
+        // request from whichever client holds the pointer focus, and the
+        // dock and the bar are this same client — a request sent from here
+        // while the pointer is on them would redraw THEIR pointer.
+        if self.pointer_surface != crate::options::PointerSurface::Desktop
+            || self.desktop.ptr.is_none()
+        {
+            return;
+        }
         let Some(device) = &self.cursor_device else {
             return;
         };
+        // Stale after a while: something outside the protocol may have
+        // repainted the pointer since (see `cursor_sent`).
+        let now = std::time::Instant::now();
+        if self
+            .desktop
+            .cursor_sent
+            .is_some_and(|t| now.duration_since(t) > CURSOR_REFRESH)
+        {
+            self.cursor_now = None;
+        }
         let over_row = self
             .desktop
             .menu
@@ -2422,8 +2451,13 @@ impl App {
             Shape::Default
         };
         if self.cursor_now != Some(shape) {
+            debug!(
+                "desktop: pointer shape {shape:?} (serial {}, was {:?})",
+                self.enter_serial, self.cursor_now
+            );
             device.set_shape(self.enter_serial, shape);
             self.cursor_now = Some(shape);
+            self.desktop.cursor_sent = Some(now);
         }
     }
 
