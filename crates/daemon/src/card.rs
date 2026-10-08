@@ -79,8 +79,9 @@ const SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(220);
 const FLING_SCROLL: f32 = 40.0;
 const FLING_BRIEF: std::time::Duration = std::time::Duration::from_millis(170);
 const FLING_QUIET: std::time::Duration = std::time::Duration::from_millis(70);
-// 18 at first, then 36 (Max: *"make the jump to the side snappier"*).
-const FLING_RATE: f32 = 36.0;
+// 18 at first, then 36 (Max: *"make the jump to the side snappier"*), then 70
+// (*"snappier"*).
+const FLING_RATE: f32 = 70.0;
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
