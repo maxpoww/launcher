@@ -114,7 +114,10 @@ const TRAVEL_BRAKE: f32 = 28.0;
 const TRAVEL_CREEP: f32 = 40.0;
 /// How long after a workspace swipe's fingers lift the card stays away: the
 /// compositor is still sliding the workspaces into place.
-const SWIPE_SETTLE: std::time::Duration = std::time::Duration::from_millis(320);
+// 320 at first: the card came a beat after the workspace had landed (Max:
+// *"the reveal should be done when i land on the workspace"*) → 130, so its
+// own unroll finishes about as the slide does.
+const SWIPE_SETTLE: std::time::Duration = std::time::Duration::from_millis(130);
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
