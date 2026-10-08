@@ -308,7 +308,9 @@ The big daemon files are cohesive but long — go straight to the function:
   (the right-click drag and the pinch at their start and end; the scroll, which has no end, through
   `card_window_nudged`: put down once quiet for 280 ms). WIDTH: a press within `GRIP` of either side edge resizes it
   (`Press::Resize`; `WIDTH_MIN`..`WIDTH_MAX`; the text is re-wrapped as it goes); the width is the
-  WINDOW's (`Card::widths`, by address), kept and forgotten with its slid place (`geom`). A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
+  WINDOW's (`Card::widths`, by address), kept like its slid place (`geom`): both survive turning
+  the card off and on, and go when the window closes (`card_window_closed`, from the
+  `closewindow` event). A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
   the list, sideways slides the card — the way that travels `SCROLL_CLAIM` first takes it until
   the scroll is quiet for 220 ms; while it slides the card the input region is the whole surface
   (the card moves out from under the pointer and the scroll must keep arriving). A THROW (`Swipe::thrown`, judged when the sliding scroll STOPS —
@@ -319,7 +321,7 @@ The big daemon files are cohesive but long — go straight to the function:
   `TRAVEL_SPEED`, gaining at most `TRAVEL_ACCEL` — one pace for following the fingers and for the
   throw's run to the end (`card rate <speed> [accel]` tunes it live). A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
   <delta>` → `card_slide`). A press on the card itself slides it sideways (no snapping; remembered per window as
-  a fraction of its width, forgotten when turned off there); wheel scrolls; × on the hovered item
+  a fraction of its width until the window closes); wheel scrolls; × on the hovered item
   removes. Pictures ride the Files thumbnailer (`card_on_thumb`) into the card renderer's own
   32-layer array. Pointer-free: `waverunner-ctl card [toggle|all|add text <…>|add file
   <path>|remove <n>|clear|state]`. Not yet: the title-bar button + stacking + frame-exact follow

@@ -51,8 +51,7 @@ pub(crate) const WIDTH: f32 = 320.0;
 /// want to resize the card width"*): a press within [`GRIP`] of either side
 /// takes that edge, between these limits (the first mockup's were 240–520).
 /// The width is the WINDOW's, like the place the card was slid to: each
-/// window has its own, and turning the card off there forgets it (*"the size
-/// is also per window and reset when i close it, as the position"*).
+/// window has its own, kept until that window closes.
 const WIDTH_MIN: f32 = 240.0;
 const WIDTH_MAX: f32 = 640.0;
 const GRIP: f32 = 7.0;
@@ -1248,8 +1247,12 @@ impl App {
                 self.card.off.insert(addr.clone());
             }
             // Turning it off here forgets where it was put here.
-            self.card.geom.remove(&addr);
-            self.card.widths.remove(&addr);
+            // Where it was put here and how wide stay with the WINDOW: off
+            // and on again finds the card as it was left, until the window
+            // itself closes (`card_window_closed`). It used to forget here
+            // (the mockup's rule) — Max, 2026-10-08: *"if i close and open
+            // the card it remembers the position and size until i close
+            // that window."*
             if self.card.host.as_deref() == Some(addr.as_str()) {
                 self.card_dismiss();
             }
@@ -1268,8 +1271,7 @@ impl App {
             self.card.all = false;
             self.card.armed.clear();
             self.card.off.clear();
-            self.card.geom.clear();
-            self.card.widths.clear();
+
             self.card_tell_bar("*", false);
             self.card_dismiss();
             "off for every window".to_owned()
@@ -1330,6 +1332,16 @@ impl App {
             self.card.press = None;
             self.request_card_draw();
         }
+    }
+
+    /// A window closed: everything the card kept for it goes — whether it
+    /// was on for it, where it was put on it, how wide. (An address is
+    /// reused: the next window to get it must find nothing.)
+    pub(crate) fn card_window_closed(&mut self, addr: &str) {
+        self.card.armed.remove(addr);
+        self.card.off.remove(addr);
+        self.card.geom.remove(addr);
+        self.card.widths.remove(addr);
     }
 
     /// Find the card's window again and put the card where it is now. Runs

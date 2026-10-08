@@ -1224,6 +1224,8 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 // Window memory: an app's last window closing
                                 // is where it reopens next time.
                                 app.remember_window_closed(&addr);
+                                // The card forgets what it kept for the window.
+                                app.card_window_closed(&addr);
                                 // Addresses are window pointers and Hyprland
                                 // reuses them, so a thumbnail left filed under a
                                 // dead window's address would eventually be
