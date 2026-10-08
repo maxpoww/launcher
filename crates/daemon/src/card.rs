@@ -58,6 +58,9 @@ const SLIDE_PER_SCROLL: f32 = 2.5;
 /// **40** (*"snappier, and also the hide animation"*) — down, or back up, in
 /// well under a tenth of a second. One rate for both ways.
 const UNROLL_RATE: f32 = 40.0;
+/// How long a scroll that moves a window (on the OPTIONS pill) must be
+/// quiet before the window counts as put down.
+const NUDGE_QUIET: std::time::Duration = std::time::Duration::from_millis(280);
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -246,6 +249,10 @@ pub(crate) struct Card {
     /// Its window is in hand (being moved or resized), since when: the
     /// card is away until the window is put down.
     lifted: Option<std::time::Instant>,
+    /// A window moved by scrolling on the OPTIONS pill has no moment it is
+    /// let go: it counts as put down once the scroll has been quiet until
+    /// this instant (`card_window_nudged`).
+    nudge_until: Option<std::time::Instant>,
     scroll: f32,
     max_scroll: f32,
     /// Show the newest item on the next draw.
@@ -1546,6 +1553,47 @@ impl App {
         self.card.shown = 0.0;
         self.card_last_frame = None;
         self.sync_card();
+    }
+
+    /// The card's window was moved a step by a gesture with no end of its
+    /// own (the scroll on the OPTIONS pill): in hand from the first step,
+    /// put down when the steps have stopped for [`NUDGE_QUIET`].
+    pub(crate) fn card_window_nudged(&mut self, addr: &str) {
+        if self.card.host.as_deref() != Some(addr) {
+            return;
+        }
+        let waiting = self.card.nudge_until.is_some();
+        self.card.nudge_until = Some(std::time::Instant::now() + NUDGE_QUIET);
+        if self.card.lifted.is_none() {
+            self.card_window_lifted(addr);
+        }
+        if !waiting {
+            self.card_nudge_wait(NUDGE_QUIET);
+        }
+    }
+
+    fn card_nudge_wait(&mut self, wait: std::time::Duration) {
+        let timer = calloop::timer::Timer::from_duration(wait);
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                let now = std::time::Instant::now();
+                match app.card.nudge_until {
+                    // Scrolled again since: wait out the rest.
+                    Some(until) if until > now => app.card_nudge_wait(until - now),
+                    _ => {
+                        app.card.nudge_until = None;
+                        if let Some(host) = app.card.host.clone() {
+                            app.card_window_placed(&host);
+                        }
+                    }
+                }
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
+        if !armed {
+            self.card.nudge_until = None;
+        }
     }
 
     /// A scroll on the title bar of the card's window (the plugin hears it

@@ -99,6 +99,8 @@ impl App {
         let relative = rpm.get_relative_pointer(&ptr, &qh, ());
         let _ = self.conn.flush();
         debug!("nub drag: grabbed {addr} at ({start_x},{start_y})");
+        // The window is in hand: its card is away until it is dropped.
+        self.card_window_lifted(&addr);
         self.nub_drag = Some(NubDrag {
             locked,
             relative,
@@ -157,6 +159,7 @@ impl App {
         nd.relative.destroy();
         let _ = self.conn.flush();
         debug!("nub drag: dropped {} (travelled {travelled:.0})", nd.addr);
+        self.card_window_placed(&nd.addr);
     }
 }
 
@@ -253,6 +256,12 @@ impl App {
         sd.acc_x += dx * SCROLL_GAIN;
         sd.acc_y += dy * SCROLL_GAIN;
         sd.last_scroll = Instant::now();
+        // The card is away while the window is being scrolled about.
+        let addr = sd.addr.clone();
+        self.card_window_nudged(&addr);
+        let Some(sd) = self.scroll_drag.as_mut() else {
+            return;
+        };
         if sd.last_move.elapsed() < MOVE_INTERVAL {
             return;
         }
@@ -338,6 +347,7 @@ impl App {
         let Some((x, y, w, h)) = hypr::active_window_geom() else {
             return;
         };
+        self.card_window_lifted(&addr);
         self.pinch_drag = Some(PinchResize {
             addr,
             start_w: w as f64,
@@ -365,7 +375,9 @@ impl App {
 
     /// Pinch ended: drop the state.
     pub(crate) fn pinch_end(&mut self) {
-        self.pinch_drag = None;
+        if let Some(pd) = self.pinch_drag.take() {
+            self.card_window_placed(&pd.addr);
+        }
     }
 }
 

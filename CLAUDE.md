@@ -304,7 +304,9 @@ The big daemon files are cohesive but long — go straight to the function:
   own drag. While its window is in hand (a move or a resize: the plugin sends `card lifted
   <addr>` when the compositor's drag takes a window, `window-placed <addr>` when it lets go) the
   card is simply away, and unrolls again where the window was put down (`card_window_lifted` /
-  `card_window_placed`). A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
+  `card_window_placed`); the OPTIONS pill's own window gestures say the same from `nub_drag.rs`
+  (the right-click drag and the pinch at their start and end; the scroll, which has no end, through
+  `card_window_nudged`: put down once quiet for 280 ms). A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
   <delta>` → `card_slide`). A press on the card itself slides it sideways (no snapping; remembered per window as
   a fraction of its width, forgotten when turned off there); wheel scrolls; × on the hovered item
   removes. Pictures ride the Files thumbnailer (`card_on_thumb`) into the card renderer's own
