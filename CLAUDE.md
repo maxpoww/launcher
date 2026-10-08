@@ -379,7 +379,8 @@ The big daemon files are cohesive but long — go straight to the function:
     surface takes the pointer) sets the card's `Place`; the card TRAVELS there (`Card::at`). A
     CLICK on an item (press and release without carrying it off) = `card_paste`: the item goes
     on the clipboard (text, or its file) and is pasted into the card's window (Ctrl+V;
-    Ctrl+Shift+V for `TERMINALS`). A
+    Ctrl+Shift+V for `SHIFT_PASTERS` — not foot, which Golem sets to Ctrl+V; `card paste <n>` does it
+    without a pointer). A
     brief scroll that stops is a THROW: outside the window on that side. Edges resize it (`GRIP`,
     `WIDTH_MIN..MAX`). Pictures ride the Files thumbnailer (`card_on_thumb`) into a 32-layer
     array; one pushed out is forgotten and asked for again when next on screen.

@@ -96,10 +96,10 @@ const DRAG_START: f32 = 6.0;
 /// longer when the card's window has to be given the keyboard first).
 const PASTE_SETTLE: u64 = 70;
 const PASTE_FOCUS: u64 = 160;
-/// Apps that paste with Ctrl+Shift+V (Ctrl+V is theirs to pass on).
-const TERMINALS: [&str; 8] = [
-    "foot",
-    "footclient",
+/// Apps that paste with Ctrl+Shift+V (Ctrl+V is theirs to pass on). NOT
+/// foot: Golem's own terminal is set to paste with Ctrl+V
+/// (`clipboard-paste=Control+v`), and Ctrl+Shift+V does nothing there.
+const SHIFT_PASTERS: [&str; 6] = [
     "kitty",
     "alacritty",
     "org.wezfurlong.wezterm",
@@ -844,7 +844,7 @@ impl App {
         );
         self.after_ms(wait, |_| {
             let terminal = crate::hypr::active_window_where()
-                .is_some_and(|(class, _)| TERMINALS.contains(&class.to_lowercase().as_str()));
+                .is_some_and(|(class, _)| SHIFT_PASTERS.contains(&class.to_lowercase().as_str()));
             crate::hypr::send_shortcut_active(if terminal { "CTRL SHIFT" } else { "CTRL" }, "v");
         });
     }
@@ -1909,6 +1909,21 @@ impl App {
                 }
                 _ => "add text <…> | add file <path>".to_owned(),
             },
+            "paste" => {
+                self.card_load();
+                match rest
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| self.card.items.get(n))
+                    .map(|it| it.id)
+                {
+                    Some(id) => {
+                        self.card_paste(id);
+                        "pasted".to_owned()
+                    }
+                    None => "no such item".to_owned(),
+                }
+            }
             "remove" => {
                 self.card_load();
                 match rest
