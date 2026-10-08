@@ -278,11 +278,12 @@ The big daemon files are cohesive but long — go straight to the function:
   folder's tree walked on a thread, `folder_size`), Dimensions (images), Link to, Where, Owner,
   Access, Modified, Created, Opened. `debug-desktop props <n>` opens it without a menu. Not yet:
   per-output surfaces, Escape closing the menu (no keyboard while it is up). MOVE TO: that row
-  does not act, it turns the menu's PAGE (`Menu::show_targets`, the menu stays up; `‹ Back` →
+  does not act, it turns the menu's PAGE (`Menu::show_targets`, the menu stays up; `‹ Back`, on hover or click →
   `show_main`): Cut · Copy (`App::serve_files` puts the selection on the clipboard as a file
   manager does, verb included) · the sticks and phones · the other computers. The lists are
   `desktop_send.rs`: sticks = volumes mounted under `/run/media/<user>` or `/media` (read from
-  `/proc/mounts` at once; an unmounted stick is not listed), devices = KDE Connect's paired AND
+  `/proc/mounts` at once; an unmounted stick is not listed) PLUS every volume on the desktop
+  (`Desktop::volumes` — a phone goes to `phone_dest`: its first storage's Download), devices = KDE Connect's paired AND
   reachable ones (`kdeconnect-cli -a --id-name-only`, asked on a thread — "Looking for devices…"
   until it answers; a `desktop`/`laptop` type, read with `busctl`, goes in the second list).
   `Action::SendTo(n)` indexes `Desktop::targets`; `desktop_send::send` runs on a thread: a stick

@@ -1444,6 +1444,27 @@ impl App {
     /// devices when the service has answered (asked off the loop).
     fn desktop_show_targets(&mut self) {
         self.desktop.targets = crate::desktop_send::sticks();
+        // Everything mounted on the desktop is a place too — a phone above
+        // all (Max, 2026-10-08: "my Pixel should appear there too, as any
+        // Android, or mounted device"): it is not in /proc/mounts, the
+        // volume service shows it through a folder of its own.
+        for v in &self.desktop.volumes {
+            let dest = if v.phone {
+                crate::desktop_send::phone_dest(&v.path)
+            } else {
+                v.path.clone()
+            };
+            let listed = self.desktop.targets.iter().any(|t| {
+                matches!(&t.place, crate::desktop_send::Place::Stick(p) if *p == v.path || *p == dest)
+            });
+            if !listed {
+                self.desktop.targets.push(crate::desktop_send::Target {
+                    name: v.name.clone(),
+                    place: crate::desktop_send::Place::Stick(dest),
+                    far: false,
+                });
+            }
+        }
         self.desktop.looking = true;
         self.desktop_fill_targets();
         let (tx, rx) = calloop::channel::channel::<Vec<crate::desktop_send::Target>>();
@@ -2277,6 +2298,12 @@ impl App {
                     if let Some(menu) = self.desktop.menu.take() {
                         self.desktop_open_props(i, (x, y), Some(menu));
                     }
+                } else if over.and_then(|r| menu.action(r)) == Some(Action::Back) {
+                    // Coming onto Back turns the page back, as it does in
+                    // the Properties box (Max, 2026-10-08).
+                    let h = self.desktop_size.1 as f32;
+                    menu.show_main(h);
+                    menu.hover = menu.hit((x, y));
                 }
                 self.request_desktop_draw();
             }

@@ -83,6 +83,30 @@ fn unescape_mount(field: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Where files go on a mounted PHONE (MTP: Android in file-transfer mode).
+/// Its top folder only lists its storages and takes no files; inside the
+/// first one, Download is where a file sent to a phone is looked for —
+/// else that storage itself.
+pub(crate) fn phone_dest(mount: &Path) -> PathBuf {
+    let mut storages: Vec<PathBuf> = std::fs::read_dir(mount)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    storages.sort();
+    let Some(storage) = storages.into_iter().next() else {
+        return mount.to_path_buf();
+    };
+    let download = storage.join("Download");
+    if download.is_dir() {
+        download
+    } else {
+        storage
+    }
+}
+
 /// The sticks plugged in and in use right now.
 pub(crate) fn sticks() -> Vec<Target> {
     std::fs::read_to_string("/proc/mounts")
@@ -178,7 +202,15 @@ fn copy_all(src: &Path, dest: &Path) -> std::io::Result<()> {
         }
         Ok(())
     } else {
-        std::fs::copy(src, dest).map(|_| ())
+        // `fs::copy` also carries the file's permissions over, which a
+        // phone's storage (MTP, through gvfs) refuses: there the bytes
+        // alone are written.
+        if std::fs::copy(src, dest).is_ok() {
+            return Ok(());
+        }
+        let mut from = std::fs::File::open(src)?;
+        let mut to = std::fs::File::create(dest)?;
+        std::io::copy(&mut from, &mut to).map(|_| ())
     }
 }
 
@@ -298,6 +330,19 @@ fn outcome(done: usize, failed: usize, verb: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_phone_takes_files_in_its_first_storages_download() {
+        let d = std::env::temp_dir().join(format!("waverunner-phone-{}", std::process::id()));
+        // No storage shown (locked): the mount itself.
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(phone_dest(&d), d);
+        std::fs::create_dir_all(d.join("Internal shared storage")).unwrap();
+        assert_eq!(phone_dest(&d), d.join("Internal shared storage"));
+        std::fs::create_dir_all(d.join("Internal shared storage/Download")).unwrap();
+        assert_eq!(phone_dest(&d), d.join("Internal shared storage/Download"));
+        std::fs::remove_dir_all(&d).ok();
+    }
 
     #[test]
     fn mounted_sticks_are_found_by_their_folder_under_media() {
