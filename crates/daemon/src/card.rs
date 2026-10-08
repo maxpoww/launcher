@@ -1388,8 +1388,18 @@ impl App {
             self.sync_card_input();
         }
         let rect = self.card.rect.unwrap_or_default();
+        // The box's colour is read on one side of the screen or the other
+        // (`box_surface_at`). By the WINDOW's place, not the card's own: a
+        // card crossing the screen's middle changed colour in mid-flight,
+        // which read as a hole in the glide (Max, 2026-10-08: *"i see a
+        // 'hole' on the animation when the card cross the middle of the
+        // window"*). Its window does not move while it slides.
         let paint = {
-            let (fill, ink) = self.box_surface_at(rect);
+            let side = match self.card.spot {
+                Some(s) => Rect::new(s.x, s.y, s.w, s.h),
+                None => rect,
+            };
+            let (fill, ink) = self.box_surface_at(side);
             Paint { fill, ink }
         };
         let Some(renderer) = self.card_renderer.as_mut() else {
