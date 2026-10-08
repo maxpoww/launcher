@@ -5980,6 +5980,11 @@ impl App {
             self.desktop_key(keysym, utf8);
             return;
         }
+        // …and while the desktop holds the keyboard, its shortcuts.
+        if self.desktop.keys {
+            self.desktop_shortcut(keysym);
+            return;
+        }
         // FAST LAUNCH holds the keyboard while its bubble is up.
         if self.fast.open {
             self.fast_key(keysym, utf8);
@@ -6696,6 +6701,14 @@ impl KeyboardHandler for App {
             // window) keeps what was typed.
             if self.desktop.rename.is_some() {
                 self.desktop_end_rename(true);
+            }
+            // Taken from us (the launcher opened, a lock): we are not
+            // holding it any more, and must not ask for it back.
+            if self.desktop.keys {
+                self.desktop.keys = false;
+                if let Some(layer) = self.desktop_layer.as_ref() {
+                    surface::set_interactive(layer, false);
+                }
             }
             self.complete_keyboard_handback(KbSurface::Desktop);
             return;

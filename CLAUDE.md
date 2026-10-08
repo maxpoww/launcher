@@ -311,6 +311,14 @@ The big daemon files are cohesive but long — go straight to the function:
   the whole screen only while one is up (a click anywhere else, a window included, just closes
   it); its pointer events go to `desktop_pointer` (`PointerSurface::DesktopTop`). Without it
   (`desktop_top_ready` false) they are drawn on the desktop as before.
+  KEYBOARD (`desktop_take_keys` / `desktop_drop_keys`, `Desktop::keys`): a left click on the
+  desktop takes the keyboard EXCLUSIVE (on-demand would be handed to it on mere hover —
+  Hyprland focuses any non-None layer under the pointer); it goes back 80 ms after the pointer
+  is on neither desktop surface with no menu up (`desktop_keys_check_soon`), when a window
+  opens/closes/moves or the workspace changes (hypr.rs event loop), when the compositor takes it
+  (keyboard `leave`), or on Escape with nothing selected. Keys route in `handle_key_event`
+  after the rename branch → `desktop_shortcut`: Ctrl+C/X/V/A, Delete (bin), Enter (open), F2
+  (rename one), arrows (`neighbour`), Escape (menu → selection → keyboard).
   HARDENING (2026-10-08 review): a `.desktop` file is a shortcut only when TRUSTED — executable,
   or an installed app's own (same file name + Exec as an indexed entry, lifted in
   `reload_desktop`); otherwise a plain file under its real name whose double click says so and

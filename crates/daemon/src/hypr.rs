@@ -1197,6 +1197,9 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         // `App::sync_solitary_pseudo`.
                         if LAYOUT_SHAPE.iter().any(|r| name.starts_with(r)) {
                             app.schedule_solitary_pseudo();
+                            // A window arrived or left: what is typed next is
+                            // for a window, not for the desktop.
+                            app.desktop_drop_keys();
                         }
                         // `workspacev2>>ID,NAME` — the space changed. Hand back
                         // the window that was left there, if the way in didn't
@@ -1208,6 +1211,7 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 .and_then(|d| d.split(',').next())
                                 .and_then(|d| d.trim().parse::<i64>().ok())
                             {
+                                app.desktop_drop_keys();
                                 app.on_workspace_changed(id);
                             }
                         }

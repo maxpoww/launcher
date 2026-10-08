@@ -419,6 +419,9 @@ pub(crate) struct Desktop {
     pub cursor_sent: Option<std::time::Instant>,
     /// An item's name being typed.
     pub rename: Option<Rename>,
+    /// The desktop holds the keyboard: from a click on it until the pointer
+    /// leaves it, or a window opens (see `App::desktop_take_keys`).
+    pub keys: bool,
     /// The icons are put away (a click on bare wallpaper toggles it); the
     /// files stay. Kept in the settings store.
     pub hidden: bool,
@@ -631,6 +634,25 @@ pub(crate) fn drag_payload(paths: &[&str], mime: &str) -> Option<String> {
         PLAIN_TEXT => Some(paths.join("\n")),
         _ => None,
     }
+}
+
+/// The item an arrow key goes to from the cell `from`: the nearest one that
+/// way (`step` is one of the four directions), a row or column off counting
+/// double so the straight neighbour wins. With nothing selected (`from`
+/// none): the first item, by column then row.
+pub(crate) fn neighbour(slots: &[Option<Slot>], from: Option<Slot>, step: (i32, i32)) -> Option<usize> {
+    let placed = slots.iter().enumerate().filter_map(|(i, s)| s.map(|s| (i, s)));
+    let Some(from) = from else {
+        return placed.min_by_key(|(_, s)| *s).map(|(i, _)| i);
+    };
+    placed
+        .filter_map(|(i, (c, r))| {
+            let (dc, dr) = (c as i32 - from.0 as i32, r as i32 - from.1 as i32);
+            let (along, across) = if step.0 != 0 { (dc * step.0, dr.abs()) } else { (dr * step.1, dc.abs()) };
+            (along > 0).then_some((along + 2 * across, i))
+        })
+        .min()
+        .map(|(_, i)| i)
 }
 
 /// The rectangle between two corners, whichever way they were dragged.
@@ -2087,7 +2109,10 @@ impl App {
         let Some(rename) = self.desktop.rename.take() else {
             return;
         };
-        if self.desktop_layer.is_some() {
+        // The keyboard goes back to the window it came from — unless the
+        // desktop holds it anyway (a click on it): then it stays for the
+        // shortcuts.
+        if self.desktop_layer.is_some() && !self.desktop.keys {
             // Armed before the release: the compositor's `leave` completes it.
             self.begin_keyboard_handback(crate::KbSurface::Desktop, None);
             if let Some(layer) = self.desktop_layer.as_ref() {
@@ -2174,6 +2199,149 @@ impl App {
                 rename.text.push_str(s);
                 self.request_desktop_draw();
             }
+        }
+    }
+
+    /// A click on the desktop gives it the keyboard, so the shortcuts a
+    /// file manager has work on what is selected (Max, 2026-10-09: Ctrl+X/C/V
+    /// — and Delete, Enter, F2, the arrows, Escape, Ctrl+A).
+    ///
+    /// EXCLUSIVELY, and given back by us: a surface that merely ASKS for the
+    /// keyboard (on-demand) is handed it by Hyprland whenever the pointer
+    /// crosses it, and wallpaper is crossed all the time. So it is taken at
+    /// a click and returned the moment the pointer has left the desktop
+    /// (`desktop_keys_check_soon`), a window opens or the space changes
+    /// (`desktop_drop_keys`) — keys typed at a window never land here.
+    pub(crate) fn desktop_take_keys(&mut self) {
+        if self.desktop.keys {
+            return;
+        }
+        let Some(layer) = self.desktop_layer.as_ref() else {
+            return;
+        };
+        crate::surface::set_interactive(layer, true);
+        let _ = self.conn.flush();
+        self.cancel_keyboard_handback(crate::KbSurface::Desktop);
+        self.desktop.keys = true;
+        debug!("desktop: has the keyboard");
+    }
+
+    /// Give the keyboard back to the window it came from. A name being
+    /// typed keeps it until it is settled.
+    pub(crate) fn desktop_drop_keys(&mut self) {
+        if !self.desktop.keys || self.desktop.rename.is_some() {
+            return;
+        }
+        self.desktop.keys = false;
+        debug!("desktop: gives the keyboard back");
+        self.begin_keyboard_handback(crate::KbSurface::Desktop, None);
+        if let Some(layer) = self.desktop_layer.as_ref() {
+            crate::surface::set_interactive(layer, false);
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// The pointer left one of the desktop's two surfaces. If, a moment
+    /// later, it is on neither (a leave for the menus' surface is followed
+    /// at once by an enter on the other), the keyboard goes back.
+    fn desktop_keys_check_soon(&mut self) {
+        if !self.desktop.keys {
+            return;
+        }
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(80));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            let away = app.desktop.ptr.is_none()
+                && app.desktop.menu.is_none()
+                && app.desktop.props.is_none();
+            if away {
+                app.desktop_drop_keys();
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
+    }
+
+    /// A key while the desktop holds the keyboard: a file manager's
+    /// shortcuts, on what is selected.
+    pub(crate) fn desktop_shortcut(&mut self, keysym: Keysym) {
+        let at = self.desktop.ptr.unwrap_or((self.desktop.grid.x0, MARGIN));
+        // A menu or a box up: Escape puts it away; nothing else is for it.
+        if self.desktop.menu.is_some() || self.desktop.props.is_some() {
+            if keysym == Keysym::Escape {
+                self.desktop.menu = None;
+                self.desktop.props = None;
+                self.request_desktop_draw();
+            }
+            return;
+        }
+        if self.desktop.hidden {
+            return;
+        }
+        let ctrl = self.modifiers.ctrl;
+        match keysym {
+            Keysym::c | Keysym::C if ctrl => self.desktop_menu_act(Action::Copy, None, at),
+            Keysym::x | Keysym::X if ctrl => self.desktop_menu_act(Action::Cut, None, at),
+            Keysym::v | Keysym::V if ctrl => self.desktop_paste(at),
+            Keysym::a | Keysym::A if ctrl => {
+                self.desktop.selected = self
+                    .desktop
+                    .items
+                    .iter()
+                    .zip(&self.desktop.slots)
+                    .filter(|(_, slot)| slot.is_some())
+                    .map(|(it, _)| it.path.clone())
+                    .collect();
+                self.request_desktop_draw();
+            }
+            Keysym::Delete | Keysym::KP_Delete if !self.desktop.selected.is_empty() => {
+                self.desktop_menu_act(Action::MoveToBin, None, at);
+                self.request_desktop_draw();
+            }
+            Keysym::Return | Keysym::KP_Enter if !self.desktop.selected.is_empty() => {
+                self.desktop_menu_act(Action::Open, None, at);
+            }
+            Keysym::F2 => {
+                // One thing selected, and not a plugged-in volume.
+                let mut picked = self
+                    .desktop
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, it)| self.desktop.selected.contains(&it.path));
+                if let (Some((i, it)), None) = (picked.next(), picked.next()) {
+                    if it.kind != Kind::Volume {
+                        self.desktop_begin_rename(i);
+                    }
+                }
+            }
+            Keysym::Escape => {
+                if self.desktop.selected.is_empty() {
+                    self.desktop_drop_keys();
+                } else {
+                    self.desktop.selected.clear();
+                    self.request_desktop_draw();
+                }
+            }
+            Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
+                let step = match keysym {
+                    Keysym::Left => (-1, 0),
+                    Keysym::Right => (1, 0),
+                    Keysym::Up => (0, -1),
+                    _ => (0, 1),
+                };
+                let from = self
+                    .desktop
+                    .items
+                    .iter()
+                    .zip(&self.desktop.slots)
+                    .find(|(it, _)| self.desktop.selected.contains(&it.path))
+                    .and_then(|(_, slot)| *slot);
+                if let Some(i) = neighbour(&self.desktop.slots, from, step) {
+                    self.desktop.selected.clear();
+                    self.desktop.selected.insert(self.desktop.items[i].path.clone());
+                    self.request_desktop_draw();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2447,6 +2615,7 @@ impl App {
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.desktop.press = None;
                 self.desktop.ptr = None;
+                self.desktop_keys_check_soon();
                 // A menu drawn ON the desktop would hang under whatever took
                 // the pointer, and goes with it. On its own surface it takes
                 // the pointer itself (this very leave), and stays.
@@ -2486,6 +2655,11 @@ impl App {
                         debug!("desktop: press with no pointer position (no enter yet); ignored");
                         return;
                     };
+                    // A click on the desktop gives it the keyboard (not one
+                    // on the menus' surface, which lies over the windows too).
+                    if self.pointer_surface == crate::options::PointerSurface::Desktop {
+                        self.desktop_take_keys();
+                    }
                     debug!(
                         "desktop: press at ({:.0},{:.0}) on {} (menu {}, hidden {})",
                         at.0,
@@ -3954,6 +4128,21 @@ mod tests {
         assert_eq!(brought, vec![desk.join("f.txt")]);
         assert!(dir.join("elsewhere/f.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn arrows_go_to_the_nearest_icon_that_way() {
+        // a b .      (0,0) (1,0)
+        // c . d      (0,1)       (2,1)
+        let slots = vec![Some((0, 0)), Some((1, 0)), Some((0, 1)), Some((2, 1)), None];
+        assert_eq!(neighbour(&slots, None, (1, 0)), Some(0), "nothing selected: the first");
+        assert_eq!(neighbour(&slots, Some((0, 0)), (1, 0)), Some(1));
+        assert_eq!(neighbour(&slots, Some((0, 0)), (0, 1)), Some(2));
+        assert_eq!(neighbour(&slots, Some((0, 0)), (-1, 0)), None, "nothing that way");
+        // From c rightwards: d in its own row beats b one row up… at equal cost the
+        // straight one wins (b: 1 along + 2×1 across = 3; d: 2 along = 2).
+        assert_eq!(neighbour(&slots, Some((0, 1)), (1, 0)), Some(3));
+        assert_eq!(neighbour(&slots, Some((2, 1)), (0, -1)), Some(1));
     }
 
     #[test]
