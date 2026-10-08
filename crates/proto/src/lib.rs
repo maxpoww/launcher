@@ -109,8 +109,8 @@ pub enum Command {
     /// position.
     DebugDesktop(String),
     /// The CARD (the shelf that rides the windows), without a pointer:
-    /// `toggle` (empty = toggle) turns it on or off for the focused window,
-    /// as the button on a title bar does; `all` is the master switch; `add
+    /// `toggle [addr]` (empty = toggle) turns it on or off for the focused
+    /// window (or the one at `addr` — what the button on a title bar sends); `all` is the master switch; `add
     /// text <…>` / `add file <path>` put an item on it; `remove <n>`,
     /// `clear`; `state` logs what it holds and where it is.
     Card(String),
@@ -436,7 +436,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-stats",
     "debug-gear <open net|open bt|close|state|detail|share|hotspot|files|back|password|type|scroll|pair|fake-off>",
     "debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row> <uri…>|select <n…>|band <x0> <y0> <x1> <y1>|hide|show|toggle|forget]",
-    "card [toggle|all|add text <…>|add file <path>|remove <n>|clear|state]",
+    "card [toggle [addr]|all|add text <…>|add file <path>|remove <n>|clear|state]",
     "options-trigger <id>",
     "control-panel",
     "modules [name]",

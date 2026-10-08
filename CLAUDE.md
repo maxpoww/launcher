@@ -280,7 +280,9 @@ The big daemon files are cohesive but long — go straight to the function:
   per-output surfaces, Escape closing the menu (no keyboard while it is up).
 - `card.rs` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new).
   ONE card with ONE list; it sits inside a window (under the bar, on the right, 320 wide, 10 in
-  from the edges) and is turned on per window (`card toggle` = the future title-bar button;
+  from the edges) and is turned on per window (`card toggle [addr]` — sent by the card button at the right end of a floating window's title
+  bar, drawn by the waveview plugin, which we tell the state with `hl.plugin.waveview.card(addr,
+  on)`: `card_tell_bar`;
   `card all` = the master switch: `Card::armed`). It follows the focus only onto windows it is on
   for (`card_focus_changed`, called where `refresh_options_content` notices the focus moved) and
   stays on its window otherwise; it unrolls from the top (`shown`, a clip — the card is whole

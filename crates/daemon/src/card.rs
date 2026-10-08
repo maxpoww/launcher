@@ -22,7 +22,7 @@
 //! (out of a web page) is saved beside the list. A drag out is a real
 //! Wayland drag of ours, always a COPY: the item stays.
 //!
-//! Pointer-free: `waverunner-ctl card [toggle|all|add text <…>|add file
+//! Pointer-free: `waverunner-ctl card [toggle [addr]|all|add text <…>|add file
 //! <path>|remove <n>|clear|state]`.
 
 use std::collections::{HashMap, HashSet};
@@ -779,6 +779,11 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
+        // A dock that has just started has the card on for no window: any
+        // title bar still showing it on (from the dock before) is put right.
+        if self.card_size == (0, 0) {
+            self.card_tell_bar("*", false);
+        }
         self.card_size = (width, height);
         if let Some(fs) = &self.card_fscale {
             fs.set_logical_size(width, height);
@@ -1020,16 +1025,25 @@ impl App {
                 .is_some_and(|s| s.visible && s.h >= MIN_HEIGHT)
     }
 
-    /// The button on a window's title bar: the card on for the focused
-    /// window (and here), or off for it (and away, if it was here).
-    pub(crate) fn card_toggle(&mut self) -> String {
-        let Some(addr) = self
-            .options_active_addr
-            .clone()
-            .or_else(crate::hypr::active_window)
-        else {
+    /// Tell the title bars which windows the card is on for (`addr`: one
+    /// window, or "*" for all): the plugin draws the button, we own the
+    /// answer. Nothing hears it without the plugin, which is fine.
+    fn card_tell_bar(&self, addr: &str, on: bool) {
+        crate::hypr::eval(&format!("hl.plugin.waveview.card(\"{addr}\", {on})"));
+    }
+
+    /// The button on a window's title bar: the card on for that window (and
+    /// here), or off for it (and away, if it was here). Without an address:
+    /// the focused window.
+    pub(crate) fn card_toggle(&mut self, addr: Option<&str>) -> String {
+        let addr = addr
+            .map(str::to_owned)
+            .or_else(|| self.options_active_addr.clone())
+            .or_else(crate::hypr::active_window);
+        let Some(addr) = addr else {
             return "no window is focused".to_owned();
         };
+        self.card_tell_bar(&addr, !self.card.armed(&addr));
         if self.card.armed(&addr) {
             self.card.armed.remove(&addr);
             if self.card.all {
@@ -1056,11 +1070,13 @@ impl App {
             self.card.armed.clear();
             self.card.off.clear();
             self.card.geom.clear();
+            self.card_tell_bar("*", false);
             self.card_dismiss();
             "off for every window".to_owned()
         } else {
             self.card.all = true;
             self.card.off.clear();
+            self.card_tell_bar("*", true);
             if let Some(addr) = self
                 .options_active_addr
                 .clone()
@@ -1082,6 +1098,10 @@ impl App {
             return;
         }
         if self.card.armed(addr) {
+            // (A window opened since the master switch has not heard yet.)
+            if self.card.all {
+                self.card_tell_bar(addr, true);
+            }
             self.card_summon(addr);
         }
     }
@@ -1828,7 +1848,7 @@ impl App {
         let (verb, rest) = what.split_once(' ').unwrap_or((what, ""));
         let rest = rest.trim();
         match verb {
-            "" | "toggle" => self.card_toggle(),
+            "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
             "all" => self.card_toggle_all(),
             "add" => match rest.split_once(' ') {
                 Some(("text", text)) => {
