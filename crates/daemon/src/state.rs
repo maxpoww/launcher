@@ -201,6 +201,7 @@ impl UiState {
             | Command::DebugStats(_)
             | Command::DebugGear(_)
             | Command::DebugDesktop(_)
+            | Command::Card(_)
             | Command::FloatMode(_)
             | Command::ControlPanel
             | Command::Modules(_)

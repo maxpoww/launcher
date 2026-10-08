@@ -278,4 +278,31 @@ The big daemon files are cohesive but long — go straight to the function:
   folder's tree walked on a thread, `folder_size`), Dimensions (images), Link to, Where, Owner,
   Access, Modified, Created, Opened. `debug-desktop props <n>` opens it without a menu. Not yet:
   per-output surfaces, Escape closing the menu (no keyboard while it is up).
+- `card.rs` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new).
+  ONE card with ONE list; it sits inside a window (under the bar, on the right, 320 wide, 10 in
+  from the edges) and is turned on per window (`card toggle` = the future title-bar button;
+  `card all` = the master switch: `Card::armed`). It follows the focus only onto windows it is on
+  for (`card_focus_changed`, called where `refresh_options_content` notices the focus moved) and
+  stays on its window otherwise; it unrolls from the top (`shown`, a clip — the card is whole
+  underneath). Its own `Top`-layer surface covers the output (`surface::create_card_surface`,
+  exclusive zone -1 so surface coordinates are the monitor's): the card is drawn where
+  `hypr::window_spot(addr)` says its window is and only its box is in the input region, so a
+  change of window is a redraw, never a resize; the renderer is built at the first summon.
+  SCAFFOLDING until the waveview plugin carries it: the window's place is re-read on layout
+  events and on a 250 ms poll while a card is up (`card_poll_arm`), so it trails a dragged window
+  and, being a layer, draws over any window overlapping its host. ITEMS (`card.json` in the data
+  dir): a text is kept whole; a file/folder/picture is kept as its PATH (not copied); a picture
+  that came as pixels is saved under `card/` and goes with its item. DROP IN
+  (`card_dnd_enter/drop/received`, routed by `DataDeviceHandler` when the drag is over the card's
+  surface — `card_dnd_active`): read the richest type first — `text/uri-list` (local paths →
+  items; none local → the picture's pixels if offered, named after the URL's end, else the text),
+  one `receive` at a time on a thread, `finish()`/`destroy()` always sent. DRAG OUT (`card_lift`):
+  a real Wayland drag, COPY only, the item stays; offers `out_mimes` (URI list, a picture's own
+  type served from the file, the path/text as text), `payload` answers each; the card refuses its
+  own drag. A press on the card itself slides it sideways (no snapping; remembered per window as
+  a fraction of its width, forgotten when turned off there); wheel scrolls; × on the hovered item
+  removes. Pictures ride the Files thumbnailer (`card_on_thumb`) into the card renderer's own
+  32-layer array. Pointer-free: `waverunner-ctl card [toggle|all|add text <…>|add file
+  <path>|remove <n>|clear|state]`. Not yet: the title-bar button + stacking + frame-exact follow
+  (plugin), a drag image for text, per-output.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

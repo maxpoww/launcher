@@ -176,6 +176,44 @@ pub fn create_desktop_surface(
     layer
 }
 
+/// Create and commit the CARD's surface: the shelf that rides the windows
+/// (`card.rs`).
+///
+/// On the `Top` layer, over the windows, covering the whole output
+/// (anchored to all four edges, exclusive zone -1 so the bar's strip is
+/// not taken out of it and the surface's origin is the output's): the card
+/// is drawn wherever its window is, so following a window is a redraw and
+/// never a resize. Input starts empty and is opened over the card's box
+/// only (`App::sync_card_input`); nothing is attached until a card is first
+/// drawn.
+pub fn create_card_surface(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<App>,
+    render_scale: u32,
+) -> LayerSurface {
+    let surface = compositor.create_surface(qh);
+    let layer = layer_shell.create_layer_surface(
+        qh,
+        surface,
+        Layer::Top,
+        Some("waverunner-card"),
+        None, // the compositor picks the active output
+    );
+    layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+    layer.set_size(0, 0);
+    layer.set_exclusive_zone(-1);
+    layer.wl_surface().set_buffer_scale(render_scale as i32);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    if let Ok(region) = Region::new(compositor) {
+        layer
+            .wl_surface()
+            .set_input_region(Some(region.wl_region()));
+    }
+    layer.commit();
+    layer
+}
+
 /// Set a layer surface's pointer input region to the union of `rects`
 /// (logical `x, y, w, h`). An empty slice makes the whole surface
 /// click-through.

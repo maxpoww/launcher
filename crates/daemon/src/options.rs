@@ -903,6 +903,8 @@ pub(crate) enum PointerSurface {
     Deck,
     /// The desktop icons behind the windows (see [`crate::desktop`]).
     Desktop,
+    /// The card on a window (see [`crate::card`]).
+    Card,
 }
 
 /// The pill modules currently on the bar.
@@ -4247,6 +4249,8 @@ impl App {
             // And remember where the user is on this workspace, so arriving
             // back by swipe hands the space over intact.
             self.note_ws_focus();
+            // The card comes along onto a window it is on for.
+            self.card_focus_changed(addr.as_deref());
         }
         // What the window IS, for the state pill. Re-read only when the answer
         // can have changed without us doing it: focus moved, or the engine
@@ -4999,6 +5003,12 @@ impl App {
             .is_some_and(|l| l.wl_surface() == surface)
         {
             PointerSurface::Desktop
+        } else if self
+            .card_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            PointerSurface::Card
         } else {
             PointerSurface::Dock
         }

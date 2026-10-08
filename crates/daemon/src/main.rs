@@ -23,6 +23,7 @@ mod content;
 mod damage;
 mod deck;
 mod deck_thumbs;
+mod card;
 mod desktop;
 mod desktop_menu;
 mod desktop_props;
@@ -318,6 +319,15 @@ fn main() -> anyhow::Result<()> {
         )
     });
 
+    // The CARD: the shelf that rides the windows (`card.rs`). A surface
+    // with nothing attached until a card is first summoned.
+    let card_layer = Some(surface::create_card_surface(
+        &compositor,
+        &layer_shell,
+        &qh,
+        config.options.render_scale.max(1),
+    ));
+
     // Draw each surface at the output's real scale (fractional.rs), when the
     // compositor offers it; otherwise the integer render_scale path above.
     let fractional = fractional::Fractional::bind(&globals, &qh);
@@ -334,6 +344,10 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .zip(desktop_layer.as_ref())
         .map(|(f, l)| f.attach(l.wl_surface(), fractional::SurfaceKind::Desktop, &qh));
+    let card_fscale = fractional
+        .as_ref()
+        .zip(card_layer.as_ref())
+        .map(|(f, l)| f.attach(l.wl_surface(), fractional::SurfaceKind::Card, &qh));
 
     // Where each surface has anything to show (visible.rs), when the
     // compositor takes the hint.
@@ -352,6 +366,10 @@ fn main() -> anyhow::Result<()> {
     let desktop_visible = visible_regions
         .as_ref()
         .zip(desktop_layer.as_ref())
+        .map(|(v, l)| v.attach(l.wl_surface(), &qh));
+    let card_visible = visible_regions
+        .as_ref()
+        .zip(card_layer.as_ref())
         .map(|(v, l)| v.attach(l.wl_surface(), &qh));
 
     // wlr-screencopy + shm for the smart-gaps colour-match. Both optional:
@@ -611,6 +629,19 @@ fn main() -> anyhow::Result<()> {
         desktop_last_frame: None,
         desktop_tick_timer: false,
         desktop_dnd_offer: None,
+        card_layer,
+        card_renderer: None,
+        card_size: (0, 0),
+        card_fscale,
+        card_visible,
+        card: card::Card::default(),
+        card_frame_pending: false,
+        card_dirty: false,
+        card_last_frame: None,
+        card_tick_timer: false,
+        card_poll_timer: false,
+        card_input: Vec::new(),
+        card_dnd_offer: None,
         frecency: focus_cycle::Frecency::default(),
         focus_walk: None,
         walk_focus_pending: None,
@@ -1455,6 +1486,28 @@ pub struct App {
     /// Another app's drag hovering the desktop (its offer, kept until the
     /// drop is read and finished).
     desktop_dnd_offer: Option<DragOffer>,
+    /// The CARD: the shelf that rides the windows, on a surface of its own
+    /// over them — see `card`. Its renderer is built when a card is first
+    /// drawn. `None` after the compositor closed the surface.
+    card_layer: Option<LayerSurface>,
+    card_renderer: Option<Renderer>,
+    /// The card surface's logical size (the output's).
+    card_size: (u32, u32),
+    card_fscale: Option<fractional::SurfaceScale>,
+    card_visible: Option<visible::SurfaceVisible>,
+    card: card::Card,
+    /// One frame in flight at a time, as on every surface.
+    card_frame_pending: bool,
+    card_dirty: bool,
+    /// The last frame of an ease in progress (`None` at rest).
+    card_last_frame: Option<Instant>,
+    card_tick_timer: bool,
+    /// The poll for the card's window is armed (see `card_poll_arm`).
+    card_poll_timer: bool,
+    /// The input region last sent for the card's surface.
+    card_input: Vec<(i32, i32, i32, i32)>,
+    /// The drag hovering the card, held from `enter` to the end of a drop.
+    card_dnd_offer: Option<DragOffer>,
     /// Decaying focus-frequency scores driving the usage-aware focus cycle
     /// (clicking the current-task pill; see `focus_cycle`).
     frecency: focus_cycle::Frecency,
@@ -3056,6 +3109,11 @@ impl App {
                 info!("debug-desktop: {done}");
                 return;
             }
+            Command::Card(what) => {
+                let done = self.card_command(&what);
+                info!("card: {done}");
+                return;
+            }
             Command::DebugModuleBox => {
                 // The gear's own act, without a pointer. A module has to be on
                 // the pill for there to be a box at all — say so rather than
@@ -3137,6 +3195,8 @@ impl App {
     /// and the re-tiling they cause all emit *no* Hyprland event
     /// (verified on socket2), so events alone can never be sufficient.
     fn on_layout_changed(&mut self) {
+        // The card's window may have moved, changed space or gone.
+        self.sync_card();
         // Window open/close/move all land here — refresh the running set
         // regardless of intellihide (the macOS dot + activate-on-click
         // need it even when the dock never dodges).
@@ -3585,6 +3645,8 @@ impl App {
         }
         info!("overview: {}", if active { "open" } else { "closed" });
         self.overview_active = active;
+        // The card is not shown under the overview.
+        self.sync_card();
         // The arrangement changed: the Mind decides against it, so it learns
         // before the frame is drawn rather than after.
         self.sync_shell_state();
@@ -5591,6 +5653,7 @@ impl App {
             SurfaceKind::Options => (&self.options_fscale, self.config.options.render_scale),
             SurfaceKind::Deck => (&self.deck_fscale, self.config.options.render_scale),
             SurfaceKind::Desktop => (&self.desktop_fscale, self.config.desktop.render_scale),
+            SurfaceKind::Card => (&self.card_fscale, self.config.options.render_scale),
         };
         let fallback = fallback.max(1) as f32;
         let scale = fs.as_ref().map_or(fallback, |f| f.scale_or(fallback));
@@ -5603,6 +5666,7 @@ impl App {
             SurfaceKind::Options => self.options_size,
             SurfaceKind::Deck => self.deck_size,
             SurfaceKind::Desktop => self.desktop_size,
+            SurfaceKind::Card => self.card_size,
         };
         let long = w.max(h);
         if long == 0 {
@@ -5627,6 +5691,7 @@ impl App {
                 self.desktop_renderer.as_mut(),
                 &self.desktop_fscale,
             ),
+            SurfaceKind::Card => (self.card_size, self.card_renderer.as_mut(), &self.card_fscale),
         };
         let (w, h) = size;
         let Some(renderer) = renderer else {
@@ -5652,6 +5717,7 @@ impl App {
                 // change — but the input region is re-sent with the draw.
                 self.relayout_desktop();
             }
+            SurfaceKind::Card => self.request_card_draw(),
         }
     }
 
@@ -6166,6 +6232,18 @@ impl CompositorHandler for App {
             }
             return;
         }
+        // The card's.
+        if self
+            .card_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+        {
+            self.card_frame_pending = false;
+            if self.card_dirty {
+                self.draw_card();
+            }
+            return;
+        }
         self.frame_pending = false;
         if self.ui.is_animating() || self.bounce.is_some() || self.dirty {
             self.draw();
@@ -6235,6 +6313,17 @@ impl LayerShellHandler for App {
             self.desktop_renderer = None;
             return;
         }
+        // The card's surface likewise.
+        if self
+            .card_layer
+            .as_ref()
+            .is_some_and(|c| c.wl_surface() == layer.wl_surface())
+        {
+            warn!("card surface closed by the compositor; the card is off");
+            self.card_layer = None;
+            self.card_renderer = None;
+            return;
+        }
         self.exit = true;
     }
 
@@ -6275,6 +6364,14 @@ impl LayerShellHandler for App {
             .is_some_and(|d| d.wl_surface() == layer.wl_surface())
         {
             self.configure_desktop(configure);
+            return;
+        }
+        if self
+            .card_layer
+            .as_ref()
+            .is_some_and(|c| c.wl_surface() == layer.wl_surface())
+        {
+            self.configure_card(configure);
             return;
         }
         let (mut width, mut height) = configure.new_size;
@@ -6681,6 +6778,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         }
         if app.pointer_surface == options::PointerSurface::Desktop {
             app.desktop_pointer(event);
+            return;
+        }
+        if app.pointer_surface == options::PointerSurface::Card {
+            app.card_pointer(event);
             return;
         }
         if app.pointer_surface == options::PointerSurface::Options {
@@ -7132,7 +7233,11 @@ impl DataDeviceHandler for App {
             .as_ref()
             .is_some_and(|l| l.wl_surface() == surface);
         let on_dock = self.layer.wl_surface() == surface;
-        if !on_desktop && !on_dock {
+        let on_card = self
+            .card_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface);
+        if !on_desktop && !on_dock && !on_card {
             return;
         }
         let offer = self
@@ -7141,12 +7246,20 @@ impl DataDeviceHandler for App {
             .filter(|d| d.inner() == device)
             .and_then(|d| d.data().drag_offer());
         if let Some(offer) = offer {
-            self.desktop_dnd_enter(offer, on_dock);
+            if on_card {
+                self.card_dnd_enter(offer);
+            } else {
+                self.desktop_dnd_enter(offer, on_dock);
+            }
         }
     }
 
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {
-        self.desktop_dnd_leave();
+        if self.card_dnd_active() {
+            self.card_dnd_leave();
+        } else {
+            self.desktop_dnd_leave();
+        }
     }
 
     fn motion(
@@ -7157,7 +7270,9 @@ impl DataDeviceHandler for App {
         x: f64,
         y: f64,
     ) {
-        self.desktop_dnd_motion(x as f32, y as f32);
+        if !self.card_dnd_active() {
+            self.desktop_dnd_motion(x as f32, y as f32);
+        }
     }
 
     fn selection(
@@ -7175,7 +7290,11 @@ impl DataDeviceHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
     ) {
-        self.desktop_dnd_drop();
+        if self.card_dnd_active() {
+            self.card_dnd_drop();
+        } else {
+            self.desktop_dnd_drop();
+        }
     }
 }
 
@@ -7221,6 +7340,8 @@ impl DataSourceHandler for App {
     ) {
         if self.is_desktop_drag_source(source) {
             self.desktop_send_drag(&mime, pipe);
+        } else if self.is_card_drag_source(source) {
+            self.card_send_drag(&mime, pipe);
         }
     }
 
@@ -7232,6 +7353,8 @@ impl DataSourceHandler for App {
     ) {
         if self.is_desktop_drag_source(source) {
             self.desktop_drag_end(false);
+        } else if self.is_card_drag_source(source) {
+            self.card_drag_end(false);
         }
     }
 
@@ -7251,6 +7374,8 @@ impl DataSourceHandler for App {
     ) {
         if self.is_desktop_drag_source(source) {
             self.desktop_drag_end(true);
+        } else if self.is_card_drag_source(source) {
+            self.card_drag_end(true);
         }
     }
 

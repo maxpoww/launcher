@@ -198,6 +198,8 @@ impl App {
         }
         // The desktop shows the same file's picture, on its own surface.
         self.desktop_on_thumb(&path, &pixels);
+        // And the card, where the file is on it.
+        self.card_on_thumb(&path, &pixels);
         self.thumb_map.insert(path, (slot, pixels));
         self.schedule_frame();
     }

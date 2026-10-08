@@ -246,6 +246,13 @@ pub(crate) struct DragIcon {
     _pool: RawPool,
 }
 
+impl DragIcon {
+    /// The surface the compositor carries under the pointer.
+    pub(crate) fn surface(&self) -> &WlSurface {
+        &self.surface
+    }
+}
+
 impl Drop for DragIcon {
     fn drop(&mut self) {
         self.surface.destroy();
@@ -2153,6 +2160,13 @@ impl App {
     /// (the drag still happens; the compositor shows its own cursor).
     fn drag_icon(&self, item: &Item, grip: (f32, f32), icon_scale: f32) -> Option<DragIcon> {
         let chain = self.desktop.chains.get(&item.icon)?;
+        self.drag_image(chain, grip, icon_scale)
+    }
+
+    /// A drag image from a picture's pixels (`chain`: an `ICON_SIZE`² RGBA
+    /// mip chain), gripped at `grip`. The card's pictures travel this way
+    /// too (`card.rs`).
+    pub(crate) fn drag_image(&self, chain: &[u8], grip: (f32, f32), icon_scale: f32) -> Option<DragIcon> {
         let shm = self.shm.as_ref()?;
         let stride = ICON_PX * 4;
         let len = stride * ICON_PX;
@@ -2162,7 +2176,7 @@ impl App {
         let mut pool = match RawPool::new(len, shm) {
             Ok(pool) => pool,
             Err(e) => {
-                warn!("desktop: no shm pool for the drag image ({e})");
+                warn!("no shm pool for the drag image ({e})");
                 return None;
             }
         };

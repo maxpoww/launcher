@@ -879,6 +879,52 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
         .collect()
 }
 
+/// Where a window is on its own screen, for the CARD (`card.rs`): the box in
+/// the logical pixels of the monitor it is on (origin = that monitor's
+/// top-left corner), and whether it can be seen at all right now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowSpot {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// Mapped, on the workspace its monitor is showing, and not fullscreen.
+    pub visible: bool,
+}
+
+/// Find `addr` among the windows and say where it is (`j/clients` +
+/// `j/monitors`, both the turn's snapshot). `None`: the window is gone.
+pub fn window_spot(addr: &str) -> Option<WindowSpot> {
+    let clients = reply_json("j/clients")?;
+    let c = clients
+        .as_array()?
+        .iter()
+        .find(|c| c["address"].as_str() == Some(addr))?;
+    let num = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.0);
+    let (x, y) = (num(&c["at"], 0), num(&c["at"], 1));
+    let (w, h) = (num(&c["size"], 0), num(&c["size"], 1));
+    let ws = c["workspace"]["id"].as_i64().unwrap_or(-1);
+    let mon = c["monitor"].as_i64().unwrap_or(0);
+    let monitors = reply_json("j/monitors")?;
+    let m = monitors
+        .as_array()?
+        .iter()
+        .find(|m| m["id"].as_i64() == Some(mon))?;
+    let fullscreen = c["fullscreen"].as_i64().unwrap_or(0) != 0
+        || c["fullscreen"].as_bool().unwrap_or(false);
+    let visible = c["mapped"].as_bool().unwrap_or(false)
+        && !c["hidden"].as_bool().unwrap_or(false)
+        && m["activeWorkspace"]["id"].as_i64() == Some(ws)
+        && !fullscreen;
+    Some(WindowSpot {
+        x: (x - m["x"].as_f64().unwrap_or(0.0)) as f32,
+        y: (y - m["y"].as_f64().unwrap_or(0.0)) as f32,
+        w: w as f32,
+        h: h as f32,
+        visible,
+    })
+}
+
 /// The special workspace the waveview plugin parks minimized windows on.
 pub const MINIMIZED_WS: &str = "special:minimized";
 
