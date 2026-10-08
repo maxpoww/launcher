@@ -1497,7 +1497,7 @@ pub(crate) fn srgb_to_linear(c: f32) -> f32 {
 /// in the space HSL actually means "lightness" in — shifting L in *linear*
 /// RGB reads wrong (linear is not perceptually uniform), so the fill is
 /// brought to sRGB, shifted there, then converted back for the shader.
-fn linear_to_srgb(c: f32) -> f32 {
+pub(crate) fn linear_to_srgb(c: f32) -> f32 {
     if c <= 0.0031308 {
         c * 12.92
     } else {

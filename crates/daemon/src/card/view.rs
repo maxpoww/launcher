@@ -373,11 +373,14 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     (scene, tiles, max_scroll)
 }
 
-/// A picture being made on the CPU: `w`×`h` pixels of premultiplied RGBA.
+/// A picture being made on the CPU: `w`×`h` pixels of premultiplied RGBA,
+/// in LINEAR light like every colour the renderer is given (the screen's
+/// own encoding is put on at the end, `bytes`) — so the picture comes out
+/// the very colours the card is drawn in.
 pub(crate) struct Canvas {
     pub w: usize,
     pub h: usize,
-    pub px: Vec<u8>,
+    px: Vec<f32>,
 }
 
 impl Canvas {
@@ -385,12 +388,30 @@ impl Canvas {
         Self {
             w,
             h,
-            px: vec![0; w * h * 4],
+            px: vec![0.0; w * h * 4],
         }
     }
 
-    /// Lay `color` (straight alpha, 0..=1 each) over the pixel at (x, y),
-    /// thinned by `cover`.
+    /// The picture as the screen wants it: premultiplied RGBA bytes.
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.px.len());
+        for p in self.px.chunks_exact(4) {
+            let a = p[3].clamp(0.0, 1.0);
+            for c in &p[..3] {
+                let straight = if a > 0.0 {
+                    (c / a).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                out.push((crate::options::linear_to_srgb(straight) * a * 255.0).round() as u8);
+            }
+            out.push((a * 255.0).round() as u8);
+        }
+        out
+    }
+
+    /// Lay `color` (linear, straight alpha, 0..=1 each) over the pixel at
+    /// (x, y), thinned by `cover`.
     pub(super) fn blend(&mut self, x: i32, y: i32, color: [f32; 4], cover: f32) {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
             return;
@@ -401,11 +422,9 @@ impl Canvas {
         }
         let at = (y as usize * self.w + x as usize) * 4;
         for (c, ink) in color.iter().enumerate().take(3) {
-            let under = self.px[at + c] as f32 / 255.0;
-            self.px[at + c] = ((ink * a + under * (1.0 - a)) * 255.0).round() as u8;
+            self.px[at + c] = ink * a + self.px[at + c] * (1.0 - a);
         }
-        let under = self.px[at + 3] as f32 / 255.0;
-        self.px[at + 3] = ((a + under * (1.0 - a)) * 255.0).round() as u8;
+        self.px[at + 3] = a + self.px[at + 3] * (1.0 - a);
     }
 
     /// Fill a rounded rectangle (pixels), its edge softened; with `stroke`
@@ -461,7 +480,8 @@ impl Canvas {
                     continue;
                 }
                 // (Premultiplied in the chain: back to straight for `blend`.)
-                let straight = |c: u8| (c as f32 / 255.0 / a).min(1.0);
+                let straight =
+                    |c: u8| crate::options::srgb_to_linear((c as f32 / 255.0 / a).min(1.0));
                 self.blend(
                     x,
                     y,
@@ -506,14 +526,15 @@ pub(crate) fn tile_picture(
     // (Whole logical pixels: the buffer is shown at 1/`scale` of its size.)
     let mut canvas = Canvas::new(s(width.round()) as usize, s(height.round()) as usize);
     let whole = Rect::new(0.0, 0.0, canvas.w as f32, canvas.h as f32);
-    // The card's own colour underneath (solid: it is seen over anything),
-    // then the item's inset and rim, as in the list.
-    let plate = [paint.fill[0], paint.fill[1], paint.fill[2], 0.97];
-    canvas.round_rect(whole, s(TILE_RADIUS), plate, None);
+    // The card's own colour underneath, then the item's inset and rim —
+    // the list's own values, so it looks in the hand as it did in the list
+    // (Max, 2026-10-08: *"i dont want the item to change color when im
+    // draging it"*).
+    canvas.round_rect(whole, s(TILE_RADIUS), paint.fill, None);
     let (inset, rim) = if bright {
-        ([0.0, 0.0, 0.0, 0.07], [0.0, 0.0, 0.0, 0.16])
+        ([0.0, 0.0, 0.0, 0.07], [0.0, 0.0, 0.0, 0.10])
     } else {
-        ([0.0, 0.0, 0.0, 0.28], [1.0, 1.0, 1.0, 0.14])
+        ([0.0, 0.0, 0.0, 0.28], [1.0, 1.0, 1.0, 0.06])
     };
     canvas.round_rect(whole, s(TILE_RADIUS), inset, None);
     canvas.round_rect(whole, s(TILE_RADIUS), rim, Some(s(1.0)));
@@ -756,7 +777,8 @@ mod tests {
         );
         // The middle is the plate (solid enough to be seen over anything),
         // the very corner is clear: the box is rounded.
-        let alpha = |x: usize, y: usize| canvas.px[(y * canvas.w + x) * 4 + 3];
+        let bytes = canvas.bytes();
+        let alpha = |x: usize, y: usize| bytes[(y * canvas.w + x) * 4 + 3];
         assert!(alpha(200, canvas.h / 2) > 240);
         assert_eq!(alpha(0, 0), 0);
     }

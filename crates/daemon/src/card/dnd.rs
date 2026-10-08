@@ -94,7 +94,9 @@ impl App {
                 let ink8 = ink.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
                 let (ox, oy) = (at.0.round() as i32, at.1.round() as i32);
                 renderer.text_to_pixels(line, px, family, ink8, &mut |x, y, c| {
-                    let c = c.map(|v| v as f32 / 255.0);
+                    // (Text colours are the screen's own encoding.)
+                    let lin = |v: u8| crate::options::srgb_to_linear(v as f32 / 255.0);
+                    let c = [lin(c[0]), lin(c[1]), lin(c[2]), c[3] as f32 / 255.0];
                     canvas.blend(ox + x, oy + y, c, 1.0);
                 });
             },
@@ -106,7 +108,7 @@ impl App {
             ),
             None => (tile.w / 2.0, tile.h / 2.0),
         };
-        self.drag_picture(&canvas.px, canvas.w, canvas.h, scale as i32, grip)
+        self.drag_picture(&canvas.bytes(), canvas.w, canvas.h, scale as i32, grip)
     }
 
     pub(super) fn card_lift(&mut self, id: u64, serial: u32) {
