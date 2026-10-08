@@ -353,13 +353,15 @@ pub(crate) fn card_rect(spot: &WindowSpot, fx: Option<f32>) -> Rect {
     )
 }
 
-/// Where a thrown card comes to rest: inside its window, against the left
-/// side (`to_left`) or the right — its resting places, not the overhang.
+/// Where a thrown card comes to rest: OUTSIDE its window, beside it with a
+/// little air, on the left (`to_left`) or the right — as far as a slide can
+/// take it (Max, 2026-10-08: *"i meant to the end outside the window"*; the
+/// first cut stopped at the inside edges).
 pub(crate) fn fling_end(window_w: f32, to_left: bool) -> f32 {
     if to_left {
-        INSET.min((window_w - WIDTH) / 2.0)
+        -(WIDTH + OVERHANG)
     } else {
-        (window_w - INSET - WIDTH).max((window_w - WIDTH) / 2.0)
+        window_w + OVERHANG
     }
 }
 
@@ -2300,11 +2302,12 @@ mod tests {
     }
 
     #[test]
-    fn a_thrown_card_rests_inside_its_window_at_either_side() {
-        assert_eq!(fling_end(900.0, true), 10.0);
-        assert_eq!(fling_end(900.0, false), 900.0 - 10.0 - 320.0);
-        // A window narrower than the card: both ends are the middle.
-        assert_eq!(fling_end(300.0, true), fling_end(300.0, false));
+    fn a_thrown_card_rests_beside_its_window_on_either_side() {
+        assert_eq!(fling_end(900.0, true), -(320.0 + 12.0));
+        assert_eq!(fling_end(900.0, false), 900.0 + 12.0);
+        // Exactly as far as a slide by hand can take it.
+        assert_eq!(fling_end(900.0, true), clamp_left(-9999.0, 900.0));
+        assert_eq!(fling_end(900.0, false), clamp_left(9999.0, 900.0));
     }
 
     #[test]
