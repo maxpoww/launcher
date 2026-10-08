@@ -414,6 +414,17 @@ pub(crate) struct Desktop {
     /// How much of the icons is on screen, 0..1, easing toward `hidden`'s
     /// opposite: they fade rather than blink.
     pub shown: f32,
+    /// Devices plugged in WHILE the icons were put away: they show alone,
+    /// once, until the next click on the wallpaper puts them away with the
+    /// rest (Max, 2026-10-08: "solo, but just once, when I connect them;
+    /// after that they behave as the others").
+    pub solo: HashSet<String>,
+    pub solo_on: bool,
+    /// How much of them is on screen, 0..1.
+    pub solo_t: f32,
+    /// The volume service has reported once: what it lists first was
+    /// already plugged in, not just connected.
+    pub mounts_seen: bool,
     /// A drag hovering one of our surfaces (another app's, or ours).
     pub dnd: Option<DndIn>,
     /// Icon pixels by key, kept so a new renderer or a reallocated array can
@@ -954,9 +965,9 @@ pub(crate) struct Live<'a> {
     /// drag is elsewhere (over a window, the dock…), where the desktop is
     /// covered anyway.
     pub carried: Option<(f32, f32)>,
-    /// How far the FILES are put away, 0..1 (0: all there). What is plugged
-    /// in stays: a volume is shown alone on a desktop whose icons are away.
-    pub hiding: f32,
+    /// When set, only these items (by path) are drawn: the devices shown
+    /// alone over put-away icons.
+    pub only: Option<&'a HashSet<String>>,
     /// Which items are selected (washed).
     pub selected: &'a [bool],
     /// A rubber band being drawn.
@@ -1036,31 +1047,24 @@ pub(crate) fn scene(
             continue;
         };
         let cell = grid.rect(slot);
-        // A file on its way out: its icon shrinks to its centre and its
-        // name fades (an icon has no opacity of its own to fade by).
-        let there = if item.kind == Kind::Volume { 1.0 } else { (1.0 - live.hiding).clamp(0.0, 1.0) };
-        if there <= 0.002 {
+        if live.only.is_some_and(|only| !only.contains(&item.path)) {
             continue;
         }
         if live.selected.get(i).copied().unwrap_or(false) {
             scene.rects.push(crate::content::RectInst {
                 rect: sel_rect(&cell),
                 radius: SEL_RADIUS,
-                color: [SEL_WASH[0], SEL_WASH[1], SEL_WASH[2], SEL_WASH[3] * there],
+                color: SEL_WASH,
                 glass: 0.0,
                 border: 0.0,
             });
         }
-        let full = icon_rect(&cell, icon_scale);
-        let (w, h) = (full.w * there, full.h * there);
-        let shrunk = Rect::new(full.x + (full.w - w) / 2.0, full.y + (full.h - h) / 2.0, w, h);
-        let labels_from = scene.labels.len();
         push_tile(
             &mut scene,
             &Tile {
                 item,
                 layer: i as u32,
-                icon: if there < 1.0 { shrunk } else { full },
+                icon: icon_rect(&cell, icon_scale),
                 name: names.get(i).map_or(item.name.as_str(), String::as_str),
                 max_w: label_max_w(&cell),
                 has_icon: has_icon.get(i).copied().unwrap_or(false),
@@ -1072,16 +1076,6 @@ pub(crate) fn scene(
                     .map(|(_, text, all, w)| (text, all, w)),
             },
         );
-        if there < 1.0 {
-            // The name stays where it was (under the full-size icon) and fades.
-            let top = full.y + full.h + LABEL_GAP;
-            for (n, l) in scene.labels[labels_from..].iter_mut().enumerate() {
-                l.pos = (full.x + full.w / 2.0, top + if n == 0 { 1.0 } else { 0.0 });
-                if let Some(c) = l.color.as_mut() {
-                    c[3] *= there;
-                }
-            }
-        }
     }
     // The rubber band, over the icons: a faint fill and a hairline.
     if let Some(band) = live.band {
@@ -1130,8 +1124,8 @@ impl Desktop {
     pub(crate) fn hit(&self, pos: (f32, f32)) -> Option<usize> {
         let slot = self.grid.slot_at(pos)?;
         let i = self.slots.iter().position(|s| *s == Some(slot))?;
-        // Put away, only what is plugged in is still there to be hit.
-        (!self.hidden || self.items[i].kind == Kind::Volume).then_some(i)
+        // Put away, only a device shown alone is there to be hit.
+        (!self.hidden || (self.solo_on && self.solo.contains(&self.items[i].path))).then_some(i)
     }
 
     /// The cells the placed items hold, less `except`'s.
@@ -1479,7 +1473,21 @@ impl App {
         for path in gone {
             self.desktop.remembered.remove(&path);
             self.desktop.selected.remove(&path);
+            self.desktop.solo.remove(&path);
         }
+        // Connected just now, with the icons put away: it shows alone, once.
+        if self.desktop.mounts_seen && self.desktop.hidden {
+            let new: Vec<String> = list
+                .iter()
+                .filter(|v| !self.desktop.volumes.contains(v))
+                .map(|v| v.path.to_string_lossy().into_owned())
+                .collect();
+            if !new.is_empty() {
+                self.desktop.solo.extend(new);
+                self.desktop.solo_on = true;
+            }
+        }
+        self.desktop.mounts_seen = true;
         self.desktop.volumes = list;
         self.save_desktop_positions();
         self.reload_desktop();
@@ -1958,6 +1966,9 @@ impl App {
         self.desktop.hidden = !self.desktop.hidden;
         self.desktop.selected.clear();
         self.desktop.band = None;
+        self.desktop.solo.clear();
+        self.desktop.solo_on = false;
+        self.desktop.solo_t = 0.0;
         self.settings.desktop_hidden = self.desktop.hidden;
         self.settings.save();
         info!(
@@ -1998,6 +2009,15 @@ impl App {
         let (shown, mut moving) =
             crate::animation::ease_toward(self.desktop.shown, target, dt, 14.0, 0.004);
         self.desktop.shown = shown;
+        // Devices shown alone fade the same way, in and out.
+        let solo_target = if self.desktop.hidden && self.desktop.solo_on { 1.0 } else { 0.0 };
+        let (solo_t, solo_moving) =
+            crate::animation::ease_toward(self.desktop.solo_t, solo_target, dt, 14.0, 0.004);
+        self.desktop.solo_t = solo_t;
+        moving |= solo_moving;
+        if !self.desktop.solo_on && solo_t <= 0.0 {
+            self.desktop.solo.clear();
+        }
         // The menu's entrance eases the same way.
         if let Some(menu) = self.desktop.menu.as_mut() {
             let (t, menu_moving) = crate::animation::ease_toward(menu.t, 1.0, dt, 20.0, 0.004);
@@ -2033,10 +2053,13 @@ impl App {
             .map(|it| self.desktop.selected.contains(&it.path))
             .collect();
         let band = self.desktop.band.map(|(a, b)| band_rect(a, b));
-        // (A menu or a box up over put-away icons must be seen too.)
-        let any_volume = self.desktop.items.iter().any(|it| it.kind == Kind::Volume)
-            || self.desktop.menu.is_some()
-            || self.desktop.props.is_some();
+        // ONE group fades at a time, by the surface's own opacity: all the
+        // icons (in or out), or — once they are away — the devices shown
+        // alone. A menu or a box up over put-away icons must be seen whole.
+        let lit = self.desktop.menu.is_some() || self.desktop.props.is_some();
+        let all_group = !self.desktop.hidden || shown > 0.004;
+        let only: Option<HashSet<String>> = (!all_group).then(|| self.desktop.solo.clone());
+        let group_alpha = if all_group { shown } else { solo_t };
         // The menu wears the OPTIONS boxes' surface, read on its own side of
         // the screen as every box's is (Max, 2026-10-07: "it should follow
         // the colours of the BG as the dock and OPTIONS").
@@ -2089,15 +2112,13 @@ impl App {
                 carried,
                 selected: &selected,
                 band,
-                hiding: if any_volume { 1.0 - shown } else { 0.0 },
+                only: only.as_ref(),
                 menu: self.desktop.menu.as_ref().zip(menu_paint),
                 props: self.desktop.props.as_ref().zip(props_paint),
                 rename: rename_view,
             },
         );
-        // With something plugged in the surface stays lit and only the
-        // files go (see `Live::hiding`); with nothing, the whole of it fades.
-        scene.alpha = if any_volume { 1.0 } else { shown };
+        scene.alpha = if lit { 1.0 } else { group_alpha };
         let (layer, qh, pending) = (
             self.desktop_layer.as_ref(),
             &self.qh,
@@ -2347,6 +2368,12 @@ impl App {
                             // back (Max, 2026-10-07/08).
                             None if !self.desktop.selected.is_empty() => {
                                 self.desktop.selected.clear();
+                                self.request_desktop_draw();
+                            }
+                            // Devices shown alone go with the rest: they
+                            // were only announced.
+                            None if self.desktop.hidden && self.desktop.solo_on => {
+                                self.desktop.solo_on = false;
                                 self.request_desktop_draw();
                             }
                             None => self.desktop_toggle_hidden(),
@@ -3436,7 +3463,7 @@ mod tests {
         let live = Live {
             in_hand: &[0],
             carried: None,
-            hiding: 0.0,
+            only: None,
             selected: &[],
             band: None,
             menu: None,
@@ -3454,7 +3481,7 @@ mod tests {
         let live = Live {
             in_hand: &[],
             carried: None,
-            hiding: 0.0,
+            only: None,
             selected: &[false, true, false],
             band: Some(band),
             menu: None,
@@ -3480,7 +3507,7 @@ mod tests {
         let live = Live {
             in_hand: &[0, 1],
             carried: Some((300.0, 200.0)),
-            hiding: 0.0,
+            only: None,
             selected: &[true, true, false],
             band: None,
             menu: None,
@@ -3502,7 +3529,7 @@ mod tests {
         let away = Live {
             in_hand: &[0, 1],
             carried: None,
-            hiding: 0.0,
+            only: None,
             selected: &[true, true, false],
             band: None,
             menu: None,
@@ -3515,7 +3542,7 @@ mod tests {
     }
 
     #[test]
-    fn what_is_plugged_in_stands_on_the_right_and_stays_when_the_files_go() {
+    fn what_is_plugged_in_stands_on_the_right_and_shows_alone_once() {
         let g = Grid::new(240.0, 300.0, 1.0); // 2 × 3
         let mut vol = item("STICK");
         vol.kind = Kind::Volume;
@@ -3527,27 +3554,23 @@ mod tests {
         assert_eq!(slots, vec![Some((1, 0)), Some((1, 1)), Some((0, 0)), Some((0, 1))]);
         let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
         let all = [true, true, true, true];
-        // Files fully away: only the two volumes are drawn.
-        let live = Live { hiding: 1.0, ..Default::default() };
+        // Icons away, the stick shown alone: it is all that is drawn, and
+        // all that can be hit.
+        let solo: HashSet<String> = HashSet::from([items[0].path.clone()]);
+        let live = Live { only: Some(&solo), ..Default::default() };
         let s = scene(&items, &slots, &g, &names, &all, 1.0, live);
-        assert_eq!(s.icons.len(), 2);
-        assert_eq!(s.labels.len(), 4);
-        // Half-way: the files' icons are half size about their centre, their
-        // names half as strong; the volumes untouched.
-        let live = Live { hiding: 0.5, ..Default::default() };
-        let s = scene(&items, &slots, &g, &names, &all, 1.0, live);
-        assert_eq!(s.icons.len(), 4);
-        assert!((s.icons[0].rect.w - GRID_ICON).abs() < 1e-4, "a volume, whole");
-        assert!((s.icons[2].rect.w - GRID_ICON / 2.0).abs() < 1e-4, "a file, shrinking");
-        let full = icon_rect(&g.rect((0, 0)), 1.0);
-        assert!((s.icons[2].rect.x + s.icons[2].rect.w / 2.0 - (full.x + full.w / 2.0)).abs() < 1e-4);
-        assert!((s.labels[5].color.unwrap()[3] - 0.5).abs() < 1e-4);
-        assert_eq!(s.labels[1].color, Some(INK));
-        // Put away, only a volume can be hit.
-        let d = Desktop { items, grid: g, slots, hidden: true, ..Default::default() };
+        assert_eq!(s.icons.len(), 1);
+        assert_eq!(s.icons[0].layer, 0);
+        assert!((s.icons[0].rect.w - GRID_ICON).abs() < 1e-4, "whole: it fades, it does not shrink");
+        assert_eq!(s.labels.len(), 2);
         let mid = |s: Slot| { let r = g.rect(s); (r.x + r.w / 2.0, r.y + r.h / 2.0) };
+        let mut d = Desktop { items, grid: g, slots, hidden: true, solo, solo_on: true, ..Default::default() };
         assert_eq!(d.hit(mid((1, 0))), Some(0));
+        assert_eq!(d.hit(mid((1, 1))), None, "the phone was not just connected");
         assert_eq!(d.hit(mid((0, 0))), None);
+        // Once put away with the rest, nothing answers.
+        d.solo_on = false;
+        assert_eq!(d.hit(mid((1, 0))), None);
     }
 
     #[test]

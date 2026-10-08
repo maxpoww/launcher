@@ -301,9 +301,10 @@ The big daemon files are cohesive but long — go straight to the function:
   Open · Open in terminal · Eject (`Menu::for_volume`, `mounts::eject` = `gio mount -e`, else
   `-u`); it is left out of Cut/Copy/Move to/Move to Home; on the bin (the row or a drag) it is
   EJECTED, never trashed; a drag of it offers a copy only; its remembered cell goes when it does. It stands on the RIGHT (`place`: first free cell
-  from the top-right) and STAYS when the files are put away (`Live::hiding`: with a volume, a
-  menu or a box up the surface stays lit and the files shrink + fade by themselves; `hit`
-  answers for volumes only).
+  from the top-right). Hide/show is a FADE of the whole surface (`scene.alpha`), volumes included.
+  A device connected WHILE the icons are away shows ALONE once (`Desktop::solo`, `Live::only`,
+  fading by the same surface opacity — one group fades at a time); the next wallpaper click
+  puts it away with the rest, the one after brings everything back.
 - `card.rs` — the CARD: a shelf that rides the windows (the mockup at ~/terminal-mockup/new).
   ONE card with ONE list; it sits inside a window (under the bar, on the right, 420 wide (`WIDTH`), 10 in
   from the edges) and is turned on per window (`card toggle [addr]` — sent by the card button at the right end of a floating window's title
