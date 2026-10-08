@@ -61,6 +61,11 @@ const UNROLL_RATE: f32 = 40.0;
 /// How long a scroll that moves a window (on the OPTIONS pill) must be
 /// quiet before the window counts as put down.
 const NUDGE_QUIET: std::time::Duration = std::time::Duration::from_millis(280);
+/// A scroll over the card is one thing at a time: the list (up and down) or
+/// the card itself (sideways). Whichever way has travelled this far first
+/// takes the gesture, and keeps it until the scroll has been quiet this long.
+const SCROLL_CLAIM: f32 = 5.0;
+const SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(220);
 /// A window shorter than this has no room for a card.
 const MIN_HEIGHT: f32 = 90.0;
 
@@ -206,6 +211,18 @@ enum Press {
     Slide { from_x: f32, left: f32, moved: bool },
 }
 
+/// A scroll gesture over the card.
+#[derive(Debug, Default)]
+struct Wheel {
+    /// `Some(true)`: it slides the card; `Some(false)`: it scrolls the list.
+    sideways: Option<bool>,
+    across: f32,
+    along: f32,
+    until: Option<std::time::Instant>,
+    /// The quiet timer is running.
+    waiting: bool,
+}
+
 /// An item in hand: a Wayland drag of ours.
 pub(crate) struct Drag {
     pub id: u64,
@@ -249,6 +266,10 @@ pub(crate) struct Card {
     /// Its window is in hand (being moved or resized), since when: the
     /// card is away until the window is put down.
     lifted: Option<std::time::Instant>,
+    /// The scroll gesture over the card: which way took it (see
+    /// [`SCROLL_CLAIM`]), what each way has travelled before one did, and
+    /// until when it lasts.
+    wheel: Wheel,
     /// A window moved by scrolling on the OPTIONS pill has no moment it is
     /// let go: it counts as put down once the scroll has been quiet until
     /// this instant (`card_window_nudged`).
@@ -1185,8 +1206,13 @@ impl App {
         let Some(layer) = self.card_layer.as_ref() else {
             return;
         };
+        // While a sideways scroll is moving the card, the whole surface
+        // takes the pointer: the card slides out from under it, and the
+        // scroll must keep reaching us until it stops.
+        let (w, h) = self.card_size;
         let rects: Vec<(i32, i32, i32, i32)> = match self.card.rect.filter(|_| self.card_present())
         {
+            Some(_) if self.card.wheel.sideways == Some(true) => vec![(0, 0, w as i32, h as i32)],
             Some(r) => vec![(r.x as i32, r.y as i32, r.w as i32, r.h as i32)],
             None => Vec::new(),
         };
@@ -1476,11 +1502,61 @@ impl App {
                 _ => {}
             },
             wl_pointer::Event::Axis {
-                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                axis: WEnum::Value(axis),
                 value,
                 ..
-            } => {
-                let to = (self.card.scroll + value as f32 * 2.4).clamp(0.0, self.card.max_scroll);
+            } => match axis {
+                wl_pointer::Axis::VerticalScroll => self.card_wheel(0.0, value as f32),
+                wl_pointer::Axis::HorizontalScroll => self.card_wheel(value as f32, 0.0),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// A scroll over the card: up and down moves the list, sideways moves
+    /// the card itself (Max, 2026-10-08: *"im on top of the card, i scroll to
+    /// the sides, the card moves, until i let go"*). One or the other for the
+    /// length of a gesture — the way that travels [`SCROLL_CLAIM`] first.
+    fn card_wheel(&mut self, across: f32, along: f32) {
+        let now = std::time::Instant::now();
+        if self.card.wheel.until.is_some_and(|t| t < now) {
+            self.card_wheel_end();
+        }
+        self.card.wheel.until = Some(now + SCROLL_QUIET);
+        if !self.card.wheel.waiting {
+            self.card_wheel_wait(SCROLL_QUIET);
+        }
+        if self.card.wheel.sideways.is_none() {
+            self.card.wheel.across += across;
+            self.card.wheel.along += along;
+            let (a, l) = (self.card.wheel.across.abs(), self.card.wheel.along.abs());
+            if a.max(l) < SCROLL_CLAIM {
+                return;
+            }
+            self.card.wheel.sideways = Some(a > l);
+            // What was gathered while deciding is not thrown away.
+            let (across, along) = (self.card.wheel.across, self.card.wheel.along);
+            if a > l {
+                self.sync_card_input();
+                self.card_wheel_apply(across, 0.0);
+            } else {
+                self.card_wheel_apply(0.0, along);
+            }
+            return;
+        }
+        self.card_wheel_apply(across, along);
+    }
+
+    fn card_wheel_apply(&mut self, across: f32, along: f32) {
+        match self.card.wheel.sideways {
+            Some(true) if across != 0.0 => {
+                if let Some(host) = self.card.host.clone() {
+                    self.card_slide(&host, across);
+                }
+            }
+            Some(false) if along != 0.0 => {
+                let to = (self.card.scroll + along * 2.4).clamp(0.0, self.card.max_scroll);
                 if to != self.card.scroll {
                     self.card.scroll = to;
                     self.request_card_draw();
@@ -1488,6 +1564,36 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The scroll gesture is over: the next one chooses its way afresh, and
+    /// the pointer is the card's box's alone again.
+    fn card_wheel_end(&mut self) {
+        let was_sideways = self.card.wheel.sideways == Some(true);
+        let waiting = self.card.wheel.waiting;
+        self.card.wheel = Wheel {
+            waiting,
+            ..Default::default()
+        };
+        if was_sideways {
+            self.sync_card_input();
+        }
+    }
+
+    fn card_wheel_wait(&mut self, wait: std::time::Duration) {
+        let timer = calloop::timer::Timer::from_duration(wait);
+        self.card.wheel.waiting = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.card.wheel.waiting = false;
+                let now = std::time::Instant::now();
+                match app.card.wheel.until {
+                    Some(until) if until > now => app.card_wheel_wait(until - now),
+                    _ => app.card_wheel_end(),
+                }
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
     }
 
     fn card_motion(&mut self, x: f32, y: f32) {

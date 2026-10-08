@@ -306,7 +306,10 @@ The big daemon files are cohesive but long — go straight to the function:
   card is simply away, and unrolls again where the window was put down (`card_window_lifted` /
   `card_window_placed`); the OPTIONS pill's own window gestures say the same from `nub_drag.rs`
   (the right-click drag and the pinch at their start and end; the scroll, which has no end, through
-  `card_window_nudged`: put down once quiet for 280 ms). A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
+  `card_window_nudged`: put down once quiet for 280 ms). A scroll OVER THE CARD is one thing per gesture (`card_wheel`): up/down scrolls
+  the list, sideways slides the card — the way that travels `SCROLL_CLAIM` first takes it until
+  the scroll is quiet for 220 ms; while it slides the card the input region is the whole surface
+  (the card moves out from under the pointer and the scroll must keep arriving). A scroll on its window's title bar slides it too (the plugin sends `card slide <addr>
   <delta>` → `card_slide`). A press on the card itself slides it sideways (no snapping; remembered per window as
   a fraction of its width, forgotten when turned off there); wheel scrolls; × on the hovered item
   removes. Pictures ride the Files thumbnailer (`card_on_thumb`) into the card renderer's own
