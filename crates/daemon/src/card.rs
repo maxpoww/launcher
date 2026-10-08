@@ -72,7 +72,9 @@ const SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(220);
 /// fast scroll on the bar or on the card"*). It glides there at
 /// [`FLING_RATE`], and the rest of that scroll (a touchpad's coasting tail)
 /// is not read as more sliding for [`FLING_DEAF`].
-const FLING_SCROLL: f32 = 45.0;
+// 45 at first: an ordinary slide kept throwing it (Max: *"too hard now to move
+// without throw it. make the throwing less sensitive"*) → 120.
+const FLING_SCROLL: f32 = 120.0;
 const FLING_WINDOW: std::time::Duration = std::time::Duration::from_millis(90);
 const FLING_RATE: f32 = 18.0;
 const FLING_DEAF: std::time::Duration = std::time::Duration::from_millis(450);
