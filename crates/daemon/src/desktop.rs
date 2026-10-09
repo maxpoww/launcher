@@ -406,6 +406,10 @@ pub(crate) struct Desktop {
     /// The phones being used as a camera: volume path → the pid of the
     /// scrcpy feeding the camera device (shared with its waiting thread).
     pub cameras: std::sync::Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    /// What lenses each phone said it has (volume path → them), asked once.
+    pub lenses: HashMap<String, Vec<Lens>>,
+    /// The lens each phone's camera was last started through.
+    pub lens_on: HashMap<String, usize>,
     /// What is plugged in and mounted, standing on the desktop as icons.
     pub volumes: Vec<crate::mounts::Mounted>,
     /// The Properties box, while it is up.
@@ -873,6 +877,89 @@ pub(crate) fn camera_withdraw() {
     }
 }
 
+/// One way a phone's camera can look: a camera of its own, and how far in.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Lens {
+    /// What the row says ("Ultra wide", "Main", "Telephoto", "Front").
+    pub name: String,
+    /// scrcpy's `--camera-id`.
+    pub id: String,
+    /// scrcpy's `--camera-zoom`: a phone's back lenses are ONE camera to
+    /// Android, which changes lens with the zoom.
+    pub zoom: Option<f32>,
+}
+
+/// The lenses a phone has (`scrcpy --list-cameras`). Empty when it would
+/// not say.
+fn phone_lenses(serial: Option<&str>) -> Vec<Lens> {
+    let mut cmd = std::process::Command::new("scrcpy");
+    if let Some(serial) = serial {
+        cmd.arg(format!("--serial={serial}"));
+    }
+    cmd.arg("--list-cameras").stderr(std::process::Stdio::null());
+    match cmd.output() {
+        Ok(out) => parse_lenses(&String::from_utf8_lossy(&out.stdout)),
+        Err(e) => {
+            warn!("desktop: scrcpy could not be asked for the cameras: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// `--camera-id=0    (back, 4080x3072, fps={15, 24, 30, 60}, zoom-range=[0.49, 30])`
+/// a line → the lenses. A back camera that zooms out below 0.6 has an ultra
+/// wide lens behind it, one that reaches 5 a telephoto (2, a nearer one):
+/// each gets a row at that zoom. Anything else is one row by its facing.
+fn parse_lenses(said: &str) -> Vec<Lens> {
+    let mut lenses = Vec::new();
+    let mut backs = 0;
+    for line in said.lines() {
+        let Some(rest) = line.trim().strip_prefix("--camera-id=") else {
+            continue;
+        };
+        let (id, about) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let facing = about.trim().trim_start_matches('(').split(',').next().unwrap_or("").trim();
+        let range = about.split_once("zoom-range=[").and_then(|(_, r)| {
+            let (lo, hi) = r.split(']').next()?.split_once(',')?;
+            Some((lo.trim().parse::<f32>().ok()?, hi.trim().parse::<f32>().ok()?))
+        });
+        let lens = |name: &str, zoom: Option<f32>| Lens { name: name.to_owned(), id: id.to_owned(), zoom };
+        match facing {
+            "back" => {
+                backs += 1;
+                let nth = |name: &str| if backs > 1 { format!("{name} {backs}") } else { name.to_owned() };
+                match range {
+                    Some((lo, hi)) => {
+                        if lo < 0.6 {
+                            lenses.push(lens(&nth("Ultra wide"), Some(lo.max(0.5))));
+                        }
+                        lenses.push(lens(&nth("Main"), Some(1.0)));
+                        if hi >= 5.0 {
+                            lenses.push(lens(&nth("Telephoto"), Some(5.0)));
+                        } else if hi >= 2.0 {
+                            lenses.push(lens(&nth("Telephoto"), Some(2.0)));
+                        }
+                    }
+                    None => lenses.push(lens(&nth("Main"), None)),
+                }
+            }
+            "front" => lenses.push(lens("Front", None)),
+            "external" => lenses.push(lens("External", None)),
+            _ => lenses.push(lens("Camera", None)),
+        }
+    }
+    lenses
+}
+
+/// Whether the loopback device is still being fed by someone (never true
+/// on a driver without the `state` file: there is nothing to wait for).
+fn camera_busy(device: &std::path::Path) -> bool {
+    device
+        .file_name()
+        .and_then(|node| std::fs::read_to_string(std::path::Path::new("/sys/class/video4linux").join(node).join("state")).ok())
+        .is_some_and(|state| state.trim() == "capture")
+}
+
 /// Whether the loopback device is being fed (its `state` in sysfs reads
 /// `capture` then, `output` while idle). On a driver without that file,
 /// taken as fed: there is nothing better to ask.
@@ -900,6 +987,7 @@ fn camera(
     serial: Option<&str>,
     path: &str,
     cameras: &std::sync::Mutex<HashMap<String, u32>>,
+    lens: &Lens,
 ) -> Option<String> {
     use crate::i18n::tr;
     if let Some(said) = serial.and_then(|s| phone_refuses(name, s)) {
@@ -909,8 +997,18 @@ fn camera(
         warn!("desktop: no loopback camera device on this system");
         return Some(tr("This computer has no camera device for a phone to use.").to_owned());
     };
+    // A change of lens: the camera that was on is ending; the device is
+    // ours once it reads idle again.
+    let waited = std::time::Instant::now();
+    while camera_busy(&device) && waited.elapsed() < std::time::Duration::from_secs(4) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     let mut cmd = std::process::Command::new("scrcpy");
-    cmd.args(["--video-source=camera", "--camera-facing=back", "--camera-ar=16:9", "--max-size=1920"])
+    cmd.arg("--video-source=camera").arg(format!("--camera-id={}", lens.id));
+    if let Some(zoom) = lens.zoom {
+        cmd.arg(format!("--camera-zoom={zoom}"));
+    }
+    cmd.args(["--camera-ar=16:9", "--max-size=1920"])
         // 60 pictures a second, where a webcam gives 30 (Max, 2026-10-09: at
         // 30 it "feels even less smooth" than the built-in one); the phone
         // was measured sending 1080p at 60 with none late or repeated. And
@@ -982,7 +1080,15 @@ fn camera(
         let _ = relay.wait();
     }
     camera_withdraw();
-    let by_hand = cameras.lock().ok().is_none_or(|mut on| on.remove(path).is_none());
+    // Ours is off the list when it was ended by hand — and the entry there
+    // may by now be the NEXT camera's (a change of lens): only ours goes.
+    let by_hand = cameras.lock().ok().is_none_or(|mut on| {
+        let ours = on.get(path) == Some(&child.id());
+        if ours {
+            on.remove(path);
+        }
+        !ours
+    });
     info!("desktop: {name} is no longer the camera ({status:?}, by hand: {by_hand})");
     match early {
         Some(status) if !status.success() && !by_hand => {
@@ -2094,6 +2200,81 @@ impl App {
             .collect()
     }
 
+    /// End a phone's camera, if it is on (taken off the list first: its
+    /// thread reads that as "by hand").
+    fn desktop_camera_stop(&mut self, path: &str) {
+        let running = self.desktop.cameras.lock().ok().and_then(|mut c| c.remove(path));
+        if let Some(pid) = running {
+            info!("desktop: {path} stops being the camera");
+            // SAFETY: a signal to a child of ours, by its pid.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+    }
+
+    /// Turn the menu to a phone's lenses: at once if it has said what it
+    /// has, else when it answers (asked off the loop, once per phone).
+    fn desktop_show_lenses(&mut self) {
+        let Some(path) = self
+            .desktop
+            .menu
+            .as_ref()
+            .and_then(|m| m.item)
+            .and_then(|i| self.desktop.items.get(i))
+            .map(|it| it.path.clone())
+        else {
+            return;
+        };
+        if self.desktop.lenses.contains_key(&path) {
+            self.desktop_fill_lenses(&path, false);
+            return;
+        }
+        let serial = self
+            .desktop
+            .volumes
+            .iter()
+            .find(|v| v.path.as_os_str() == path.as_str())
+            .and_then(|v| phone_serial(&v.uri));
+        self.desktop_fill_lenses(&path, true);
+        let asked = path.clone();
+        self.desktop_off_loop(
+            move || phone_lenses(serial.as_deref()),
+            move |app, lenses| {
+                // A phone that would not say is asked again next time.
+                if !lenses.is_empty() {
+                    app.desktop.lenses.insert(asked.clone(), lenses);
+                }
+                // Only if that page is still the one up, on that phone.
+                let still = app.desktop.menu.as_ref().is_some_and(|m| {
+                    m.lenses && m.item.and_then(|i| app.desktop.items.get(i)).is_some_and(|it| it.path == asked)
+                });
+                if still {
+                    app.desktop_fill_lenses(&asked, false);
+                }
+            },
+        );
+    }
+
+    /// Write the lens page from what is known now.
+    fn desktop_fill_lenses(&mut self, path: &str, looking: bool) {
+        let h = self.desktop_size.1 as f32;
+        let names: Vec<String> = self
+            .desktop
+            .lenses
+            .get(path)
+            .map(|l| l.iter().map(|l| l.name.clone()).collect())
+            .unwrap_or_default();
+        let on = self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(path));
+        let current = on.then(|| self.desktop.lens_on.get(path).copied()).flatten();
+        let at = self.desktop.ptr;
+        if let Some(menu) = self.desktop.menu.as_mut() {
+            menu.show_lenses(&names, current, looking, h);
+            menu.hover = at.and_then(|p| menu.hit(p));
+        }
+        self.request_desktop_draw();
+    }
+
     /// Turn the menu to its "Move to" page: the sticks at once, the paired
     /// devices when the service has answered (asked off the loop).
     fn desktop_show_targets(&mut self) {
@@ -2249,7 +2430,7 @@ impl App {
                 }
             }
             // (Turning the page is the release handler's: the menu stays up.)
-            Action::MoveTo | Action::Back => {}
+            Action::MoveTo | Action::Back | Action::Camera => {}
             Action::Cut | Action::Copy => {
                 let paths = self.desktop_selected_paths();
                 let cut = action == Action::Cut;
@@ -2274,30 +2455,33 @@ impl App {
                     }
                 });
             }
-            Action::Camera => {
+            Action::CameraStop => {
+                let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
+                    return;
+                };
+                self.desktop.selected.clear();
+                self.desktop_camera_stop(&path);
+            }
+            Action::Lens(n) => {
                 let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
                     return;
                 };
                 let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
                     return;
                 };
+                let Some(lens) = self.desktop.lenses.get(&path).and_then(|l| l.get(n)).cloned() else {
+                    return;
+                };
                 let (name, serial) = (v.name.clone(), phone_serial(&v.uri));
                 self.desktop.selected.clear();
-                // On already: this is the way to end it.
-                // (Taken off the list first: its thread reads that as "by hand".)
-                let running = self.desktop.cameras.lock().ok().and_then(|mut c| c.remove(&path));
-                if let Some(pid) = running {
-                    info!("desktop: {name} stops being the camera");
-                    // SAFETY: a signal to a child of ours, by its pid.
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                    }
-                    return;
-                }
-                info!("desktop: {name} as the camera (serial {serial:?})");
+                // On already, through another lens: that one ends first (the
+                // new one waits for the device to be let go).
+                self.desktop_camera_stop(&path);
+                self.desktop.lens_on.insert(path.clone(), n);
+                info!("desktop: {name} as the camera, {} (serial {serial:?})", lens.name);
                 let cameras = self.desktop.cameras.clone();
                 std::thread::spawn(move || {
-                    if let Some(said) = camera(&name, serial.as_deref(), &path, &cameras) {
+                    if let Some(said) = camera(&name, serial.as_deref(), &path, &cameras, &lens) {
                         crate::desktop_send_notify(&said);
                     }
                 });
@@ -3159,6 +3343,10 @@ impl App {
                                 match action {
                                     Action::MoveTo => {
                                         self.desktop_show_targets();
+                                        return;
+                                    }
+                                    Action::Camera => {
+                                        self.desktop_show_lenses();
                                         return;
                                     }
                                     Action::Back => {
@@ -4024,6 +4212,11 @@ impl App {
                     self.desktop_show_targets();
                     "MoveTo".to_owned()
                 }
+                Some(Action::Camera) => {
+                    self.desktop.menu = Some(menu);
+                    self.desktop_show_lenses();
+                    "Camera".to_owned()
+                }
                 Some(Action::Back) => {
                     let mut menu = menu;
                     menu.show_main(self.desktop_size.1 as f32);
@@ -4563,6 +4756,26 @@ mod tests {
         assert_eq!(brought, vec![desk.join("f.txt")]);
         assert!(dir.join("elsewhere/f.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_phones_lenses_are_read_from_its_cameras() {
+        let said = "[server] INFO: List of cameras:\n    --camera-id=0    (back, 4080x3072, fps={15, 24, 30, 60}, zoom-range=[0.49, 30])\n    --camera-id=1    (front, 3440x2448, fps={15, 24, 30, 60}, zoom-range=[0.9, 10])\n";
+        let lenses = parse_lenses(said);
+        let rows: Vec<(&str, &str, Option<f32>)> = lenses.iter().map(|l| (l.name.as_str(), l.id.as_str(), l.zoom)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Ultra wide", "0", Some(0.5)),
+                ("Main", "0", Some(1.0)),
+                ("Telephoto", "0", Some(5.0)),
+                ("Front", "1", None),
+            ]
+        );
+        // An older scrcpy, a plain phone: one row a camera.
+        let plain = parse_lenses("    --camera-id=0    (back, 1920x1080, fps={30})\n    --camera-id=1    (front, 1280x720, fps={30})\n");
+        assert_eq!(plain.iter().map(|l| (l.name.as_str(), l.zoom)).collect::<Vec<_>>(), vec![("Main", None), ("Front", None)]);
+        assert!(parse_lenses("ERROR: Could not find any ADB device").is_empty());
     }
 
     #[test]
