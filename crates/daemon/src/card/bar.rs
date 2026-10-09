@@ -455,11 +455,8 @@ pub(super) fn draw(
 ) {
     let ink = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * a];
     let accent = |a: f32| [ACCENT[0], ACCENT[1], ACCENT[2], a];
-    let well = if bright {
-        [0.0, 0.0, 0.0, 0.08]
-    } else {
-        [0.0, 0.0, 0.0, 0.30]
-    };
+    // (Solid, as the items' boxes are: the card's ground is see-through.)
+    let well = super::view::solid(paint, bright);
     let rim = if bright {
         [0.0, 0.0, 0.0, 0.12]
     } else {

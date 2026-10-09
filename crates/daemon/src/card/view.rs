@@ -325,6 +325,21 @@ impl Paint {
     }
 }
 
+/// How solid an item's box (and the input box, and the picker) is.
+pub(super) const ITEM: f32 = 0.96;
+
+/// The colour of a box that sits on the card: the card's own, a shade
+/// darker, solid.
+pub(super) fn solid(paint: &Paint, bright: bool) -> [f32; 4] {
+    let shade = if bright { 0.93 } else { 0.72 };
+    [
+        paint.fill[0] * shade,
+        paint.fill[1] * shade,
+        paint.fill[2] * shade,
+        ITEM,
+    ]
+}
+
 /// Everything one frame of the card is drawn from.
 pub(crate) struct View<'a> {
     pub rect: Rect,
@@ -527,11 +542,13 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     let max_scroll = (total - body.h).max(0.0);
     let scroll = view.scroll.clamp(0.0, max_scroll);
 
-    let tile_fill = if bright {
-        [0.0, 0.0, 0.0, 0.07]
-    } else {
-        [0.0, 0.0, 0.0, 0.28]
-    };
+    // An item's box is SOLID: the card's own colour, a shade down — the
+    // colour it had when it was a dark wash over an opaque card. (The
+    // card's ground is see-through now, and a wash over that let the
+    // window behind show through the items too — Max, 2026-10-09: *"the
+    // card looks good, but not the items. those need to be less
+    // transparent"*.)
+    let tile_fill = solid(paint, bright);
     let tile_rim = if bright {
         [0.0, 0.0, 0.0, 0.10]
     } else {
