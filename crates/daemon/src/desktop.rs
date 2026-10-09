@@ -835,6 +835,19 @@ fn camera_withdraw() {
     }
 }
 
+/// Whether the loopback device is being fed (its `state` in sysfs reads
+/// `capture` then, `output` while idle). On a driver without that file,
+/// taken as fed: there is nothing better to ask.
+fn camera_fed(device: &std::path::Path) -> bool {
+    let Some(node) = device.file_name() else {
+        return true;
+    };
+    match std::fs::read_to_string(std::path::Path::new("/sys/class/video4linux").join(node).join("state")) {
+        Ok(state) => state.trim() == "capture",
+        Err(_) => true,
+    }
+}
+
 /// How long scrcpy is given to start feeding the camera device.
 const CAMERA_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -862,7 +875,7 @@ fn camera(
     if let Some(serial) = serial {
         cmd.arg(format!("--serial={serial}"));
     }
-    let mut child = match cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() {
+    let mut child = match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
         Ok(child) => child,
         Err(e) => {
             warn!("desktop: scrcpy could not be run: {e}");
@@ -872,23 +885,15 @@ fn camera(
     if let Ok(mut on) = cameras.lock() {
         on.insert(path.to_owned(), child.id());
     }
-    // It is a camera from the moment scrcpy says it feeds the device, not
-    // before (a few seconds, and not always the same few: announced on a
-    // fixed wait, the device was sometimes not a camera yet and the apps
-    // got nothing). Its talk is read to the end so it never blocks on it.
-    let (fed, feeding) = std::sync::mpsc::channel();
-    if let Some(out) = child.stdout.take() {
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-                if line.contains("v4l2 sink started") {
-                    let _ = fed.send(());
-                }
-            }
-        });
+    // It is a camera from the moment the device says it is fed, not
+    // before (announced on a fixed wait, it was sometimes not a camera yet
+    // and the apps got nothing).
+    let asked = std::time::Instant::now();
+    let mut started = false;
+    while !started && asked.elapsed() < CAMERA_PATIENCE && matches!(child.try_wait(), Ok(None)) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        started = camera_fed(&device);
     }
-    // (The sender going away without a word = scrcpy ended first.)
-    let started = feeding.recv_timeout(CAMERA_PATIENCE).is_ok();
     let early = match child.try_wait().ok().flatten() {
         None if !started => {
             warn!("desktop: scrcpy never fed the camera device for {name}");
