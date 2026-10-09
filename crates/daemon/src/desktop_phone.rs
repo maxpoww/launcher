@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 
 use tracing::{info, warn};
 
+use crate::tasks::TaskHandle;
+
 /// Where a file sent to a phone lands.
 const DOWNLOAD: &str = "/sdcard/Download/";
 /// The folders of a phone that hold its photos and videos.
@@ -116,7 +118,7 @@ fn folder_name(name: &str) -> String {
 /// Bring the phone's new photos and videos to `Pictures/<its name>/`, album
 /// by album: only what is not there yet, so every time after the first is a
 /// top-up. What to tell the owner.
-pub(crate) fn import_photos(name: &str, serial: Option<&str>, mount: Option<&Path>) -> String {
+pub(crate) fn import_photos(name: &str, serial: Option<&str>, mount: Option<&Path>, task: &TaskHandle) -> String {
     let dest = pictures_dir().join(folder_name(name));
     let shown = format!(
         "{}/{}",
@@ -124,9 +126,9 @@ pub(crate) fn import_photos(name: &str, serial: Option<&str>, mount: Option<&Pat
         folder_name(name)
     );
     let brought = match serial.filter(|s| ready(s)) {
-        Some(serial) => import_over_adb(serial, &dest),
+        Some(serial) => import_over_adb(serial, &dest, task),
         None => match mount {
-            Some(mount) => import_from_folder(mount, &dest),
+            Some(mount) => import_from_folder(mount, &dest, task),
             None => None,
         },
     };
@@ -146,7 +148,7 @@ pub(crate) fn import_photos(name: &str, serial: Option<&str>, mount: Option<&Pat
 }
 
 /// How many came, how many did not. `None`: the phone could not be asked.
-fn import_over_adb(serial: &str, dest: &Path) -> Option<(usize, usize)> {
+fn import_over_adb(serial: &str, dest: &Path, task: &TaskHandle) -> Option<(usize, usize)> {
     let albums: Vec<String> = ALBUMS.iter().map(|a| format!("/sdcard/{a}")).collect();
     // (A folder that is not there makes `find` end badly with the rest
     // listed all the same: what it listed is read either way.)
@@ -160,6 +162,11 @@ fn import_over_adb(serial: &str, dest: &Path) -> Option<(usize, usize)> {
     let shots = parse_shots(&String::from_utf8_lossy(&listing.stdout));
     let wanted = missing(&shots, dest);
     info!("phone: {} photos and videos on {serial}, {} new", shots.len(), wanted.len());
+    // Counted in bytes: a phone's videos are hundreds of times its
+    // screenshots, and a bar counted in files would crawl and then jump.
+    let total: u64 = wanted.iter().map(|s| s.size).sum();
+    let mut done: u64 = 0;
+    task.set(0, total);
     // One `adb pull` a folder's batch: it takes many files and one place.
     let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<&Shot>> = Default::default();
     for shot in &wanted {
@@ -180,7 +187,25 @@ fn import_over_adb(serial: &str, dest: &Path) -> Option<(usize, usize)> {
             }
             // (The trailing slash: a place for many files, not a name.)
             cmd.arg(format!("{}/", into.display()));
-            let _ = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            // While it runs, how much of the batch has landed is read off
+            // the files themselves (adb writes each as it comes).
+            let landed = || -> u64 {
+                batch
+                    .iter()
+                    .map(|s| std::fs::metadata(dest.join(s.place())).map(|m| m.len().min(s.size)).unwrap_or(0))
+                    .sum()
+            };
+            match cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+                Ok(mut child) => {
+                    while matches!(child.try_wait(), Ok(None)) {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        task.set(done + landed(), total);
+                    }
+                }
+                Err(e) => warn!("phone: adb could not be run: {e}"),
+            }
+            done += landed();
+            task.set(done, total);
         }
     }
     let left = missing(&shots, dest).len();
@@ -189,9 +214,11 @@ fn import_over_adb(serial: &str, dest: &Path) -> Option<(usize, usize)> {
 
 /// The same, read from the phone's mounted folder (no `adb`): slower, and
 /// the only way for a phone whose owner has not turned debugging on.
-fn import_from_folder(mount: &Path, dest: &Path) -> Option<(usize, usize)> {
+fn import_from_folder(mount: &Path, dest: &Path, task: &TaskHandle) -> Option<(usize, usize)> {
     let storages: Vec<PathBuf> = std::fs::read_dir(mount).ok()?.flatten().map(|e| e.path()).collect();
-    let (mut came, mut failed, mut any) = (0, 0, false);
+    // What there is to bring, first: the bar needs the whole of it.
+    let mut wanted: Vec<(PathBuf, PathBuf, u64)> = Vec::new();
+    let mut any = false;
     for storage in &storages {
         for album in ALBUMS {
             let mut stack = vec![storage.join(album)];
@@ -214,25 +241,30 @@ fn import_from_folder(mount: &Path, dest: &Path) -> Option<(usize, usize)> {
                         continue;
                     };
                     let to = dest.join(place);
-                    let size = entry.metadata().map(|m| m.len()).ok();
-                    if size.is_some() && std::fs::metadata(&to).map(|m| m.len()).ok() == size {
+                    let Ok(size) = entry.metadata().map(|m| m.len()) else {
                         continue;
-                    }
-                    let copied = to
-                        .parent()
-                        .map(std::fs::create_dir_all)
-                        .transpose()
-                        .and_then(|_| std::fs::copy(&path, &to));
-                    match copied {
-                        Ok(_) => came += 1,
-                        Err(e) => {
-                            warn!("phone: {} was not copied: {e}", path.display());
-                            failed += 1;
-                        }
+                    };
+                    if std::fs::metadata(&to).map(|m| m.len()).ok() != Some(size) {
+                        wanted.push((path, to, size));
                     }
                 }
             }
         }
+    }
+    let total: u64 = wanted.iter().map(|w| w.2).sum();
+    let (mut came, mut failed, mut done) = (0, 0, 0u64);
+    task.set(0, total);
+    for (path, to, size) in &wanted {
+        let copied = to.parent().map(std::fs::create_dir_all).transpose().and_then(|_| std::fs::copy(path, to));
+        match copied {
+            Ok(_) => came += 1,
+            Err(e) => {
+                warn!("phone: {} was not copied: {e}", path.display());
+                failed += 1;
+            }
+        }
+        done += size;
+        task.set(done, total);
     }
     any.then_some((came, failed))
 }
@@ -241,17 +273,28 @@ fn import_from_folder(mount: &Path, dest: &Path) -> Option<(usize, usize)> {
 
 /// Copy `paths` (files, whole folders) to the phone's Download folder.
 /// What to tell the owner.
-pub(crate) fn push(name: &str, serial: Option<&str>, mount: Option<&Path>, paths: &[PathBuf]) -> String {
+pub(crate) fn push(
+    name: &str,
+    serial: Option<&str>,
+    mount: Option<&Path>,
+    paths: &[PathBuf],
+    task: &TaskHandle,
+) -> String {
+    let all = paths.len() as u64;
+    task.set(0, all);
     let (came, failed) = match serial.filter(|s| ready(s)) {
         Some(serial) => {
-            let mut came = 0;
-            for batch in paths.chunks(BATCH) {
+            let (mut came, mut tried) = (0, 0u64);
+            // One at a time: the bar moves a file at a time.
+            for path in paths {
                 let mut cmd = Command::new("adb");
-                cmd.args(["-s", serial, "push"]).args(batch).arg(DOWNLOAD);
+                cmd.args(["-s", serial, "push"]).arg(path).arg(DOWNLOAD);
                 if cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
                 {
-                    came += batch.len();
+                    came += 1;
                 }
+                tried += 1;
+                task.set(tried, all);
             }
             (came, paths.len() - came)
         }
@@ -396,13 +439,15 @@ mod tests {
         std::fs::write(camera.join("a.jpg"), b"aaaa").unwrap();
         std::fs::write(camera.join("b.jpg"), b"bb").unwrap();
         std::fs::write(mount.join("Internal storage/DCIM/.thumbnails/t.jpg"), b"t").unwrap();
-        assert_eq!(import_from_folder(&mount, &dest), Some((2, 0)));
+        let (tx, _rx) = calloop::channel::channel();
+        let task = TaskHandle::new(1, tx);
+        assert_eq!(import_from_folder(&mount, &dest, &task), Some((2, 0)));
         assert_eq!(std::fs::read(dest.join("Camera/a.jpg")).unwrap(), b"aaaa");
         assert!(!dest.join(".thumbnails").exists());
         // Again: nothing new.
-        assert_eq!(import_from_folder(&mount, &dest), Some((0, 0)));
+        assert_eq!(import_from_folder(&mount, &dest, &task), Some((0, 0)));
         // A phone that shows no storage (locked): not "no new photos".
-        assert_eq!(import_from_folder(&root.join("nothing"), &dest), None);
+        assert_eq!(import_from_folder(&root.join("nothing"), &dest, &task), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

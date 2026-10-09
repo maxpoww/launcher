@@ -89,7 +89,9 @@ mod module_box;
 mod stats;
 mod surface;
 mod sys;
+mod task_pill;
 mod task_title;
+mod tasks;
 mod thumbs;
 mod unfurl;
 // FreeDesktop trash backend. Read (`list`/`file_path`) and trash (drop a file
@@ -647,6 +649,9 @@ fn main() -> anyhow::Result<()> {
         deck_icon_capacity: 0,
         deck_ptr: None,
         desktop_top,
+        tasks: tasks::Tasks::default(),
+        task_tx: None,
+        task_pill: task_pill::TaskPill::default(),
         desktop_layer,
         desktop_renderer: None,
         desktop_size: (0, 0),
@@ -1509,6 +1514,11 @@ pub struct App {
     /// when disabled, or after the compositor closed it.
     /// The surface the desktop's menus are drawn on, above the windows.
     desktop_top: desktop_top::Top,
+    /// The long things being done, shown as one pill on the OPTIONS bar
+    /// (`tasks.rs`); `task_tx` is how their workers report, made at the first.
+    pub(crate) tasks: tasks::Tasks,
+    task_tx: Option<calloop::channel::Sender<tasks::Report>>,
+    task_pill: task_pill::TaskPill,
     desktop_layer: Option<LayerSurface>,
     desktop_renderer: Option<Renderer>,
     /// The desktop surface's logical size.

@@ -226,6 +226,15 @@ The big daemon files are cohesive but long — go straight to the function:
   the dock holds; apps on the fast card get NVIDIA's offload variables at launch (`gpu_exec`).
   Pointer-free: `waverunner-ctl debug-gear <open net|bt|gear|disk|cpu|ram|gpu|bat>`, then
   `detail|hotspot|files|page <about|health|clean|drive|folder|card|app|system>|close|…`.
+- `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar
+  (what on the left, the pill filling like the player's track, the percentage on the right in a
+  slot reserved at "100%"; left of the bell, growing out of its right end so it moves no other
+  OPTION; `PillId::Task`, inert on click). GLOBAL by design (Max, 2026-10-09): any work is wired in
+  with `let task = app.task_begin("Moving x.iso to Home")` on the loop, `task.set(done, total)` from
+  its thread (reports thin themselves out), and dropping the handle ends it — the pill shows the
+  newest running task (`+N` for the others), a finished one lingers `LINGER` at 100%. Wired so far:
+  the photo import (bytes) and files dropped on a phone. Pointer-free: `waverunner-ctl debug-desktop
+  "task <seconds> [what]"`.
 - `desktop.rs` — the DESKTOP: `~/Desktop` as icons behind the windows (macOS/Windows style) on
   its own `Bottom`-layer surface (`surface::create_desktop_surface`; Bottom, not Background, so
   swww can never map over it) with its own renderer + icon array (layer = item index). Lists the

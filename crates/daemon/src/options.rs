@@ -579,7 +579,8 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         | PillId::CavaOut => PillGroup::Mind,
         PillId::Settings | PillId::SettingsStats => PillGroup::Settings,
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
-        PillId::Notif | PillId::NotifMute => PillGroup::Notif,
+        // The task pill stands by the bell and, like it, is led by nothing.
+        PillId::Notif | PillId::NotifMute | PillId::Task => PillGroup::Notif,
         PillId::Clock => PillGroup::Clock,
         // A doorway belongs to whatever it stands in for; today only the window
         // controls can go sticky. It never reflows anyway — a sticky pair is a
@@ -858,6 +859,8 @@ fn draw_z(id: PillId) -> u8 {
         // on top of it, capping its right end as it grows out from behind.
         PillId::Notif => 7,
         PillId::NotifMute => 8,
+        // Under the bell's preview, which grows over it.
+        PillId::Task => 6,
         // Mirror of the bell on the left edge: the box + copy-link pill draw
         // first (emerging from behind), then the small fixed glyph pill on top.
         PillId::ClipboardBox => 9,
@@ -990,6 +993,8 @@ pub(crate) enum PillId {
     CavaNow,
     /// Where it is coming out.
     CavaOut,
+    /// What this computer is busy with, and how far along (`task_pill.rs`).
+    Task,
 }
 
 impl PillId {
@@ -1359,7 +1364,7 @@ fn presence(id: PillId) -> Presence {
         PillId::Window | PillId::Close | PillId::Clock => BOTH,
         // A notification arriving while you pick a window is still worth
         // seeing, and the bell doesn't act on the focused window.
-        PillId::Notif | PillId::NotifMute => BOTH,
+        PillId::Notif | PillId::NotifMute | PillId::Task => BOTH,
         // Window-mode controls act on the FOCUSED window — meaningless while
         // you're above the desktop choosing one.
         PillId::Pseudo | PillId::Float | PillId::Fullscreen => DESKTOP_ONLY,
@@ -1765,6 +1770,12 @@ impl App {
             family: Some(NERD),
             glyph_color: None,
         });
+
+        // The TASK pill (`task_pill.rs`): what this computer is busy with and
+        // how far along, left of the bell, while there is something.
+        if let Some(rect) = self.task_pill_rect(y, ph) {
+            pills.push(Pill { id: PillId::Task, rect, text: String::new(), family: None, glyph_color: None });
+        }
 
         // The settings gear: the very first thing on the banner, pinned to the
         // left edge (Max, 2026-09-13). Everything else on this side starts from
@@ -3675,6 +3686,10 @@ impl App {
             // preview/box that grows out from behind it.
             if pill.id == PillId::NotifMute {
                 self.push_notif_mute(scene, pill.rect);
+                continue;
+            }
+            if pill.id == PillId::Task {
+                self.push_task_pill(scene, pill.rect);
                 continue;
             }
             // The clipboard box draws itself (slides out from behind the small
@@ -6625,7 +6640,8 @@ impl App {
                 _ => Shape::Default,
             },
             // The small clipboard pill is clickable (paste) → pointer.
-            Some(PillId::Clock) | None => Shape::Default,
+            // (The task pill says, it does not do.)
+            Some(PillId::Clock | PillId::Task) | None => Shape::Default,
             Some(_) => Shape::Pointer, // control circle / small clipboard pill
         };
         if self.cursor_now != Some(shape) {

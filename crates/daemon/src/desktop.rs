@@ -2567,9 +2567,10 @@ impl App {
                 let (name, serial) = (v.name.clone(), phone_serial_of(v));
                 let mount = (!v.closed).then(|| v.path.clone());
                 info!("desktop: importing the photos of {name}");
+                let task = self.task_begin(&format!("{} {name}", crate::i18n::tr("Importing photos from")));
                 self.desktop_off_loop(
                     move || {
-                        let said = crate::desktop_phone::import_photos(&name, serial.as_deref(), mount.as_deref());
+                        let said = crate::desktop_phone::import_photos(&name, serial.as_deref(), mount.as_deref(), &task);
                         crate::desktop_send_notify(&said);
                         said
                     },
@@ -4202,9 +4203,14 @@ impl App {
         info!("desktop: {} file(s) dropped on {}", paths.len(), v.name);
         let (name, phone, serial) = (v.name.clone(), v.phone, phone_serial_of(v));
         let mount = (!v.closed).then(|| v.path.clone());
+        let what = match paths.as_slice() {
+            [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            many => format!("{} {}", many.len(), crate::i18n::tr("files")),
+        };
+        let task = self.task_begin(&format!("{} {what} {} {name}", crate::i18n::tr("Copying"), crate::i18n::tr("to")));
         std::thread::spawn(move || {
             let said = if phone {
-                crate::desktop_phone::push(&name, serial.as_deref(), mount.as_deref(), &paths)
+                crate::desktop_phone::push(&name, serial.as_deref(), mount.as_deref(), &paths, &task)
             } else {
                 let dir = mount.unwrap_or_default();
                 let (copies, failed) = crate::desktop_send::put(&paths, &dir, false);
@@ -4446,6 +4452,20 @@ impl App {
                 }
                 None => "props <n>".to_owned(),
             };
+        }
+        // `task <seconds> [what]`: a task that takes that long, for the
+        // OPTIONS bar's task pill to show (no phone needed).
+        if let Some(rest) = what.strip_prefix("task ") {
+            let (secs, label) = rest.trim().split_once(' ').unwrap_or((rest.trim(), "Importing photos from Pixel 8 Pro"));
+            let steps = secs.parse::<u64>().unwrap_or(5).clamp(1, 600) * 20;
+            let task = self.task_begin(label);
+            std::thread::spawn(move || {
+                for step in 0..=steps {
+                    task.set(step, steps);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            });
+            return format!("a task of {} s", steps / 20);
         }
         if let Some(rest) = what.strip_prefix("pick ") {
             let Some(menu) = self.desktop.menu.take() else {
