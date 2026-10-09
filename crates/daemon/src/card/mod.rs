@@ -1465,6 +1465,7 @@ impl App {
                 crate::surface::set_interactive(layer, false);
             }
             let _ = self.conn.flush();
+            self.sync_card_input();
             self.request_card_draw();
         }
         self.complete_keyboard_handback(crate::KbSurface::Card);
@@ -1481,6 +1482,7 @@ impl App {
             crate::surface::set_interactive(layer, false);
         }
         let _ = self.conn.flush();
+        self.sync_card_input();
         self.request_card_draw();
     }
 
@@ -2077,6 +2079,10 @@ impl App {
         let rects: Vec<(i32, i32, i32, i32)> = match self.card.rect.filter(|_| self.card_present())
         {
             Some(_) if self.card.wheel.sideways == Some(true) => vec![(0, 0, w as i32, h as i32)],
+            // …and while the card has the keyboard: a click anywhere off the
+            // card must reach us, for it is how the keyboard is given back
+            // (see `card_drop_keys`).
+            Some(_) if self.card.field.is_some() => vec![(0, 0, w as i32, h as i32)],
             Some(r) => vec![(r.x as i32, r.y as i32, r.w as i32, r.h as i32)],
             None => Vec::new(),
         };
@@ -2649,6 +2655,18 @@ impl App {
                     let Some(at) = self.card.ptr else {
                         return;
                     };
+                    // A click off the card while it has the keyboard: the
+                    // typing is over, the keyboard is its window's again.
+                    // (It has to be taken here: the window under the card
+                    // is still the compositor's "active" one, so a click on
+                    // it changes nothing there and the keyboard would stay
+                    // on the card — Max, 2026-10-09: *"it wont let my KB go…
+                    // it got stuck until i closed the card"*.)
+                    if self.card.field.is_some() && !self.card.rect.is_some_and(|r| r.contains(at))
+                    {
+                        self.card_drop_keys();
+                        return;
+                    }
                     let edge = self.card.grip(at).zip(self.card.rect).zip(self.card.spot);
                     self.card.press = match self.card.hit(at) {
                         // A side edge first: it is the card's, whatever

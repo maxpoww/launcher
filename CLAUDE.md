@@ -425,7 +425,9 @@ The big daemon files are cohesive but long — go straight to the function:
   the INPUT BOX (an open memory only): emoji and paperclip on its left, talk-to-text and record on
   its right, all inside it. THE KEYBOARD: the card has none until the input box, the search or the
   name is clicked (`card_take_keys`: an exclusive grab that drops to on-demand the moment the
-  keyboard arrives, as the desktop does; `card_keys_left` when a window is clicked;
+  keyboard arrives, as the desktop does; while it has it the WHOLE surface takes the pointer and a
+  click off the card gives it back — `card_drop_keys` — because the card's window is still the
+  compositor's active one: a click on it changes nothing there and the keyboard stayed on the card;
   `KbSurface::Card`; keys route first in `main.rs::handle_key_event` → `card_key`). In the box
   ENTER KEEPS what is written in the memory, CTRL+ENTER SENDS it to the window (text only, pasted
   after the keyboard is handed back), Shift+Enter breaks the line, Escape gives the keyboard back.
