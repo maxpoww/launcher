@@ -403,6 +403,9 @@ pub(crate) struct Desktop {
     /// answered yet.
     pub targets: Vec<crate::desktop_send::Target>,
     pub looking: bool,
+    /// The phones being used as a camera: volume path → the pid of the
+    /// scrcpy feeding the camera device (shared with its waiting thread).
+    pub cameras: std::sync::Arc<std::sync::Mutex<HashMap<String, u32>>>,
     /// What is plugged in and mounted, standing on the desktop as icons.
     pub volumes: Vec<crate::mounts::Mounted>,
     /// The Properties box, while it is up.
@@ -751,28 +754,101 @@ fn mirror_size((short, long): (f64, f64), usable: f64) -> (i64, i64) {
     ((h * short / long).round() as i64, h as i64)
 }
 
+/// What to tell the owner when a phone does not let this computer in,
+/// asked before anything is started so it is said at once and exactly
+/// (Max, 2026-10-09: "turn on USB debugging to use this feature").
+fn phone_refuses(name: &str, serial: &str) -> Option<String> {
+    let what = match phone_debugging(serial) {
+        Debugging::Off => "turn on USB debugging on the phone (Settings, Developer options), then try again.",
+        Debugging::NotAllowed => "allow USB debugging for this computer on the phone, then try again.",
+        Debugging::Ready | Debugging::Unknown => return None,
+    };
+    info!("desktop: {name} does not let us in: {what}");
+    Some(format!("{name}: {}", crate::i18n::tr(what)))
+}
+
+/// The camera device a phone's picture is fed into: a loopback one
+/// (Golem's is "Android WebCam", /dev/video10), which every app then sees
+/// as a camera. `None` on a system without one.
+fn camera_device() -> Option<std::path::PathBuf> {
+    let mut found: Vec<(bool, String)> = std::fs::read_dir("/sys/devices/virtual/video4linux")
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let node = e.file_name().to_string_lossy().into_owned();
+            let name = std::fs::read_to_string(e.path().join("name")).unwrap_or_default();
+            node.starts_with("video").then(|| (!name.contains("Android"), node))
+        })
+        .collect();
+    found.sort();
+    found.first().map(|(_, node)| std::path::Path::new("/dev").join(node))
+}
+
+/// How long a camera has to stay up to count as working.
+const CAMERA_SETTLE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Use a phone's back camera as this computer's (scrcpy into the loopback
+/// camera device, no window), until it is stopped from the same menu row
+/// or the phone goes. What to tell the owner — that it is on, or why not.
+fn camera(
+    name: &str,
+    serial: Option<&str>,
+    path: &str,
+    cameras: &std::sync::Mutex<HashMap<String, u32>>,
+) -> Option<String> {
+    use crate::i18n::tr;
+    if let Some(said) = serial.and_then(|s| phone_refuses(name, s)) {
+        return Some(said);
+    }
+    let Some(device) = camera_device() else {
+        warn!("desktop: no loopback camera device on this system");
+        return Some(tr("This computer has no camera device for a phone to use.").to_owned());
+    };
+    let mut cmd = std::process::Command::new("scrcpy");
+    cmd.args(["--video-source=camera", "--camera-facing=back", "--camera-ar=16:9", "--max-size=1920"])
+        .args(["--camera-fps=30", "--no-audio", "--no-window"])
+        .arg(format!("--v4l2-sink={}", device.display()));
+    if let Some(serial) = serial {
+        cmd.arg(format!("--serial={serial}"));
+    }
+    let mut child = match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            warn!("desktop: scrcpy could not be run: {e}");
+            return Some(tr("The screen mirror (scrcpy) is not installed.").to_owned());
+        }
+    };
+    if let Ok(mut on) = cameras.lock() {
+        on.insert(path.to_owned(), child.id());
+    }
+    // Still up after a moment: it works, and with no window to show for
+    // it, say so.
+    std::thread::sleep(CAMERA_SETTLE);
+    let early = child.try_wait().ok().flatten();
+    if early.is_none() {
+        crate::desktop_send_notify(&format!(
+            "{name}: {}",
+            tr("is this computer's camera now (Android WebCam). Its menu stops it.")
+        ));
+    }
+    let status = early.or_else(|| child.wait().ok());
+    let by_hand = cameras.lock().ok().is_none_or(|mut on| on.remove(path).is_none());
+    info!("desktop: {name} is no longer the camera ({status:?}, by hand: {by_hand})");
+    match early {
+        Some(status) if !status.success() && !by_hand => {
+            warn!("desktop: scrcpy's camera gave up on {name} ({status})");
+            Some(format!("{name}: {}", tr("its camera could not be used (this needs Android 12 or newer).")))
+        }
+        _ => None,
+    }
+}
+
 /// Show a phone's screen in a window (scrcpy), until that window is
 /// closed. What to tell the owner if it could not: the program is missing,
 /// or the phone would not let it in.
 fn mirror(name: &str, serial: Option<&str>) -> Option<String> {
-    // Asked first, so the owner is told at once and exactly what to do
-    // (Max, 2026-10-09: "turn on USB debugging to use this feature").
-    match serial.map(phone_debugging) {
-        Some(Debugging::Off) => {
-            info!("desktop: {name} has USB debugging off");
-            return Some(format!(
-                "{name}: {}",
-                crate::i18n::tr("turn on USB debugging to mirror its screen (Settings, Developer options).")
-            ));
-        }
-        Some(Debugging::NotAllowed) => {
-            info!("desktop: {name} has not allowed this computer");
-            return Some(format!(
-                "{name}: {}",
-                crate::i18n::tr("allow USB debugging for this computer on the phone, then mirror again.")
-            ));
-        }
-        _ => {}
+    if let Some(said) = serial.and_then(|s| phone_refuses(name, s)) {
+        return Some(said);
     }
     // The window is the phone's own shape, standing: left to itself it
     // opens at the size of any other window, the picture lost in it (Max,
@@ -1783,7 +1859,10 @@ impl App {
             let phone = item
                 .and_then(|i| self.desktop.items.get(i))
                 .is_some_and(|it| self.desktop.volumes.iter().any(|v| v.phone && v.path.as_os_str() == it.path.as_str()));
-            menu = menu.for_volume(phone, h as f32);
+            let camera = item
+                .and_then(|i| self.desktop.items.get(i))
+                .is_some_and(|it| self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&it.path)));
+            menu = menu.for_volume(phone, camera, h as f32);
         }
         // On a shortcut nothing vouches for: letting it run comes first.
         let locked = item
@@ -2041,6 +2120,34 @@ impl App {
                 // Off the loop: it runs for as long as the window is open.
                 std::thread::spawn(move || {
                     if let Some(said) = mirror(&name, serial.as_deref()) {
+                        crate::desktop_send_notify(&said);
+                    }
+                });
+            }
+            Action::Camera => {
+                let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
+                    return;
+                };
+                let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
+                    return;
+                };
+                let (name, serial) = (v.name.clone(), phone_serial(&v.uri));
+                self.desktop.selected.clear();
+                // On already: this is the way to end it.
+                // (Taken off the list first: its thread reads that as "by hand".)
+                let running = self.desktop.cameras.lock().ok().and_then(|mut c| c.remove(&path));
+                if let Some(pid) = running {
+                    info!("desktop: {name} stops being the camera");
+                    // SAFETY: a signal to a child of ours, by its pid.
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    }
+                    return;
+                }
+                info!("desktop: {name} as the camera (serial {serial:?})");
+                let cameras = self.desktop.cameras.clone();
+                std::thread::spawn(move || {
+                    if let Some(said) = camera(&name, serial.as_deref(), &path, &cameras) {
                         crate::desktop_send_notify(&said);
                     }
                 });

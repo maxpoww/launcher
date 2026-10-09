@@ -43,6 +43,8 @@ pub(crate) enum Action {
     Eject,
     /// A phone: its screen in a window here (scrcpy).
     Mirror,
+    /// A phone as this computer's camera: on, or off again.
+    Camera,
     /// Out of the desktop, into the home folder.
     MoveToHome,
     MoveToBin,
@@ -239,7 +241,7 @@ impl Menu {
 
     /// The menu of a plugged-in volume standing on the desktop: it is not a
     /// file of the desktop's — nothing renames, moves or bins it.
-    pub fn for_volume(mut self, phone: bool, h: f32) -> Self {
+    pub fn for_volume(mut self, phone: bool, camera: bool, h: f32) -> Self {
         let mut rows = vec![
             Row::Item { label: "Open", action: Action::Open, danger: false },
             Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
@@ -247,6 +249,9 @@ impl Menu {
         // A phone: its screen, here (Max, 2026-10-09).
         if phone {
             rows.push(Row::Item { label: "Mirror screen", action: Action::Mirror, danger: false });
+            // And its camera as this computer's; the same row ends it.
+            let label = if camera { "Stop camera" } else { "Use as camera" };
+            rows.push(Row::Item { label, action: Action::Camera, danger: false });
         }
         rows.push(Row::Sep);
         rows.push(Row::Item { label: "Eject", action: Action::Eject, danger: false });
@@ -496,9 +501,13 @@ mod tests {
         assert!(!m.targets);
         assert_eq!(m.action(0), Some(Action::Open));
         // A volume's menu: open it or let it go, nothing else.
-        let phone = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(true, 800.0);
+        let phone = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(true, false, 800.0);
         assert_eq!(phone.action(2), Some(Action::Mirror), "a phone's screen can be mirrored");
-        let m = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(false, 800.0);
+        assert_eq!(phone.action(3), Some(Action::Camera), "and its camera used");
+        assert_eq!(phone.rows[3], Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
+        let on = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(true, true, 800.0);
+        assert_eq!(on.rows[3], Row::Item { label: "Stop camera", action: Action::Camera, danger: false });
+        let m = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(false, false, 800.0);
         let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
         assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject]);
         // The wallpaper's menu takes Paste on top when there is something.
