@@ -74,13 +74,13 @@ const SEEK: f32 = 28.0;
 const SEEK_OPEN_W: f32 = 220.0;
 /// The input box: its least height, its buttons, the most lines it grows to.
 const BOX_MIN: f32 = 48.0;
-const BTN: f32 = 32.0;
+const BTN: f32 = 34.0;
 /// How far one button is from the next: less than a button is wide —
 /// their icons are smaller than they are, so they sit shoulder to shoulder.
-const BTN_STEP: f32 = 25.0;
+const BTN_STEP: f32 = 22.0;
 /// How far its buttons are from its edges, and its words from them.
-const BTN_EDGE: f32 = 0.0;
-const BTN_GAP: f32 = -3.0;
+const BTN_EDGE: f32 = -4.0;
+const BTN_GAP: f32 = -5.0;
 pub(super) const BOX_LINES: usize = 5;
 const HINT_H: f32 = 16.0;
 const PAD: f32 = 8.0;
@@ -816,7 +816,7 @@ pub(super) fn draw(
             }
             if live || hot {
                 grid.rects.push(RectInst {
-                    rect: Rect::new(br.x + 4.0, br.y + 3.0, br.w - 8.0, br.h - 6.0),
+                    rect: Rect::new(br.x + 6.0, br.y + 4.0, br.w - 12.0, br.h - 8.0),
                     radius: 7.0,
                     color: match (live, which) {
                         (true, BoxBtn::Mic) => [DANGER[0], DANGER[1], DANGER[2], 0.9],
@@ -833,7 +833,7 @@ pub(super) fn draw(
                 ink(if hot { 0.95 } else { 0.55 })
             };
             grid.labels
-                .push(glyph(which.glyph(), br, 17.0, color, clip));
+                .push(glyph(which.glyph(), br, 20.0, color, clip));
         }
         let top = r.y + (r.h - bar.draft.len().clamp(1, BOX_LINES) as f32 * TEXT_LINE) / 2.0;
         if let Some(secs) = bar.rec {
@@ -949,7 +949,9 @@ mod tests {
         // Its four buttons are inside it, two to each side of the words.
         let text = b.text().unwrap();
         for (n, (_, r)) in b.btns.iter().enumerate() {
-            assert!(r.x >= input.x && r.x + r.w <= input.x + input.w && r.y >= input.y);
+            // (The icon is well inside; its hit box may run a hair past the edge.)
+            let mid = r.x + r.w / 2.0;
+            assert!(mid > input.x + 8.0 && mid < input.x + input.w - 8.0 && r.y >= input.y);
             // (Their icons — their middles — are to each side of the words.)
             assert_eq!(r.x + r.w / 2.0 < text.x, n < 2);
             assert_eq!(r.x + r.w / 2.0 > text.x + text.w, n >= 2);
