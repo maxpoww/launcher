@@ -10,10 +10,11 @@
 //! player's left-aligned clipped line, its number sits in a slot reserved at
 //! its widest ("100%") so the pill does not twitch as the digits change.
 //!
-//! It stands left of the bell, in ground no other OPTION uses, and grows out
-//! from its right end: arriving, filling and leaving, it moves nothing else
-//! (the Still Bar, by having no neighbour to push). The bell's preview and
-//! the clock's date cover it while they are out, as they cover anything
+//! It stands centred between the player's band and the window's pill (Max,
+//! same day), in ground no other OPTION uses, and grows out from its middle:
+//! arriving, filling and leaving, it moves nothing else (the Still Bar, by
+//! pushing no neighbour); what that ground cannot hold of its words is cut.
+//! A box that grows over the bar covers it as it covers anything
 //! (`clear_under`). It does nothing when clicked.
 
 use std::time::Instant;
@@ -24,15 +25,14 @@ use crate::options::{push_neumorph, FONT_PX, LINE_PX, OPTION_GAP, PILL_PAD_X, TE
 use crate::tasks::Task;
 use crate::App;
 
-/// The pill at its widest, in pill-heights (the player's own cap).
-const MAX_W: f32 = 13.0;
+/// The pill at its widest, in pill-heights. Wider than the player's pill is
+/// let be (13): that one scrolls a long name, this one would cut it — at 13
+/// "Importing photos from Pixel 8 Pro" lost its last word.
+const MAX_W: f32 = 24.0;
 /// Between the words and the number.
 const GAP: f32 = 10.0;
 /// What the number's slot is measured from.
 const WIDEST: &str = "100%";
-/// The room kept right of the window's pill for its own controls, in
-/// pill-heights: the task's words give way before they would crowd them.
-const WINDOW_ROOM: f32 = 6.0;
 
 /// The pill's state.
 #[derive(Debug, Default)]
@@ -119,25 +119,30 @@ impl App {
         }
     }
 
-    /// The pill's width when it is all the way out: its words and its number,
-    /// no wider than the player's pill may be, nor than the ground between
-    /// the window's pill and the bell allows.
+    /// The pill's width when nothing holds it in: its words and its number,
+    /// up to `MAX_W`.
     fn task_pill_full_w(&self) -> f32 {
-        let ph = self.options_pill_h();
-        let number = self.task_pill.pct_w + 2.0 * PILL_PAD_X;
         let wanted = 2.0 * PILL_PAD_X + self.task_pill.label_w + GAP + self.task_pill.pct_w;
-        let right = self.options_clock_rest_left() - OPTION_GAP - ph - OPTION_GAP;
-        let title = (self.options_title_content_w() + 2.0 * PILL_PAD_X).max(ph);
-        let window_right = self.options_size.0 as f32 / 2.0 + title / 2.0 + WINDOW_ROOM * ph;
-        wanted.min(ph * MAX_W).min(right - window_right).max(number)
+        wanted.min(self.options_pill_h() * MAX_W)
     }
 
-    /// Where the pill is on the bar now (`None`: it is not there). It grows
-    /// leftward out of its right end, which is fixed beside the bell.
-    pub(crate) fn task_pill_rect(&self, y: f32, ph: f32) -> Option<Rect> {
+    /// Where the pill is on the bar now (`None`: it is not there): centred
+    /// in the ground between the left band's end (`band_right`) and the
+    /// window's pill (`window_left`), growing out from its middle, its words
+    /// giving way if that ground is narrow. With no ground there at all (no
+    /// window pill, or a very long title) it stands left of the bell.
+    pub(crate) fn task_pill_rect(&self, band_right: f32, window_left: f32, y: f32, ph: f32) -> Option<Rect> {
         let t = self.task_pill.t;
         if t <= 0.01 || self.task_pill.shown.is_none() {
             return None;
+        }
+        let number = self.task_pill.pct_w + 2.0 * PILL_PAD_X;
+        let ground = window_left - band_right - 2.0 * OPTION_GAP;
+        if window_left.is_finite() && ground >= number {
+            let full = self.task_pill_full_w().min(ground).max(number);
+            let w = lerp(ph.min(full), full, t);
+            let centre = (band_right + window_left) / 2.0;
+            return Some(Rect::new(centre - w / 2.0, y, w, ph));
         }
         let right = self.options_clock_rest_left() - OPTION_GAP - ph - OPTION_GAP;
         let w = lerp(ph, self.task_pill_full_w().max(ph), t);

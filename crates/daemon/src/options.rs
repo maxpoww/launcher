@@ -1771,12 +1771,6 @@ impl App {
             glyph_color: None,
         });
 
-        // The TASK pill (`task_pill.rs`): what this computer is busy with and
-        // how far along, left of the bell, while there is something.
-        if let Some(rect) = self.task_pill_rect(y, ph) {
-            pills.push(Pill { id: PillId::Task, rect, text: String::new(), family: None, glyph_color: None });
-        }
-
         // The settings gear: the very first thing on the banner, pinned to the
         // left edge (Max, 2026-09-13). Everything else on this side starts from
         // `left_start` below, so the gear's place is the one that never moves.
@@ -2204,6 +2198,23 @@ impl App {
                 pres.desktop
             }
         });
+        // The TASK pill (`task_pill.rs`): what this computer is busy with and
+        // how far along — centred in the ground between the left band (the
+        // player, when there is one) and the window's pill (Max, 2026-10-09).
+        // Placed last: that ground is whatever the pills that ARE there leave.
+        let window_left = pills
+            .iter()
+            .filter(|p| group_of(p.id) == PillGroup::Window)
+            .map(|p| p.rect.x)
+            .fold(f32::INFINITY, f32::min);
+        let band_right = pills
+            .iter()
+            .filter(|p| p.rect.x + p.rect.w <= window_left && group_of(p.id) != PillGroup::Window)
+            .map(|p| p.rect.x + p.rect.w)
+            .fold(EDGE_PAD, f32::max);
+        if let Some(rect) = self.task_pill_rect(band_right, window_left, y, ph) {
+            pills.push(Pill { id: PillId::Task, rect, text: String::new(), family: None, glyph_color: None });
+        }
         pills
     }
 
