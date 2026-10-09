@@ -74,10 +74,13 @@ const SEEK: f32 = 28.0;
 const SEEK_OPEN_W: f32 = 220.0;
 /// The input box: its least height, its buttons, the most lines it grows to.
 const BOX_MIN: f32 = 48.0;
-const BTN: f32 = 28.0;
+const BTN: f32 = 32.0;
+/// How far one button is from the next: less than a button is wide —
+/// their icons are smaller than they are, so they sit shoulder to shoulder.
+const BTN_STEP: f32 = 25.0;
 /// How far its buttons are from its edges, and its words from them.
-const BTN_EDGE: f32 = 4.0;
-const BTN_GAP: f32 = 3.0;
+const BTN_EDGE: f32 = 0.0;
+const BTN_GAP: f32 = -3.0;
 pub(super) const BOX_LINES: usize = 5;
 const HINT_H: f32 = 16.0;
 const PAD: f32 = 8.0;
@@ -227,8 +230,8 @@ pub(crate) fn bottom(
     let right = x + w - BTN_EDGE - BTN;
     let btns = [
         (BoxBtn::Emoji, Rect::new(left, btn_y, BTN, BTN)),
-        (BoxBtn::Clip, Rect::new(left + BTN, btn_y, BTN, BTN)),
-        (BoxBtn::Talk, Rect::new(right - BTN, btn_y, BTN, BTN)),
+        (BoxBtn::Clip, Rect::new(left + BTN_STEP, btn_y, BTN, BTN)),
+        (BoxBtn::Talk, Rect::new(right - BTN_STEP, btn_y, BTN, BTN)),
         (BoxBtn::Mic, Rect::new(right, btn_y, BTN, BTN)),
     ];
     Bottom {
@@ -813,7 +816,7 @@ pub(super) fn draw(
             }
             if live || hot {
                 grid.rects.push(RectInst {
-                    rect: Rect::new(br.x + 2.0, br.y + 2.0, br.w - 4.0, br.h - 4.0),
+                    rect: Rect::new(br.x + 4.0, br.y + 3.0, br.w - 8.0, br.h - 6.0),
                     radius: 7.0,
                     color: match (live, which) {
                         (true, BoxBtn::Mic) => [DANGER[0], DANGER[1], DANGER[2], 0.9],
@@ -830,7 +833,7 @@ pub(super) fn draw(
                 ink(if hot { 0.95 } else { 0.55 })
             };
             grid.labels
-                .push(glyph(which.glyph(), br, 14.0, color, clip));
+                .push(glyph(which.glyph(), br, 17.0, color, clip));
         }
         let top = r.y + (r.h - bar.draft.len().clamp(1, BOX_LINES) as f32 * TEXT_LINE) / 2.0;
         if let Some(secs) = bar.rec {
@@ -947,7 +950,9 @@ mod tests {
         let text = b.text().unwrap();
         for (n, (_, r)) in b.btns.iter().enumerate() {
             assert!(r.x >= input.x && r.x + r.w <= input.x + input.w && r.y >= input.y);
-            assert_eq!(r.x + r.w <= text.x, n < 2);
+            // (Their icons — their middles — are to each side of the words.)
+            assert_eq!(r.x + r.w / 2.0 < text.x, n < 2);
+            assert_eq!(r.x + r.w / 2.0 > text.x + text.w, n >= 2);
         }
         // It grows with what is written, to a point; the search rides up with it.
         let tall = bottom(rect, Page::Session, 4, false, None);
