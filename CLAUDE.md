@@ -410,6 +410,39 @@ The big daemon files are cohesive but long — go straight to the function:
   PHONE BRIDGE to come (an Android panel showing the session and the pins; not built). A picture of
   the card's own is deleted with the last item that shows it (`Card::keeps`). Not built: renaming
   a session by hand.
+  THE CARD IS A CHAT WITH YOURSELF BESIDE EVERY WINDOW (Max, 2026-10-09; the approved mockup is
+  ~/terminal-mockup/chat — `#demo` plays it, `#chats` shows Memory). What that added, over the
+  sessions above: HEAD = Memory · Pinned · Clipboard (`Foot`). An open memory's NAME floats over
+  its items (`bar::name_rect`; a click renames it — `Field::Name`); every item carries a small
+  line with its time (`View::notes`, `model::when_text`). MEMORY lists the memories as a messenger
+  lists chats (`ROW_H`, a coloured initial, the name, the last thing, its time) with NEW at the
+  bottom, in the input box's place. CLIPBOARD (`Page::Clipboard`, `card_clip_rows`) is the plain
+  clipboard's history as rows (ids `CLIP_IDS + clip.id`; a click pastes, the pin's place is a `+`
+  = keep it in the memory, `card_keep_clip`; refreshed by `card_clip_changed` from
+  `clipboard.rs`). `bar.rs` is the BOTTOM (`bottom()` lays it out, `draw()` paints it, `Bottom::hit`
+  tests it): the SEARCH — a circle with the magnifier that opens into a field (`Field::Seek`,
+  `Card::query`, `Card::matches`; a memory is found by its name or anything in it) — and under it
+  the INPUT BOX (an open memory only): emoji and paperclip on its left, talk-to-text and record on
+  its right, all inside it. THE KEYBOARD: the card has none until the input box, the search or the
+  name is clicked (`card_take_keys`: an exclusive grab that drops to on-demand the moment the
+  keyboard arrives, as the desktop does; `card_keys_left` when a window is clicked;
+  `KbSurface::Card`; keys route first in `main.rs::handle_key_event` → `card_key`). In the box
+  ENTER KEEPS what is written in the memory, CTRL+ENTER SENDS it to the window (text only, pasted
+  after the keyboard is handed back), Shift+Enter breaks the line, Escape gives the keyboard back.
+  The EMOJI picker (`bar::EMOJI`, a tray over the box) puts an emoji where the cursor is: in the
+  box while the card has the keyboard, straight into the window otherwise. The PAPERCLIP opens the
+  desktop portal's file picker (`bt_files::pick_file_waiting`, on a thread). `voice.rs`: a VOICE
+  NOTE is recorded with `pw-record` (16 kHz mono WAV under the card's folder; stopped with SIGINT
+  so the file is closed properly) and kept as a `Kind::Voice` item (`aspect` = its seconds; a play
+  button, a wave drawn from its id — NOT its real sound — lit as it plays through `pw-play`);
+  TALK-TO-TEXT records the same way and runs **whisper.cpp** on it when the talking stops
+  (`voice::engine`: `whisper-cli` from `WAVERUNNER_WHISPER` / PATH / `<data>/whisper/engine/bin`,
+  the model = `WAVERUNNER_WHISPER_MODEL` / the first `<data>/whisper/ggml-*.bin`), the words land
+  in the input box to be fixed before they go anywhere. Not built from the mockup: ONE item made
+  of several things (text + picture + voice composed together — each still lands as its own item),
+  dragging a single piece out of such an item, GIFs and stickers (no source), the full emoji table
+  and its search, typing to search without clicking the magnifier first (the card has no keyboard
+  until clicked). Pointer-free: `card write <text>|keep|send|find <words>|rename <name>|clipboard`.
   ZOOM (`card_zoom`, `Card::zoom()`, kept in `card.json`): the items' text, lines and pictures are
   drawn at `View::zoom` (`ZOOM_MIN..ZOOM_MAX`, a tenth a step); Ctrl +/− and Ctrl 0 do it ONLY
   while the pointer is on the card. The card never has the keyboard, so those keys are compositor

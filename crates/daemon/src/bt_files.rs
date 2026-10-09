@@ -129,6 +129,21 @@ fn run_worker(events: &Sender<FileEvent>, mut commands: mpsc::UnboundedReceiver<
     });
 }
 
+/// Ask the desktop for one file and WAIT for the answer (on a thread of the
+/// caller's: the picker stays up as long as it is looked at). The card's
+/// paperclip (`card/`). `None`: cancelled, or no portal.
+pub(crate) fn pick_file_waiting() -> Option<PathBuf> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    rt.block_on(async {
+        let conn = Connection::session().await.ok()?;
+        let token = std::process::id() ^ 0x5eed;
+        pick_file(&conn, token).await.ok().flatten()
+    })
+}
+
 /// Ask the desktop for one file. `None` when the picker was cancelled.
 async fn pick_file(conn: &Connection, token: u32) -> zbus::Result<Option<PathBuf>> {
     let handle = format!("golem{token}");

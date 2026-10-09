@@ -54,6 +54,7 @@ mod dnd;
 mod model;
 mod place;
 mod view;
+mod voice;
 
 use bar::*;
 use model::*;
@@ -327,6 +328,16 @@ pub(crate) struct Card {
     query: String,
     /// The memory's new name, while it is typed.
     naming: String,
+    /// A recording in progress, a voice note being played, and whether
+    /// what was said is being written out right now (`voice.rs`).
+    rec: Option<voice::Rec>,
+    playing: Option<voice::Playing>,
+    writing: bool,
+    /// The emoji picker is open over the input box.
+    picking: bool,
+    /// Something to say in the line under the input box (a tool that is
+    /// missing, nothing made out), until the next thing is done.
+    say: Option<&'static str>,
     /// Ctrl +/− are the card's right now (the pointer is on it).
     keys: bool,
     /// A drag is over the card (another app's, or an item of ours).
@@ -555,7 +566,13 @@ impl Card {
         if !rect.contains(pos) {
             return None;
         }
-        let low = bottom(rect, self.page, self.draft_lines.len(), self.seeking());
+        let low = bottom(
+            rect,
+            self.page,
+            self.draft_lines.len(),
+            self.seeking(),
+            self.picking,
+        );
         if let Some(hit) = low.hit(pos, self.seeking()) {
             return Some(hit);
         }
@@ -1235,6 +1252,11 @@ impl App {
         let Some(item) = self.card.item(id).cloned() else {
             return;
         };
+        // (A voice note is listened to: there is nothing of it to paste.)
+        if item.kind == Kind::Voice {
+            self.card_play(id);
+            return;
+        }
         match &item.path {
             Some(path) => self.serve_files(std::slice::from_ref(path), false),
             None => self.serve_transient_text(&item.body),
@@ -1531,15 +1553,58 @@ impl App {
     /// One of the input box's buttons.
     fn card_box_button(&mut self, which: BoxBtn) {
         match which {
-            // (Not built yet: they say so in the line under the box.)
-            BoxBtn::Emoji | BoxBtn::Clip | BoxBtn::Talk | BoxBtn::Mic => {
-                debug!("card: {which:?} is not built yet");
+            BoxBtn::Mic => self.card_voice_button(false),
+            BoxBtn::Talk => self.card_voice_button(true),
+            BoxBtn::Emoji => {
+                self.card.picking = !self.card.picking;
+                self.sync_card_input();
+                self.request_card_draw();
             }
+            BoxBtn::Clip => self.card_pick_file(),
+        }
+    }
+
+    /// An emoji of the picker goes WHERE THE CURSOR IS: into the input box
+    /// while the card has the keyboard there; straight into the window
+    /// while the window has it — as a phone's keyboard does, and nothing
+    /// is left on the card (Max, 2026-10-09: *"i dont want to have one
+    /// emoji on the card for each time i want to send an emoji"*). The
+    /// picker stays open for the next one.
+    fn card_emoji(&mut self, n: usize) {
+        let Some(emoji) = EMOJI.get(n) else {
+            return;
+        };
+        if self.card.field == Some(Field::Box) {
+            self.card.draft.push_str(emoji);
+            self.request_card_draw();
+        } else if self.card.field.is_none() {
+            self.serve_transient_text(emoji);
+            self.after_ms(PASTE_SETTLE, |_| card_paste_key());
+        }
+    }
+
+    /// The paperclip: the desktop's file picker, and what is picked is
+    /// kept in the memory.
+    fn card_pick_file(&mut self) {
+        let (tx, rx) = calloop::channel::channel::<Option<PathBuf>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::bt_files::pick_file_waiting());
+        });
+        let waiting = self
+            .loop_handle
+            .insert_source(rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(Some(path)) = event {
+                    app.card_add_paths(vec![path]);
+                }
+            });
+        if waiting.is_err() {
+            warn!("card: cannot wait for the file picker");
         }
     }
 
     /// A button, let go where it was pressed.
     fn card_tap(&mut self, what: Hover) {
+        self.card.say = None;
         match what {
             Hover::Close(id) => self.card_remove(id),
             Hover::Pin(id) if self.card.page == Page::Clipboard => self.card_keep_clip(id),
@@ -1564,7 +1629,9 @@ impl App {
                 self.card_take_keys(Field::Box);
             }
             Hover::Name => self.card_take_keys(Field::Name),
-            Hover::Play(_) | Hover::Item(_) => {}
+            Hover::Play(id) => self.card_play(id),
+            Hover::Emoji(n) => self.card_emoji(n),
+            Hover::Item(_) => {}
         }
     }
 
@@ -1850,6 +1917,7 @@ impl App {
     fn card_let_go(&mut self) {
         self.card_keys(false);
         self.card_drop_keys();
+        self.card_voice_quiet();
         self.card.host = None;
         self.card.spot = None;
         self.card.rect = None;
@@ -2210,7 +2278,7 @@ impl App {
             self.card.to_bottom = true;
         }
         // What is written in the input box, wrapped to it.
-        let low = bottom(rect, self.card.page, 1, self.card.seeking());
+        let low = bottom(rect, self.card.page, 1, self.card.seeking(), false);
         let box_w = low.text().map_or(200.0, |r| r.w);
         let per = renderer.measure_text("nnnnnnnnnn", TEXT_PX + 0.5, None) / 10.0;
         let cols = if per > 0.0 {
@@ -2261,7 +2329,19 @@ impl App {
             })
             .collect();
         let name = self.card.open_name();
+        let recording = self.card.rec.as_ref().map(|r| (r.seconds(), r.talk()));
+        let talk = match (recording, self.card.writing) {
+            (Some((_, true)), _) => Some("Listening…  press again to write it"),
+            (_, true) => Some("Writing what you said…"),
+            _ => None,
+        };
+        let playing = self
+            .card
+            .playing
+            .as_ref()
+            .map(|p| (p.id, p.started.elapsed().as_secs_f32()));
         let hint = match hover {
+            _ if self.card.say.is_some() => self.card.say.unwrap_or(""),
             Some(Hover::Btn(which)) => which.hint(),
             _ if self.card.draft.trim().is_empty() => "",
             _ => "Enter keeps it in this memory  ·  Ctrl+Enter sends it to the window",
@@ -2297,11 +2377,13 @@ impl App {
                     query: &self.card.query,
                     found: listed.len(),
                     field: self.card.field,
-                    rec: None,
-                    talk: None,
+                    rec: recording.filter(|(_, talk)| !talk).map(|(secs, _)| secs),
+                    talk,
                     hint,
+                    picking: self.card.picking,
                 },
                 notes: &notes,
+                playing,
             }),
             dnd_over: self.card.dnd_over,
             hidden,

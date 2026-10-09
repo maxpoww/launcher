@@ -133,6 +133,8 @@ pub(crate) enum Hover {
     Name,
     /// A voice note's play button.
     Play(u64),
+    /// One of the picker's emoji (its place in `bar::EMOJI`).
+    Emoji(usize),
 }
 
 impl Hover {
@@ -157,6 +159,8 @@ pub(crate) struct FootView<'a> {
     /// The small line at the foot of each item, by id: when it is from
     /// (and, on the clipboard's page, which app).
     pub notes: &'a HashMap<u64, String>,
+    /// The voice note being played, and for how many seconds now.
+    pub playing: Option<(u64, f32)>,
 }
 
 /// The foot's height, and its buttons' own.
@@ -198,6 +202,8 @@ pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 3] {
 
 /// The room an open memory's name takes at the top of its list.
 const NAME_SPACE: f32 = 30.0;
+/// How many bars a voice note's wave is drawn with.
+const WAVE_BARS: usize = 30;
 /// A voice note's play button.
 pub(super) const PLAY: f32 = 28.0;
 /// A memory's row on Memory's page: its picture, its name, its last thing.
@@ -372,6 +378,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             f.page,
             f.bar.draft.len(),
             !f.bar.query.is_empty() || f.bar.field == Some(Field::Seek),
+            f.bar.picking,
         )
     });
     let body = list_rect(rect, view.foot.is_some(), low.map_or(0.0, |b| b.h));
@@ -575,6 +582,90 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 color: Some([ACCENT[0], ACCENT[1], ACCENT[2], 0.85]),
             });
             line_y += kind_line;
+        }
+        if item.kind == Kind::Voice {
+            // A voice note: its play button, its wave (the part already
+            // heard is lit), how long it is.
+            let play = tile.play();
+            let now = view
+                .foot
+                .as_ref()
+                .and_then(|f| f.playing)
+                .filter(|(id, _)| *id == item.id)
+                .map(|(_, secs)| secs);
+            list.rects.push(RectInst {
+                rect: play,
+                radius: 7.0,
+                color: [ACCENT[0], ACCENT[1], ACCENT[2], 0.92],
+                glass: 0.0,
+                border: 0.0,
+            });
+            list.labels.push(Label {
+                text: if now.is_some() {
+                    "\u{f04d}"
+                } else {
+                    "\u{f04b}"
+                }
+                .to_owned(),
+                pos: (
+                    play.x + play.w / 2.0 + if now.is_some() { 0.0 } else { 1.0 },
+                    play.y + 7.0,
+                ),
+                max_w: play.w,
+                font_px: 10.0,
+                line_px: 14.0,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(clip),
+                family: Some(crate::options::NERD),
+                color: Some([0.10, 0.09, 0.12, 1.0]),
+            });
+            let secs = item.aspect.max(1.0);
+            let heard = now.map_or(0.0, |s| (s / secs).clamp(0.0, 1.0));
+            let (x0, x1) = (
+                play.x + play.w + 10.0,
+                t.x + t.w - TILE_PAD_X - 34.0 - 2.0 * CLOSE,
+            );
+            let step = (x1 - x0) / WAVE_BARS as f32;
+            for n in 0..WAVE_BARS {
+                // (Its shape is the note's own every time: from its id.)
+                let mix = (item.id.wrapping_mul(31).wrapping_add(n as u64))
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let seed = (mix >> 40) % 1000;
+                let h = 4.0 + (seed as f32 / 1000.0) * 16.0;
+                let lit = (n as f32 + 0.5) / WAVE_BARS as f32 <= heard && now.is_some();
+                list.rects.push(RectInst {
+                    rect: Rect::new(
+                        (x0 + n as f32 * step).round(),
+                        (play.y + (play.h - h) / 2.0).round(),
+                        (step - 2.0).max(1.0),
+                        h.round(),
+                    ),
+                    radius: 1.0,
+                    color: if lit {
+                        [ACCENT[0], ACCENT[1], ACCENT[2], 1.0]
+                    } else {
+                        paint.ink_at(0.42)
+                    },
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            let total = secs.round() as u32;
+            list.labels.push(Label {
+                text: format!("{}:{:02}", total / 60, total % 60),
+                pos: (t.x + t.w - TILE_PAD_X - 15.0 - 2.0 * CLOSE, play.y + 7.0),
+                max_w: 40.0,
+                font_px: 10.5,
+                line_px: 14.0,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(clip),
+                family: None,
+                color: Some(paint.ink_at(0.6)),
+            });
         }
         if item.kind == Kind::Image {
             let frame = Rect::new(x, line_y, text_w, pic_h);
@@ -1253,8 +1344,10 @@ mod tests {
                     rec: None,
                     talk: None,
                     hint: "",
+                    picking: false,
                 },
                 notes: &notes,
+                playing: None,
             }),
             dnd_over: false,
             hidden: None,
@@ -1267,8 +1360,9 @@ mod tests {
         let (with, _, scroll_foot) = scene(&view(true));
         // The list is shorter by the head and by what is at the bottom, so
         // there is that much more to scroll.
-        let low = crate::card::bar::bottom(rect, Page::Session, 0, false);
-        assert_eq!(scroll_foot, scroll_bare + FOOT_H + low.h);
+        let low = crate::card::bar::bottom(rect, Page::Session, 0, false, false);
+        // (…and its first item starts under the memory's name.)
+        assert_eq!(scroll_foot, scroll_bare + FOOT_H + low.h + NAME_SPACE);
         assert_eq!(with.grids.len(), bare.grids.len() + 1);
         // The buttons, in the head, side by side inside the card; the
         // list starts under them and ends over the input box.
