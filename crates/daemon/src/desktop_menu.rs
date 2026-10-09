@@ -175,6 +175,8 @@ fn volume_rows(v: &Volume) -> Vec<Row> {
     // ticked — a change of lens is one click (Max, same day).
     if v.phone {
         rows.push(Row::Item { label: "Mirror screen", action: Action::Mirror, danger: false });
+        // The camera is a group of its own (Max, 2026-10-09).
+        rows.push(Row::Sep);
         if !v.camera {
             rows.push(Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
         } else {
@@ -569,17 +571,18 @@ mod tests {
         let open = || Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0);
         let phone = open().for_volume(Volume { phone: true, ..Default::default() }, 800.0);
         assert_eq!(phone.action(2), Some(Action::Mirror), "a phone's screen can be mirrored");
-        assert_eq!(phone.rows[3], Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
+        assert_eq!(phone.rows[3], Row::Sep);
+        assert_eq!(phone.rows[4], Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
         // While it is the camera: Stop, and the lenses right under it.
         let lenses = vec!["Main".to_owned(), "Front".to_owned()];
         let using = Volume { phone: true, camera: true, lenses: lenses.clone(), current: Some(1) };
         let mut on = open().for_volume(using, 800.0);
-        assert_eq!(on.rows[3], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
-        assert_eq!(on.rows[4], Row::Target { label: "Main".into(), action: Action::Lens(0) });
-        assert_eq!(on.rows[5], Row::Target { label: "Front  ✓".into(), action: Action::Lens(1) });
-        assert_eq!(on.rows[6], Row::Sep);
+        assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+        assert_eq!(on.rows[5], Row::Target { label: "Main".into(), action: Action::Lens(0) });
+        assert_eq!(on.rows[6], Row::Target { label: "Front  ✓".into(), action: Action::Lens(1) });
+        assert_eq!(on.rows[7], Row::Sep);
         let blind = open().for_volume(Volume { phone: true, camera: true, ..Default::default() }, 800.0);
-        assert_eq!(blind.rows[4], Row::Item { label: "Change lens", action: Action::Camera, danger: false });
+        assert_eq!(blind.rows[5], Row::Item { label: "Change lens", action: Action::Camera, danger: false });
         // The lens page: Back, then each lens, the one in use ticked.
         on.show_lenses(&lenses, Some(1), false, 800.0);
         assert!(on.lenses);
@@ -591,7 +594,7 @@ mod tests {
         // Back is the VOLUME's first page, not a file's.
         on.show_main(800.0);
         assert!(!on.lenses);
-        assert_eq!(on.rows[3], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+        assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
         let m = open().for_volume(Volume::default(), 800.0);
         let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
         assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject]);
