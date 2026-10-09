@@ -74,6 +74,8 @@ pub(crate) struct Mounted {
     /// How the service names the mount (what `gio mount -e` is told).
     pub uri: String,
     pub phone: bool,
+    /// A phone's USB node (`/dev/bus/usb/003/043`), when the service says.
+    pub port: Option<String>,
 }
 
 /// Read `gio mount -li`: the volumes, each with what its drive says about
@@ -178,6 +180,7 @@ pub(crate) fn mounted(volumes: &[Volume], runtime_dir: &str) -> Vec<Mounted> {
                 path: mount_path(&uri, runtime_dir)?,
                 uri,
                 phone: v.phone,
+                port: v.port.clone(),
             })
         })
         .collect()

@@ -666,6 +666,37 @@ pub(crate) fn neighbour(slots: &[Option<Slot>], from: Option<Slot>, step: (i32, 
 /// (`mtp://Google_Pixel_8_Pro_3A301FDJG000UW/`: the last part) — what
 /// `adb` and `scrcpy` know it by. `None` when it cannot be told.
 pub(crate) fn phone_serial(uri: &str) -> Option<String> {
+    phone_serial_in(uri)
+}
+
+/// A mounted phone's serial, for `adb` and `scrcpy`: read off its USB node
+/// (what every brand gives the same way — and with two phones on the desk
+/// it is what tells them apart), else out of its mount's name.
+fn phone_serial_of(v: &crate::mounts::Mounted) -> Option<String> {
+    v.port
+        .as_deref()
+        .and_then(|port| usb_serial(port, std::path::Path::new("/sys/bus/usb/devices")))
+        .or_else(|| phone_serial(&v.uri))
+}
+
+/// The serial of the USB device at `port` (`/dev/bus/usb/<bus>/<dev>`), from
+/// the kernel's account of the bus under `sysfs`.
+fn usb_serial(port: &str, sysfs: &std::path::Path) -> Option<String> {
+    let mut parts = port.rsplit('/');
+    let (dev, bus) = (parts.next()?.parse::<u32>().ok()?, parts.next()?.parse::<u32>().ok()?);
+    let number = |dir: &std::path::Path, file: &str| {
+        std::fs::read_to_string(dir.join(file)).ok().and_then(|s| s.trim().parse::<u32>().ok())
+    };
+    std::fs::read_dir(sysfs).ok()?.flatten().map(|e| e.path()).find_map(|dir| {
+        (number(&dir, "busnum") == Some(bus) && number(&dir, "devnum") == Some(dev))
+            .then(|| std::fs::read_to_string(dir.join("serial")).ok())
+            .flatten()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    })
+}
+
+fn phone_serial_in(uri: &str) -> Option<String> {
     let host = uri.split("://").nth(1)?.split('/').next()?;
     let host = host.strip_prefix('[').unwrap_or(host);
     let serial = host.rsplit('_').next()?;
@@ -887,6 +918,9 @@ pub(crate) struct Lens {
     /// scrcpy's `--camera-zoom`: a phone's back lenses are ONE camera to
     /// Android, which changes lens with the zoom.
     pub zoom: Option<f32>,
+    /// The most pictures a second it gives, up to 60 (`None`: it did not
+    /// say; the phone's own choice then).
+    pub fps: Option<u32>,
 }
 
 /// The lenses a phone has (`scrcpy --list-cameras`). Empty when it would
@@ -923,7 +957,13 @@ fn parse_lenses(said: &str) -> Vec<Lens> {
             let (lo, hi) = r.split(']').next()?.split_once(',')?;
             Some((lo.trim().parse::<f32>().ok()?, hi.trim().parse::<f32>().ok()?))
         });
-        let lens = |name: &str, zoom: Option<f32>| Lens { name: name.to_owned(), id: id.to_owned(), zoom };
+        // `fps={15, 24, 30, 60}`: the most it gives, no more than 60. Asked
+        // for more than it has, a phone refuses outright (a Galaxy A11 stops
+        // at 30).
+        let fps = about.split_once("fps={").and_then(|(_, r)| {
+            r.split('}').next()?.split(',').filter_map(|n| n.trim().parse::<u32>().ok()).filter(|n| *n <= 60).max()
+        });
+        let lens = |name: &str, zoom: Option<f32>| Lens { name: name.to_owned(), id: id.to_owned(), zoom, fps };
         match facing {
             "back" => {
                 backs += 1;
@@ -934,10 +974,13 @@ fn parse_lenses(said: &str) -> Vec<Lens> {
                             lenses.push(lens(&nth("Ultra wide"), Some(lo.max(0.5))));
                         }
                         lenses.push(lens(&nth("Main"), Some(1.0)));
-                        if hi >= 5.0 {
-                            lenses.push(lens(&nth("Telephoto"), Some(5.0)));
-                        } else if hi >= 2.0 {
-                            lenses.push(lens(&nth("Telephoto"), Some(2.0)));
+                        // Further in: a lens of its own where the camera
+                        // is several (it had an ultra wide), plain zoom
+                        // otherwise — and called what it is.
+                        let far = if hi >= 5.0 { Some(5.0) } else if hi >= 2.0 { Some(2.0) } else { None };
+                        if let Some(zoom) = far {
+                            let name = if lo < 0.6 { "Telephoto".to_owned() } else { format!("Zoom {zoom}×") };
+                            lenses.push(lens(&nth(&name), Some(zoom)));
                         }
                     }
                     None => lenses.push(lens(&nth("Main"), None)),
@@ -1008,12 +1051,15 @@ fn camera(
     if let Some(zoom) = lens.zoom {
         cmd.arg(format!("--camera-zoom={zoom}"));
     }
+    if let Some(fps) = lens.fps {
+        cmd.arg(format!("--camera-fps={fps}"));
+    }
     cmd.args(["--camera-ar=16:9", "--max-size=1920"])
         // 60 pictures a second, where a webcam gives 30 (Max, 2026-10-09: at
         // 30 it "feels even less smooth" than the built-in one); the phone
         // was measured sending 1080p at 60 with none late or repeated. And
         // twice scrcpy's usual bit rate, for the picture's sake.
-        .args(["--camera-fps=60", "--video-bit-rate=16M", "--no-audio", "--no-window"])
+        .args(["--video-bit-rate=16M", "--no-audio", "--no-window"])
         // Frames come off the phone up to 20 ms early or late (measured);
         // held this long they go out evenly. (80 ms was tried first, on a
         // day the picture was choppy for another reason, and judged worse.)
@@ -2240,7 +2286,7 @@ impl App {
             .volumes
             .iter()
             .find(|v| v.path.as_os_str() == path.as_str())
-            .and_then(|v| phone_serial(&v.uri));
+            .and_then(phone_serial_of);
         self.desktop_fill_lenses(&path, true);
         let asked = path.clone();
         self.desktop_off_loop(
@@ -2450,7 +2496,7 @@ impl App {
                 let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
                     return;
                 };
-                let (name, serial) = (v.name.clone(), phone_serial(&v.uri));
+                let (name, serial) = (v.name.clone(), phone_serial_of(v));
                 self.desktop.selected.clear();
                 info!("desktop: mirroring {name} (serial {serial:?})");
                 // Off the loop: it runs for as long as the window is open.
@@ -2477,7 +2523,7 @@ impl App {
                 let Some(lens) = self.desktop.lenses.get(&path).and_then(|l| l.get(n)).cloned() else {
                     return;
                 };
-                let (name, serial) = (v.name.clone(), phone_serial(&v.uri));
+                let (name, serial) = (v.name.clone(), phone_serial_of(v));
                 self.desktop.selected.clear();
                 // On already, through another lens: that one ends first (the
                 // new one waits for the device to be let go).
@@ -4764,9 +4810,32 @@ mod tests {
     }
 
     #[test]
+    fn a_phones_serial_is_read_off_its_usb_node() {
+        let sys = std::env::temp_dir().join(format!("wr-usb-{}", std::process::id()));
+        for (dir, bus, dev, serial) in [("3-9", "3", "43", "R9HN80AD0QJ\n"), ("3-4", "3", "2", "01.00.00\n")] {
+            let d = sys.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("busnum"), bus).unwrap();
+            std::fs::write(d.join("devnum"), dev).unwrap();
+            std::fs::write(d.join("serial"), serial).unwrap();
+        }
+        assert_eq!(usb_serial("/dev/bus/usb/003/043", &sys).as_deref(), Some("R9HN80AD0QJ"));
+        assert_eq!(usb_serial("/dev/bus/usb/003/044", &sys), None);
+        assert_eq!(usb_serial("nonsense", &sys), None);
+        let _ = std::fs::remove_dir_all(&sys);
+    }
+
+    #[test]
     fn a_phones_lenses_are_read_from_its_cameras() {
         let said = "[server] INFO: List of cameras:\n    --camera-id=0    (back, 4080x3072, fps={15, 24, 30, 60}, zoom-range=[0.49, 30])\n    --camera-id=1    (front, 3440x2448, fps={15, 24, 30, 60}, zoom-range=[0.9, 10])\n";
         let lenses = parse_lenses(said);
+        assert!(lenses.iter().all(|l| l.fps == Some(60)));
+        // A Galaxy A11: no lens behind the zoom, and 30 pictures at most.
+        let galaxy = parse_lenses("    --camera-id=0    (back, 4208x3120, fps={15, 20, 24, 30}, zoom-range=[1, 8])\n    --camera-id=1    (front, 3264x2448, fps={15, 20, 24, 30}, zoom-range=[1, 8])\n");
+        assert_eq!(
+            galaxy.iter().map(|l| (l.name.as_str(), l.zoom, l.fps)).collect::<Vec<_>>(),
+            vec![("Main", Some(1.0), Some(30)), ("Zoom 5×", Some(5.0), Some(30)), ("Front", None, Some(30))]
+        );
         let rows: Vec<(&str, &str, Option<f32>)> = lenses.iter().map(|l| (l.name.as_str(), l.id.as_str(), l.zoom)).collect();
         assert_eq!(
             rows,
