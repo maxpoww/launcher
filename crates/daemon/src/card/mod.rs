@@ -108,6 +108,9 @@ const SHIFT_PASTERS: [&str; 6] = [
     "xterm",
 ];
 
+/// How many window titles are remembered with their session.
+const TITLES_MAX: usize = 300;
+
 /// Picture layers in the card's texture array; past it the oldest is
 /// reused.
 const PIC_LAYERS: u32 = 32;
@@ -189,6 +192,10 @@ struct Win {
     on: Option<bool>,
     place: Option<Place>,
     width: Option<f32>,
+    /// The session this window works with (`Past::id`); `None` until one
+    /// is found for it or picked.
+    #[serde(default)]
+    session: Option<u64>,
 }
 
 /// Why a card that has a window is not showing on it. Each cause comes and
@@ -274,17 +281,21 @@ pub(crate) struct Card {
     ptr: Option<(f32, f32)>,
     press: Option<Press>,
     pub drag: Option<Drag>,
-    /// Which page is up. `items` is ALWAYS the list on screen — the
+    /// Which page is up. `items` is ALWAYS the list on screen — a
     /// session's on its page, the pinned ones on theirs, one row a session
     /// on Memory's — so everything that works on the list (order, drags,
-    /// the ×, a click) works on every page; `session` and `pinned` hold
-    /// the two real lists while they are not the one on screen
-    /// (`App::card_show` moves them in and out).
+    /// the ×, a click) works on every page. The real lists are `memory`
+    /// (every session, newest first) and `pinned`; the one on screen is
+    /// OUT of there meanwhile (`Card::put_back` / `take_out`).
     page: Page,
-    session: Vec<Item>,
+    /// The session whose items are the card's on the Session page: the
+    /// one of the window the card is on. `None`: that window has none yet
+    /// (Memory's page is up for one to be picked).
+    open: Option<u64>,
     pinned: Vec<Item>,
-    /// The sessions put away, newest first.
     memory: Vec<Past>,
+    /// The session each window title was given (see `model::Saved`).
+    titles: HashMap<String, u64>,
     /// A drag is over the card (another app's, or an item of ours).
     dnd_over: bool,
     /// …and it is one of the card's own items, being moved to a new place.
@@ -487,12 +498,14 @@ impl Card {
         })
     }
 
-    /// The session's own items and the pinned ones, whichever page is up.
+    /// The items of the session that is out on the card (none while
+    /// another page is up: it is back in `memory` then), and the pinned
+    /// ones wherever they are.
     fn session_items(&self) -> &[Item] {
         if self.page == Page::Session {
             &self.items
         } else {
-            &self.session
+            &[]
         }
     }
 
@@ -504,67 +517,148 @@ impl Card {
         }
     }
 
-    /// Put page `page` up: the list on screen goes back where it is kept
-    /// and the new page's comes out. Whether anything changed.
-    fn show(&mut self, page: Page) -> bool {
-        if page == self.page {
-            return false;
+    /// Every session as it is right now (the one on screen included).
+    fn sessions(&self) -> Vec<Past> {
+        let mut all = self.memory.clone();
+        if let (Page::Session, Some(id)) = (self.page, self.open) {
+            if let Some(past) = all.iter_mut().find(|p| p.id == id) {
+                past.items = self.items.clone();
+            }
         }
+        all
+    }
+
+    /// The list on screen goes back where it is kept.
+    fn put_back(&mut self) {
         let shown = std::mem::take(&mut self.items);
         match self.page {
-            Page::Session => self.session = shown,
+            Page::Session => {
+                let open = self.open;
+                if let Some(past) = self.memory.iter_mut().find(|p| Some(p.id) == open) {
+                    past.items = shown;
+                }
+            }
             Page::Pinned => self.pinned = shown,
             Page::Memory => {}
         }
-        self.page = page;
-        self.items = match page {
-            Page::Session => std::mem::take(&mut self.session),
+    }
+
+    /// The page's list comes out onto the screen.
+    fn take_out(&mut self) {
+        self.items = match self.page {
+            Page::Session => {
+                let open = self.open;
+                self.memory
+                    .iter_mut()
+                    .find(|p| Some(p.id) == open)
+                    .map(|p| std::mem::take(&mut p.items))
+                    .unwrap_or_default()
+            }
             Page::Pinned => std::mem::take(&mut self.pinned),
             Page::Memory => self.memory.iter().map(session_row).collect(),
         };
-        // (A session's rows are wrapped afresh: one may have changed.)
+        // (A session's row is wrapped afresh: it may have changed.)
         for past in &self.memory {
             self.lines.remove(&past.id);
         }
         self.shifts.clear();
         self.scroll = 0.0;
-        self.to_bottom = page == Page::Session;
+        self.to_bottom = self.page == Page::Session;
+    }
+
+    /// Put page `page` up. Whether anything changed.
+    fn show(&mut self, page: Page) -> bool {
+        if page == self.page {
+            return false;
+        }
+        self.put_back();
+        self.page = page;
+        self.take_out();
         true
     }
 
-    /// Start a new session: the one on the card goes to memory (an empty
-    /// one is not worth remembering). Whether one was put away.
-    fn renew(&mut self, now: u64) -> bool {
-        self.show(Page::Session);
-        if self.items.is_empty() {
-            return false;
-        }
+    /// The card works with session `id` from now on, and shows it; with
+    /// none, Memory's page is up for one to be picked.
+    fn turn_to(&mut self, id: Option<u64>) {
+        self.put_back();
+        self.open = id.filter(|id| self.memory.iter().any(|p| p.id == *id));
+        self.page = if self.open.is_some() {
+            Page::Session
+        } else {
+            Page::Memory
+        };
+        self.take_out();
+    }
+
+    /// Start a session called `name`: it is in memory at once, first, with
+    /// nothing in it yet. Its id.
+    fn begin(&mut self, name: Option<String>, now: u64) -> u64 {
         let id = self.next_id.max(1);
         self.next_id = id + 1;
-        let items = std::mem::take(&mut self.items);
+        // (Memory's page, if it is up, is listed again by whoever shows it.)
         self.memory.insert(
             0,
             Past {
                 id,
                 at: now,
-                name: None,
-                items,
+                name,
+                items: Vec::new(),
             },
         );
-        true
+        id
     }
 
-    /// Bring session `id` back out of memory: it is the card's again, and
-    /// the one that was on the card takes its turn in memory.
-    fn recall(&mut self, id: u64, now: u64) -> bool {
-        let Some(at) = self.memory.iter().position(|p| p.id == id) else {
-            return false;
-        };
+    /// The session window `addr`, titled `title`, should show: the one it
+    /// was given by hand; else the one a window of that title was given
+    /// before; else the only one there is. `None`: there are several and
+    /// nothing says which — it is picked on Memory's page.
+    fn session_for(&self, addr: &str, title: Option<&str>) -> Option<u64> {
+        let exists = |id: &u64| self.memory.iter().any(|p| p.id == *id);
+        self.wins
+            .get(addr)
+            .and_then(|w| w.session)
+            .filter(exists)
+            .or_else(|| {
+                title
+                    .and_then(|t| self.titles.get(t).copied())
+                    .filter(exists)
+            })
+            .or_else(|| (self.memory.len() == 1).then(|| self.memory[0].id))
+    }
+
+    /// Window `addr` works with session `id` until it closes. With `title`
+    /// (the choice was made by hand), windows of that title find it again.
+    fn give(&mut self, addr: &str, title: Option<&str>, id: u64) {
+        self.wins.entry(addr.to_owned()).or_default().session = Some(id);
+        if let Some(title) = title.filter(|t| !t.is_empty()) {
+            if self.titles.len() >= TITLES_MAX && !self.titles.contains_key(title) {
+                self.titles.clear();
+            }
+            self.titles.insert(title.to_owned(), id);
+        }
+    }
+
+    /// Session `id` is forgotten: no window works with it any more. What
+    /// it was, for its pictures to be cleared away.
+    fn lose(&mut self, id: u64) -> Option<Past> {
+        let at = self.memory.iter().position(|p| p.id == id)?;
+        if self.open == Some(id) {
+            self.put_back();
+            self.open = None;
+            self.take_out();
+        }
         let past = self.memory.remove(at);
-        self.renew(now);
-        self.items = past.items;
-        self.to_bottom = true;
-        true
+        for win in self.wins.values_mut() {
+            if win.session == Some(id) {
+                win.session = None;
+            }
+        }
+        self.titles.retain(|_, s| *s != id);
+        if self.page == Page::Memory {
+            self.items.retain(|row| row.id != id);
+        }
+        self.lines.remove(&id);
+        Some(past)
     }
 
     /// Pin item `id` of the session, or take its pin off. Whether it is
@@ -767,9 +861,18 @@ impl App {
             .chain(saved.memory.iter().map(|p| p.id));
         self.card.next_id = saved.next_id.max(ids.max().map_or(1, |id| id + 1));
         self.card.page = Page::Session;
-        self.card.items = saved.items;
+        self.card.open = None;
+        self.card.items = Vec::new();
         self.card.pinned = saved.pinned;
         self.card.memory = saved.memory;
+        self.card.titles = saved.titles;
+        // The one list of before there were sessions is a session now.
+        if !saved.items.is_empty() {
+            let id = self.card.begin(None, now_secs());
+            self.card.memory[0].items = saved.items;
+            self.card.open = Some(id);
+            self.card.take_out();
+        }
         self.card.to_bottom = true;
         for path in self.card_pictures() {
             self.card_ask_picture(&path);
@@ -782,9 +885,10 @@ impl App {
             &crate::persist::data_path(ITEMS_FILE),
             &Saved {
                 next_id: self.card.next_id,
-                items: self.card.session_items().to_vec(),
+                items: Vec::new(),
                 pinned: self.card.pinned_items().to_vec(),
-                memory: self.card.memory.clone(),
+                memory: self.card.sessions(),
+                titles: self.card.titles.clone(),
             },
         );
     }
@@ -859,8 +963,12 @@ impl App {
         at: Option<usize>,
     ) {
         self.card_load();
-        // (Memory's page lists sessions: what arrives is the session's.)
-        if self.card.page == Page::Memory {
+        // What arrives is a session's: the window's own, or — where none
+        // was picked yet — a new one of its name.
+        if self.card.page != Page::Pinned {
+            if self.card.open.is_none() {
+                self.card_begin();
+            }
             self.card_show(Page::Session);
         }
         let id = self.card.next_id.max(1);
@@ -1017,48 +1125,109 @@ impl App {
         }
     }
 
-    /// A button of the foot. New: a clean card, the session that was on
-    /// it kept in memory. Memory, Pinned: that page — or back to the
-    /// session when it is the one already up.
-    fn card_foot(&mut self, which: Foot) {
-        self.card_load();
-        match which.page() {
-            None => {
-                if self.card.renew(now_secs()) {
-                    info!("card: a new session; {} in memory", self.card.memory.len());
-                    self.card_save();
-                }
-                self.request_card_draw();
+    /// The title of the window the card is on, as the bar's pill reads it
+    /// (`task_title::groom`): what a session started there is called, and
+    /// how a window of that task finds it again.
+    fn card_host_title(&self) -> Option<String> {
+        let host = self.card.host.as_deref()?;
+        let (class, title) = crate::hypr::window_class_title(host)?;
+        let home = std::env::var("HOME").ok();
+        let name = crate::task_title::groom(&title, Some(&class), home.as_deref());
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// The card has come to a window: it shows that window's session — the
+    /// one it was given, or the one its title was given before, or the
+    /// only one there is. With several and nothing to go by it opens on
+    /// MEMORY, to be picked (Max, 2026-10-09: *"which session should a new
+    /// window start on? i think it should open on memory"*); with none at
+    /// all, a first one is started.
+    fn card_attach(&mut self) {
+        let Some(host) = self.card.host.clone() else {
+            return;
+        };
+        let title = self.card_host_title();
+        let found = self.card.session_for(&host, title.as_deref());
+        let id = match found {
+            None if self.card.memory.is_empty() => {
+                let id = self.card.begin(title.clone(), now_secs());
+                self.card.give(&host, title.as_deref(), id);
+                self.card_save();
+                Some(id)
             }
-            Some(page) if page == self.card.page => self.card_show(Page::Session),
-            Some(page) => self.card_show(page),
+            found => found,
+        };
+        if let Some(id) = id {
+            // (Not remembered by title: nobody chose it.)
+            self.card.give(&host, None, id);
+        }
+        self.card.turn_to(id);
+        for path in self.card_pictures() {
+            self.card_ask_picture(&path);
         }
     }
 
-    /// A click on a session in memory: it is the card's again.
-    fn card_recall(&mut self, id: u64) {
-        if self.card.recall(id, now_secs()) {
-            info!(
-                "card: a session back from memory; {} left there",
-                self.card.memory.len()
-            );
-            for path in self.card_pictures() {
-                self.card_ask_picture(&path);
-            }
-            self.card_save();
-            self.request_card_draw();
+    /// Start a session for the window the card is on, called after it. It
+    /// is in memory at once, even with nothing in it — it can be picked
+    /// from another window straight away (Max, 2026-10-09: *"i can start a
+    /// session here and go to the browser, open it and drop some stuff
+    /// there"*).
+    fn card_begin(&mut self) {
+        self.card_load();
+        let title = self.card_host_title();
+        let id = self.card.begin(title.clone(), now_secs());
+        if let Some(host) = self.card.host.clone() {
+            self.card.give(&host, title.as_deref(), id);
         }
+        self.card.turn_to(Some(id));
+        info!(
+            "card: a new session {title:?}; {} in memory",
+            self.card.memory.len()
+        );
+        self.card_save();
+        self.card_save_session();
+        self.request_card_draw();
+    }
+
+    /// A button of the foot. New: a session for this window. Memory,
+    /// Pinned: that page — or back to the session when it is the one
+    /// already up (if the window has one).
+    fn card_foot(&mut self, which: Foot) {
+        self.card_load();
+        match which.page() {
+            None => self.card_begin(),
+            Some(page) if page != self.card.page => self.card_show(page),
+            Some(_) if self.card.open.is_some() => self.card_show(Page::Session),
+            Some(_) => self.card_show(Page::Memory),
+        }
+    }
+
+    /// A click on a session in memory: this window works with it from now
+    /// on (and so will a window of the same title, another day).
+    fn card_recall(&mut self, id: u64) {
+        if !self.card.memory.iter().any(|p| p.id == id) {
+            return;
+        }
+        let title = self.card_host_title();
+        if let Some(host) = self.card.host.clone() {
+            self.card.give(&host, title.as_deref(), id);
+        }
+        self.card.turn_to(Some(id));
+        info!("card: session {id} picked for {title:?}");
+        for path in self.card_pictures() {
+            self.card_ask_picture(&path);
+        }
+        self.card_save();
+        self.card_save_session();
+        self.request_card_draw();
     }
 
     /// The × of a session in memory: it is gone for good, with the
     /// pictures that were only its.
     fn card_forget(&mut self, id: u64) {
-        let Some(at) = self.card.memory.iter().position(|p| p.id == id) else {
+        let Some(past) = self.card.lose(id) else {
             return;
         };
-        let past = self.card.memory.remove(at);
-        self.card.items.retain(|row| row.id != id);
-        self.card.lines.remove(&id);
         info!("card: a session of {} forgotten", past.items.len());
         for item in &past.items {
             self.card.lines.remove(&item.id);
@@ -1069,6 +1238,7 @@ impl App {
             }
         }
         self.card_save();
+        self.card_save_session();
         self.request_card_draw();
     }
 
@@ -1209,6 +1379,7 @@ impl App {
         if self.card.width() != before {
             self.card.lines.clear();
         }
+        self.card_attach();
         self.card.leaving = false;
         self.card.shown = 0.0;
         self.card.spot = None;
@@ -1605,6 +1776,12 @@ impl App {
             foot: Some(FootView {
                 page: self.card.page,
                 pinned: &pinned,
+                current: self
+                    .card
+                    .host
+                    .as_ref()
+                    .and_then(|h| self.card.wins.get(h))
+                    .and_then(|w| w.session),
             }),
             dnd_over: self.card.dnd_over,
             hidden,
@@ -2100,6 +2277,30 @@ impl App {
         }
     }
 
+    /// Where the card stands, in a line (the answer to the page verbs).
+    fn card_words(&self) -> String {
+        let sessions: Vec<String> = self
+            .card
+            .sessions()
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}:{:?}:{}",
+                    p.id,
+                    p.name.as_deref().unwrap_or(""),
+                    p.items.len()
+                )
+            })
+            .collect();
+        format!(
+            "{:?}, session {:?}, {} pinned, sessions [{}]",
+            self.card.page,
+            self.card.open,
+            self.card.pinned_items().len(),
+            sessions.join(", ")
+        )
+    }
+
     /// `waverunner-ctl card …`: the card without a pointer.
     pub(crate) fn card_command(&mut self, what: &str) -> String {
         let what = what.trim();
@@ -2117,13 +2318,7 @@ impl App {
                     "pinned" => self.card_show(Page::Pinned),
                     _ => self.card_show(Page::Session),
                 }
-                format!(
-                    "{:?}: {} on it, {} pinned, {} in memory",
-                    self.card.page,
-                    self.card.session_items().len(),
-                    self.card.pinned_items().len(),
-                    self.card.memory.len()
-                )
+                self.card_words()
             }
             "pin" | "open" | "forget" => {
                 self.card_load();
@@ -2145,12 +2340,7 @@ impl App {
                         .map(|id| self.card_forget(id)),
                 };
                 match done {
-                    Some(()) => format!(
-                        "{} on it, {} pinned, {} in memory",
-                        self.card.session_items().len(),
-                        self.card.pinned_items().len(),
-                        self.card.memory.len()
-                    ),
+                    Some(()) => self.card_words(),
                     None => "no such one".to_owned(),
                 }
             }
@@ -2447,6 +2637,7 @@ mod tests {
                 on: Some(true),
                 place: Some(Place::FromLeft(-432.0)),
                 width: Some(500.0),
+                session: Some(7),
             },
         );
         wins.insert("0x2".to_owned(), Win::default());
@@ -2474,66 +2665,68 @@ mod tests {
     }
 
     #[test]
-    fn new_puts_the_session_in_memory_and_a_click_there_swaps_it_back() {
+    fn each_window_works_with_its_own_session() {
         let bodies = |items: &[Item]| items.iter().map(|it| it.body.clone()).collect::<Vec<_>>();
-        let mut card = Card {
-            items: vec![note(1, "a"), note(2, "b")],
-            next_id: 3,
-            ..Default::default()
-        };
-        // New on a session with things: a clean card, one session kept.
-        assert!(card.renew(100));
+        let mut card = Card::default();
+        // A session started in one window is in memory at once, empty.
+        let a = card.begin(Some("Golem new feature".into()), 100);
+        card.give("0x1", Some("Golem new feature"), a);
+        card.turn_to(Some(a));
+        assert_eq!((card.page, card.memory.len()), (Page::Session, 1));
+        card.items.push(note(10, "for the feature"));
+
+        // Another window, another session.
+        let b = card.begin(Some("Desktop".into()), 200);
+        card.give("0x2", Some("Desktop"), b);
+        card.turn_to(Some(b));
         assert!(card.items.is_empty());
-        assert_eq!(card.memory.len(), 1);
-        assert_eq!(
-            (card.memory[0].at, bodies(&card.memory[0].items)),
-            (100, vec!["a".into(), "b".into()])
-        );
-        // New on an empty one remembers nothing.
-        assert!(!card.renew(101));
-        assert_eq!(card.memory.len(), 1);
+        card.items.push(note(11, "for the desktop"));
+        assert_eq!(card.memory[0].name.as_deref(), Some("Desktop"));
 
-        // Memory's page lists one row a session; the session's own list is
-        // kept aside meanwhile.
-        card.items.push(note(9, "c"));
-        assert!(card.show(Page::Memory));
+        // Each window finds its own; what was on the card went back.
+        assert_eq!(card.session_for("0x1", None), Some(a));
+        card.turn_to(Some(a));
+        assert_eq!(bodies(&card.items), ["for the feature"]);
+        assert_eq!(bodies(&card.sessions()[0].items), ["for the desktop"]);
+
+        // A new window of a known title finds that session; an unknown one
+        // has to pick (there are two) — Memory's page, a row a session.
+        assert_eq!(card.session_for("0x9", Some("Desktop")), Some(b));
+        assert_eq!(card.session_for("0x9", Some("Seam")), None);
+        card.turn_to(None);
+        assert_eq!((card.page, card.items.len()), (Page::Memory, 2));
+        assert_eq!(bodies(&card.sessions()[1].items), ["for the feature"]);
+
+        // Forgotten: its windows and its title have nothing any more, and
+        // with one session left there is nothing to pick.
+        assert!(card.lose(b).is_some());
         assert_eq!(card.items.len(), 1);
-        assert_eq!(card.items[0].id, card.memory[0].id);
-        assert_eq!(bodies(card.session_items()), ["c"]);
-
-        // A click on it: it is the card's again, and "c" takes its place.
-        let id = card.memory[0].id;
-        assert!(card.recall(id, 200));
-        assert_eq!(card.page, Page::Session);
-        assert_eq!(bodies(&card.items), ["a", "b"]);
-        assert_eq!(card.memory.len(), 1);
-        assert_eq!(
-            (card.memory[0].at, bodies(&card.memory[0].items)),
-            (200, vec!["c".into()])
-        );
+        assert_eq!(card.session_for("0x2", Some("Desktop")), Some(a));
+        assert!(card.titles.get("Desktop").is_none());
     }
 
     #[test]
     fn a_pin_is_a_copy_that_outlives_the_session() {
-        let mut card = Card {
-            items: vec![note(1, "me@example.org"), note(2, "b")],
-            next_id: 3,
-            ..Default::default()
-        };
+        let mut card = Card::default();
+        let a = card.begin(None, 1);
+        card.turn_to(Some(a));
+        card.items = vec![note(1, "me@example.org"), note(2, "b")];
+        card.next_id = 3;
         assert_eq!(card.pin(1), Some(true));
         assert_eq!(card.pinned.len(), 1);
         assert_ne!(card.pinned[0].id, 1);
         assert!(card.pinned[0].same(&card.items[0]));
         // The session goes; the pin stays, and is the list of its page.
-        card.renew(5);
+        card.lose(a);
         assert!(card.show(Page::Pinned));
         assert_eq!(card.items.len(), 1);
         assert_eq!(card.pinned_items().len(), 1);
         // (No pinning from the pinned page itself.)
         let pid = card.items[0].id;
         assert_eq!(card.pin(pid), None);
-        // Back on a session that has the same thing: its pin comes off.
-        card.show(Page::Session);
+        // On a session that has the same thing: its pin comes off.
+        let b = card.begin(None, 2);
+        card.turn_to(Some(b));
         card.items.push(note(7, "me@example.org"));
         assert_eq!(card.pin(7), Some(false));
         assert!(card.pinned.is_empty());
@@ -2547,18 +2740,18 @@ mod tests {
             owned: true,
             ..note(id, "p.png")
         };
-        let mut card = Card {
-            items: vec![pic(1)],
-            next_id: 2,
-            ..Default::default()
-        };
+        let mut card = Card::default();
+        let a = card.begin(None, 1);
+        card.turn_to(Some(a));
+        card.items = vec![pic(1)];
+        card.next_id = 5;
         card.pin(1);
-        card.renew(1);
-        // On nothing now, but pinned and in memory.
-        assert!(card.items.is_empty() && card.keeps("/tmp/card/p.png"));
+        // Off the screen (Memory's page is up), but pinned and in memory.
+        card.turn_to(None);
+        assert!(card.keeps("/tmp/card/p.png"));
         card.pinned.clear();
         assert!(card.keeps("/tmp/card/p.png"));
-        card.memory.clear();
+        card.lose(a);
         assert!(!card.keeps("/tmp/card/p.png"));
     }
 }

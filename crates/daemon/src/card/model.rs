@@ -93,30 +93,36 @@ impl Item {
     }
 }
 
-/// A session put away: the card as it was when a new one was started.
-/// What MEMORY keeps (Max, 2026-10-09: *"new sends the actual session to
-/// memory"*).
+/// A session: one working set of things, named after the window it was
+/// started in. MEMORY is the list of them all; each window shows the one it
+/// was given (Max, 2026-10-09: *"if i start a new session, it takes the name
+/// of the current window and appears on memory right away"*).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Past {
     pub id: u64,
-    /// When it was put away (seconds since 1970).
+    /// When it was started (seconds since 1970).
     pub at: u64,
-    /// The name it was given (none yet: it reads by its date).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub items: Vec<Item>,
 }
 
-/// Everything the card keeps, as it is on disk: the session on it now
-/// (`items`), the pinned items, and the sessions put away, newest first.
+/// Everything the card keeps, as it is on disk: the sessions (newest
+/// first), the pinned items, and which session each window TITLE was given
+/// (so the window of a task finds its session again another day). `items`
+/// is the one list of before there were sessions; it is read into a session
+/// of its own and written empty.
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct Saved {
     pub next_id: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<Item>,
     #[serde(default)]
     pub pinned: Vec<Item>,
     #[serde(default)]
     pub memory: Vec<Past>,
+    #[serde(default)]
+    pub titles: std::collections::HashMap<String, u64>,
 }
 
 /// The seconds since 1970, now.
@@ -133,11 +139,13 @@ pub(super) fn session_row(session: &Past) -> Item {
     let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.at);
     let when = crate::desktop_props::date_text(Some(when)).unwrap_or_default();
     let n = session.items.len();
+    // Its name on the first line; when it is from and how much is in it
+    // on the second.
+    let count = format!("{n} {}", if n == 1 { "item" } else { "items" });
     let mut body = match &session.name {
-        Some(name) => format!("{name} · {when}"),
-        None => when,
+        Some(name) => format!("{name}\n{when} · {count}"),
+        None => format!("{when} · {count}"),
     };
-    body.push_str(&format!(" · {n} {}", if n == 1 { "item" } else { "items" }));
     for item in session.items.iter().take(ROW_PEEK) {
         let first = item.body.trim().lines().next().unwrap_or("").trim();
         let short: String = first.chars().take(ROW_CHARS).collect();
@@ -506,6 +514,7 @@ mod tests {
             next_id: 9,
             items: vec![text(1, "a\nb"), file(2, Kind::Folder, "/tmp/d")],
             pinned: vec![text(3, "me@example.org")],
+            titles: [("Golem new feature".to_owned(), 4)].into(),
             memory: vec![Past {
                 id: 4,
                 at: 1_700_000_000,
@@ -535,11 +544,11 @@ mod tests {
     }
 
     #[test]
-    fn a_session_in_memory_reads_as_its_date_its_size_and_its_first_things() {
+    fn a_session_in_memory_reads_as_its_name_its_date_and_its_first_things() {
         let session = Past {
             id: 9,
             at: 1_700_000_000,
-            name: None,
+            name: Some("Golem new feature".to_owned()),
             items: vec![
                 text(1, "first line\nsecond line"),
                 text(2, &"x".repeat(80)),
@@ -550,21 +559,29 @@ mod tests {
         let row = session_row(&session);
         assert_eq!(row.id, 9);
         let lines: Vec<&str> = row.body.lines().collect();
-        assert_eq!(lines.len(), 4);
-        assert!(lines[0].ends_with("· 4 items"));
-        assert_eq!(lines[1], "first line");
-        assert!(lines[2].ends_with('…') && lines[2].chars().count() == 35);
-        assert_eq!(lines[3], "c");
-        // One thing is "1 item".
-        let one = Past {
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "Golem new feature");
+        assert!(lines[1].ends_with("· 4 items"));
+        assert_eq!(lines[2], "first line");
+        assert!(lines[3].ends_with('…') && lines[3].chars().count() == 35);
+        assert_eq!(lines[4], "c");
+        // Without a name it starts at its date; one thing is "1 item"; an
+        // empty one still has a row.
+        let bare = Past {
+            name: None,
             items: vec![text(1, "a")],
-            ..session
+            ..session.clone()
         };
-        assert!(session_row(&one)
+        assert!(session_row(&bare)
             .body
             .lines()
             .next()
             .unwrap()
             .ends_with("· 1 item"));
+        let empty = Past {
+            items: vec![],
+            ..session
+        };
+        assert_eq!(session_row(&empty).body.lines().count(), 2);
     }
 }

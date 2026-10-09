@@ -132,6 +132,9 @@ impl Hover {
 pub(crate) struct FootView<'a> {
     pub page: Page,
     pub pinned: &'a HashSet<u64>,
+    /// On Memory's page: the session this window is working with (its
+    /// row is rimmed).
+    pub current: Option<u64>,
 }
 
 /// The foot's height, and its buttons' own.
@@ -366,10 +369,19 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             glass: 0.0,
             border: 0.0,
         });
+        let mine = page == Page::Memory
+            && view
+                .foot
+                .as_ref()
+                .is_some_and(|f| f.current == Some(item.id));
         list.rects.push(RectInst {
             rect: t,
             radius: TILE_RADIUS,
-            color: tile_rim,
+            color: if mine {
+                [ACCENT[0], ACCENT[1], ACCENT[2], 0.55]
+            } else {
+                tile_rim
+            },
             glass: 0.0,
             border: 1.0,
         });
@@ -1023,6 +1035,7 @@ mod tests {
             foot: foot.then_some(FootView {
                 page: Page::Session,
                 pinned: &pinned,
+                current: None,
             }),
             dnd_over: false,
             hidden: None,

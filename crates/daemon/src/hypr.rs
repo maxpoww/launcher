@@ -2522,6 +2522,20 @@ pub fn stage_tasks() -> Vec<StageTask> {
     out
 }
 
+/// The class and the title of the window at `addr` (the card names a session
+/// after the window it was started in — `card/`).
+pub fn window_class_title(addr: &str) -> Option<(String, String)> {
+    let clients = reply_json("j/clients")?;
+    let client = clients
+        .as_array()?
+        .iter()
+        .find(|c| c["address"].as_str() == Some(addr))?;
+    Some((
+        client["class"].as_str().unwrap_or("").to_owned(),
+        client["title"].as_str().unwrap_or("").to_owned(),
+    ))
+}
+
 /// Whether `addr` is still a live mapped window — the check before focusing a
 /// remembered address (the anchor) that may have been closed meanwhile.
 pub fn window_exists(addr: &str) -> bool {

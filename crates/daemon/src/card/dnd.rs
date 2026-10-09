@@ -209,7 +209,9 @@ impl App {
         let own = self.card.drag.is_some();
         // Something brought to the card while Memory is up is for the
         // session: its page comes back to take it.
-        if self.card.page == super::view::Page::Memory {
+        // (A window with no session yet keeps Memory up: the drop starts
+        // one, `card_push`.)
+        if self.card.page == super::view::Page::Memory && self.card.open.is_some() {
             self.card_show(super::view::Page::Session);
         }
         let first = if mimes.iter().any(|m| m == URI_LIST) {
