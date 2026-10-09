@@ -313,6 +313,9 @@ fn main() -> anyhow::Result<()> {
 
     // The DESKTOP: `~/Desktop` as icons behind the windows, on its own
     // surface under them. Its renderer and listing arrive on first configure.
+    // (A phone camera announced by a dock that has since gone is taken
+    // off the apps' list: its feed went with that dock.)
+    std::thread::spawn(desktop::camera_withdraw);
     let desktop_layer = config.desktop.enabled.then(|| {
         surface::create_desktop_surface(
             &compositor,

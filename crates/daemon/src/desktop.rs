@@ -814,7 +814,7 @@ fn camera_announce(name: &str, device: &std::path::Path) {
 }
 
 /// Take our camera node away again (the phone stopped being one).
-fn camera_withdraw() {
+pub(crate) fn camera_withdraw() {
     let Ok(out) = std::process::Command::new("pw-dump").stderr(std::process::Stdio::null()).output() else {
         return;
     };
