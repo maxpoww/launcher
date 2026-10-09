@@ -688,6 +688,54 @@ fn phone_shape(serial: Option<&str>) -> (f64, f64) {
         .unwrap_or(PHONE_SHAPE)
 }
 
+/// Whether a phone lets this computer in over `adb`.
+#[derive(Debug, PartialEq)]
+enum Debugging {
+    Ready,
+    /// The phone is plugged in but `adb` does not see it: debugging is off.
+    Off,
+    /// It is seen, and waits for the owner to allow this computer.
+    NotAllowed,
+    /// `adb` itself could not be asked; scrcpy is left to find out.
+    Unknown,
+}
+
+fn phone_debugging(serial: &str) -> Debugging {
+    // The first call starts adb's server and a phone takes a moment to
+    // show up in it: ask again before saying it is not there.
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+        let Ok(out) = std::process::Command::new("adb")
+            .arg("devices")
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            return Debugging::Unknown;
+        };
+        match debugging_of(&String::from_utf8_lossy(&out.stdout), serial) {
+            Debugging::Off => {}
+            other => return other,
+        }
+    }
+    Debugging::Off
+}
+
+/// `adb devices`' answer for one phone (`<serial>\tdevice|unauthorized|…`).
+fn debugging_of(listing: &str, serial: &str) -> Debugging {
+    let state = listing.lines().find_map(|l| {
+        let mut parts = l.split_whitespace();
+        (parts.next() == Some(serial)).then(|| parts.next().unwrap_or(""))
+    });
+    match state {
+        None => Debugging::Off,
+        Some("device") => Debugging::Ready,
+        Some("unauthorized") => Debugging::NotAllowed,
+        Some(_) => Debugging::Unknown,
+    }
+}
+
 /// `Physical size: 1344x2992` (and perhaps `Override size: …` after it) →
 /// the last size said, short side first.
 fn parse_wm_size(said: &str) -> Option<(f64, f64)> {
@@ -707,6 +755,25 @@ fn mirror_size((short, long): (f64, f64), usable: f64) -> (i64, i64) {
 /// closed. What to tell the owner if it could not: the program is missing,
 /// or the phone would not let it in.
 fn mirror(name: &str, serial: Option<&str>) -> Option<String> {
+    // Asked first, so the owner is told at once and exactly what to do
+    // (Max, 2026-10-09: "turn on USB debugging to use this feature").
+    match serial.map(phone_debugging) {
+        Some(Debugging::Off) => {
+            info!("desktop: {name} has USB debugging off");
+            return Some(format!(
+                "{name}: {}",
+                crate::i18n::tr("turn on USB debugging to mirror its screen (Settings, Developer options).")
+            ));
+        }
+        Some(Debugging::NotAllowed) => {
+            info!("desktop: {name} has not allowed this computer");
+            return Some(format!(
+                "{name}: {}",
+                crate::i18n::tr("allow USB debugging for this computer on the phone, then mirror again.")
+            ));
+        }
+        _ => {}
+    }
     // The window is the phone's own shape, standing: left to itself it
     // opens at the size of any other window, the picture lost in it (Max,
     // 2026-10-09: "the window is huge").
@@ -4239,6 +4306,15 @@ mod tests {
         assert_eq!(brought, vec![desk.join("f.txt")]);
         assert!(dir.join("elsewhere/f.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_phone_says_whether_it_lets_us_in() {
+        let listing = "List of devices attached\n3A301FDJG000UW\tunauthorized\nABCDEF123\tdevice\n\n";
+        assert_eq!(debugging_of(listing, "3A301FDJG000UW"), Debugging::NotAllowed);
+        assert_eq!(debugging_of(listing, "ABCDEF123"), Debugging::Ready);
+        assert_eq!(debugging_of(listing, "ZZZZZZ"), Debugging::Off);
+        assert_eq!(debugging_of("X1Y2Z3\toffline\n", "X1Y2Z3"), Debugging::Unknown);
     }
 
     #[test]
