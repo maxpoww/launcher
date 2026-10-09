@@ -138,6 +138,8 @@ pub(crate) enum Hover {
     Emoji(usize),
     PickSeek,
     Tray,
+    /// One of the picker's kinds (its place in `emoji_table::GROUPS`).
+    Kind(usize),
 }
 
 impl Hover {
@@ -1350,6 +1352,8 @@ mod tests {
                     picking: None,
                     emoji: &[],
                     pick_query: "",
+                    kinds: &[],
+                    recent: 0,
                 },
                 notes: &notes,
                 playing: None,

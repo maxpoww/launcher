@@ -133,6 +133,9 @@ const ZOOM_KEYS: [(&str, &str); 8] = [
 /// added): far from the card's own.
 const CLIP_IDS: u64 = 1 << 62;
 
+/// How many emoji the picker remembers as used lately (two rows).
+const RECENT_EMOJI: usize = 16;
+
 /// How many window titles are remembered with their session.
 const TITLES_MAX: usize = 300;
 
@@ -340,6 +343,9 @@ pub(crate) struct Card {
     pick_query: String,
     picked: Vec<usize>,
     pick_scroll: f32,
+    /// The emoji used lately (their place in the table), the latest
+    /// first: the picker's first rows.
+    recent: Vec<usize>,
     /// Something to say in the line under the input box (a tool that is
     /// missing, nothing made out), until the next thing is done.
     say: Option<&'static str>,
@@ -554,13 +560,24 @@ impl Card {
     /// Which emoji the picker shows: all, or those its search names.
     fn repick(&mut self) {
         let needle = self.pick_query.trim().to_lowercase();
-        self.picked = crate::emoji_table::EMOJI
+        let found = crate::emoji_table::EMOJI
             .iter()
             .enumerate()
             .filter(|(_, def)| needle.is_empty() || crate::emoji::emoji_matches(def, &needle))
-            .map(|(n, _)| n)
-            .collect();
+            .map(|(n, _)| n);
+        // (With nothing searched: the ones used lately first, then all.)
+        self.picked = match needle.is_empty() {
+            true => self.recent.iter().copied().chain(found).collect(),
+            false => found.collect(),
+        };
         self.pick_scroll = 0.0;
+    }
+
+    /// An emoji was used: it is the first of the recent ones now.
+    fn used(&mut self, at: usize) {
+        self.recent.retain(|n| *n != at);
+        self.recent.insert(0, at);
+        self.recent.truncate(RECENT_EMOJI);
     }
 
     /// Whether the search is open (it has the cursor, or holds a query).
@@ -1051,6 +1068,11 @@ impl App {
         self.card.memory = saved.memory;
         self.card.titles = saved.titles;
         self.card.zoom = saved.zoom;
+        self.card.recent = saved
+            .emoji
+            .iter()
+            .filter_map(|ch| crate::emoji_table::EMOJI.iter().position(|d| d.ch == ch))
+            .collect();
         // The one list of before there were sessions is a session now.
         if !saved.items.is_empty() {
             let id = self.card.begin(None, now_secs());
@@ -1075,6 +1097,12 @@ impl App {
                 memory: self.card.sessions(),
                 titles: self.card.titles.clone(),
                 zoom: self.card.zoom,
+                emoji: self
+                    .card
+                    .recent
+                    .iter()
+                    .filter_map(|n| crate::emoji_table::EMOJI.get(*n).map(|d| d.ch.to_owned()))
+                    .collect(),
             },
         );
     }
@@ -1608,15 +1636,18 @@ impl App {
     /// emoji on the card for each time i want to send an emoji"*). The
     /// picker stays open for the next one.
     fn card_emoji(&mut self, n: usize) {
-        let Some(emoji) = self
+        let Some((at, emoji)) = self
             .card
             .picked
             .get(n)
-            .and_then(|at| crate::emoji_table::EMOJI.get(*at))
-            .map(|def| def.ch)
+            .and_then(|at| crate::emoji_table::EMOJI.get(*at).map(|def| (*at, def.ch)))
         else {
             return;
         };
+        // (Remembered as used — shown first the NEXT time the picker
+        // opens: the grid does not jump under the pointer now.)
+        self.card.used(at);
+        self.card_save();
         if matches!(self.card.field, Some(Field::Box | Field::Pick)) {
             self.card.draft.push_str(emoji);
             self.request_card_draw();
@@ -1676,6 +1707,19 @@ impl App {
             Hover::Emoji(n) => self.card_emoji(n),
             Hover::PickSeek => self.card_take_keys(Field::Pick),
             Hover::Tray => {}
+            // A kind of the picker: its grid jumps to where that kind starts.
+            Hover::Kind(kind) => {
+                self.card.pick_query.clear();
+                self.card.repick();
+                let first = crate::emoji_table::EMOJI
+                    .iter()
+                    .position(|d| d.group as usize == kind)
+                    .unwrap_or(0);
+                // (Past the recent ones, which fill whole rows of their own.)
+                let recent = self.card.recent.len();
+                self.card.pick_scroll = Bottom::pick_row(recent + first).min(self.card_pick_span());
+                self.request_card_draw();
+            }
             Hover::Item(_) => {}
         }
     }
@@ -2382,6 +2426,18 @@ impl App {
                 .collect(),
             false => Vec::new(),
         };
+        // One emoji to stand for each kind: its first.
+        let kinds: Vec<&'static str> = match self.card.picking {
+            true => (0..crate::emoji_table::GROUPS.len())
+                .filter_map(|g| {
+                    crate::emoji_table::EMOJI
+                        .iter()
+                        .find(|d| d.group as usize == g)
+                        .map(|d| d.ch)
+                })
+                .collect(),
+            false => Vec::new(),
+        };
         let name = self.card.open_name();
         let recording = self.card.rec.as_ref().map(|r| (r.seconds(), r.talk()));
         let talk = match (recording, self.card.writing) {
@@ -2437,6 +2493,12 @@ impl App {
                     picking: self.card.pick(),
                     emoji: &emoji,
                     pick_query: &self.card.pick_query,
+                    kinds: &kinds,
+                    recent: if self.card.pick_query.trim().is_empty() {
+                        self.card.recent.len()
+                    } else {
+                        0
+                    },
                 },
                 notes: &notes,
                 playing,
@@ -2683,16 +2745,7 @@ impl App {
             }
             // Over the emoji picker it is the emoji that scroll.
             Some(false) if along != 0.0 && self.card_over_tray() => {
-                let span = self.card.rect.map_or(0.0, |rect| {
-                    bottom(
-                        rect,
-                        self.card.page,
-                        self.card.draft_lines.len(),
-                        self.card.seeking(),
-                        self.card.pick(),
-                    )
-                    .pick_span()
-                });
+                let span = self.card_pick_span();
                 let to = (self.card.pick_scroll + along * 2.4).clamp(0.0, span);
                 if to != self.card.pick_scroll {
                     self.card.pick_scroll = to;
@@ -2708,6 +2761,20 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// How far the emoji picker's grid can be scrolled.
+    fn card_pick_span(&self) -> f32 {
+        self.card.rect.map_or(0.0, |rect| {
+            bottom(
+                rect,
+                self.card.page,
+                self.card.draft_lines.len(),
+                self.card.seeking(),
+                self.card.pick(),
+            )
+            .pick_span()
+        })
     }
 
     /// Whether the pointer is on the emoji picker.

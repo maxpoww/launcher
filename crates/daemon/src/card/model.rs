@@ -130,6 +130,10 @@ pub(super) struct Saved {
     /// How big the items are drawn (0 = never set: as designed).
     #[serde(default)]
     pub zoom: f32,
+    /// The emoji used lately, the latest first (the picker shows them
+    /// before the rest).
+    #[serde(default)]
+    pub emoji: Vec<String>,
 }
 
 /// The seconds since 1970, now.
@@ -551,6 +555,7 @@ mod tests {
             pinned: vec![text(3, "me@example.org")],
             titles: [("Golem new feature".to_owned(), 4)].into(),
             zoom: 1.2,
+            emoji: vec!["👍".to_owned()],
             memory: vec![Past {
                 id: 4,
                 at: 1_700_000_000,

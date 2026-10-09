@@ -431,7 +431,10 @@ The big daemon files are cohesive but long — go straight to the function:
   after the keyboard is handed back), Shift+Enter breaks the line, Escape gives the keyboard back.
   The EMOJI picker (a tray over the box: EVERY emoji of `emoji_table::EMOJI` on a grid that
   scrolls under the wheel, with its own search — `Field::Pick`, `Card::repick`, the clipboard
-  box's `emoji::emoji_matches`) puts an emoji where the cursor is: in the
+  box's `emoji::emoji_matches`; the ones used lately come first (`Card::recent`, kept in
+  `card.json`), and a row of KINDS along its bottom jumps the grid to faces, people, animals,
+  food… — `Bottom::kinds`, `Hover::Kind`; emoji ONLY: GIFs and stickers were cut, Max 2026-10-09,
+  each chat app sends its own properly and takes a pasted one its own way) puts an emoji where the cursor is: in the
   box while the card has the keyboard, straight into the window otherwise. The PAPERCLIP opens the
   desktop portal's file picker (`bt_files::pick_file_waiting`, on a thread). `voice.rs`: a VOICE
   NOTE is recorded with `pw-record` (16 kHz mono WAV under the card's folder; stopped with SIGINT

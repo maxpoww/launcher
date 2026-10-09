@@ -59,8 +59,11 @@ const GLYPH_SEARCH: &str = "\u{f002}";
 /// `emoji_table::EMOJI`), on a grid that scrolls, under a field that
 /// searches them by name. (GIFs and stickers, which the mockup shows beside
 /// them, have no source yet.)
-const PICK_ROWS: f32 = 5.0;
+const PICK_ROWS: f32 = 6.0;
 const PICK_SEEK: f32 = 30.0;
+/// The row of kinds along its bottom (faces, people, animals, food…): a
+/// click jumps the grid to that kind, as on a phone's keyboard.
+const PICK_KINDS: f32 = 32.0;
 const EMOJI_COLS: usize = 8;
 const EMOJI_CELL: f32 = 34.0;
 
@@ -102,6 +105,10 @@ pub(crate) struct BarView<'a> {
     pub picking: Option<(usize, f32)>,
     pub emoji: &'a [&'static str],
     pub pick_query: &'a str,
+    /// One emoji standing for each kind (the row along its bottom), and
+    /// how many of the first emoji shown are the RECENT ones.
+    pub kinds: &'a [&'static str],
+    pub recent: usize,
 }
 
 impl BarView<'_> {
@@ -155,7 +162,7 @@ pub(crate) fn bottom(
             input = Some(Rect::new(x, y.round(), w, h));
             y -= STEP;
             if picking.is_some() {
-                let h = PICK_SEEK + PICK_ROWS * EMOJI_CELL + 14.0;
+                let h = PICK_SEEK + PICK_ROWS * EMOJI_CELL + PICK_KINDS + 14.0;
                 y -= h;
                 tray = Some(Rect::new(x, y.round(), w, h));
                 y -= STEP;
@@ -230,6 +237,36 @@ impl Bottom {
         ))
     }
 
+    /// The kinds along the picker's bottom, each with its cell.
+    pub(crate) fn kinds(&self) -> impl Iterator<Item = (usize, Rect)> + '_ {
+        let tray = self.tray;
+        let count = crate::emoji_table::GROUPS.len();
+        (0..count).filter_map(move |kind| {
+            let tray = tray?;
+            let cell = (tray.w - 12.0) / count as f32;
+            Some((
+                kind,
+                Rect::new(
+                    tray.x + 6.0 + kind as f32 * cell,
+                    tray.y + tray.h - PICK_KINDS - 4.0,
+                    cell,
+                    PICK_KINDS,
+                ),
+            ))
+        })
+    }
+
+    /// How far down the grid the emoji at place `n` is: the scroll that
+    /// brings its row to the top.
+    pub(crate) fn pick_row(n: usize) -> f32 {
+        (n / EMOJI_COLS) as f32 * EMOJI_CELL
+    }
+
+    /// How far the picker's grid is scrolled.
+    pub(crate) fn pick_scroll(&self) -> f32 {
+        self.pick.1
+    }
+
     /// How far the picker's grid can be scrolled.
     pub(crate) fn pick_span(&self) -> f32 {
         let rows = self.pick.0.div_ceil(EMOJI_COLS) as f32;
@@ -278,6 +315,9 @@ impl Bottom {
                     .find(|(_, r)| r.contains(pos))
                     .map_or(Hover::Tray, |(n, _)| Hover::Emoji(n)),
             );
+        }
+        if let Some((kind, _)) = self.kinds().find(|(_, r)| r.contains(pos)) {
+            return Some(Hover::Kind(kind));
         }
         if self.tray.is_some_and(|r| r.contains(pos)) {
             return Some(Hover::Tray);
@@ -592,6 +632,63 @@ pub(super) fn draw(
                 clip,
             ));
         }
+        // The kinds, along its bottom.
+        for (kind, cell) in b.kinds() {
+            let Some(face) = bar.kinds.get(kind) else {
+                continue;
+            };
+            if hover == Some(Hover::Kind(kind)) {
+                grid.rects.push(RectInst {
+                    rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
+                    radius: 7.0,
+                    color: ink(0.10),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            grid.labels.push(Label {
+                text: (*face).to_owned(),
+                pos: (cell.x + cell.w / 2.0, cell.y + 7.0),
+                max_w: cell.w,
+                font_px: 13.0,
+                line_px: 18.0,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(clip),
+                family: Some(crate::options::EMOJI_FONT),
+                color: Some([
+                    1.0,
+                    1.0,
+                    1.0,
+                    if hover == Some(Hover::Kind(kind)) {
+                        1.0
+                    } else {
+                        0.7
+                    },
+                ]),
+            });
+        }
+        // The ones used lately come first, on a faint band of their own.
+        if bar.recent > 0 && bar.pick_query.is_empty() {
+            let rows = bar.recent.div_ceil(EMOJI_COLS) as f32;
+            let top = cells.y - b.pick_scroll();
+            let band = Rect::new(
+                cells.x,
+                top.max(cells.y),
+                cells.w,
+                (top + rows * EMOJI_CELL - top.max(cells.y)).max(0.0),
+            );
+            if band.h > 0.0 {
+                grid.rects.push(RectInst {
+                    rect: band,
+                    radius: 7.0,
+                    color: accent(0.06),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+        }
         for (n, cell) in b.emoji() {
             let Some(emoji) = bar.emoji.get(n) else {
                 continue;
@@ -811,6 +908,15 @@ mod tests {
             Some(Hover::Emoji(n + 2 * EMOJI_COLS))
         );
         assert!(down.pick_span() > 0.0);
+        // Its kinds run along its bottom, inside it, under the grid.
+        let kinds: Vec<_> = p.kinds().collect();
+        assert_eq!(kinds.len(), crate::emoji_table::GROUPS.len());
+        let grid = p.pick_grid().unwrap();
+        for (kind, r) in &kinds {
+            assert!(r.y >= grid.y + grid.h && r.y + r.h <= tray.y + tray.h);
+            assert_eq!(p.hit(mid(*r), false), Some(Hover::Kind(*kind)));
+        }
+        assert_eq!(Bottom::pick_row(2 * EMOJI_COLS + 3), 2.0 * EMOJI_CELL);
         assert!(b.tray.is_none() && b.emoji().next().is_none());
     }
 }
