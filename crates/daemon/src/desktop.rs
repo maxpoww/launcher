@@ -835,6 +835,9 @@ fn camera_withdraw() {
     }
 }
 
+/// How long the camera's frames are held to even out their pace (ms).
+const CAMERA_BUFFER_MS: u32 = 80;
+
 /// How long a camera has to stay up to count as working.
 const CAMERA_SETTLE: std::time::Duration = std::time::Duration::from_secs(4);
 
@@ -858,6 +861,10 @@ fn camera(
     let mut cmd = std::process::Command::new("scrcpy");
     cmd.args(["--video-source=camera", "--camera-facing=back", "--camera-ar=16:9", "--max-size=1920"])
         .args(["--camera-fps=30", "--no-audio", "--no-window"])
+        // Frames come off the phone in fits and starts and were handed on
+        // as they came: a choppy picture (Max, 2026-10-09). Held this long,
+        // they go out evenly.
+        .arg(format!("--v4l2-buffer={CAMERA_BUFFER_MS}"))
         .arg(format!("--v4l2-sink={}", device.display()));
     if let Some(serial) = serial {
         cmd.arg(format!("--serial={serial}"));
