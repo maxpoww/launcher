@@ -655,6 +655,43 @@ pub(crate) fn neighbour(slots: &[Option<Slot>], from: Option<Slot>, step: (i32, 
         .map(|(_, i)| i)
 }
 
+/// A phone's serial out of how the volume service names its mount
+/// (`mtp://Google_Pixel_8_Pro_3A301FDJG000UW/`: the last part) — what
+/// `adb` and `scrcpy` know it by. `None` when it cannot be told.
+pub(crate) fn phone_serial(uri: &str) -> Option<String> {
+    let host = uri.split("://").nth(1)?.split('/').next()?;
+    let host = host.strip_prefix('[').unwrap_or(host);
+    let serial = host.rsplit('_').next()?;
+    (serial.len() >= 6 && serial.chars().all(|c| c.is_ascii_alphanumeric())).then(|| serial.to_owned())
+}
+
+/// Show a phone's screen in a window (scrcpy), until that window is
+/// closed. What to tell the owner if it could not: the program is missing,
+/// or the phone would not let it in.
+fn mirror(name: &str, serial: Option<&str>) -> Option<String> {
+    let mut cmd = std::process::Command::new("scrcpy");
+    cmd.arg(format!("--window-title={name}"));
+    if let Some(serial) = serial {
+        cmd.arg(format!("--serial={serial}"));
+    }
+    let started = std::time::Instant::now();
+    match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
+        Err(e) => {
+            warn!("desktop: scrcpy could not be run: {e}");
+            Some(crate::i18n::tr("The screen mirror (scrcpy) is not installed.").to_owned())
+        }
+        // It ended at once without a window: the phone did not answer adb.
+        Ok(status) if !status.success() && started.elapsed().as_secs() < 8 => {
+            warn!("desktop: scrcpy gave up on {name} ({status})");
+            Some(format!(
+                "{name}: {}",
+                crate::i18n::tr("turn on USB debugging in the phone's developer options, and allow this computer when the phone asks.")
+            ))
+        }
+        Ok(_) => None,
+    }
+}
+
 /// The rectangle between two corners, whichever way they were dragged.
 pub(crate) fn band_rect((x0, y0): (f32, f32), (x1, y1): (f32, f32)) -> Rect {
     Rect::new(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
@@ -1628,7 +1665,10 @@ impl App {
             .and_then(|i| self.desktop.items.get(i))
             .is_some_and(|it| it.kind == Kind::Volume);
         if on_volume && !many {
-            menu = menu.for_volume(h as f32);
+            let phone = item
+                .and_then(|i| self.desktop.items.get(i))
+                .is_some_and(|it| self.desktop.volumes.iter().any(|v| v.phone && v.path.as_os_str() == it.path.as_str()));
+            menu = menu.for_volume(phone, h as f32);
         }
         // On a shortcut nothing vouches for: letting it run comes first.
         let locked = item
@@ -1873,6 +1913,23 @@ impl App {
                 self.serve_files(&paths, cut);
             }
             Action::Paste => self.desktop_paste(at),
+            Action::Mirror => {
+                let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
+                    return;
+                };
+                let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
+                    return;
+                };
+                let (name, serial) = (v.name.clone(), phone_serial(&v.uri));
+                self.desktop.selected.clear();
+                info!("desktop: mirroring {name} (serial {serial:?})");
+                // Off the loop: it runs for as long as the window is open.
+                std::thread::spawn(move || {
+                    if let Some(said) = mirror(&name, serial.as_deref()) {
+                        crate::desktop_send_notify(&said);
+                    }
+                });
+            }
             Action::Eject => {
                 if let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) {
                     self.desktop.selected.clear();
@@ -4134,6 +4191,16 @@ mod tests {
         assert_eq!(brought, vec![desk.join("f.txt")]);
         assert!(dir.join("elsewhere/f.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_phones_serial_is_read_from_its_mount() {
+        assert_eq!(
+            phone_serial("mtp://Google_Pixel_8_Pro_3A301FDJG000UW/").as_deref(),
+            Some("3A301FDJG000UW")
+        );
+        assert_eq!(phone_serial("mtp://[usb:001,012]/"), None, "a bus address is not a serial");
+        assert_eq!(phone_serial("file:///run/media/x/STICK"), None);
     }
 
     #[test]

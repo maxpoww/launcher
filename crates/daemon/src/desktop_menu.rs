@@ -41,6 +41,8 @@ pub(crate) enum Action {
     SendTo(usize),
     /// A plugged-in volume (a stick, a phone): let it go.
     Eject,
+    /// A phone: its screen in a window here (scrcpy).
+    Mirror,
     /// Out of the desktop, into the home folder.
     MoveToHome,
     MoveToBin,
@@ -237,16 +239,18 @@ impl Menu {
 
     /// The menu of a plugged-in volume standing on the desktop: it is not a
     /// file of the desktop's — nothing renames, moves or bins it.
-    pub fn for_volume(mut self, h: f32) -> Self {
-        self.set_rows(
-            vec![
-                Row::Item { label: "Open", action: Action::Open, danger: false },
-                Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
-                Row::Sep,
-                Row::Item { label: "Eject", action: Action::Eject, danger: false },
-            ],
-            h,
-        );
+    pub fn for_volume(mut self, phone: bool, h: f32) -> Self {
+        let mut rows = vec![
+            Row::Item { label: "Open", action: Action::Open, danger: false },
+            Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
+        ];
+        // A phone: its screen, here (Max, 2026-10-09).
+        if phone {
+            rows.push(Row::Item { label: "Mirror screen", action: Action::Mirror, danger: false });
+        }
+        rows.push(Row::Sep);
+        rows.push(Row::Item { label: "Eject", action: Action::Eject, danger: false });
+        self.set_rows(rows, h);
         self
     }
 
@@ -492,7 +496,9 @@ mod tests {
         assert!(!m.targets);
         assert_eq!(m.action(0), Some(Action::Open));
         // A volume's menu: open it or let it go, nothing else.
-        let m = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(800.0);
+        let phone = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(true, 800.0);
+        assert_eq!(phone.action(2), Some(Action::Mirror), "a phone's screen can be mirrored");
+        let m = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(false, 800.0);
         let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
         assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject]);
         // The wallpaper's menu takes Paste on top when there is something.

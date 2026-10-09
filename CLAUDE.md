@@ -298,7 +298,7 @@ The big daemon files are cohesive but long — go straight to the function:
   the mounted list comes to `App::on_mounts` and each stands on the desktop as a `Kind::Volume`
   item (path = the mount's folder: `/run/media/<user>/<label>`, or `$XDG_RUNTIME_DIR/gvfs/
   mtp:host=…` for a phone — `mount_path`). A volume is NOT a file of the desktop's: its menu is
-  Open · Open in terminal · Eject (`Menu::for_volume`, `mounts::eject` = `gio mount -e`, else
+  Open · Open in terminal · [Mirror screen, a phone: `scrcpy --serial` from the mount uri, `phone_serial`/`mirror`] · Eject (`Menu::for_volume`, `mounts::eject` = `gio mount -e`, else
   `-u`); it is left out of Cut/Copy/Move to/Move to Home; on the bin (the row or a drag) it is
   EJECTED, never trashed; a drag of it offers a copy only; its remembered cell goes when it does. It stands on the RIGHT (`place`: first free cell
   from the top-right). Hide/show is a FADE of the whole surface (`scene.alpha`), volumes included.
