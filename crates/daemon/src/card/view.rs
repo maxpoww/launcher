@@ -190,13 +190,17 @@ impl Tile {
 }
 
 /// How tall an item with `lines` lines of text is.
-pub(crate) fn tile_height(kind: Kind, lines: usize) -> f32 {
-    let text = lines.max(1) as f32 * TEXT_LINE;
+pub(crate) fn tile_height(kind: Kind, lines: usize, zoom: f32) -> f32 {
+    // The items' own sizes, at the card's zoom.
+    let (_text_px, text_line) = (TEXT_PX * zoom, (TEXT_LINE * zoom).round());
+    let (_kind_px, kind_line) = (KIND_PX * zoom, (KIND_LINE * zoom).round());
+    let pic_h = (PIC_H * zoom).round();
+    let text = lines.max(1) as f32 * text_line;
     2.0 * TILE_PAD_Y
         + match kind {
             Kind::Text => text,
-            Kind::Image => KIND_LINE + PIC_H + PIC_GAP + text,
-            Kind::File | Kind::Folder => KIND_LINE + text,
+            Kind::Image => kind_line + pic_h + PIC_GAP + text,
+            Kind::File | Kind::Folder => kind_line + text,
         }
 }
 
@@ -240,6 +244,9 @@ pub(crate) struct View<'a> {
     /// The pictures that have arrived: path → texture layer.
     pub slots: &'a HashMap<String, u32>,
     pub paint: Paint,
+    /// How big the items are drawn (1 = as designed): their text, their
+    /// lines, their pictures. Ctrl +/− over the card (`App::card_zoom`).
+    pub zoom: f32,
 }
 
 /// The card as a scene, the boxes its items were drawn in, and how far the
@@ -257,6 +264,12 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     }
     let paint = &view.paint;
     let bright = paint.bright();
+    let zoom = view.zoom;
+    // The items' own sizes, at the card's zoom.
+    let (text_px, text_line) = (TEXT_PX * zoom, (TEXT_LINE * zoom).round());
+    let (kind_px, kind_line) = (KIND_PX * zoom, (KIND_LINE * zoom).round());
+    let pic_h = (PIC_H * zoom).round();
+
     let window = Rect::new(rect.x, rect.y, rect.w, (rect.h * shown).round());
 
     scene.shadows.push(ShadowInst {
@@ -318,7 +331,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         .collect();
     let heights: Vec<f32> = shown_items
         .iter()
-        .map(|it| tile_height(it.kind, view.lines.get(&it.id).map_or(1, Vec::len)))
+        .map(|it| tile_height(it.kind, view.lines.get(&it.id).map_or(1, Vec::len), zoom))
         .collect();
     // (The opening for something dragged in is part of the list's length.)
     let opening = shown_items
@@ -392,8 +405,8 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 text: word.to_owned(),
                 pos: (x, line_y),
                 max_w: text_w,
-                font_px: KIND_PX,
-                line_px: KIND_LINE,
+                font_px: kind_px,
+                line_px: kind_line,
                 centered: false,
                 dim: false,
                 cache: true,
@@ -401,10 +414,10 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 family: None,
                 color: Some([ACCENT[0], ACCENT[1], ACCENT[2], 0.85]),
             });
-            line_y += KIND_LINE;
+            line_y += kind_line;
         }
         if item.kind == Kind::Image {
-            let frame = Rect::new(x, line_y, text_w, PIC_H);
+            let frame = Rect::new(x, line_y, text_w, pic_h);
             list.rects.push(RectInst {
                 rect: frame,
                 radius: PIC_RADIUS,
@@ -418,9 +431,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 // sized so the picture itself fills the frame's height, or
                 // its width where it is wider than that allows.
                 let side = if item.aspect > 1.0 {
-                    (PIC_H * item.aspect).min(frame.w)
+                    (pic_h * item.aspect).min(frame.w)
                 } else {
-                    PIC_H
+                    pic_h
                 };
                 list.icons.push(IconInst {
                     rect: Rect::new(
@@ -438,7 +451,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     plate: NO_PLATE,
                 });
             }
-            line_y += PIC_H + PIC_GAP;
+            line_y += pic_h + PIC_GAP;
         }
         let family = (item.kind == Kind::Text).then_some(crate::options::NERD);
         for (n, line) in view.lines.get(&item.id).into_iter().flatten().enumerate() {
@@ -447,8 +460,8 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     text: line.clone(),
                     pos: (x, line_y),
                     max_w: text_w,
-                    font_px: TEXT_PX,
-                    line_px: TEXT_LINE,
+                    font_px: text_px,
+                    line_px: text_line,
                     centered: false,
                     dim: false,
                     cache: true,
@@ -463,7 +476,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     }),
                 });
             }
-            line_y += TEXT_LINE;
+            line_y += text_line;
         }
         // The × shows on the item under the pointer only; the pin beside
         // it too, and on a pinned item all the time (lit).
@@ -741,13 +754,18 @@ pub(crate) fn tile_picture(
     lines: &[String],
     width: f32,
     scale: f32,
+    zoom: f32,
     paint: &Paint,
     thumb: Option<&[u8]>,
     thumb_side: usize,
     text: &mut DrawText,
 ) -> Canvas {
     let bright = paint.bright();
-    let height = tile_height(item.kind, lines.len());
+    // The items' own sizes, at the card's zoom.
+    let (text_px, text_line) = (TEXT_PX * zoom, (TEXT_LINE * zoom).round());
+    let (kind_px, kind_line) = (KIND_PX * zoom, (KIND_LINE * zoom).round());
+    let pic_h = (PIC_H * zoom).round();
+    let height = tile_height(item.kind, lines.len(), zoom);
     let s = |v: f32| v * scale;
     // (Whole logical pixels: the buffer is shown at 1/`scale` of its size.)
     let mut canvas = Canvas::new(s(width.round()) as usize, s(height.round()) as usize);
@@ -772,15 +790,15 @@ pub(crate) fn tile_picture(
         text(
             &mut canvas,
             word,
-            s(KIND_PX),
+            s(kind_px),
             None,
             [ACCENT[0], ACCENT[1], ACCENT[2], 0.85],
             (s(x), s(y)),
         );
-        y += KIND_LINE;
+        y += kind_line;
     }
     if item.kind == Kind::Image {
-        let frame = Rect::new(s(x), s(y), s(text_w), s(PIC_H));
+        let frame = Rect::new(s(x), s(y), s(text_w), s(pic_h));
         let fill = if bright {
             [0.0, 0.0, 0.0, 0.08]
         } else {
@@ -789,9 +807,9 @@ pub(crate) fn tile_picture(
         canvas.round_rect(frame, s(PIC_RADIUS), fill, None);
         if let Some(pixels) = thumb {
             let side = if item.aspect > 1.0 {
-                (s(PIC_H) * item.aspect).min(frame.w)
+                (s(pic_h) * item.aspect).min(frame.w)
             } else {
-                s(PIC_H)
+                s(pic_h)
             };
             let to = Rect::new(
                 frame.x + (frame.w - side) / 2.0,
@@ -801,15 +819,15 @@ pub(crate) fn tile_picture(
             );
             canvas.picture(pixels, thumb_side, to, frame);
         }
-        y += PIC_H + PIC_GAP;
+        y += pic_h + PIC_GAP;
     }
     let family = (item.kind == Kind::Text).then_some(crate::options::NERD);
     let ink = paint.ink_at(0.92);
     for line in lines {
         if !line.is_empty() {
-            text(&mut canvas, line, s(TEXT_PX), family, ink, (s(x), s(y)));
+            text(&mut canvas, line, s(text_px), family, ink, (s(x), s(y)));
         }
-        y += TEXT_LINE;
+        y += text_line;
     }
     canvas
 }
@@ -877,6 +895,7 @@ mod tests {
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
+            zoom: 1.0,
         };
         let (scene, tiles, max_scroll) = scene(&view(0.0, 1.0));
         assert_eq!(tiles.len(), 3);
@@ -884,9 +903,9 @@ mod tests {
         assert!(tiles[1].rect.y > tiles[0].rect.y && tiles[2].rect.y > tiles[1].rect.y);
         // Taller than the card: it scrolls, by exactly the overflow.
         let total = 2.0 * LIST_PAD
-            + tile_height(Kind::Text, 1)
-            + tile_height(Kind::File, 1)
-            + tile_height(Kind::Image, 1)
+            + tile_height(Kind::Text, 1, 1.0)
+            + tile_height(Kind::File, 1, 1.0)
+            + tile_height(Kind::Image, 1, 1.0)
             + 2.0 * GAP;
         assert_eq!(max_scroll, total - 200.0);
         // The picture is drawn from its layer, the × on the hovered item.
@@ -921,6 +940,7 @@ mod tests {
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
+            zoom: 1.0,
         });
         assert_eq!(scene.grids[0].clip.h, 100.0);
         // The card under the clip is whole, and wears the drag's rim.
@@ -951,12 +971,13 @@ mod tests {
                 shifts,
                 slots: &slots,
                 paint: PAINT,
+                zoom: 1.0,
             })
             .1
         };
         let none = HashMap::new();
         let rest = view(&none, None);
-        let h = tile_height(Kind::Text, 1);
+        let h = tile_height(Kind::Text, 1, 1.0);
         // Above the first, between, and below the last.
         assert_eq!(insert_index(&rest, rest[0].rect.y - 5.0), 0);
         assert_eq!(insert_index(&rest, rest[0].rect.y + h + 2.0), 1);
@@ -986,6 +1007,7 @@ mod tests {
             &["hello".to_owned()],
             200.0,
             2.0,
+            1.0,
             &PAINT,
             None,
             0,
@@ -998,7 +1020,7 @@ mod tests {
         assert_eq!(canvas.w, 400);
         assert_eq!(
             canvas.h,
-            (tile_height(Kind::Text, 1) * 2.0).round() as usize
+            (tile_height(Kind::Text, 1, 1.0) * 2.0).round() as usize
         );
         assert_eq!(
             asked,
@@ -1042,6 +1064,7 @@ mod tests {
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
+            zoom: 1.0,
         };
         let (bare, _, scroll_bare) = scene(&view(false));
         let (with, _, scroll_foot) = scene(&view(true));

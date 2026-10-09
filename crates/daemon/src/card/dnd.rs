@@ -78,6 +78,7 @@ impl App {
             .ceil()
             .clamp(1.0, 3.0);
         let paint = self.card_paint();
+        let zoom = self.card.zoom();
         let renderer = self.card_renderer.as_mut()?;
         let lines = self.card.lines.get(&item.id).map_or(&[][..], Vec::as_slice);
         let thumb = item.path.as_ref().and_then(|p| self.card.chains.get(p));
@@ -87,6 +88,7 @@ impl App {
             lines,
             tile.w,
             scale,
+            zoom,
             &paint,
             thumb.map(|chain| &chain[..(side * side * 4).min(chain.len())]),
             side,
@@ -262,7 +264,7 @@ impl App {
             return;
         };
         let lines = self.card.lines.get(&id).map_or(1, Vec::len);
-        let step = way * (tile_height(self.card.items[at].kind, lines) + GAP);
+        let step = way * (tile_height(self.card.items[at].kind, lines, self.card.zoom()) + GAP);
         for it in &self.card.items[at + 1..] {
             *self.card.shifts.entry(it.id).or_insert(0.0) += step;
         }

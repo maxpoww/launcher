@@ -409,8 +409,14 @@ The big daemon files are cohesive but long — go straight to the function:
   PHONE BRIDGE to come (an Android panel showing the session and the pins; not built). A picture of
   the card's own is deleted with the last item that shows it (`Card::keeps`). Not built: renaming
   a session by hand.
+  ZOOM (`card_zoom`, `Card::zoom()`, kept in `card.json`): the items' text, lines and pictures are
+  drawn at `View::zoom` (`ZOOM_MIN..ZOOM_MAX`, a tenth a step); Ctrl +/− and Ctrl 0 do it ONLY
+  while the pointer is on the card. The card never has the keyboard, so those keys are compositor
+  BINDS that exist exactly that long (`card_keys`: `hl.unbind` then `hl.bind(key,
+  exec_cmd("waverunner-ctl card zoom in|out|reset"))` on the pointer's enter, `hl.unbind` on its
+  leave and whenever the card goes away; `ZOOM_KEYS`).
   Pointer-free: `waverunner-ctl card [toggle [addr]|all|add text <…>|add file <path>|remove
-  <n>|clear|state|rate <speed> [accel]|new|memory|pinned|session|pin <n>|open <n>|forget <n>]` (`open`/`forget` take a row of Memory). Not built: a card button for Seam/staged windows (no
+  <n>|clear|state|rate <speed> [accel]|new|memory|pinned|session|pin <n>|open <n>|forget <n>|zoom in|out|reset|<n>]` (`open`/`forget` take a row of Memory). Not built: a card button for Seam/staged windows (no
   Golem bar), drawing it in its window's place in the stack (it draws over a window overlapping
   its own), per-output.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

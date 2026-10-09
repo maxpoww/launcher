@@ -123,6 +123,9 @@ pub(super) struct Saved {
     pub memory: Vec<Past>,
     #[serde(default)]
     pub titles: std::collections::HashMap<String, u64>,
+    /// How big the items are drawn (0 = never set: as designed).
+    #[serde(default)]
+    pub zoom: f32,
 }
 
 /// The seconds since 1970, now.
@@ -515,6 +518,7 @@ mod tests {
             items: vec![text(1, "a\nb"), file(2, Kind::Folder, "/tmp/d")],
             pinned: vec![text(3, "me@example.org")],
             titles: [("Golem new feature".to_owned(), 4)].into(),
+            zoom: 1.2,
             memory: vec![Past {
                 id: 4,
                 at: 1_700_000_000,

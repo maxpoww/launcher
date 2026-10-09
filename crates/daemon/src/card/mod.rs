@@ -108,6 +108,24 @@ const SHIFT_PASTERS: [&str; 6] = [
     "xterm",
 ];
 
+/// The items' zoom: how far it goes and how much a key press changes it.
+const ZOOM_MIN: f32 = 0.7;
+const ZOOM_MAX: f32 = 2.2;
+const ZOOM_STEP: f32 = 0.1;
+/// The keys that zoom while the pointer is on the card, as the compositor
+/// names them, and what each does (`card zoom <…>`). Plus is its own key on
+/// some layouts and Shift+= on others; both, and the keypad.
+const ZOOM_KEYS: [(&str, &str); 8] = [
+    ("CTRL + plus", "in"),
+    ("CTRL + SHIFT + plus", "in"),
+    ("CTRL + equal", "in"),
+    ("CTRL + KP_Add", "in"),
+    ("CTRL + minus", "out"),
+    ("CTRL + KP_Subtract", "out"),
+    ("CTRL + 0", "reset"),
+    ("CTRL + KP_0", "reset"),
+];
+
 /// How many window titles are remembered with their session.
 const TITLES_MAX: usize = 300;
 
@@ -296,6 +314,10 @@ pub(crate) struct Card {
     memory: Vec<Past>,
     /// The session each window title was given (see `model::Saved`).
     titles: HashMap<String, u64>,
+    /// How big the items are drawn (0 = never set; read with `zoom()`).
+    zoom: f32,
+    /// Ctrl +/− are the card's right now (the pointer is on it).
+    keys: bool,
     /// A drag is over the card (another app's, or an item of ours).
     dnd_over: bool,
     /// …and it is one of the card's own items, being moved to a new place.
@@ -345,6 +367,15 @@ impl Card {
             .and_then(|h| self.wins.get(h))
             .copied()
             .unwrap_or_default()
+    }
+
+    /// How big the items are drawn: 1 as designed.
+    fn zoom(&self) -> f32 {
+        if self.zoom > 0.0 {
+            self.zoom.clamp(ZOOM_MIN, ZOOM_MAX)
+        } else {
+            1.0
+        }
     }
 
     /// How wide the card is on the window it is on.
@@ -419,7 +450,11 @@ impl Card {
         let height = carried
             .and_then(|id| self.item(id))
             .map_or(DROP_OPENING, |it| {
-                tile_height(it.kind, self.lines.get(&it.id).map_or(1, Vec::len))
+                tile_height(
+                    it.kind,
+                    self.lines.get(&it.id).map_or(1, Vec::len),
+                    self.zoom(),
+                )
             });
         Some((insert_index(&self.tiles, y), height + GAP))
     }
@@ -866,6 +901,7 @@ impl App {
         self.card.pinned = saved.pinned;
         self.card.memory = saved.memory;
         self.card.titles = saved.titles;
+        self.card.zoom = saved.zoom;
         // The one list of before there were sessions is a session now.
         if !saved.items.is_empty() {
             let id = self.card.begin(None, now_secs());
@@ -889,6 +925,7 @@ impl App {
                 pinned: self.card.pinned_items().to_vec(),
                 memory: self.card.sessions(),
                 titles: self.card.titles.clone(),
+                zoom: self.card.zoom,
             },
         );
     }
@@ -1407,6 +1444,7 @@ impl App {
     /// The card has no window any more: nothing is drawn, nothing takes the
     /// pointer, and the renderer is shrunk until it is wanted again.
     fn card_let_go(&mut self) {
+        self.card_keys(false);
         self.card.host = None;
         self.card.spot = None;
         self.card.rect = None;
@@ -1578,6 +1616,7 @@ impl App {
             return;
         }
         if self.card.hide(why, Instant::now()) {
+            self.card_keys(false);
             self.card.shown = 0.0;
             self.card.press = None;
             self.card.at = None;
@@ -1679,7 +1718,8 @@ impl App {
         // Wrap what has not been wrapped yet: a text by the column (its
         // font is fixed-pitch), a name by its own average glyph.
         let text_w = self.card.width() - 2.0 * LIST_PAD - 2.0 * TILE_PAD_X;
-        let mono = renderer.measure_text("MMMMMMMMMM", TEXT_PX, Some(crate::options::NERD)) / 10.0;
+        let text_px = TEXT_PX * self.card.zoom();
+        let mono = renderer.measure_text("MMMMMMMMMM", text_px, Some(crate::options::NERD)) / 10.0;
         for item in &self.card.items {
             if self.card.lines.contains_key(&item.id) {
                 continue;
@@ -1693,7 +1733,7 @@ impl App {
                 wrap(&item.body, cols, MAX_LINES)
             } else {
                 let n = item.body.chars().count().max(1);
-                let w = renderer.measure_text(&item.body, TEXT_PX, None);
+                let w = renderer.measure_text(&item.body, text_px, None);
                 let cols = if w > 0.0 {
                     (text_w * 0.94 / (w / n as f32)).floor() as usize
                 } else {
@@ -1788,6 +1828,7 @@ impl App {
             shifts: &self.card.shifts,
             slots: &self.card.slots,
             paint,
+            zoom: self.card.zoom(),
         };
         let (scene, tiles, max_scroll) = scene(&view);
         if shown > 0.0 {
@@ -1898,6 +1939,7 @@ impl App {
                 self.enter_serial = serial;
                 self.cursor_now = None;
                 self.card_motion(surface_x as f32, surface_y as f32);
+                self.card_keys(true);
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -1909,6 +1951,7 @@ impl App {
                 // ours starts: the pointer is its from then on.)
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.card.ptr = None;
+                self.card_keys(false);
                 match self.card.press.take() {
                     Some(Press::Slide { moved: true, .. }) => self.card_settle(),
                     Some(Press::Resize { .. }) => self.card_settle(),
@@ -2051,6 +2094,57 @@ impl App {
         if was_sideways {
             self.sync_card_input();
         }
+    }
+
+    /// Ctrl +/− (and Ctrl 0) are the card's while the pointer is on it, and
+    /// the window's the rest of the time (Max, 2026-10-09: *"Ctrl + +- to
+    /// make the items bigger as the window. but only when i hover the
+    /// card"*). The card never has the keyboard — its window keeps typing
+    /// — so the keys are taken as compositor BINDS for exactly as long as
+    /// the pointer is on it: bound on its enter, unbound on its leave.
+    /// (`hl.bind` adds: always unbound first, or one press would act twice.)
+    pub(crate) fn card_keys(&mut self, on: bool) {
+        if on == self.card.keys {
+            return;
+        }
+        self.card.keys = on;
+        let ctl = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("waverunner-ctl")))
+            .filter(|ctl| ctl.exists());
+        let mut lua = String::new();
+        for (key, what) in ZOOM_KEYS {
+            lua.push_str(&format!("hl.unbind(\"{key}\") "));
+            if let (true, Some(ctl)) = (on, &ctl) {
+                lua.push_str(&format!(
+                    "hl.bind(\"{key}\", hl.dsp.exec_cmd(\"{} card zoom {what}\")) ",
+                    ctl.display()
+                ));
+            }
+        }
+        crate::hypr::eval(&lua);
+    }
+
+    /// Make the items bigger or smaller, or as designed again.
+    fn card_zoom(&mut self, what: &str) -> String {
+        self.card_load();
+        let now = self.card.zoom();
+        let to = match what {
+            "in" => now + ZOOM_STEP,
+            "out" => now - ZOOM_STEP,
+            "reset" | "" => 1.0,
+            n => n.parse().unwrap_or(now),
+        };
+        // (On a tenth, so ten steps out and ten back end where they began.)
+        let to = ((to * 10.0).round() / 10.0).clamp(ZOOM_MIN, ZOOM_MAX);
+        if to != now {
+            self.card.zoom = to;
+            self.card.lines.clear();
+            self.card.shifts.clear();
+            self.card_save();
+            self.request_card_draw();
+        }
+        format!("zoom {to:.1}")
     }
 
     /// Whether the pointer is (still) on `what`: a button acts when it is
@@ -2308,6 +2402,8 @@ impl App {
         let rest = rest.trim();
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
+            // `zoom in|out|reset|<n>`: the items' size (Ctrl +/− over the card).
+            "zoom" => self.card_zoom(rest),
             // The foot's buttons, and what the pages do, without a pointer:
             // `new` · `memory` · `pinned` · `session` · `pin <n>` · `open <n>`
             // (a session of memory) · `forget <n>`.
