@@ -98,6 +98,8 @@ pub(crate) struct BarView<'a> {
     /// Where the writing cursor is in the input box: the line of `draft`
     /// it is on, and how far along it (px).
     pub caret: Option<(usize, f32)>,
+    /// The first of its lines that is in view.
+    pub first: usize,
     /// A voice note is being recorded: for how many seconds now.
     pub rec: Option<u32>,
     /// Talking is being listened to / written out.
@@ -837,7 +839,7 @@ pub(super) fn draw(
             ));
         } else {
             let empty = bar.draft.is_empty() || (bar.draft.len() == 1 && bar.draft[0].is_empty());
-            let first = first_line(bar.draft.len(), bar.caret.map(|c| c.0));
+            let first = bar.first.min(bar.draft.len().saturating_sub(1));
             if empty {
                 // (Nothing written: what to do, unless the cursor is here.)
                 let words = match bar.talk {
@@ -870,8 +872,10 @@ pub(super) fn draw(
                 }
             }
             // The writing cursor, where it is in the text.
-            if let (true, Some((line, x))) = (typing, bar.caret) {
-                let row = line.saturating_sub(first).min(BOX_LINES - 1) as f32;
+            // (Not while it is scrolled out of view.)
+            let seen = |line: usize| line >= first && line < first + BOX_LINES;
+            if let (true, Some((line, x))) = (typing, bar.caret.filter(|c| seen(c.0))) {
+                let row = (line - first) as f32;
                 grid.rects.push(RectInst {
                     rect: Rect::new(
                         (text.x + x).round(),

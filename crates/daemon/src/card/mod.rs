@@ -335,6 +335,11 @@ pub(crate) struct Card {
     /// writing cursor is among them (0 = before the first).
     draft_spans: Vec<(usize, usize)>,
     caret: usize,
+    /// The first line of the input box in view when the WHEEL chose it
+    /// (`None`: it follows the cursor), and the wheel's travel not yet
+    /// worth a line.
+    draft_first: Option<usize>,
+    draft_wheel: f32,
     /// What is being searched for on the page that is up.
     query: String,
     /// The memory's new name, while it is typed.
@@ -651,6 +656,7 @@ impl Card {
     /// The whole draft, taken (the box is empty again).
     fn take_draft(&mut self) -> String {
         self.caret = 0;
+        self.draft_first = None;
         self.draft_spans.clear();
         std::mem::take(&mut self.draft)
     }
@@ -660,6 +666,17 @@ impl Card {
         match self.draft_spans.is_empty() {
             true => vec![(0, self.draft_len())],
             false => self.draft_spans.clone(),
+        }
+    }
+
+    /// The first line of the input box that is in view: where the wheel
+    /// left it, or wherever keeps the cursor in sight.
+    fn draft_top(&self) -> usize {
+        let lines = self.spans().len();
+        let most = lines.saturating_sub(BOX_LINES);
+        match self.draft_first {
+            Some(first) => first.min(most),
+            None => first_line(lines, Some(self.caret_line())),
         }
     }
 
@@ -1697,6 +1714,10 @@ impl App {
             return;
         };
         let (ctrl, shift) = (self.modifiers.ctrl, self.modifiers.shift);
+        if field == Field::Box {
+            // (Typing or moving the cursor: the box shows where it is again.)
+            self.card.draft_first = None;
+        }
         let typed = utf8
             .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
             .filter(|_| !ctrl);
@@ -1928,7 +1949,7 @@ impl App {
             self.card.pick(),
         );
         let spans = self.card.spans();
-        let first = first_line(self.card.draft_lines.len(), Some(self.card.caret_line()));
+        let first = self.card.draft_top();
         let Some((line, x)) = low.text_at(pos, spans.len(), first) else {
             return;
         };
@@ -2806,6 +2827,7 @@ impl App {
                     },
                     field: self.card.field,
                     caret,
+                    first: self.card.draft_top(),
                     rec: recording.filter(|(_, talk)| !talk).map(|(secs, _)| secs),
                     talk,
                     hint,
@@ -3075,6 +3097,22 @@ impl App {
                     self.card_slide(&host, across);
                 }
             }
+            // Over the input box it is what is written that scrolls, a line
+            // at a time (Max, 2026-10-09: *"i need to scroll on the text
+            // when im over the input box too"*).
+            Some(false) if along != 0.0 && self.card_over_box() => {
+                let lines = self.card.spans().len();
+                let most = lines.saturating_sub(BOX_LINES);
+                self.card.draft_wheel += along * 2.4;
+                let steps = (self.card.draft_wheel / TEXT_LINE).trunc();
+                if steps != 0.0 && most > 0 {
+                    self.card.draft_wheel -= steps * TEXT_LINE;
+                    let to =
+                        (self.card.draft_top() as f32 + steps).clamp(0.0, most as f32) as usize;
+                    self.card.draft_first = Some(to);
+                    self.request_card_draw();
+                }
+            }
             // Over the emoji picker it is the emoji that scroll.
             Some(false) if along != 0.0 && self.card_over_tray() => {
                 let span = self.card_pick_span();
@@ -3107,6 +3145,14 @@ impl App {
             )
             .pick_span()
         })
+    }
+
+    /// Whether the pointer is on the input box.
+    fn card_over_box(&self) -> bool {
+        matches!(
+            self.card.ptr.and_then(|p| self.card.hit(p)),
+            Some(Hover::Input | Hover::Btn(_))
+        )
     }
 
     /// Whether the pointer is on the emoji picker.
@@ -3449,6 +3495,16 @@ impl App {
                 self.card.caret = self.card.draft_len();
                 self.request_card_draw();
                 format!("draft {:?}", self.card.draft)
+            }
+            // `caret <n>`: the writing cursor before character n of the box.
+            "caret" => {
+                self.card.caret = rest
+                    .parse::<usize>()
+                    .unwrap_or(0)
+                    .min(self.card.draft_len());
+                self.card.draft_first = None;
+                self.request_card_draw();
+                format!("caret {}", self.card.caret)
             }
             "keep" => {
                 self.card_keep_draft();

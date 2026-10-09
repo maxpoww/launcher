@@ -1461,6 +1461,7 @@ mod tests {
                     found: 0,
                     field: None,
                     caret: None,
+                    first: 0,
                     rec: None,
                     talk: None,
                     hint: "",
