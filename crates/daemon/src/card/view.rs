@@ -87,7 +87,7 @@ pub(crate) enum Foot {
 }
 
 impl Foot {
-    const ALL: [Foot; 3] = [Foot::New, Foot::Memory, Foot::Pinned];
+    const ALL: [Foot; 3] = [Foot::New, Foot::Pinned, Foot::Memory];
 
     fn word(self) -> &'static str {
         match self {
@@ -1039,7 +1039,7 @@ mod tests {
         let buttons = foot_buttons(rect);
         assert_eq!(
             buttons.map(|(f, _)| f),
-            [Foot::New, Foot::Memory, Foot::Pinned]
+            [Foot::New, Foot::Pinned, Foot::Memory]
         );
         for (_, r) in buttons {
             assert!(r.y >= rect.y + rect.h - FOOT_H && r.y + r.h <= rect.y + rect.h);

@@ -387,7 +387,7 @@ The big daemon files are cohesive but long — go straight to the function:
     `WIDTH_MIN..MAX`). Pictures ride the Files thumbnailer (`card_on_thumb`) into a 32-layer
     array; one pushed out is forgotten and asked for again when next on screen.
   PAGES (Max, 2026-10-09: *"three buttons, [new] [memory] [pinned]"*): ONE session for the whole
-  desktop; the card's FOOT (`view::foot_buttons`, `FOOT_H`) holds New · Memory · Pinned. NEW puts
+  desktop; the card's FOOT (`view::foot_buttons`, `FOOT_H`) holds New · Pinned · Memory. NEW puts
   the session in MEMORY (`Card::renew` → a `model::Past { id, at, name, items }`, newest first; an
   empty one is not kept) and leaves a clean card. MEMORY's page lists one row a session
   (`model::session_row`: date · count, then its first things); a click brings it back and the one
