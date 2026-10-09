@@ -278,9 +278,22 @@ pub(crate) fn wrap(text: &str, cols: usize, max: usize) -> Vec<String> {
 /// (mid-word where there is none). Unlike [`wrap`] nothing is trimmed or
 /// dropped, so a place in a line is a place in the text — what a writing
 /// cursor needs. A text that ends in a line break has an empty last line.
+#[cfg(test)]
 pub(crate) fn wrap_spans(text: &str, cols: usize) -> Vec<(usize, usize)> {
+    wrap_spans_by(text, cols.max(4) as f32, |_| 1.0)
+}
+
+/// The same, by MEASURE: a line holds as many characters as fit in `room`,
+/// each as wide as `width` says. (The input box breaks its lines by the
+/// real widths of its letters — by a count of them it broke early and left
+/// room unused at the right: Max, 2026-10-09.) A line always takes at
+/// least one character.
+pub(crate) fn wrap_spans_by(
+    text: &str,
+    room: f32,
+    mut width: impl FnMut(char) -> f32,
+) -> Vec<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
-    let cols = cols.max(4);
     let mut spans = Vec::new();
     let mut start = 0;
     loop {
@@ -292,7 +305,18 @@ pub(crate) fn wrap_spans(text: &str, cols: usize) -> Vec<(usize, usize)> {
         }
         let mut at = start;
         while at < end {
-            let mut to = (at + cols).min(end);
+            // As far as fits…
+            let mut to = at;
+            let mut used = 0.0;
+            while to < end {
+                let w = width(chars[to]);
+                if to > at && used + w > room {
+                    break;
+                }
+                used += w;
+                to += 1;
+            }
+            // …and back to after the last space, if the line was cut.
             if to < end {
                 if let Some(space) = (at + 1..=to).rev().find(|&i| chars[i - 1] == ' ') {
                     to = space;
@@ -667,5 +691,11 @@ mod tests {
         assert_eq!(wrap_spans("", 10), [(0, 0)]);
         assert_eq!(wrap_spans("ab\n", 10), [(0, 2), (3, 3)]);
         assert_eq!(wrap_spans("a\n\nb", 10), [(0, 1), (2, 2), (3, 4)]);
+        // By measure: narrow letters fit more to a line than wide ones.
+        let w = |c: char| if c == 'i' { 1.0 } else { 3.0 };
+        assert_eq!(wrap_spans_by("iiiiiiii", 6.0, w), [(0, 6), (6, 8)]);
+        assert_eq!(wrap_spans_by("mmmm", 6.0, w), [(0, 2), (2, 4)]);
+        // A letter wider than the box still takes a line of its own.
+        assert_eq!(wrap_spans_by("mm", 1.0, w), [(0, 1), (1, 2)]);
     }
 }

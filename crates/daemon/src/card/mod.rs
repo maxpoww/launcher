@@ -340,6 +340,8 @@ pub(crate) struct Card {
     /// worth a line.
     draft_first: Option<usize>,
     draft_wheel: f32,
+    /// How wide each letter met in the input box is (measured once).
+    letter_w: HashMap<char, f32>,
     /// What is being searched for on the page that is up.
     query: String,
     /// The memory's new name, while it is typed.
@@ -2690,15 +2692,22 @@ impl App {
         // What is written in the input box, wrapped to it.
         let low = bottom(rect, self.card.page, 1, self.card.seeking(), None);
         let box_w = low.text().map_or(200.0, |r| r.w);
-        let per = renderer.measure_text("nnnnnnnnnn", TEXT_PX + 0.5, None) / 10.0;
-        let cols = if per > 0.0 {
-            (box_w / per).floor() as usize
-        } else {
-            30
-        };
-        // (As ranges of its characters, so the cursor has a place in it.)
+        // (As ranges of its characters, so the cursor has a place in it;
+        // by the real width of each letter — measured once and kept — so a
+        // line is as long as the box lets it be.)
         self.card.caret = self.card.caret.min(self.card.draft_len());
-        self.card.draft_spans = wrap_spans(&self.card.draft, cols.max(8));
+        for c in self.card.draft.chars() {
+            if c != '\n' && !self.card.letter_w.contains_key(&c) {
+                // (Between two others, so a space has its width too.)
+                let both = renderer.measure_text(&format!("n{c}n"), TEXT_PX + 0.5, None);
+                let bare = renderer.measure_text("nn", TEXT_PX + 0.5, None);
+                self.card.letter_w.insert(c, (both - bare).max(0.0));
+            }
+        }
+        let widths = &self.card.letter_w;
+        self.card.draft_spans = wrap_spans_by(&self.card.draft, (box_w - 3.0).max(20.0), |c| {
+            widths.get(&c).copied().unwrap_or(7.0)
+        });
         let letters: Vec<char> = self.card.draft.chars().collect();
         self.card.draft_lines = match self.card.draft.is_empty() {
             true => Vec::new(),
