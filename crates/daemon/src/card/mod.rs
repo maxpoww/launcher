@@ -590,7 +590,11 @@ impl Card {
                     .unwrap_or_default()
             }
             Page::Pinned => std::mem::take(&mut self.pinned),
-            Page::Memory => self.memory.iter().map(session_row).collect(),
+            // (Its first row starts a session: Max, 2026-10-09, *"we move
+            // new inside memory"*.)
+            Page::Memory => std::iter::once(new_row())
+                .chain(self.memory.iter().map(session_row))
+                .collect(),
         };
         // (A session's row is wrapped afresh: it may have changed.)
         for past in &self.memory {
@@ -1226,22 +1230,24 @@ impl App {
         self.request_card_draw();
     }
 
-    /// A button of the foot. New: a session for this window. Memory,
-    /// Pinned: that page — or back to the session when it is the one
-    /// already up (if the window has one).
+    /// A button of the head: its page — or back to the session when it is
+    /// the one already up (if the window has one).
     fn card_foot(&mut self, which: Foot) {
         self.card_load();
         match which.page() {
-            None => self.card_begin(),
-            Some(page) if page != self.card.page => self.card_show(page),
-            Some(_) if self.card.open.is_some() => self.card_show(Page::Session),
-            Some(_) => self.card_show(Page::Memory),
+            page if page != self.card.page => self.card_show(page),
+            _ if self.card.open.is_some() => self.card_show(Page::Session),
+            _ => self.card_show(Page::Memory),
         }
     }
 
     /// A click on a session in memory: this window works with it from now
     /// on (and so will a window of the same title, another day).
     fn card_recall(&mut self, id: u64) {
+        if id == NEW_ROW {
+            self.card_begin();
+            return;
+        }
         if !self.card.memory.iter().any(|p| p.id == id) {
             return;
         }
@@ -2415,7 +2421,7 @@ impl App {
             // (a session of memory) · `forget <n>`.
             "new" | "memory" | "pinned" | "session" => {
                 match verb {
-                    "new" => self.card_foot(Foot::New),
+                    "new" => self.card_begin(),
                     "memory" => self.card_show(Page::Memory),
                     "pinned" => self.card_show(Page::Pinned),
                     _ => self.card_show(Page::Session),
@@ -2796,13 +2802,15 @@ mod tests {
         assert_eq!(card.session_for("0x9", Some("Desktop")), Some(b));
         assert_eq!(card.session_for("0x9", Some("Seam")), None);
         card.turn_to(None);
-        assert_eq!((card.page, card.items.len()), (Page::Memory, 2));
+        // (Two sessions, under the row that starts a new one.)
+        assert_eq!((card.page, card.items.len()), (Page::Memory, 3));
+        assert_eq!(card.items[0].id, NEW_ROW);
         assert_eq!(bodies(&card.sessions()[1].items), ["for the feature"]);
 
         // Forgotten: its windows and its title have nothing any more, and
         // with one session left there is nothing to pick.
         assert!(card.lose(b).is_some());
-        assert_eq!(card.items.len(), 1);
+        assert_eq!(card.items.len(), 2);
         assert_eq!(card.session_for("0x2", Some("Desktop")), Some(a));
         assert!(card.titles.get("Desktop").is_none());
     }

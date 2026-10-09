@@ -170,6 +170,20 @@ pub(super) fn session_row(session: &Past) -> Item {
     }
 }
 
+/// Memory's first row: it starts a session for the window the card is on.
+pub(super) fn new_row() -> Item {
+    Item {
+        id: super::view::NEW_ROW,
+        kind: Kind::Text,
+        body: "+  New session".to_owned(),
+        path: None,
+        aspect: 0.0,
+        owned: false,
+        at: 0,
+        from: None,
+    }
+}
+
 /// How many of a session's things its row shows, and how much of each.
 const ROW_PEEK: usize = 3;
 const ROW_CHARS: usize = 34;

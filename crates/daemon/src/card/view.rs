@@ -78,34 +78,37 @@ pub(crate) enum Page {
     Pinned,
 }
 
-/// The buttons along the card's foot.
+/// The buttons along the card's HEAD (they were its foot until Max,
+/// 2026-10-09: *"the buttons have to be on the top"* — the card is called
+/// from the title bar, and they are then right under the pointer). New is
+/// not one of them any more: it is Memory's first row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Foot {
-    New,
-    Memory,
     Pinned,
+    Memory,
 }
 
 impl Foot {
-    const ALL: [Foot; 3] = [Foot::New, Foot::Pinned, Foot::Memory];
+    const ALL: [Foot; 2] = [Foot::Pinned, Foot::Memory];
 
     fn word(self) -> &'static str {
         match self {
-            Foot::New => "New",
             Foot::Memory => "Memory",
             Foot::Pinned => "Pinned",
         }
     }
 
-    /// The page this button shows (New shows none: it acts).
-    pub(super) fn page(self) -> Option<Page> {
+    /// The page this button shows.
+    pub(super) fn page(self) -> Page {
         match self {
-            Foot::New => None,
-            Foot::Memory => Some(Page::Memory),
-            Foot::Pinned => Some(Page::Pinned),
+            Foot::Memory => Page::Memory,
+            Foot::Pinned => Page::Pinned,
         }
     }
 }
+
+/// The id of Memory's first row, which is no session: "New session".
+pub(crate) const NEW_ROW: u64 = u64::MAX;
 
 /// What the pointer is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,20 +146,17 @@ const FOOT_BUTTON_H: f32 = 28.0;
 /// The pin glyph (fa-thumb-tack, in the Nerd font).
 const GLYPH_PIN: &str = "\u{f08d}";
 
-/// The part of the card the list has: all of it but the foot.
+/// The part of the card the list has: all of it but the head.
 pub(crate) fn list_rect(rect: Rect, foot: bool) -> Rect {
-    let h = if foot {
-        (rect.h - FOOT_H).max(0.0)
-    } else {
-        rect.h
-    };
-    Rect::new(rect.x, rect.y, rect.w, h)
+    let head = if foot { FOOT_H.min(rect.h) } else { 0.0 };
+    Rect::new(rect.x, rect.y + head, rect.w, rect.h - head)
 }
 
-/// Where the foot's three buttons are: side by side, the card's width.
-pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 3] {
-    let w = (rect.w - 2.0 * LIST_PAD - 2.0 * GAP) / 3.0;
-    let y = rect.y + rect.h - FOOT_H + (FOOT_H - FOOT_BUTTON_H) / 2.0 - 2.0;
+/// Where the head's buttons are: side by side, the card's width.
+pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 2] {
+    let count = Foot::ALL.len() as f32;
+    let w = (rect.w - 2.0 * LIST_PAD - (count - 1.0) * GAP) / count;
+    let y = rect.y + (FOOT_H - FOOT_BUTTON_H) / 2.0 + 2.0;
     Foot::ALL.map(|f| {
         let n = Foot::ALL.iter().position(|x| *x == f).unwrap_or(0) as f32;
         (
@@ -361,7 +361,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         [0.0, 0.0, 0.0, 0.30]
     };
     let mut tiles = Vec::with_capacity(shown_items.len());
-    let mut y = rect.y + LIST_PAD - scroll;
+    let mut y = body.y + LIST_PAD - scroll;
     for (item, h) in shown_items.iter().copied().zip(heights) {
         let shift = view.shifts.get(&item.id).copied().unwrap_or(0.0);
         let tile = Tile {
@@ -518,7 +518,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 }),
             });
         };
-        if over.is_some() {
+        if over.is_some() && item.id != NEW_ROW {
             button(
                 tile.close(),
                 "×",
@@ -564,7 +564,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         bar.rects.push(RectInst {
             rect: Rect::new(
                 rect.x + LIST_PAD,
-                body.y + body.h,
+                body.y - 1.0,
                 rect.w - 2.0 * LIST_PAD,
                 1.0,
             ),
@@ -574,7 +574,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             border: 0.0,
         });
         for (which, r) in foot_buttons(rect) {
-            let up = which.page() == Some(foot.page);
+            let up = which.page() == foot.page;
             let hot = view.hover == Some(Hover::Foot(which));
             bar.rects.push(RectInst {
                 rect: r,
@@ -1071,14 +1071,13 @@ mod tests {
         // The list is shorter by the foot, so there is that much more to scroll.
         assert_eq!(scroll_foot, scroll_bare + FOOT_H);
         assert_eq!(with.grids.len(), bare.grids.len() + 1);
-        // Three buttons, in the foot, side by side inside the card.
+        // The buttons, in the head, side by side inside the card; the
+        // list starts under them.
         let buttons = foot_buttons(rect);
-        assert_eq!(
-            buttons.map(|(f, _)| f),
-            [Foot::New, Foot::Pinned, Foot::Memory]
-        );
+        assert_eq!(buttons.map(|(f, _)| f), [Foot::Pinned, Foot::Memory]);
+        assert_eq!(list_rect(rect, true).y, rect.y + FOOT_H);
         for (_, r) in buttons {
-            assert!(r.y >= rect.y + rect.h - FOOT_H && r.y + r.h <= rect.y + rect.h);
+            assert!(r.y >= rect.y && r.y + r.h <= rect.y + FOOT_H);
             assert!(r.x >= rect.x && r.x + r.w <= rect.x + rect.w);
         }
         assert!(buttons[0].1.x + buttons[0].1.w <= buttons[1].1.x);

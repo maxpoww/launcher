@@ -386,8 +386,9 @@ The big daemon files are cohesive but long — go straight to the function:
     brief scroll that stops is a THROW: outside the window on that side. Edges resize it (`GRIP`,
     `WIDTH_MIN..MAX`). Pictures ride the Files thumbnailer (`card_on_thumb`) into a 32-layer
     array; one pushed out is forgotten and asked for again when next on screen.
-  SESSIONS (Max, 2026-10-09): the card's FOOT (`view::foot_buttons`, `FOOT_H`) holds New · Pinned ·
-  Memory. A SESSION (`model::Past { id, at, name, items }`) is a working set; `Card::memory` is
+  SESSIONS (Max, 2026-10-09): the card's HEAD — its buttons are at the TOP, right under the
+  pointer that called it (`view::foot_buttons`, `FOOT_H`; the names say foot from when they were
+  there) — holds Pinned · Memory. New is Memory's FIRST ROW (`model::new_row`, id `NEW_ROW`). A SESSION (`model::Past { id, at, name, items }`) is a working set; `Card::memory` is
   ALL of them, newest first, and EACH WINDOW works with one (`Win::session`, until it closes).
   When the card comes to a window (`card_attach`, from `card_summon`) it shows, in this order: the
   session that window was given; else the one a window of the same TITLE was given before
