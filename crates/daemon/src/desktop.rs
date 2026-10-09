@@ -873,7 +873,11 @@ fn camera(
     };
     let mut cmd = std::process::Command::new("scrcpy");
     cmd.args(["--video-source=camera", "--camera-facing=back", "--camera-ar=16:9", "--max-size=1920"])
-        .args(["--camera-fps=30", "--no-audio", "--no-window"])
+        // 60 pictures a second, where a webcam gives 30 (Max, 2026-10-09: at
+        // 30 it "feels even less smooth" than the built-in one); the phone
+        // was measured sending 1080p at 60 with none late or repeated. And
+        // twice scrcpy's usual bit rate, for the picture's sake.
+        .args(["--camera-fps=60", "--video-bit-rate=16M", "--no-audio", "--no-window"])
         // Frames come off the phone up to 20 ms early or late (measured);
         // held this long they go out evenly. (80 ms was tried first, on a
         // day the picture was choppy for another reason, and judged worse.)
