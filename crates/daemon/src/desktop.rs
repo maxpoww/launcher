@@ -2115,10 +2115,15 @@ impl App {
             let phone = item
                 .and_then(|i| self.desktop.items.get(i))
                 .is_some_and(|it| self.desktop.volumes.iter().any(|v| v.phone && v.path.as_os_str() == it.path.as_str()));
-            let camera = item
-                .and_then(|i| self.desktop.items.get(i))
-                .is_some_and(|it| self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&it.path)));
-            menu = menu.for_volume(phone, camera, h as f32);
+            let path = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()).unwrap_or_default();
+            let camera = self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
+            let lenses = match (camera, self.desktop.lenses.get(&path)) {
+                (true, Some(lenses)) => lenses.iter().map(|l| l.name.clone()).collect(),
+                _ => Vec::new(),
+            };
+            let current = self.desktop.lens_on.get(&path).copied();
+            let volume = crate::desktop_menu::Volume { phone, camera, lenses, current };
+            menu = menu.for_volume(volume, h as f32);
         }
         // On a shortcut nothing vouches for: letting it run comes first.
         let locked = item

@@ -151,22 +151,42 @@ pub(crate) fn rows(on_item: bool, many: bool) -> Vec<Row> {
     }
 }
 
+/// What a plugged-in volume's menu is made from.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct Volume {
+    /// A phone: its screen can be mirrored, its camera used.
+    pub phone: bool,
+    /// That phone is being used as a camera, through these lenses' `n`th
+    /// (`current`): they are rows of the menu itself then.
+    pub camera: bool,
+    pub lenses: Vec<String>,
+    pub current: Option<usize>,
+}
+
 /// The rows of a plugged-in volume's menu.
-fn volume_rows(phone: bool, camera: bool) -> Vec<Row> {
+fn volume_rows(v: &Volume) -> Vec<Row> {
     let mut rows = vec![
         Row::Item { label: "Open", action: Action::Open, danger: false },
         Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
     ];
     // A phone: its screen, here (Max, 2026-10-09). And its camera as this
-    // computer's: the row turns the page to its lenses; while it is on, the
-    // lens can be changed and a row ends it.
-    if phone {
+    // computer's: the row turns the page to its lenses. While it is on, a
+    // row ends it and the lenses stand right under that one, the one in use
+    // ticked — a change of lens is one click (Max, same day).
+    if v.phone {
         rows.push(Row::Item { label: "Mirror screen", action: Action::Mirror, danger: false });
-        if camera {
-            rows.push(Row::Item { label: "Change lens", action: Action::Camera, danger: false });
-            rows.push(Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
-        } else {
+        if !v.camera {
             rows.push(Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
+        } else {
+            rows.push(Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+            for (n, name) in v.lenses.iter().enumerate() {
+                let label = if v.current == Some(n) { format!("{name}  ✓") } else { name.clone() };
+                rows.push(Row::Target { label, action: Action::Lens(n) });
+            }
+            // (Not known what it has: the page that asks it.)
+            if v.lenses.is_empty() {
+                rows.push(Row::Item { label: "Change lens", action: Action::Camera, danger: false });
+            }
         }
     }
     rows.push(Row::Sep);
@@ -185,9 +205,8 @@ pub(crate) struct Menu {
     pub targets: bool,
     /// Showing a phone's lenses (see `show_lenses`).
     pub lenses: bool,
-    /// A plugged-in volume's menu (`for_volume`): whether it is a phone, and
-    /// whether that phone is being used as a camera — what Back goes back to.
-    pub volume: Option<(bool, bool)>,
+    /// A plugged-in volume's menu (`for_volume`) — what Back goes back to.
+    pub volume: Option<Volume>,
     /// Where the pointer was: a new folder goes in that cell.
     pub at: (f32, f32),
     pub rows: Vec<Row>,
@@ -275,9 +294,9 @@ impl Menu {
 
     /// The menu of a plugged-in volume standing on the desktop: it is not a
     /// file of the desktop's — nothing renames, moves or bins it.
-    pub fn for_volume(mut self, phone: bool, camera: bool, h: f32) -> Self {
-        self.volume = Some((phone, camera));
-        self.set_rows(volume_rows(phone, camera), h);
+    pub fn for_volume(mut self, volume: Volume, h: f32) -> Self {
+        self.set_rows(volume_rows(&volume), h);
+        self.volume = Some(volume);
         self
     }
 
@@ -312,8 +331,8 @@ impl Menu {
     pub fn show_main(&mut self, h: f32) {
         self.targets = false;
         self.lenses = false;
-        let rows = match self.volume {
-            Some((phone, camera)) => volume_rows(phone, camera),
+        let rows = match &self.volume {
+            Some(volume) => volume_rows(volume),
             None => rows(self.item.is_some(), self.many),
         };
         self.set_rows(rows, h);
@@ -547,15 +566,22 @@ mod tests {
         assert!(!m.targets);
         assert_eq!(m.action(0), Some(Action::Open));
         // A volume's menu: open it or let it go, nothing else.
-        let phone = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(true, false, 800.0);
+        let open = || Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0);
+        let phone = open().for_volume(Volume { phone: true, ..Default::default() }, 800.0);
         assert_eq!(phone.action(2), Some(Action::Mirror), "a phone's screen can be mirrored");
-        assert_eq!(phone.action(3), Some(Action::Camera), "and its camera used");
         assert_eq!(phone.rows[3], Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
-        let mut on = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(true, true, 800.0);
-        assert_eq!(on.rows[3], Row::Item { label: "Change lens", action: Action::Camera, danger: false });
-        assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+        // While it is the camera: Stop, and the lenses right under it.
+        let lenses = vec!["Main".to_owned(), "Front".to_owned()];
+        let using = Volume { phone: true, camera: true, lenses: lenses.clone(), current: Some(1) };
+        let mut on = open().for_volume(using, 800.0);
+        assert_eq!(on.rows[3], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+        assert_eq!(on.rows[4], Row::Target { label: "Main".into(), action: Action::Lens(0) });
+        assert_eq!(on.rows[5], Row::Target { label: "Front  ✓".into(), action: Action::Lens(1) });
+        assert_eq!(on.rows[6], Row::Sep);
+        let blind = open().for_volume(Volume { phone: true, camera: true, ..Default::default() }, 800.0);
+        assert_eq!(blind.rows[4], Row::Item { label: "Change lens", action: Action::Camera, danger: false });
         // The lens page: Back, then each lens, the one in use ticked.
-        on.show_lenses(&["Main".into(), "Front".into()], Some(1), false, 800.0);
+        on.show_lenses(&lenses, Some(1), false, 800.0);
         assert!(on.lenses);
         assert_eq!(on.action(0), Some(Action::Back));
         assert_eq!(on.rows[2], Row::Target { label: "Main".into(), action: Action::Lens(0) });
@@ -565,8 +591,8 @@ mod tests {
         // Back is the VOLUME's first page, not a file's.
         on.show_main(800.0);
         assert!(!on.lenses);
-        assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
-        let m = Menu::open(Some(0), false, (10.0, 10.0), 1000.0, 800.0).for_volume(false, false, 800.0);
+        assert_eq!(on.rows[3], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+        let m = open().for_volume(Volume::default(), 800.0);
         let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
         assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject]);
         // The wallpaper's menu takes Paste on top when there is something.
