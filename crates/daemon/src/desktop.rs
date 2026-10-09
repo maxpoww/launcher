@@ -2168,7 +2168,8 @@ impl App {
                 _ => Vec::new(),
             };
             let current = self.desktop.lens_on.get(&path).copied();
-            let volume = crate::desktop_menu::Volume { phone, camera, lenses, current };
+            let closed = self.desktop.volumes.iter().any(|v| v.closed && v.path.as_os_str() == path.as_str());
+            let volume = crate::desktop_menu::Volume { phone, closed, camera, lenses, current };
             menu = menu.for_volume(volume, h as f32);
         }
         // On a shortcut nothing vouches for: letting it run comes first.
@@ -2190,8 +2191,8 @@ impl App {
     /// What is plugged in changed (`mounts.rs`): its icons follow.
     pub(crate) fn on_mounts(&mut self, list: Vec<crate::mounts::Mounted>) {
         info!(
-            "desktop: plugged in and mounted: {:?}",
-            list.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
+            "desktop: plugged in: {:?}",
+            list.iter().map(|m| if m.closed { format!("{} (closed)", m.name) } else { m.name.clone() }).collect::<Vec<_>>()
         );
         // A volume that left takes its remembered cell with it: the same
         // stick comes back to the first free cells, not to a stale one.
@@ -2199,7 +2200,9 @@ impl App {
             .desktop
             .volumes
             .iter()
-            .filter(|v| !list.contains(v))
+            // (By its place, not by all it is: a phone that was closed and
+            // has opened is the same icon in the same cell.)
+            .filter(|v| !list.iter().any(|n| n.path == v.path))
             .map(|v| v.path.to_string_lossy().into_owned())
             .collect();
         for path in gone {
@@ -2211,7 +2214,7 @@ impl App {
         if self.desktop.mounts_seen && self.desktop.hidden {
             let new: Vec<String> = list
                 .iter()
-                .filter(|v| !self.desktop.volumes.contains(v))
+                .filter(|v| !self.desktop.volumes.iter().any(|o| o.path == v.path))
                 .map(|v| v.path.to_string_lossy().into_owned())
                 .collect();
             if !new.is_empty() {
@@ -2232,7 +2235,7 @@ impl App {
 
     /// Let the volume at `path` go.
     fn desktop_eject(&mut self, path: &str) {
-        if let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path) {
+        if let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path && !v.closed) {
             info!("desktop: eject {}", v.name);
             crate::mounts::eject(v.uri.clone(), v.name.clone());
         }
@@ -2334,7 +2337,7 @@ impl App {
         // all (Max, 2026-10-08: "my Pixel should appear there too, as any
         // Android, or mounted device"): it is not in /proc/mounts, the
         // volume service shows it through a folder of its own.
-        for v in &self.desktop.volumes {
+        for v in self.desktop.volumes.iter().filter(|v| !v.closed) {
             let dest = if v.phone {
                 crate::desktop_send::phone_dest(&v.path)
             } else {
@@ -4185,6 +4188,17 @@ impl App {
         let Some(item) = self.desktop.items.get(i) else {
             return;
         };
+        // A phone that is plugged in and will not open: what to do on it.
+        if self.desktop.volumes.iter().any(|v| v.closed && v.path.as_os_str() == item.path.as_str()) {
+            info!("desktop: {} is not open", item.name);
+            let body = format!(
+                "{}: {}",
+                item.name,
+                crate::i18n::tr("unlock it and choose File transfer (or Allow) in its USB notification. It opens here by itself.")
+            );
+            std::thread::spawn(move || crate::desktop_send_notify(&body));
+            return;
+        }
         if locked_shortcut(item).is_some() {
             info!("desktop: {} is a shortcut not yet let run", item.name);
             let body = format!(

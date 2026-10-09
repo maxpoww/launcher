@@ -156,6 +156,9 @@ pub(crate) fn rows(on_item: bool, many: bool) -> Vec<Row> {
 pub(crate) struct Volume {
     /// A phone: its screen can be mirrored, its camera used.
     pub phone: bool,
+    /// A phone that is plugged in but not open (locked, charge only): no
+    /// folder to open a terminal in, nothing to eject.
+    pub closed: bool,
     /// That phone is being used as a camera, through these lenses' `n`th
     /// (`current`): they are rows of the menu itself then.
     pub camera: bool,
@@ -165,10 +168,10 @@ pub(crate) struct Volume {
 
 /// The rows of a plugged-in volume's menu.
 fn volume_rows(v: &Volume) -> Vec<Row> {
-    let mut rows = vec![
-        Row::Item { label: "Open", action: Action::Open, danger: false },
-        Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
-    ];
+    let mut rows = vec![Row::Item { label: "Open", action: Action::Open, danger: false }];
+    if !v.closed {
+        rows.push(Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false });
+    }
     // A phone: its screen, here (Max, 2026-10-09). And its camera as this
     // computer's: the row turns the page to its lenses. While it is on, a
     // row ends it and the lenses stand right under that one, the one in use
@@ -191,8 +194,10 @@ fn volume_rows(v: &Volume) -> Vec<Row> {
             }
         }
     }
-    rows.push(Row::Sep);
-    rows.push(Row::Item { label: "Eject", action: Action::Eject, danger: false });
+    if !v.closed {
+        rows.push(Row::Sep);
+        rows.push(Row::Item { label: "Eject", action: Action::Eject, danger: false });
+    }
     rows
 }
 
@@ -575,7 +580,7 @@ mod tests {
         assert_eq!(phone.rows[4], Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
         // While it is the camera: Stop, and the lenses right under it.
         let lenses = vec!["Main".to_owned(), "Front".to_owned()];
-        let using = Volume { phone: true, camera: true, lenses: lenses.clone(), current: Some(1) };
+        let using = Volume { phone: true, camera: true, lenses: lenses.clone(), current: Some(1), ..Default::default() };
         let mut on = open().for_volume(using, 800.0);
         assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
         assert_eq!(on.rows[5], Row::Target { label: "Main".into(), action: Action::Lens(0) });
@@ -595,6 +600,10 @@ mod tests {
         on.show_main(800.0);
         assert!(!on.lenses);
         assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+        // A phone that is not open: no terminal, no eject.
+        let shut = open().for_volume(Volume { phone: true, closed: true, ..Default::default() }, 800.0);
+        let actions: Vec<Action> = (0..shut.rows.len()).filter_map(|i| shut.action(i)).collect();
+        assert_eq!(actions, vec![Action::Open, Action::Mirror, Action::Camera]);
         let m = open().for_volume(Volume::default(), 800.0);
         let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
         assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject]);
