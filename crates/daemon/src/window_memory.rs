@@ -93,6 +93,22 @@ impl WindowMemory {
     }
 }
 
+/// Make the NEXT window of `class` open floating, `w`×`h` and centred,
+/// whatever was remembered for it and whether or not Golem is floating —
+/// for a window whose right size is known before it opens (a phone's
+/// mirror). It goes out under the class's own rule name, so there is one
+/// rule for the app and the last one declared is the one that holds; what
+/// the owner then does to the window is remembered as for any other. Any
+/// thread.
+pub(crate) fn declare_sized(class: &str, w: i64, h: i64) {
+    let (name, regex) = (rule_name(class), class_regex(class));
+    hypr::dispatch(&format!(
+        "(function() hl.window_rule({{ name = \"{name}\", match = {{ class = \"{regex}\" }}, \
+         float = true, size = {{ {w}, {h} }}, center = true, enabled = true }}) \
+         return hl.dsp.no_op() end)()"
+    ));
+}
+
 /// A rule name for an app class: Hyprland names are free text, but keep it
 /// tidy and unique per class.
 fn rule_name(class: &str) -> String {

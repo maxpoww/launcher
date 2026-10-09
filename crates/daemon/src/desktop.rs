@@ -665,10 +665,58 @@ pub(crate) fn phone_serial(uri: &str) -> Option<String> {
     (serial.len() >= 6 && serial.chars().all(|c| c.is_ascii_alphanumeric())).then(|| serial.to_owned())
 }
 
+/// What scrcpy's window calls itself: its own name, and the name of the
+/// wrapper it runs under when it comes from the nix store.
+const MIRROR_CLASSES: [&str; 2] = ["scrcpy", ".scrcpy-wrapped"];
+/// How much of the screen's free height a phone's mirror stands in.
+const MIRROR_HEIGHT: f64 = 0.72;
+/// A phone's shape when it would not say: 9 by 20, what most are near.
+const PHONE_SHAPE: (f64, f64) = (9.0, 20.0);
+
+/// The phone's screen, in its own pixels, short side first (`adb shell wm
+/// size`; the last line is the size in force). The usual shape when it
+/// cannot be asked.
+fn phone_shape(serial: Option<&str>) -> (f64, f64) {
+    let mut cmd = std::process::Command::new("adb");
+    if let Some(serial) = serial {
+        cmd.args(["-s", serial]);
+    }
+    cmd.args(["shell", "wm", "size"]).stderr(std::process::Stdio::null());
+    cmd.output()
+        .ok()
+        .and_then(|out| parse_wm_size(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or(PHONE_SHAPE)
+}
+
+/// `Physical size: 1344x2992` (and perhaps `Override size: …` after it) →
+/// the last size said, short side first.
+fn parse_wm_size(said: &str) -> Option<(f64, f64)> {
+    let (a, b) = said.lines().rev().find_map(|l| l.rsplit(' ').next()?.trim().split_once('x'))?;
+    let (a, b) = (a.parse::<f64>().ok()?, b.parse::<f64>().ok()?);
+    (a > 0.0 && b > 0.0).then_some((a.min(b), a.max(b)))
+}
+
+/// The mirror's window for a phone of `shape` on a screen with `usable`
+/// logical px of free height: standing, `MIRROR_HEIGHT` of it tall.
+fn mirror_size((short, long): (f64, f64), usable: f64) -> (i64, i64) {
+    let h = (usable * MIRROR_HEIGHT).round();
+    ((h * short / long).round() as i64, h as i64)
+}
+
 /// Show a phone's screen in a window (scrcpy), until that window is
 /// closed. What to tell the owner if it could not: the program is missing,
 /// or the phone would not let it in.
 fn mirror(name: &str, serial: Option<&str>) -> Option<String> {
+    // The window is the phone's own shape, standing: left to itself it
+    // opens at the size of any other window, the picture lost in it (Max,
+    // 2026-10-09: "the window is huge").
+    if let Ok(mon) = crate::hypr::focused_monitor() {
+        let usable = mon.h - mon.reserved.1 - mon.reserved.3;
+        let (w, h) = mirror_size(phone_shape(serial), usable);
+        for class in MIRROR_CLASSES {
+            crate::window_memory::declare_sized(class, w, h);
+        }
+    }
     let mut cmd = std::process::Command::new("scrcpy");
     cmd.arg(format!("--window-title={name}"));
     if let Some(serial) = serial {
@@ -4191,6 +4239,17 @@ mod tests {
         assert_eq!(brought, vec![desk.join("f.txt")]);
         assert!(dir.join("elsewhere/f.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_mirror_window_has_the_phones_shape() {
+        assert_eq!(parse_wm_size("Physical size: 1344x2992\n"), Some((1344.0, 2992.0)));
+        assert_eq!(
+            parse_wm_size("Physical size: 1344x2992\nOverride size: 1008x2244\n"),
+            Some((1008.0, 2244.0))
+        );
+        assert_eq!(parse_wm_size("error: device unauthorized"), None);
+        assert_eq!(mirror_size((1344.0, 2992.0), 1000.0), (323, 720));
     }
 
     #[test]
