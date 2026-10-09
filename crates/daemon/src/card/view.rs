@@ -1,7 +1,7 @@
 //! How the card is DRAWN: one frame as a scene, and the boxes its items
 //! landed in (what the pointer is tested against).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::model::{Item, Kind};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst, NO_PLATE};
@@ -67,7 +67,114 @@ pub(crate) fn insert_index(tiles: &[Tile], y: f32) -> usize {
         .count()
 }
 
+/// The card's three pages: the session on it now, the sessions put away,
+/// the pinned items (Max, 2026-10-09: *"i just have three buttons, [new]
+/// [memory] [pinned]"*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Page {
+    #[default]
+    Session,
+    Memory,
+    Pinned,
+}
+
+/// The buttons along the card's foot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Foot {
+    New,
+    Memory,
+    Pinned,
+}
+
+impl Foot {
+    const ALL: [Foot; 3] = [Foot::New, Foot::Memory, Foot::Pinned];
+
+    fn word(self) -> &'static str {
+        match self {
+            Foot::New => "New",
+            Foot::Memory => "Memory",
+            Foot::Pinned => "Pinned",
+        }
+    }
+
+    /// The page this button shows (New shows none: it acts).
+    pub(super) fn page(self) -> Option<Page> {
+        match self {
+            Foot::New => None,
+            Foot::Memory => Some(Page::Memory),
+            Foot::Pinned => Some(Page::Pinned),
+        }
+    }
+}
+
+/// What the pointer is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hover {
+    Item(u64),
+    /// An item's ×.
+    Close(u64),
+    /// An item's pin.
+    Pin(u64),
+    Foot(Foot),
+}
+
+impl Hover {
+    fn item(self) -> Option<u64> {
+        match self {
+            Hover::Item(id) | Hover::Close(id) | Hover::Pin(id) => Some(id),
+            Hover::Foot(_) => None,
+        }
+    }
+}
+
+/// The foot of the card: which page is up, and which of the items shown
+/// are pinned (their pin stays lit).
+pub(crate) struct FootView<'a> {
+    pub page: Page,
+    pub pinned: &'a HashSet<u64>,
+}
+
+/// The foot's height, and its buttons' own.
+pub(super) const FOOT_H: f32 = 46.0;
+const FOOT_BUTTON_H: f32 = 28.0;
+/// The pin glyph (fa-thumb-tack, in the Nerd font).
+const GLYPH_PIN: &str = "\u{f08d}";
+
+/// The part of the card the list has: all of it but the foot.
+pub(crate) fn list_rect(rect: Rect, foot: bool) -> Rect {
+    let h = if foot {
+        (rect.h - FOOT_H).max(0.0)
+    } else {
+        rect.h
+    };
+    Rect::new(rect.x, rect.y, rect.w, h)
+}
+
+/// Where the foot's three buttons are: side by side, the card's width.
+pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 3] {
+    let w = (rect.w - 2.0 * LIST_PAD - 2.0 * GAP) / 3.0;
+    let y = rect.y + rect.h - FOOT_H + (FOOT_H - FOOT_BUTTON_H) / 2.0 - 2.0;
+    Foot::ALL.map(|f| {
+        let n = Foot::ALL.iter().position(|x| *x == f).unwrap_or(0) as f32;
+        (
+            f,
+            Rect::new(
+                (rect.x + LIST_PAD + n * (w + GAP)).round(),
+                y.round(),
+                w.round(),
+                FOOT_BUTTON_H,
+            ),
+        )
+    })
+}
+
 impl Tile {
+    /// Where its pin is: beside the ×.
+    pub(super) fn pin(&self) -> Rect {
+        let close = self.close();
+        Rect::new(close.x - CLOSE - 2.0, close.y, CLOSE, CLOSE)
+    }
+
     /// Where its × is.
     pub(super) fn close(&self) -> Rect {
         Rect::new(
@@ -117,8 +224,10 @@ pub(crate) struct View<'a> {
     pub items: &'a [Item],
     pub lines: &'a HashMap<u64, Vec<String>>,
     pub scroll: f32,
-    /// The item under the pointer, and whether the pointer is on its ×.
-    pub hover: Option<(u64, bool)>,
+    /// What the pointer is on.
+    pub hover: Option<Hover>,
+    /// The foot with its three buttons (`None`: a card without one).
+    pub foot: Option<FootView<'a>>,
     pub dnd_over: bool,
     /// An item not drawn at all: it is in the hand, over the card.
     pub hidden: Option<u64>,
@@ -184,7 +293,8 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
 
     // The list, clipped a hair inside the card so nothing rides over its
     // rim, and to what the unroll has let through.
-    let inner = Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0);
+    let body = list_rect(rect, view.foot.is_some());
+    let inner = Rect::new(body.x + 1.0, body.y + 1.0, body.w - 2.0, body.h - 2.0);
     let clip = Rect::new(
         inner.x,
         inner.y,
@@ -195,6 +305,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         clip,
         ..Default::default()
     };
+    let page = view.foot.as_ref().map_or(Page::Session, |f| f.page);
     let tile_w = rect.w - 2.0 * LIST_PAD;
     let text_w = tile_w - 2.0 * TILE_PAD_X;
     let shown_items: Vec<&Item> = view
@@ -215,7 +326,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         + heights.iter().sum::<f32>()
         + GAP * heights.len().saturating_sub(1) as f32
         + opening;
-    let max_scroll = (total - rect.h).max(0.0);
+    let max_scroll = (total - body.h).max(0.0);
     let scroll = view.scroll.clamp(0.0, max_scroll);
 
     let tile_fill = if bright {
@@ -318,7 +429,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             line_y += PIC_H + PIC_GAP;
         }
         let family = (item.kind == Kind::Text).then_some(crate::options::NERD);
-        for line in view.lines.get(&item.id).into_iter().flatten() {
+        for (n, line) in view.lines.get(&item.id).into_iter().flatten().enumerate() {
             if !line.is_empty() {
                 list.labels.push(Label {
                     text: line.clone(),
@@ -331,45 +442,148 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     cache: true,
                     clip: Some(clip),
                     family,
-                    color: Some(paint.ink_at(0.92)),
+                    // (A session in memory: its date stands out, what is
+                    // in it sits back.)
+                    color: Some(match (page, n) {
+                        (Page::Memory, 0) => [ACCENT[0], ACCENT[1], ACCENT[2], 0.95],
+                        (Page::Memory, _) => paint.ink_at(0.62),
+                        _ => paint.ink_at(0.92),
+                    }),
                 });
             }
             line_y += TEXT_LINE;
         }
-        // The × shows on the item under the pointer only.
-        if let Some((id, on_close)) = view.hover {
-            if id == item.id {
-                let close = tile.close();
-                if on_close {
-                    list.rects.push(RectInst {
-                        rect: close,
-                        radius: 6.0,
-                        color: [DANGER[0], DANGER[1], DANGER[2], 0.2],
-                        glass: 0.0,
-                        border: 0.0,
-                    });
-                }
-                list.labels.push(Label {
-                    text: "×".to_owned(),
-                    pos: (close.x + close.w / 2.0, close.y + 1.0),
-                    max_w: close.w,
-                    font_px: 15.0,
-                    line_px: CLOSE - 2.0,
-                    centered: true,
-                    dim: false,
-                    cache: true,
-                    clip: Some(clip),
-                    family: None,
-                    color: Some(if on_close {
-                        [DANGER[0], DANGER[1], DANGER[2], 1.0]
-                    } else {
-                        paint.ink_at(0.45)
-                    }),
+        // The × shows on the item under the pointer only; the pin beside
+        // it too, and on a pinned item all the time (lit).
+        let over = view.hover.filter(|h| h.item() == Some(item.id));
+        let mut button = |rect: Rect,
+                          glyph: &str,
+                          family: Option<&'static str>,
+                          px: f32,
+                          on: bool,
+                          hot: bool,
+                          lit: [f32; 3]| {
+            if hot {
+                list.rects.push(RectInst {
+                    rect,
+                    radius: 6.0,
+                    color: [lit[0], lit[1], lit[2], 0.2],
+                    glass: 0.0,
+                    border: 0.0,
                 });
+            }
+            list.labels.push(Label {
+                text: glyph.to_owned(),
+                pos: (
+                    rect.x + rect.w / 2.0,
+                    rect.y + if family.is_some() { 3.0 } else { 1.0 },
+                ),
+                max_w: rect.w,
+                font_px: px,
+                line_px: CLOSE - 2.0,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(clip),
+                family,
+                color: Some(if on {
+                    [lit[0], lit[1], lit[2], 1.0]
+                } else {
+                    paint.ink_at(0.45)
+                }),
+            });
+        };
+        if over.is_some() {
+            button(
+                tile.close(),
+                "×",
+                None,
+                15.0,
+                over == Some(Hover::Close(item.id)),
+                over == Some(Hover::Close(item.id)),
+                DANGER,
+            );
+        }
+        if page == Page::Session {
+            let pinned = view
+                .foot
+                .as_ref()
+                .is_some_and(|f| f.pinned.contains(&item.id));
+            if over.is_some() || pinned {
+                let on = pinned || over == Some(Hover::Pin(item.id));
+                button(
+                    tile.pin(),
+                    GLYPH_PIN,
+                    Some(crate::options::NERD),
+                    12.0,
+                    on,
+                    over == Some(Hover::Pin(item.id)),
+                    ACCENT,
+                );
             }
         }
     }
     scene.grids.push(list);
+
+    // The foot: New · Memory · Pinned, the page that is up lit.
+    if let Some(foot) = &view.foot {
+        let mut bar = GridContent {
+            clip: window,
+            ..Default::default()
+        };
+        let line = if bright {
+            [0.0, 0.0, 0.0, 0.10]
+        } else {
+            [1.0, 1.0, 1.0, 0.07]
+        };
+        bar.rects.push(RectInst {
+            rect: Rect::new(
+                rect.x + LIST_PAD,
+                body.y + body.h,
+                rect.w - 2.0 * LIST_PAD,
+                1.0,
+            ),
+            radius: 0.0,
+            color: line,
+            glass: 0.0,
+            border: 0.0,
+        });
+        for (which, r) in foot_buttons(rect) {
+            let up = which.page() == Some(foot.page);
+            let hot = view.hover == Some(Hover::Foot(which));
+            bar.rects.push(RectInst {
+                rect: r,
+                radius: TILE_RADIUS,
+                color: match (up, hot, bright) {
+                    (true, _, _) => [ACCENT[0], ACCENT[1], ACCENT[2], 0.07],
+                    (_, true, true) => [0.0, 0.0, 0.0, 0.14],
+                    (_, true, false) => [1.0, 1.0, 1.0, 0.10],
+                    (_, _, true) => [0.0, 0.0, 0.0, 0.07],
+                    (_, _, false) => [0.0, 0.0, 0.0, 0.28],
+                },
+                glass: 0.0,
+                border: 0.0,
+            });
+            bar.labels.push(Label {
+                text: which.word().to_owned(),
+                pos: (r.x + r.w / 2.0, r.y + (r.h - TEXT_LINE) / 2.0),
+                max_w: r.w,
+                font_px: TEXT_PX,
+                line_px: TEXT_LINE,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(window),
+                family: None,
+                color: Some(if up {
+                    [ACCENT[0], ACCENT[1], ACCENT[2], 1.0]
+                } else {
+                    paint.ink_at(if hot { 0.95 } else { 0.72 })
+                }),
+            });
+        }
+        scene.grids.push(bar);
+    }
     (scene, tiles, max_scroll)
 }
 
@@ -601,6 +815,8 @@ mod tests {
             path: None,
             aspect: 0.0,
             owned: false,
+            at: 0,
+            from: None,
         }
     }
 
@@ -612,6 +828,8 @@ mod tests {
             path: Some(path.to_owned()),
             aspect: 1.5,
             owned: false,
+            at: 0,
+            from: None,
         }
     }
 
@@ -640,7 +858,8 @@ mod tests {
             items: &items,
             lines: &lines,
             scroll,
-            hover: Some((2, true)),
+            hover: Some(Hover::Close(2)),
+            foot: None,
             dnd_over: false,
             hidden: None,
             shifts: &shifts,
@@ -684,6 +903,7 @@ mod tests {
             lines: &lines,
             scroll: 0.0,
             hover: None,
+            foot: None,
             dnd_over: true,
             hidden: None,
             shifts: &shifts,
@@ -713,6 +933,7 @@ mod tests {
                 lines: &lines,
                 scroll: 0.0,
                 hover: None,
+                foot: None,
                 dnd_over: true,
                 hidden,
                 shifts,
@@ -781,5 +1002,58 @@ mod tests {
         let alpha = |x: usize, y: usize| bytes[(y * canvas.w + x) * 4 + 3];
         assert!(alpha(200, canvas.h / 2) > 240);
         assert_eq!(alpha(0, 0), 0);
+    }
+
+    #[test]
+    fn the_foot_takes_its_height_from_the_list_and_holds_three_buttons() {
+        let items: Vec<Item> = (1..=8).map(|n| text(n, "a")).collect();
+        let lines: HashMap<u64, Vec<String>> = items
+            .iter()
+            .map(|it| (it.id, vec![it.body.clone()]))
+            .collect();
+        let (shifts, slots, pinned) = (HashMap::new(), HashMap::new(), HashSet::from([2u64]));
+        let rect = Rect::new(600.0, 60.0, WIDTH, 200.0);
+        let view = |foot: bool| View {
+            rect,
+            shown: 1.0,
+            items: &items,
+            lines: &lines,
+            scroll: 0.0,
+            hover: None,
+            foot: foot.then_some(FootView {
+                page: Page::Session,
+                pinned: &pinned,
+            }),
+            dnd_over: false,
+            hidden: None,
+            shifts: &shifts,
+            slots: &slots,
+            paint: PAINT,
+        };
+        let (bare, _, scroll_bare) = scene(&view(false));
+        let (with, _, scroll_foot) = scene(&view(true));
+        // The list is shorter by the foot, so there is that much more to scroll.
+        assert_eq!(scroll_foot, scroll_bare + FOOT_H);
+        assert_eq!(with.grids.len(), bare.grids.len() + 1);
+        // Three buttons, in the foot, side by side inside the card.
+        let buttons = foot_buttons(rect);
+        assert_eq!(
+            buttons.map(|(f, _)| f),
+            [Foot::New, Foot::Memory, Foot::Pinned]
+        );
+        for (_, r) in buttons {
+            assert!(r.y >= rect.y + rect.h - FOOT_H && r.y + r.h <= rect.y + rect.h);
+            assert!(r.x >= rect.x && r.x + r.w <= rect.x + rect.w);
+        }
+        assert!(buttons[0].1.x + buttons[0].1.w <= buttons[1].1.x);
+        // A pinned item wears its pin without the pointer on it.
+        let pins = |s: &Scene| {
+            s.grids[1]
+                .labels
+                .iter()
+                .filter(|l| l.text == GLYPH_PIN)
+                .count()
+        };
+        assert_eq!((pins(&bare), pins(&with)), (0, 1));
     }
 }

@@ -207,6 +207,11 @@ impl App {
     pub(crate) fn card_dnd_enter(&mut self, offer: DragOffer) {
         let mimes = offer.with_mime_types(|m| m.to_vec());
         let own = self.card.drag.is_some();
+        // Something brought to the card while Memory is up is for the
+        // session: its page comes back to take it.
+        if self.card.page == super::view::Page::Memory {
+            self.card_show(super::view::Page::Session);
+        }
         let first = if mimes.iter().any(|m| m == URI_LIST) {
             Some(URI_LIST)
         } else {

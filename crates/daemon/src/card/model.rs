@@ -76,14 +76,92 @@ pub(crate) struct Item {
     /// with the item.
     #[serde(default)]
     pub owned: bool,
+    /// When it was put on the card (seconds since 1970; 0 = not known),
+    /// and the app it came from (its window class) — kept with the item
+    /// so what is remembered can say where and when it is from.
+    #[serde(default)]
+    pub at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
-/// The list as kept on disk.
+impl Item {
+    /// Whether `other` is the same THING (a pinned copy of it, say),
+    /// whatever its id.
+    pub(super) fn same(&self, other: &Item) -> bool {
+        self.kind == other.kind && self.body == other.body && self.path == other.path
+    }
+}
+
+/// A session put away: the card as it was when a new one was started.
+/// What MEMORY keeps (Max, 2026-10-09: *"new sends the actual session to
+/// memory"*).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Past {
+    pub id: u64,
+    /// When it was put away (seconds since 1970).
+    pub at: u64,
+    /// The name it was given (none yet: it reads by its date).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub items: Vec<Item>,
+}
+
+/// Everything the card keeps, as it is on disk: the session on it now
+/// (`items`), the pinned items, and the sessions put away, newest first.
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct Saved {
     pub next_id: u64,
     pub items: Vec<Item>,
+    #[serde(default)]
+    pub pinned: Vec<Item>,
+    #[serde(default)]
+    pub memory: Vec<Past>,
 }
+
+/// The seconds since 1970, now.
+pub(super) fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// A session in memory as ONE row of the list: when it was put away and
+/// how much is in it, then the start of its first things. (A row is drawn
+/// as a text item whose id is the session's.)
+pub(super) fn session_row(session: &Past) -> Item {
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.at);
+    let when = crate::desktop_props::date_text(Some(when)).unwrap_or_default();
+    let n = session.items.len();
+    let mut body = match &session.name {
+        Some(name) => format!("{name} · {when}"),
+        None => when,
+    };
+    body.push_str(&format!(" · {n} {}", if n == 1 { "item" } else { "items" }));
+    for item in session.items.iter().take(ROW_PEEK) {
+        let first = item.body.trim().lines().next().unwrap_or("").trim();
+        let short: String = first.chars().take(ROW_CHARS).collect();
+        body.push('\n');
+        body.push_str(&short);
+        if first.chars().count() > ROW_CHARS {
+            body.push('…');
+        }
+    }
+    Item {
+        id: session.id,
+        kind: Kind::Text,
+        body,
+        path: None,
+        aspect: 0.0,
+        owned: false,
+        at: session.at,
+        from: None,
+    }
+}
+
+/// How many of a session's things its row shows, and how much of each.
+const ROW_PEEK: usize = 3;
+const ROW_CHARS: usize = 34;
 
 /// What a drag out hands over for one type.
 #[derive(Debug, Clone, PartialEq)]
@@ -325,6 +403,8 @@ mod tests {
             path: None,
             aspect: 0.0,
             owned: false,
+            at: 0,
+            from: None,
         }
     }
 
@@ -336,6 +416,8 @@ mod tests {
             path: Some(path.to_owned()),
             aspect: 1.5,
             owned: false,
+            at: 0,
+            from: None,
         }
     }
 
@@ -423,6 +505,13 @@ mod tests {
         let saved = Saved {
             next_id: 9,
             items: vec![text(1, "a\nb"), file(2, Kind::Folder, "/tmp/d")],
+            pinned: vec![text(3, "me@example.org")],
+            memory: vec![Past {
+                id: 4,
+                at: 1_700_000_000,
+                name: None,
+                items: vec![text(5, "old")],
+            }],
         };
         let json = serde_json::to_string(&saved).unwrap();
         let back: Saved = serde_json::from_str(&json).unwrap();
@@ -433,5 +522,49 @@ mod tests {
         assert_eq!(old.next_id, 1);
         // A text has no path on disk at all.
         assert!(!json.contains("\"path\":null"));
+    }
+
+    #[test]
+    fn a_card_file_from_before_memory_still_reads() {
+        let saved: Saved =
+            serde_json::from_str(r#"{"next_id":3,"items":[{"id":1,"kind":"text","body":"a"}]}"#)
+                .unwrap();
+        assert_eq!(saved.items.len(), 1);
+        assert!(saved.pinned.is_empty() && saved.memory.is_empty());
+        assert_eq!(saved.items[0].at, 0);
+    }
+
+    #[test]
+    fn a_session_in_memory_reads_as_its_date_its_size_and_its_first_things() {
+        let session = Past {
+            id: 9,
+            at: 1_700_000_000,
+            name: None,
+            items: vec![
+                text(1, "first line\nsecond line"),
+                text(2, &"x".repeat(80)),
+                text(3, "c"),
+                text(4, "d"),
+            ],
+        };
+        let row = session_row(&session);
+        assert_eq!(row.id, 9);
+        let lines: Vec<&str> = row.body.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].ends_with("· 4 items"));
+        assert_eq!(lines[1], "first line");
+        assert!(lines[2].ends_with('…') && lines[2].chars().count() == 35);
+        assert_eq!(lines[3], "c");
+        // One thing is "1 item".
+        let one = Past {
+            items: vec![text(1, "a")],
+            ..session
+        };
+        assert!(session_row(&one)
+            .body
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("· 1 item"));
     }
 }

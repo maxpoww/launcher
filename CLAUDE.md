@@ -386,8 +386,23 @@ The big daemon files are cohesive but long — go straight to the function:
     brief scroll that stops is a THROW: outside the window on that side. Edges resize it (`GRIP`,
     `WIDTH_MIN..MAX`). Pictures ride the Files thumbnailer (`card_on_thumb`) into a 32-layer
     array; one pushed out is forgotten and asked for again when next on screen.
+  PAGES (Max, 2026-10-09: *"three buttons, [new] [memory] [pinned]"*): ONE session for the whole
+  desktop; the card's FOOT (`view::foot_buttons`, `FOOT_H`) holds New · Memory · Pinned. NEW puts
+  the session in MEMORY (`Card::renew` → a `model::Past { id, at, name, items }`, newest first; an
+  empty one is not kept) and leaves a clean card. MEMORY's page lists one row a session
+  (`model::session_row`: date · count, then its first things); a click brings it back and the one
+  on the card takes its turn in memory (`Card::recall`), its × forgets it for good (`card_forget`).
+  PINNED's page is the pinned items; an item is pinned by the PIN beside its × (`Tile::pin`,
+  `Card::pin` — a COPY, so it outlives the session; the pin stays lit, a second click unpins).
+  The button of the page that is up is lit and pressing it again goes back to the session.
+  `Card::items` is ALWAYS the list on screen (`Card::show` moves `session`/`pinned` in and out), so
+  order, drags, × and click-to-paste work the same on every page; `card.json` keeps
+  `{ items, pinned, memory }` (`session_items`/`pinned_items` say which is which). An item carries
+  `at` (when) and `from` (the app's class) — metadata for memory and for the PHONE BRIDGE to come
+  (an Android panel showing the session and the pins; not built). A picture of the card's own is
+  deleted with the last item that shows it (`Card::keeps`). Not built: naming a session.
   Pointer-free: `waverunner-ctl card [toggle [addr]|all|add text <…>|add file <path>|remove
-  <n>|clear|state|rate <speed> [accel]]`. Not built: a card button for Seam/staged windows (no
+  <n>|clear|state|rate <speed> [accel]|new|memory|pinned|session|pin <n>|open <n>|forget <n>]`. Not built: a card button for Seam/staged windows (no
   Golem bar), drawing it in its window's place in the stack (it draws over a window overlapping
   its own), per-output.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

@@ -132,6 +132,9 @@ const PARKED: u32 = 8;
 enum Press {
     /// On an item's ×: let go there and the item is off.
     Close(u64),
+    /// On an item's pin, on a button of the foot: let go there and it acts.
+    Pin(u64),
+    Foot(Foot),
     /// On an item: travel takes it into a drag.
     Item {
         id: u64,
@@ -140,7 +143,11 @@ enum Press {
     },
     /// On the card itself: it slides sideways with the pointer. `left` is
     /// where its left edge was, from its window's.
-    Slide { from_x: f32, left: f32, moved: bool },
+    Slide {
+        from_x: f32,
+        left: f32,
+        moved: bool,
+    },
     /// On one of its side edges: that edge follows the pointer and the
     /// other stays. `left`/`width` are what they were at the press.
     Resize {
@@ -267,6 +274,17 @@ pub(crate) struct Card {
     ptr: Option<(f32, f32)>,
     press: Option<Press>,
     pub drag: Option<Drag>,
+    /// Which page is up. `items` is ALWAYS the list on screen — the
+    /// session's on its page, the pinned ones on theirs, one row a session
+    /// on Memory's — so everything that works on the list (order, drags,
+    /// the ×, a click) works on every page; `session` and `pinned` hold
+    /// the two real lists while they are not the one on screen
+    /// (`App::card_show` moves them in and out).
+    page: Page,
+    session: Vec<Item>,
+    pinned: Vec<Item>,
+    /// The sessions put away, newest first.
+    memory: Vec<Past>,
     /// A drag is over the card (another app's, or an item of ours).
     dnd_over: bool,
     /// …and it is one of the card's own items, being moved to a new place.
@@ -446,16 +464,135 @@ impl Card {
         self.items.iter().find(|it| it.id == id)
     }
 
-    /// The item under `pos`, and whether the pointer is on its ×.
-    fn hit(&self, pos: (f32, f32)) -> Option<(u64, bool)> {
+    /// What is under `pos`: a button of the foot, or an item (its ×, its
+    /// pin — only a session's items have one — or the item itself).
+    fn hit(&self, pos: (f32, f32)) -> Option<Hover> {
         let rect = self.rect?;
         if !rect.contains(pos) {
             return None;
         }
-        self.tiles
-            .iter()
-            .find(|t| t.rect.contains(pos))
-            .map(|t| (t.id, t.close().contains(pos)))
+        if !list_rect(rect, true).contains(pos) {
+            return foot_buttons(rect)
+                .into_iter()
+                .find(|(_, r)| r.contains(pos))
+                .map(|(f, _)| Hover::Foot(f));
+        }
+        let tile = self.tiles.iter().find(|t| t.rect.contains(pos))?;
+        Some(if tile.close().contains(pos) {
+            Hover::Close(tile.id)
+        } else if self.page == Page::Session && tile.pin().contains(pos) {
+            Hover::Pin(tile.id)
+        } else {
+            Hover::Item(tile.id)
+        })
+    }
+
+    /// The session's own items and the pinned ones, whichever page is up.
+    fn session_items(&self) -> &[Item] {
+        if self.page == Page::Session {
+            &self.items
+        } else {
+            &self.session
+        }
+    }
+
+    fn pinned_items(&self) -> &[Item] {
+        if self.page == Page::Pinned {
+            &self.items
+        } else {
+            &self.pinned
+        }
+    }
+
+    /// Put page `page` up: the list on screen goes back where it is kept
+    /// and the new page's comes out. Whether anything changed.
+    fn show(&mut self, page: Page) -> bool {
+        if page == self.page {
+            return false;
+        }
+        let shown = std::mem::take(&mut self.items);
+        match self.page {
+            Page::Session => self.session = shown,
+            Page::Pinned => self.pinned = shown,
+            Page::Memory => {}
+        }
+        self.page = page;
+        self.items = match page {
+            Page::Session => std::mem::take(&mut self.session),
+            Page::Pinned => std::mem::take(&mut self.pinned),
+            Page::Memory => self.memory.iter().map(session_row).collect(),
+        };
+        // (A session's rows are wrapped afresh: one may have changed.)
+        for past in &self.memory {
+            self.lines.remove(&past.id);
+        }
+        self.shifts.clear();
+        self.scroll = 0.0;
+        self.to_bottom = page == Page::Session;
+        true
+    }
+
+    /// Start a new session: the one on the card goes to memory (an empty
+    /// one is not worth remembering). Whether one was put away.
+    fn renew(&mut self, now: u64) -> bool {
+        self.show(Page::Session);
+        if self.items.is_empty() {
+            return false;
+        }
+        let id = self.next_id.max(1);
+        self.next_id = id + 1;
+        let items = std::mem::take(&mut self.items);
+        self.memory.insert(
+            0,
+            Past {
+                id,
+                at: now,
+                name: None,
+                items,
+            },
+        );
+        true
+    }
+
+    /// Bring session `id` back out of memory: it is the card's again, and
+    /// the one that was on the card takes its turn in memory.
+    fn recall(&mut self, id: u64, now: u64) -> bool {
+        let Some(at) = self.memory.iter().position(|p| p.id == id) else {
+            return false;
+        };
+        let past = self.memory.remove(at);
+        self.renew(now);
+        self.items = past.items;
+        self.to_bottom = true;
+        true
+    }
+
+    /// Pin item `id` of the session, or take its pin off. Whether it is
+    /// pinned now. (The pinned one is a copy: it stays when the session
+    /// goes — Max, 2026-10-09.)
+    fn pin(&mut self, id: u64) -> Option<bool> {
+        if self.page != Page::Session {
+            return None;
+        }
+        let item = self.item(id)?.clone();
+        if let Some(at) = self.pinned.iter().position(|p| p.same(&item)) {
+            self.pinned.remove(at);
+            return Some(false);
+        }
+        let new = self.next_id.max(1);
+        self.next_id = new + 1;
+        self.pinned.push(Item { id: new, ..item });
+        Some(true)
+    }
+
+    /// Whether anything the card keeps — on it, pinned, or in memory — is
+    /// the file at `path` (a picture of the card's own is deleted only
+    /// with the LAST item that shows it).
+    fn keeps(&self, path: &str) -> bool {
+        let is = |it: &Item| it.path.as_deref() == Some(path);
+        self.session_items().iter().any(is)
+            || self.pinned_items().iter().any(is)
+            || self.memory.iter().any(|p| p.items.iter().any(is))
     }
 }
 
@@ -621,10 +758,18 @@ impl App {
         }
         self.card.loaded = true;
         let saved = load();
-        self.card.next_id = saved
-            .next_id
-            .max(saved.items.iter().map(|it| it.id + 1).max().unwrap_or(1));
+        let ids = saved
+            .items
+            .iter()
+            .chain(&saved.pinned)
+            .chain(saved.memory.iter().flat_map(|p| &p.items))
+            .map(|it| it.id)
+            .chain(saved.memory.iter().map(|p| p.id));
+        self.card.next_id = saved.next_id.max(ids.max().map_or(1, |id| id + 1));
+        self.card.page = Page::Session;
         self.card.items = saved.items;
+        self.card.pinned = saved.pinned;
+        self.card.memory = saved.memory;
         self.card.to_bottom = true;
         for path in self.card_pictures() {
             self.card_ask_picture(&path);
@@ -637,7 +782,9 @@ impl App {
             &crate::persist::data_path(ITEMS_FILE),
             &Saved {
                 next_id: self.card.next_id,
-                items: self.card.items.clone(),
+                items: self.card.session_items().to_vec(),
+                pinned: self.card.pinned_items().to_vec(),
+                memory: self.card.memory.clone(),
             },
         );
     }
@@ -712,6 +859,10 @@ impl App {
         at: Option<usize>,
     ) {
         self.card_load();
+        // (Memory's page lists sessions: what arrives is the session's.)
+        if self.card.page == Page::Memory {
+            self.card_show(Page::Session);
+        }
         let id = self.card.next_id.max(1);
         self.card.next_id = id + 1;
         if let (Some(p), Kind::Image) = (&path, kind) {
@@ -734,6 +885,8 @@ impl App {
                 path,
                 aspect,
                 owned,
+                at: now_secs(),
+                from: crate::hypr::active_window_where().map(|(class, _)| class),
             },
         );
         self.card.to_bottom = at == end;
@@ -821,6 +974,10 @@ impl App {
     /// grab) to paste the item as copy and paste will do"*). A text goes as
     /// text, anything else as its file. It stays on the clipboard.
     fn card_paste(&mut self, id: u64) {
+        if self.card.page == Page::Memory {
+            self.card_recall(id);
+            return;
+        }
         let Some(item) = self.card.item(id).cloned() else {
             return;
         };
@@ -849,7 +1006,86 @@ impl App {
         });
     }
 
+    /// Put page `page` up.
+    fn card_show(&mut self, page: Page) {
+        self.card_load();
+        if self.card.show(page) {
+            for path in self.card_pictures() {
+                self.card_ask_picture(&path);
+            }
+            self.request_card_draw();
+        }
+    }
+
+    /// A button of the foot. New: a clean card, the session that was on
+    /// it kept in memory. Memory, Pinned: that page — or back to the
+    /// session when it is the one already up.
+    fn card_foot(&mut self, which: Foot) {
+        self.card_load();
+        match which.page() {
+            None => {
+                if self.card.renew(now_secs()) {
+                    info!("card: a new session; {} in memory", self.card.memory.len());
+                    self.card_save();
+                }
+                self.request_card_draw();
+            }
+            Some(page) if page == self.card.page => self.card_show(Page::Session),
+            Some(page) => self.card_show(page),
+        }
+    }
+
+    /// A click on a session in memory: it is the card's again.
+    fn card_recall(&mut self, id: u64) {
+        if self.card.recall(id, now_secs()) {
+            info!(
+                "card: a session back from memory; {} left there",
+                self.card.memory.len()
+            );
+            for path in self.card_pictures() {
+                self.card_ask_picture(&path);
+            }
+            self.card_save();
+            self.request_card_draw();
+        }
+    }
+
+    /// The × of a session in memory: it is gone for good, with the
+    /// pictures that were only its.
+    fn card_forget(&mut self, id: u64) {
+        let Some(at) = self.card.memory.iter().position(|p| p.id == id) else {
+            return;
+        };
+        let past = self.card.memory.remove(at);
+        self.card.items.retain(|row| row.id != id);
+        self.card.lines.remove(&id);
+        info!("card: a session of {} forgotten", past.items.len());
+        for item in &past.items {
+            self.card.lines.remove(&item.id);
+            if let (true, Some(path)) = (item.owned, item.path.as_deref()) {
+                if !self.card.keeps(path) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        self.card_save();
+        self.request_card_draw();
+    }
+
+    /// The pin of an item: pinned, or not any more.
+    fn card_pin(&mut self, id: u64) {
+        if let Some(on) = self.card.pin(id) {
+            info!("card: an item {}", if on { "pinned" } else { "unpinned" });
+            self.card_save();
+            self.request_card_draw();
+        }
+    }
+
     fn card_remove(&mut self, id: u64) {
+        if self.card.page == Page::Memory {
+            self.card_forget(id);
+            return;
+        }
         let Some(at) = self.card.items.iter().position(|it| it.id == id) else {
             return;
         };
@@ -871,7 +1107,7 @@ impl App {
                 self.card.slots.remove(path);
                 self.card.asked.remove(path);
             }
-            if item.owned {
+            if item.owned && !self.card.keeps(path) {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -1335,6 +1571,17 @@ impl App {
             self.card_last_frame = Some(now);
         }
         let hover = self.card.ptr.and_then(|p| self.card.hit(p));
+        // The items of the session that are pinned too: their pin is lit.
+        let pinned: HashSet<u64> = match self.card.page {
+            Page::Session => self
+                .card
+                .items
+                .iter()
+                .filter(|it| self.card.pinned.iter().any(|p| p.same(it)))
+                .map(|it| it.id)
+                .collect(),
+            _ => HashSet::new(),
+        };
         // A list that was showing its newest item keeps showing it when
         // the card's height changes under it (its window was resized).
         if self.card.max_scroll > 0.0 && self.card.scroll >= self.card.max_scroll - 0.5 {
@@ -1355,6 +1602,10 @@ impl App {
             } else {
                 hover
             },
+            foot: Some(FootView {
+                page: self.card.page,
+                pinned: &pinned,
+            }),
             dnd_over: self.card.dnd_over,
             hidden,
             shifts: &self.card.shifts,
@@ -1508,8 +1759,10 @@ impl App {
                             left: r.x - s.x,
                             width: r.w,
                         }),
-                        Some((id, true)) => Some(Press::Close(id)),
-                        Some((id, false)) => Some(Press::Item { id, at, serial }),
+                        Some(Hover::Close(id)) => Some(Press::Close(id)),
+                        Some(Hover::Pin(id)) => Some(Press::Pin(id)),
+                        Some(Hover::Foot(which)) => Some(Press::Foot(which)),
+                        Some(Hover::Item(id)) => Some(Press::Item { id, at, serial }),
                         None => self
                             .card
                             .rect
@@ -1527,9 +1780,18 @@ impl App {
                         // Pressed and let go without carrying it off: a click.
                         Some(Press::Item { id, .. }) => self.card_paste(id),
                         Some(Press::Close(id)) => {
-                            let still = self.card.ptr.and_then(|p| self.card.hit(p));
-                            if still == Some((id, true)) {
+                            if self.card_still_on(Hover::Close(id)) {
                                 self.card_remove(id);
+                            }
+                        }
+                        Some(Press::Pin(id)) => {
+                            if self.card_still_on(Hover::Pin(id)) {
+                                self.card_pin(id);
+                            }
+                        }
+                        Some(Press::Foot(which)) => {
+                            if self.card_still_on(Hover::Foot(which)) {
+                                self.card_foot(which);
                             }
                         }
                         Some(Press::Slide { moved: true, .. }) => self.card_settle(),
@@ -1614,11 +1876,20 @@ impl App {
         }
     }
 
+    /// Whether the pointer is (still) on `what`: a button acts when it is
+    /// let go where it was pressed.
+    fn card_still_on(&self, what: Hover) -> bool {
+        self.card.ptr.and_then(|p| self.card.hit(p)) == Some(what)
+    }
+
     fn card_motion(&mut self, x: f32, y: f32) {
         let before = self.card.ptr.and_then(|p| self.card.hit(p));
         self.card.ptr = Some((x, y));
         match self.card.press {
-            Some(Press::Item { id, at, serial }) if (x - at.0).hypot(y - at.1) >= DRAG_START => {
+            // (A session in memory is not carried anywhere: it is clicked.)
+            Some(Press::Item { id, at, serial })
+                if self.card.page != Page::Memory && (x - at.0).hypot(y - at.1) >= DRAG_START =>
+            {
                 self.card_lift(id, serial);
                 return;
             }
@@ -1819,8 +2090,8 @@ impl App {
             (Some(Press::Resize { .. }), _) => Shape::EwResize,
             (Some(Press::Slide { .. }), _) => Shape::Grabbing,
             (None, _) if grip.is_some() => Shape::EwResize,
-            (_, Some((_, true))) => Shape::Pointer,
-            (_, Some((_, false))) => Shape::Default,
+            (_, Some(Hover::Item(_))) if self.card.page != Page::Memory => Shape::Default,
+            (_, Some(_)) => Shape::Pointer,
             (_, None) => Shape::Grab,
         };
         if self.cursor_now != Some(shape) {
@@ -1836,6 +2107,58 @@ impl App {
         let rest = rest.trim();
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
+            // The foot's buttons, and what the pages do, without a pointer:
+            // `new` · `memory` · `pinned` · `session` · `pin <n>` · `open <n>`
+            // (a session of memory) · `forget <n>`.
+            "new" | "memory" | "pinned" | "session" => {
+                match verb {
+                    "new" => self.card_foot(Foot::New),
+                    "memory" => self.card_show(Page::Memory),
+                    "pinned" => self.card_show(Page::Pinned),
+                    _ => self.card_show(Page::Session),
+                }
+                format!(
+                    "{:?}: {} on it, {} pinned, {} in memory",
+                    self.card.page,
+                    self.card.session_items().len(),
+                    self.card.pinned_items().len(),
+                    self.card.memory.len()
+                )
+            }
+            "pin" | "open" | "forget" => {
+                self.card_load();
+                let n = rest.parse::<usize>().ok();
+                let done = match verb {
+                    "pin" => {
+                        self.card_show(Page::Session);
+                        n.and_then(|n| self.card.items.get(n))
+                            .map(|it| it.id)
+                            .map(|id| self.card_pin(id))
+                    }
+                    "open" => n
+                        .and_then(|n| self.card.memory.get(n))
+                        .map(|p| p.id)
+                        .map(|id| self.card_recall(id)),
+                    _ => n
+                        .and_then(|n| self.card.memory.get(n))
+                        .map(|p| p.id)
+                        .map(|id| self.card_forget(id)),
+                };
+                match done {
+                    Some(()) => format!(
+                        "{} on it, {} pinned, {} in memory",
+                        self.card.session_items().len(),
+                        self.card.pinned_items().len(),
+                        self.card.memory.len()
+                    ),
+                    None => "no such one".to_owned(),
+                }
+            }
+            // (These work on the SESSION's items.)
+            "add" | "remove" | "clear" | "move" | "paste" if self.card.page != Page::Session => {
+                self.card_show(Page::Session);
+                self.card_command(what)
+            }
             "all" => self.card_toggle_all(),
             // `move <n> <place>`: item n to that place of the list, as a
             // drag within the card does.
@@ -1963,7 +2286,7 @@ impl App {
                     })
                     .collect();
                 format!(
-                    "host {:?} spot {:?} rect {:?} shown {:.2} away {} parked {} all {} windows {:?} scroll {:.0}/{:.0} pictures {} items [{}]",
+                    "host {:?} spot {:?} rect {:?} shown {:.2} away {} parked {} all {} windows {:?} scroll {:.0}/{:.0} pictures {} page {:?} pinned {} memory {} items [{}]",
                     self.card.host,
                     self.card.spot,
                     self.card.rect,
@@ -1975,6 +2298,9 @@ impl App {
                     self.card.scroll,
                     self.card.max_scroll,
                     self.card.slots.len(),
+                    self.card.page,
+                    self.card.pinned_items().len(),
+                    self.card.memory.len(),
                     items.join(", ")
                 )
             }
@@ -2028,6 +2354,8 @@ mod tests {
             path: None,
             aspect: 0.0,
             owned: false,
+            at: 0,
+            from: None,
         };
         let order = |c: &Card| c.items.iter().map(|it| it.id).collect::<Vec<_>>();
         let mut card = Card {
@@ -2130,5 +2458,107 @@ mod tests {
         let back: Session = serde_json::from_str(&json).unwrap();
         assert!(back.all);
         assert_eq!(back.wins, wins);
+    }
+
+    fn note(id: u64, body: &str) -> Item {
+        Item {
+            id,
+            kind: Kind::Text,
+            body: body.to_owned(),
+            path: None,
+            aspect: 0.0,
+            owned: false,
+            at: 0,
+            from: None,
+        }
+    }
+
+    #[test]
+    fn new_puts_the_session_in_memory_and_a_click_there_swaps_it_back() {
+        let bodies = |items: &[Item]| items.iter().map(|it| it.body.clone()).collect::<Vec<_>>();
+        let mut card = Card {
+            items: vec![note(1, "a"), note(2, "b")],
+            next_id: 3,
+            ..Default::default()
+        };
+        // New on a session with things: a clean card, one session kept.
+        assert!(card.renew(100));
+        assert!(card.items.is_empty());
+        assert_eq!(card.memory.len(), 1);
+        assert_eq!(
+            (card.memory[0].at, bodies(&card.memory[0].items)),
+            (100, vec!["a".into(), "b".into()])
+        );
+        // New on an empty one remembers nothing.
+        assert!(!card.renew(101));
+        assert_eq!(card.memory.len(), 1);
+
+        // Memory's page lists one row a session; the session's own list is
+        // kept aside meanwhile.
+        card.items.push(note(9, "c"));
+        assert!(card.show(Page::Memory));
+        assert_eq!(card.items.len(), 1);
+        assert_eq!(card.items[0].id, card.memory[0].id);
+        assert_eq!(bodies(card.session_items()), ["c"]);
+
+        // A click on it: it is the card's again, and "c" takes its place.
+        let id = card.memory[0].id;
+        assert!(card.recall(id, 200));
+        assert_eq!(card.page, Page::Session);
+        assert_eq!(bodies(&card.items), ["a", "b"]);
+        assert_eq!(card.memory.len(), 1);
+        assert_eq!(
+            (card.memory[0].at, bodies(&card.memory[0].items)),
+            (200, vec!["c".into()])
+        );
+    }
+
+    #[test]
+    fn a_pin_is_a_copy_that_outlives_the_session() {
+        let mut card = Card {
+            items: vec![note(1, "me@example.org"), note(2, "b")],
+            next_id: 3,
+            ..Default::default()
+        };
+        assert_eq!(card.pin(1), Some(true));
+        assert_eq!(card.pinned.len(), 1);
+        assert_ne!(card.pinned[0].id, 1);
+        assert!(card.pinned[0].same(&card.items[0]));
+        // The session goes; the pin stays, and is the list of its page.
+        card.renew(5);
+        assert!(card.show(Page::Pinned));
+        assert_eq!(card.items.len(), 1);
+        assert_eq!(card.pinned_items().len(), 1);
+        // (No pinning from the pinned page itself.)
+        let pid = card.items[0].id;
+        assert_eq!(card.pin(pid), None);
+        // Back on a session that has the same thing: its pin comes off.
+        card.show(Page::Session);
+        card.items.push(note(7, "me@example.org"));
+        assert_eq!(card.pin(7), Some(false));
+        assert!(card.pinned.is_empty());
+    }
+
+    #[test]
+    fn a_picture_of_the_cards_own_is_kept_while_anything_shows_it() {
+        let pic = |id: u64| Item {
+            kind: Kind::Image,
+            path: Some("/tmp/card/p.png".to_owned()),
+            owned: true,
+            ..note(id, "p.png")
+        };
+        let mut card = Card {
+            items: vec![pic(1)],
+            next_id: 2,
+            ..Default::default()
+        };
+        card.pin(1);
+        card.renew(1);
+        // On nothing now, but pinned and in memory.
+        assert!(card.items.is_empty() && card.keeps("/tmp/card/p.png"));
+        card.pinned.clear();
+        assert!(card.keeps("/tmp/card/p.png"));
+        card.memory.clear();
+        assert!(!card.keeps("/tmp/card/p.png"));
     }
 }
