@@ -333,8 +333,13 @@ pub(crate) struct Card {
     rec: Option<voice::Rec>,
     playing: Option<voice::Playing>,
     writing: bool,
-    /// The emoji picker is open over the input box.
+    /// The emoji picker is open over the input box; what its search
+    /// holds, the emoji it shows for that (`emoji_table::EMOJI` by place),
+    /// how far its grid is scrolled.
     picking: bool,
+    pick_query: String,
+    picked: Vec<usize>,
+    pick_scroll: f32,
     /// Something to say in the line under the input box (a tool that is
     /// missing, nothing made out), until the next thing is done.
     say: Option<&'static str>,
@@ -540,6 +545,24 @@ impl Card {
         self.items.iter().find(|it| it.id == id)
     }
 
+    /// The emoji picker, when it is open: how many it shows, how far down.
+    fn pick(&self) -> Option<(usize, f32)> {
+        self.picking
+            .then_some((self.picked.len(), self.pick_scroll))
+    }
+
+    /// Which emoji the picker shows: all, or those its search names.
+    fn repick(&mut self) {
+        let needle = self.pick_query.trim().to_lowercase();
+        self.picked = crate::emoji_table::EMOJI
+            .iter()
+            .enumerate()
+            .filter(|(_, def)| needle.is_empty() || crate::emoji::emoji_matches(def, &needle))
+            .map(|(n, _)| n)
+            .collect();
+        self.pick_scroll = 0.0;
+    }
+
     /// Whether the search is open (it has the cursor, or holds a query).
     fn seeking(&self) -> bool {
         self.field == Some(Field::Seek) || !self.query.is_empty()
@@ -571,7 +594,7 @@ impl Card {
             self.page,
             self.draft_lines.len(),
             self.seeking(),
-            self.picking,
+            self.pick(),
         );
         if let Some(hit) = low.hit(pos, self.seeking()) {
             return Some(hit);
@@ -1480,6 +1503,11 @@ impl App {
             (Field::Seek, Keysym::BackSpace) => {
                 self.card.query.pop();
             }
+            (Field::Pick, Keysym::BackSpace) => {
+                self.card.pick_query.pop();
+                self.card.repick();
+            }
+            (Field::Pick, Keysym::Return | Keysym::KP_Enter) => {}
             (Field::Seek, Keysym::Return | Keysym::KP_Enter) => {}
             (Field::Name, Keysym::BackSpace) => {
                 self.card.naming.pop();
@@ -1493,6 +1521,10 @@ impl App {
                 (Field::Box, Some(s)) => self.card.draft.push_str(s),
                 (Field::Seek, Some(s)) => self.card.query.push_str(s),
                 (Field::Name, Some(s)) => self.card.naming.push_str(s),
+                (Field::Pick, Some(s)) => {
+                    self.card.pick_query.push_str(s);
+                    self.card.repick();
+                }
                 _ => return,
             },
         }
@@ -1557,6 +1589,11 @@ impl App {
             BoxBtn::Talk => self.card_voice_button(true),
             BoxBtn::Emoji => {
                 self.card.picking = !self.card.picking;
+                self.card.pick_query.clear();
+                self.card.repick();
+                if !self.card.picking && self.card.field == Some(Field::Pick) {
+                    self.card.field = Some(Field::Box);
+                }
                 self.sync_card_input();
                 self.request_card_draw();
             }
@@ -1571,10 +1608,16 @@ impl App {
     /// emoji on the card for each time i want to send an emoji"*). The
     /// picker stays open for the next one.
     fn card_emoji(&mut self, n: usize) {
-        let Some(emoji) = EMOJI.get(n) else {
+        let Some(emoji) = self
+            .card
+            .picked
+            .get(n)
+            .and_then(|at| crate::emoji_table::EMOJI.get(*at))
+            .map(|def| def.ch)
+        else {
             return;
         };
-        if self.card.field == Some(Field::Box) {
+        if matches!(self.card.field, Some(Field::Box | Field::Pick)) {
             self.card.draft.push_str(emoji);
             self.request_card_draw();
         } else if self.card.field.is_none() {
@@ -1631,6 +1674,8 @@ impl App {
             Hover::Name => self.card_take_keys(Field::Name),
             Hover::Play(id) => self.card_play(id),
             Hover::Emoji(n) => self.card_emoji(n),
+            Hover::PickSeek => self.card_take_keys(Field::Pick),
+            Hover::Tray => {}
             Hover::Item(_) => {}
         }
     }
@@ -2278,7 +2323,7 @@ impl App {
             self.card.to_bottom = true;
         }
         // What is written in the input box, wrapped to it.
-        let low = bottom(rect, self.card.page, 1, self.card.seeking(), false);
+        let low = bottom(rect, self.card.page, 1, self.card.seeking(), None);
         let box_w = low.text().map_or(200.0, |r| r.w);
         let per = renderer.measure_text("nnnnnnnnnn", TEXT_PX + 0.5, None) / 10.0;
         let cols = if per > 0.0 {
@@ -2328,6 +2373,15 @@ impl App {
                 (it.id, note)
             })
             .collect();
+        let emoji: Vec<&'static str> = match self.card.picking {
+            true => self
+                .card
+                .picked
+                .iter()
+                .filter_map(|n| crate::emoji_table::EMOJI.get(*n).map(|d| d.ch))
+                .collect(),
+            false => Vec::new(),
+        };
         let name = self.card.open_name();
         let recording = self.card.rec.as_ref().map(|r| (r.seconds(), r.talk()));
         let talk = match (recording, self.card.writing) {
@@ -2380,7 +2434,9 @@ impl App {
                     rec: recording.filter(|(_, talk)| !talk).map(|(secs, _)| secs),
                     talk,
                     hint,
-                    picking: self.card.picking,
+                    picking: self.card.pick(),
+                    emoji: &emoji,
+                    pick_query: &self.card.pick_query,
                 },
                 notes: &notes,
                 playing,
@@ -2625,6 +2681,24 @@ impl App {
                     self.card_slide(&host, across);
                 }
             }
+            // Over the emoji picker it is the emoji that scroll.
+            Some(false) if along != 0.0 && self.card_over_tray() => {
+                let span = self.card.rect.map_or(0.0, |rect| {
+                    bottom(
+                        rect,
+                        self.card.page,
+                        self.card.draft_lines.len(),
+                        self.card.seeking(),
+                        self.card.pick(),
+                    )
+                    .pick_span()
+                });
+                let to = (self.card.pick_scroll + along * 2.4).clamp(0.0, span);
+                if to != self.card.pick_scroll {
+                    self.card.pick_scroll = to;
+                    self.request_card_draw();
+                }
+            }
             Some(false) if along != 0.0 => {
                 let to = (self.card.scroll + along * 2.4).clamp(0.0, self.card.max_scroll);
                 if to != self.card.scroll {
@@ -2634,6 +2708,14 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Whether the pointer is on the emoji picker.
+    fn card_over_tray(&self) -> bool {
+        matches!(
+            self.card.ptr.and_then(|p| self.card.hit(p)),
+            Some(Hover::Emoji(_) | Hover::Tray | Hover::PickSeek)
+        )
     }
 
     /// The scroll gesture is over: the next one chooses its way afresh, and

@@ -429,19 +429,22 @@ The big daemon files are cohesive but long — go straight to the function:
   `KbSurface::Card`; keys route first in `main.rs::handle_key_event` → `card_key`). In the box
   ENTER KEEPS what is written in the memory, CTRL+ENTER SENDS it to the window (text only, pasted
   after the keyboard is handed back), Shift+Enter breaks the line, Escape gives the keyboard back.
-  The EMOJI picker (`bar::EMOJI`, a tray over the box) puts an emoji where the cursor is: in the
+  The EMOJI picker (a tray over the box: EVERY emoji of `emoji_table::EMOJI` on a grid that
+  scrolls under the wheel, with its own search — `Field::Pick`, `Card::repick`, the clipboard
+  box's `emoji::emoji_matches`) puts an emoji where the cursor is: in the
   box while the card has the keyboard, straight into the window otherwise. The PAPERCLIP opens the
   desktop portal's file picker (`bt_files::pick_file_waiting`, on a thread). `voice.rs`: a VOICE
   NOTE is recorded with `pw-record` (16 kHz mono WAV under the card's folder; stopped with SIGINT
   so the file is closed properly) and kept as a `Kind::Voice` item (`aspect` = its seconds; a play
   button, a wave drawn from its id — NOT its real sound — lit as it plays through `pw-play`);
+  a MUTED microphone is said before recording (`voice::mic_muted`, `wpctl`) and a recording of
+  nothing but silence is said and not kept (`voice::loudest`);
   TALK-TO-TEXT records the same way and runs **whisper.cpp** on it when the talking stops
   (`voice::engine`: `whisper-cli` from `WAVERUNNER_WHISPER` / PATH / `<data>/whisper/engine/bin`,
   the model = `WAVERUNNER_WHISPER_MODEL` / the first `<data>/whisper/ggml-*.bin`), the words land
   in the input box to be fixed before they go anywhere. Not built from the mockup: ONE item made
   of several things (text + picture + voice composed together — each still lands as its own item),
-  dragging a single piece out of such an item, GIFs and stickers (no source), the full emoji table
-  and its search, typing to search without clicking the magnifier first (the card has no keyboard
+  dragging a single piece out of such an item, GIFs and stickers (no source), typing to search without clicking the magnifier first (the card has no keyboard
   until clicked). Pointer-free: `card write <text>|keep|send|find <words>|rename <name>|clipboard`.
   ZOOM (`card_zoom`, `Card::zoom()`, kept in `card.json`): the items' text, lines and pictures are
   drawn at `View::zoom` (`ZOOM_MIN..ZOOM_MAX`, a tenth a step); Ctrl +/− and Ctrl 0 do it ONLY

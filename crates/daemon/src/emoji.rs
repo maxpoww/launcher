@@ -406,7 +406,7 @@ impl App {
 /// Word-prefix, not substring (which is what the clip list wants): searching
 /// "cat" for substrings drags in edu**cat**ion 🎓, notifi**cat**ion 🔔 and
 /// appli**cat**ion 🈸 ahead of half the cats (seen live, 2026-09-13).
-fn emoji_matches(def: &crate::emoji_table::EmojiDef, needle: &str) -> bool {
+pub(crate) fn emoji_matches(def: &crate::emoji_table::EmojiDef, needle: &str) -> bool {
     word_prefix(def.name, needle) || word_prefix(def.keys, needle)
 }
 

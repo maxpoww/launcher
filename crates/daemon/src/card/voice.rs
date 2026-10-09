@@ -99,6 +99,39 @@ pub(super) fn engine() -> Option<(PathBuf, PathBuf)> {
     Some((cli, model))
 }
 
+/// Whether the microphone the system records from is muted (`wpctl`; not
+/// known = not muted: the recording itself is checked afterwards).
+fn mic_muted() -> bool {
+    let Some(wpctl) = tool("WAVERUNNER_WPCTL", "wpctl") else {
+        return false;
+    };
+    Command::new(wpctl)
+        .args(["get-volume", "@DEFAULT_AUDIO_SOURCE@"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("MUTED"))
+}
+
+/// A recording whose loudest sample is under this is silence.
+const QUIET: i32 = 120;
+
+/// The loudest sample in the 16-bit recording at `wav` (0: none, or
+/// unreadable).
+pub(super) fn loudest(wav: &PathBuf) -> i32 {
+    let Ok(bytes) = std::fs::read(wav) else {
+        return 0;
+    };
+    // (Past the WAV's head: 44 bytes as the recorder writes it.)
+    bytes
+        .get(44..)
+        .unwrap_or(&[])
+        .chunks_exact(2)
+        .map(|s| i32::from(i16::from_le_bytes([s[0], s[1]])).abs())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Write out what is said in the recording at `wav`.
 fn transcribe(cli: &PathBuf, model: &PathBuf, wav: &PathBuf) -> Result<String, &'static str> {
     let out = Command::new(cli)
@@ -149,6 +182,11 @@ impl App {
         if talk && engine().is_none() {
             self.card.say =
                 Some("Talk-to-text needs the speech engine (whisper), which is not installed");
+            self.request_card_draw();
+            return;
+        }
+        if mic_muted() {
+            self.card.say = Some("The microphone is muted. Unmute it and press again");
             self.request_card_draw();
             return;
         }
@@ -219,6 +257,15 @@ impl App {
         let (tx, rx) = calloop::channel::channel::<Done>();
         std::thread::spawn(move || {
             let _ = rec.child.wait();
+            // (Nothing but silence in it: said, and not kept — a muted or
+            // dead microphone records exactly that.)
+            if keep && loudest(&rec.path) < QUIET {
+                let _ = std::fs::remove_file(&rec.path);
+                let _ = tx.send(Done::Failed(
+                    "Nothing was heard. Is the microphone muted or off?",
+                ));
+                return;
+            }
             let done = match (keep, talk, engine) {
                 (false, _, _) => {
                     let _ = std::fs::remove_file(&rec.path);
@@ -353,5 +400,22 @@ mod tests {
         let out = "\n Hello, this is a test.\n And a second line.\n[BLANK_AUDIO]\n (music)\n\n";
         assert_eq!(words(out), "Hello, this is a test. And a second line.");
         assert_eq!(words(" [BLANK_AUDIO] \n"), "");
+    }
+
+    #[test]
+    fn a_recording_of_nothing_is_known_for_silence() {
+        let dir = std::env::temp_dir().join(format!("card-voice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = |name: &str, samples: &[i16]| {
+            let path = dir.join(name);
+            let mut bytes = vec![0u8; 44];
+            bytes.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        assert!(loudest(&wav("quiet.wav", &[0, 3, -2, 0])) < QUIET);
+        assert!(loudest(&wav("said.wav", &[0, 900, -4000, 12])) >= QUIET);
+        assert_eq!(loudest(&dir.join("none.wav")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

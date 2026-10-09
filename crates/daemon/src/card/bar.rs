@@ -17,6 +17,8 @@ pub(crate) enum Field {
     Seek,
     /// The open memory's name.
     Name,
+    /// The emoji picker's search.
+    Pick,
 }
 
 /// The input box's own buttons: two on its left, two on its right.
@@ -53,14 +55,12 @@ impl BoxBtn {
 
 const GLYPH_SEARCH: &str = "\u{f002}";
 
-/// The emoji the input box's picker offers: the ones most used, a few
-/// signs. (The whole table is the clipboard box's picker's; GIFs and
-/// stickers, which the mockup shows beside them, have no source yet.)
-pub(crate) const EMOJI: [&str; 40] = [
-    "👍", "😂", "🙏", "🔥", "❤️", "😅", "🎉", "👀", "😀", "😁", "🥹", "😊", "😉", "😍", "😎", "🤔",
-    "😴", "😭", "😡", "🤯", "🥳", "🤝", "👏", "🙌", "💪", "👋", "✅", "❌", "⚠️", "💡", "📌", "🚀",
-    "⭐", "💬", "📎", "🐛", "☕", "🍕", "🎧", "💤",
-];
+/// The emoji picker: EVERY emoji (the clipboard box's table,
+/// `emoji_table::EMOJI`), on a grid that scrolls, under a field that
+/// searches them by name. (GIFs and stickers, which the mockup shows beside
+/// them, have no source yet.)
+const PICK_ROWS: f32 = 5.0;
+const PICK_SEEK: f32 = 30.0;
 const EMOJI_COLS: usize = 8;
 const EMOJI_CELL: f32 = 34.0;
 
@@ -96,8 +96,12 @@ pub(crate) struct BarView<'a> {
     pub talk: Option<&'a str>,
     /// The line under the input box.
     pub hint: &'a str,
-    /// The emoji picker is open.
-    pub picking: bool,
+    /// The emoji picker, when it is open: how many emoji it shows and
+    /// how far its grid is scrolled; the emoji themselves (all, or those
+    /// its search found); what is being searched.
+    pub picking: Option<(usize, f32)>,
+    pub emoji: &'a [&'static str],
+    pub pick_query: &'a str,
 }
 
 impl BarView<'_> {
@@ -121,6 +125,8 @@ pub(crate) struct Bottom {
     pub new: Option<Rect>,
     /// The emoji picker, open over the input box.
     pub tray: Option<Rect>,
+    /// How many emoji it holds, and how far its grid is scrolled.
+    pick: (usize, f32),
     hint_y: f32,
 }
 
@@ -131,7 +137,7 @@ pub(crate) fn bottom(
     page: Page,
     box_lines: usize,
     seeking: bool,
-    picking: bool,
+    picking: Option<(usize, f32)>,
 ) -> Bottom {
     let (x, w) = (rect.x + LIST_PAD - 2.0, rect.w - 2.0 * LIST_PAD + 4.0);
     let mut y = rect.y + rect.h - PAD;
@@ -148,9 +154,8 @@ pub(crate) fn bottom(
             y -= h;
             input = Some(Rect::new(x, y.round(), w, h));
             y -= STEP;
-            if picking {
-                let rows = EMOJI.len().div_ceil(EMOJI_COLS) as f32;
-                let h = rows * EMOJI_CELL + 12.0;
+            if picking.is_some() {
+                let h = PICK_SEEK + PICK_ROWS * EMOJI_CELL + 14.0;
                 y -= h;
                 tray = Some(Rect::new(x, y.round(), w, h));
                 y -= STEP;
@@ -190,6 +195,7 @@ pub(crate) fn bottom(
         btns,
         new,
         tray,
+        pick: picking.unwrap_or((0, 0.0)),
         hint_y,
     }
 }
@@ -203,17 +209,48 @@ impl Bottom {
         Some(Rect::new(left, r.y, (right - left).max(0.0), r.h))
     }
 
-    /// The picker's emoji, each with its cell.
+    /// The picker's search row, and the grid under it.
+    pub(crate) fn pick_seek(&self) -> Option<Rect> {
+        let tray = self.tray?;
+        Some(Rect::new(
+            tray.x + 6.0,
+            tray.y + 6.0,
+            tray.w - 12.0,
+            PICK_SEEK - 6.0,
+        ))
+    }
+
+    pub(crate) fn pick_grid(&self) -> Option<Rect> {
+        let tray = self.tray?;
+        Some(Rect::new(
+            tray.x + 6.0,
+            tray.y + PICK_SEEK + 4.0,
+            tray.w - 12.0,
+            PICK_ROWS * EMOJI_CELL,
+        ))
+    }
+
+    /// How far the picker's grid can be scrolled.
+    pub(crate) fn pick_span(&self) -> f32 {
+        let rows = self.pick.0.div_ceil(EMOJI_COLS) as f32;
+        ((rows - PICK_ROWS) * EMOJI_CELL).max(0.0)
+    }
+
+    /// The picker's emoji that are in view, each with its cell (by its
+    /// place among those shown).
     pub(crate) fn emoji(&self) -> impl Iterator<Item = (usize, Rect)> + '_ {
-        let tray = self.tray;
-        (0..EMOJI.len()).filter_map(move |n| {
-            let tray = tray?;
-            let cell = (tray.w - 12.0) / EMOJI_COLS as f32;
+        let grid = self.pick_grid();
+        let (count, scroll) = self.pick;
+        let first = (scroll / EMOJI_CELL).floor().max(0.0) as usize * EMOJI_COLS;
+        let last = (first + (PICK_ROWS as usize + 1) * EMOJI_COLS).min(count);
+        (first..last).filter_map(move |n| {
+            let grid = grid?;
+            let cell = grid.w / EMOJI_COLS as f32;
             Some((
                 n,
                 Rect::new(
-                    tray.x + 6.0 + (n % EMOJI_COLS) as f32 * cell,
-                    tray.y + 6.0 + (n / EMOJI_COLS) as f32 * EMOJI_CELL,
+                    grid.x + (n % EMOJI_COLS) as f32 * cell,
+                    grid.y + (n / EMOJI_COLS) as f32 * EMOJI_CELL - scroll,
                     cell,
                     EMOJI_CELL,
                 ),
@@ -232,8 +269,18 @@ impl Bottom {
         if self.new.is_some_and(|r| r.contains(pos)) {
             return Some(Hover::New);
         }
-        if let Some((n, _)) = self.emoji().find(|(_, r)| r.contains(pos)) {
-            return Some(Hover::Emoji(n));
+        if self.pick_seek().is_some_and(|r| r.contains(pos)) {
+            return Some(Hover::PickSeek);
+        }
+        if self.pick_grid().is_some_and(|r| r.contains(pos)) {
+            return Some(
+                self.emoji()
+                    .find(|(_, r)| r.contains(pos))
+                    .map_or(Hover::Tray, |(n, _)| Hover::Emoji(n)),
+            );
+        }
+        if self.tray.is_some_and(|r| r.contains(pos)) {
+            return Some(Hover::Tray);
         }
         let input = self.input.filter(|r| r.contains(pos))?;
         let _ = input;
@@ -494,10 +541,65 @@ pub(super) fn draw(
     }
 
     // The emoji picker, over the input box.
-    if let Some(tray) = b.tray {
+    if let (Some(tray), Some(seek), Some(cells)) = (b.tray, b.pick_seek(), b.pick_grid()) {
         boxed(grid, tray, RADIUS, well, rim, 1.0);
+        // Its search.
+        let searching = bar.field == Some(Field::Pick);
+        boxed(
+            grid,
+            seek,
+            7.0,
+            ink(0.04),
+            if searching { accent(0.7) } else { rim },
+            1.0,
+        );
+        grid.labels.push(glyph(
+            GLYPH_SEARCH,
+            Rect::new(seek.x, seek.y, seek.h, seek.h),
+            10.0,
+            ink(0.5),
+            clip,
+        ));
+        let (words, color) = match (bar.pick_query.is_empty(), searching) {
+            (true, false) => ("Search emoji".to_owned(), ink(0.42)),
+            (_, true) => (format!("{}|", bar.pick_query), ink(0.95)),
+            (false, false) => (bar.pick_query.to_owned(), ink(0.95)),
+        };
+        grid.labels.push(label(
+            &words,
+            (seek.x + seek.h + 2.0, seek.y + 4.0),
+            seek.w - seek.h - 8.0,
+            11.5,
+            false,
+            color,
+            clip,
+        ));
+        // The grid, cut to its own box (it scrolls).
+        let window = Rect::new(
+            cells.x,
+            cells.y.max(clip.y),
+            cells.w,
+            (cells.h).min((clip.y + clip.h - cells.y).max(0.0)),
+        );
+        if bar.emoji.is_empty() {
+            grid.labels.push(label(
+                "No emoji by that name",
+                (cells.x + cells.w / 2.0, cells.y + 30.0),
+                cells.w,
+                11.5,
+                true,
+                ink(0.5),
+                clip,
+            ));
+        }
         for (n, cell) in b.emoji() {
-            if hover == Some(Hover::Emoji(n)) {
+            let Some(emoji) = bar.emoji.get(n) else {
+                continue;
+            };
+            // (The hover wash is not cut to the grid's box as the labels
+            // are: only a row wholly in it wears one.)
+            let whole = cell.y >= cells.y - 1.0 && cell.y + cell.h <= cells.y + cells.h + 1.0;
+            if whole && hover == Some(Hover::Emoji(n)) {
                 grid.rects.push(RectInst {
                     rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
                     radius: 7.0,
@@ -507,7 +609,7 @@ pub(super) fn draw(
                 });
             }
             grid.labels.push(Label {
-                text: EMOJI[n].to_owned(),
+                text: (*emoji).to_owned(),
                 pos: (cell.x + cell.w / 2.0, cell.y + 6.0),
                 max_w: cell.w,
                 font_px: 17.0,
@@ -515,7 +617,7 @@ pub(super) fn draw(
                 centered: true,
                 dim: false,
                 cache: true,
-                clip: Some(clip),
+                clip: Some(window),
                 family: Some(crate::options::EMOJI_FONT),
                 color: Some([1.0, 1.0, 1.0, 1.0]),
             });
@@ -538,7 +640,7 @@ pub(super) fn draw(
             let live = match which {
                 BoxBtn::Mic => bar.rec.is_some(),
                 BoxBtn::Talk => bar.talk.is_some(),
-                BoxBtn::Emoji => bar.picking,
+                BoxBtn::Emoji => bar.picking.is_some(),
                 BoxBtn::Clip => false,
             };
             if bar.rec.is_some() && which != BoxBtn::Mic {
@@ -634,7 +736,7 @@ mod tests {
         let rect = Rect::new(600.0, 60.0, 420.0, 600.0);
         let low = rect.y + rect.h;
         // An open memory: the search over the input box, all inside the card.
-        let b = bottom(rect, Page::Session, 1, false, false);
+        let b = bottom(rect, Page::Session, 1, false, None);
         let input = b.input.unwrap();
         assert!(b.new.is_none());
         assert!(b.seek.y + b.seek.h <= input.y && input.y + input.h < low);
@@ -647,23 +749,23 @@ mod tests {
             assert_eq!(r.x + r.w <= text.x, n < 2);
         }
         // It grows with what is written, to a point; the search rides up with it.
-        let tall = bottom(rect, Page::Session, 4, false, false);
+        let tall = bottom(rect, Page::Session, 4, false, None);
         assert!(tall.input.unwrap().h > input.h && tall.seek.y < b.seek.y);
         assert_eq!(
-            bottom(rect, Page::Session, 40, false, false),
-            bottom(rect, Page::Session, BOX_LINES, false, false)
+            bottom(rect, Page::Session, 40, false, None),
+            bottom(rect, Page::Session, BOX_LINES, false, None)
         );
         // Memory: New where the input box is. Pinned, Clipboard: the search alone, lower.
-        let m = bottom(rect, Page::Memory, 1, false, false);
+        let m = bottom(rect, Page::Memory, 1, false, None);
         assert_eq!(
             m.new.map(|r| (r.x, r.y, r.h)),
             Some((input.x, low - PAD - BOX_MIN, BOX_MIN))
         );
         assert!(m.input.is_none());
-        let p = bottom(rect, Page::Pinned, 1, false, false);
+        let p = bottom(rect, Page::Pinned, 1, false, None);
         assert!(p.input.is_none() && p.new.is_none() && p.seek.y > b.seek.y && p.h < m.h);
         // The search opens sideways, about its middle.
-        let open = bottom(rect, Page::Pinned, 1, true, false);
+        let open = bottom(rect, Page::Pinned, 1, true, None);
         assert_eq!(open.seek.w, SEEK_OPEN_W);
         assert!((open.seek.x + open.seek.w / 2.0 - (p.seek.x + p.seek.w / 2.0)).abs() <= 1.0);
     }
@@ -671,7 +773,7 @@ mod tests {
     #[test]
     fn the_pointer_finds_the_bottoms_parts() {
         let rect = Rect::new(0.0, 0.0, 420.0, 600.0);
-        let b = bottom(rect, Page::Session, 1, false, false);
+        let b = bottom(rect, Page::Session, 1, false, None);
         let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
         assert_eq!(b.hit(mid(b.seek), false), Some(Hover::Seek));
         assert_eq!(
@@ -680,16 +782,35 @@ mod tests {
         );
         assert_eq!(b.hit(mid(b.text().unwrap()), false), Some(Hover::Input));
         assert_eq!(b.hit((5.0, 5.0), false), None);
-        let m = bottom(rect, Page::Memory, 1, true, false);
+        let m = bottom(rect, Page::Memory, 1, true, None);
         assert_eq!(m.hit(mid(m.new.unwrap()), true), Some(Hover::New));
         assert_eq!(m.hit(mid(m.seek_clear), true), Some(Hover::SeekClear));
-        // The emoji picker opens over the input box, the search over it.
-        let p = bottom(rect, Page::Session, 1, false, true);
+        // The emoji picker opens over the input box, the search over it;
+        // it shows the rows in view of however many emoji it holds.
+        let p = bottom(rect, Page::Session, 1, false, Some((1800, 0.0)));
         let tray = p.tray.unwrap();
         assert!(tray.y + tray.h <= p.input.unwrap().y && p.seek.y + p.seek.h <= tray.y);
-        assert_eq!(p.emoji().count(), EMOJI.len());
+        assert_eq!(p.emoji().next().map(|(n, _)| n), Some(0));
+        assert!(p.emoji().count() <= (PICK_ROWS as usize + 1) * EMOJI_COLS);
         let (n, cell) = p.emoji().nth(9).unwrap();
         assert_eq!(p.hit(mid(cell), false), Some(Hover::Emoji(n)));
+        assert_eq!(
+            p.hit(mid(p.pick_seek().unwrap()), false),
+            Some(Hover::PickSeek)
+        );
+        // Scrolled two rows down, the same cell is a later emoji.
+        let down = bottom(
+            rect,
+            Page::Session,
+            1,
+            false,
+            Some((1800, 2.0 * EMOJI_CELL)),
+        );
+        assert_eq!(
+            down.hit(mid(cell), false),
+            Some(Hover::Emoji(n + 2 * EMOJI_COLS))
+        );
+        assert!(down.pick_span() > 0.0);
         assert!(b.tray.is_none() && b.emoji().next().is_none());
     }
 }

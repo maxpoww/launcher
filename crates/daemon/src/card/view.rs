@@ -133,8 +133,11 @@ pub(crate) enum Hover {
     Name,
     /// A voice note's play button.
     Play(u64),
-    /// One of the picker's emoji (its place in `bar::EMOJI`).
+    /// One of the picker's emoji (its place among those shown), its
+    /// search, and the rest of it.
     Emoji(usize),
+    PickSeek,
+    Tray,
 }
 
 impl Hover {
@@ -1344,7 +1347,9 @@ mod tests {
                     rec: None,
                     talk: None,
                     hint: "",
-                    picking: false,
+                    picking: None,
+                    emoji: &[],
+                    pick_query: "",
                 },
                 notes: &notes,
                 playing: None,
@@ -1360,7 +1365,7 @@ mod tests {
         let (with, _, scroll_foot) = scene(&view(true));
         // The list is shorter by the head and by what is at the bottom, so
         // there is that much more to scroll.
-        let low = crate::card::bar::bottom(rect, Page::Session, 0, false, false);
+        let low = crate::card::bar::bottom(rect, Page::Session, 0, false, None);
         // (…and its first item starts under the memory's name.)
         assert_eq!(scroll_foot, scroll_bare + FOOT_H + low.h + NAME_SPACE);
         assert_eq!(with.grids.len(), bare.grids.len() + 1);
