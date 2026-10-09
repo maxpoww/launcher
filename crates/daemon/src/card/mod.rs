@@ -932,6 +932,15 @@ pub(crate) fn declare_layer_rule() {
     crate::hypr::eval(
         "hl.layer_rule({ name = \"golem-card-under-dock\", match = { namespace = \"waverunner-card\" }, order = 1 })",
     );
+    // Its ground is see-through (`view::AIR`): what shows through it is
+    // frosted, as behind the dock — and only where the card is (the rest
+    // of its surface is clear, under the threshold).
+    crate::hypr::eval(
+        "hl.layer_rule({ name = \"golem-card-blur\", match = { namespace = \"waverunner-card\" }, blur = true })",
+    );
+    crate::hypr::eval(
+        "hl.layer_rule({ name = \"golem-card-blur-edge\", match = { namespace = \"waverunner-card\" }, ignore_alpha = 0.5 })",
+    );
 }
 
 impl App {

@@ -8,6 +8,8 @@ use super::model::{Item, Kind};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst, NO_PLATE};
 
 pub(super) const RADIUS: f32 = 10.0;
+/// How solid the card's ground is (1 = opaque).
+pub(super) const AIR: f32 = 0.72;
 
 /// The list: its padding, the gap between items, an item's own padding
 /// and corner.
@@ -438,7 +440,16 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     panel.rects.push(RectInst {
         rect,
         radius: RADIUS,
-        color: paint.fill,
+        // The card's own ground lets what is behind it through (Max,
+        // 2026-10-09: *"make the 'air' of the card more transparent"*);
+        // the compositor frosts it (`declare_layer_rule`). The items on it
+        // keep their own darker boxes, so they stay as readable as before.
+        color: [
+            paint.fill[0],
+            paint.fill[1],
+            paint.fill[2],
+            paint.fill[3] * AIR,
+        ],
         glass: 0.0,
         border: 0.0,
     });
