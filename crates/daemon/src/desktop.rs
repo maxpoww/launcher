@@ -974,7 +974,11 @@ fn camera(
     }
     let status = early.or_else(|| child.wait().ok());
     if let Some(mut relay) = relay {
-        let _ = relay.kill();
+        // Asked to end, not killed: it has a child of its own to end first.
+        // SAFETY: a signal to a child of ours, by its pid.
+        unsafe {
+            libc::kill(relay.id() as libc::pid_t, libc::SIGTERM);
+        }
         let _ = relay.wait();
     }
     camera_withdraw();
