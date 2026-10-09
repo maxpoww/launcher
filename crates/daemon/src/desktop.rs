@@ -835,11 +835,8 @@ fn camera_withdraw() {
     }
 }
 
-/// How long the camera's frames are held to even out their pace (ms).
-const CAMERA_BUFFER_MS: u32 = 80;
-
-/// How long a camera has to stay up to count as working.
-const CAMERA_SETTLE: std::time::Duration = std::time::Duration::from_secs(4);
+/// How long scrcpy is given to start feeding the camera device.
+const CAMERA_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Use a phone's back camera as this computer's (scrcpy into the loopback
 /// camera device, no window), until it is stopped from the same menu row
@@ -861,15 +858,11 @@ fn camera(
     let mut cmd = std::process::Command::new("scrcpy");
     cmd.args(["--video-source=camera", "--camera-facing=back", "--camera-ar=16:9", "--max-size=1920"])
         .args(["--camera-fps=30", "--no-audio", "--no-window"])
-        // Frames come off the phone in fits and starts and were handed on
-        // as they came: a choppy picture (Max, 2026-10-09). Held this long,
-        // they go out evenly.
-        .arg(format!("--v4l2-buffer={CAMERA_BUFFER_MS}"))
         .arg(format!("--v4l2-sink={}", device.display()));
     if let Some(serial) = serial {
         cmd.arg(format!("--serial={serial}"));
     }
-    let mut child = match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+    let mut child = match cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() {
         Ok(child) => child,
         Err(e) => {
             warn!("desktop: scrcpy could not be run: {e}");
@@ -879,10 +872,31 @@ fn camera(
     if let Ok(mut on) = cameras.lock() {
         on.insert(path.to_owned(), child.id());
     }
-    // Still up after a moment: it works, and with no window to show for
-    // it, say so.
-    std::thread::sleep(CAMERA_SETTLE);
-    let early = child.try_wait().ok().flatten();
+    // It is a camera from the moment scrcpy says it feeds the device, not
+    // before (a few seconds, and not always the same few: announced on a
+    // fixed wait, the device was sometimes not a camera yet and the apps
+    // got nothing). Its talk is read to the end so it never blocks on it.
+    let (fed, feeding) = std::sync::mpsc::channel();
+    if let Some(out) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                if line.contains("v4l2 sink started") {
+                    let _ = fed.send(());
+                }
+            }
+        });
+    }
+    // (The sender going away without a word = scrcpy ended first.)
+    let started = feeding.recv_timeout(CAMERA_PATIENCE).is_ok();
+    let early = match child.try_wait().ok().flatten() {
+        None if !started => {
+            warn!("desktop: scrcpy never fed the camera device for {name}");
+            let _ = child.kill();
+            child.wait().ok()
+        }
+        other => other,
+    };
     if early.is_none() {
         camera_announce(name, &device);
         crate::desktop_send_notify(&format!(
