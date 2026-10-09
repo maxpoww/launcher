@@ -28,11 +28,11 @@ use crate::App;
 /// The pill at its widest, in pill-heights. Wider than the player's pill is
 /// let be (13): that one scrolls a long name, this one would cut it — at 13
 /// "Importing photos from Pixel 8 Pro" lost its last word.
-const MAX_W: f32 = 24.0;
+const MAX_W: f32 = 32.0;
 /// How much longer than its words and number need the pill is: the fill has
 /// further to go, so it is seen to move (Max, 2026-10-09: "make it longer so
-/// it goes faster, like another 1/3 longer").
-const STRETCH: f32 = 4.0 / 3.0;
+/// it goes faster, like another 1/3 longer" — then a quarter longer again).
+const STRETCH: f32 = 5.0 / 3.0;
 /// Between the words and the number.
 const GAP: f32 = 10.0;
 /// What the number's slot is measured from.
