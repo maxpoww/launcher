@@ -87,8 +87,10 @@ impl App {
             item,
             lines,
             tile.w,
-            scale,
-            zoom,
+            // (The tile is in the laid-out space: its picture is `zoom`
+            // times that, as it shows on the card.)
+            scale * zoom,
+            1.0,
             &paint,
             thumb.map(|chain| &chain[..(side * side * 4).min(chain.len())]),
             side,
@@ -103,12 +105,11 @@ impl App {
                 });
             },
         );
+        let corner = self.card.outside((tile.x, tile.y));
+        let (w, h) = (tile.w * zoom, tile.h * zoom);
         let grip = match self.card.ptr {
-            Some((x, y)) => (
-                (x - tile.x).clamp(0.0, tile.w),
-                (y - tile.y).clamp(0.0, tile.h),
-            ),
-            None => (tile.w / 2.0, tile.h / 2.0),
+            Some((x, y)) => ((x - corner.0).clamp(0.0, w), (y - corner.1).clamp(0.0, h)),
+            None => (w / 2.0, h / 2.0),
         };
         self.drag_picture(&canvas.bytes(), canvas.w, canvas.h, scale as i32, grip)
     }
@@ -264,7 +265,7 @@ impl App {
             return;
         };
         let lines = self.card.lines.get(&id).map_or(1, Vec::len);
-        let step = way * (tile_height(self.card.items[at].kind, lines, self.card.zoom()) + GAP);
+        let step = way * (tile_height(self.card.items[at].kind, lines, 1.0) + GAP);
         for it in &self.card.items[at + 1..] {
             *self.card.shifts.entry(it.id).or_insert(0.0) += step;
         }
@@ -274,7 +275,8 @@ impl App {
     /// land now.
     pub(crate) fn card_dnd_motion(&mut self, _x: f32, y: f32) {
         if self.card.dnd_over {
-            self.card.drop_y = Some(y);
+            // (Where the items are laid out: see `view::virt`.)
+            self.card.drop_y = Some(self.card.inside((0.0, y)).1);
             self.request_card_draw();
         }
     }

@@ -419,6 +419,34 @@ impl Card {
         }
     }
 
+    /// The card's box as its contents are laid out in: `1/zoom` its size,
+    /// about its top-left corner (`view::virt`).
+    fn vrect(&self) -> Option<Rect> {
+        self.rect.map(|r| virt(r, self.zoom()))
+    }
+
+    /// `pos` on the surface, in the space the contents are laid out in.
+    fn inside(&self, pos: (f32, f32)) -> (f32, f32) {
+        match self.rect {
+            Some(r) => {
+                let z = self.zoom();
+                (r.x + (pos.0 - r.x) / z, r.y + (pos.1 - r.y) / z)
+            }
+            None => pos,
+        }
+    }
+
+    /// A point of the laid-out space, on the surface.
+    fn outside(&self, pos: (f32, f32)) -> (f32, f32) {
+        match self.rect {
+            Some(r) => {
+                let z = self.zoom();
+                (r.x + (pos.0 - r.x) * z, r.y + (pos.1 - r.y) * z)
+            }
+            None => pos,
+        }
+    }
+
     /// How wide the card is on the window it is on.
     fn width(&self) -> f32 {
         self.win()
@@ -491,11 +519,7 @@ impl Card {
         let height = carried
             .and_then(|id| self.item(id))
             .map_or(DROP_OPENING, |it| {
-                tile_height(
-                    it.kind,
-                    self.lines.get(&it.id).map_or(1, Vec::len),
-                    self.zoom(),
-                )
+                tile_height(it.kind, self.lines.get(&it.id).map_or(1, Vec::len), 1.0)
             });
         Some((insert_index(&self.tiles, y), height + GAP))
     }
@@ -602,10 +626,12 @@ impl Card {
     /// (a memory's items; on the clipboard's page it means "keep"), a
     /// voice note's play button, or the item itself.
     fn hit(&self, pos: (f32, f32)) -> Option<Hover> {
-        let rect = self.rect?;
-        if !rect.contains(pos) {
+        if !self.rect?.contains(pos) {
             return None;
         }
+        // (Everything is tested where it was laid out: see `view::virt`.)
+        let rect = self.vrect()?;
+        let pos = self.inside(pos);
         let low = bottom(
             rect,
             self.page,
@@ -2286,8 +2312,13 @@ impl App {
         };
         // Wrap what has not been wrapped yet: a text by the column (its
         // font is fixed-pitch), a name by its own average glyph.
-        let text_w = self.card.width() - 2.0 * LIST_PAD - 2.0 * TILE_PAD_X;
-        let text_px = TEXT_PX * self.card.zoom();
+        // (All of it in the space the contents are laid out in: the card
+        // `1/zoom` its size. The scene is scaled up at the end.)
+        let zoom = self.card.zoom();
+        let real = rect;
+        let rect = virt(rect, zoom);
+        let text_w = rect.w - 2.0 * LIST_PAD - 2.0 * TILE_PAD_X;
+        let text_px = TEXT_PX;
         let mono = renderer.measure_text("MMMMMMMMMM", text_px, Some(crate::options::NERD)) / 10.0;
         for item in &self.card.items {
             if self.card.lines.contains_key(&item.id) {
@@ -2514,9 +2545,10 @@ impl App {
             shifts: &self.card.shifts,
             slots: &self.card.slots,
             paint,
-            zoom: self.card.zoom(),
+            zoom: 1.0,
         };
-        let (scene, tiles, max_scroll) = scene(&view);
+        let (mut scene, tiles, max_scroll) = scene(&view);
+        zoom_scene(&mut scene, (real.x, real.y), zoom);
         if shown > 0.0 {
             self.card.max_scroll = max_scroll;
             self.card.scroll = if self.card.to_bottom {
@@ -2783,7 +2815,7 @@ impl App {
 
     /// How far the emoji picker's grid can be scrolled.
     fn card_pick_span(&self) -> f32 {
-        self.card.rect.map_or(0.0, |rect| {
+        self.card.vrect().map_or(0.0, |rect| {
             bottom(
                 rect,
                 self.card.page,

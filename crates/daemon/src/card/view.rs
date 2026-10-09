@@ -317,6 +317,58 @@ pub(crate) struct View<'a> {
     pub zoom: f32,
 }
 
+/// THE ZOOM is of the whole card (Max, 2026-10-09: *"i want ctrl + +- to
+/// affect all the card, including buttons, icons, emojis, input, all"*):
+/// everything is laid out as if the card were `1/zoom` its size, about its
+/// own top-left corner (`virt`), and the finished scene is scaled up from
+/// that corner (`zoom_scene`). The pointer is brought into the same space
+/// before it is tested (`Card::inside`), and the tiles are kept in it.
+pub(crate) fn virt(rect: Rect, zoom: f32) -> Rect {
+    Rect::new(rect.x, rect.y, rect.w / zoom, rect.h / zoom)
+}
+
+/// Scale a scene laid out in `virt` space up by `zoom` about `origin`.
+/// The card's own frame — its corners, its rim, its shadow — stays as it
+/// is at any zoom: it is the card that holds, its contents that grow.
+pub(crate) fn zoom_scene(scene: &mut Scene, origin: (f32, f32), zoom: f32) {
+    if (zoom - 1.0).abs() < 0.001 {
+        return;
+    }
+    let r = |rect: &mut Rect| {
+        rect.x = origin.0 + (rect.x - origin.0) * zoom;
+        rect.y = origin.1 + (rect.y - origin.1) * zoom;
+        rect.w *= zoom;
+        rect.h *= zoom;
+    };
+    for shadow in &mut scene.shadows {
+        r(&mut shadow.rect);
+    }
+    for (n, grid) in scene.grids.iter_mut().enumerate() {
+        r(&mut grid.clip);
+        for rect in &mut grid.rects {
+            r(&mut rect.rect);
+            // (Grid 0 is the card's own frame.)
+            if n > 0 {
+                rect.radius *= zoom;
+                rect.border *= zoom;
+            }
+        }
+        for icon in &mut grid.icons {
+            r(&mut icon.rect);
+        }
+        for label in &mut grid.labels {
+            label.pos.0 = origin.0 + (label.pos.0 - origin.0) * zoom;
+            label.pos.1 = origin.1 + (label.pos.1 - origin.1) * zoom;
+            label.max_w *= zoom;
+            label.font_px *= zoom;
+            label.line_px *= zoom;
+            if let Some(clip) = label.clip.as_mut() {
+                r(clip);
+            }
+        }
+    }
+}
+
 /// The card as a scene, the boxes its items were drawn in, and how far the
 /// list can be scrolled. The unroll is a clip from the top: the card is
 /// whole underneath and `shown` of its height is let through.
@@ -1397,5 +1449,53 @@ mod tests {
                 .count()
         };
         assert_eq!((pins(&bare), pins(&with)), (0, 1));
+    }
+
+    #[test]
+    fn the_whole_card_zooms_about_its_corner_and_its_frame_holds() {
+        let items = vec![text(1, "a")];
+        let lines: HashMap<u64, Vec<String>> = HashMap::from([(1, vec!["a".to_owned()])]);
+        let (shifts, slots) = (HashMap::new(), HashMap::new());
+        let rect = Rect::new(600.0, 60.0, WIDTH, 400.0);
+        let build = |rect: Rect| {
+            scene(&View {
+                rect,
+                shown: 1.0,
+                items: &items,
+                lines: &lines,
+                scroll: 0.0,
+                hover: None,
+                foot: None,
+                dnd_over: false,
+                hidden: None,
+                shifts: &shifts,
+                slots: &slots,
+                paint: PAINT,
+                zoom: 1.0,
+            })
+        };
+        let (plain, tiles, _) = build(rect);
+        // At twice the size the card is laid out half as big, and scaled up.
+        let (mut big, small, _) = build(virt(rect, 2.0));
+        zoom_scene(&mut big, (rect.x, rect.y), 2.0);
+        // Its frame is the same box, the same corners.
+        assert_eq!(big.grids[0].rects[0].rect, plain.grids[0].rects[0].rect);
+        assert_eq!(big.grids[0].rects[0].radius, RADIUS);
+        // Its first item starts twice as far from the corner, twice as tall,
+        // its words twice as big.
+        let (a, b) = (plain.grids[1].rects[0].rect, big.grids[1].rects[0].rect);
+        assert_eq!(b.x - rect.x, 2.0 * (a.x - rect.x));
+        assert_eq!(b.y - rect.y, 2.0 * (a.y - rect.y));
+        assert_eq!(b.h, 2.0 * a.h);
+        assert_eq!(
+            big.grids[1].labels[0].font_px,
+            2.0 * plain.grids[1].labels[0].font_px
+        );
+        // The tiles stay in the laid-out space (the pointer is brought to it).
+        assert_eq!(small[0].rect.h, tiles[0].rect.h);
+        // At 1 nothing moves.
+        let (mut same, _, _) = build(rect);
+        zoom_scene(&mut same, (rect.x, rect.y), 1.0);
+        assert_eq!(same.grids[1].rects[0].rect, a);
     }
 }

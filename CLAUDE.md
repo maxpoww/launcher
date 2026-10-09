@@ -451,8 +451,13 @@ The big daemon files are cohesive but long — go straight to the function:
   of several things (text + picture + voice composed together — each still lands as its own item),
   dragging a single piece out of such an item, GIFs and stickers (no source), typing to search without clicking the magnifier first (the card has no keyboard
   until clicked). Pointer-free: `card write <text>|keep|send|find <words>|rename <name>|clipboard`.
-  ZOOM (`card_zoom`, `Card::zoom()`, kept in `card.json`): the items' text, lines and pictures are
-  drawn at `View::zoom` (`ZOOM_MIN..ZOOM_MAX`, a tenth a step); Ctrl +/− and Ctrl 0 do it ONLY
+  ZOOM (`card_zoom`, `Card::zoom()`, kept in `card.json`): of the WHOLE card — tabs, items, icons,
+  emoji, the input box (Max, 2026-10-09). Everything is laid out as if the card were `1/zoom` its
+  size about its top-left corner (`view::virt`) and the finished scene is scaled up from that corner
+  (`view::zoom_scene`; the card's own frame, rim and shadow hold). `Card::tiles`, `drop_y` and every
+  hit test live in that laid-out space: the pointer is brought into it first (`Card::inside`,
+  `Card::outside` back) — so NO layout code knows about the zoom (`View::zoom` is always 1 now;
+  `ZOOM_MIN..ZOOM_MAX`, a tenth a step); Ctrl +/− and Ctrl 0 do it ONLY
   while the pointer is on the card. The card never has the keyboard, so those keys are compositor
   BINDS that exist exactly that long (`card_keys`: `hl.unbind` then `hl.bind(key,
   exec_cmd("waverunner-ctl card zoom in|out|reset"))` on the pointer's enter, `hl.unbind` on its
