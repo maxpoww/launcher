@@ -556,7 +556,8 @@ pub(super) fn draw(
                 ink(0.95),
                 clip,
             ));
-            if !bar.query.is_empty() {
+            // (How many were found — where the search narrows a list.)
+            if !bar.query.is_empty() && bar.found != usize::MAX {
                 let found = format!("{} found", bar.found);
                 grid.labels.push(label(
                     &found,

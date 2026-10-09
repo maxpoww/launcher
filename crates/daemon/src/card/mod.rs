@@ -132,6 +132,8 @@ const ZOOM_KEYS: [(&str, &str); 8] = [
 /// The ids of the clipboard page's rows start here (a clip's own id is
 /// added): far from the card's own.
 const CLIP_IDS: u64 = 1 << 62;
+/// The most lines an answer of the dictionary is shown with.
+const DICT_LINES: usize = 120;
 /// …and the dictionary page's rows here.
 const DICT_IDS: u64 = 1 << 61;
 
@@ -2415,7 +2417,14 @@ impl App {
                 } else {
                     40
                 };
-                wrap(&item.body, cols, MAX_LINES)
+                // (A word's answer is read whole; a text on the card keeps
+                // its first lines.)
+                let most = if self.card.page == Page::Dictionary {
+                    DICT_LINES
+                } else {
+                    MAX_LINES
+                };
+                wrap(&item.body, cols, most)
             } else {
                 let n = item.body.chars().count().max(1);
                 let w = renderer.measure_text(&item.body, text_px, None);
@@ -2604,7 +2613,12 @@ impl App {
                     naming: Some(&self.card.naming),
                     draft: &self.card.draft_lines,
                     query: &self.card.query,
-                    found: listed.len(),
+                    // (The dictionary's search is a word, not a filter.)
+                    found: if self.card.page == Page::Dictionary {
+                        usize::MAX
+                    } else {
+                        listed.len()
+                    },
                     field: self.card.field,
                     rec: recording.filter(|(_, talk)| !talk).map(|(secs, _)| secs),
                     talk,

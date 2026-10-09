@@ -412,7 +412,14 @@ The big daemon files are cohesive but long — go straight to the function:
   a session by hand.
   THE CARD IS A CHAT WITH YOURSELF BESIDE EVERY WINDOW (Max, 2026-10-09; the approved mockup is
   ~/terminal-mockup/chat — `#demo` plays it, `#chats` shows Memory). What that added, over the
-  sessions above: HEAD = Memory · Pinned · Clipboard (`Foot`). An open memory's NAME floats over
+  sessions above: HEAD = Memory · Pinned by name, then THREE ROUND BUTTONS with an icon — clipboard,
+  dictionary, emoji (`Foot`, `foot_buttons`). DICTIONARY (`Page::Dictionary`, `card_dict_rows`):
+  the card's search is where the word is typed (it has the cursor as the page opens) and each
+  language that has the word answers as a row — the clipboard box's own offline data, through
+  `App::dict_define` (loaded on first use, `card_dict_loaded` when it is in). EMOJI
+  (`Page::Emoji`): the picker as the WHOLE card under the head (`bar::bottom`'s `Page::Emoji` arm),
+  and a pick goes straight into the window. Clipboard and Dictionary are LENT pages
+  (`Page::lent`): no ×, the pin's place is a `+` = keep it in the memory. An open memory's NAME floats over
   its items (`bar::name_rect`; a click renames it — `Field::Name`); every item carries a small
   line with its time (`View::notes`, `model::when_text`). MEMORY lists the memories as a messenger
   lists chats (`ROW_H`, a coloured initial, the name, the last thing, its time) with NEW at the
