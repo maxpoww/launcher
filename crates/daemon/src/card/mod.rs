@@ -132,6 +132,8 @@ const ZOOM_KEYS: [(&str, &str); 8] = [
 /// The ids of the clipboard page's rows start here (a clip's own id is
 /// added): far from the card's own.
 const CLIP_IDS: u64 = 1 << 62;
+/// …and the dictionary page's rows here.
+const DICT_IDS: u64 = 1 << 61;
 
 /// How many emoji the picker remembers as used lately (two rows).
 const RECENT_EMOJI: usize = 16;
@@ -577,8 +579,7 @@ impl Card {
 
     /// The emoji picker, when it is open: how many it shows, how far down.
     fn pick(&self) -> Option<(usize, f32)> {
-        self.picking
-            .then_some((self.picked.len(), self.pick_scroll))
+        (self.picking || self.page == Page::Emoji).then_some((self.picked.len(), self.pick_scroll))
     }
 
     /// Which emoji the picker shows: all, or those its search names.
@@ -662,26 +663,25 @@ impl Card {
             }
         }
         let tile = self.tiles.iter().find(|t| t.rect.contains(pos))?;
-        let pins = matches!(self.page, Page::Session | Page::Clipboard);
-        Some(
-            if self.page != Page::Clipboard && tile.close().contains(pos) {
-                Hover::Close(tile.id)
-            } else if pins && tile.pin().contains(pos) {
-                Hover::Pin(tile.id)
-            } else if tile.play().contains(pos)
-                && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
-            {
-                Hover::Play(tile.id)
-            } else {
-                Hover::Item(tile.id)
-            },
-        )
+        let pins = self.page == Page::Session || self.page.lent();
+        Some(if !self.page.lent() && tile.close().contains(pos) {
+            Hover::Close(tile.id)
+        } else if pins && tile.pin().contains(pos) {
+            Hover::Pin(tile.id)
+        } else if tile.play().contains(pos)
+            && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
+        {
+            Hover::Play(tile.id)
+        } else {
+            Hover::Item(tile.id)
+        })
     }
 
     /// Whether `item` (of the page that is up) matches what is searched.
     fn matches(&self, item: &Item) -> bool {
         let query = self.query.trim().to_lowercase();
-        if query.is_empty() {
+        // (On the dictionary's page what is typed is the word looked up.)
+        if query.is_empty() || self.page == Page::Dictionary {
             return true;
         }
         let has = |it: &Item| {
@@ -762,7 +762,7 @@ impl Card {
                 }
             }
             Page::Pinned => self.pinned = shown,
-            Page::Memory | Page::Clipboard => {}
+            Page::Memory | Page::Clipboard | Page::Dictionary | Page::Emoji => {}
         }
     }
 
@@ -780,7 +780,7 @@ impl Card {
             Page::Pinned => std::mem::take(&mut self.pinned),
             Page::Memory => self.memory.iter().map(session_row).collect(),
             // (The clipboard's rows are the dock's to list: `card_show`.)
-            Page::Clipboard => Vec::new(),
+            Page::Clipboard | Page::Dictionary | Page::Emoji => Vec::new(),
         };
         // (A session's row is wrapped afresh: it may have changed.)
         for past in &self.memory {
@@ -1367,6 +1367,19 @@ impl App {
             if page != Page::Session && matches!(self.card.field, Some(Field::Box | Field::Name)) {
                 self.card_drop_keys();
             }
+            match page {
+                // The dictionary: the search is where the word is typed,
+                // so it has the cursor at once.
+                Page::Dictionary => {
+                    self.card_dict_rows();
+                    self.card_take_keys(Field::Seek);
+                }
+                Page::Emoji => {
+                    self.card.pick_query.clear();
+                    self.card.repick();
+                }
+                _ => {}
+            }
             if page == Page::Clipboard {
                 self.card.items = self.card_clip_rows();
             }
@@ -1416,6 +1429,58 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    /// The dictionary's page: the word in the search, looked up — one row
+    /// a language that has it (its origin first, where one is recorded),
+    /// or a row that says what to do / that it is not there. Rows are
+    /// lent: a click pastes the answer, the + keeps it in the memory.
+    fn card_dict_rows(&mut self) {
+        let word = self.card.query.trim().to_owned();
+        let row = |n: u64, body: String, from: Option<String>| Item {
+            id: DICT_IDS + n,
+            kind: Kind::Text,
+            body,
+            path: None,
+            aspect: 0.0,
+            owned: false,
+            at: 0,
+            from,
+        };
+        let rows = if word.is_empty() {
+            vec![row(0, "Type a word in the search below.".to_owned(), None)]
+        } else {
+            match self.dict_define(&word) {
+                None => vec![row(0, "Opening the dictionary…".to_owned(), None)],
+                Some(found) if found.is_empty() => {
+                    vec![row(0, format!("No entry for “{word}”."), None)]
+                }
+                Some(found) => found
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, (lang, definition, origin))| {
+                        let body = match origin {
+                            Some(origin) => format!("{origin}\n{definition}"),
+                            None => definition,
+                        };
+                        row(n as u64 + 1, body, Some(lang))
+                    })
+                    .collect(),
+            }
+        };
+        for item in &rows {
+            self.card.lines.remove(&item.id);
+        }
+        self.card.items = rows;
+        self.card.scroll = 0.0;
+        self.request_card_draw();
+    }
+
+    /// The dictionary is in memory now: its page, if it is up, answers.
+    pub(crate) fn card_dict_loaded(&mut self) {
+        if self.card.page == Page::Dictionary && self.card.host.is_some() {
+            self.card_dict_rows();
+        }
     }
 
     /// The clipboard's history changed: its page, if it is up, lists it anew.
@@ -1584,6 +1649,9 @@ impl App {
                 _ => return,
             },
         }
+        if field == Field::Seek && self.card.page == Page::Dictionary {
+            self.card_dict_rows();
+        }
         self.card.scroll = if self.card.field == Some(Field::Seek) {
             0.0
         } else {
@@ -1676,7 +1744,19 @@ impl App {
         // opens: the grid does not jump under the pointer now.)
         self.card.used(at);
         self.card_save();
-        if matches!(self.card.field, Some(Field::Box | Field::Pick)) {
+        if self.card.page == Page::Emoji {
+            // The emoji's own page: straight into the window, whatever has
+            // the cursor (the picker's search gives the keyboard back first).
+            let typing = self.card.field.is_some();
+            self.serve_transient_text(emoji);
+            self.card_drop_keys();
+            let wait = if typing {
+                PASTE_FOCUS + 60
+            } else {
+                PASTE_SETTLE
+            };
+            self.after_ms(wait, |_| card_paste_key());
+        } else if matches!(self.card.field, Some(Field::Box | Field::Pick)) {
             self.card.draft.push_str(emoji);
             self.request_card_draw();
         } else if self.card.field.is_none() {
@@ -1709,7 +1789,7 @@ impl App {
         self.card.say = None;
         match what {
             Hover::Close(id) => self.card_remove(id),
-            Hover::Pin(id) if self.card.page == Page::Clipboard => self.card_keep_clip(id),
+            Hover::Pin(id) if self.card.page.lent() => self.card_keep_clip(id),
             Hover::Pin(id) => self.card_pin(id),
             Hover::Foot(which) => self.card_foot(which),
             Hover::Seek => self.card_take_keys(Field::Seek),
@@ -2444,6 +2524,7 @@ impl App {
             .map(|it| {
                 let when = when_text(it.at, now_s);
                 let note = match (self.card.page, &it.from) {
+                    (Page::Dictionary, Some(from)) => from.clone(),
                     (Page::Clipboard, Some(from)) => {
                         let from: String = from.chars().take(26).collect();
                         format!("{from} · {when}")
@@ -2454,7 +2535,8 @@ impl App {
                 (it.id, note)
             })
             .collect();
-        let emoji: Vec<&'static str> = match self.card.picking {
+        let picking = self.card.pick().is_some();
+        let emoji: Vec<&'static str> = match picking {
             true => self
                 .card
                 .picked
@@ -2464,7 +2546,7 @@ impl App {
             false => Vec::new(),
         };
         // One emoji to stand for each kind: its first.
-        let kinds: Vec<&'static str> = match self.card.picking {
+        let kinds: Vec<&'static str> = match picking {
             true => (0..crate::emoji_table::GROUPS.len())
                 .filter_map(|g| {
                     crate::emoji_table::EMOJI
@@ -3189,6 +3271,17 @@ impl App {
             "clipboard" => {
                 self.card_show(Page::Clipboard);
                 format!("{} rows", self.card.items.len())
+            }
+            // `dictionary [word]` · `emojis`: their pages.
+            "dictionary" => {
+                self.card_show(Page::Dictionary);
+                self.card.query = rest.to_owned();
+                self.card_dict_rows();
+                format!("{} rows", self.card.items.len())
+            }
+            "emojis" => {
+                self.card_show(Page::Emoji);
+                format!("{} emoji", self.card.picked.len())
             }
             // `zoom in|out|reset|<n>`: the items' size (Ctrl +/− over the card).
             "zoom" => self.card_zoom(rest),

@@ -3230,6 +3230,35 @@ impl App {
     }
 
     /// Fold a finished dictionary load into the panel (or record why it failed).
+    /// Look `word` up for the card's dictionary page: each language's
+    /// answer as (language, definition, origin). `None`: the dictionary is
+    /// not in memory yet — it is being loaded, and `card_dict_loaded` says
+    /// when (the same data, loading and idle unloading as the box's panel).
+    pub(crate) fn dict_define(&mut self, word: &str) -> Option<Vec<(String, String, Option<String>)>> {
+        self.clip.dict_used = Instant::now();
+        let Some(dict) = self.clip.dict_data.as_ref() else {
+            if !self.clip.dict_loading {
+                if let Some(tx) = &self.dict_tx {
+                    self.clip.dict_loading = true;
+                    crate::dict::spawn_load(tx.clone());
+                }
+            }
+            return None;
+        };
+        Some(
+            dict.lookup(word)
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.lang.to_owned(),
+                        e.definition.to_owned(),
+                        e.etymology.map(str::to_owned),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     pub(crate) fn on_dict_loaded(&mut self, ev: crate::dict::Event) {
         let crate::dict::Event::Loaded(result) = ev;
         match result {
@@ -3244,6 +3273,7 @@ impl App {
             }
         }
         self.clip.dict_loading = false;
+        self.card_dict_loaded();
         self.schedule_clip_frame();
     }
 

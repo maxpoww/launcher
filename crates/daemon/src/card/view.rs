@@ -79,27 +79,58 @@ pub(crate) enum Page {
     Pinned,
     /// The plain clipboard's history, reachable from the card.
     Clipboard,
+    /// A word looked up (the offline dictionaries).
+    Dictionary,
+    /// Every emoji, the whole card of them: for when a few emoji are all
+    /// that is wanted (they go straight into the window).
+    Emoji,
+}
+
+impl Page {
+    /// A page of things that are not the card's own (clipboard rows, a
+    /// word's answers): they have no ×, and their pin's place is "keep".
+    pub(crate) fn lent(self) -> bool {
+        matches!(self, Page::Clipboard | Page::Dictionary)
+    }
 }
 
 /// The buttons along the card's HEAD (they were its foot until Max,
 /// 2026-10-09: *"the buttons have to be on the top"* — the card is called
-/// from the title bar, and they are then right under the pointer).
+/// from the title bar, and they are then right under the pointer): Memory
+/// and Pinned by name, then three round ones with an icon — the clipboard,
+/// the dictionary, the emoji (Max, 2026-10-09: *"replace the clipboard for
+/// three circular buttons with icons"*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Foot {
     Memory,
     Pinned,
     Clipboard,
+    Dictionary,
+    Emoji,
 }
 
 impl Foot {
-    const ALL: [Foot; 3] = [Foot::Memory, Foot::Pinned, Foot::Clipboard];
+    const ALL: [Foot; 5] = [
+        Foot::Memory,
+        Foot::Pinned,
+        Foot::Clipboard,
+        Foot::Dictionary,
+        Foot::Emoji,
+    ];
 
+    /// Its word (the two that are named) or its icon (the round three).
     fn word(self) -> &'static str {
         match self {
             Foot::Memory => "Memory",
             Foot::Pinned => "Pinned",
-            Foot::Clipboard => "Clipboard",
+            Foot::Clipboard => "\u{f0ea}",  // fa-clipboard
+            Foot::Dictionary => "\u{f02d}", // fa-book
+            Foot::Emoji => "\u{f118}",      // fa-smile-o
         }
+    }
+
+    fn round(self) -> bool {
+        matches!(self, Foot::Clipboard | Foot::Dictionary | Foot::Emoji)
     }
 
     /// The page this button shows.
@@ -108,6 +139,8 @@ impl Foot {
             Foot::Memory => Page::Memory,
             Foot::Pinned => Page::Pinned,
             Foot::Clipboard => Page::Clipboard,
+            Foot::Dictionary => Page::Dictionary,
+            Foot::Emoji => Page::Emoji,
         }
     }
 }
@@ -186,22 +219,20 @@ pub(crate) fn list_rect(rect: Rect, foot: bool, bottom: f32) -> Rect {
     )
 }
 
-/// Where the head's buttons are: side by side, the card's width.
-pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 3] {
-    let count = Foot::ALL.len() as f32;
-    let w = (rect.w - 2.0 * LIST_PAD - (count - 1.0) * GAP) / count;
-    let y = rect.y + (FOOT_H - FOOT_BUTTON_H) / 2.0 + 2.0;
+/// Where the head's buttons are: the two named ones share what the three
+/// round ones, at the right, leave.
+pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 5] {
+    let y = (rect.y + (FOOT_H - FOOT_BUTTON_H) / 2.0 + 2.0).round();
+    let rounds = Foot::ALL.iter().filter(|f| f.round()).count() as f32;
+    let names = Foot::ALL.len() as f32 - rounds;
+    let round_w = rounds * (FOOT_BUTTON_H + GAP);
+    let w = ((rect.w - 2.0 * LIST_PAD - round_w - (names - 1.0) * GAP) / names).round();
+    let mut x = rect.x + LIST_PAD;
     Foot::ALL.map(|f| {
-        let n = Foot::ALL.iter().position(|x| *x == f).unwrap_or(0) as f32;
-        (
-            f,
-            Rect::new(
-                (rect.x + LIST_PAD + n * (w + GAP)).round(),
-                y.round(),
-                w.round(),
-                FOOT_BUTTON_H,
-            ),
-        )
+        let this = if f.round() { FOOT_BUTTON_H } else { w };
+        let r = Rect::new(x.round(), y, this, FOOT_BUTTON_H);
+        x += this + GAP;
+        (f, r)
     })
 }
 
@@ -842,7 +873,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 }),
             });
         };
-        if over.is_some() && page != Page::Clipboard {
+        if over.is_some() && !page.lent() {
             button(
                 tile.close(),
                 "×",
@@ -853,7 +884,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 DANGER,
             );
         }
-        if page == Page::Session || page == Page::Clipboard {
+        if page == Page::Session || page.lent() {
             let pinned = view
                 .foot
                 .as_ref()
@@ -863,11 +894,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 button(
                     tile.pin(),
                     // (On the clipboard's page it is "keep this in the memory".)
-                    if page == Page::Clipboard {
-                        "\u{f067}"
-                    } else {
-                        GLYPH_PIN
-                    },
+                    if page.lent() { "\u{f067}" } else { GLYPH_PIN },
                     Some(crate::options::NERD),
                     12.0,
                     on,
@@ -907,7 +934,11 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             let hot = view.hover == Some(Hover::Foot(which));
             bar.rects.push(RectInst {
                 rect: r,
-                radius: TILE_RADIUS,
+                radius: if which.round() {
+                    r.h / 2.0
+                } else {
+                    TILE_RADIUS
+                },
                 color: match (up, hot, bright) {
                     (true, _, _) => [ACCENT[0], ACCENT[1], ACCENT[2], 0.07],
                     (_, true, true) => [0.0, 0.0, 0.0, 0.14],
@@ -920,7 +951,10 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             });
             bar.labels.push(Label {
                 text: which.word().to_owned(),
-                pos: (r.x + r.w / 2.0, r.y + (r.h - TEXT_LINE) / 2.0),
+                pos: (
+                    r.x + r.w / 2.0,
+                    r.y + (r.h - TEXT_LINE) / 2.0 + if which.round() { 1.0 } else { 0.0 },
+                ),
                 max_w: r.w,
                 font_px: TEXT_PX,
                 line_px: TEXT_LINE,
@@ -928,7 +962,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 dim: false,
                 cache: true,
                 clip: Some(window),
-                family: None,
+                family: which.round().then_some(crate::options::NERD),
                 color: Some(if up {
                     [ACCENT[0], ACCENT[1], ACCENT[2], 1.0]
                 } else {
@@ -1430,8 +1464,21 @@ mod tests {
         let buttons = foot_buttons(rect);
         assert_eq!(
             buttons.map(|(f, _)| f),
-            [Foot::Memory, Foot::Pinned, Foot::Clipboard]
+            [
+                Foot::Memory,
+                Foot::Pinned,
+                Foot::Clipboard,
+                Foot::Dictionary,
+                Foot::Emoji
+            ]
         );
+        // The two named ones are as wide as each other; the three with an
+        // icon are round, at the right.
+        assert_eq!(buttons[0].1.w, buttons[1].1.w);
+        for (_, r) in &buttons[2..] {
+            assert_eq!((r.w, r.h), (FOOT_BUTTON_H, FOOT_BUTTON_H));
+        }
+        assert!(buttons[4].1.x + buttons[4].1.w <= rect.x + rect.w - LIST_PAD + 1.0);
         let list = list_rect(rect, true, low.h);
         assert_eq!(list.y, rect.y + FOOT_H);
         assert!(list.y + list.h <= low.seek.y);

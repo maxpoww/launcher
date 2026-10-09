@@ -4,7 +4,9 @@
 //! input box a memory is written in (on Memory's page: New, in its place);
 //! at the TOP of an open memory its name, floating over the items.
 
-use super::view::{Hover, Page, Paint, ACCENT, DANGER, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX};
+use super::view::{
+    Hover, Page, Paint, ACCENT, DANGER, FOOT_H, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX,
+};
 use crate::content::{GridContent, Label, Rect, RectInst};
 use crate::options::NERD;
 
@@ -134,6 +136,8 @@ pub(crate) struct Bottom {
     pub tray: Option<Rect>,
     /// How many emoji it holds, and how far its grid is scrolled.
     pick: (usize, f32),
+    /// How many rows of them are in view.
+    rows: f32,
     hint_y: f32,
 }
 
@@ -173,7 +177,29 @@ pub(crate) fn bottom(
             new = Some(Rect::new(x, y.round(), w, BOX_MIN));
             y -= STEP;
         }
-        Page::Pinned | Page::Clipboard => {}
+        Page::Pinned | Page::Clipboard | Page::Dictionary => {}
+        // The emoji's own page: the picker is all of it, under the head
+        // (it has its own search; the card's is not shown).
+        Page::Emoji => {
+            let top = rect.y + FOOT_H + STEP;
+            let tray = Rect::new(x, top.round(), w, (y - top).max(0.0).round());
+            let rows = ((tray.h - PICK_SEEK - PICK_KINDS - 14.0) / EMOJI_CELL)
+                .floor()
+                .max(1.0);
+            return Bottom {
+                h: rect.h - FOOT_H,
+                seek: Rect::new(rect.x, rect.y, 0.0, 0.0),
+                seek_clear: Rect::new(rect.x, rect.y, 0.0, 0.0),
+                input: None,
+                btns: [BoxBtn::Emoji, BoxBtn::Clip, BoxBtn::Talk, BoxBtn::Mic]
+                    .map(|b| (b, Rect::new(rect.x, rect.y, 0.0, 0.0))),
+                new: None,
+                tray: Some(tray),
+                pick: picking.unwrap_or((0, 0.0)),
+                rows,
+                hint_y: y,
+            };
+        }
     }
     y -= SEEK;
     let seek_w = if seeking { SEEK_OPEN_W.min(w) } else { SEEK };
@@ -203,6 +229,7 @@ pub(crate) fn bottom(
         new,
         tray,
         pick: picking.unwrap_or((0, 0.0)),
+        rows: PICK_ROWS,
         hint_y,
     }
 }
@@ -233,7 +260,7 @@ impl Bottom {
             tray.x + 6.0,
             tray.y + PICK_SEEK + 4.0,
             tray.w - 12.0,
-            PICK_ROWS * EMOJI_CELL,
+            self.rows * EMOJI_CELL,
         ))
     }
 
@@ -270,7 +297,7 @@ impl Bottom {
     /// How far the picker's grid can be scrolled.
     pub(crate) fn pick_span(&self) -> f32 {
         let rows = self.pick.0.div_ceil(EMOJI_COLS) as f32;
-        ((rows - PICK_ROWS) * EMOJI_CELL).max(0.0)
+        ((rows - self.rows) * EMOJI_CELL).max(0.0)
     }
 
     /// The picker's emoji that are in view, each with its cell (by its
@@ -279,7 +306,7 @@ impl Bottom {
         let grid = self.pick_grid();
         let (count, scroll) = self.pick;
         let first = (scroll / EMOJI_CELL).floor().max(0.0) as usize * EMOJI_COLS;
-        let last = (first + (PICK_ROWS as usize + 1) * EMOJI_COLS).min(count);
+        let last = (first + (self.rows as usize + 1) * EMOJI_COLS).min(count);
         (first..last).filter_map(move |n| {
             let grid = grid?;
             let cell = grid.w / EMOJI_COLS as f32;
@@ -322,8 +349,7 @@ impl Bottom {
         if self.tray.is_some_and(|r| r.contains(pos)) {
             return Some(Hover::Tray);
         }
-        let input = self.input.filter(|r| r.contains(pos))?;
-        let _ = input;
+        self.input.filter(|r| r.contains(pos))?;
         Some(
             self.btns
                 .iter()
@@ -488,74 +514,77 @@ pub(super) fn draw(
         ));
     }
 
-    // The search: a circle with the magnifier; open, a field.
-    let seeking = bar.seeking();
-    let on_seek = matches!(hover, Some(Hover::Seek | Hover::SeekClear));
-    boxed(
-        grid,
-        b.seek,
-        if seeking { RADIUS } else { SEEK / 2.0 },
-        plate,
-        if seeking {
-            accent(1.0)
-        } else if on_seek {
-            accent(0.5)
-        } else {
-            rim
-        },
-        if seeking { 1.5 } else { 1.0 },
-    );
-    let lens = Rect::new(b.seek.x, b.seek.y, SEEK, SEEK);
-    grid.labels.push(glyph(
-        GLYPH_SEARCH,
-        lens,
-        11.0,
-        if seeking { accent(1.0) } else { ink(0.6) },
-        clip,
-    ));
-    if seeking {
-        let caret = if bar.field == Some(Field::Seek) {
-            "|"
-        } else {
-            ""
-        };
-        grid.labels.push(label(
-            &format!("{}{caret}", bar.query),
-            (b.seek.x + SEEK, b.seek.y + 6.0),
-            b.seek.w - SEEK - 84.0,
-            12.0,
-            false,
-            ink(0.95),
+    // The search: a circle with the magnifier; open, a field. (Not on the
+    // emoji's page, whose picker has its own.)
+    if b.seek.w > 0.0 {
+        let seeking = bar.seeking();
+        let on_seek = matches!(hover, Some(Hover::Seek | Hover::SeekClear));
+        boxed(
+            grid,
+            b.seek,
+            if seeking { RADIUS } else { SEEK / 2.0 },
+            plate,
+            if seeking {
+                accent(1.0)
+            } else if on_seek {
+                accent(0.5)
+            } else {
+                rim
+            },
+            if seeking { 1.5 } else { 1.0 },
+        );
+        let lens = Rect::new(b.seek.x, b.seek.y, SEEK, SEEK);
+        grid.labels.push(glyph(
+            GLYPH_SEARCH,
+            lens,
+            11.0,
+            if seeking { accent(1.0) } else { ink(0.6) },
             clip,
         ));
-        if !bar.query.is_empty() {
-            let found = format!("{} found", bar.found);
+        if seeking {
+            let caret = if bar.field == Some(Field::Seek) {
+                "|"
+            } else {
+                ""
+            };
             grid.labels.push(label(
-                &found,
-                (
-                    b.seek_clear.x - about(found.chars().count(), 10.0) / 2.0 - 6.0,
-                    b.seek.y + 8.0,
-                ),
-                80.0,
-                10.0,
+                &format!("{}{caret}", bar.query),
+                (b.seek.x + SEEK, b.seek.y + 6.0),
+                b.seek.w - SEEK - 84.0,
+                12.0,
+                false,
+                ink(0.95),
+                clip,
+            ));
+            if !bar.query.is_empty() {
+                let found = format!("{} found", bar.found);
+                grid.labels.push(label(
+                    &found,
+                    (
+                        b.seek_clear.x - about(found.chars().count(), 10.0) / 2.0 - 6.0,
+                        b.seek.y + 8.0,
+                    ),
+                    80.0,
+                    10.0,
+                    true,
+                    ink(0.5),
+                    clip,
+                ));
+            }
+            grid.labels.push(label(
+                "×",
+                (b.seek_clear.x + b.seek_clear.w / 2.0, b.seek_clear.y),
+                b.seek_clear.w,
+                14.0,
                 true,
-                ink(0.5),
+                ink(if hover == Some(Hover::SeekClear) {
+                    0.95
+                } else {
+                    0.5
+                }),
                 clip,
             ));
         }
-        grid.labels.push(label(
-            "×",
-            (b.seek_clear.x + b.seek_clear.w / 2.0, b.seek_clear.y),
-            b.seek_clear.w,
-            14.0,
-            true,
-            ink(if hover == Some(Hover::SeekClear) {
-                0.95
-            } else {
-                0.5
-            }),
-            clip,
-        ));
     }
 
     // New, in the input box's place.
@@ -917,6 +946,14 @@ mod tests {
             assert_eq!(p.hit(mid(*r), false), Some(Hover::Kind(*kind)));
         }
         assert_eq!(Bottom::pick_row(2 * EMOJI_COLS + 3), 2.0 * EMOJI_CELL);
+        // On the emoji's own page the picker is the whole card under the
+        // head: more rows, no card search, nothing left for a list.
+        let page = bottom(rect, Page::Emoji, 1, false, Some((1800, 0.0)));
+        let all = page.tray.unwrap();
+        assert!(all.y >= rect.y + FOOT_H && all.y + all.h <= low);
+        assert!(page.emoji().count() > p.emoji().count());
+        assert_eq!((page.seek.w, page.h), (0.0, rect.h - FOOT_H));
+        assert!(page.kinds().all(|(_, r)| r.y + r.h <= all.y + all.h));
         assert!(b.tray.is_none() && b.emoji().next().is_none());
     }
 }
