@@ -784,6 +784,44 @@ fn camera_device() -> Option<std::path::PathBuf> {
     found.first().map(|(_, node)| std::path::Path::new("/dev").join(node))
 }
 
+/// The program that hands the loopback camera's frames on to the apps.
+const CAMERA_RELAY: &str = "golem-camera-relay";
+
+/// Start the relay: it reads the loopback device and offers the frames, in
+/// buffers of its OWN, as a camera under the phone's name. The device has
+/// two frames to lend; an app that keeps two while it draws (Snapshot) got
+/// every other frame, one that keeps three got none (measured, 2026-10-09)
+/// — the picture was never smooth. Through the relay an app keeping six
+/// still gets all sixty a second. `None` where the relay is not installed:
+/// the camera is then announced straight on the device (`camera_announce`).
+fn camera_relay(name: &str, device: &std::path::Path) -> Option<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    camera_withdraw(); // one left by a dock that went away mid-camera
+    let name: String = name.chars().filter(|c| !"\"\\{},".contains(*c)).collect();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    let programs = [std::path::PathBuf::from(CAMERA_RELAY), home.join(".local/bin").join(CAMERA_RELAY)];
+    for program in programs {
+        let mut cmd = std::process::Command::new(&program);
+        cmd.arg(device).arg(&name).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        // SAFETY: only an async-signal-safe call between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let Ok(mut relay) = cmd.spawn() else { continue };
+        // One that ends at once could not do it here.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        if matches!(relay.try_wait(), Ok(None)) {
+            info!("desktop: camera relay up ({})", program.display());
+            return Some(relay);
+        }
+        warn!("desktop: camera relay {} ended at once", program.display());
+    }
+    None
+}
+
 /// The name of the camera node we put in the session's media service.
 const CAMERA_NODE: &str = "golem-phone-camera";
 
@@ -923,14 +961,22 @@ fn camera(
         }
         other => other,
     };
+    let mut relay = None;
     if early.is_none() {
-        camera_announce(name, &device);
+        relay = camera_relay(name, &device);
+        if relay.is_none() {
+            camera_announce(name, &device);
+        }
         crate::desktop_send_notify(&format!(
             "{name}: {}",
             tr("is this computer's camera now: pick it by its name in any app. Its menu stops it.")
         ));
     }
     let status = early.or_else(|| child.wait().ok());
+    if let Some(mut relay) = relay {
+        let _ = relay.kill();
+        let _ = relay.wait();
+    }
     camera_withdraw();
     let by_hand = cameras.lock().ok().is_none_or(|mut on| on.remove(path).is_none());
     info!("desktop: {name} is no longer the camera ({status:?}, by hand: {by_hand})");
