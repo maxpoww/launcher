@@ -39,6 +39,9 @@ pub(crate) struct Volume {
     pub device: Option<String>,
     /// `mtp://…/`, for one that is an address and not a device (a phone).
     pub address: Option<String>,
+    /// A phone's USB node (`/dev/bus/usb/003/043`): new each time it is
+    /// plugged in, or drops off the port and comes back.
+    pub port: Option<String>,
     pub can_mount: bool,
     pub automount: bool,
     /// On a drive that can be taken out, or a phone/camera.
@@ -52,10 +55,13 @@ pub(crate) struct Volume {
 impl Volume {
     /// What it is told apart by, for as long as it is plugged in.
     fn id(&self) -> String {
-        self.device
-            .clone()
-            .or_else(|| self.address.clone())
-            .unwrap_or_else(|| self.name.clone())
+        // A phone keeps its address when it drops off the port and comes
+        // straight back (what it does when its owner allows the computer, or
+        // changes its USB mode): by the address alone it was "already
+        // tried" and stayed unmounted — a second Android never reached the
+        // desktop (Max, 2026-10-09). Its USB node is new each time.
+        let phone = || self.address.as_ref().map(|a| format!("{a} {}", self.port.as_deref().unwrap_or("")));
+        self.device.clone().or_else(phone).unwrap_or_else(|| self.name.clone())
     }
 }
 
@@ -117,8 +123,11 @@ pub(crate) fn parse_listing(listing: &str) -> Vec<Volume> {
             // keys below do not occur under a mount anyway).
             if let Some(dev) = line.strip_prefix("unix-device: ") {
                 let dev = dev.trim_matches('\'');
-                // (A phone's "device" is its USB node, not something to mount.)
-                if !dev.starts_with("/dev/bus/") {
+                // (A phone's "device" is its USB node, not something to
+                // mount — but it is what changes when the phone comes anew.)
+                if dev.starts_with("/dev/bus/") {
+                    vol.port = Some(dev.to_owned());
+                } else {
                     vol.device = Some(dev.to_owned());
                 }
             } else if let Some(root) = line.strip_prefix("activation_root=") {
@@ -427,6 +436,20 @@ Mount(1): share -> smb://nas/share/
         assert!(parse_listing(LISTING)
             .iter()
             .all(|v| v.name != "SAMSUNG MZVL21T0HCLR-00BL2"));
+    }
+
+    #[test]
+    fn a_phone_that_comes_back_is_a_new_arrival() {
+        let listing = |node: &str| {
+            format!(
+                "Volume(0): SAMSUNG Android\n  Type: GProxyVolume (GProxyVolumeMonitorMTP)\n  ids:\n   unix-device: '/dev/bus/usb/003/{node}'\n  activation_root=mtp://SAMSUNG_SAMSUNG_Android_R9HN80AD0QJ/\n  can_mount=1\n  can_eject=0\n  should_automount=1\n"
+            )
+        };
+        let (before, after) = (parse_listing(&listing("042")), parse_listing(&listing("043")));
+        assert_eq!(before[0].address, after[0].address);
+        assert_eq!(before[0].device, None, "its USB node is not something to mount");
+        assert_ne!(before[0].id(), after[0].id(), "off the port and back: to be mounted again");
+        assert_eq!(before[0].id(), parse_listing(&listing("042"))[0].id());
     }
 
     #[test]
