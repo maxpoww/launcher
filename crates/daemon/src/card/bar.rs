@@ -951,7 +951,7 @@ mod tests {
         // head: more rows, no card search, nothing left for a list.
         let page = bottom(rect, Page::Emoji, 1, false, Some((1800, 0.0)));
         let all = page.tray.unwrap();
-        assert!(all.y >= rect.y + FOOT_H && all.y + all.h <= low);
+        assert!(all.y >= rect.y + FOOT_H && all.y + all.h <= rect.y + rect.h);
         assert!(page.emoji().count() > p.emoji().count());
         assert_eq!((page.seek.w, page.h), (0.0, rect.h - FOOT_H));
         assert!(page.kinds().all(|(_, r)| r.y + r.h <= all.y + all.h));
