@@ -331,6 +331,10 @@ pub(crate) struct Card {
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
+    /// …the same lines as ranges of its characters, and where the
+    /// writing cursor is among them (0 = before the first).
+    draft_spans: Vec<(usize, usize)>,
+    caret: usize,
     /// What is being searched for on the page that is up.
     query: String,
     /// The memory's new name, while it is typed.
@@ -605,6 +609,95 @@ impl Card {
         self.recent.retain(|n| *n != at);
         self.recent.insert(0, at);
         self.recent.truncate(RECENT_EMOJI);
+    }
+
+    // ---- the input box's text and its writing cursor ----
+
+    fn draft_len(&self) -> usize {
+        self.draft.chars().count()
+    }
+
+    /// Where character `at` of the draft starts, in bytes.
+    fn draft_byte(&self, at: usize) -> usize {
+        self.draft
+            .char_indices()
+            .nth(at)
+            .map_or(self.draft.len(), |(b, _)| b)
+    }
+
+    /// Write `text` in at the cursor.
+    fn type_in(&mut self, text: &str) {
+        self.caret = self.caret.min(self.draft_len());
+        let at = self.draft_byte(self.caret);
+        self.draft.insert_str(at, text);
+        self.caret += text.chars().count();
+    }
+
+    /// Rub out the character before the cursor, or (`ahead`) the one after.
+    fn rub(&mut self, ahead: bool) {
+        self.caret = self.caret.min(self.draft_len());
+        if !ahead {
+            if self.caret == 0 {
+                return;
+            }
+            self.caret -= 1;
+        }
+        if self.caret < self.draft_len() {
+            let at = self.draft_byte(self.caret);
+            self.draft.remove(at);
+        }
+    }
+
+    /// The whole draft, taken (the box is empty again).
+    fn take_draft(&mut self) -> String {
+        self.caret = 0;
+        self.draft_spans.clear();
+        std::mem::take(&mut self.draft)
+    }
+
+    /// The lines of the draft as the box breaks them (at least one).
+    fn spans(&self) -> Vec<(usize, usize)> {
+        match self.draft_spans.is_empty() {
+            true => vec![(0, self.draft_len())],
+            false => self.draft_spans.clone(),
+        }
+    }
+
+    /// Which of those lines the cursor is on: the one it is inside — and
+    /// at a line's very end, that line, unless the next one starts right
+    /// there (a long line broken in two: the cursor is at its second part).
+    fn caret_line(&self) -> usize {
+        let spans = self.spans();
+        let at = self.caret;
+        spans
+            .iter()
+            .enumerate()
+            .position(|(n, (start, end))| {
+                at >= *start
+                    && (at < *end
+                        || (at == *end && spans.get(n + 1).is_none_or(|next| next.0 > *end)))
+            })
+            .unwrap_or(spans.len() - 1)
+    }
+
+    /// Move the cursor a line up (`-1`) or down (`1`), keeping how far
+    /// along the line it is; to the line's start or end with `edge`.
+    fn caret_line_move(&mut self, by: i32, edge: Option<bool>) {
+        let spans = self.spans();
+        let line = self.caret_line();
+        let (start, end) = spans[line];
+        match edge {
+            Some(false) => self.caret = start,
+            Some(true) => self.caret = end,
+            None => {
+                let to = line as i32 + by;
+                if to < 0 || to as usize >= spans.len() {
+                    return;
+                }
+                let (s, e) = spans[to as usize];
+                self.caret = (s + (self.caret - start)).min(e);
+            }
+        }
     }
 
     /// Whether the search is open (it has the cursor, or holds a query).
@@ -1617,7 +1710,7 @@ impl App {
             }
             // The input box: Enter keeps it in the memory, Ctrl+Enter sends
             // it to the window, Shift+Enter breaks the line.
-            (Field::Box, Keysym::Return | Keysym::KP_Enter) if shift => self.card.draft.push('\n'),
+            (Field::Box, Keysym::Return | Keysym::KP_Enter) if shift => self.card.type_in("\n"),
             (Field::Box, Keysym::Return | Keysym::KP_Enter) if ctrl => self.card_send_draft(),
             (Field::Box, Keysym::Return | Keysym::KP_Enter) => self.card_keep_draft(),
             (Field::Box, Keysym::v | Keysym::V) if ctrl => {
@@ -1625,13 +1718,27 @@ impl App {
                 if let Some(clip) = self.clip.history.first() {
                     if clip.kind == crate::clipboard::ClipKind::Text {
                         let text = clip.text.clone();
-                        self.card.draft.push_str(&text);
+                        self.card.type_in(&text);
                     }
                 }
             }
-            (Field::Box, Keysym::BackSpace) => {
-                self.card.draft.pop();
+            (Field::Box, Keysym::BackSpace) => self.card.rub(false),
+            (Field::Box, Keysym::Delete | Keysym::KP_Delete) => self.card.rub(true),
+            // The writing cursor: along the text, to a line's ends, up and
+            // down its lines (Max, 2026-10-09: *"i cant use the arrows to
+            // jump on the text"*).
+            (Field::Box, Keysym::Left | Keysym::KP_Left) => {
+                self.card.caret = self.card.caret.saturating_sub(1);
             }
+            (Field::Box, Keysym::Right | Keysym::KP_Right) => {
+                self.card.caret = (self.card.caret + 1).min(self.card.draft_len());
+            }
+            (Field::Box, Keysym::Home | Keysym::KP_Home) => {
+                self.card.caret_line_move(0, Some(false))
+            }
+            (Field::Box, Keysym::End | Keysym::KP_End) => self.card.caret_line_move(0, Some(true)),
+            (Field::Box, Keysym::Up | Keysym::KP_Up) => self.card.caret_line_move(-1, None),
+            (Field::Box, Keysym::Down | Keysym::KP_Down) => self.card.caret_line_move(1, None),
             (Field::Seek, Keysym::BackSpace) => {
                 self.card.query.pop();
             }
@@ -1650,7 +1757,7 @@ impl App {
                 self.card.field = Some(Field::Box);
             }
             _ => match (field, typed) {
-                (Field::Box, Some(s)) => self.card.draft.push_str(s),
+                (Field::Box, Some(s)) => self.card.type_in(s),
                 (Field::Seek, Some(s)) => self.card.query.push_str(s),
                 (Field::Name, Some(s)) => self.card.naming.push_str(s),
                 (Field::Pick, Some(s)) => {
@@ -1691,7 +1798,7 @@ impl App {
     /// Enter in the input box: what is written is kept in the memory, and
     /// the cursor stays for the next thing.
     fn card_keep_draft(&mut self) {
-        let text = std::mem::take(&mut self.card.draft);
+        let text = self.card.take_draft();
         if text.trim().is_empty() {
             return;
         }
@@ -1708,7 +1815,7 @@ impl App {
     /// Ctrl+Enter in the input box: what is written goes into the card's
     /// window, and the cursor goes back there with it.
     fn card_send_draft(&mut self) {
-        let text = std::mem::take(&mut self.card.draft);
+        let text = self.card.take_draft();
         if text.trim().is_empty() {
             return;
         }
@@ -1768,7 +1875,7 @@ impl App {
             };
             self.after_ms(wait, |_| card_paste_key());
         } else if matches!(self.card.field, Some(Field::Box | Field::Pick)) {
-            self.card.draft.push_str(emoji);
+            self.card.type_in(emoji);
             self.request_card_draw();
         } else if self.card.field.is_none() {
             self.serve_transient_text(emoji);
@@ -1795,6 +1902,58 @@ impl App {
         }
     }
 
+    /// What was said, written in where the cursor is (a space before it
+    /// if it follows a word).
+    pub(super) fn card_say_in(&mut self, text: &str) {
+        let at = self.card.caret.min(self.card.draft_len());
+        let before = self.card.draft.chars().nth(at.wrapping_sub(1));
+        if at > 0 && before.is_some_and(|c| !c.is_whitespace()) {
+            self.card.type_in(" ");
+        }
+        self.card.type_in(text);
+    }
+
+    /// Put the writing cursor where the pointer is in the input box: on
+    /// the line under it, between the two letters it is nearest to.
+    fn card_place_caret(&mut self) {
+        let (Some(ptr), Some(rect)) = (self.card.ptr, self.card.vrect()) else {
+            return;
+        };
+        let pos = self.card.inside(ptr);
+        let low = bottom(
+            rect,
+            self.card.page,
+            self.card.draft_lines.len(),
+            self.card.seeking(),
+            self.card.pick(),
+        );
+        let spans = self.card.spans();
+        let first = first_line(self.card.draft_lines.len(), Some(self.card.caret_line()));
+        let Some((line, x)) = low.text_at(pos, spans.len(), first) else {
+            return;
+        };
+        let Some(renderer) = self.card_renderer.as_mut() else {
+            return;
+        };
+        let letters: Vec<char> = self.card.draft.chars().collect();
+        let (start, end) = spans[line.min(spans.len() - 1)];
+        // The nearest gap between letters: where the width of what is
+        // before it comes closest to the pointer.
+        let mut best = (start, f32::MAX);
+        let mut before = String::new();
+        for at in start..=end {
+            let far = (renderer.measure_text(&before, TEXT_PX + 0.5, None) - x).abs();
+            if far < best.1 {
+                best = (at, far);
+            }
+            if let Some(c) = letters.get(at) {
+                before.push(*c);
+            }
+        }
+        self.card.caret = best.0;
+        self.request_card_draw();
+    }
+
     /// A button, let go where it was pressed.
     fn card_tap(&mut self, what: Hover) {
         self.card.say = None;
@@ -1812,7 +1971,13 @@ impl App {
                 self.sync_card_input();
                 self.request_card_draw();
             }
-            Hover::Input => self.card_take_keys(Field::Box),
+            // A click in the input box: the cursor goes there, and where in
+            // the text it was clicked (Max: *"or click on a spot to place
+            // my writing cursor"*).
+            Hover::Input => {
+                self.card_take_keys(Field::Box);
+                self.card_place_caret();
+            }
             Hover::Btn(which) => self.card_box_button(which),
             // New, in the input box's place: the new memory opens with the
             // cursor already in its box (Max: *"so i click on it and i have
@@ -2510,15 +2675,26 @@ impl App {
         } else {
             30
         };
-        self.card.draft_lines = if self.card.draft.is_empty() {
-            Vec::new()
-        } else {
-            let mut lines = wrap(&self.card.draft, cols.max(8), 200);
-            if self.card.draft.ends_with('\n') {
-                lines.push(String::new());
-            }
-            lines
+        // (As ranges of its characters, so the cursor has a place in it.)
+        self.card.caret = self.card.caret.min(self.card.draft_len());
+        self.card.draft_spans = wrap_spans(&self.card.draft, cols.max(8));
+        let letters: Vec<char> = self.card.draft.chars().collect();
+        self.card.draft_lines = match self.card.draft.is_empty() {
+            true => Vec::new(),
+            false => self
+                .card
+                .draft_spans
+                .iter()
+                .map(|(s, e)| letters[*s..*e].iter().collect())
+                .collect(),
         };
+        // Where the writing cursor is: its line, and how far along it.
+        let caret = (self.card.field == Some(Field::Box)).then(|| {
+            let line = self.card.caret_line();
+            let start = self.card.spans()[line].0;
+            let before: String = letters[start..self.card.caret.max(start)].iter().collect();
+            (line, renderer.measure_text(&before, TEXT_PX + 0.5, None))
+        });
         // The search narrows the list to what matches.
         let found: Vec<Item>;
         let listed: &[Item] = if self.card.query.trim().is_empty() {
@@ -2629,6 +2805,7 @@ impl App {
                         listed.len()
                     },
                     field: self.card.field,
+                    caret,
                     rec: recording.filter(|(_, talk)| !talk).map(|(secs, _)| secs),
                     talk,
                     hint,
@@ -3269,6 +3446,7 @@ impl App {
             // · `clipboard` (its page).
             "write" => {
                 self.card.draft = rest.replace("\\n", "\n");
+                self.card.caret = self.card.draft_len();
                 self.request_card_draw();
                 format!("draft {:?}", self.card.draft)
             }

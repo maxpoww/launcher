@@ -436,6 +436,11 @@ The big daemon files are cohesive but long — go straight to the function:
   click off the card gives it back — `card_drop_keys` — because the card's window is still the
   compositor's active one: a click on it changes nothing there and the keyboard stayed on the card;
   `KbSurface::Card`; keys route first in `main.rs::handle_key_event` → `card_key`). In the box
+  it has a real WRITING CURSOR (`Card::caret`, a place among the draft's characters;
+  `model::wrap_spans` breaks the draft into lines WITHOUT dropping a character, so a place in a
+  line is a place in the text): the arrows, Home/End, Delete, and a click puts it between the two
+  letters nearest the pointer (`card_place_caret`, by measured widths); the other fields (search,
+  name, the picker's search) still write at their end only.
   ENTER KEEPS what is written in the memory, CTRL+ENTER SENDS it to the window (text only, pasted
   after the keyboard is handed back), Shift+Enter breaks the line, Escape gives the keyboard back.
   The EMOJI picker (a tray over the box: EVERY emoji of `emoji_table::EMOJI` on a grid that

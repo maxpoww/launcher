@@ -310,10 +310,7 @@ impl App {
                         app.card.say = Some("Nothing was made out")
                     }
                     Done::Words(text) => {
-                        if !app.card.draft.is_empty() && !app.card.draft.ends_with([' ', '\n']) {
-                            app.card.draft.push(' ');
-                        }
-                        app.card.draft.push_str(&text);
+                        app.card_say_in(&text);
                     }
                     Done::Failed(why) => app.card.say = Some(why),
                 }

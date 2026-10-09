@@ -95,6 +95,9 @@ pub(crate) struct BarView<'a> {
     pub found: usize,
     /// Which field has the cursor.
     pub field: Option<Field>,
+    /// Where the writing cursor is in the input box: the line of `draft`
+    /// it is on, and how far along it (px).
+    pub caret: Option<(usize, f32)>,
     /// A voice note is being recorded: for how many seconds now.
     pub rec: Option<u32>,
     /// Talking is being listened to / written out.
@@ -235,6 +238,26 @@ pub(crate) fn bottom(
 }
 
 impl Bottom {
+    /// Which of the input box's lines (of `lines`, the first in view being
+    /// `first`) is at height `y`, and how far along it `x` is.
+    pub(crate) fn text_at(
+        &self,
+        pos: (f32, f32),
+        lines: usize,
+        first: usize,
+    ) -> Option<(usize, f32)> {
+        let (r, text) = (self.input?, self.text()?);
+        let shown = lines.clamp(1, BOX_LINES);
+        let top = r.y + (r.h - shown as f32 * TEXT_LINE) / 2.0;
+        let row = ((pos.1 - top) / TEXT_LINE)
+            .floor()
+            .clamp(0.0, shown as f32 - 1.0) as usize;
+        Some((
+            (first + row).min(lines.saturating_sub(1)),
+            (pos.0 - text.x).max(0.0),
+        ))
+    }
+
     /// The part of the input box the words are in.
     pub(crate) fn text(&self) -> Option<Rect> {
         let r = self.input?;
@@ -356,6 +379,16 @@ impl Bottom {
                 .find(|(_, r)| r.contains(pos))
                 .map_or(Hover::Input, |(b, _)| Hover::Btn(*b)),
         )
+    }
+}
+
+/// The first of the input box's lines that is in view: all of them while
+/// they fit; past that, the ones up to the line the cursor is on.
+pub(crate) fn first_line(lines: usize, caret: Option<usize>) -> usize {
+    let over = lines.saturating_sub(BOX_LINES);
+    match caret {
+        Some(line) => (line + 1).saturating_sub(BOX_LINES).min(over),
+        None => over,
     }
 }
 
@@ -802,39 +835,55 @@ pub(super) fn draw(
                 [DANGER[0], DANGER[1], DANGER[2], 1.0],
                 clip,
             ));
-        } else if bar.draft.is_empty() || (bar.draft.len() == 1 && bar.draft[0].is_empty()) {
-            let (words, color) = match bar.talk {
-                Some(say) => (say, accent(0.9)),
-                None if typing => ("|", ink(0.95)),
-                None => ("Write to this memory", ink(0.42)),
-            };
-            grid.labels.push(label(
-                words,
-                (text.x, top),
-                text.w,
-                TEXT_PX + 0.5,
-                false,
-                color,
-                clip,
-            ));
         } else {
-            let first = bar.draft.len().saturating_sub(BOX_LINES);
-            for (n, line) in bar.draft[first..].iter().enumerate() {
-                let last = first + n + 1 == bar.draft.len();
-                let shown = if last && typing {
-                    format!("{line}|")
-                } else {
-                    line.clone()
+            let empty = bar.draft.is_empty() || (bar.draft.len() == 1 && bar.draft[0].is_empty());
+            let first = first_line(bar.draft.len(), bar.caret.map(|c| c.0));
+            if empty {
+                // (Nothing written: what to do, unless the cursor is here.)
+                let words = match bar.talk {
+                    Some(say) => Some((say, accent(0.9))),
+                    None if typing => None,
+                    None => Some(("Write to this memory", ink(0.42))),
                 };
-                grid.labels.push(label(
-                    &shown,
-                    (text.x, top + n as f32 * TEXT_LINE),
-                    text.w,
-                    TEXT_PX + 0.5,
-                    false,
-                    ink(0.95),
-                    clip,
-                ));
+                if let Some((words, color)) = words {
+                    grid.labels.push(label(
+                        words,
+                        (text.x, top),
+                        text.w,
+                        TEXT_PX + 0.5,
+                        false,
+                        color,
+                        clip,
+                    ));
+                }
+            } else {
+                for (n, line) in bar.draft.iter().skip(first).take(BOX_LINES).enumerate() {
+                    grid.labels.push(label(
+                        line,
+                        (text.x, top + n as f32 * TEXT_LINE),
+                        text.w + 40.0,
+                        TEXT_PX + 0.5,
+                        false,
+                        ink(0.95),
+                        clip,
+                    ));
+                }
+            }
+            // The writing cursor, where it is in the text.
+            if let (true, Some((line, x))) = (typing, bar.caret) {
+                let row = line.saturating_sub(first).min(BOX_LINES - 1) as f32;
+                grid.rects.push(RectInst {
+                    rect: Rect::new(
+                        (text.x + x).round(),
+                        top + row * TEXT_LINE + 2.0,
+                        1.5,
+                        TEXT_LINE - 3.0,
+                    ),
+                    radius: 0.0,
+                    color: accent(1.0),
+                    glass: 0.0,
+                    border: 0.0,
+                });
             }
         }
         if !bar.hint.is_empty() {
@@ -953,5 +1002,14 @@ mod tests {
         assert_eq!((page.seek.w, page.h), (0.0, rect.h - FOOT_H));
         assert!(page.kinds().all(|(_, r)| r.y + r.h <= all.y + all.h));
         assert!(b.tray.is_none() && b.emoji().next().is_none());
+        // The input box shows the lines up to the one the cursor is on; a
+        // point in it is a line and a distance along it.
+        assert_eq!(first_line(3, Some(1)), 0);
+        assert_eq!(first_line(9, None), 9 - BOX_LINES);
+        assert_eq!(first_line(9, Some(0)), 0);
+        assert_eq!(first_line(9, Some(6)), 7 - BOX_LINES);
+        let text = b.text().unwrap();
+        let at = b.text_at((text.x + 30.0, text.y + text.h / 2.0), 1, 0);
+        assert_eq!(at, Some((0, 30.0)));
     }
 }

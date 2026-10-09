@@ -272,6 +272,42 @@ pub(crate) fn wrap(text: &str, cols: usize, max: usize) -> Vec<String> {
     out
 }
 
+/// Break `text` into the lines of a box `cols` characters wide, as RANGES
+/// of its characters (start, end): its own line breaks end a line (the
+/// break itself is in no line), a long line breaks after its last space
+/// (mid-word where there is none). Unlike [`wrap`] nothing is trimmed or
+/// dropped, so a place in a line is a place in the text — what a writing
+/// cursor needs. A text that ends in a line break has an empty last line.
+pub(crate) fn wrap_spans(text: &str, cols: usize) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let cols = cols.max(4);
+    let mut spans = Vec::new();
+    let mut start = 0;
+    loop {
+        let end = (start..chars.len())
+            .find(|&i| chars[i] == '\n')
+            .unwrap_or(chars.len());
+        if start == end {
+            spans.push((start, end));
+        }
+        let mut at = start;
+        while at < end {
+            let mut to = (at + cols).min(end);
+            if to < end {
+                if let Some(space) = (at + 1..=to).rev().find(|&i| chars[i - 1] == ' ') {
+                    to = space;
+                }
+            }
+            spans.push((at, to));
+            at = to;
+        }
+        if end == chars.len() {
+            return spans;
+        }
+        start = end + 1;
+    }
+}
+
 /// What a local path is to the card.
 pub(crate) fn kind_of(path: &Path) -> Kind {
     if path.is_dir() {
@@ -618,5 +654,18 @@ mod tests {
         let old = when_text(now - 40 * 86_400, now);
         assert!(old.contains(' ') && !old.contains(':'), "{old}");
         assert_eq!(when_text(0, now), "");
+    }
+
+    #[test]
+    fn a_box_of_text_is_lines_that_keep_every_character() {
+        // Its own breaks end a line; a long line breaks after a space.
+        assert_eq!(wrap_spans("ab\ncd", 10), [(0, 2), (3, 5)]);
+        assert_eq!(wrap_spans("one two three", 8), [(0, 8), (8, 13)]);
+        // No space to break at: mid-word.
+        assert_eq!(wrap_spans("abcdefghij", 4), [(0, 4), (4, 8), (8, 10)]);
+        // Nothing is one empty line; a trailing break opens another.
+        assert_eq!(wrap_spans("", 10), [(0, 0)]);
+        assert_eq!(wrap_spans("ab\n", 10), [(0, 2), (3, 3)]);
+        assert_eq!(wrap_spans("a\n\nb", 10), [(0, 1), (2, 2), (3, 4)]);
     }
 }

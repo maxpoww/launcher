@@ -1460,6 +1460,7 @@ mod tests {
                     query: "",
                     found: 0,
                     field: None,
+                    caret: None,
                     rec: None,
                     talk: None,
                     hint: "",
