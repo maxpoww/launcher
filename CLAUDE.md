@@ -448,7 +448,12 @@ The big daemon files are cohesive but long — go straight to the function:
   it has a real WRITING CURSOR (`Card::caret`, a place among the draft's characters;
   `model::wrap_spans` breaks the draft into lines WITHOUT dropping a character, so a place in a
   line is a place in the text): the arrows, Home/End, Delete, and a click puts it between the two
-  letters nearest the pointer (`card_place_caret`, by measured widths); the other fields (search,
+  letters nearest the pointer (`card_place_caret`, by measured widths); and a SELECTION
+  (`Card::anchor` = its other end: Shift with a move, Ctrl+A, or a press in the words and travel —
+  `Press::Select`; typing, Backspace and Delete replace it, Ctrl+C / Ctrl+X copy and cut it), drawn
+  as a band per line behind the words (`BarView::select`); the wheel over the box scrolls its lines
+  (`Card::draft_first`), and its lines break by the measured width of each letter
+  (`model::wrap_spans_by`, `Card::letter_w`); the other fields (search,
   name, the picker's search) still write at their end only.
   ENTER KEEPS what is written in the memory, CTRL+ENTER SENDS it to the window (text only, pasted
   after the keyboard is handed back), Shift+Enter breaks the line, Escape gives the keyboard back.

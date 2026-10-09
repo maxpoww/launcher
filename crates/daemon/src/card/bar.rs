@@ -103,6 +103,9 @@ pub(crate) struct BarView<'a> {
     pub caret: Option<(usize, f32)>,
     /// The first of its lines that is in view.
     pub first: usize,
+    /// What is selected in it: for each line it touches, from where to
+    /// where along that line (px).
+    pub select: &'a [(usize, f32, f32)],
     /// A voice note is being recorded: for how many seconds now.
     pub rec: Option<u32>,
     /// Talking is being listened to / written out.
@@ -843,6 +846,24 @@ pub(super) fn draw(
         } else {
             let empty = bar.draft.is_empty() || (bar.draft.len() == 1 && bar.draft[0].is_empty());
             let first = bar.first.min(bar.draft.len().saturating_sub(1));
+            // What is selected, behind the words.
+            for (line, from, to) in bar.select {
+                if *line < first || *line >= first + BOX_LINES {
+                    continue;
+                }
+                grid.rects.push(RectInst {
+                    rect: Rect::new(
+                        (text.x + from).round(),
+                        top + (line - first) as f32 * TEXT_LINE + 1.0,
+                        (to - from).max(3.0).round(),
+                        TEXT_LINE - 1.0,
+                    ),
+                    radius: 2.0,
+                    color: accent(0.34),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
             if empty {
                 // (Nothing written: what to do, unless the cursor is here.)
                 let words = match bar.talk {

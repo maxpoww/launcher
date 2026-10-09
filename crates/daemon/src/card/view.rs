@@ -1462,6 +1462,7 @@ mod tests {
                     field: None,
                     caret: None,
                     first: 0,
+                    select: &[],
                     rec: None,
                     talk: None,
                     hint: "",

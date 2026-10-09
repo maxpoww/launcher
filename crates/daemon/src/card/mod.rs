@@ -165,6 +165,8 @@ const PARKED: u32 = 8;
 /// The left button, held.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Press {
+    /// In the input box's words: travel selects them.
+    Select,
     /// On a button of any kind (a pin, a tab, the search, a button of the
     /// input box…): let go there and it acts.
     Tap(Hover),
@@ -340,6 +342,9 @@ pub(crate) struct Card {
     /// worth a line.
     draft_first: Option<usize>,
     draft_wheel: f32,
+    /// The other end of what is SELECTED in the input box (the cursor is
+    /// one end); `None`, or the cursor's own place: nothing is.
+    anchor: Option<usize>,
     /// How wide each letter met in the input box is (measured once).
     letter_w: HashMap<char, f32>,
     /// What is being searched for on the page that is up.
@@ -632,8 +637,38 @@ impl Card {
             .map_or(self.draft.len(), |(b, _)| b)
     }
 
-    /// Write `text` in at the cursor.
+    /// What is selected in the input box: from which character to which.
+    fn selected(&self) -> Option<(usize, usize)> {
+        let (a, b) = (
+            self.anchor?.min(self.draft_len()),
+            self.caret.min(self.draft_len()),
+        );
+        (a != b).then_some((a.min(b), a.max(b)))
+    }
+
+    /// The selected words themselves.
+    fn selection(&self) -> Option<String> {
+        let (from, to) = self.selected()?;
+        Some(self.draft.chars().skip(from).take(to - from).collect())
+    }
+
+    /// Take what is selected out of the text; the cursor is where it was.
+    /// Whether there was anything.
+    fn cut(&mut self) -> bool {
+        let Some((from, to)) = self.selected() else {
+            self.anchor = None;
+            return false;
+        };
+        let (a, b) = (self.draft_byte(from), self.draft_byte(to));
+        self.draft.replace_range(a..b, "");
+        self.caret = from;
+        self.anchor = None;
+        true
+    }
+
+    /// Write `text` in at the cursor (over what is selected, if anything is).
     fn type_in(&mut self, text: &str) {
+        self.cut();
         self.caret = self.caret.min(self.draft_len());
         let at = self.draft_byte(self.caret);
         self.draft.insert_str(at, text);
@@ -642,6 +677,10 @@ impl Card {
 
     /// Rub out the character before the cursor, or (`ahead`) the one after.
     fn rub(&mut self, ahead: bool) {
+        // (With words selected, either key rubs those out.)
+        if self.cut() {
+            return;
+        }
         self.caret = self.caret.min(self.draft_len());
         if !ahead {
             if self.caret == 0 {
@@ -658,6 +697,7 @@ impl Card {
     /// The whole draft, taken (the box is empty again).
     fn take_draft(&mut self) -> String {
         self.caret = 0;
+        self.anchor = None;
         self.draft_first = None;
         self.draft_spans.clear();
         std::mem::take(&mut self.draft)
@@ -1719,6 +1759,29 @@ impl App {
         if field == Field::Box {
             // (Typing or moving the cursor: the box shows where it is again.)
             self.card.draft_first = None;
+            // A move of the cursor with Shift held selects from where it
+            // was; without, whatever was selected is let go.
+            let moves = matches!(
+                keysym,
+                Keysym::Left
+                    | Keysym::Right
+                    | Keysym::Up
+                    | Keysym::Down
+                    | Keysym::Home
+                    | Keysym::End
+                    | Keysym::KP_Left
+                    | Keysym::KP_Right
+                    | Keysym::KP_Up
+                    | Keysym::KP_Down
+                    | Keysym::KP_Home
+                    | Keysym::KP_End
+            );
+            if moves && shift {
+                let at = self.card.caret;
+                self.card.anchor.get_or_insert(at);
+            } else if moves {
+                self.card.anchor = None;
+            }
         }
         let typed = utf8
             .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
@@ -1736,6 +1799,20 @@ impl App {
             (Field::Box, Keysym::Return | Keysym::KP_Enter) if shift => self.card.type_in("\n"),
             (Field::Box, Keysym::Return | Keysym::KP_Enter) if ctrl => self.card_send_draft(),
             (Field::Box, Keysym::Return | Keysym::KP_Enter) => self.card_keep_draft(),
+            // Select all, copy, cut — as any text field (Max, 2026-10-09:
+            // *"so i can select all and erase it"*).
+            (Field::Box, Keysym::a | Keysym::A) if ctrl => {
+                self.card.anchor = Some(0);
+                self.card.caret = self.card.draft_len();
+            }
+            (Field::Box, Keysym::c | Keysym::C | Keysym::x | Keysym::X) if ctrl => {
+                if let Some(text) = self.card.selection() {
+                    self.serve_transient_text(&text);
+                    if matches!(keysym, Keysym::x | Keysym::X) {
+                        self.card.cut();
+                    }
+                }
+            }
             (Field::Box, Keysym::v | Keysym::V) if ctrl => {
                 // Paste, as any text field does.
                 if let Some(clip) = self.clip.history.first() {
@@ -2725,6 +2802,23 @@ impl App {
             let before: String = letters[start..self.card.caret.max(start)].iter().collect();
             (line, renderer.measure_text(&before, TEXT_PX + 0.5, None))
         });
+        // What is selected in it: for each line it touches, from where to
+        // where along it.
+        let mut select: Vec<(usize, f32, f32)> = Vec::new();
+        if let (Some(Field::Box), Some((from, to))) = (self.card.field, self.card.selected()) {
+            for (line, (start, end)) in self.card.spans().into_iter().enumerate() {
+                let (a, b) = (from.max(start), to.min(end));
+                if a > b || (a == b && !(from <= start && to > end)) {
+                    continue;
+                }
+                let upto = |at: usize, r: &mut crate::renderer::Renderer| {
+                    let before: String = letters[start..at.max(start)].iter().collect();
+                    r.measure_text(&before, TEXT_PX + 0.5, None)
+                };
+                let (x0, x1) = (upto(a, renderer), upto(b, renderer));
+                select.push((line, x0, x1));
+            }
+        }
         // The search narrows the list to what matches.
         let found: Vec<Item>;
         let listed: &[Item] = if self.card.query.trim().is_empty() {
@@ -2837,6 +2931,7 @@ impl App {
                     field: self.card.field,
                     caret,
                     first: self.card.draft_top(),
+                    select: &select,
                     rec: recording.filter(|(_, talk)| !talk).map(|(secs, _)| secs),
                     talk,
                     hint,
@@ -3012,6 +3107,17 @@ impl App {
                         self.card_drop_keys();
                         return;
                     }
+                    // In the input box's words: the cursor goes there, and
+                    // travel from here selects (`Press::Select`).
+                    if self.card.hit(at) == Some(Hover::Input) && self.card.grip(at).is_none() {
+                        self.card.say = None;
+                        self.card_take_keys(Field::Box);
+                        self.card_place_caret();
+                        self.card.anchor = Some(self.card.caret);
+                        self.card.press = Some(Press::Select);
+                        self.card_cursor();
+                        return;
+                    }
                     let edge = self.card.grip(at).zip(self.card.rect).zip(self.card.spot);
                     self.card.press = match self.card.hit(at) {
                         // A side edge first: it is the card's, whatever
@@ -3044,6 +3150,14 @@ impl App {
                             if self.card_still_on(what) {
                                 self.card_tap(what);
                             }
+                        }
+                        // (Let go where it was pressed: a click, nothing
+                        // selected.)
+                        Some(Press::Select) => {
+                            if self.card.anchor == Some(self.card.caret) {
+                                self.card.anchor = None;
+                            }
+                            self.request_card_draw();
                         }
                         Some(Press::Slide { moved: true, .. }) => self.card_settle(),
                         Some(Press::Resize { .. }) => self.card_settle(),
@@ -3249,6 +3363,12 @@ impl App {
         let before = self.card.ptr.and_then(|p| self.card.hit(p));
         self.card.ptr = Some((x, y));
         match self.card.press {
+            // Travel in the input box's words selects them, from where the
+            // press was to where the pointer is.
+            Some(Press::Select) => {
+                self.card_place_caret();
+                return;
+            }
             // (A session in memory is not carried anywhere: it is clicked.)
             Some(Press::Item { id, at, serial })
                 if self.card.page != Page::Memory && (x - at.0).hypot(y - at.1) >= DRAG_START =>
@@ -3502,6 +3622,25 @@ impl App {
             "write" => {
                 self.card.draft = rest.replace("\\n", "\n");
                 self.card.caret = self.card.draft_len();
+                self.request_card_draw();
+                format!("draft {:?}", self.card.draft)
+            }
+            // `select <from> <to>`: those characters of the box, selected
+            // (the box is given the cursor so it shows) · `type <text>`:
+            // written in at the cursor, over what is selected.
+            "select" => {
+                let mut ends = rest
+                    .split_whitespace()
+                    .filter_map(|n| n.parse::<usize>().ok());
+                let (from, to) = (ends.next().unwrap_or(0), ends.next().unwrap_or(usize::MAX));
+                self.card.field = Some(Field::Box);
+                self.card.anchor = Some(from.min(self.card.draft_len()));
+                self.card.caret = to.min(self.card.draft_len());
+                self.request_card_draw();
+                format!("selected {:?}", self.card.selection())
+            }
+            "type" => {
+                self.card.type_in(rest);
                 self.request_card_draw();
                 format!("draft {:?}", self.card.draft)
             }
