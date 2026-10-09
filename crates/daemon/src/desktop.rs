@@ -848,6 +848,9 @@ fn camera_fed(device: &std::path::Path) -> bool {
     }
 }
 
+/// How long the camera's frames are held to even out their pace (ms).
+const CAMERA_BUFFER_MS: u32 = 50;
+
 /// How long scrcpy is given to start feeding the camera device.
 const CAMERA_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -871,9 +874,23 @@ fn camera(
     let mut cmd = std::process::Command::new("scrcpy");
     cmd.args(["--video-source=camera", "--camera-facing=back", "--camera-ar=16:9", "--max-size=1920"])
         .args(["--camera-fps=30", "--no-audio", "--no-window"])
+        // Frames come off the phone up to 20 ms early or late (measured);
+        // held this long they go out evenly. (80 ms was tried first, on a
+        // day the picture was choppy for another reason, and judged worse.)
+        .arg(format!("--v4l2-buffer={CAMERA_BUFFER_MS}"))
         .arg(format!("--v4l2-sink={}", device.display()));
     if let Some(serial) = serial {
         cmd.arg(format!("--serial={serial}"));
+    }
+    // It goes when the dock goes: left behind, it kept the phone's camera
+    // on with no row anywhere to stop it.
+    // SAFETY: only an async-signal-safe call between fork and exec.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
     }
     let mut child = match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
         Ok(child) => child,
