@@ -44,6 +44,9 @@ pub(crate) enum Kind {
     Image,
     File,
     Folder,
+    /// A voice note: `path` is its recording, `aspect` holds how many
+    /// seconds it lasts.
+    Voice,
 }
 
 impl Kind {
@@ -54,6 +57,7 @@ impl Kind {
             Kind::Image => Some("IMAGE"),
             Kind::File => Some("FILE"),
             Kind::Folder => Some("FOLDER"),
+            Kind::Voice => None,
         }
     }
 }
@@ -135,58 +139,72 @@ pub(super) fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// A session in memory as ONE row of the list: when it was put away and
-/// how much is in it, then the start of its first things. (A row is drawn
-/// as a text item whose id is the session's.)
+/// A memory as ONE row of Memory's page, as a messenger lists a chat: its
+/// name on the first line, the last thing in it on the second. (A row is
+/// drawn from an item whose id is the memory's and whose time is its last
+/// thing's.)
 pub(super) fn session_row(session: &Past) -> Item {
-    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.at);
-    let when = crate::desktop_props::date_text(Some(when)).unwrap_or_default();
-    let n = session.items.len();
-    // Its name on the first line; when it is from and how much is in it
-    // on the second.
-    let count = format!("{n} {}", if n == 1 { "item" } else { "items" });
-    let mut body = match &session.name {
-        Some(name) => format!("{name}\n{when} · {count}"),
-        None => format!("{when} · {count}"),
+    let name = session
+        .name
+        .clone()
+        .unwrap_or_else(|| "Untitled".to_owned());
+    let last = match session.items.last() {
+        Some(item) if item.kind == Kind::Voice => "Voice note".to_owned(),
+        Some(item) => item
+            .body
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_owned(),
+        None => "Nothing yet".to_owned(),
     };
-    for item in session.items.iter().take(ROW_PEEK) {
-        let first = item.body.trim().lines().next().unwrap_or("").trim();
-        let short: String = first.chars().take(ROW_CHARS).collect();
-        body.push('\n');
-        body.push_str(&short);
-        if first.chars().count() > ROW_CHARS {
-            body.push('…');
-        }
-    }
     Item {
         id: session.id,
         kind: Kind::Text,
-        body,
+        body: format!("{name}\n{last}"),
         path: None,
         aspect: 0.0,
         owned: false,
-        at: session.at,
+        at: session
+            .items
+            .last()
+            .map_or(session.at, |it| it.at.max(session.at)),
         from: None,
     }
 }
 
-/// Memory's first row: it starts a session for the window the card is on.
-pub(super) fn new_row() -> Item {
-    Item {
-        id: super::view::NEW_ROW,
-        kind: Kind::Text,
-        body: "+  New session".to_owned(),
-        path: None,
-        aspect: 0.0,
-        owned: false,
-        at: 0,
-        from: None,
+/// When `at` was, as a messenger says it next to `now`: the time for
+/// today, the day for anything older ("14:02", "Oct 6"). Local time.
+pub(crate) fn when_text(at: u64, now: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    if at == 0 {
+        return String::new();
+    }
+    let local = |secs: u64| -> Option<libc::tm> {
+        let secs = secs as libc::time_t;
+        // SAFETY: `localtime_r` fills a caller-owned `tm` from a valid `time_t`.
+        unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            (!libc::localtime_r(&secs, &mut tm).is_null()).then_some(tm)
+        }
+    };
+    let (Some(then), Some(today)) = (local(at), local(now)) else {
+        return String::new();
+    };
+    if (then.tm_year, then.tm_yday) == (today.tm_year, today.tm_yday) {
+        format!("{:02}:{:02}", then.tm_hour, then.tm_min)
+    } else {
+        format!(
+            "{} {}",
+            MONTHS[(then.tm_mon as usize).min(11)],
+            then.tm_mday
+        )
     }
 }
-
-/// How many of a session's things its row shows, and how much of each.
-const ROW_PEEK: usize = 3;
-const ROW_CHARS: usize = 34;
 
 /// What a drag out hands over for one type.
 #[derive(Debug, Clone, PartialEq)]
@@ -562,44 +580,38 @@ mod tests {
     }
 
     #[test]
-    fn a_session_in_memory_reads_as_its_name_its_date_and_its_first_things() {
+    fn a_memory_reads_as_its_name_and_its_last_thing() {
+        let mut last = text(2, "the last one\nsecond line");
+        last.at = 1_700_000_500;
         let session = Past {
             id: 9,
             at: 1_700_000_000,
             name: Some("Golem new feature".to_owned()),
-            items: vec![
-                text(1, "first line\nsecond line"),
-                text(2, &"x".repeat(80)),
-                text(3, "c"),
-                text(4, "d"),
-            ],
+            items: vec![text(1, "first"), last],
         };
         let row = session_row(&session);
-        assert_eq!(row.id, 9);
-        let lines: Vec<&str> = row.body.lines().collect();
-        assert_eq!(lines.len(), 5);
-        assert_eq!(lines[0], "Golem new feature");
-        assert!(lines[1].ends_with("· 4 items"));
-        assert_eq!(lines[2], "first line");
-        assert!(lines[3].ends_with('…') && lines[3].chars().count() == 35);
-        assert_eq!(lines[4], "c");
-        // Without a name it starts at its date; one thing is "1 item"; an
-        // empty one still has a row.
-        let bare = Past {
-            name: None,
-            items: vec![text(1, "a")],
-            ..session.clone()
-        };
-        assert!(session_row(&bare)
-            .body
-            .lines()
-            .next()
-            .unwrap()
-            .ends_with("· 1 item"));
+        assert_eq!((row.id, row.at), (9, 1_700_000_500));
+        assert_eq!(row.body, "Golem new feature\nthe last one");
         let empty = Past {
+            name: None,
             items: vec![],
             ..session
         };
-        assert_eq!(session_row(&empty).body.lines().count(), 2);
+        assert_eq!(session_row(&empty).body, "Untitled\nNothing yet");
+        assert_eq!(session_row(&empty).at, 1_700_000_000);
+    }
+
+    #[test]
+    fn a_time_reads_as_the_hour_today_and_as_the_day_before() {
+        let now = 1_700_000_000;
+        let today = when_text(now - 60, now);
+        // (Unless the minute before crossed midnight where this runs.)
+        assert!(
+            today.len() == 5 && today.as_bytes()[2] == b':' || today.contains(' '),
+            "{today}"
+        );
+        let old = when_text(now - 40 * 86_400, now);
+        assert!(old.contains(' ') && !old.contains(':'), "{old}");
+        assert_eq!(when_text(0, now), "");
     }
 }

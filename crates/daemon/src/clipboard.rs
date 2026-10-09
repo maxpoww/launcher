@@ -1455,6 +1455,8 @@ impl App {
                 // into — a fresh clip shifts every index by one.
                 self.refilter_clips();
                 self.save_clip_history();
+                // (The card's clipboard page lists the same history.)
+                self.card_clip_changed();
                 // Own the freshly captured clip ourselves so it stays pasteable
                 // after the app that produced it drops the selection (a plain
                 // capture leaves us owning nothing → Ctrl+V finds an empty

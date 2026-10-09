@@ -5978,6 +5978,11 @@ impl App {
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // The card's input box, search or name being typed in takes every key.
+        if self.card_typing() {
+            self.card_key(keysym, utf8);
+            return;
+        }
         // A desktop icon's name being typed takes every key.
         if self.desktop.rename.is_some() {
             self.desktop_key(keysym, utf8);
@@ -6652,6 +6657,8 @@ pub(crate) enum KbSurface {
     Options,
     /// The desktop, while a name is being typed (see `desktop.rs`).
     Desktop,
+    /// The card, while its input box, search or name is typed in (`card/`).
+    Card,
 }
 
 /// A keyboard hand-back in flight (see [`App::begin_keyboard_handback`]).
@@ -6685,6 +6692,9 @@ impl KeyboardHandler for App {
         {
             self.desktop_keys_arrived();
         }
+        if self.card_layer.as_ref().is_some_and(|l| l.wl_surface() == surface) {
+            self.card_keys_arrived();
+        }
     }
 
     fn leave(
@@ -6701,6 +6711,10 @@ impl KeyboardHandler for App {
         // releases its grab on every box close, which must not collapse an open
         // launcher or drop the window it means to hand focus back to.
         // (And the desktop, while a name is typed on it.)
+        if self.card_layer.as_ref().is_some_and(|l| l.wl_surface() == surface) {
+            self.card_keys_left();
+            return;
+        }
         if self
             .desktop_layer
             .as_ref()

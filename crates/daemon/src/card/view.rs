@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::bar::{BarView, BoxBtn, Field};
 use super::model::{Item, Kind};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst, NO_PLATE};
 
@@ -18,7 +19,7 @@ pub(super) const TILE_PAD_X: f32 = 10.0;
 
 pub(super) const TILE_PAD_Y: f32 = 9.0;
 
-pub(super) const TILE_RADIUS: f32 = 8.0;
+pub(super) const TILE_RADIUS: f32 = RADIUS;
 
 pub(super) const TEXT_PX: f32 = 12.0;
 
@@ -76,25 +77,28 @@ pub(crate) enum Page {
     Session,
     Memory,
     Pinned,
+    /// The plain clipboard's history, reachable from the card.
+    Clipboard,
 }
 
 /// The buttons along the card's HEAD (they were its foot until Max,
 /// 2026-10-09: *"the buttons have to be on the top"* — the card is called
-/// from the title bar, and they are then right under the pointer). New is
-/// not one of them any more: it is Memory's first row.
+/// from the title bar, and they are then right under the pointer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Foot {
-    Pinned,
     Memory,
+    Pinned,
+    Clipboard,
 }
 
 impl Foot {
-    const ALL: [Foot; 2] = [Foot::Pinned, Foot::Memory];
+    const ALL: [Foot; 3] = [Foot::Memory, Foot::Pinned, Foot::Clipboard];
 
     fn word(self) -> &'static str {
         match self {
             Foot::Memory => "Memory",
             Foot::Pinned => "Pinned",
+            Foot::Clipboard => "Clipboard",
         }
     }
 
@@ -103,12 +107,10 @@ impl Foot {
         match self {
             Foot::Memory => Page::Memory,
             Foot::Pinned => Page::Pinned,
+            Foot::Clipboard => Page::Clipboard,
         }
     }
 }
-
-/// The id of Memory's first row, which is no session: "New session".
-pub(crate) const NEW_ROW: u64 = u64::MAX;
 
 /// What the pointer is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,13 +121,25 @@ pub(crate) enum Hover {
     /// An item's pin.
     Pin(u64),
     Foot(Foot),
+    /// The search, and the × of an open one.
+    Seek,
+    SeekClear,
+    /// The input box (its words), and one of its buttons.
+    Input,
+    Btn(BoxBtn),
+    /// New (Memory's page).
+    New,
+    /// The open memory's name.
+    Name,
+    /// A voice note's play button.
+    Play(u64),
 }
 
 impl Hover {
     fn item(self) -> Option<u64> {
         match self {
-            Hover::Item(id) | Hover::Close(id) | Hover::Pin(id) => Some(id),
-            Hover::Foot(_) => None,
+            Hover::Item(id) | Hover::Close(id) | Hover::Pin(id) | Hover::Play(id) => Some(id),
+            _ => None,
         }
     }
 }
@@ -138,6 +152,11 @@ pub(crate) struct FootView<'a> {
     /// On Memory's page: the session this window is working with (its
     /// row is rimmed).
     pub current: Option<u64>,
+    /// The search, the input box, the name (`bar.rs`).
+    pub bar: BarView<'a>,
+    /// The small line at the foot of each item, by id: when it is from
+    /// (and, on the clipboard's page, which app).
+    pub notes: &'a HashMap<u64, String>,
 }
 
 /// The foot's height, and its buttons' own.
@@ -146,14 +165,20 @@ const FOOT_BUTTON_H: f32 = 28.0;
 /// The pin glyph (fa-thumb-tack, in the Nerd font).
 const GLYPH_PIN: &str = "\u{f08d}";
 
-/// The part of the card the list has: all of it but the head.
-pub(crate) fn list_rect(rect: Rect, foot: bool) -> Rect {
+/// The part of the card the list has: all of it but the head and what is
+/// at the bottom (`bottom`: how tall that is).
+pub(crate) fn list_rect(rect: Rect, foot: bool, bottom: f32) -> Rect {
     let head = if foot { FOOT_H.min(rect.h) } else { 0.0 };
-    Rect::new(rect.x, rect.y + head, rect.w, rect.h - head)
+    Rect::new(
+        rect.x,
+        rect.y + head,
+        rect.w,
+        (rect.h - head - bottom).max(0.0),
+    )
 }
 
 /// Where the head's buttons are: side by side, the card's width.
-pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 2] {
+pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 3] {
     let count = Foot::ALL.len() as f32;
     let w = (rect.w - 2.0 * LIST_PAD - (count - 1.0) * GAP) / count;
     let y = rect.y + (FOOT_H - FOOT_BUTTON_H) / 2.0 + 2.0;
@@ -171,11 +196,41 @@ pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 2] {
     })
 }
 
+/// The room an open memory's name takes at the top of its list.
+const NAME_SPACE: f32 = 30.0;
+/// A voice note's play button.
+pub(super) const PLAY: f32 = 28.0;
+/// A memory's row on Memory's page: its picture, its name, its last thing.
+pub(super) const ROW_H: f32 = 54.0;
+const AVATAR: f32 = 36.0;
+/// The line at the foot of an item (when it is from).
+const NOTE_PX: f32 = 9.5;
+const NOTE_LINE: f32 = 12.0;
+/// The colours a memory's picture can have (one is picked by its id).
+const AVATARS: [[f32; 3]; 6] = [
+    [0.871, 0.376, 0.106],
+    [0.275, 0.462, 0.807],
+    [0.345, 0.651, 0.353],
+    [0.686, 0.361, 0.745],
+    [0.807, 0.585, 0.243],
+    [0.243, 0.651, 0.651],
+];
+
 impl Tile {
     /// Where its pin is: beside the ×.
     pub(super) fn pin(&self) -> Rect {
         let close = self.close();
         Rect::new(close.x - CLOSE - 2.0, close.y, CLOSE, CLOSE)
+    }
+
+    /// Where a voice note's play button is.
+    pub(super) fn play(&self) -> Rect {
+        Rect::new(
+            self.rect.x + TILE_PAD_X,
+            self.rect.y + TILE_PAD_Y - 1.0,
+            PLAY,
+            PLAY,
+        )
     }
 
     /// Where its × is.
@@ -196,11 +251,13 @@ pub(crate) fn tile_height(kind: Kind, lines: usize, zoom: f32) -> f32 {
     let (_kind_px, kind_line) = (KIND_PX * zoom, (KIND_LINE * zoom).round());
     let pic_h = (PIC_H * zoom).round();
     let text = lines.max(1) as f32 * text_line;
-    2.0 * TILE_PAD_Y
+    2.0 * TILE_PAD_Y - 3.0
+        + NOTE_LINE
         + match kind {
             Kind::Text => text,
             Kind::Image => kind_line + pic_h + PIC_GAP + text,
             Kind::File | Kind::Folder => kind_line + text,
+            Kind::Voice => PLAY + 2.0,
         }
 }
 
@@ -309,7 +366,15 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
 
     // The list, clipped a hair inside the card so nothing rides over its
     // rim, and to what the unroll has let through.
-    let body = list_rect(rect, view.foot.is_some());
+    let low = view.foot.as_ref().map(|f| {
+        super::bar::bottom(
+            rect,
+            f.page,
+            f.bar.draft.len(),
+            !f.bar.query.is_empty() || f.bar.field == Some(Field::Seek),
+        )
+    });
+    let body = list_rect(rect, view.foot.is_some(), low.map_or(0.0, |b| b.h));
     let inner = Rect::new(body.x + 1.0, body.y + 1.0, body.w - 2.0, body.h - 2.0);
     let clip = Rect::new(
         inner.x,
@@ -331,14 +396,25 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         .collect();
     let heights: Vec<f32> = shown_items
         .iter()
-        .map(|it| tile_height(it.kind, view.lines.get(&it.id).map_or(1, Vec::len), zoom))
+        .map(|it| match page {
+            Page::Memory => ROW_H,
+            _ => tile_height(it.kind, view.lines.get(&it.id).map_or(1, Vec::len), zoom),
+        })
         .collect();
     // (The opening for something dragged in is part of the list's length.)
     let opening = shown_items
         .iter()
         .filter_map(|it| view.shifts.get(&it.id))
         .fold(0.0f32, |a, s| a.max(*s));
+    // (An open memory's name floats over the top of its list: the items
+    // start under it, and slide behind it when the list is scrolled.)
+    let named = view
+        .foot
+        .as_ref()
+        .is_some_and(|f| f.page == Page::Session && f.bar.name.is_some());
+    let over = if named { NAME_SPACE } else { 0.0 };
     let total = 2.0 * LIST_PAD
+        + over
         + heights.iter().sum::<f32>()
         + GAP * heights.len().saturating_sub(1) as f32
         + opening;
@@ -361,7 +437,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         [0.0, 0.0, 0.0, 0.30]
     };
     let mut tiles = Vec::with_capacity(shown_items.len());
-    let mut y = body.y + LIST_PAD - scroll;
+    let mut y = body.y + LIST_PAD + over - scroll;
     for (item, h) in shown_items.iter().copied().zip(heights) {
         let shift = view.shifts.get(&item.id).copied().unwrap_or(0.0);
         let tile = Tile {
@@ -398,6 +474,90 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             glass: 0.0,
             border: 1.0,
         });
+        let note = view.foot.as_ref().and_then(|f| f.notes.get(&item.id));
+        if page == Page::Memory {
+            // A memory, as a messenger lists a chat: its picture (the
+            // first letter of its name on its colour), its name, the last
+            // thing in it, and when that was.
+            let row = view.lines.get(&item.id).map(Vec::as_slice).unwrap_or(&[]);
+            let name = row.first().map(String::as_str).unwrap_or("");
+            let hue = AVATARS[(item.id % AVATARS.len() as u64) as usize];
+            let av = Rect::new(t.x + 9.0, t.y + (t.h - AVATAR) / 2.0, AVATAR, AVATAR);
+            list.rects.push(RectInst {
+                rect: av,
+                radius: TILE_RADIUS,
+                color: [hue[0], hue[1], hue[2], 0.9],
+                glass: 0.0,
+                border: 0.0,
+            });
+            let first: String = name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().collect())
+                .unwrap_or_default();
+            let mut put =
+                |text: &str, pos: (f32, f32), w: f32, px: f32, centered: bool, color: [f32; 4]| {
+                    list.labels.push(Label {
+                        text: text.to_owned(),
+                        pos,
+                        max_w: w,
+                        font_px: px,
+                        line_px: (px * 1.35).round(),
+                        centered,
+                        dim: false,
+                        cache: true,
+                        clip: Some(clip),
+                        family: None,
+                        color: Some(color),
+                    });
+                };
+            put(
+                &first,
+                (av.x + av.w / 2.0, av.y + 9.0),
+                av.w,
+                13.0,
+                true,
+                [0.08, 0.07, 0.10, 1.0],
+            );
+            let tx = av.x + av.w + 11.0;
+            let when = note.map(String::as_str).unwrap_or("");
+            let when_w = super::bar::about(when.chars().count(), NOTE_PX + 1.0) + 8.0;
+            let tw = t.x + t.w - tx - when_w - 34.0;
+            put(name, (tx, t.y + 10.0), tw, 12.5, false, paint.ink_at(0.96));
+            put(
+                row.get(1).map(String::as_str).unwrap_or(""),
+                (tx, t.y + 29.0),
+                tw + when_w,
+                11.5,
+                false,
+                paint.ink_at(0.52),
+            );
+            put(
+                when,
+                (t.x + t.w - when_w / 2.0 - 30.0, t.y + 11.0),
+                when_w,
+                NOTE_PX + 1.0,
+                true,
+                paint.ink_at(0.5),
+            );
+            if view.hover.is_some_and(|h| h.item() == Some(item.id)) {
+                let close = tile.close();
+                let hot = view.hover == Some(Hover::Close(item.id));
+                put(
+                    "×",
+                    (close.x + close.w / 2.0, close.y + 1.0),
+                    close.w,
+                    15.0,
+                    true,
+                    if hot {
+                        [DANGER[0], DANGER[1], DANGER[2], 1.0]
+                    } else {
+                        paint.ink_at(0.45)
+                    },
+                );
+            }
+            continue;
+        }
         let x = t.x + TILE_PAD_X;
         let mut line_y = t.y + TILE_PAD_Y;
         if let Some(word) = item.kind.word() {
@@ -469,14 +629,30 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     family,
                     // (A session in memory: its date stands out, what is
                     // in it sits back.)
-                    color: Some(match (page, n) {
-                        (Page::Memory, 0) => [ACCENT[0], ACCENT[1], ACCENT[2], 0.95],
-                        (Page::Memory, _) => paint.ink_at(0.62),
-                        _ => paint.ink_at(0.92),
-                    }),
+                    color: Some(paint.ink_at(if n > 9000 { 0.0 } else { 0.92 })),
                 });
             }
             line_y += text_line;
+        }
+        // The line at its foot: when it is from (to the right).
+        if let Some(note) = note {
+            let w = super::bar::about(note.chars().count(), NOTE_PX) + 6.0;
+            list.labels.push(Label {
+                text: note.clone(),
+                pos: (
+                    t.x + t.w - TILE_PAD_X - w / 2.0,
+                    t.y + t.h - NOTE_LINE - 5.0,
+                ),
+                max_w: w + 20.0,
+                font_px: NOTE_PX,
+                line_px: NOTE_LINE,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(clip),
+                family: None,
+                color: Some(paint.ink_at(0.45)),
+            });
         }
         // The × shows on the item under the pointer only; the pin beside
         // it too, and on a pinned item all the time (lit).
@@ -518,7 +694,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 }),
             });
         };
-        if over.is_some() && item.id != NEW_ROW {
+        if over.is_some() && page != Page::Clipboard {
             button(
                 tile.close(),
                 "×",
@@ -529,7 +705,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 DANGER,
             );
         }
-        if page == Page::Session {
+        if page == Page::Session || page == Page::Clipboard {
             let pinned = view
                 .foot
                 .as_ref()
@@ -538,7 +714,12 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 let on = pinned || over == Some(Hover::Pin(item.id));
                 button(
                     tile.pin(),
-                    GLYPH_PIN,
+                    // (On the clipboard's page it is "keep this in the memory".)
+                    if page == Page::Clipboard {
+                        "\u{f067}"
+                    } else {
+                        GLYPH_PIN
+                    },
                     Some(crate::options::NERD),
                     12.0,
                     on,
@@ -607,6 +788,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 }),
             });
         }
+        super::bar::draw(
+            &mut bar, rect, body, window, foot.page, &foot.bar, paint, bright, view.hover,
+        );
         scene.grids.push(bar);
     }
     (scene, tiles, max_scroll)
@@ -1040,13 +1224,14 @@ mod tests {
 
     #[test]
     fn the_foot_takes_its_height_from_the_list_and_holds_three_buttons() {
-        let items: Vec<Item> = (1..=8).map(|n| text(n, "a")).collect();
+        let items: Vec<Item> = (1..=20).map(|n| text(n, "a")).collect();
         let lines: HashMap<u64, Vec<String>> = items
             .iter()
             .map(|it| (it.id, vec![it.body.clone()]))
             .collect();
         let (shifts, slots, pinned) = (HashMap::new(), HashMap::new(), HashSet::from([2u64]));
-        let rect = Rect::new(600.0, 60.0, WIDTH, 200.0);
+        let notes: HashMap<u64, String> = HashMap::new();
+        let rect = Rect::new(600.0, 60.0, WIDTH, 500.0);
         let view = |foot: bool| View {
             rect,
             shown: 1.0,
@@ -1058,6 +1243,18 @@ mod tests {
                 page: Page::Session,
                 pinned: &pinned,
                 current: None,
+                bar: BarView {
+                    name: Some("Golem new feature"),
+                    naming: None,
+                    draft: &[],
+                    query: "",
+                    found: 0,
+                    field: None,
+                    rec: None,
+                    talk: None,
+                    hint: "",
+                },
+                notes: &notes,
             }),
             dnd_over: false,
             hidden: None,
@@ -1068,14 +1265,21 @@ mod tests {
         };
         let (bare, _, scroll_bare) = scene(&view(false));
         let (with, _, scroll_foot) = scene(&view(true));
-        // The list is shorter by the foot, so there is that much more to scroll.
-        assert_eq!(scroll_foot, scroll_bare + FOOT_H);
+        // The list is shorter by the head and by what is at the bottom, so
+        // there is that much more to scroll.
+        let low = crate::card::bar::bottom(rect, Page::Session, 0, false);
+        assert_eq!(scroll_foot, scroll_bare + FOOT_H + low.h);
         assert_eq!(with.grids.len(), bare.grids.len() + 1);
         // The buttons, in the head, side by side inside the card; the
-        // list starts under them.
+        // list starts under them and ends over the input box.
         let buttons = foot_buttons(rect);
-        assert_eq!(buttons.map(|(f, _)| f), [Foot::Pinned, Foot::Memory]);
-        assert_eq!(list_rect(rect, true).y, rect.y + FOOT_H);
+        assert_eq!(
+            buttons.map(|(f, _)| f),
+            [Foot::Memory, Foot::Pinned, Foot::Clipboard]
+        );
+        let list = list_rect(rect, true, low.h);
+        assert_eq!(list.y, rect.y + FOOT_H);
+        assert!(list.y + list.h <= low.seek.y);
         for (_, r) in buttons {
             assert!(r.y >= rect.y && r.y + r.h <= rect.y + FOOT_H);
             assert!(r.x >= rect.x && r.x + r.w <= rect.x + rect.w);

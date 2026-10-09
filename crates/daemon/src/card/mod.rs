@@ -49,11 +49,13 @@ use crate::desktop::DragIcon;
 use crate::hypr::WindowSpot;
 use crate::App;
 
+mod bar;
 mod dnd;
 mod model;
 mod place;
 mod view;
 
+use bar::*;
 use model::*;
 use place::*;
 use view::*;
@@ -126,6 +128,10 @@ const ZOOM_KEYS: [(&str, &str); 8] = [
     ("CTRL + KP_0", "reset"),
 ];
 
+/// The ids of the clipboard page's rows start here (a clip's own id is
+/// added): far from the card's own.
+const CLIP_IDS: u64 = 1 << 62;
+
 /// How many window titles are remembered with their session.
 const TITLES_MAX: usize = 300;
 
@@ -151,11 +157,9 @@ const PARKED: u32 = 8;
 /// The left button, held.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Press {
-    /// On an item's ×: let go there and the item is off.
-    Close(u64),
-    /// On an item's pin, on a button of the foot: let go there and it acts.
-    Pin(u64),
-    Foot(Foot),
+    /// On a button of any kind (a pin, a tab, the search, a button of the
+    /// input box…): let go there and it acts.
+    Tap(Hover),
     /// On an item: travel takes it into a drag.
     Item {
         id: u64,
@@ -164,11 +168,7 @@ enum Press {
     },
     /// On the card itself: it slides sideways with the pointer. `left` is
     /// where its left edge was, from its window's.
-    Slide {
-        from_x: f32,
-        left: f32,
-        moved: bool,
-    },
+    Slide { from_x: f32, left: f32, moved: bool },
     /// On one of its side edges: that edge follows the pointer and the
     /// other stays. `left`/`width` are what they were at the press.
     Resize {
@@ -316,6 +316,17 @@ pub(crate) struct Card {
     titles: HashMap<String, u64>,
     /// How big the items are drawn (0 = never set; read with `zoom()`).
     zoom: f32,
+    /// The card has the keyboard, and the typing goes into this (the
+    /// input box, the search, the memory's name). `None`: its window has
+    /// the keyboard, as always.
+    field: Option<Field>,
+    /// What is written in the input box, and that wrapped to the box.
+    draft: String,
+    draft_lines: Vec<String>,
+    /// What is being searched for on the page that is up.
+    query: String,
+    /// The memory's new name, while it is typed.
+    naming: String,
     /// Ctrl +/− are the card's right now (the pointer is on it).
     keys: bool,
     /// A drag is over the card (another app's, or an item of ours).
@@ -343,6 +354,14 @@ pub(crate) struct Card {
     asked: HashSet<String>,
     /// The renderer is shrunk to [`PARKED`]: there is no card anywhere.
     parked: bool,
+}
+
+/// The paste keystroke, into the window that has the keyboard: Ctrl+V, or
+/// Ctrl+Shift+V where that is what pastes.
+fn card_paste_key() {
+    let shifted = crate::hypr::active_window_where()
+        .is_some_and(|(class, _)| SHIFT_PASTERS.contains(&class.to_lowercase().as_str()));
+    crate::hypr::send_shortcut_active(if shifted { "CTRL SHIFT" } else { "CTRL" }, "v");
 }
 
 /// Whether `addr` is a window's address as the compositor writes it
@@ -510,27 +529,113 @@ impl Card {
         self.items.iter().find(|it| it.id == id)
     }
 
-    /// What is under `pos`: a button of the foot, or an item (its ×, its
-    /// pin — only a session's items have one — or the item itself).
+    /// Whether the search is open (it has the cursor, or holds a query).
+    fn seeking(&self) -> bool {
+        self.field == Some(Field::Seek) || !self.query.is_empty()
+    }
+
+    /// The memory the card is working with.
+    fn memory_open(&self) -> Option<&Past> {
+        let open = self.open?;
+        self.memory.iter().find(|p| p.id == open)
+    }
+
+    /// Its name as the bubble shows it.
+    fn open_name(&self) -> Option<String> {
+        self.memory_open()
+            .map(|p| p.name.clone().unwrap_or_else(|| "Untitled".to_owned()))
+    }
+
+    /// What is under `pos`: the bottom (the search, the input box, New), a
+    /// button of the head, the memory's name, or an item — its ×, its pin
+    /// (a memory's items; on the clipboard's page it means "keep"), a
+    /// voice note's play button, or the item itself.
     fn hit(&self, pos: (f32, f32)) -> Option<Hover> {
         let rect = self.rect?;
         if !rect.contains(pos) {
             return None;
         }
-        if !list_rect(rect, true).contains(pos) {
+        let low = bottom(rect, self.page, self.draft_lines.len(), self.seeking());
+        if let Some(hit) = low.hit(pos, self.seeking()) {
+            return Some(hit);
+        }
+        let list = list_rect(rect, true, low.h);
+        if pos.1 < list.y {
             return foot_buttons(rect)
                 .into_iter()
                 .find(|(_, r)| r.contains(pos))
                 .map(|(f, _)| Hover::Foot(f));
         }
+        if pos.1 >= list.y + list.h {
+            return None;
+        }
+        if self.page == Page::Session {
+            let name = match self.field {
+                Some(Field::Name) => Some(format!("{}|", self.naming)),
+                _ => self.open_name(),
+            };
+            if name.is_some_and(|n| name_rect(list, &n).contains(pos)) {
+                return Some(Hover::Name);
+            }
+        }
         let tile = self.tiles.iter().find(|t| t.rect.contains(pos))?;
-        Some(if tile.close().contains(pos) {
-            Hover::Close(tile.id)
-        } else if self.page == Page::Session && tile.pin().contains(pos) {
-            Hover::Pin(tile.id)
-        } else {
-            Hover::Item(tile.id)
-        })
+        let pins = matches!(self.page, Page::Session | Page::Clipboard);
+        Some(
+            if self.page != Page::Clipboard && tile.close().contains(pos) {
+                Hover::Close(tile.id)
+            } else if pins && tile.pin().contains(pos) {
+                Hover::Pin(tile.id)
+            } else if tile.play().contains(pos)
+                && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
+            {
+                Hover::Play(tile.id)
+            } else {
+                Hover::Item(tile.id)
+            },
+        )
+    }
+
+    /// Whether `item` (of the page that is up) matches what is searched.
+    fn matches(&self, item: &Item) -> bool {
+        let query = self.query.trim().to_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let has = |it: &Item| {
+            it.body.to_lowercase().contains(&query)
+                || it
+                    .from
+                    .as_ref()
+                    .is_some_and(|f| f.to_lowercase().contains(&query))
+                || (it.kind == Kind::Voice && "voice note".contains(&query))
+        };
+        // A memory is found by its name or by anything in it.
+        match (self.page, self.memory.iter().find(|p| p.id == item.id)) {
+            (Page::Memory, Some(past)) => has(item) || past.items.iter().any(has),
+            _ => has(item),
+        }
+    }
+
+    /// Keep a copy of `item` in the memory the card is working with, while
+    /// another page is up (the clipboard's "keep"). Whether there was one.
+    fn keep(&mut self, item: &Item, now: u64) -> bool {
+        if self.page == Page::Session {
+            return false;
+        }
+        let Some(open) = self.open else {
+            return false;
+        };
+        let id = self.next_id.max(1);
+        self.next_id = id + 1;
+        let Some(past) = self.memory.iter_mut().find(|p| p.id == open) else {
+            return false;
+        };
+        past.items.push(Item {
+            id,
+            at: now,
+            ..item.clone()
+        });
+        true
     }
 
     /// The items of the session that is out on the card (none while
@@ -574,7 +679,7 @@ impl Card {
                 }
             }
             Page::Pinned => self.pinned = shown,
-            Page::Memory => {}
+            Page::Memory | Page::Clipboard => {}
         }
     }
 
@@ -590,11 +695,9 @@ impl Card {
                     .unwrap_or_default()
             }
             Page::Pinned => std::mem::take(&mut self.pinned),
-            // (Its first row starts a session: Max, 2026-10-09, *"we move
-            // new inside memory"*.)
-            Page::Memory => std::iter::once(new_row())
-                .chain(self.memory.iter().map(session_row))
-                .collect(),
+            Page::Memory => self.memory.iter().map(session_row).collect(),
+            // (The clipboard's rows are the dock's to list: `card_show`.)
+            Page::Clipboard => Vec::new(),
         };
         // (A session's row is wrapped afresh: it may have changed.)
         for past in &self.memory {
@@ -612,6 +715,8 @@ impl Card {
         }
         self.put_back();
         self.page = page;
+        // (A search belongs to the page it was typed on.)
+        self.query.clear();
         self.take_out();
         true
     }
@@ -1134,10 +1239,14 @@ impl App {
             Some(path) => self.serve_files(std::slice::from_ref(path), false),
             None => self.serve_transient_text(&item.body),
         }
-        // The paste is the keyboard's window's: the card's own first.
+        // The paste is the keyboard's window's: the card's own first. (A
+        // card that has the keyboard hands it back before the keys go.)
         let host = self.card.host.clone();
         let focused = crate::hypr::active_window();
+        let typing = self.card.field.is_some();
+        self.card_drop_keys();
         let wait = match host {
+            _ if typing => PASTE_FOCUS + 60,
             Some(host) if focused.as_deref() != Some(host.as_str()) => {
                 crate::hypr::focus_window(&host);
                 PASTE_FOCUS
@@ -1148,21 +1257,314 @@ impl App {
             "card: {:?} pasted",
             item.body.chars().take(60).collect::<String>()
         );
-        self.after_ms(wait, |_| {
-            let terminal = crate::hypr::active_window_where()
-                .is_some_and(|(class, _)| SHIFT_PASTERS.contains(&class.to_lowercase().as_str()));
-            crate::hypr::send_shortcut_active(if terminal { "CTRL SHIFT" } else { "CTRL" }, "v");
-        });
+        self.after_ms(wait, |_| card_paste_key());
     }
 
     /// Put page `page` up.
     fn card_show(&mut self, page: Page) {
         self.card_load();
         if self.card.show(page) {
+            // (The input box and the name are a memory's.)
+            if page != Page::Session && matches!(self.card.field, Some(Field::Box | Field::Name)) {
+                self.card_drop_keys();
+            }
+            if page == Page::Clipboard {
+                self.card.items = self.card_clip_rows();
+            }
             for path in self.card_pictures() {
                 self.card_ask_picture(&path);
             }
             self.request_card_draw();
+        }
+    }
+
+    /// The plain clipboard's history as the rows of its page, newest first
+    /// (Max, 2026-10-09: *"the plain clipboard should be reachable from the
+    /// card"*): a text as a text, copied files and pictures as their file.
+    /// A row's id is the clip's, out of the way of the card's own.
+    fn card_clip_rows(&self) -> Vec<Item> {
+        self.clip
+            .history
+            .iter()
+            .filter_map(|clip| {
+                let (kind, body, path) = match clip.kind {
+                    crate::clipboard::ClipKind::Text => (Kind::Text, clip.text.clone(), None),
+                    crate::clipboard::ClipKind::Files => {
+                        let at = crate::desktop::uri_list_paths(&clip.text)
+                            .into_iter()
+                            .next()?;
+                        let path = at.to_string_lossy().into_owned();
+                        (kind_of(&at), file_body(&at), Some(path))
+                    }
+                    crate::clipboard::ClipKind::Image => {
+                        let path = clip.image_path.as_ref()?.to_string_lossy().into_owned();
+                        (Kind::Image, clip.preview.clone(), Some(path))
+                    }
+                };
+                Some(Item {
+                    id: CLIP_IDS + clip.id,
+                    kind,
+                    body,
+                    path,
+                    aspect: if clip.height > 0 {
+                        clip.width as f32 / clip.height as f32
+                    } else {
+                        0.0
+                    },
+                    owned: false,
+                    at: clip.timestamp_ms / 1000,
+                    from: (!clip.source.is_empty()).then(|| clip.source.clone()),
+                })
+            })
+            .collect()
+    }
+
+    /// The clipboard's history changed: its page, if it is up, lists it anew.
+    pub(crate) fn card_clip_changed(&mut self) {
+        if self.card.page == Page::Clipboard && self.card.host.is_some() {
+            self.card.items = self.card_clip_rows();
+            self.request_card_draw();
+        }
+    }
+
+    /// The pin of a clipboard row: a copy of it is kept in the memory the
+    /// card is working with (one is started if the window has none).
+    fn card_keep_clip(&mut self, id: u64) {
+        let Some(item) = self.card.item(id).cloned() else {
+            return;
+        };
+        if self.card.open.is_none() {
+            let title = self.card_host_title();
+            let new = self.card.begin(title.clone(), now_secs());
+            if let Some(host) = self.card.host.clone() {
+                self.card.give(&host, title.as_deref(), new);
+            }
+            self.card.open = Some(new);
+        }
+        if self.card.keep(&item, now_secs()) {
+            info!("card: kept from the clipboard");
+            self.card_save();
+            self.card_show(Page::Session);
+        }
+    }
+
+    // ---- the keyboard: the input box, the search, the name ----
+
+    /// The card takes the keyboard for `field` (a click on the input box,
+    /// the search, the name). As the desktop does it (`desktop_take_keys`):
+    /// an EXCLUSIVE grab fetches it at once, and the moment it arrives
+    /// (`card_keys_arrived`) the grab is let go for "on demand" — the
+    /// keyboard stays until a window is clicked, and the pointer is free.
+    fn card_take_keys(&mut self, field: Field) {
+        let had = self.card.field.replace(field);
+        if field == Field::Name {
+            self.card.naming = self.card.open_name().unwrap_or_default();
+        }
+        if had.is_none() {
+            if let Some(layer) = self.card_layer.as_ref() {
+                crate::surface::set_interactive(layer, true);
+                let _ = self.conn.flush();
+            }
+            self.cancel_keyboard_handback(crate::KbSurface::Card);
+            debug!("card: has the keyboard ({field:?})");
+        }
+        self.sync_card_input();
+        self.request_card_draw();
+    }
+
+    /// The keyboard has arrived on the card.
+    pub(crate) fn card_keys_arrived(&mut self) {
+        if self.card.field.is_none() {
+            return;
+        }
+        if let Some(layer) = self.card_layer.as_ref() {
+            crate::surface::set_on_demand(layer);
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// The keyboard left the card (a window was clicked): what was being
+    /// typed stays where it is, the cursor is the window's again.
+    pub(crate) fn card_keys_left(&mut self) {
+        if self.card.field.take().is_some() {
+            debug!("card: the keyboard left");
+            if let Some(layer) = self.card_layer.as_ref() {
+                crate::surface::set_interactive(layer, false);
+            }
+            let _ = self.conn.flush();
+            self.request_card_draw();
+        }
+        self.complete_keyboard_handback(crate::KbSurface::Card);
+    }
+
+    /// Give the keyboard back to the card's window.
+    fn card_drop_keys(&mut self) {
+        if self.card.field.take().is_none() {
+            return;
+        }
+        debug!("card: gives the keyboard back");
+        self.begin_keyboard_handback(crate::KbSurface::Card, self.card.host.clone());
+        if let Some(layer) = self.card_layer.as_ref() {
+            crate::surface::set_interactive(layer, false);
+        }
+        let _ = self.conn.flush();
+        self.request_card_draw();
+    }
+
+    /// Whether the card takes the keys right now.
+    pub(crate) fn card_typing(&self) -> bool {
+        self.card.field.is_some()
+    }
+
+    /// A key, while the card has the keyboard.
+    pub(crate) fn card_key(
+        &mut self,
+        keysym: smithay_client_toolkit::seat::keyboard::Keysym,
+        utf8: Option<&str>,
+    ) {
+        use smithay_client_toolkit::seat::keyboard::Keysym;
+        let Some(field) = self.card.field else {
+            return;
+        };
+        let (ctrl, shift) = (self.modifiers.ctrl, self.modifiers.shift);
+        let typed = utf8
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+            .filter(|_| !ctrl);
+        match (field, keysym) {
+            (_, Keysym::Escape) => {
+                // One layer at a time: the search's words, then the cursor.
+                match field {
+                    Field::Seek if !self.card.query.is_empty() => self.card.query.clear(),
+                    _ => self.card_drop_keys(),
+                }
+            }
+            // The input box: Enter keeps it in the memory, Ctrl+Enter sends
+            // it to the window, Shift+Enter breaks the line.
+            (Field::Box, Keysym::Return | Keysym::KP_Enter) if shift => self.card.draft.push('\n'),
+            (Field::Box, Keysym::Return | Keysym::KP_Enter) if ctrl => self.card_send_draft(),
+            (Field::Box, Keysym::Return | Keysym::KP_Enter) => self.card_keep_draft(),
+            (Field::Box, Keysym::v | Keysym::V) if ctrl => {
+                // Paste, as any text field does.
+                if let Some(clip) = self.clip.history.first() {
+                    if clip.kind == crate::clipboard::ClipKind::Text {
+                        let text = clip.text.clone();
+                        self.card.draft.push_str(&text);
+                    }
+                }
+            }
+            (Field::Box, Keysym::BackSpace) => {
+                self.card.draft.pop();
+            }
+            (Field::Seek, Keysym::BackSpace) => {
+                self.card.query.pop();
+            }
+            (Field::Seek, Keysym::Return | Keysym::KP_Enter) => {}
+            (Field::Name, Keysym::BackSpace) => {
+                self.card.naming.pop();
+            }
+            (Field::Name, Keysym::Return | Keysym::KP_Enter) => {
+                let name = self.card.naming.trim().to_owned();
+                self.card_rename(&name);
+                self.card.field = Some(Field::Box);
+            }
+            _ => match (field, typed) {
+                (Field::Box, Some(s)) => self.card.draft.push_str(s),
+                (Field::Seek, Some(s)) => self.card.query.push_str(s),
+                (Field::Name, Some(s)) => self.card.naming.push_str(s),
+                _ => return,
+            },
+        }
+        self.card.scroll = if self.card.field == Some(Field::Seek) {
+            0.0
+        } else {
+            self.card.scroll
+        };
+        self.sync_card_input();
+        self.request_card_draw();
+    }
+
+    /// The open memory is called `name` from now on (an empty one keeps
+    /// what it had).
+    fn card_rename(&mut self, name: &str) {
+        let Some(open) = self.card.open else {
+            return;
+        };
+        if name.is_empty() {
+            return;
+        }
+        if let Some(past) = self.card.memory.iter_mut().find(|p| p.id == open) {
+            past.name = Some(name.to_owned());
+            info!("card: a memory renamed {name:?}");
+            self.card_save();
+        }
+    }
+
+    /// Enter in the input box: what is written is kept in the memory, and
+    /// the cursor stays for the next thing.
+    fn card_keep_draft(&mut self) {
+        let text = std::mem::take(&mut self.card.draft);
+        if text.trim().is_empty() {
+            return;
+        }
+        self.card_push(
+            Kind::Text,
+            text.trim_end().to_owned(),
+            None,
+            false,
+            0.0,
+            None,
+        );
+    }
+
+    /// Ctrl+Enter in the input box: what is written goes into the card's
+    /// window, and the cursor goes back there with it.
+    fn card_send_draft(&mut self) {
+        let text = std::mem::take(&mut self.card.draft);
+        if text.trim().is_empty() {
+            return;
+        }
+        self.serve_transient_text(text.trim_end());
+        self.card_drop_keys();
+        self.after_ms(PASTE_FOCUS + 60, |_| card_paste_key());
+    }
+
+    /// One of the input box's buttons.
+    fn card_box_button(&mut self, which: BoxBtn) {
+        match which {
+            // (Not built yet: they say so in the line under the box.)
+            BoxBtn::Emoji | BoxBtn::Clip | BoxBtn::Talk | BoxBtn::Mic => {
+                debug!("card: {which:?} is not built yet");
+            }
+        }
+    }
+
+    /// A button, let go where it was pressed.
+    fn card_tap(&mut self, what: Hover) {
+        match what {
+            Hover::Close(id) => self.card_remove(id),
+            Hover::Pin(id) if self.card.page == Page::Clipboard => self.card_keep_clip(id),
+            Hover::Pin(id) => self.card_pin(id),
+            Hover::Foot(which) => self.card_foot(which),
+            Hover::Seek => self.card_take_keys(Field::Seek),
+            Hover::SeekClear => {
+                self.card.query.clear();
+                if self.card.field == Some(Field::Seek) {
+                    self.card_drop_keys();
+                }
+                self.sync_card_input();
+                self.request_card_draw();
+            }
+            Hover::Input => self.card_take_keys(Field::Box),
+            Hover::Btn(which) => self.card_box_button(which),
+            // New, in the input box's place: the new memory opens with the
+            // cursor already in its box (Max: *"so i click on it and i have
+            // my pointer on the input"*).
+            Hover::New => {
+                self.card_begin();
+                self.card_take_keys(Field::Box);
+            }
+            Hover::Name => self.card_take_keys(Field::Name),
+            Hover::Play(_) | Hover::Item(_) => {}
         }
     }
 
@@ -1244,10 +1646,6 @@ impl App {
     /// A click on a session in memory: this window works with it from now
     /// on (and so will a window of the same title, another day).
     fn card_recall(&mut self, id: u64) {
-        if id == NEW_ROW {
-            self.card_begin();
-            return;
-        }
         if !self.card.memory.iter().any(|p| p.id == id) {
             return;
         }
@@ -1451,6 +1849,7 @@ impl App {
     /// pointer, and the renderer is shrunk until it is wanted again.
     fn card_let_go(&mut self) {
         self.card_keys(false);
+        self.card_drop_keys();
         self.card.host = None;
         self.card.spot = None;
         self.card.rect = None;
@@ -1623,6 +2022,7 @@ impl App {
         }
         if self.card.hide(why, Instant::now()) {
             self.card_keys(false);
+            self.card_drop_keys();
             self.card.shown = 0.0;
             self.card.press = None;
             self.card.at = None;
@@ -1730,7 +2130,12 @@ impl App {
             if self.card.lines.contains_key(&item.id) {
                 continue;
             }
-            let lines = if item.kind == Kind::Text {
+            let lines = if self.card.page == Page::Memory {
+                // (A memory's row: its name, its last thing — one line each.)
+                item.body.lines().take(2).map(str::to_owned).collect()
+            } else if item.kind == Kind::Voice {
+                Vec::new()
+            } else if item.kind == Kind::Text {
                 let cols = if mono > 0.0 {
                     (text_w / mono).floor() as usize
                 } else {
@@ -1804,10 +2209,67 @@ impl App {
         if self.card.max_scroll > 0.0 && self.card.scroll >= self.card.max_scroll - 0.5 {
             self.card.to_bottom = true;
         }
+        // What is written in the input box, wrapped to it.
+        let low = bottom(rect, self.card.page, 1, self.card.seeking());
+        let box_w = low.text().map_or(200.0, |r| r.w);
+        let per = renderer.measure_text("nnnnnnnnnn", TEXT_PX + 0.5, None) / 10.0;
+        let cols = if per > 0.0 {
+            (box_w / per).floor() as usize
+        } else {
+            30
+        };
+        self.card.draft_lines = if self.card.draft.is_empty() {
+            Vec::new()
+        } else {
+            let mut lines = wrap(&self.card.draft, cols.max(8), 200);
+            if self.card.draft.ends_with('\n') {
+                lines.push(String::new());
+            }
+            lines
+        };
+        // The search narrows the list to what matches.
+        let found: Vec<Item>;
+        let listed: &[Item] = if self.card.query.trim().is_empty() {
+            &self.card.items
+        } else {
+            found = self
+                .card
+                .items
+                .iter()
+                .filter(|it| self.card.matches(it))
+                .cloned()
+                .collect();
+            &found
+        };
+        // The line at the foot of each item: when it is from (and, on the
+        // clipboard's page, which app).
+        let now_s = now_secs();
+        let pinned_too = &pinned;
+        let notes: HashMap<u64, String> = listed
+            .iter()
+            .map(|it| {
+                let when = when_text(it.at, now_s);
+                let note = match (self.card.page, &it.from) {
+                    (Page::Clipboard, Some(from)) => {
+                        let from: String = from.chars().take(26).collect();
+                        format!("{from} · {when}")
+                    }
+                    _ if pinned_too.contains(&it.id) => format!("pinned · {when}"),
+                    _ => when,
+                };
+                (it.id, note)
+            })
+            .collect();
+        let name = self.card.open_name();
+        let hint = match hover {
+            Some(Hover::Btn(which)) => which.hint(),
+            _ if self.card.draft.trim().is_empty() => "",
+            _ => "Enter keeps it in this memory  ·  Ctrl+Enter sends it to the window",
+        };
         let view = View {
             rect,
             shown,
-            items: &self.card.items,
+            items: listed,
             lines: &self.card.lines,
             scroll: if self.card.to_bottom {
                 f32::MAX
@@ -1828,6 +2290,18 @@ impl App {
                     .as_ref()
                     .and_then(|h| self.card.wins.get(h))
                     .and_then(|w| w.session),
+                bar: BarView {
+                    name: name.as_deref(),
+                    naming: Some(&self.card.naming),
+                    draft: &self.card.draft_lines,
+                    query: &self.card.query,
+                    found: listed.len(),
+                    field: self.card.field,
+                    rec: None,
+                    talk: None,
+                    hint,
+                },
+                notes: &notes,
             }),
             dnd_over: self.card.dnd_over,
             hidden,
@@ -1985,10 +2459,8 @@ impl App {
                             left: r.x - s.x,
                             width: r.w,
                         }),
-                        Some(Hover::Close(id)) => Some(Press::Close(id)),
-                        Some(Hover::Pin(id)) => Some(Press::Pin(id)),
-                        Some(Hover::Foot(which)) => Some(Press::Foot(which)),
                         Some(Hover::Item(id)) => Some(Press::Item { id, at, serial }),
+                        Some(button) => Some(Press::Tap(button)),
                         None => self
                             .card
                             .rect
@@ -2005,19 +2477,9 @@ impl App {
                     match self.card.press.take() {
                         // Pressed and let go without carrying it off: a click.
                         Some(Press::Item { id, .. }) => self.card_paste(id),
-                        Some(Press::Close(id)) => {
-                            if self.card_still_on(Hover::Close(id)) {
-                                self.card_remove(id);
-                            }
-                        }
-                        Some(Press::Pin(id)) => {
-                            if self.card_still_on(Hover::Pin(id)) {
-                                self.card_pin(id);
-                            }
-                        }
-                        Some(Press::Foot(which)) => {
-                            if self.card_still_on(Hover::Foot(which)) {
-                                self.card_foot(which);
+                        Some(Press::Tap(what)) => {
+                            if self.card_still_on(what) {
+                                self.card_tap(what);
                             }
                         }
                         Some(Press::Slide { moved: true, .. }) => self.card_settle(),
@@ -2374,6 +2836,8 @@ impl App {
             (Some(Press::Slide { .. }), _) => Shape::Grabbing,
             (None, _) if grip.is_some() => Shape::EwResize,
             (_, Some(Hover::Item(_))) if self.card.page != Page::Memory => Shape::Default,
+            (_, Some(Hover::Input | Hover::Name)) => Shape::Text,
+            (_, Some(Hover::Seek)) if self.card.seeking() => Shape::Text,
             (_, Some(_)) => Shape::Pointer,
             (_, None) => Shape::Grab,
         };
@@ -2414,6 +2878,37 @@ impl App {
         let rest = rest.trim();
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
+            // The input box, the search and the name, without a keyboard:
+            // `write <text>` · `keep` · `send` · `find <words>` · `rename <name>`
+            // · `clipboard` (its page).
+            "write" => {
+                self.card.draft = rest.replace("\\n", "\n");
+                self.request_card_draw();
+                format!("draft {:?}", self.card.draft)
+            }
+            "keep" => {
+                self.card_keep_draft();
+                self.card_words()
+            }
+            "send" => {
+                self.card_send_draft();
+                "sent".to_owned()
+            }
+            "find" => {
+                self.card.query = rest.to_owned();
+                self.request_card_draw();
+                format!("find {:?}", self.card.query)
+            }
+            "rename" => {
+                self.card_rename(rest);
+                self.card.lines.clear();
+                self.request_card_draw();
+                self.card_words()
+            }
+            "clipboard" => {
+                self.card_show(Page::Clipboard);
+                format!("{} rows", self.card.items.len())
+            }
             // `zoom in|out|reset|<n>`: the items' size (Ctrl +/− over the card).
             "zoom" => self.card_zoom(rest),
             // The foot's buttons, and what the pages do, without a pointer:
@@ -2802,15 +3297,13 @@ mod tests {
         assert_eq!(card.session_for("0x9", Some("Desktop")), Some(b));
         assert_eq!(card.session_for("0x9", Some("Seam")), None);
         card.turn_to(None);
-        // (Two sessions, under the row that starts a new one.)
-        assert_eq!((card.page, card.items.len()), (Page::Memory, 3));
-        assert_eq!(card.items[0].id, NEW_ROW);
+        assert_eq!((card.page, card.items.len()), (Page::Memory, 2));
         assert_eq!(bodies(&card.sessions()[1].items), ["for the feature"]);
 
         // Forgotten: its windows and its title have nothing any more, and
         // with one session left there is nothing to pick.
         assert!(card.lose(b).is_some());
-        assert_eq!(card.items.len(), 2);
+        assert_eq!(card.items.len(), 1);
         assert_eq!(card.session_for("0x2", Some("Desktop")), Some(a));
         assert!(card.titles.get("Desktop").is_none());
     }
