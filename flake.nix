@@ -41,7 +41,8 @@
       #  - ffmpegthumbnailer / poppler's pdftoppm: Files-section thumbnails
       #  - nix-index (nix-locate): icon/desktop hints for the package index
       #    without `nix shell nixpkgs#nix-index` (a ~3GB nixpkgs eval)
-      runtimeTools = pkgs: with pkgs; [ wl-clipboard grim curl ffmpegthumbnailer poppler-utils nix-index ];
+      #  - pipewire (pw-record/pw-play): the card's voice notes and talk-to-text
+      runtimeTools = pkgs: with pkgs; [ wl-clipboard grim curl ffmpegthumbnailer poppler-utils nix-index pipewire ];
     in {
 
       # ── Nix packages ────────────────────────────────────────────────────────
@@ -51,6 +52,28 @@
         # public domain) copied as-is, and the RAE dump (Spanish) parsed by
         # tools/rae-parse into `{word: {e,d}}` JSON. Installed to
         # $out/share/waverunner/, pointed at by $WAVERUNNER_DICT[_ES].
+        # The card's talk-to-text: the speech engine (whisper.cpp) and its
+        # model, pinned — so what is said is written out on the machine,
+        # offline, and neither can be swept away by a clean-up (the first cut
+        # borrowed a copy another package happened to depend on). The model is
+        # the multilingual "base": 148 MB, a second or two for a sentence on a
+        # laptop. Pointed at by $WAVERUNNER_WHISPER / $WAVERUNNER_WHISPER_MODEL
+        # (`crates/daemon/src/card/voice.rs`).
+        speech =
+          let
+            model = pkgs.fetchurl {
+              # (Upstream's moving branch: the hash below is what pins it — a
+              # changed file fails the build, it is never taken unseen.)
+              url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+              hash = "sha256-YO1bw90U7qhWST0zQ0m0BXgt3K8AKNS130CINF+6Lv4=";
+            };
+          in
+          pkgs.runCommand "waverunner-speech" { } ''
+            mkdir -p $out/bin $out/share/waverunner
+            ln -s ${pkgs.whisper-cpp}/bin/whisper-cli $out/bin/whisper-cli
+            ln -s ${model} $out/share/waverunner/ggml-base.bin
+          '';
+
         dictionaries =
           let
             english = pkgs.fetchurl {
@@ -108,7 +131,9 @@
               --set-default __EGL_VENDOR_LIBRARY_DIRS /run/opengl-driver/share/glvnd/egl_vendor.d \
               --prefix PATH : ${pkgs.lib.makeBinPath (runtimeTools pkgs)} \
               --set-default WAVERUNNER_DICT ${dictionaries}/share/waverunner/dictionary.json \
-              --set-default WAVERUNNER_DICT_ES ${dictionaries}/share/waverunner/dictionary-es.json
+              --set-default WAVERUNNER_DICT_ES ${dictionaries}/share/waverunner/dictionary-es.json \
+              --set-default WAVERUNNER_WHISPER ${speech}/bin/whisper-cli \
+              --set-default WAVERUNNER_WHISPER_MODEL ${speech}/share/waverunner/ggml-base.bin
           '';
         };
 

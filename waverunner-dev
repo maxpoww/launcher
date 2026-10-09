@@ -59,6 +59,17 @@ if [ -n "$DICTS" ]; then
   export WAVERUNNER_DICT_ES="$DICTS/share/waverunner/dictionary-es.json"
 fi
 
+# The card's talk-to-text: the speech engine and its model, built by the flake
+# and ROOTED via the out-link exactly as the dictionaries are (a clean-up can
+# never take them; an offline boot serves the last build). Without either the
+# daemon says so when the talk button is pressed.
+SPEECH="$(timeout $WAIT nix build --out-link "$STATE/speech" --print-out-paths /home/max/launcher#speech 2>/dev/null)"
+[ -z "$SPEECH" ] && [ -e "$STATE/speech" ] && SPEECH="$STATE/speech"
+if [ -n "$SPEECH" ]; then
+  export WAVERUNNER_WHISPER="$SPEECH/bin/whisper-cli"
+  export WAVERUNNER_WHISPER_MODEL="$SPEECH/share/waverunner/ggml-base.bin"
+fi
+
 # Which build to run: release by default — Hyprland runs this at login, and a
 # debug default once brought the desk up on a stale debug binary after a
 # reboot (2026-09-30). Set WAVERUNNER_PROFILE=debug for the dev loop (verify-ui
