@@ -29,6 +29,10 @@ use crate::App;
 /// let be (13): that one scrolls a long name, this one would cut it — at 13
 /// "Importing photos from Pixel 8 Pro" lost its last word.
 const MAX_W: f32 = 24.0;
+/// How much longer than its words and number need the pill is: the fill has
+/// further to go, so it is seen to move (Max, 2026-10-09: "make it longer so
+/// it goes faster, like another 1/3 longer").
+const STRETCH: f32 = 4.0 / 3.0;
 /// Between the words and the number.
 const GAP: f32 = 10.0;
 /// What the number's slot is measured from.
@@ -123,7 +127,7 @@ impl App {
     /// up to `MAX_W`.
     fn task_pill_full_w(&self) -> f32 {
         let wanted = 2.0 * PILL_PAD_X + self.task_pill.label_w + GAP + self.task_pill.pct_w;
-        wanted.min(self.options_pill_h() * MAX_W)
+        (wanted * STRETCH).min(self.options_pill_h() * MAX_W)
     }
 
     /// Where the pill is on the bar now (`None`: it is not there): centred
