@@ -49,6 +49,10 @@ pub(crate) enum Action {
     Lens(usize),
     /// …and off again.
     CameraStop,
+    /// A phone: its new photos and videos, to this computer's Pictures.
+    ImportPhotos,
+    /// A phone: its internet for this computer over the cable, on or off.
+    Tether,
     /// Out of the desktop, into the home folder.
     MoveToHome,
     MoveToBin,
@@ -164,6 +168,8 @@ pub(crate) struct Volume {
     pub camera: bool,
     pub lenses: Vec<String>,
     pub current: Option<usize>,
+    /// That phone is giving this computer its internet.
+    pub tether: bool,
 }
 
 /// The rows of a plugged-in volume's menu.
@@ -194,10 +200,21 @@ fn volume_rows(v: &Volume) -> Vec<Row> {
             }
         }
     }
+    // What a phone has for this computer (Max, 2026-10-09): its photos, its
+    // internet.
+    if v.phone {
+        rows.push(Row::Sep);
+        rows.push(Row::Item { label: "Import photos", action: Action::ImportPhotos, danger: false });
+        let label = if v.tether { "Stop phone's internet" } else { "Use phone's internet" };
+        rows.push(Row::Item { label, action: Action::Tether, danger: false });
+    }
     if !v.closed {
         rows.push(Row::Sep);
         rows.push(Row::Item { label: "Eject", action: Action::Eject, danger: false });
     }
+    // Last, and opened by coming onto it, as on a file's menu.
+    rows.push(Row::Sep);
+    rows.push(Row::Item { label: "Properties", action: Action::Properties, danger: false });
     rows
 }
 
@@ -603,10 +620,15 @@ mod tests {
         // A phone that is not open: no terminal, no eject.
         let shut = open().for_volume(Volume { phone: true, closed: true, ..Default::default() }, 800.0);
         let actions: Vec<Action> = (0..shut.rows.len()).filter_map(|i| shut.action(i)).collect();
-        assert_eq!(actions, vec![Action::Open, Action::Mirror, Action::Camera]);
+        assert_eq!(
+            actions,
+            vec![Action::Open, Action::Mirror, Action::Camera, Action::ImportPhotos, Action::Tether, Action::Properties]
+        );
+        let sharing = open().for_volume(Volume { phone: true, tether: true, ..Default::default() }, 800.0);
+        assert!(sharing.rows.contains(&Row::Item { label: "Stop phone's internet", action: Action::Tether, danger: false }));
         let m = open().for_volume(Volume::default(), 800.0);
         let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
-        assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject]);
+        assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject, Action::Properties]);
         // The wallpaper's menu takes Paste on top when there is something.
         let m = Menu::open(None, false, (10.0, 10.0), 1000.0, 800.0).with_paste(800.0);
         assert_eq!(m.action(0), Some(Action::Paste));

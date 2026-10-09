@@ -26,6 +26,7 @@ mod deck_thumbs;
 mod card;
 mod desktop;
 mod desktop_menu;
+mod desktop_phone;
 mod desktop_props;
 mod desktop_send;
 mod desktop_top;

@@ -276,11 +276,24 @@ impl Props {
     /// corner where the menu's is, Back leading to it again), or by the
     /// pointer at `at` on its own.
     pub fn open(item: &Item, at: (f32, f32), menu: Option<Menu>, w: f32, h: f32, home: &Path) -> Self {
-        let rows = rows_for(item, home);
         let title = Path::new(&item.path)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| item.name.clone());
+        Self::open_rows(&item.path, title, rows_for(item, home), at, menu, w, h)
+    }
+
+    /// The same box with lines that are given (a phone's: it is asked, not
+    /// read from the disk).
+    pub fn open_rows(
+        path: &str,
+        title: String,
+        rows: Vec<(&'static str, String)>,
+        at: (f32, f32),
+        menu: Option<Menu>,
+        w: f32,
+        h: f32,
+    ) -> Self {
         let back_h = if menu.is_some() { BACK_H + BACK_GAP } else { 0.0 };
         let height = PAD * 2.0 + back_h + TITLE_LINE + TITLE_GAP * 2.0 + 1.0 + rows.len() as f32 * ROW_H;
         let (x, y) = match &menu {
@@ -291,7 +304,7 @@ impl Props {
             ),
         };
         Self {
-            path: item.path.clone(),
+            path: path.to_owned(),
             title,
             rows,
             rect: Rect::new(x, y, WIDTH, height),
@@ -305,6 +318,14 @@ impl Props {
     pub fn back_rect(&self) -> Option<Rect> {
         self.back.as_ref()?;
         Some(Rect::new(self.rect.x + PAD - 8.0, self.rect.y + PAD - 4.0, 76.0, BACK_H))
+    }
+
+    /// Other lines (a phone answered): the box takes the height they need,
+    /// from the same top, kept on a surface `h` tall.
+    pub fn set_rows(&mut self, rows: Vec<(&'static str, String)>, h: f32) {
+        self.rect.h += (rows.len() as f32 - self.rows.len() as f32) * ROW_H;
+        self.rect.y = self.rect.y.min(h - self.rect.h).max(0.0);
+        self.rows = rows;
     }
 
     /// A folder's walk came back: its Size line.

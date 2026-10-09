@@ -86,6 +86,8 @@ pub(crate) struct Mounted {
     /// charge only): it stands on the desktop all the same, `path` being a
     /// name for it and no folder.
     pub closed: bool,
+    /// A phone that is giving this computer its internet over the cable.
+    pub tether: bool,
 }
 
 /// Read `gio mount -li`: the volumes, each with what its drive says about
@@ -192,6 +194,7 @@ pub(crate) fn mounted(volumes: &[Volume], runtime_dir: &str) -> Vec<Mounted> {
                 phone: v.phone,
                 port: v.port.clone(),
                 closed: false,
+                tether: false,
             })
         })
         .collect()
@@ -206,6 +209,8 @@ pub(crate) struct UsbPhone {
     pub serial: Option<String>,
     /// It offers `adb` (USB debugging is on).
     pub adb: bool,
+    /// It is a network card to this computer (USB tethering is on).
+    pub tether: bool,
     /// What the volume service will call it once it shows files
     /// (`SAMSUNG_SAMSUNG_Android_R9HN80AD0QJ`), when all three parts are known.
     pub host: Option<String>,
@@ -248,7 +253,7 @@ pub(crate) fn usb_phones(sysfs: &Path) -> Vec<UsbPhone> {
         ) else {
             continue;
         };
-        let (mut adb, mut mtp, mut other) = (false, false, false);
+        let (mut adb, mut mtp, mut other, mut tether) = (false, false, false, false);
         for face in entries.iter().filter(|e| {
             e.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("{node}:")))
         }) {
@@ -257,11 +262,20 @@ pub(crate) fn usb_phones(sysfs: &Path) -> Vec<UsbPhone> {
             let proto = read(face.join("bInterfaceProtocol")).unwrap_or_default();
             let said = read(face.join("interface")).unwrap_or_default();
             adb |= (class.as_str(), sub.as_str(), proto.as_str()) == ("ff", "42", "01");
+            // RNDIS in its three spellings, NCM, ECM: the phone as a network card.
+            let net = matches!(
+                (class.as_str(), sub.as_str(), proto.as_str()),
+                ("e0", "01", "03") | ("ef", "04", "01") | ("02", "02", "ff") | ("02", "0d", _) | ("02", "06", _)
+            );
+            tether |= net;
+            if net {
+                continue;
+            }
             mtp |= class == "06" || said.contains("MTP");
             other |= NOT_A_PHONE.contains(&class.as_str());
         }
         let maker = read(dev.join("idVendor")).is_some_and(|v| PHONE_VENDORS.contains(&v.as_str()));
-        if !(adb || mtp || (maker && !other)) {
+        if !(adb || mtp || (maker && (tether || !other))) {
             continue;
         }
         let name = read(dev.join("product"))
@@ -274,7 +288,7 @@ pub(crate) fn usb_phones(sysfs: &Path) -> Vec<UsbPhone> {
             (Some(maker), Some(product), Some(serial)) => Some(format!("{maker}_{product}_{serial}").replace(' ', "_")),
             _ => None,
         };
-        out.push(UsbPhone { port: format!("/dev/bus/usb/{bus:03}/{num:03}"), name, serial, adb, host });
+        out.push(UsbPhone { port: format!("/dev/bus/usb/{bus:03}/{num:03}"), name, serial, adb, tether, host });
     }
     out
 }
@@ -293,13 +307,14 @@ pub(crate) fn closed(
     // its cell: the service's own address for one it shows, and for one only
     // the bus shows the address the service will give it (maker, product and
     // serial, joined its way). A wrong guess costs a moved icon, no more.
-    let stand = |name: &str, path: PathBuf, uri: String, port: Option<String>| Mounted {
+    let stand = |name: &str, path: PathBuf, uri: String, port: Option<String>, tether: bool| Mounted {
         name: name.to_owned(),
         path,
         uri,
         phone: true,
         port,
         closed: true,
+        tether,
     };
     let unnamed = |key: &str| {
         let tidy: String = key.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
@@ -311,7 +326,7 @@ pub(crate) fn closed(
         .map(|v| {
             let address = v.address.clone().unwrap_or_default();
             let path = mount_path(&address, runtime_dir).unwrap_or_else(|| unnamed(&v.id()));
-            stand(&v.name, path, address, v.port.clone())
+            stand(&v.name, path, address, v.port.clone(), false)
         })
         .collect();
     for phone in usb {
@@ -323,7 +338,7 @@ pub(crate) fn closed(
             .as_ref()
             .and_then(|host| mount_path(&format!("mtp://{host}/"), runtime_dir))
             .unwrap_or_else(|| unnamed(&phone.port));
-        out.push(stand(&phone.name, path, format!("usb:{}", phone.port), Some(phone.port.clone())));
+        out.push(stand(&phone.name, path, format!("usb:{}", phone.port), Some(phone.port.clone()), phone.tether));
     }
     out
 }
@@ -353,7 +368,8 @@ fn nudge(usb: &[UsbPhone], volumes: &[Volume], nudged: &mut HashMap<String, u8>,
         let Some(serial) = phone.serial.as_deref() else {
             continue;
         };
-        if !phone.adb || volumes.iter().any(|v| v.port.as_deref() == Some(phone.port.as_str())) {
+        // (One that is giving its internet was put there on purpose.)
+        if !phone.adb || phone.tether || volumes.iter().any(|v| v.port.as_deref() == Some(phone.port.as_str())) {
             continue;
         }
         // Once each time it is on the bus: `adb` is a process to run.
@@ -703,10 +719,18 @@ Mount(1): share -> smb://nas/share/
                 ("3-4", &[("busnum", "3"), ("devnum", "2"), ("idVendor", "04f2"), ("product", "Integrated Camera")]),
                 ("3-4:1.0", &[("bInterfaceClass", "0e"), ("bInterfaceSubClass", "01"), ("bInterfaceProtocol", "00")]),
                 ("usb3", &[("busnum", "3"), ("devnum", "1"), ("idVendor", "1d6b")]),
+                // Giving its internet (RNDIS), debugging on.
+                ("3-7", &[("busnum", "3"), ("devnum", "9"), ("idVendor", "2717"), ("manufacturer", "Xiaomi"), ("product", "Redmi Note"), ("serial", "abc123")]),
+                ("3-7:1.0", &[("bInterfaceClass", "e0"), ("bInterfaceSubClass", "01"), ("bInterfaceProtocol", "03")]),
+                ("3-7:1.1", &[("bInterfaceClass", "0a"), ("bInterfaceSubClass", "00"), ("bInterfaceProtocol", "00")]),
+                ("3-7:1.2", &[("bInterfaceClass", "ff"), ("bInterfaceSubClass", "42"), ("bInterfaceProtocol", "01")]),
             ],
         );
         let found = usb_phones(&root);
         let _ = std::fs::remove_dir_all(&root);
+        let tethered = found.iter().find(|p| p.name == "Redmi Note").expect("a tethering phone is a phone");
+        assert!(tethered.tether && tethered.adb);
+        let found: Vec<UsbPhone> = found.into_iter().filter(|p| !p.tether).collect();
         let names: Vec<(&str, &str, bool)> = found.iter().map(|p| (p.name.as_str(), p.port.as_str(), p.adb)).collect();
         assert_eq!(
             names,

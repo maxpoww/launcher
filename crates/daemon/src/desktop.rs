@@ -410,6 +410,8 @@ pub(crate) struct Desktop {
     pub lenses: HashMap<String, Vec<Lens>>,
     /// The lens each phone's camera was last started through.
     pub lens_on: HashMap<String, usize>,
+    /// The phones whose photos are being brought right now (volume paths).
+    pub importing: HashSet<String>,
     /// What is plugged in and mounted, standing on the desktop as icons.
     pub volumes: Vec<crate::mounts::Mounted>,
     /// The Properties box, while it is up.
@@ -787,6 +789,46 @@ fn parse_wm_size(said: &str) -> Option<(f64, f64)> {
 fn mirror_size((short, long): (f64, f64), usable: f64) -> (i64, i64) {
     let h = (usable * MIRROR_HEIGHT).round();
     ((h * short / long).round() as i64, h as i64)
+}
+
+/// Turn a phone's USB tethering on or off. It needs `adb` (there is no other
+/// way to ask a phone for it from here); the cable shows whether the phone
+/// did it — as RNDIS, the way every Android has, then as NCM, the newer one.
+/// What to tell the owner: that this computer is on its internet, or why not.
+fn phone_internet(name: &str, serial: Option<&str>, on: bool) -> Option<String> {
+    use crate::i18n::tr;
+    let Some(serial) = serial else {
+        return Some(format!("{name}: {}", tr("turn on USB debugging on the phone to use its internet from here.")));
+    };
+    if let Some(said) = phone_refuses(name, serial) {
+        return Some(said);
+    }
+    if !on {
+        // Back to what it was for: its files.
+        crate::desktop_phone::tether(serial, "mtp");
+        return None;
+    }
+    let shares = || {
+        crate::mounts::usb_phones(Path::new("/sys/bus/usb/devices"))
+            .iter()
+            .any(|p| p.tether && p.serial.as_deref() == Some(serial))
+    };
+    for function in ["rndis", "ncm"] {
+        crate::desktop_phone::tether(serial, function);
+        // It drops off the cable and comes back as a network card.
+        for _ in 0..16 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if shares() {
+                info!("desktop: {name} gives its internet ({function})");
+                return Some(format!("{name}: {}", tr("this computer is using its internet. Its menu stops it.")));
+            }
+        }
+    }
+    warn!("desktop: {name} did not start tethering");
+    Some(format!(
+        "{name}: {}",
+        tr("it would not share its internet. Turn on USB tethering on the phone (Settings, Hotspot and tethering).")
+    ))
 }
 
 /// What to tell the owner when a phone does not let this computer in,
@@ -2169,7 +2211,8 @@ impl App {
             };
             let current = self.desktop.lens_on.get(&path).copied();
             let closed = self.desktop.volumes.iter().any(|v| v.closed && v.path.as_os_str() == path.as_str());
-            let volume = crate::desktop_menu::Volume { phone, closed, camera, lenses, current };
+            let tether = self.desktop.volumes.iter().any(|v| v.tether && v.path.as_os_str() == path.as_str());
+            let volume = crate::desktop_menu::Volume { phone, closed, camera, lenses, current, tether };
             menu = menu.for_volume(volume, h as f32);
         }
         // On a shortcut nothing vouches for: letting it run comes first.
@@ -2509,6 +2552,49 @@ impl App {
                     }
                 });
             }
+            Action::ImportPhotos => {
+                let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
+                    return;
+                };
+                let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
+                    return;
+                };
+                self.desktop.selected.clear();
+                // One at a time a phone: a second would copy the same files.
+                if !self.desktop.importing.insert(path.clone()) {
+                    return;
+                }
+                let (name, serial) = (v.name.clone(), phone_serial_of(v));
+                let mount = (!v.closed).then(|| v.path.clone());
+                info!("desktop: importing the photos of {name}");
+                self.desktop_off_loop(
+                    move || {
+                        let said = crate::desktop_phone::import_photos(&name, serial.as_deref(), mount.as_deref());
+                        crate::desktop_send_notify(&said);
+                        said
+                    },
+                    move |app, said| {
+                        info!("desktop: {said}");
+                        app.desktop.importing.remove(&path);
+                    },
+                );
+            }
+            Action::Tether => {
+                let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
+                    return;
+                };
+                let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
+                    return;
+                };
+                self.desktop.selected.clear();
+                let (name, serial, on) = (v.name.clone(), phone_serial_of(v), !v.tether);
+                info!("desktop: {name}'s internet {}", if on { "on" } else { "off" });
+                std::thread::spawn(move || {
+                    if let Some(said) = phone_internet(&name, serial.as_deref(), on) {
+                        crate::desktop_send_notify(&said);
+                    }
+                });
+            }
             Action::CameraStop => {
                 let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
                     return;
@@ -2682,6 +2768,45 @@ impl App {
         };
         let (w, h) = self.desktop_size;
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        // A phone is asked what it is (over adb, off the loop); until it
+        // answers, and if it does not, the box says what the cable does.
+        let phone = self.desktop.volumes.iter().find(|v| v.phone && v.path.as_os_str() == item.path.as_str());
+        if let Some(v) = phone {
+            let state = if v.tether {
+                "Giving its internet"
+            } else if v.closed {
+                "Plugged in, not open"
+            } else {
+                "Plugged in, files open"
+            };
+            let rows = vec![("Kind", "Phone".to_owned()), ("State", state.to_owned())];
+            let props = Props::open_rows(&item.path, item.name.clone(), rows.clone(), at, menu, w as f32, h as f32);
+            let (path, serial) = (item.path.clone(), phone_serial_of(v));
+            info!("desktop: properties of {}", props.title);
+            self.desktop.props = Some(props);
+            self.request_desktop_draw();
+            self.desktop_off_loop(
+                move || match serial.as_deref() {
+                    Some(serial) if crate::desktop_phone::ready(serial) => {
+                        let mut facts = crate::desktop_phone::facts(serial);
+                        facts.push(("Serial", serial.to_owned()));
+                        facts
+                    }
+                    Some(serial) => vec![("Serial", serial.to_owned()), ("Debugging", "Off, or not allowed".to_owned())],
+                    None => Vec::new(),
+                },
+                move |app, facts| {
+                    let h = app.desktop_size.1 as f32;
+                    if let Some(p) = app.desktop.props.as_mut().filter(|p| p.path == path) {
+                        let mut all = rows.clone();
+                        all.extend(facts);
+                        p.set_rows(all, h);
+                        app.request_desktop_draw();
+                    }
+                },
+            );
+            return;
+        }
         let props = Props::open(item, at, menu, w as f32, h as f32, &home);
         if item.kind == Kind::Folder {
             let path = item.path.clone();
@@ -3972,6 +4097,16 @@ impl App {
                         self.trash_file(&path); // the folder watch takes it off the desktop
                     }
                 }
+            } else if let Some(onto) = self.desktop_volume_under(at.pos, &items) {
+                // Let go over a stick or a phone: copied onto it (the
+                // desktop's own keep their cells).
+                let paths: Vec<PathBuf> = items
+                    .iter()
+                    .filter_map(|&i| self.desktop.items.get(i))
+                    .filter(|it| it.kind != Kind::Volume)
+                    .map(|it| PathBuf::from(&it.path))
+                    .collect();
+                self.desktop_drop_on_volume(onto, paths);
             } else {
                 self.desktop_settle_group(&items, at.pos);
             }
@@ -4046,6 +4181,44 @@ impl App {
         }
     }
 
+    /// The plugged-in volume whose icon is at `pos` (not one of `carried`).
+    fn desktop_volume_under(&self, pos: (f32, f32), carried: &[usize]) -> Option<usize> {
+        let i = self.desktop.hit(pos)?;
+        (!carried.contains(&i) && self.desktop.items.get(i)?.kind == Kind::Volume).then_some(i)
+    }
+
+    /// Copy `paths` onto the volume that is item `i`: a phone's Download
+    /// folder, a stick's top folder. Off the loop; the outcome is said.
+    fn desktop_drop_on_volume(&mut self, i: usize, paths: Vec<PathBuf>) {
+        let Some(path) = self.desktop.items.get(i).map(|it| it.path.clone()) else {
+            return;
+        };
+        let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+        info!("desktop: {} file(s) dropped on {}", paths.len(), v.name);
+        let (name, phone, serial) = (v.name.clone(), v.phone, phone_serial_of(v));
+        let mount = (!v.closed).then(|| v.path.clone());
+        std::thread::spawn(move || {
+            let said = if phone {
+                crate::desktop_phone::push(&name, serial.as_deref(), mount.as_deref(), &paths)
+            } else {
+                let dir = mount.unwrap_or_default();
+                let (copies, failed) = crate::desktop_send::put(&paths, &dir, false);
+                let _ = std::process::Command::new("sync").arg("-f").arg(&dir).status();
+                match (copies.len(), failed) {
+                    (0, _) => format!("{name}: {}", crate::i18n::tr("nothing could be copied to it.")),
+                    (n, 0) => format!("{name}: {n} {}", crate::i18n::tr("copied to it.")),
+                    (n, f) => format!("{name}: {n} {}; {f} {}", crate::i18n::tr("copied to it"), crate::i18n::tr("could not be copied.")),
+                }
+            };
+            crate::desktop_send_notify(&said);
+        });
+    }
+
     /// A drop that cannot be taken after all: the offer is destroyed (the
     /// other app learns its drag was cancelled, and ends it) and the wash
     /// goes.
@@ -4069,6 +4242,13 @@ impl App {
         // A move, unless the source only lets its files be copied (the
         // card's items stay on the card).
         let may_move = offer.source_actions.is_empty() || offer.source_actions.contains(DndAction::Move);
+        // Dropped on a stick's or a phone's icon: onto it, not onto the
+        // desktop (a copy: the other app's files stay where they are).
+        if let Some(onto) = self.desktop_volume_under(at, &[]) {
+            self.desktop_drop_on_volume(onto, paths);
+            offer.finish();
+            return;
+        }
         let (dir, offer) = (desktop_dir(), offer.clone());
         self.desktop_off_loop(
             move || import(&paths, &dir, may_move),
@@ -4189,13 +4369,14 @@ impl App {
             return;
         };
         // A phone that is plugged in and will not open: what to do on it.
-        if self.desktop.volumes.iter().any(|v| v.closed && v.path.as_os_str() == item.path.as_str()) {
+        if let Some(v) = self.desktop.volumes.iter().find(|v| v.closed && v.path.as_os_str() == item.path.as_str()) {
             info!("desktop: {} is not open", item.name);
-            let body = format!(
-                "{}: {}",
-                item.name,
-                crate::i18n::tr("unlock it and choose File transfer (or Allow) in its USB notification. It opens here by itself.")
-            );
+            let what = if v.tether {
+                "it is giving this computer its internet. Its files are back when that is stopped (its menu)."
+            } else {
+                "unlock it and choose File transfer (or Allow) in its USB notification. It opens here by itself."
+            };
+            let body = format!("{}: {}", item.name, crate::i18n::tr(what));
             std::thread::spawn(move || crate::desktop_send_notify(&body));
             return;
         }
