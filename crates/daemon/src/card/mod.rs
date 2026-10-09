@@ -2122,7 +2122,13 @@ impl App {
                 ));
             }
         }
-        crate::hypr::eval(&lua);
+        let ok = crate::hypr::eval_ok(&lua);
+        info!(
+            "card: Ctrl +/- {} (ctl {}, compositor said {})",
+            if on { "taken" } else { "given back" },
+            if ctl.is_some() { "found" } else { "MISSING" },
+            if ok { "ok" } else { "NO" }
+        );
     }
 
     /// Make the items bigger or smaller, or as designed again.
