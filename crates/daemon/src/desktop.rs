@@ -784,6 +784,57 @@ fn camera_device() -> Option<std::path::PathBuf> {
     found.first().map(|(_, node)| std::path::Path::new("/dev").join(node))
 }
 
+/// The name of the camera node we put in the session's media service.
+const CAMERA_NODE: &str = "golem-phone-camera";
+
+/// Make the phone's camera one the apps can SEE. The loopback device only
+/// says it is a camera while something feeds it, and the media service
+/// (PipeWire) looked at it once, at boot, when nothing did: it has the
+/// device and no camera on it, so Cheese, the browser's picker and the rest
+/// listed only the built-in one (Max, 2026-10-09). Now that it is fed, a
+/// source is made on it by hand, under the phone's own name; it lasts until
+/// `camera_withdraw`.
+fn camera_announce(name: &str, device: &std::path::Path) {
+    camera_withdraw(); // one left by a dock that went away mid-camera
+    let name: String = name.chars().filter(|c| !"\"\\{}".contains(*c)).collect();
+    let props = format!(
+        "{{ factory.name=api.v4l2.source api.v4l2.path={} node.name={CAMERA_NODE} \
+         node.description=\"{name}\" node.nick=\"{name}\" media.class=Video/Source \
+         media.role=Camera object.linger=true }}",
+        device.display()
+    );
+    let made = std::process::Command::new("pw-cli")
+        .args(["create-node", "spa-node-factory", &props])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if !made.as_ref().is_ok_and(|s| s.success()) {
+        warn!("desktop: the phone's camera could not be announced to the media service: {made:?}");
+    }
+}
+
+/// Take our camera node away again (the phone stopped being one).
+fn camera_withdraw() {
+    let Ok(out) = std::process::Command::new("pw-dump").stderr(std::process::Stdio::null()).output() else {
+        return;
+    };
+    let Ok(all) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return;
+    };
+    for object in all.as_array().into_iter().flatten() {
+        if object["info"]["props"]["node.name"].as_str() != Some(CAMERA_NODE) {
+            continue;
+        }
+        if let Some(id) = object["id"].as_u64() {
+            let _ = std::process::Command::new("pw-cli")
+                .args(["destroy", &id.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
 /// How long a camera has to stay up to count as working.
 const CAMERA_SETTLE: std::time::Duration = std::time::Duration::from_secs(4);
 
@@ -826,12 +877,14 @@ fn camera(
     std::thread::sleep(CAMERA_SETTLE);
     let early = child.try_wait().ok().flatten();
     if early.is_none() {
+        camera_announce(name, &device);
         crate::desktop_send_notify(&format!(
             "{name}: {}",
-            tr("is this computer's camera now (Android WebCam). Its menu stops it.")
+            tr("is this computer's camera now: pick it by its name in any app. Its menu stops it.")
         ));
     }
     let status = early.or_else(|| child.wait().ok());
+    camera_withdraw();
     let by_hand = cameras.lock().ok().is_none_or(|mut on| on.remove(path).is_none());
     info!("desktop: {name} is no longer the camera ({status:?}, by hand: {by_hand})");
     match early {
