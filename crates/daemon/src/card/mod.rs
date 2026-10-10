@@ -341,6 +341,9 @@ pub(crate) struct Card {
     tabbed: bool,
     /// The window that has the focus, as last heard from the compositor.
     active: Option<String>,
+    /// The width the items' words were last wrapped to (`lines`): another
+    /// one, and they are wrapped again.
+    wrapped_w: f32,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -2812,6 +2815,12 @@ impl App {
         let real = rect;
         let rect = virt(rect, zoom);
         let text_w = rect.w - 2.0 * LIST_PAD - 2.0 * TILE_PAD_X;
+        // (Wrapped for another width — a frame drawn before the card had
+        // its place, a window resized: all of it again.)
+        if (text_w - self.card.wrapped_w).abs() > 0.5 {
+            self.card.lines.clear();
+            self.card.wrapped_w = text_w;
+        }
         let text_px = TEXT_PX;
         let mono = renderer.measure_text("MMMMMMMMMM", text_px, Some(crate::options::NERD)) / 10.0;
         for item in &self.card.items {
@@ -3265,6 +3274,17 @@ impl App {
                     {
                         self.card_drop_keys();
                         return;
+                    }
+                    // A click on the card of a window that is not the focused
+                    // one FOCUSES that window (Max, 2026-10-10: *"clicking the
+                    // card from another window activates the card on the
+                    // calling window"*): the card is its window's, and from
+                    // then on the pointer gives it the keys.
+                    if let Some(host) = self.card.host.clone() {
+                        if self.card.active.as_deref() != Some(host.as_str()) {
+                            crate::hypr::focus_window(&host);
+                            self.card.active = Some(host);
+                        }
                     }
                     // A click on the card brings the keys back after a Tab.
                     self.card.tabbed = false;
