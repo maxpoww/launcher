@@ -309,6 +309,13 @@ impl App {
                             secs as f32,
                             None,
                         );
+                        // (Recorded with Space held: it asks for its title
+                        // at once — Max, 2026-10-10.)
+                        if std::mem::take(&mut app.card.name_next) {
+                            if let Some(id) = app.card.items.last().map(|it| it.id) {
+                                app.card_edit(id);
+                            }
+                        }
                     }
                     Done::Words(text) if text.is_empty() => {
                         app.card.say = Some("Nothing was made out")

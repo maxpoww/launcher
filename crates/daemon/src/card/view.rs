@@ -314,8 +314,6 @@ pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 5] {
 
 /// The room an open memory's name takes at the top of its list.
 const NAME_SPACE: f32 = 30.0;
-/// How many bars a voice note's wave is drawn with.
-const WAVE_BARS: usize = 30;
 /// A voice note's play button.
 pub(super) const PLAY: f32 = 28.0;
 /// A session's row on Memory's page: its name, and when its last thing was.
@@ -398,9 +396,27 @@ pub(crate) fn tile_height(kind: Kind, lines: usize, zoom: f32) -> f32 {
             Kind::Text => text,
             Kind::Image => kind_line + pic_h + PIC_GAP + text,
             Kind::File | Kind::Folder => kind_line + text,
-            Kind::Voice => PLAY + 2.0,
+            // (A voice note: its title beside the play button, the line
+            // with its two times; what is said in it under them, when shown.)
+            Kind::Voice => {
+                VOICE_HEAD
+                    + if lines > 0 {
+                        4.0 + lines as f32 * text_line
+                    } else {
+                        0.0
+                    }
+            }
         }
 }
+
+/// A voice note's own rows: the title beside the play button, and the line
+/// with its two times ("00:00 ——|—— 01:13").
+const VOICE_HEAD: f32 = 40.0;
+/// What a voice note with no title of its own is called (its body starts
+/// so: "Voice note · 0:07").
+pub(crate) const VOICE_NAME: &str = "Voice note";
+/// What stands in for what a voice note says while that is being written out.
+pub(crate) const WRITING_OUT: &str = "Writing out what it says…";
 
 /// A file as a part of an item: a small square of it, its name under.
 pub(crate) const THUMB: f32 = 64.0;
@@ -1355,8 +1371,11 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             line_y += kind_line;
         }
         if item.kind == Kind::Voice {
-            // A voice note: its play button, its wave (the part already
-            // heard is lit), how long it is.
+            // A VOICE NOTE (Max, 2026-10-10, settled on the mockup): the
+            // play symbol alone — no colour, no box — with the note's title
+            // beside it; under them a line that fills as it plays, between
+            // where it is and how long it is; and "Transcribe" at its foot,
+            // which shows what is said in it.
             let play = tile.play();
             let now = view
                 .foot
@@ -1364,79 +1383,129 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 .and_then(|f| f.playing)
                 .filter(|(id, _)| *id == item.id)
                 .map(|(_, secs)| secs);
-            list.rects.push(RectInst {
-                rect: play,
-                radius: 7.0,
-                color: [acc[0], acc[1], acc[2], 0.92],
-                glass: 0.0,
-                border: 0.0,
-            });
-            list.labels.push(Label {
-                text: if now.is_some() {
+            let mut put =
+                |text: &str, pos: (f32, f32), w: f32, px: f32, centered: bool, family, color| {
+                    list.labels.push(Label {
+                        text: text.to_owned(),
+                        pos,
+                        max_w: w,
+                        font_px: px,
+                        line_px: 14.0,
+                        centered,
+                        dim: false,
+                        cache: true,
+                        clip: Some(clip),
+                        family,
+                        color: Some(color),
+                    });
+                };
+            put(
+                if now.is_some() {
                     "\u{f04d}"
                 } else {
                     "\u{f04b}"
-                }
-                .to_owned(),
-                pos: (
-                    play.x + play.w / 2.0 + if now.is_some() { 0.0 } else { 1.0 },
-                    play.y + 7.0,
-                ),
-                max_w: play.w,
-                font_px: 10.0,
-                line_px: 14.0,
-                centered: true,
-                dim: false,
-                cache: true,
-                clip: Some(clip),
-                family: Some(crate::options::NERD),
-                color: Some([0.10, 0.09, 0.12, 1.0]),
-            });
-            let secs = item.aspect.max(1.0);
-            let heard = now.map_or(0.0, |s| (s / secs).clamp(0.0, 1.0));
-            let (x0, x1) = (
-                play.x + play.w + 10.0,
-                t.x + t.w - TILE_PAD_X - 34.0 - 2.0 * CLOSE,
+                },
+                (x + 14.0, t.y + TILE_PAD_Y + 2.0),
+                play.w,
+                11.0,
+                true,
+                Some(crate::options::NERD),
+                paint.ink_at(0.92),
             );
-            let step = (x1 - x0) / WAVE_BARS as f32;
-            for n in 0..WAVE_BARS {
-                // (Its shape is the note's own every time: from its id.)
-                let mix = (item.id.wrapping_mul(31).wrapping_add(n as u64))
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                let seed = (mix >> 40) % 1000;
-                let h = 4.0 + (seed as f32 / 1000.0) * 16.0;
-                let lit = (n as f32 + 0.5) / WAVE_BARS as f32 <= heard && now.is_some();
-                list.rects.push(RectInst {
-                    rect: Rect::new(
-                        (x0 + n as f32 * step).round(),
-                        (play.y + (play.h - h) / 2.0).round(),
-                        (step - 2.0).max(1.0),
-                        h.round(),
-                    ),
-                    radius: 1.0,
-                    color: if lit {
-                        [acc[0], acc[1], acc[2], 1.0]
-                    } else {
-                        paint.ink_at(0.42)
-                    },
-                    glass: 0.0,
-                    border: 0.0,
-                });
-            }
-            let total = secs.round() as u32;
-            list.labels.push(Label {
-                text: format!("{}:{:02}", total / 60, total % 60),
-                pos: (t.x + t.w - TILE_PAD_X - 15.0 - 2.0 * CLOSE, play.y + 7.0),
-                max_w: 40.0,
-                font_px: 10.5,
-                line_px: 14.0,
-                centered: true,
-                dim: false,
-                cache: true,
-                clip: Some(clip),
-                family: None,
-                color: Some(paint.ink_at(0.6)),
+            // Its title (one of its own, or what it is: dimmer).
+            let named = !item.body.starts_with(VOICE_NAME);
+            put(
+                if named {
+                    item.body.as_str()
+                } else {
+                    VOICE_NAME
+                },
+                (x + 32.0, t.y + TILE_PAD_Y + 1.0),
+                text_w - 32.0 - 3.0 * CLOSE,
+                TEXT_PX + 0.5,
+                false,
+                None,
+                paint.ink_at(if named { 0.95 } else { 0.5 }),
+            );
+            let secs = item.aspect.max(1.0);
+            let heard = now.unwrap_or(0.0).min(secs);
+            let clock = |s: f32| {
+                let s = s.round() as u32;
+                format!("{:02}:{:02}", s / 60, s % 60)
+            };
+            let row = t.y + TILE_PAD_Y + 22.0;
+            put(
+                &clock(heard),
+                (x + 14.0, row),
+                34.0,
+                10.0,
+                true,
+                None,
+                paint.ink_at(0.6),
+            );
+            put(
+                &clock(secs),
+                (x + text_w - 14.0, row),
+                34.0,
+                10.0,
+                true,
+                None,
+                paint.ink_at(0.6),
+            );
+            let track = Rect::new(x + 36.0, row + 6.0, (text_w - 72.0).max(0.0), 2.0);
+            list.rects.push(RectInst {
+                rect: track,
+                radius: 1.0,
+                color: paint.ink_at(0.18),
+                glass: 0.0,
+                border: 0.0,
             });
+            let at = track.w * (heard / secs).clamp(0.0, 1.0);
+            list.rects.push(RectInst {
+                rect: Rect::new(track.x, track.y, at, track.h),
+                radius: 1.0,
+                color: [acc[0], acc[1], acc[2], 1.0],
+                glass: 0.0,
+                border: 0.0,
+            });
+            list.rects.push(RectInst {
+                rect: Rect::new((track.x + at - 1.0).round(), track.y - 4.0, 2.0, 10.0),
+                radius: 1.0,
+                color: if now.is_some() {
+                    [acc[0], acc[1], acc[2], 1.0]
+                } else {
+                    paint.ink_at(0.9)
+                },
+                glass: 0.0,
+                border: 0.0,
+            });
+            // "Transcribe", in the middle of its foot (the word alone).
+            let wide = view
+                .foot
+                .as_ref()
+                .is_some_and(|f| f.wide.contains(&item.id));
+            let more = tile.more();
+            let hot = view.hover == Some(Hover::More(item.id));
+            let busy = item.said.as_deref() == Some(WRITING_OUT);
+            put(
+                match (busy, wide) {
+                    (true, _) => "Transcribing…",
+                    (_, true) => "Hide text",
+                    _ => "Transcribe",
+                },
+                (more.x + more.w / 2.0, more.y + 3.0),
+                more.w,
+                NOTE_PX + 1.0,
+                true,
+                None,
+                if hot && !busy {
+                    [acc[0], acc[1], acc[2], 1.0]
+                } else {
+                    paint.ink_at(if busy { 0.4 } else { 0.6 })
+                },
+            );
+            // (What is said in it comes under these rows, as lines.)
+            line_y = t.y + TILE_PAD_Y + VOICE_HEAD + 4.0;
         }
         if item.kind == Kind::Image {
             let frame = Rect::new(x, line_y, text_w, pic_h);
@@ -1588,7 +1657,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             });
         };
         // The pencil, on what can be written again: a text of one's own.
-        if over.is_some() && item.kind == Kind::Text && matches!(page, Page::Session | Page::Pinned)
+        if over.is_some()
+            && matches!(item.kind, Kind::Text | Kind::Voice)
+            && matches!(page, Page::Session | Page::Pinned)
         {
             button(
                 tile.edit(true),

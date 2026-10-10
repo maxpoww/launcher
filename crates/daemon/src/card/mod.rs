@@ -398,6 +398,9 @@ pub(crate) struct Card {
     /// The session being renamed in its row on Memory's page (`None`: the
     /// name being typed is the open session's own).
     renaming: Option<u64>,
+    /// The voice note being recorded (Space held) asks for its title the
+    /// moment it is kept.
+    name_next: bool,
     /// Space is down since then (nothing being written): held long enough
     /// it is a voice note, recorded until it is let go (`held`).
     space: Option<Instant>,
@@ -914,7 +917,9 @@ impl Card {
             return Some(Hover::Edit(tile.id));
         }
         let pencil = matches!(self.page, Page::Session | Page::Pinned)
-            && self.item(tile.id).is_some_and(|it| it.kind == Kind::Text);
+            && self
+                .item(tile.id)
+                .is_some_and(|it| matches!(it.kind, Kind::Text | Kind::Voice));
         // (The clipboard's rows too: a copied password must be removable.
         // A word's answers are not things to remove.)
         let closes =
@@ -927,12 +932,14 @@ impl Card {
             Hover::Pin(tile.id)
         } else if tile.more().contains(pos)
             && self.item(tile.id).is_some_and(|it| {
-                it.kind == Kind::Text
-                    && it.parts.is_empty()
-                    && has_more(
-                        self.lines.get(&it.id).map_or(&[][..], Vec::as_slice),
-                        self.wide.contains(&it.id),
-                    )
+                // (A voice note's "Transcribe"; a long text's "Show all".)
+                it.kind == Kind::Voice
+                    || it.kind == Kind::Text
+                        && it.parts.is_empty()
+                        && has_more(
+                            self.lines.get(&it.id).map_or(&[][..], Vec::as_slice),
+                            self.wide.contains(&it.id),
+                        )
             })
         {
             Hover::More(tile.id)
@@ -2003,6 +2010,7 @@ impl App {
         }
         self.card.space = None;
         if std::mem::take(&mut self.card.held) {
+            self.card.name_next = true;
             self.card_record_stop(true);
             self.request_card_draw();
         }
@@ -2352,13 +2360,29 @@ impl App {
         let Some(item) = self
             .card
             .item(id)
-            .filter(|it| it.kind == Kind::Text)
+            .filter(|it| matches!(it.kind, Kind::Text | Kind::Voice))
             .cloned()
         else {
             return;
         };
         self.card.take_draft();
         self.card_unseal();
+        // (A voice note: it is its TITLE that is written — none yet, an
+        // empty line.)
+        if item.kind == Kind::Voice {
+            if !item.body.starts_with(VOICE_NAME) {
+                self.card.type_in(&item.body);
+            }
+            self.card.edit = Some(id);
+            if self.card.field.is_none() {
+                self.card_take_keys(Field::Box);
+            } else {
+                self.card.field = Some(Field::Box);
+            }
+            self.sync_card_input();
+            self.request_card_draw();
+            return;
+        }
         // (Made of parts: they stand in the box as they were put in, and
         // its last words — if it ends in words — are the line being written.)
         let mut parts = item.parts.clone();
@@ -2391,6 +2415,18 @@ impl App {
             parts.push(words);
         }
         let edit = self.card.edit.take();
+        // (A voice note's title: the words alone, the note stays a note.)
+        if let Some(note) = edit
+            .and_then(|id| self.card.item_mut(id))
+            .filter(|it| it.kind == Kind::Voice)
+        {
+            if !text.trim().is_empty() {
+                note.body = text.trim().lines().next().unwrap_or("").to_owned();
+                self.card_save();
+            }
+            self.request_card_draw();
+            return;
+        }
         // (Nothing in it: nothing is kept — an item being changed stays as
         // it was; its × is what removes it.)
         if parts.is_empty() {
@@ -2648,9 +2684,12 @@ impl App {
             Hover::Menu(row) => self.card_menu(row),
             Hover::Undo => self.card_undo(),
             // "Show all" / "Show less": the text is wrapped again, whole or cut.
+            // (On a voice note it is "Transcribe" / "Hide text": what is
+            // said in it is written out the first time, and kept.)
             Hover::More(id) => {
                 if !self.card.wide.remove(&id) {
                     self.card.wide.insert(id);
+                    self.card_write_out(id);
                 }
                 self.card.lines.remove(&id);
                 self.request_card_draw();
@@ -2881,13 +2920,14 @@ impl App {
     /// out yet): each on a thread, as talk-to-text does it; its words stand
     /// under its row once they are in.
     fn card_write_out(&mut self, id: u64) {
-        const BUSY: &str = "Writing out what it says…";
+        const BUSY: &str = WRITING_OUT;
+        // (The item itself, when it is a voice note; else its parts.)
         let todo: Vec<(u64, PathBuf)> = self
             .card
             .items
             .iter()
             .filter(|it| it.id == id)
-            .flat_map(|it| it.parts.iter())
+            .flat_map(|it| std::iter::once(it).chain(it.parts.iter()))
             .filter(|p| p.kind == Kind::Voice)
             // (Not yet, or it could not be: "(…)" is a reason, not its words —
             // it is tried again the next time the item is opened.)
@@ -3603,7 +3643,13 @@ impl App {
                 item.body.lines().take(2).map(str::to_owned).collect()
             } else if item.kind == Kind::Voice {
                 // (A voice note that was written out: what it says.)
-                match item.said.as_deref() {
+                // (A note of its own shows it only once asked — "Transcribe";
+                // a part's is always wrapped, and shown when its item is open.)
+                match item
+                    .said
+                    .as_deref()
+                    .filter(|_| whole || self.card.wide.contains(&item.id))
+                {
                     Some(said) => {
                         let n = said.chars().count().max(1);
                         let w = renderer.measure_text(said, text_px, None);
@@ -3833,6 +3879,15 @@ impl App {
             }
             (Some(Hover::Btn(which)), ..) => which.hint(),
             (_, None, _) => "",
+            (_, Some(Field::Box), _)
+                if self
+                    .card
+                    .edit
+                    .and_then(|id| self.card.item(id))
+                    .is_some_and(|it| it.kind == Kind::Voice) =>
+            {
+                "Type a title and press Enter"
+            }
             (_, Some(Field::Box), _) if recording.is_some_and(|r| r.1) => {
                 "Listening… Enter writes what you said"
             }
