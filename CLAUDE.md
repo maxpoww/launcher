@@ -226,6 +226,14 @@ The big daemon files are cohesive but long — go straight to the function:
   the dock holds; apps on the fast card get NVIDIA's offload variables at launch (`gpu_exec`).
   Pointer-free: `waverunner-ctl debug-gear <open net|bt|gear|disk|cpu|ram|gpu|bat>`, then
   `detail|hotspot|files|page <about|health|clean|drive|folder|card|app|system>|close|…`.
+- `zoom.rs` — ZOOM (Max, 2026-10-10): Ctrl +/−/0 make the top bar and the desktop bigger, smaller,
+  as shipped. The BAR on HOVER: compositor binds made on the pointer's enter and taken away on its
+  leave (`bar_zoom_keys`, the card's way) → `waverunner-ctl debug-desktop zoom bar in|out|reset`;
+  its zoom multiplies `App::options_scale` (banner, pills, boxes; `sync_options_zone` does the
+  rest, as for a change of screen). The DESKTOP when FOCUSED: the keys come through
+  `desktop_shortcut`; its zoom multiplies the icon scale of its grid (`desktop_icon_scale`), an
+  icon keeps its cell. Both kept in `settings.json` (`bar_zoom`, `desktop_zoom`; 0.7–2.0 by
+  tenths). The desktop's NAMES do not grow yet.
 - `phones.rs` + `desktop_config.rs` — a PHONE'S SETTINGS and its CONFIGURE box (Max, 2026-10-10,
   mockup `~/phone-configure-mockup`): the "Configure" row of a phone's menu (above Properties, a
   click) opens the box, on the menus' surface; nothing changes until Apply. A phone is known by

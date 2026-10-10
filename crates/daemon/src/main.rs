@@ -108,6 +108,7 @@ mod usage;
 mod visible;
 mod webapps;
 mod window_memory;
+mod zoom;
 mod fast_launch;
 mod modules;
 
@@ -654,6 +655,7 @@ fn main() -> anyhow::Result<()> {
         tasks: tasks::Tasks::default(),
         task_tx: None,
         task_pill: task_pill::TaskPill::default(),
+        bar_zoom_keys: false,
         desktop_layer,
         desktop_renderer: None,
         desktop_size: (0, 0),
@@ -1533,6 +1535,8 @@ pub struct App {
     pub(crate) tasks: tasks::Tasks,
     task_tx: Option<calloop::channel::Sender<tasks::Report>>,
     task_pill: task_pill::TaskPill,
+    /// Ctrl +/−/0 are bound to the bar's zoom (the pointer is on it).
+    bar_zoom_keys: bool,
     desktop_layer: Option<LayerSurface>,
     desktop_renderer: Option<Renderer>,
     /// The desktop surface's logical size.
@@ -2564,7 +2568,8 @@ impl App {
     /// uniformly (every dimension AND font) so text measurement and drawing
     /// stay consistent and the surface just shrinks proportionally.
     pub fn options_scale(&self) -> f32 {
-        options::pill_scale_for(self.output_logical_height())
+        // (Times the owner's zoom: Ctrl +/− with the pointer on the bar.)
+        options::pill_scale_for(self.output_logical_height()) * self.bar_zoom()
     }
 
     /// The topbar's LIVE bar height: the configured height at the small-screen

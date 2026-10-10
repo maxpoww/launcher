@@ -5108,6 +5108,8 @@ impl App {
                 self.enter_serial = serial;
                 self.cursor_now = None;
                 self.options_ptr = Some((surface_x as f32, surface_y as f32));
+                // On the bar: Ctrl +/− zoom it (`zoom.rs`).
+                self.bar_zoom_keys(true);
                 self.options_on_motion(surface_y as f32);
             }
             wl_pointer::Event::Motion {
@@ -5123,6 +5125,7 @@ impl App {
                 // eases home to its resting position (`OptionUXRules.md` §1).
                 // Nothing is permanently displaced.
                 self.release_leader();
+                self.bar_zoom_keys(false);
                 self.options_ptr = None;
                 self.pointer_surface = PointerSurface::Dock;
                 self.options_reveal_deadline = None;

@@ -44,6 +44,10 @@ pub(crate) struct Settings {
     /// The desktop's icons are put away (a click on bare wallpaper toggles
     /// it — Max, 2026-10-07); the files stay where they are.
     pub(crate) desktop_hidden: bool,
+    /// How much bigger than its own size the top bar is drawn, and the
+    /// desktop's icons than the dock's (Ctrl +/−, `zoom.rs`; 0 = never set = 1).
+    pub(crate) bar_zoom: f32,
+    pub(crate) desktop_zoom: f32,
 }
 
 impl Settings {

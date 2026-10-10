@@ -2193,12 +2193,18 @@ impl App {
 
     /// Place the items on the grid, open the input over them, bring their
     /// pictures into the texture array, and draw.
+    /// The scale the desktop's grid and icons are laid out at: the dock's
+    /// icon scale times the owner's zoom of the desktop (`zoom.rs`).
+    pub(crate) fn desktop_icon_scale(&self) -> f32 {
+        self.icon_scale() * self.desktop_zoom()
+    }
+
     pub(crate) fn relayout_desktop(&mut self) {
         let (w, h) = self.desktop_size;
         if w == 0 || h == 0 {
             return;
         }
-        self.desktop.grid = Grid::new(w as f32, h as f32, self.icon_scale());
+        self.desktop.grid = Grid::new(w as f32, h as f32, self.desktop_icon_scale());
         self.desktop.slots = place(&self.desktop.items, &self.desktop.remembered, &self.desktop.grid);
         if stick(&self.desktop.items, &self.desktop.slots, &self.desktop.grid, &mut self.desktop.remembered) {
             self.save_desktop_positions();
@@ -3267,6 +3273,16 @@ impl App {
         }
         let ctrl = self.modifiers.ctrl;
         match keysym {
+            // Bigger, smaller, as shipped (`zoom.rs`).
+            Keysym::plus | Keysym::equal | Keysym::KP_Add if ctrl => {
+                self.zoom("desktop", "in");
+            }
+            Keysym::minus | Keysym::KP_Subtract if ctrl => {
+                self.zoom("desktop", "out");
+            }
+            Keysym::_0 | Keysym::KP_0 if ctrl => {
+                self.zoom("desktop", "reset");
+            }
             Keysym::c | Keysym::C if ctrl => self.desktop_menu_act(Action::Copy, None, at),
             Keysym::x | Keysym::X if ctrl => self.desktop_menu_act(Action::Cut, None, at),
             Keysym::v | Keysym::V if ctrl => self.desktop_paste(at),
@@ -3429,7 +3445,7 @@ impl App {
             .collect();
         let has_icon: Vec<bool> = layer_of.iter().map(Option::is_some).collect();
         let layers: Vec<u32> = layer_of.iter().map(|l| l.unwrap_or(0)).collect();
-        let icon_scale = self.icon_scale();
+        let icon_scale = self.desktop_icon_scale();
         let in_hand: Vec<usize> = self
             .desktop
             .drag
@@ -3875,7 +3891,7 @@ impl App {
         if let Some((from, _)) = self.desktop.band {
             self.desktop.band = Some((from, (x, y)));
             let band = band_rect(from, (x, y));
-            let hits = band_hits(&self.desktop.grid, &self.desktop.slots, self.icon_scale(), &band);
+            let hits = band_hits(&self.desktop.grid, &self.desktop.slots, self.desktop_icon_scale(), &band);
             self.desktop.selected = hits.into_iter().map(|i| self.desktop.items[i].path.clone()).collect();
             self.request_desktop_draw();
         } else if self.desktop.drag.is_none() {
@@ -3917,7 +3933,7 @@ impl App {
             return;
         };
         self.desktop.press = None;
-        let icon_scale = self.icon_scale();
+        let icon_scale = self.desktop_icon_scale();
         let icon = icon_rect(&self.desktop.grid.rect(slot), icon_scale);
         let grip = (at.0 - icon.x, at.1 - icon.y);
         // A plugged-in volume in hand is only ever COPIED from: an app that
@@ -4678,7 +4694,7 @@ impl App {
             let (w, h) = self.desktop_size;
             let at = match rest.trim().parse::<usize>().ok().and_then(|i| self.desktop.slots.get(i).copied().flatten()) {
                 Some(slot) => {
-                    let r = icon_rect(&self.desktop.grid.rect(slot), self.icon_scale());
+                    let r = icon_rect(&self.desktop.grid.rect(slot), self.desktop_icon_scale());
                     (r.x + r.w / 2.0, r.y + r.h / 2.0)
                 }
                 None => (w as f32 / 2.0, h as f32 / 2.0),
@@ -4690,7 +4706,7 @@ impl App {
         if let Some(rest) = what.strip_prefix("props ") {
             return match rest.trim().parse::<usize>().ok().and_then(|i| self.desktop.slots.get(i).copied().flatten().map(|s| (i, s))) {
                 Some((i, slot)) => {
-                    let r = icon_rect(&self.desktop.grid.rect(slot), self.icon_scale());
+                    let r = icon_rect(&self.desktop.grid.rect(slot), self.desktop_icon_scale());
                     self.desktop_open_props(i, (r.x + r.w / 2.0, r.y + r.h / 2.0), None);
                     format!("properties of {i}")
                 }
@@ -4698,6 +4714,11 @@ impl App {
             };
         }
         // `taskbox open|close`: the task pill's box, without a scroll.
+        // `zoom bar|desktop in|out|reset|<n>` (what Ctrl +/−/0 do).
+        if let Some(rest) = what.strip_prefix("zoom ") {
+            let (target, how) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            return self.zoom(target, how);
+        }
         // `config <n>`: the Configure box of the phone that is item n;
         // `config sync|kind <i>|every|charging|after|clean|really|notnow|
         // apply|cancel|name <text>`: a click on that part of it.
@@ -4800,7 +4821,7 @@ impl App {
             let hits = band_hits(
                 &self.desktop.grid,
                 &self.desktop.slots,
-                self.icon_scale(),
+                self.desktop_icon_scale(),
                 &band_rect((x0, y0), (x1, y1)),
             );
             self.desktop.selected = hits.iter().map(|&i| self.desktop.items[i].path.clone()).collect();
