@@ -173,6 +173,8 @@ pub(crate) enum Hover {
     Close(u64),
     /// An item's pin.
     Pin(u64),
+    /// An item's pencil: it is opened again to be changed.
+    Edit(u64),
     Foot(Foot),
     /// The search, and the × of an open one.
     Seek,
@@ -198,7 +200,11 @@ pub(crate) enum Hover {
 impl Hover {
     fn item(self) -> Option<u64> {
         match self {
-            Hover::Item(id) | Hover::Close(id) | Hover::Pin(id) | Hover::Play(id) => Some(id),
+            Hover::Item(id)
+            | Hover::Close(id)
+            | Hover::Pin(id)
+            | Hover::Play(id)
+            | Hover::Edit(id) => Some(id),
             _ => None,
         }
     }
@@ -219,7 +225,16 @@ pub(crate) struct FootView<'a> {
     pub notes: &'a HashMap<u64, String>,
     /// The voice note being played, and for how many seconds now.
     pub playing: Option<(u64, f32)>,
+    /// Something is being written IN THE LIST: a new thing, at its end
+    /// (`Some(None)`), or the item of this id, in its own place.
+    pub writing: Option<Option<u64>>,
 }
+
+/// The id the list gives the tile of the box something is being written in
+/// (`FootView::writing`): where that box is this frame.
+pub(crate) const WRITER: u64 = u64::MAX - 7;
+/// The pencil (fa-pencil).
+const GLYPH_EDIT: &str = "\u{f040}";
 
 /// The foot's height, and its buttons' own.
 pub(super) const FOOT_H: f32 = 46.0;
@@ -279,6 +294,17 @@ const NOTE_PX: f32 = 9.5;
 const NOTE_LINE: f32 = 12.0;
 
 impl Tile {
+    /// Where its pencil is: left of the pin where there is one (`pins`),
+    /// else in the pin's place, beside the ×.
+    pub(super) fn edit(&self, pins: bool) -> Rect {
+        let pin = self.pin();
+        if pins {
+            Rect::new(pin.x - CLOSE - 2.0, pin.y, CLOSE, CLOSE)
+        } else {
+            pin
+        }
+    }
+
     /// Where its pin is: beside the ×.
     pub(super) fn pin(&self) -> Rect {
         let close = self.close();
@@ -572,7 +598,6 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         super::bar::bottom(
             rect,
             f.page,
-            f.bar.box_lines(),
             !f.bar.query.is_empty() || f.bar.field == Some(Field::Seek),
             f.bar.picking,
         )
@@ -601,9 +626,18 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         .iter()
         .filter(|it| Some(it.id) != view.hidden)
         .collect();
+    // Something being written is in the list (Max, 2026-10-10: *"enter
+    // creates a new item and i can type on it"*): a new thing has its box
+    // after the last item; an item being changed has it in its own place.
+    let writing = view.foot.as_ref().and_then(|f| f.writing);
+    let box_h = view
+        .foot
+        .as_ref()
+        .map_or(0.0, |f| super::bar::box_h(f.bar.box_lines()));
     let heights: Vec<f32> = shown_items
         .iter()
         .map(|it| match page {
+            _ if writing == Some(Some(it.id)) => box_h,
             Page::Memory => ROW_H,
             _ => tile_height(it.kind, view.lines.get(&it.id).map_or(1, Vec::len), zoom),
         })
@@ -624,7 +658,12 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         + over
         + heights.iter().sum::<f32>()
         + GAP * heights.len().saturating_sub(1) as f32
-        + opening;
+        + opening
+        + if writing == Some(None) {
+            box_h + if heights.is_empty() { 0.0 } else { GAP }
+        } else {
+            0.0
+        };
     let max_scroll = (total - body.h).max(0.0);
     let scroll = view.scroll.clamp(0.0, max_scroll);
 
@@ -658,6 +697,11 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             shift,
         };
         y += h + GAP;
+        // (An item being changed: its place is the writing box's.)
+        if writing == Some(Some(item.id)) {
+            tiles.push(Tile { id: WRITER, ..tile });
+            continue;
+        }
         tiles.push(tile);
         let t = tile.rect;
         if t.y > clip.y + clip.h || t.y + t.h < clip.y {
@@ -963,6 +1007,20 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 }),
             });
         };
+        // The pencil, on what can be written again: a text of one's own.
+        let pins = page == Page::Session;
+        if over.is_some() && item.kind == Kind::Text && matches!(page, Page::Session | Page::Pinned)
+        {
+            button(
+                tile.edit(pins),
+                GLYPH_EDIT,
+                Some(crate::options::NERD),
+                12.0,
+                over == Some(Hover::Edit(item.id)),
+                over == Some(Hover::Edit(item.id)),
+                acc,
+            );
+        }
         if over.is_some() && !page.lent() {
             button(
                 tile.close(),
@@ -994,6 +1052,15 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             }
         }
     }
+    // A new thing being written: its box after the last item.
+    if writing == Some(None) {
+        tiles.push(Tile {
+            id: WRITER,
+            rect: Rect::new(rect.x + LIST_PAD, y.round(), tile_w, box_h),
+            shift: 0.0,
+        });
+    }
+    let writer = tiles.iter().find(|t| t.id == WRITER).map(|t| t.rect);
     scene.grids.push(list);
 
     // The foot: New · Memory · Pinned, the page that is up lit.
@@ -1078,10 +1145,19 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 }),
             });
         }
+        // (The writing box: in the list's own clip, over the items.)
+        let mut well = GridContent {
+            clip,
+            ..Default::default()
+        };
         super::bar::draw(
-            &mut bar, rect, body, window, foot.page, &foot.bar, paint, bright, view.hover,
+            &mut bar, &mut well, writer, rect, body, window, foot.page, &foot.bar, paint, bright,
+            view.hover,
         );
         scene.grids.push(bar);
+        if writer.is_some() {
+            scene.grids.push(well);
+        }
     }
     (scene, tiles, max_scroll)
 }
@@ -1558,6 +1634,7 @@ mod tests {
                 },
                 notes: &notes,
                 playing: None,
+                writing: None,
             }),
             dnd_over: false,
             hidden: None,
@@ -1570,7 +1647,7 @@ mod tests {
         let (with, _, scroll_foot) = scene(&view(true));
         // The list is shorter by the head and by what is at the bottom, so
         // there is that much more to scroll.
-        let low = crate::card::bar::bottom(rect, Page::Session, 0, false, None);
+        let low = crate::card::bar::bottom(rect, Page::Session, false, None);
         // (…and its first item starts under the memory's name.)
         assert_eq!(scroll_foot, scroll_bare + FOOT_H + low.h + NAME_SPACE);
         assert_eq!(with.grids.len(), bare.grids.len() + 1);

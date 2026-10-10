@@ -343,6 +343,12 @@ pub(crate) struct Card {
     /// The width the items' words were last wrapped to (`lines`): another
     /// one, and they are wrapped again.
     wrapped_w: f32,
+    /// What is in the writing box is this item, being changed (its pencil);
+    /// `None`: a new thing.
+    edit: Option<u64>,
+    /// Where the writing box is in the list this frame (as the tiles are:
+    /// in the space the card is laid out in).
+    writer: Option<Rect>,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -776,16 +782,6 @@ impl Card {
         self.field == Some(Field::Seek) || !self.query.is_empty()
     }
 
-    /// How many lines the input box holds — none when nothing is being
-    /// written in it (it is not up then: `bar::bottom`).
-    fn box_lines(&self) -> usize {
-        if self.field == Some(Field::Box) {
-            self.draft_lines.len().max(1)
-        } else {
-            0
-        }
-    }
-
     /// The memory the card is working with.
     fn memory_open(&self) -> Option<&Past> {
         let open = self.open?;
@@ -809,13 +805,7 @@ impl Card {
         // (Everything is tested where it was laid out: see `view::virt`.)
         let rect = self.vrect()?;
         let pos = self.inside(pos);
-        let low = bottom(
-            rect,
-            self.page,
-            self.box_lines(),
-            self.seeking(),
-            self.pick(),
-        );
+        let low = bottom(rect, self.page, self.seeking(), self.pick()).with_input(self.writer);
         if let Some(hit) = low.hit(pos, self.seeking()) {
             return Some(hit);
         }
@@ -840,8 +830,12 @@ impl Card {
         }
         let tile = self.tiles.iter().find(|t| t.rect.contains(pos))?;
         let pins = self.page == Page::Session || self.page.lent();
+        let pencil = matches!(self.page, Page::Session | Page::Pinned)
+            && self.item(tile.id).is_some_and(|it| it.kind == Kind::Text);
         Some(if !self.page.lent() && tile.close().contains(pos) {
             Hover::Close(tile.id)
+        } else if pencil && tile.edit(self.page == Page::Session).contains(pos) {
+            Hover::Edit(tile.id)
         } else if pins && tile.pin().contains(pos) {
             Hover::Pin(tile.id)
         } else if tile.play().contains(pos)
@@ -1552,8 +1546,11 @@ impl App {
         self.card_load();
         if self.card.show(page) {
             // (The input box and the name are a memory's.)
-            if page != Page::Session && matches!(self.card.field, Some(Field::Box | Field::Name)) {
-                self.card_drop_keys();
+            // (What was being written was the other page's.)
+            if matches!(self.card.field, Some(Field::Box | Field::Name)) {
+                self.card.take_draft();
+                self.card.edit = None;
+                self.card_rest();
             }
             match page {
                 // The dictionary: the search is where the word is typed,
@@ -1835,8 +1832,9 @@ impl App {
                     return;
                 }
                 (Keysym::Return | Keysym::KP_Enter, Page::Session) if self.card.open.is_some() => {
-                    self.card.field = Some(Field::Box);
+                    self.card_write_new("");
                 }
+                (Keysym::Return | Keysym::KP_Enter, Page::Pinned) => self.card_write_new(""),
                 (Keysym::Return | Keysym::KP_Enter, Page::Memory) => {
                     self.card_begin();
                     self.card.field = Some(Field::Box);
@@ -1900,6 +1898,7 @@ impl App {
                     // (Escape drops what was being written.)
                     Field::Box => {
                         self.card.take_draft();
+                        self.card.edit = None;
                         self.card_rest();
                     }
                     _ => self.card_rest(),
@@ -1969,11 +1968,11 @@ impl App {
             // Enter in the search of an open session: what was typed
             // becomes a new thing, to be finished in the box.
             (Field::Seek, Keysym::Return | Keysym::KP_Enter)
-                if self.card.page == Page::Session && self.card.open.is_some() =>
+                if self.card.page == Page::Pinned
+                    || (self.card.page == Page::Session && self.card.open.is_some()) =>
             {
                 let words = std::mem::take(&mut self.card.query);
-                self.card.field = Some(Field::Box);
-                self.card.type_in(&words);
+                self.card_write_new(&words);
             }
             (Field::Seek, Keysym::Return | Keysym::KP_Enter) => {}
             (Field::Name, Keysym::BackSpace) => {
@@ -2023,10 +2022,59 @@ impl App {
         }
     }
 
-    /// Enter in the input box: what is written is kept in the memory, and
-    /// the cursor stays for the next thing.
+    /// Enter (on a session, on Pinned): a NEW thing is written, in the list,
+    /// after the last item — starting with `words` (what the search held).
+    fn card_write_new(&mut self, words: &str) {
+        self.card.take_draft();
+        self.card.edit = None;
+        self.card.field = Some(Field::Box);
+        self.card.type_in(words);
+        self.card.to_bottom = true;
+        self.sync_card_input();
+        self.request_card_draw();
+    }
+
+    /// An item's pencil: its words are in the writing box, in its own place
+    /// in the list, to be changed. Enter keeps the changes, Escape leaves it
+    /// as it was.
+    fn card_edit(&mut self, id: u64) {
+        let Some(body) = self
+            .card
+            .item(id)
+            .filter(|it| it.kind == Kind::Text)
+            .map(|it| it.body.clone())
+        else {
+            return;
+        };
+        self.card.take_draft();
+        self.card.type_in(&body);
+        self.card.edit = Some(id);
+        if self.card.field.is_none() {
+            self.card_take_keys(Field::Box);
+        } else {
+            self.card.field = Some(Field::Box);
+        }
+        self.sync_card_input();
+        self.request_card_draw();
+    }
+
+    /// Enter in the writing box: what is written is kept — as a new item of
+    /// the list that is up, or as the new words of the item being changed.
     fn card_keep_draft(&mut self) {
         let text = self.card.take_draft();
+        if let Some(id) = self.card.edit.take() {
+            // (Emptied: it stays as it was — its × is what removes it.)
+            if text.trim().is_empty() {
+                return;
+            }
+            if let Some(item) = self.card.items.iter_mut().find(|it| it.id == id) {
+                item.body = text.trim_end().to_owned();
+            }
+            self.card.lines.remove(&id);
+            self.card_save();
+            self.request_card_draw();
+            return;
+        }
         if text.trim().is_empty() {
             return;
         }
@@ -2130,13 +2178,8 @@ impl App {
             return;
         };
         let pos = self.card.inside(ptr);
-        let low = bottom(
-            rect,
-            self.card.page,
-            self.card.box_lines(),
-            self.card.seeking(),
-            self.card.pick(),
-        );
+        let low = bottom(rect, self.card.page, self.card.seeking(), self.card.pick())
+            .with_input(self.card.writer);
         let spans = self.card.spans();
         let first = self.card.draft_top();
         let Some((line, x)) = low.text_at(pos, spans.len(), first) else {
@@ -2171,6 +2214,7 @@ impl App {
             Hover::Close(id) => self.card_remove(id),
             Hover::Pin(id) if self.card.page.lent() => self.card_keep_clip(id),
             Hover::Pin(id) => self.card_pin(id),
+            Hover::Edit(id) => self.card_edit(id),
             Hover::Foot(which) => self.card_foot(which),
             Hover::Seek => self.card_take_keys(Field::Seek),
             Hover::SeekClear => {
@@ -2901,7 +2945,10 @@ impl App {
             self.card.to_bottom = true;
         }
         // What is written in the input box, wrapped to it.
-        let low = bottom(rect, self.card.page, 1, self.card.seeking(), None);
+        // (The box is as wide as an item: it stands among them.)
+        let low = bottom(rect, self.card.page, self.card.seeking(), None).with_input(Some(
+            Rect::new(rect.x + LIST_PAD, rect.y, rect.w - 2.0 * LIST_PAD, 48.0),
+        ));
         let box_w = low.text().map_or(200.0, |r| r.w);
         // (As ranges of its characters, so the cursor has a place in it;
         // by the real width of each letter — measured once and kept — so a
@@ -3037,7 +3084,7 @@ impl App {
             }
             (_, _, Page::Memory) => "Enter to create · type to search",
             (_, _, Page::Clipboard) => "Click to paste · type to search",
-            (_, _, Page::Pinned) => "Type to search",
+            (_, _, Page::Pinned) => "Type to search · press Enter to create",
             (_, _, Page::Dictionary) => "Type a word",
             _ => "",
         };
@@ -3095,6 +3142,7 @@ impl App {
                 },
                 notes: &notes,
                 playing,
+                writing: (self.card.field == Some(Field::Box)).then_some(self.card.edit),
             }),
             dnd_over: self.card.dnd_over,
             hidden,
@@ -3113,9 +3161,12 @@ impl App {
                 self.card.scroll.clamp(0.0, max_scroll)
             };
             self.card.to_bottom = false;
-            self.card.tiles = tiles;
+            // (The writing box's place is not an item's: it is kept apart.)
+            self.card.writer = tiles.iter().find(|t| t.id == WRITER).map(|t| t.rect);
+            self.card.tiles = tiles.into_iter().filter(|t| t.id != WRITER).collect();
         } else {
             self.card.tiles.clear();
+            self.card.writer = None;
         }
         let (layer, qh, pending) = (
             self.card_layer.as_ref(),
@@ -3428,14 +3479,7 @@ impl App {
     /// How far the emoji picker's grid can be scrolled.
     fn card_pick_span(&self) -> f32 {
         self.card.vrect().map_or(0.0, |rect| {
-            bottom(
-                rect,
-                self.card.page,
-                self.card.box_lines(),
-                self.card.seeking(),
-                self.card.pick(),
-            )
-            .pick_span()
+            bottom(rect, self.card.page, self.card.seeking(), self.card.pick()).pick_span()
         })
     }
 
@@ -3826,6 +3870,21 @@ impl App {
             "keep" => {
                 self.card_keep_draft();
                 self.card_words()
+            }
+            // `edit <n>`: the pencil of item n of the list that is up.
+            "edit" => {
+                let id = rest
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| self.card.items.get(n.saturating_sub(1)))
+                    .map(|it| it.id);
+                match id {
+                    Some(id) => {
+                        self.card_edit(id);
+                        format!("editing {:?}", self.card.draft)
+                    }
+                    None => "edit <n>".to_owned(),
+                }
             }
             // `key <enter|escape|tab|backspace>`: that key, as the keyboard
             // would give it (the card must have the keys: the pointer on it).

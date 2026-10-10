@@ -187,19 +187,18 @@ pub(crate) struct Bottom {
 /// 2026-10-10, settled on ~/terminal-mockup/card): at rest there is ONLY A
 /// LINE OF HINT — no search button, no input box, no New. The search is a
 /// field that shows in the hint's place once something is typed
-/// (`seeking`); the box is there only while something is being written in
-/// it (`box_lines`: how many lines it holds; 0 = it is not up).
+/// (`seeking`). The box something is written in is IN THE LIST, where the
+/// thing will be (`box_h`, `with_input`).
 pub(crate) fn bottom(
     rect: Rect,
     page: Page,
-    box_lines: usize,
     seeking: bool,
     picking: Option<(usize, f32)>,
 ) -> Bottom {
     let (x, w) = (rect.x + LIST_PAD - 2.0, rect.w - 2.0 * LIST_PAD + 4.0);
     let mut y = rect.y + rect.h - PAD;
-    let mut input = None;
-    let mut tray = None;
+    let input = None;
+    let tray = None;
     let hint_y;
     let nowhere = Rect::new(rect.x, rect.y, 0.0, 0.0);
     let (mut seek, mut seek_clear) = (nowhere, nowhere);
@@ -242,33 +241,14 @@ pub(crate) fn bottom(
                 y -= HINT_H;
                 hint_y = y;
             }
-            if page == Page::Session && box_lines > 0 {
-                let lines = box_lines.clamp(1, BOX_LINES) as f32;
-                let h = (lines * TEXT_LINE + 2.0 * 14.0).max(BOX_MIN).round();
-                y -= h;
-                input = Some(Rect::new(x, y.round(), w, h));
-                if picking.is_some() {
-                    y -= STEP;
-                    let h = PICK_SEEK + PICK_ROWS * EMOJI_CELL + PICK_KINDS + 14.0;
-                    y -= h;
-                    tray = Some(Rect::new(x, y.round(), w, h));
-                }
-            }
+            // (The box something is written in is not here: it stands in
+            // the LIST, where the thing will be — `with_input`.)
             y -= STEP;
         }
     }
     let new = None;
-    let btn_y = input.map_or(0.0, |r| r.y + r.h - BTN - (BOX_MIN - BTN) / 2.0);
-    // (The + has the same room on every side — to the box's left edge, to
-    // its top and bottom, to the words: Max, 2026-10-10. Its mark is about
-    // 13 px in a box 48 tall, so that room is about 17.)
-    let left = x + BTN_EDGE + 11.0;
-    let right = x + w - BTN_EDGE - BTN;
-    let btns = [
-        (BoxBtn::Clip, Rect::new(left, btn_y, BTN, BTN)),
-        (BoxBtn::Talk, Rect::new(right - BTN_STEP, btn_y, BTN, BTN)),
-        (BoxBtn::Mic, Rect::new(right, btn_y, BTN, BTN)),
-    ];
+    // (The box's buttons are placed with the box: `with_input`.)
+    let btns = [BoxBtn::Clip, BoxBtn::Talk, BoxBtn::Mic].map(|b| (b, nowhere));
     Bottom {
         h: rect.y + rect.h - y,
         seek,
@@ -283,7 +263,34 @@ pub(crate) fn bottom(
     }
 }
 
+/// How tall the box is for `lines` lines of writing.
+pub(crate) fn box_h(lines: usize) -> f32 {
+    (lines.clamp(1, BOX_LINES) as f32 * TEXT_LINE + 2.0 * 14.0)
+        .max(BOX_MIN)
+        .round()
+}
+
 impl Bottom {
+    /// The same bottom with the writing box at `r` — where the list has it
+    /// this frame (none: nothing is being written). Its buttons go with it.
+    pub(crate) fn with_input(mut self, r: Option<Rect>) -> Bottom {
+        self.input = r;
+        if let Some(r) = r {
+            let btn_y = r.y + r.h - BTN - (BOX_MIN - BTN) / 2.0;
+            // (The + has the same room on every side — to the box's left
+            // edge, to its top and bottom, to the words: Max, 2026-10-10.
+            // Its mark is about 13 px in a box 48 tall: about 17.)
+            let left = r.x + BTN_EDGE + 11.0;
+            let right = r.x + r.w - BTN_EDGE - BTN;
+            self.btns = [
+                (BoxBtn::Clip, Rect::new(left, btn_y, BTN, BTN)),
+                (BoxBtn::Talk, Rect::new(right - BTN_STEP, btn_y, BTN, BTN)),
+                (BoxBtn::Mic, Rect::new(right, btn_y, BTN, BTN)),
+            ];
+        }
+        self
+    }
+
     /// Which of the input box's lines (of `lines`, the first in view being
     /// `first`) is at height `y`, and how far along it `x` is.
     pub(crate) fn text_at(
@@ -523,6 +530,11 @@ fn boxed(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
     grid: &mut GridContent,
+    // The box something is written in: where the list has it this frame,
+    // and the grid it is drawn into (the list's own clip — it scrolls with
+    // the items and passes under the head as they do).
+    boxg: &mut GridContent,
+    writer: Option<Rect>,
     rect: Rect,
     list: Rect,
     clip: Rect,
@@ -549,7 +561,7 @@ pub(super) fn draw(
         paint.fill[2] * 0.72,
         0.94,
     ];
-    let b = bottom(rect, page, bar.box_lines(), bar.seeking(), bar.picking);
+    let b = bottom(rect, page, bar.seeking(), bar.picking).with_input(writer);
 
     // The name of the memory, floating at the top.
     if let (Page::Session, Some(name)) = (page, bar.name) {
@@ -832,7 +844,7 @@ pub(super) fn draw(
     if let (Some(r), Some(text)) = (b.input, b.text()) {
         let typing = bar.field == Some(Field::Box);
         boxed(
-            grid,
+            boxg,
             r,
             RADIUS,
             well,
@@ -850,7 +862,7 @@ pub(super) fn draw(
                 continue;
             }
             if live || hot {
-                grid.rects.push(RectInst {
+                boxg.rects.push(RectInst {
                     rect: Rect::new(br.x + 6.0, br.y + 4.0, br.w - 12.0, br.h - 8.0),
                     radius: 7.0,
                     color: match (live, which) {
@@ -867,19 +879,19 @@ pub(super) fn draw(
             } else {
                 ink(if hot { 0.95 } else { 0.55 })
             };
-            grid.labels
-                .push(glyph(which.glyph(), br, which.px(), color, clip));
+            boxg.labels
+                .push(glyph(which.glyph(), br, which.px(), color, boxg.clip));
         }
         let top = r.y + (r.h - bar.draft.len().clamp(1, BOX_LINES) as f32 * TEXT_LINE) / 2.0;
         if let Some(secs) = bar.rec {
-            grid.labels.push(label(
+            boxg.labels.push(label(
                 &format!("●  {}:{:02}   recording", secs / 60, secs % 60),
                 (r.x + 16.0, top),
                 r.w - BTN - 30.0,
                 TEXT_PX + 0.5,
                 false,
                 [DANGER[0], DANGER[1], DANGER[2], 1.0],
-                clip,
+                boxg.clip,
             ));
         } else {
             let empty = bar.draft.is_empty() || (bar.draft.len() == 1 && bar.draft[0].is_empty());
@@ -889,7 +901,7 @@ pub(super) fn draw(
                 if *line < first || *line >= first + BOX_LINES {
                     continue;
                 }
-                grid.rects.push(RectInst {
+                boxg.rects.push(RectInst {
                     rect: Rect::new(
                         (text.x + from).round(),
                         top + (line - first) as f32 * TEXT_LINE + 1.0,
@@ -907,29 +919,29 @@ pub(super) fn draw(
                 let words = match bar.talk {
                     Some(say) => Some((say, accent(0.9))),
                     None if typing => None,
-                    None => Some(("Write to this memory", ink(0.42))),
+                    None => Some(("Type and press Enter", ink(0.42))),
                 };
                 if let Some((words, color)) = words {
-                    grid.labels.push(label(
+                    boxg.labels.push(label(
                         words,
                         (text.x, top),
                         text.w,
                         TEXT_PX + 0.5,
                         false,
                         color,
-                        clip,
+                        boxg.clip,
                     ));
                 }
             } else {
                 for (n, line) in bar.draft.iter().skip(first).take(BOX_LINES).enumerate() {
-                    grid.labels.push(label(
+                    boxg.labels.push(label(
                         line,
                         (text.x, top + n as f32 * TEXT_LINE),
                         text.w + 40.0,
                         TEXT_PX + 0.5,
                         false,
                         ink(0.95),
-                        clip,
+                        boxg.clip,
                     ));
                 }
             }
@@ -938,7 +950,7 @@ pub(super) fn draw(
             let seen = |line: usize| line >= first && line < first + BOX_LINES;
             if let (true, Some((line, x))) = (typing, bar.caret.filter(|c| seen(c.0))) {
                 let row = (line - first) as f32;
-                grid.rects.push(RectInst {
+                boxg.rects.push(RectInst {
                     rect: Rect::new(
                         (text.x + x).round(),
                         top + row * TEXT_LINE + 2.0,
@@ -978,19 +990,24 @@ mod tests {
         let low = rect.y + rect.h;
         // At rest every page has only its line of hint: no search, no box, no New.
         for page in [Page::Session, Page::Pinned, Page::Memory, Page::Clipboard] {
-            let b = bottom(rect, page, 0, false, None);
+            let b = bottom(rect, page, false, None);
             assert!(
                 b.input.is_none() && b.new.is_none() && b.seek.w == 0.0,
                 "{page:?}"
             );
             assert_eq!(b.h, PAD + HINT_H + STEP, "{page:?}");
         }
-        // Something being written in an open session: the box, over the hint.
-        let b = bottom(rect, Page::Session, 1, false, None);
-        let input = b.input.unwrap();
-        assert!(input.y + input.h < low && input.h == BOX_MIN && b.seek.w == 0.0);
-        // Its buttons are inside it, to each side of the words.
-        let text = b.text().unwrap();
+        // The search is a field in the hint's place, in the middle.
+        let open = bottom(rect, Page::Pinned, true, None);
+        assert_eq!(open.seek.w, SEEK_OPEN_W);
+        assert!((open.seek.x + open.seek.w / 2.0 - (rect.x + rect.w / 2.0)).abs() <= 1.0);
+        assert!(open.seek.y + open.seek.h <= low);
+        // The box something is written in stands where the list puts it: its
+        // buttons are inside it, to each side of the words.
+        let at = Rect::new(rect.x + 12.0, 300.0, rect.w - 24.0, box_h(1));
+        let b = bottom(rect, Page::Session, false, None).with_input(Some(at));
+        let (input, text) = (b.input.unwrap(), b.text().unwrap());
+        assert_eq!((input, input.h), (at, BOX_MIN));
         for (n, (_, r)) in b.btns.iter().enumerate() {
             // (The icon is well inside; its hit box may run a hair past the edge.)
             let mid = r.x + r.w / 2.0;
@@ -999,25 +1016,15 @@ mod tests {
             assert_eq!(r.x + r.w / 2.0 > text.x + text.w, n >= 1);
         }
         // It grows with what is written, to a point.
-        let tall = bottom(rect, Page::Session, 4, false, None);
-        assert!(tall.input.unwrap().h > input.h && tall.h > b.h);
-        assert_eq!(
-            bottom(rect, Page::Session, 40, false, None),
-            bottom(rect, Page::Session, BOX_LINES, false, None)
-        );
-        // (The box is a session's: the other pages never have it.)
-        assert!(bottom(rect, Page::Pinned, 1, false, None).input.is_none());
-        // The search is a field in the hint's place, in the middle.
-        let open = bottom(rect, Page::Pinned, 0, true, None);
-        assert_eq!(open.seek.w, SEEK_OPEN_W);
-        assert!((open.seek.x + open.seek.w / 2.0 - (rect.x + rect.w / 2.0)).abs() <= 1.0);
-        assert!(open.seek.y + open.seek.h <= low);
+        assert!(box_h(4) > box_h(1));
+        assert_eq!(box_h(40), box_h(BOX_LINES));
     }
 
     #[test]
     fn the_pointer_finds_the_bottoms_parts() {
         let rect = Rect::new(0.0, 0.0, 420.0, 600.0);
-        let b = bottom(rect, Page::Session, 1, false, None);
+        let at = Rect::new(12.0, 300.0, 396.0, box_h(1));
+        let b = bottom(rect, Page::Session, false, None).with_input(Some(at));
         let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
         assert_eq!(
             b.hit(mid(b.btns[2].1), false),
@@ -1025,19 +1032,17 @@ mod tests {
         );
         assert_eq!(b.hit(mid(b.text().unwrap()), false), Some(Hover::Input));
         assert_eq!(b.hit((5.0, 5.0), false), None);
-        let m = bottom(rect, Page::Memory, 0, true, None);
+        let m = bottom(rect, Page::Memory, true, None);
         assert_eq!(m.hit(mid(m.seek_clear), true), Some(Hover::SeekClear));
         assert_eq!(
             m.hit((m.seek.x + 40.0, m.seek.y + 14.0), true),
             Some(Hover::Seek)
         );
-        // The emoji picker opens over the input box, the search over it;
+        // The emoji's own page: the picker is the whole card under the head;
         // it shows the rows in view of however many emoji it holds.
-        let p = bottom(rect, Page::Session, 1, false, Some((1800, 0.0)));
+        let p = bottom(rect, Page::Emoji, false, Some((1800, 0.0)));
         let tray = p.tray.unwrap();
-        assert!(tray.y + tray.h <= p.input.unwrap().y);
         assert_eq!(p.emoji().next().map(|(n, _)| n), Some(0));
-        assert!(p.emoji().count() <= (PICK_ROWS as usize + 1) * EMOJI_COLS);
         let (n, cell) = p.emoji().nth(9).unwrap();
         assert_eq!(p.hit(mid(cell), false), Some(Hover::Emoji(n)));
         assert_eq!(
@@ -1045,13 +1050,7 @@ mod tests {
             Some(Hover::PickSeek)
         );
         // Scrolled two rows down, the same cell is a later emoji.
-        let down = bottom(
-            rect,
-            Page::Session,
-            1,
-            false,
-            Some((1800, 2.0 * EMOJI_CELL)),
-        );
+        let down = bottom(rect, Page::Emoji, false, Some((1800, 2.0 * EMOJI_CELL)));
         assert_eq!(
             down.hit(mid(cell), false),
             Some(Hover::Emoji(n + 2 * EMOJI_COLS))
@@ -1068,10 +1067,10 @@ mod tests {
         assert_eq!(Bottom::pick_row(2 * EMOJI_COLS + 3), 2.0 * EMOJI_CELL);
         // On the emoji's own page the picker is the whole card under the
         // head: more rows, no card search, nothing left for a list.
-        let page = bottom(rect, Page::Emoji, 1, false, Some((1800, 0.0)));
+        let page = bottom(rect, Page::Emoji, false, Some((1800, 0.0)));
         let all = page.tray.unwrap();
         assert!(all.y >= rect.y + head_h(Page::Emoji) && all.y + all.h <= rect.y + rect.h);
-        assert!(page.emoji().count() > p.emoji().count());
+        assert!(page.emoji().count() >= p.emoji().count());
         assert_eq!((page.seek.w, page.h), (0.0, rect.h - head_h(Page::Emoji)));
         assert!(page.kinds().all(|(_, r)| r.y + r.h <= all.y + all.h));
         assert!(b.tray.is_none() && b.emoji().next().is_none());
