@@ -87,9 +87,29 @@ pub(crate) struct Item {
     pub at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// AN ITEM MADE OF SEVERAL THINGS (Max, 2026-10-10: *"the card format
+    /// should respect the order, text (if i write) then image, then i write
+    /// a little more, then a pdf"*): its parts, in the order they were put
+    /// in — each one an item of its own kind (a text, a picture, a file, a
+    /// voice note). Empty for a plain item. With parts, `body` is their
+    /// words run together (what a search looks through, what a click on
+    /// the whole pastes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<Item>,
 }
 
-impl Item {}
+impl Item {
+    /// The words of `parts` run together: a composed item's `body`.
+    pub(super) fn words_of(parts: &[Item]) -> String {
+        parts
+            .iter()
+            .filter(|p| p.kind == Kind::Text)
+            .map(|p| p.body.trim())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
 
 /// A session: one working set of things, named after the window it was
 /// started in. MEMORY is the list of them all; each window shows the one it
@@ -170,6 +190,7 @@ pub(super) fn session_row(session: &Past) -> Item {
             .last()
             .map_or(session.at, |it| it.at.max(session.at)),
         from: None,
+        parts: Vec::new(),
     }
 }
 
@@ -534,6 +555,7 @@ mod tests {
             owned: false,
             at: 0,
             from: None,
+            parts: Vec::new(),
         }
     }
 
@@ -547,6 +569,7 @@ mod tests {
             owned: false,
             at: 0,
             from: None,
+            parts: Vec::new(),
         }
     }
 

@@ -64,7 +64,7 @@ impl BoxBtn {
 
     pub(super) fn hint(self) -> &'static str {
         match self {
-            BoxBtn::Clip => "Add a file from this computer",
+            BoxBtn::Clip => "Add a picture, a file, a voice note…",
             BoxBtn::Talk => "Talk and it is written here",
             BoxBtn::Mic => "Record a voice note",
         }
@@ -91,12 +91,8 @@ const SEEK_OPEN_W: f32 = 220.0;
 /// The input box: its least height, its buttons, the most lines it grows to.
 const BOX_MIN: f32 = 48.0;
 const BTN: f32 = 34.0;
-/// How far one button is from the next: less than a button is wide —
-/// their icons are smaller than they are, so they sit shoulder to shoulder.
-const BTN_STEP: f32 = 22.0;
 /// How far its buttons are from its edges, and its words from them.
 const BTN_EDGE: f32 = -4.0;
-const BTN_GAP: f32 = -5.0;
 /// …and from the + on the left, which keeps the same room all round.
 const PLUS_GAP: f32 = 6.0;
 pub(super) const BOX_LINES: usize = 5;
@@ -291,12 +287,16 @@ impl Bottom {
             // (The + has the same room on every side — to the box's left
             // edge, to its top and bottom, to the words: Max, 2026-10-10.
             // Its mark is about 13 px in a box 48 tall: about 17.)
-            let left = r.x + BTN_EDGE + 11.0;
-            let right = r.x + r.w - BTN_EDGE - BTN;
+            // ONE button: the +, at the right (Max, 2026-10-10: *"add the +
+            // button to the right of the box"*, then *"i want the + to open
+            // a menu (image, file, etc, and there i want also voice note and
+            // voice to text)"*). The other two have no place of their own.
+            let right = r.x + r.w - BTN - 11.0 - BTN_EDGE;
+            let nowhere = Rect::new(r.x, r.y, 0.0, 0.0);
             self.btns = [
-                (BoxBtn::Clip, Rect::new(left, btn_y, BTN, BTN)),
-                (BoxBtn::Talk, Rect::new(right - BTN_STEP, btn_y, BTN, BTN)),
-                (BoxBtn::Mic, Rect::new(right, btn_y, BTN, BTN)),
+                (BoxBtn::Clip, Rect::new(right, btn_y, BTN, BTN)),
+                (BoxBtn::Talk, nowhere),
+                (BoxBtn::Mic, nowhere),
             ];
         }
         self
@@ -325,8 +325,8 @@ impl Bottom {
     /// The part of the input box the words are in.
     pub(crate) fn text(&self) -> Option<Rect> {
         let r = self.input?;
-        let left = self.btns[0].1.x + BTN + PLUS_GAP;
-        let right = self.btns[1].1.x - BTN_GAP;
+        let left = r.x + 14.0;
+        let right = self.btns[0].1.x - PLUS_GAP + 6.0;
         Some(Rect::new(left, r.y, (right - left).max(0.0), r.h))
     }
 
@@ -440,7 +440,7 @@ impl Bottom {
         Some(
             self.btns
                 .iter()
-                .find(|(_, r)| r.contains(pos))
+                .find(|(_, r)| r.w > 0.0 && r.contains(pos))
                 .map_or(Hover::Input, |(b, _)| Hover::Btn(*b)),
         )
     }
@@ -546,6 +546,8 @@ pub(super) fn draw(
     // the items and passes under the head as they do).
     boxg: &mut GridContent,
     writer: Option<Rect>,
+    // (All of the box, when it holds parts over the writing; else `writer`.)
+    frame: Option<Rect>,
     rect: Rect,
     list: Rect,
     clip: Rect,
@@ -856,13 +858,17 @@ pub(super) fn draw(
         let typing = bar.field == Some(Field::Box);
         boxed(
             boxg,
-            r,
+            frame.unwrap_or(r),
             RADIUS,
             well,
             if typing { accent(0.6) } else { rim },
             1.0,
         );
         for (which, br) in b.btns {
+            // (The ones with no place of their own: in the +'s menu.)
+            if br.w == 0.0 {
+                continue;
+            }
             let hot = hover == Some(Hover::Btn(which));
             let live = match which {
                 BoxBtn::Mic => bar.rec.is_some(),
@@ -1024,13 +1030,11 @@ mod tests {
         let b = bottom(rect, Page::Session, false, None).with_input(Some(at));
         let (input, text) = (b.input.unwrap(), b.text().unwrap());
         assert_eq!((input, input.h), (at, BOX_MIN));
-        for (n, (_, r)) in b.btns.iter().enumerate() {
-            // (The icon is well inside; its hit box may run a hair past the edge.)
-            let mid = r.x + r.w / 2.0;
-            assert!(mid > input.x + 8.0 && mid < input.x + input.w - 8.0 && r.y >= input.y);
-            assert_eq!(r.x + r.w / 2.0 < text.x, n < 1);
-            assert_eq!(r.x + r.w / 2.0 > text.x + text.w, n >= 1);
-        }
+        // (One button: the +, at the right of the words, inside the box.)
+        let plus = b.btns[0].1;
+        let mid = plus.x + plus.w / 2.0;
+        assert!(mid > text.x + text.w && mid < input.x + input.w - 8.0 && plus.y >= input.y);
+        assert!(b.btns[1..].iter().all(|(_, r)| r.w == 0.0));
         // It grows with what is written, to a point.
         assert!(box_h(4) > box_h(1));
         assert_eq!(box_h(40), box_h(BOX_LINES));
@@ -1043,8 +1047,8 @@ mod tests {
         let b = bottom(rect, Page::Session, false, None).with_input(Some(at));
         let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
         assert_eq!(
-            b.hit(mid(b.btns[2].1), false),
-            Some(Hover::Btn(BoxBtn::Mic))
+            b.hit(mid(b.btns[0].1), false),
+            Some(Hover::Btn(BoxBtn::Clip))
         );
         assert_eq!(b.hit(mid(b.text().unwrap()), false), Some(Hover::Input));
         assert_eq!(b.hit((5.0, 5.0), false), None);

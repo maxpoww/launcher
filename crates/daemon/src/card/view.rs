@@ -232,6 +232,8 @@ pub(crate) struct FootView<'a> {
     pub choosing: bool,
     /// The disk's menu, when it is open.
     pub menu: Option<MenuView<'a>>,
+    /// The parts already put in what is being written (over the writing).
+    pub sealed: &'a [Item],
     /// On Memory's page: the session whose × was clicked once (it asks to
     /// be clicked again), and the one being renamed with what is typed.
     pub arming: Option<u64>,
@@ -370,6 +372,294 @@ pub(crate) fn tile_height(kind: Kind, lines: usize, zoom: f32) -> f32 {
             Kind::File | Kind::Folder => kind_line + text,
             Kind::Voice => PLAY + 2.0,
         }
+}
+
+/// A file as a part of an item: a small square of it, its name under.
+pub(crate) const THUMB: f32 = 64.0;
+const THUMB_NAME: f32 = 14.0;
+const THUMB_GAP: f32 = 8.0;
+/// A voice note as a part of an item: a row with play, a line, its length.
+const VOICE_ROW: f32 = 30.0;
+/// Between two pieces of an item.
+const PIECE_GAP: f32 = 7.0;
+
+/// One PIECE of an item made of several things, as it is laid out: some
+/// words, a row of files (those put in one after the other stand side by
+/// side), a voice note. The numbers are places in the item's `parts`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PieceKind {
+    Words(usize),
+    Chips(Vec<usize>),
+    Voice(usize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Piece {
+    pub kind: PieceKind,
+    /// From the top of the item's contents, and how tall.
+    pub y: f32,
+    pub h: f32,
+}
+
+/// Lay `parts` out, top down: the pieces and how tall they are together.
+/// (`lines`: the words of each text part, wrapped, by the part's id.)
+pub(crate) fn pieces(
+    parts: &[Item],
+    lines: &HashMap<u64, Vec<String>>,
+    zoom: f32,
+) -> (Vec<Piece>, f32) {
+    let text_line = (TEXT_LINE * zoom).round();
+    let mut out: Vec<Piece> = Vec::new();
+    let mut y = 0.0f32;
+    for (n, part) in parts.iter().enumerate() {
+        let file = matches!(part.kind, Kind::Image | Kind::File | Kind::Folder);
+        if let (
+            true,
+            Some(Piece {
+                kind: PieceKind::Chips(row),
+                ..
+            }),
+        ) = (file, out.last_mut())
+        {
+            row.push(n);
+            continue;
+        }
+        if !out.is_empty() {
+            y += PIECE_GAP;
+        }
+        let (kind, h) = match part.kind {
+            Kind::Text => (
+                PieceKind::Words(n),
+                lines.get(&part.id).map_or(1, Vec::len).max(1) as f32 * text_line,
+            ),
+            Kind::Voice => (PieceKind::Voice(n), VOICE_ROW),
+            _ => (PieceKind::Chips(vec![n]), THUMB + 3.0 + THUMB_NAME),
+        };
+        out.push(Piece { kind, y, h });
+        y += h;
+    }
+    (out, y)
+}
+
+/// How tall an item made of `parts` is.
+pub(crate) fn mixed_height(parts: &[Item], lines: &HashMap<u64, Vec<String>>, zoom: f32) -> f32 {
+    2.0 * TILE_PAD_Y - 3.0 + NOTE_LINE + pieces(parts, lines, zoom).1
+}
+
+/// Draw the pieces of `parts` into `grid`, their contents' top-left corner
+/// at `at`, `w` wide.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_pieces(
+    grid: &mut GridContent,
+    parts: &[Item],
+    lines: &HashMap<u64, Vec<String>>,
+    slots: &HashMap<String, u32>,
+    at: (f32, f32),
+    w: f32,
+    zoom: f32,
+    paint: &Paint,
+    clip: Rect,
+) {
+    let (text_px, text_line) = (TEXT_PX * zoom, (TEXT_LINE * zoom).round());
+    let bright = paint.bright();
+    let label = |grid: &mut GridContent,
+                 text: &str,
+                 pos: (f32, f32),
+                 max_w: f32,
+                 px: f32,
+                 line: f32,
+                 centered: bool,
+                 family: Option<&'static str>,
+                 color: [f32; 4]| {
+        grid.labels.push(Label {
+            text: text.to_owned(),
+            pos,
+            max_w,
+            font_px: px,
+            line_px: line,
+            centered,
+            dim: false,
+            cache: true,
+            clip: Some(clip),
+            family,
+            color: Some(color),
+        });
+    };
+    for piece in pieces(parts, lines, zoom).0 {
+        let y = at.1 + piece.y;
+        match piece.kind {
+            PieceKind::Words(n) => {
+                let part = &parts[n];
+                for (i, line) in lines.get(&part.id).into_iter().flatten().enumerate() {
+                    if !line.is_empty() {
+                        label(
+                            grid,
+                            line,
+                            (at.0, y + i as f32 * text_line),
+                            w,
+                            text_px,
+                            text_line,
+                            false,
+                            Some(crate::options::NERD),
+                            paint.ink_at(0.92),
+                        );
+                    }
+                }
+            }
+            PieceKind::Chips(row) => {
+                for (i, n) in row.iter().enumerate() {
+                    let part = &parts[*n];
+                    let face = Rect::new(at.0 + i as f32 * (THUMB + THUMB_GAP), y, THUMB, THUMB);
+                    if face.x + face.w > at.0 + w + 1.0 {
+                        break;
+                    }
+                    let layer = part.path.as_ref().and_then(|p| slots.get(p));
+                    let picture = part.kind == Kind::Image && layer.is_some();
+                    grid.rects.push(RectInst {
+                        rect: face,
+                        radius: 7.0,
+                        color: if picture {
+                            [0.0, 0.0, 0.0, if bright { 0.08 } else { 0.30 }]
+                        } else {
+                            // (A page: the paper a document is.)
+                            [0.925, 0.914, 0.886, 1.0]
+                        },
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                    if let (true, Some(&layer)) = (picture, layer) {
+                        grid.icons.push(IconInst {
+                            rect: face,
+                            layer,
+                            tint: [0.0; 4],
+                            ring: -1.0,
+                            plate: NO_PLATE,
+                        });
+                    } else {
+                        // Its lines of writing, and its kind in a corner.
+                        for (l, part_w) in [1.0f32, 0.8, 1.0, 0.55].into_iter().enumerate() {
+                            grid.rects.push(RectInst {
+                                rect: Rect::new(
+                                    face.x + 8.0,
+                                    face.y + 10.0 + l as f32 * 8.0,
+                                    (face.w - 16.0) * part_w,
+                                    3.0,
+                                ),
+                                radius: 1.0,
+                                color: [0.0, 0.0, 0.0, 0.22],
+                                glass: 0.0,
+                                border: 0.0,
+                            });
+                        }
+                        let ext: String = part
+                            .path
+                            .as_deref()
+                            .and_then(|p| std::path::Path::new(p).extension())
+                            .map(|e| e.to_string_lossy().to_uppercase())
+                            .unwrap_or_else(|| {
+                                if part.kind == Kind::Folder {
+                                    "DIR".to_owned()
+                                } else {
+                                    "FILE".to_owned()
+                                }
+                            })
+                            .chars()
+                            .take(4)
+                            .collect();
+                        let badge =
+                            Rect::new(face.x + face.w - 30.0, face.y + face.h - 17.0, 26.0, 13.0);
+                        grid.rects.push(RectInst {
+                            rect: badge,
+                            radius: 3.0,
+                            color: [0.753, 0.314, 0.302, 1.0],
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                        label(
+                            grid,
+                            &ext,
+                            (badge.x + badge.w / 2.0, badge.y + 1.0),
+                            badge.w,
+                            8.0,
+                            11.0,
+                            true,
+                            None,
+                            [1.0, 1.0, 1.0, 1.0],
+                        );
+                    }
+                    // Its name, under it.
+                    let name = part
+                        .path
+                        .as_deref()
+                        .and_then(|p| std::path::Path::new(p).file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| part.body.clone());
+                    let short: String = if name.chars().count() > 11 {
+                        format!("{}…", name.chars().take(10).collect::<String>())
+                    } else {
+                        name
+                    };
+                    label(
+                        grid,
+                        &short,
+                        (face.x + face.w / 2.0, face.y + face.h + 3.0),
+                        THUMB + 6.0,
+                        9.5,
+                        THUMB_NAME - 1.0,
+                        true,
+                        None,
+                        paint.ink_at(0.7),
+                    );
+                }
+            }
+            PieceKind::Voice(n) => {
+                let part = &parts[n];
+                let row = Rect::new(at.0, y, w, VOICE_ROW);
+                grid.rects.push(RectInst {
+                    rect: row,
+                    radius: 7.0,
+                    color: paint.ink_at(0.06),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                label(
+                    grid,
+                    "\u{f04b}",
+                    (row.x + 16.0, row.y + 8.0),
+                    20.0,
+                    10.0,
+                    14.0,
+                    true,
+                    Some(crate::options::NERD),
+                    paint.ink_at(0.9),
+                );
+                grid.rects.push(RectInst {
+                    rect: Rect::new(
+                        row.x + 32.0,
+                        row.y + row.h / 2.0 - 1.0,
+                        (row.w - 84.0).max(0.0),
+                        2.0,
+                    ),
+                    radius: 1.0,
+                    color: paint.ink_at(0.2),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                let total = part.aspect.max(1.0).round() as u32;
+                label(
+                    grid,
+                    &format!("{:02}:{:02}", total / 60, total % 60),
+                    (row.x + row.w - 26.0, row.y + 8.0),
+                    44.0,
+                    10.5,
+                    14.0,
+                    true,
+                    None,
+                    paint.ink_at(0.65),
+                );
+            }
+        }
+    }
 }
 
 /// The colours a card is drawn in: the box's fill and ink (the OPTIONS
@@ -653,15 +943,24 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     // creates a new item and i can type on it"*): a new thing has its box
     // after the last item; an item being changed has it in its own place.
     let writing = view.foot.as_ref().and_then(|f| f.writing);
-    let box_h = view
+    // (The box: the parts already put in, then the line being written.)
+    let sealed: &[Item] = view.foot.as_ref().map_or(&[], |f| f.sealed);
+    let draft_h = view
         .foot
         .as_ref()
         .map_or(0.0, |f| super::bar::box_h(f.bar.box_lines()));
+    let sealed_h = if sealed.is_empty() {
+        0.0
+    } else {
+        TILE_PAD_Y + pieces(sealed, view.lines, zoom).1
+    };
+    let box_h = sealed_h + draft_h;
     let heights: Vec<f32> = shown_items
         .iter()
         .map(|it| match page {
             _ if writing == Some(Some(it.id)) => box_h,
             Page::Memory => ROW_H,
+            _ if !it.parts.is_empty() => mixed_height(&it.parts, view.lines, zoom),
             _ => tile_height(it.kind, view.lines.get(&it.id).map_or(1, Vec::len), zoom),
         })
         .collect();
@@ -865,6 +1164,22 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         }
         let x = t.x + TILE_PAD_X;
         let mut line_y = t.y + TILE_PAD_Y;
+        // (Made of several things: its pieces, in their order. It has no
+        // lines of its own, so the rest of this finds nothing to draw but
+        // its foot and its buttons.)
+        if !item.parts.is_empty() {
+            draw_pieces(
+                &mut list,
+                &item.parts,
+                view.lines,
+                view.slots,
+                (x, line_y),
+                text_w,
+                zoom,
+                paint,
+                clip,
+            );
+        }
         if let Some(word) = item.kind.word() {
             list.labels.push(Label {
                 text: word.to_owned(),
@@ -1288,10 +1603,25 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             clip,
             ..Default::default()
         };
+        // (The writing is the lower part of the box; the parts over it.)
+        let draft = writer.map(|w| Rect::new(w.x, w.y + w.h - draft_h, w.w, draft_h));
         super::bar::draw(
-            &mut bar, &mut well, writer, rect, body, window, foot.page, &foot.bar, paint, bright,
-            view.hover,
+            &mut bar, &mut well, draft, writer, rect, body, window, foot.page, &foot.bar, paint,
+            bright, view.hover,
         );
+        if let (Some(w), false) = (writer, sealed.is_empty()) {
+            draw_pieces(
+                &mut well,
+                sealed,
+                view.lines,
+                view.slots,
+                (w.x + TILE_PAD_X, w.y + TILE_PAD_Y),
+                tile_w - 2.0 * TILE_PAD_X - 34.0,
+                zoom,
+                paint,
+                clip,
+            );
+        }
         scene.grids.push(bar);
         if writer.is_some() {
             scene.grids.push(well);
@@ -1632,6 +1962,7 @@ mod tests {
             owned: false,
             at: 0,
             from: None,
+            parts: Vec::new(),
         }
     }
 
@@ -1645,6 +1976,7 @@ mod tests {
             owned: false,
             at: 0,
             from: None,
+            parts: Vec::new(),
         }
     }
 
@@ -1873,6 +2205,7 @@ mod tests {
                 menu: None,
                 arming: None,
                 renaming: None,
+                sealed: &[],
             }),
             dnd_over: false,
             hidden: None,

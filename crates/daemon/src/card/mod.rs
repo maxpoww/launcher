@@ -369,6 +369,14 @@ pub(crate) struct Card {
     /// Where the writing box is in the list this frame (as the tiles are:
     /// in the space the card is laid out in).
     writer: Option<Rect>,
+    /// The parts already put in what is being written: they stand in the
+    /// box, over the line being written, in the order they were put in.
+    sealed: Vec<Item>,
+    /// The +'s menu (of the writing box) is open.
+    plus: bool,
+    /// What is written is being kept right now (so what `card_push` is
+    /// given then is the thing itself, not one more part of it).
+    keeping: bool,
     /// The item whose disk's menu is open.
     menu: Option<u64>,
     /// A session is being CHOSEN on Memory's page, to keep this in; and the
@@ -927,6 +935,10 @@ impl Card {
     /// The rows of the disk's menu on the page that is up: Pin (not for
     /// what is pinned already), Memory, New session.
     fn menu_rows(&self) -> &'static [&'static str] {
+        // (The +'s, in the writing box: what can be put in.)
+        if self.plus {
+            return &["Image", "File", "Voice note", "Voice to text"];
+        }
         match self.page {
             Page::Pinned => &["Memory", "New session"],
             _ => &["Pin", "Memory", "New session"],
@@ -936,8 +948,19 @@ impl Card {
     /// Where the disk's menu is: under the disk of its item, its right edge
     /// on the disk's (over it where there is no room under).
     fn menu_rect(&self) -> Option<Rect> {
-        let tile = self.tiles.iter().find(|t| Some(t.id) == self.menu)?;
-        let (disk, card) = (tile.pin(), self.vrect()?);
+        let card = self.vrect()?;
+        // (Under the + of the writing box, or under an item's disk.)
+        let disk = if self.plus {
+            bottom(card, self.page, self.seeking(), self.pick())
+                .with_input(self.writer)
+                .btns[0]
+                .1
+        } else {
+            self.tiles.iter().find(|t| Some(t.id) == self.menu)?.pin()
+        };
+        if disk.w == 0.0 {
+            return None;
+        }
         let h = self.menu_rows().len() as f32 * MENU_ROW + 2.0 * MENU_PAD;
         let x = (disk.x + disk.w - MENU_W).max(card.x + 6.0);
         let under = disk.y + disk.h + 4.0;
@@ -954,11 +977,16 @@ impl Card {
     fn copy_of(&mut self, item: &Item, now: u64) -> Item {
         let id = self.next_id.max(1);
         self.next_id = id + 1;
-        Item {
+        let mut copy = Item {
             id,
             at: now,
             ..item.clone()
+        };
+        for part in &mut copy.parts {
+            part.id = self.next_id;
+            self.next_id += 1;
         }
+        copy
     }
 
     /// Pin a copy of `item`.
@@ -1177,7 +1205,11 @@ impl Card {
     /// the file at `path` (a picture of the card's own is deleted only
     /// with the LAST item that shows it).
     fn keeps(&self, path: &str) -> bool {
-        let is = |it: &Item| it.path.as_deref() == Some(path);
+        // (An item's own file, or one of its parts'.)
+        let is = |it: &Item| {
+            it.path.as_deref() == Some(path)
+                || it.parts.iter().any(|p| p.path.as_deref() == Some(path))
+        };
         self.session_items().iter().any(is)
             || self.pinned_items().iter().any(is)
             || self.memory.iter().any(|p| p.items.iter().any(is))
@@ -1413,6 +1445,8 @@ impl App {
         self.card
             .items
             .iter()
+            .flat_map(|it| std::iter::once(it).chain(it.parts.iter()))
+            .chain(self.card.sealed.iter())
             .filter(|it| it.kind == Kind::Image)
             .filter_map(|it| it.path.clone())
             .collect()
@@ -1429,12 +1463,8 @@ impl App {
     /// A thumbnail arrived: if it is of a picture on the card, keep it and
     /// put it in a layer.
     pub(crate) fn card_on_thumb(&mut self, path: &str, pixels: &[u8]) {
-        if !self
-            .card
-            .items
-            .iter()
-            .any(|it| it.path.as_deref() == Some(path))
-        {
+        // (An item's own picture, a part's, or one in what is being written.)
+        if !self.card_pictures().iter().any(|p| p == path) {
             return;
         }
         let layer = match self.card.slots.get(path) {
@@ -1479,6 +1509,13 @@ impl App {
         at: Option<usize>,
     ) {
         self.card_load();
+        // While something is being WRITTEN, what arrives is a part of it: a
+        // file dropped on the card, a voice note recorded from the +.
+        if self.card.field == Some(Field::Box) && !self.card.keeping {
+            let part = self.card_part(kind, body, path, owned, aspect);
+            self.card_seal(part);
+            return;
+        }
         // What arrives is a session's: the window's own, or — where none
         // was picked yet — a new one of its name.
         if self.card.page != Page::Pinned {
@@ -1511,6 +1548,7 @@ impl App {
                 owned,
                 at: now_secs(),
                 from: crate::hypr::active_window_where().map(|(class, _)| class),
+                parts: Vec::new(),
             },
         );
         self.card.to_bottom = at == end;
@@ -1642,6 +1680,7 @@ impl App {
     fn card_show(&mut self, page: Page) {
         self.card_load();
         self.card.menu = None;
+        self.card.plus = false;
         // (Choosing a session is Memory's page's: leaving it gives it up.)
         if page != Page::Memory {
             self.card.picking = None;
@@ -1651,6 +1690,7 @@ impl App {
             // (What was being written was the other page's.)
             if matches!(self.card.field, Some(Field::Box | Field::Name)) {
                 self.card.take_draft();
+                self.card_unseal();
                 self.card.edit = None;
                 self.card_rest();
             }
@@ -1713,6 +1753,7 @@ impl App {
                     owned: false,
                     at: clip.timestamp_ms / 1000,
                     from: (!clip.source.is_empty()).then(|| clip.source.clone()),
+                    parts: Vec::new(),
                 })
             })
             .collect()
@@ -1733,6 +1774,7 @@ impl App {
             owned: false,
             at: 0,
             from,
+            parts: Vec::new(),
         };
         let rows = if word.is_empty() {
             vec![row(0, "Type a word in the search below.".to_owned(), None)]
@@ -2044,7 +2086,12 @@ impl App {
                     Field::Seek if !self.card.query.is_empty() => self.card.query.clear(),
                     // (Escape drops what was being written.)
                     Field::Box => {
+                        // (…a recording into it too.)
+                        if self.card.rec.is_some() {
+                            self.card_record_stop(false);
+                        }
                         self.card.take_draft();
+                        self.card_unseal();
                         self.card.edit = None;
                         self.card_rest();
                     }
@@ -2060,6 +2107,11 @@ impl App {
             (Field::Box, Keysym::Return | Keysym::KP_Enter) if shift => self.card.type_in("\n"),
             (Field::Box, Keysym::Return | Keysym::KP_Enter) if ctrl => self.card_send_draft(),
             // (Kept, and the box is gone again: the hint is back.)
+            // (While something is recorded into the box, Enter ends that:
+            // the note becomes a part, what was said is written in.)
+            (Field::Box, Keysym::Return | Keysym::KP_Enter) if self.card.rec.is_some() => {
+                self.card_record_stop(true);
+            }
             (Field::Box, Keysym::Return | Keysym::KP_Enter) => {
                 self.card_keep_draft();
                 self.card_rest();
@@ -2084,6 +2136,22 @@ impl App {
                     if clip.kind == crate::clipboard::ClipKind::Text {
                         let text = clip.text.clone();
                         self.card.type_in(&text);
+                    }
+                }
+            }
+            // Backspace with nothing written: the last part put in goes
+            // back — words into the line to be written again, anything
+            // else out of the box.
+            (Field::Box, Keysym::BackSpace)
+                if self.card.draft.is_empty() && !self.card.sealed.is_empty() =>
+            {
+                if let Some(part) = self.card.sealed.pop() {
+                    if part.kind == Kind::Text {
+                        self.card.type_in(&part.body);
+                    } else if let (true, Some(path)) = (part.owned, part.path.as_deref()) {
+                        if !self.card.keeps(path) {
+                            let _ = std::fs::remove_file(path);
+                        }
                     }
                 }
             }
@@ -2184,6 +2252,7 @@ impl App {
     /// after the last item — starting with `words` (what the search held).
     fn card_write_new(&mut self, words: &str) {
         self.card.take_draft();
+        self.card_unseal();
         self.card.edit = None;
         self.card.field = Some(Field::Box);
         self.card.type_in(words);
@@ -2218,16 +2287,28 @@ impl App {
             self.request_card_draw();
             return;
         }
-        let Some(body) = self
+        let Some(item) = self
             .card
             .item(id)
             .filter(|it| it.kind == Kind::Text)
-            .map(|it| it.body.clone())
+            .cloned()
         else {
             return;
         };
         self.card.take_draft();
-        self.card.type_in(&body);
+        self.card_unseal();
+        // (Made of parts: they stand in the box as they were put in, and
+        // its last words — if it ends in words — are the line being written.)
+        let mut parts = item.parts.clone();
+        match parts.last() {
+            Some(last) if last.kind == Kind::Text => {
+                let words = parts.pop().map(|p| p.body).unwrap_or_default();
+                self.card.type_in(&words);
+            }
+            Some(_) => {}
+            None => self.card.type_in(&item.body),
+        }
+        self.card.sealed = parts;
         self.card.edit = Some(id);
         if self.card.field.is_none() {
             self.card_take_keys(Field::Box);
@@ -2242,30 +2323,53 @@ impl App {
     /// the list that is up, or as the new words of the item being changed.
     fn card_keep_draft(&mut self) {
         let text = self.card.take_draft();
-        if let Some(id) = self.card.edit.take() {
-            // (Emptied: it stays as it was — its × is what removes it.)
-            if text.trim().is_empty() {
-                return;
-            }
+        let mut parts = std::mem::take(&mut self.card.sealed);
+        if !text.trim().is_empty() {
+            let words = self.card_part(Kind::Text, text.trim_end().to_owned(), None, false, 0.0);
+            parts.push(words);
+        }
+        let edit = self.card.edit.take();
+        // (Nothing in it: nothing is kept — an item being changed stays as
+        // it was; its × is what removes it.)
+        if parts.is_empty() {
+            return;
+        }
+        // ONE thing is an item of that kind, as ever; SEVERAL are one item
+        // made of them, in their order.
+        let (kind, body, path, owned, aspect, parts) = if parts.len() == 1 {
+            let p = parts.remove(0);
+            (p.kind, p.body, p.path, p.owned, p.aspect, Vec::new())
+        } else {
+            (Kind::Text, Item::words_of(&parts), None, false, 0.0, parts)
+        };
+        if let Some(id) = edit {
             if let Some(item) = self.card.items.iter_mut().find(|it| it.id == id) {
-                item.body = text.trim_end().to_owned();
+                item.kind = kind;
+                item.body = body;
+                item.path = path;
+                item.owned = owned;
+                item.aspect = aspect;
+                item.parts = parts;
             }
             self.card.lines.remove(&id);
+            for path in self.card_pictures() {
+                self.card_ask_picture(&path);
+            }
             self.card_save();
             self.request_card_draw();
             return;
         }
-        if text.trim().is_empty() {
-            return;
+        self.card.keeping = true;
+        self.card_push(kind, body, path, owned, aspect, None);
+        self.card.keeping = false;
+        if !parts.is_empty() {
+            if let Some(last) = self.card.items.last_mut() {
+                last.parts = parts;
+                let id = last.id;
+                self.card.lines.remove(&id);
+            }
+            self.card_save();
         }
-        self.card_push(
-            Kind::Text,
-            text.trim_end().to_owned(),
-            None,
-            false,
-            0.0,
-            None,
-        );
     }
 
     /// Ctrl+Enter in the input box: what is written goes into the card's
@@ -2285,7 +2389,14 @@ impl App {
         match which {
             BoxBtn::Mic => self.card_voice_button(false),
             BoxBtn::Talk => self.card_voice_button(true),
-            BoxBtn::Clip => self.card_pick_file(),
+            // The +: its menu — or, while something is being recorded into
+            // the box, the end of that.
+            BoxBtn::Clip if self.card.rec.is_some() => self.card_record_stop(true),
+            BoxBtn::Clip => {
+                self.card.menu = None;
+                self.card.plus = !self.card.plus;
+                self.request_card_draw();
+            }
         }
     }
 
@@ -2323,16 +2434,90 @@ impl App {
 
     /// The paperclip: the desktop's file picker, and what is picked is
     /// kept in the memory.
+    fn card_plus(&mut self, row: usize) {
+        match row {
+            // A picture, a file: picked from this computer.
+            0 | 1 => self.card_pick_file(),
+            // A voice note: recorded until Enter (or the +) ends it.
+            2 => self.card_record_start(false),
+            // Voice to text: what is said is written where the cursor is.
+            _ => self.card_record_start(true),
+        }
+        self.request_card_draw();
+    }
+
+    /// A new item of the card's, not yet in any list.
+    fn card_part(
+        &mut self,
+        kind: Kind,
+        body: String,
+        path: Option<String>,
+        owned: bool,
+        aspect: f32,
+    ) -> Item {
+        let id = self.card.next_id.max(1);
+        self.card.next_id = id + 1;
+        Item {
+            id,
+            kind,
+            body,
+            path,
+            aspect,
+            owned,
+            at: now_secs(),
+            from: None,
+            parts: Vec::new(),
+        }
+    }
+
+    /// `part` goes INTO what is being written, after what is there: the
+    /// words written so far become a part of their own first, so the order
+    /// is the order things were put in (words, a picture, more words…).
+    fn card_seal(&mut self, part: Item) {
+        let text = self.card.take_draft();
+        if !text.trim().is_empty() {
+            let words = self.card_part(Kind::Text, text.trim_end().to_owned(), None, false, 0.0);
+            self.card.sealed.push(words);
+        }
+        if let (Kind::Image, Some(path)) = (part.kind, part.path.clone()) {
+            self.card_ask_picture(&path);
+        }
+        self.card.sealed.push(part);
+        self.card.to_bottom = self.card.edit.is_none();
+        self.sync_card_input();
+        self.request_card_draw();
+    }
+
+    /// What was being written is given up: the parts put in it go — a
+    /// recording of the card's own with them, unless an item still has it.
+    fn card_unseal(&mut self) {
+        for part in std::mem::take(&mut self.card.sealed) {
+            if let (true, Some(path)) = (part.owned, part.path.as_deref()) {
+                if !self.card.keeps(path) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+
+    /// The file picker (the +'s Image and File): what is picked goes into
+    /// what is being written.
     fn card_pick_file(&mut self) {
-        let (tx, rx) = calloop::channel::channel::<Option<PathBuf>>();
+        let (tx, rx) = calloop::channel::channel::<Option<Facts>>();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::bt_files::pick_file_waiting());
+            let _ = tx.send(crate::bt_files::pick_file_waiting().and_then(|p| facts(&p)));
         });
         let waiting = self
             .loop_handle
             .insert_source(rx, |event, _, app: &mut App| {
-                if let calloop::channel::Event::Msg(Some(path)) = event {
-                    app.card_add_paths(vec![path]);
+                if let calloop::channel::Event::Msg(Some(f)) = event {
+                    // (The picker had the keyboard meanwhile: the box has
+                    // it again, to go on writing.)
+                    if app.card.field != Some(Field::Box) {
+                        app.card_take_keys(Field::Box);
+                    }
+                    let part = app.card_part(f.kind, f.body, Some(f.path), false, f.aspect);
+                    app.card_seal(part);
                 }
             });
         if waiting.is_err() {
@@ -2602,6 +2787,10 @@ impl App {
     /// be CHOSEN (`picking`), and comes back once one is; NEW SESSION — a
     /// session is started with a copy of it in it. Always a copy of its own.
     fn card_menu(&mut self, row: usize) {
+        if std::mem::take(&mut self.card.plus) {
+            self.card_plus(row);
+            return;
+        }
         let Some(id) = self.card.menu.take() else {
             return;
         };
@@ -3243,11 +3432,20 @@ impl App {
         }
         let text_px = TEXT_PX;
         let mono = renderer.measure_text("MMMMMMMMMM", text_px, Some(crate::options::NERD)) / 10.0;
-        for item in &self.card.items {
+        let all = self
+            .card
+            .items
+            .iter()
+            .flat_map(|it| std::iter::once(it).chain(it.parts.iter()))
+            .chain(self.card.sealed.iter());
+        for item in all {
             if self.card.lines.contains_key(&item.id) {
                 continue;
             }
-            let lines = if self.card.page == Page::Memory {
+            let lines = if !item.parts.is_empty() {
+                // (Made of parts: it has no lines of its own.)
+                Vec::new()
+            } else if self.card.page == Page::Memory {
                 // (A memory's row: its name, its last thing — one line each.)
                 item.body.lines().take(2).map(str::to_owned).collect()
             } else if item.kind == Kind::Voice {
@@ -3467,6 +3665,10 @@ impl App {
             }
             (Some(Hover::Btn(which)), ..) => which.hint(),
             (_, None, _) => "",
+            (_, Some(Field::Box), _) if recording.is_some_and(|r| r.1) => {
+                "Listening… Enter writes what you said"
+            }
+            (_, Some(Field::Box), _) if recording.is_some() => "Recording… Enter puts it in",
             (_, Some(Field::Box), _) => {
                 "Enter keeps it · Shift+Enter for a new line · Escape drops it"
             }
@@ -3542,6 +3744,7 @@ impl App {
                     .is_some()
                     .then_some("Keep in which session?"),
                 choosing: self.card.picking.is_some(),
+                sealed: &self.card.sealed,
                 arming: self.card.arming.map(|a| a.0),
                 renaming: self
                     .card
@@ -3575,7 +3778,13 @@ impl App {
             };
             self.card.to_bottom = false;
             // (The writing box's place is not an item's: it is kept apart.)
-            self.card.writer = tiles.iter().find(|t| t.id == WRITER).map(|t| t.rect);
+            // (Its lower part: the line being written. Over it, the parts
+            // already put in.)
+            let draft_h = box_h(self.card.draft_lines.len());
+            self.card.writer = tiles
+                .iter()
+                .find(|t| t.id == WRITER)
+                .map(|t| Rect::new(t.rect.x, t.rect.y + t.rect.h - draft_h, t.rect.w, draft_h));
             self.card.tiles = tiles.into_iter().filter(|t| t.id != WRITER).collect();
         } else {
             self.card.tiles.clear();
@@ -3695,6 +3904,8 @@ impl App {
                 // written: that keeps them until it is done.
                 self.card.tabbed = false;
                 self.card.menu = None;
+                self.card.plus = false;
+                self.card.plus = false;
                 if self.card.field == Some(Field::Card) {
                     self.card_drop_keys();
                 }
@@ -3728,10 +3939,16 @@ impl App {
                         return;
                     }
                     // (A press anywhere but on the disk's menu closes it.)
-                    if self.card.menu.is_some()
-                        && !matches!(self.card.hit(at), Some(Hover::Menu(_) | Hover::Pin(_)))
+                    if (self.card.menu.is_some() || self.card.plus)
+                        && !matches!(
+                            self.card.hit(at),
+                            Some(Hover::Menu(_) | Hover::Pin(_) | Hover::Btn(_))
+                        )
                     {
                         self.card.menu = None;
+                        self.card.plus = false;
+                        self.card.plus = false;
+                        self.card.plus = false;
                         self.request_card_draw();
                     }
                     // A click on the card of a window that is not the focused
@@ -4307,6 +4524,12 @@ impl App {
                 self.card_menu(rest.parse::<usize>().unwrap_or(1).saturating_sub(1));
                 format!("page {:?}", self.card.page)
             }
+            // `plus`: the +'s menu of the writing box, open (then `menu <row>`).
+            "plus" => {
+                self.card.plus = true;
+                self.request_card_draw();
+                format!("menu {:?}", self.card.menu_rows())
+            }
             // `undo`: what the hint offers back, taken back.
             "undo" => {
                 self.card_undo();
@@ -4619,6 +4842,7 @@ mod tests {
             owned: false,
             at: 0,
             from: None,
+            parts: Vec::new(),
         };
         let order = |c: &Card| c.items.iter().map(|it| it.id).collect::<Vec<_>>();
         let mut card = Card {
@@ -4734,6 +4958,7 @@ mod tests {
             owned: false,
             at: 0,
             from: None,
+            parts: Vec::new(),
         }
     }
 
