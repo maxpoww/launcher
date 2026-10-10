@@ -2379,28 +2379,26 @@ impl App {
             return;
         };
         // One of the desktop's own outcomes that has something to show (a
-        // finished photo import: the folder the photos went to): the click
-        // opens that folder in the file manager.
-        let folder = n
-            .actions
-            .iter()
-            .find_map(|key| key.strip_prefix(crate::NOTIFY_OPEN))
-            .filter(|_| n.app_name == "waverunner")
-            .map(str::to_owned);
-        if let Some(folder) = folder {
-            tracing::info!("notif: opening {folder}");
-            let uri = crate::desktop::file_uri(&folder);
-            let exec = format!(
-                "busctl --user call org.freedesktop.FileManager1 /org/freedesktop/FileManager1 \
-                 org.freedesktop.FileManager1 ShowFolders ass 1 {} '' || xdg-open {}",
-                crate::launch::shell_quote(&uri),
-                crate::launch::shell_quote(&folder)
-            );
-            if let Err(e) = crate::launch::launch(&exec, false, "") {
-                tracing::warn!("notif: cannot open {folder}: {e:#}");
+        // finished photo import): the click shows it in the file manager —
+        // the photos that just came, selected in their folder, or the folder.
+        if n.app_name == "waverunner" {
+            let key = |prefix: &str| n.actions.iter().find_map(|k| k.strip_prefix(prefix)).map(str::to_owned);
+            let shown = if let Some(list) = key(crate::NOTIFY_SHOW) {
+                let files: Vec<std::path::PathBuf> = std::fs::read_to_string(&list)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                crate::desktop::to_show(&files)
+            } else {
+                key(crate::NOTIFY_OPEN).map(|folder| (std::path::PathBuf::from(folder), Vec::new()))
+            };
+            if let Some((folder, items)) = shown {
+                tracing::info!("notif: showing {} ({} selected)", folder.display(), items.len());
+                crate::desktop::show_in_file_manager(folder, items);
+                self.notif_dismiss(idx);
+                return;
             }
-            self.notif_dismiss(idx);
-            return;
         }
         // One of Golem's own records: the card remembers an offer it made and
         // what you answered, so opening it runs that offer again — there is no

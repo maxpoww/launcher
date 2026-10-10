@@ -123,17 +123,7 @@ pub(crate) fn import_photos(
     serial: Option<&str>,
     mount: Option<&Path>,
     task: &TaskHandle,
-) -> (String, Option<PathBuf>) {
-    let dest = pictures_dir().join(folder_name(name));
-    let said = import_photos_said(name, serial, mount, task);
-    // The folder to show for it, once there is one.
-    (said, dest.is_dir().then_some(dest))
-}
-
-/// The notification's words. Its TITLE is the phone's name, so they do not
-/// repeat it (Max, 2026-10-10: not "Desktop" — "Pixel 8 Pro: 121 photos
-/// imported, click to view").
-fn import_photos_said(name: &str, serial: Option<&str>, mount: Option<&Path>, task: &TaskHandle) -> String {
+) -> (String, Option<String>) {
     use crate::i18n::tr;
     let dest = pictures_dir().join(folder_name(name));
     let brought = match serial.filter(|s| ready(s)) {
@@ -143,30 +133,45 @@ fn import_photos_said(name: &str, serial: Option<&str>, mount: Option<&Path>, ta
             None => None,
         },
     };
-    // What it says is what the click does, and how many (Max: "Pixel 8 Pro:
-    // click to view [quantity] imported photos").
+    // What a click on the notification shows: the photos that just came,
+    // selected in their folder (their list is kept in a file: there may be
+    // thousands) — or, with none new, the phone's folder if there is one.
+    let came: &[PathBuf] = brought.as_ref().map_or(&[], |(came, _)| came.as_slice());
+    let list = crate::persist::data_path(&format!("imported-{}.list", folder_name(name)));
+    let text: String = came.iter().map(|p| format!("{}\n", p.display())).collect();
+    let show = if !came.is_empty() && std::fs::write(&list, text).is_ok() {
+        Some(format!("{}{}", crate::NOTIFY_SHOW, list.display()))
+    } else {
+        dest.is_dir().then(|| format!("{}{}", crate::NOTIFY_OPEN, dest.display()))
+    };
+    // The notification's words. Its TITLE is the phone's name, so they do not
+    // repeat it; what they say is what the click does, and how many (Max,
+    // 2026-10-10: "Pixel 8 Pro: click to view [quantity] imported photos").
     let view = |n: usize| match n {
         1 => tr("Click to view 1 imported photo").to_owned(),
         n => format!("{} {n} {}", tr("Click to view"), tr("imported photos")),
     };
+    let counts = brought.as_ref().map(|(came, failed)| (came.len(), *failed));
     // Cancelled from the bar: what came is kept, and said.
-    if task.cancelled() {
-        return match brought.map_or(0, |(n, _)| n) {
+    let said = if task.cancelled() {
+        match counts.map_or(0, |(n, _)| n) {
             0 => tr("Import stopped.").to_owned(),
             n => format!("{} {}.", tr("Import stopped."), view(n)),
-        };
-    }
-    match brought {
-        None => tr("Its photos could not be read. Unlock it and choose File transfer, or turn on USB debugging.").to_owned(),
-        Some((0, 0)) => tr("No new photos.").to_owned(),
-        Some((0, failed)) => format!("{failed} {}", tr("photos could not be copied.")),
-        Some((n, 0)) => view(n),
-        Some((n, failed)) => format!("{}. {failed} {}", view(n), tr("could not be copied.")),
-    }
+        }
+    } else {
+        match counts {
+            None => tr("Its photos could not be read. Unlock it and choose File transfer, or turn on USB debugging.").to_owned(),
+            Some((0, 0)) => tr("No new photos.").to_owned(),
+            Some((0, failed)) => format!("{failed} {}", tr("photos could not be copied.")),
+            Some((n, 0)) => view(n),
+            Some((n, failed)) => format!("{}. {failed} {}", view(n), tr("could not be copied.")),
+        }
+    };
+    (said, show)
 }
 
 /// How many came, how many did not. `None`: the phone could not be asked.
-fn import_over_adb(serial: &str, dest: &Path, task: &TaskHandle) -> Option<(usize, usize)> {
+fn import_over_adb(serial: &str, dest: &Path, task: &TaskHandle) -> Option<(Vec<PathBuf>, usize)> {
     let albums: Vec<String> = ALBUMS.iter().map(|a| format!("/sdcard/{a}")).collect();
     // (A folder that is not there makes `find` end badly with the rest
     // listed all the same: what it listed is read either way.)
@@ -237,13 +242,20 @@ fn import_over_adb(serial: &str, dest: &Path, task: &TaskHandle) -> Option<(usiz
             break;
         }
     }
-    let left = missing(&shots, dest).len();
-    Some((wanted.len() - left.min(wanted.len()), left))
+    // What arrived whole, by the files themselves.
+    let came: Vec<PathBuf> = wanted
+        .iter()
+        .map(|s| (dest.join(s.place()), s.size))
+        .filter(|(to, size)| std::fs::metadata(to).map(|m| m.len()).ok() == Some(*size))
+        .map(|(to, _)| to)
+        .collect();
+    let failed = wanted.len() - came.len();
+    Some((came, failed))
 }
 
 /// The same, read from the phone's mounted folder (no `adb`): slower, and
 /// the only way for a phone whose owner has not turned debugging on.
-fn import_from_folder(mount: &Path, dest: &Path, task: &TaskHandle) -> Option<(usize, usize)> {
+fn import_from_folder(mount: &Path, dest: &Path, task: &TaskHandle) -> Option<(Vec<PathBuf>, usize)> {
     let storages: Vec<PathBuf> = std::fs::read_dir(mount).ok()?.flatten().map(|e| e.path()).collect();
     // What there is to bring, first: the bar needs the whole of it.
     let mut wanted: Vec<(PathBuf, PathBuf, u64)> = Vec::new();
@@ -281,7 +293,7 @@ fn import_from_folder(mount: &Path, dest: &Path, task: &TaskHandle) -> Option<(u
         }
     }
     let total: u64 = wanted.iter().map(|w| w.2).sum();
-    let (mut came, mut failed, mut done) = (0, 0, 0u64);
+    let (mut came, mut failed, mut done) = (Vec::new(), 0, 0u64);
     task.set(0, total);
     for (path, to, size) in &wanted {
         if task.cancelled() {
@@ -289,7 +301,7 @@ fn import_from_folder(mount: &Path, dest: &Path, task: &TaskHandle) -> Option<(u
         }
         let copied = to.parent().map(std::fs::create_dir_all).transpose().and_then(|_| std::fs::copy(path, to));
         match copied {
-            Ok(_) => came += 1,
+            Ok(_) => came.push(to.clone()),
             Err(e) => {
                 warn!("phone: {} was not copied: {e}", path.display());
                 failed += 1;
@@ -475,13 +487,14 @@ mod tests {
         std::fs::write(camera.join("b.jpg"), b"bb").unwrap();
         std::fs::write(mount.join("Internal storage/DCIM/.thumbnails/t.jpg"), b"t").unwrap();
         let task = TaskHandle::detached();
-        assert_eq!(import_from_folder(&mount, &dest, &task), Some((2, 0)));
+        let counts = |r: Option<(Vec<PathBuf>, usize)>| r.map(|(came, failed)| (came.len(), failed));
+        assert_eq!(counts(import_from_folder(&mount, &dest, &task)), Some((2, 0)));
         assert_eq!(std::fs::read(dest.join("Camera/a.jpg")).unwrap(), b"aaaa");
         assert!(!dest.join(".thumbnails").exists());
         // Again: nothing new.
-        assert_eq!(import_from_folder(&mount, &dest, &task), Some((0, 0)));
+        assert_eq!(counts(import_from_folder(&mount, &dest, &task)), Some((0, 0)));
         // A phone that shows no storage (locked): not "no new photos".
-        assert_eq!(import_from_folder(&root.join("nothing"), &dest, &task), None);
+        assert_eq!(counts(import_from_folder(&root.join("nothing"), &dest, &task)), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
