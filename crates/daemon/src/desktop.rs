@@ -1193,10 +1193,16 @@ fn camera(
     // moment's reading says (Max, 2026-10-10: "it has to be specific to
     // that kind of hardware" — the other laptops' picture must not change).
     let adaptive = std::env::var_os("GOLEM_CAMERA_ADAPTIVE").is_some();
-    let mut step = if adaptive { camera_step_known().min(steps.len() - 1) } else { 0 };
+    // And where the system names a feeder of its own (GOLEM_CAMERA_FEED,
+    // same hardware: the graphics chip decodes what the processor cannot),
+    // that is run in scrcpy's place, with scrcpy's arguments, at the best
+    // step — the MacBook's 23 pictures a second became all 60 at 13 % of a
+    // core. It ending before the device is fed sends us back to scrcpy.
+    let mut feed = std::env::var_os("GOLEM_CAMERA_FEED").filter(|f| !f.is_empty());
+    let mut step = if adaptive && feed.is_none() { camera_step_known().min(steps.len() - 1) } else { 0 };
     let (mut child, early) = loop {
         let (fps, size, rate) = steps[step];
-        let mut cmd = std::process::Command::new("scrcpy");
+        let mut cmd = std::process::Command::new(feed.as_deref().unwrap_or(std::ffi::OsStr::new("scrcpy")));
         cmd.arg("--video-source=camera").arg(format!("--camera-id={}", lens.id));
         if let Some(zoom) = lens.zoom {
             cmd.arg(format!("--camera-zoom={zoom}"));
@@ -1259,8 +1265,23 @@ fn camera(
             }
             other => other,
         };
+        if feed.is_some() && (early.is_some() || !started) {
+            let still_ours = cameras.lock().ok().is_some_and(|on| on.get(path) == Some(&child.id()));
+            if !still_ours {
+                return None;
+            }
+            info!("desktop: the system's camera feeder could not feed {name}'s camera ({early:?}); scrcpy does it");
+            feed = None;
+            step = if adaptive { camera_step_known().min(steps.len() - 1) } else { 0 };
+            continue;
+        }
         // Keeping up? One core flat out on the decoding means it is not.
-        if adaptive && early.is_none() && step + 1 < steps.len() && camera_overworked(child.id()) {
+        if adaptive
+            && feed.is_none()
+            && early.is_none()
+            && step + 1 < steps.len()
+            && camera_overworked(child.id())
+        {
             // Ours may have been ended by hand meanwhile (the menu's row).
             let still_ours = cameras.lock().ok().is_some_and(|on| on.get(path) == Some(&child.id()));
             let _ = child.kill();
@@ -1276,7 +1297,7 @@ fn camera(
             }
             continue;
         }
-        if adaptive {
+        if adaptive && feed.is_none() {
             camera_step_keep(step);
         }
         break (child, early);
