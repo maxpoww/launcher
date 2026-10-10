@@ -572,7 +572,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         super::bar::bottom(
             rect,
             f.page,
-            f.bar.draft.len(),
+            f.bar.box_lines(),
             !f.bar.query.is_empty() || f.bar.field == Some(Field::Seek),
             f.bar.picking,
         )
@@ -1602,7 +1602,8 @@ mod tests {
             rect.y + FOOT_H + TITLE_H
         );
         assert_eq!(Page::Memory.title(), Some("Sessions"));
-        assert!(list.y + list.h <= low.seek.y);
+        // (…and ends over the line of hint at the bottom.)
+        assert_eq!(list.y + list.h, rect.y + rect.h - low.h);
         for (_, r) in buttons {
             assert!(r.y >= rect.y && r.y + r.h <= rect.y + FOOT_H);
             assert!(r.x >= rect.x && r.x + r.w <= rect.x + rect.w);

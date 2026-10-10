@@ -330,6 +330,10 @@ pub(crate) struct Card {
     /// input box, the search, the memory's name). `None`: its window has
     /// the keyboard, as always.
     field: Option<Field>,
+    /// Tab (or a paste) handed the keys to the window with the pointer still
+    /// on the card: they come back on a click on it, or when the pointer
+    /// leaves and comes in again — not on a mere movement.
+    tabbed: bool,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -763,6 +767,16 @@ impl Card {
         self.field == Some(Field::Seek) || !self.query.is_empty()
     }
 
+    /// How many lines the input box holds — none when nothing is being
+    /// written in it (it is not up then: `bar::bottom`).
+    fn box_lines(&self) -> usize {
+        if self.field == Some(Field::Box) {
+            self.draft_lines.len().max(1)
+        } else {
+            0
+        }
+    }
+
     /// The memory the card is working with.
     fn memory_open(&self) -> Option<&Past> {
         let open = self.open?;
@@ -789,7 +803,7 @@ impl Card {
         let low = bottom(
             rect,
             self.page,
-            self.draft_lines.len(),
+            self.box_lines(),
             self.seeking(),
             self.pick(),
         );
@@ -1505,6 +1519,9 @@ impl App {
         let host = self.card.host.clone();
         let focused = crate::hypr::active_window();
         let typing = self.card.field.is_some();
+        // (…and they stay its: Enter after a paste must run it there, not
+        // make an item here — until the pointer leaves and comes back.)
+        self.card.tabbed = true;
         self.card_drop_keys();
         let wait = match host {
             _ if typing => PASTE_FOCUS + 60,
@@ -1739,6 +1756,37 @@ impl App {
         self.request_card_draw();
     }
 
+    /// THE KEYS FOLLOW THE POINTER (Max, 2026-10-10): on the card, they are
+    /// the card's — a letter searches, Enter makes something new — with no
+    /// click; off it, the window's again. (Not after a Tab: see `tabbed`.)
+    fn card_hover_keys(&mut self) {
+        let on = self
+            .card
+            .ptr
+            .zip(self.card.rect)
+            .is_some_and(|(at, r)| r.contains(at));
+        if on && self.card.field.is_none() && !self.card.tabbed && self.card_present() {
+            self.card_take_keys(Field::Card);
+        }
+    }
+
+    /// What was being written is done: the keys stay the card's while the
+    /// pointer is on it, and go back to the window otherwise.
+    fn card_rest(&mut self) {
+        let on = self
+            .card
+            .ptr
+            .zip(self.card.rect)
+            .is_some_and(|(at, r)| r.contains(at));
+        if on && !self.card.tabbed && self.card.field.is_some() {
+            self.card.field = Some(Field::Card);
+            self.sync_card_input();
+            self.request_card_draw();
+        } else {
+            self.card_drop_keys();
+        }
+    }
+
     /// Whether the card takes the keys right now.
     pub(crate) fn card_typing(&self) -> bool {
         self.card.field.is_some()
@@ -1755,6 +1803,47 @@ impl App {
             return;
         };
         let (ctrl, shift) = (self.modifiers.ctrl, self.modifiers.shift);
+        if field == Field::Card {
+            // Nothing is being written. TAB (or Escape) hands the keys to
+            // the window with the pointer where it is; ENTER starts
+            // something new; a letter starts a search.
+            let letter = utf8
+                .filter(|s| !s.is_empty() && !s.chars().any(|c| c.is_control() || c == ' '))
+                .filter(|_| !ctrl);
+            match (keysym, self.card.page) {
+                (Keysym::Tab | Keysym::Escape, _) => {
+                    self.card.tabbed = true;
+                    self.card_drop_keys();
+                    return;
+                }
+                (Keysym::Return | Keysym::KP_Enter, Page::Session) if self.card.open.is_some() => {
+                    self.card.field = Some(Field::Box);
+                }
+                (Keysym::Return | Keysym::KP_Enter, Page::Memory) => {
+                    self.card_begin();
+                    self.card.field = Some(Field::Box);
+                }
+                _ => match letter {
+                    Some(s) if self.card.page != Page::Emoji => {
+                        self.card.field = Some(Field::Seek);
+                        self.card.query.push_str(s);
+                        self.card.scroll = 0.0;
+                        if self.card.page == Page::Dictionary {
+                            self.card_dict_rows();
+                        }
+                    }
+                    Some(s) => {
+                        self.card.field = Some(Field::Pick);
+                        self.card.pick_query.push_str(s);
+                        self.card.repick();
+                    }
+                    None => return,
+                },
+            }
+            self.sync_card_input();
+            self.request_card_draw();
+            return;
+        }
         if field == Field::Box {
             // (Typing or moving the cursor: the box shows where it is again.)
             self.card.draft_first = None;
@@ -1790,14 +1879,23 @@ impl App {
                 // One layer at a time: the search's words, then the cursor.
                 match field {
                     Field::Seek if !self.card.query.is_empty() => self.card.query.clear(),
-                    _ => self.card_drop_keys(),
+                    // (Escape drops what was being written.)
+                    Field::Box => {
+                        self.card.take_draft();
+                        self.card_rest();
+                    }
+                    _ => self.card_rest(),
                 }
             }
             // The input box: Enter keeps it in the memory, Ctrl+Enter sends
             // it to the window, Shift+Enter breaks the line.
             (Field::Box, Keysym::Return | Keysym::KP_Enter) if shift => self.card.type_in("\n"),
             (Field::Box, Keysym::Return | Keysym::KP_Enter) if ctrl => self.card_send_draft(),
-            (Field::Box, Keysym::Return | Keysym::KP_Enter) => self.card_keep_draft(),
+            // (Kept, and the box is gone again: the hint is back.)
+            (Field::Box, Keysym::Return | Keysym::KP_Enter) => {
+                self.card_keep_draft();
+                self.card_rest();
+            }
             // Select all, copy, cut — as any text field (Max, 2026-10-09:
             // *"so i can select all and erase it"*).
             (Field::Box, Keysym::a | Keysym::A) if ctrl => {
@@ -1840,12 +1938,25 @@ impl App {
             (Field::Box, Keysym::Down | Keysym::KP_Down) => self.card.caret_line_move(1, None),
             (Field::Seek, Keysym::BackSpace) => {
                 self.card.query.pop();
+                // (Nothing left of it: the hint is back in its place.)
+                if self.card.query.is_empty() && self.card.page != Page::Dictionary {
+                    self.card_rest();
+                }
             }
             (Field::Pick, Keysym::BackSpace) => {
                 self.card.pick_query.pop();
                 self.card.repick();
             }
             (Field::Pick, Keysym::Return | Keysym::KP_Enter) => {}
+            // Enter in the search of an open session: what was typed
+            // becomes a new thing, to be finished in the box.
+            (Field::Seek, Keysym::Return | Keysym::KP_Enter)
+                if self.card.page == Page::Session && self.card.open.is_some() =>
+            {
+                let words = std::mem::take(&mut self.card.query);
+                self.card.field = Some(Field::Box);
+                self.card.type_in(&words);
+            }
             (Field::Seek, Keysym::Return | Keysym::KP_Enter) => {}
             (Field::Name, Keysym::BackSpace) => {
                 self.card.naming.pop();
@@ -2004,7 +2115,7 @@ impl App {
         let low = bottom(
             rect,
             self.card.page,
-            self.card.draft_lines.len(),
+            self.card.box_lines(),
             self.card.seeking(),
             self.card.pick(),
         );
@@ -2047,7 +2158,7 @@ impl App {
             Hover::SeekClear => {
                 self.card.query.clear();
                 if self.card.field == Some(Field::Seek) {
-                    self.card_drop_keys();
+                    self.card_rest();
                 }
                 self.sync_card_input();
                 self.request_card_draw();
@@ -2445,7 +2556,11 @@ impl App {
             // …and while the card has the keyboard: a click anywhere off the
             // card must reach us, for it is how the keyboard is given back
             // (see `card_drop_keys`).
-            Some(_) if self.card.field.is_some() => vec![(0, 0, w as i32, h as i32)],
+            // (Not while they are only the pointer's — `Field::Card`: then
+            // the pointer leaving the card is what gives them back.)
+            Some(_) if self.card.field.is_some_and(|f| f != Field::Card) => {
+                vec![(0, 0, w as i32, h as i32)]
+            }
             Some(r) => vec![(r.x as i32, r.y as i32, r.w as i32, r.h as i32)],
             None => Vec::new(),
         };
@@ -2868,11 +2983,25 @@ impl App {
             .playing
             .as_ref()
             .map(|p| (p.id, p.started.elapsed().as_secs_f32()));
-        let hint = match hover {
+        // THE HINT: what the keys do here, for as long as the card has them
+        // (without them it says nothing — Max, 2026-10-10: *"they are not
+        // useful when it is unfocused"*).
+        let hint = match (hover, self.card.field, self.card.page) {
             _ if self.card.say.is_some() => self.card.say.unwrap_or(""),
-            Some(Hover::Btn(which)) => which.hint(),
-            _ if self.card.draft.trim().is_empty() => "",
-            _ => "Enter keeps it in this memory  ·  Ctrl+Enter sends it to the window",
+            (Some(Hover::Btn(which)), ..) => which.hint(),
+            (_, None, _) => "",
+            (_, Some(Field::Box), _) => {
+                "Enter keeps it · Shift+Enter for a new line · Escape drops it"
+            }
+            (_, Some(Field::Name), _) => "Enter keeps the name · Escape leaves it",
+            (_, _, Page::Session) if self.card.open.is_some() => {
+                "Type to search · press Enter to create"
+            }
+            (_, _, Page::Memory) => "Enter to create · type to search",
+            (_, _, Page::Clipboard) => "Click to paste · type to search",
+            (_, _, Page::Pinned) => "Type to search",
+            (_, _, Page::Dictionary) => "Type a word",
+            _ => "",
         };
         let view = View {
             rect,
@@ -3047,6 +3176,7 @@ impl App {
                 self.cursor_now = None;
                 self.card_motion(surface_x as f32, surface_y as f32);
                 self.card_keys(true);
+                self.card_hover_keys();
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -3059,6 +3189,12 @@ impl App {
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.card.ptr = None;
                 self.card_keys(false);
+                // The keys go with the pointer — unless something is being
+                // written: that keeps them until it is done.
+                self.card.tabbed = false;
+                if self.card.field == Some(Field::Card) {
+                    self.card_drop_keys();
+                }
                 match self.card.press.take() {
                     Some(Press::Slide { moved: true, .. }) => self.card_settle(),
                     Some(Press::Resize { .. }) => self.card_settle(),
@@ -3088,6 +3224,9 @@ impl App {
                         self.card_drop_keys();
                         return;
                     }
+                    // A click on the card brings the keys back after a Tab.
+                    self.card.tabbed = false;
+                    self.card_hover_keys();
                     // In the input box's words: the cursor goes there, and
                     // travel from here selects (`Press::Select`).
                     if self.card.hit(at) == Some(Hover::Input) && self.card.grip(at).is_none() {
@@ -3243,7 +3382,7 @@ impl App {
             bottom(
                 rect,
                 self.card.page,
-                self.card.draft_lines.len(),
+                self.card.box_lines(),
                 self.card.seeking(),
                 self.card.pick(),
             )
@@ -3638,6 +3777,20 @@ impl App {
             "keep" => {
                 self.card_keep_draft();
                 self.card_words()
+            }
+            // `key <enter|escape|tab|backspace>`: that key, as the keyboard
+            // would give it (the card must have the keys: the pointer on it).
+            "key" => {
+                use smithay_client_toolkit::seat::keyboard::Keysym;
+                let key = match rest {
+                    "enter" => Keysym::Return,
+                    "escape" => Keysym::Escape,
+                    "tab" => Keysym::Tab,
+                    "backspace" => Keysym::BackSpace,
+                    _ => return "key enter|escape|tab|backspace".to_owned(),
+                };
+                self.card_key(key, None);
+                format!("field {:?}", self.card.field)
             }
             "send" => {
                 self.card_send_draft();
