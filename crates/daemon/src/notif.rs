@@ -2379,26 +2379,19 @@ impl App {
             return;
         };
         // One of the desktop's own outcomes that has something to show (a
-        // finished photo import): the click shows it in the file manager —
-        // the photos that just came, selected in their folder, or the folder.
-        if n.app_name == "waverunner" {
-            let key = |prefix: &str| n.actions.iter().find_map(|k| k.strip_prefix(prefix)).map(str::to_owned);
-            let shown = if let Some(list) = key(crate::NOTIFY_SHOW) {
-                let files: Vec<std::path::PathBuf> = std::fs::read_to_string(&list)
-                    .unwrap_or_default()
-                    .lines()
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                crate::desktop::to_show(&files)
-            } else {
-                key(crate::NOTIFY_OPEN).map(|folder| (std::path::PathBuf::from(folder), Vec::new()))
-            };
-            if let Some((folder, items)) = shown {
-                tracing::info!("notif: showing {} ({} selected)", folder.display(), items.len());
-                crate::desktop::show_in_file_manager(folder, items);
-                self.notif_dismiss(idx);
-                return;
-            }
+        // finished photo import): the click opens its folder in the file
+        // manager.
+        let folder = n
+            .actions
+            .iter()
+            .find_map(|key| key.strip_prefix(crate::NOTIFY_OPEN))
+            .filter(|_| n.app_name == "waverunner")
+            .map(std::path::PathBuf::from);
+        if let Some(folder) = folder {
+            tracing::info!("notif: opening {}", folder.display());
+            crate::desktop::show_in_file_manager(folder);
+            self.notif_dismiss(idx);
+            return;
         }
         // One of Golem's own records: the card remembers an offer it made and
         // what you answered, so opening it runs that offer again — there is no

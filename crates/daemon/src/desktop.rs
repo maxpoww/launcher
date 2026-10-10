@@ -629,41 +629,14 @@ fn icon_request(key: &str) -> Option<crate::notif_icons::Request> {
     }
 }
 
-/// The most files the file manager is asked to select at once.
-const SHOW_MOST: usize = 1000;
-
-/// Of `files`, the ones to show selected: those of the ONE folder that holds
-/// the most of them (a file manager's window is a folder), still there, no
-/// more than `SHOW_MOST`. And that folder.
-pub(crate) fn to_show(files: &[PathBuf]) -> Option<(PathBuf, Vec<PathBuf>)> {
-    let mut by_folder: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-    for file in files.iter().filter(|f| f.exists()) {
-        if let Some(folder) = file.parent() {
-            by_folder.entry(folder.to_path_buf()).or_default().push(file.clone());
-        }
-    }
-    let (folder, mut items) = by_folder.into_iter().max_by(|a, b| a.1.len().cmp(&b.1.len()).then(b.0.cmp(&a.0)))?;
-    items.sort();
-    items.truncate(SHOW_MOST);
-    Some((folder, items))
-}
-
-/// Open `folder` in the file manager with `items` selected in it (none: just
-/// the folder). Off the loop; `xdg-open` is the way out with no file manager
-/// that answers.
-pub(crate) fn show_in_file_manager(folder: PathBuf, items: Vec<PathBuf>) {
+/// Open `folder` in the file manager. Off the loop; `xdg-open` is the way
+/// out with no file manager that answers.
+pub(crate) fn show_in_file_manager(folder: PathBuf) {
     std::thread::spawn(move || {
-        let uri = |p: &Path| file_uri(&p.to_string_lossy());
-        let mut cmd = std::process::Command::new("busctl");
-        cmd.args(["--user", "call", "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1"]);
-        // (Each a small argument of its own: a thousand in one would be more
-        // than a command line takes.)
-        if items.is_empty() {
-            cmd.args(["ShowFolders", "ass", "1"]).arg(uri(&folder));
-        } else {
-            cmd.args(["ShowItems", "ass"]).arg(items.len().to_string()).args(items.iter().map(|p| uri(p)));
-        }
-        let shown = cmd
+        let shown = std::process::Command::new("busctl")
+            .args(["--user", "call", "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1"])
+            .args(["org.freedesktop.FileManager1", "ShowFolders", "ass", "1"])
+            .arg(file_uri(&folder.to_string_lossy()))
             .arg("")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -2618,9 +2591,8 @@ impl App {
                     move || {
                         let (said, show) =
                             crate::desktop_phone::import_photos(&name, serial.as_deref(), mount.as_deref(), &task);
-                        // A click on it shows the photos that came, selected
-                        // in their folder. (Under the phone's name and the
-                        // icon it has on the desktop.)
+                        // A click on it opens the folder they went to. (Under
+                        // the phone's name and the icon it has on the desktop.)
                         crate::desktop_send_notify_open(&name, "phone", &said, show.as_deref());
                         format!("{name}: {said}")
                     },
@@ -5087,25 +5059,6 @@ mod tests {
         assert_eq!(brought, vec![desk.join("f.txt")]);
         assert!(dir.join("elsewhere/f.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn the_folder_with_the_most_new_files_is_the_one_shown() {
-        let root = std::env::temp_dir().join(format!("wr-show-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let mut files = Vec::new();
-        for name in ["Camera/a.jpg", "Camera/b.jpg", "Camera/c.mp4", "Screenshots/s.png"] {
-            let path = root.join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, b"x").unwrap();
-            files.push(path);
-        }
-        files.push(root.join("Camera/gone.jpg")); // listed, since deleted
-        let (folder, items) = to_show(&files).expect("there is something to show");
-        assert_eq!(folder, root.join("Camera"));
-        assert_eq!(items, vec![root.join("Camera/a.jpg"), root.join("Camera/b.jpg"), root.join("Camera/c.mp4")]);
-        assert!(to_show(&[root.join("nowhere/x.jpg")]).is_none());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

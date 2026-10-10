@@ -133,17 +133,10 @@ pub(crate) fn import_photos(
             None => None,
         },
     };
-    // What a click on the notification shows: the photos that just came,
-    // selected in their folder (their list is kept in a file: there may be
-    // thousands) — or, with none new, the phone's folder if there is one.
-    let came: &[PathBuf] = brought.as_ref().map_or(&[], |(came, _)| came.as_slice());
-    let list = crate::persist::data_path(&format!("imported-{}.list", folder_name(name)));
-    let text: String = came.iter().map(|p| format!("{}\n", p.display())).collect();
-    let show = if !came.is_empty() && std::fs::write(&list, text).is_ok() {
-        Some(format!("{}{}", crate::NOTIFY_SHOW, list.display()))
-    } else {
-        dest.is_dir().then(|| format!("{}{}", crate::NOTIFY_OPEN, dest.display()))
-    };
+    // What a click on the notification opens: the phone's folder in
+    // Pictures, where all of it is (Max, 2026-10-10: no selection — "click
+    // opens the dir where all is").
+    let show = dest.is_dir().then(|| format!("{}{}", crate::NOTIFY_OPEN, dest.display()));
     // The notification's words. Its TITLE is the phone's name, so they do not
     // repeat it; what they say is what the click does, and how many (Max,
     // 2026-10-10: "Pixel 8 Pro: click to view [quantity] imported photos").

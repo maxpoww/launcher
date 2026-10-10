@@ -2483,14 +2483,11 @@ pub(crate) fn desktop_send_notify(body: &str) {
 /// open a folder (the rest of the key is the folder): the card of a finished
 /// photo import opens the folder the photos went to (`notif.rs::notif_open`).
 pub(crate) const NOTIFY_OPEN: &str = "golem-open:";
-/// …and when it is to show FILES selected in their folder: the rest of the
-/// key is a file that lists them, a path a line.
-pub(crate) const NOTIFY_SHOW: &str = "golem-show:";
 
 /// The same under a title of its own (a phone's name, for what was done
 /// with that phone), with a folder that a click on the notification opens.
 /// `icon` is a themed icon's name (`phone`: the one a phone has on the desktop).
-/// `show` is the whole key of the action a click runs (`NOTIFY_OPEN…` / `NOTIFY_SHOW…`).
+/// `show` is the whole key of the action a click runs (`NOTIFY_OPEN…`).
 pub(crate) fn desktop_send_notify_open(title: &str, icon: &str, body: &str, show: Option<&str>) {
     let mut cmd = std::process::Command::new("busctl");
     cmd.args([
