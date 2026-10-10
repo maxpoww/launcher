@@ -39,7 +39,7 @@ pub(crate) enum BoxBtn {
 impl BoxBtn {
     fn glyph(self) -> &'static str {
         match self {
-            BoxBtn::Clip => "\u{f0c6}", // fa-paperclip
+            BoxBtn::Clip => "\u{f067}", // fa-plus
             // (Looked at, each one, in the font itself: a microphone with a
             // speech bubble for "talk and it is written" — the plain speech
             // bubble said nothing of talking; and the font's larger, solid
@@ -240,7 +240,8 @@ pub(crate) fn bottom(
     let seek_clear = Rect::new(seek.x + seek.w - 24.0, seek.y + 4.0, 20.0, 20.0);
     y -= STEP;
     let btn_y = input.map_or(0.0, |r| r.y + r.h - BTN - (BOX_MIN - BTN) / 2.0);
-    let left = x + BTN_EDGE;
+    // (The + stands a little in from the edge: Max, 2026-10-10.)
+    let left = x + BTN_EDGE + 7.0;
     let right = x + w - BTN_EDGE - BTN;
     let btns = [
         (BoxBtn::Clip, Rect::new(left, btn_y, BTN, BTN)),
