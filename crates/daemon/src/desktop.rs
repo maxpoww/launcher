@@ -1042,17 +1042,18 @@ impl Picture {
 /// "after I choose the lens I choose the resolution and the fps").
 /// `chip`: this computer decodes the phone's video on its graphics chip
 /// (GOLEM_CAMERA_FEED — old Intel, two slow cores). There 60 a second is
-/// offered only small: at 720p and up the camera app stopped taking
-/// pictures at 60 and the picture froze (MacBook Air 2013), while 540p at
-/// 60 ran with the app at 13 % of a core.
+/// not offered at all: the camera app stopped taking pictures and the
+/// picture froze — always at 1080p, and one start in two or three at 720p
+/// and 540p, with half the processor idle (MacBook Air 2013; the stop is
+/// in the hand-over to the app, not found yet). The smaller sizes are
+/// there because the app's own work goes with the size: 66 % of a core at
+/// 1080p, 46 % at 720p.
 fn camera_pictures(lens: &Lens, chip: bool) -> Vec<Picture> {
     let most = lens.fps.unwrap_or(30);
     let mut all = Vec::new();
     if chip {
-        all.push(Picture { size: 1920, fps: most.min(30) });
-        all.push(Picture { size: 1280, fps: most.min(30) });
-        if most > 30 {
-            all.push(Picture { size: 960, fps: most });
+        for size in [1920, 1280, 960] {
+            all.push(Picture { size, fps: most.min(30) });
         }
     } else {
         for size in [1920, 1280] {
@@ -5621,9 +5622,9 @@ mod tests {
         assert_eq!(said(&lens(Some(60)), false), ["1080p · 60", "1080p · 30", "720p · 60", "720p · 30"]);
         assert_eq!(said(&lens(Some(30)), false), ["1080p · 30", "720p · 30"]);
         assert_eq!(said(&lens(None), false), ["1080p · 30", "720p · 30"]);
-        // Decoded on the graphics chip (old Intel): 60 only small.
-        assert_eq!(said(&lens(Some(60)), true), ["1080p · 30", "720p · 30", "540p · 60"]);
-        assert_eq!(said(&lens(Some(30)), true), ["1080p · 30", "720p · 30"]);
+        // Decoded on the graphics chip (old Intel): never 60.
+        assert_eq!(said(&lens(Some(60)), true), ["1080p · 30", "720p · 30", "540p · 30"]);
+        assert_eq!(said(&lens(Some(30)), true), ["1080p · 30", "720p · 30", "540p · 30"]);
     }
 
     #[test]
