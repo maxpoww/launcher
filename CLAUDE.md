@@ -538,4 +538,35 @@ The big daemon files are cohesive but long — go straight to the function:
   <n>|clear|state|rate <speed> [accel]|new|memory|pinned|session|pin <n>|open <n>|forget <n>|zoom in|out|reset|<n>]` (`open`/`forget` take a row of Memory). Not built: a card button for Seam/staged windows (no
   Golem bar), drawing it in its window's place in the stack (it draws over a window overlapping
   its own), per-output.
+  THE CARD, REDESIGNED (Max, 2026-10-10; the design is the mockup `~/terminal-mockup/card/index.html`,
+  look = its `?zpills`; being built in stages — what follows is what is IN, and replaces what the
+  paragraphs above say where they differ). LOOK: no orange — `Paint::accent()` is the card's own hue,
+  stronger and brighter (not linearised: the words are drawn with these values); what sits on the card
+  is in two ZEBRA tones of its colour (`Paint::zebra`, `tone`; steps `ZEBRA_1/2`): the buttons the
+  lighter, the button of the page that is up the other, the first item the darker, the second the
+  lighter. HEAD: round buttons from the left (emoji, pinned, clipboard, dictionary), Memory by name at
+  the right; the lit one is an ARROW UP (back to the session); the page's name small under them
+  (`Page::title`, `head_h`, `list_rect(rect, Some(page), bottom)`); Memory's page is "Sessions" — a
+  row is the name and the date (`ROW_H` 38). TIMES (`model::when_text`): "14:21", "3d ago",
+  "8/30 10:30", "9/25/25 12:15"; month first only for en_US/C. THE KEYS FOLLOW THE POINTER
+  (`Field::Card`, `card_hover_keys`, `card_rest`, `Card::tabbed`): on the card — only while its window
+  is the focused one — it has them with no click; Tab, Escape or a click-paste hand them to the window
+  until a click on the card or the pointer leaving and returning; while something is written it keeps
+  them. The card is HIDDEN while its window is not the focused one (`Away::Focus`; staying unless
+  covered, and not drawing its covered part, were tried and rejected — the real fix is waveview
+  drawing it in the window's place in the stack). BOTTOM (`bar::bottom(rect, page, seeking, picking)`):
+  one line of hint while it has the keys, the search field in its place once a letter is typed; no
+  search button, no New, no input box. WRITING IS IN THE LIST: Enter (or Enter in the search) on a
+  session or on Pinned opens the box after the last item (`card_write_new`), an item's PENCIL opens it
+  in the item's own place (`Hover::Edit`, `card_edit`, `Card::edit`); `FootView::writing`, the tile of
+  id `view::WRITER`, `Bottom::with_input`, `bar::box_h`; Enter keeps, Escape drops; Enter on Sessions =
+  a new session. THE DISK (`Hover::Pin` now means it; `GLYPH_DISK`) on every item of every list, its
+  menu (`Card::menu`, `menu_rect`, `menu_rows`, `MenuView`, `card_menu`): Pin · Memory · New session —
+  always a COPY of its own (`copy_of`, `pin_copy`, `keep_in`); Memory = choose a session on its page
+  (`Card::picking`, `card_picked`; title "Keep in which session?"). `card_flash` says what was done
+  where the hint is. Pointer-free: `card key enter|escape|tab|backspace`, `card edit <n>`,
+  `card disk <n>`, `card menu <row>`. NOT BUILT YET from the mockup: Removed · Undo, forget-twice,
+  renaming a session from its row, empty sessions disappearing, the search across sessions, hold Space,
+  items made of parts and the + menu (the box still has its three old buttons), the dashed empty
+  frames, the voice-to-text page, the dictionary on this flow, the translator (no engine chosen).
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
