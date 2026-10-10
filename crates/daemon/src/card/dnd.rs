@@ -334,7 +334,22 @@ impl App {
         self.card.shifts.clear();
         if own {
             if let (Some(id), Some(index)) = (self.card.drag.as_ref().map(|d| d.id), index) {
-                if self.card.move_to(id, index) {
+                // (A PIECE of an open item, let go on the list: it becomes
+                // an item of its own there — the item it came from keeps it.)
+                let piece = self
+                    .card
+                    .items
+                    .iter()
+                    .flat_map(|it| it.parts.iter())
+                    .find(|p| p.id == id)
+                    .cloned();
+                if let Some(piece) = piece {
+                    let copy = self.card.copy_of(&piece, super::now_secs());
+                    let at = index.min(self.card.items.len());
+                    self.card.items.insert(at, copy);
+                    info!("card: a piece put at place {index}");
+                    self.card_save();
+                } else if self.card.move_to(id, index) {
                     info!("card: an item moved to place {index}");
                     self.card_save();
                 }

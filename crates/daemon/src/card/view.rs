@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::bar::{BarView, BoxBtn, Field};
-use super::model::{Item, Kind};
+use super::model::{Item, Kind, MAX_LINES};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst, NO_PLATE};
 
 pub(super) const RADIUS: f32 = 10.0;
@@ -171,6 +171,8 @@ pub(crate) enum Hover {
     Menu(usize),
     /// The hint, while it offers a way back ("Removed · Undo").
     Undo,
+    /// A long text's "Show all" / "Show less".
+    More(u64),
     /// An item's pencil: it is opened again to be changed.
     Edit(u64),
     Foot(Foot),
@@ -202,7 +204,8 @@ impl Hover {
             | Hover::Close(id)
             | Hover::Pin(id)
             | Hover::Play(id)
-            | Hover::Edit(id) => Some(id),
+            | Hover::Edit(id)
+            | Hover::More(id) => Some(id),
             _ => None,
         }
     }
@@ -321,7 +324,29 @@ pub(super) const ROW_H: f32 = 38.0;
 const NOTE_PX: f32 = 9.5;
 const NOTE_LINE: f32 = 12.0;
 
+/// Whether a text's lines are not all of it (its last line ends in "…":
+/// `model::wrap` cut it at `MAX_LINES`), or are all of a long one (it was
+/// opened): either way it has a "Show all" / "Show less" at its foot.
+pub(crate) fn has_more(lines: &[String], wide: bool) -> bool {
+    if wide {
+        lines.len() > MAX_LINES
+    } else {
+        lines.len() >= MAX_LINES && lines.last().is_some_and(|l| l.ends_with('…'))
+    }
+}
+
 impl Tile {
+    /// Where a long text's "Show all" is: in the middle of its foot, on
+    /// the line its time is on.
+    pub(super) fn more(&self) -> Rect {
+        Rect::new(
+            self.rect.x + self.rect.w / 2.0 - 45.0,
+            self.rect.y + self.rect.h - NOTE_LINE - 8.0,
+            90.0,
+            NOTE_LINE + 6.0,
+        )
+    }
+
     /// Where its pencil is: left of the pin where there is one (`pins`),
     /// else in the pin's place, beside the ×.
     pub(super) fn edit(&self, pins: bool) -> Rect {
@@ -1470,6 +1495,37 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 });
             }
             line_y += text_line;
+        }
+        // A LONG text shows its first lines and "Show all" (Max,
+        // 2026-10-10): a click on that opens all of it, and folds it again.
+        // (A click on the item still pastes all of it; a drag carries all.)
+        if item.kind == Kind::Text && item.parts.is_empty() {
+            let wide = view
+                .foot
+                .as_ref()
+                .is_some_and(|f| f.wide.contains(&item.id));
+            let all = view.lines.get(&item.id).map_or(&[][..], Vec::as_slice);
+            if has_more(all, wide) {
+                let r = tile.more();
+                let hot = view.hover == Some(Hover::More(item.id));
+                list.labels.push(Label {
+                    text: if wide { "Show less" } else { "Show all" }.to_owned(),
+                    pos: (r.x + r.w / 2.0, r.y + 3.0),
+                    max_w: r.w,
+                    font_px: NOTE_PX + 1.0,
+                    line_px: NOTE_LINE,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    clip: Some(clip),
+                    family: None,
+                    color: Some(if hot {
+                        [acc[0], acc[1], acc[2], 1.0]
+                    } else {
+                        paint.ink_at(0.6)
+                    }),
+                });
+            }
         }
         // The line at its foot: when it is from (to the right).
         if let Some(note) = note {

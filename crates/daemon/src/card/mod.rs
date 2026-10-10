@@ -243,6 +243,9 @@ enum Undone {
     },
 }
 
+/// How many lines a text opened whole ("Show all") shows at the most.
+const ALL_LINES: usize = 400;
+
 /// How long Space is held before it is a voice note and not a tap (ms).
 const HOLD_MS: u64 = 350;
 
@@ -922,6 +925,17 @@ impl Card {
             Hover::Edit(tile.id)
         } else if pins && tile.pin().contains(pos) {
             Hover::Pin(tile.id)
+        } else if tile.more().contains(pos)
+            && self.item(tile.id).is_some_and(|it| {
+                it.kind == Kind::Text
+                    && it.parts.is_empty()
+                    && has_more(
+                        self.lines.get(&it.id).map_or(&[][..], Vec::as_slice),
+                        self.wide.contains(&it.id),
+                    )
+            })
+        {
+            Hover::More(tile.id)
         } else if tile.play().contains(pos)
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
         {
@@ -2633,6 +2647,14 @@ impl App {
             }
             Hover::Menu(row) => self.card_menu(row),
             Hover::Undo => self.card_undo(),
+            // "Show all" / "Show less": the text is wrapped again, whole or cut.
+            Hover::More(id) => {
+                if !self.card.wide.remove(&id) {
+                    self.card.wide.insert(id);
+                }
+                self.card.lines.remove(&id);
+                self.request_card_draw();
+            }
             Hover::Edit(id) => self.card_edit(id),
             Hover::Foot(which) => self.card_foot(which),
             Hover::Seek => self.card_take_keys(Field::Seek),
@@ -3561,13 +3583,15 @@ impl App {
         }
         let text_px = TEXT_PX;
         let mono = renderer.measure_text("MMMMMMMMMM", text_px, Some(crate::options::NERD)) / 10.0;
+        // (`whole`: a part of an item, or of what is being written — its
+        // words are never cut short; an item's own are, unless it is open.)
         let all = self
             .card
             .items
             .iter()
-            .flat_map(|it| std::iter::once(it).chain(it.parts.iter()))
-            .chain(self.card.sealed.iter());
-        for item in all {
+            .flat_map(|it| std::iter::once((it, false)).chain(it.parts.iter().map(|p| (p, true))))
+            .chain(self.card.sealed.iter().map(|p| (p, true)));
+        for (item, whole) in all {
             if self.card.lines.contains_key(&item.id) {
                 continue;
             }
@@ -3602,6 +3626,8 @@ impl App {
                 // its first lines.)
                 let most = if self.card.page == Page::Dictionary {
                     DICT_LINES
+                } else if whole || self.card.wide.contains(&item.id) {
+                    ALL_LINES
                 } else {
                     MAX_LINES
                 };

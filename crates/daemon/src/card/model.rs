@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// A text keeps this many lines on the card; the whole of it still leaves
 /// with a drag.
-pub(super) const MAX_LINES: usize = 12;
+pub(super) const MAX_LINES: usize = 6;
 
 /// The largest drop read into memory (a picture out of a web page).
 pub(super) const DROP_MAX: u64 = 48 * 1024 * 1024;
