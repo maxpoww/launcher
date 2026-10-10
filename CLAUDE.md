@@ -226,6 +226,13 @@ The big daemon files are cohesive but long — go straight to the function:
   the dock holds; apps on the fast card get NVIDIA's offload variables at launch (`gpu_exec`).
   Pointer-free: `waverunner-ctl debug-gear <open net|bt|gear|disk|cpu|ram|gpu|bat>`, then
   `detail|hotspot|files|page <about|health|clean|drive|folder|card|app|system>|close|…`.
+- DRAGS AND FOCUS (Max, 2026-10-10, macOS's way): on Golem a drag does NOT focus or raise the
+  windows it passes over (Golem's hyprland.lua: `misc.always_follow_on_dnd = false`), so a file is
+  carried across one window onto another under it. HOLDING is how a window is asked forward: over
+  a window, the compositor does it (Golem's `hyprland-dnd-hold-raise.patch`, 650 ms within 14 px);
+  over an app's tile in the dock, `desktop.rs::dock_spring_*` does (`Spring`: any drag over the
+  dock — the dock comes up for one that is not the desktop's own — held `SPRING` on a tile with a
+  window → `hypr::focus_window`, or `restore_minimized`).
 - `zoom.rs` — ZOOM (Max, 2026-10-10): Ctrl +/−/0 make the top bar and the desktop bigger, smaller,
   as shipped. The BAR on HOVER: compositor binds made on the pointer's enter and taken away on its
   leave (`bar_zoom_keys`, the card's way) → `waverunner-ctl debug-desktop zoom bar in|out|reset`;

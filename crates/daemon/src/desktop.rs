@@ -427,6 +427,8 @@ pub(crate) struct Desktop {
     pub sync_now: HashSet<String>,
     /// The pointer is on a surface of ours (any of them).
     pub pointer_ours: bool,
+    /// A drag is over the dock (`dock_spring_*`).
+    pub spring: Option<Spring>,
     /// The last plain click on an item (its path, and when): a second one
     /// on the same item soon enough is a double click, which opens it.
     pub last_click: Option<(String, std::time::Instant)>,
@@ -659,10 +661,22 @@ pub(crate) fn show_in_file_manager(folder: PathBuf) {
     });
 }
 
-/// Whether the compositor makes focus follow the pointer during a drag (its
-/// own default: yes). Off while the desktop's own drag lasts.
-pub(crate) fn dnd_follow(on: bool) {
-    crate::hypr::eval(&format!("hl.config({{ [\"misc.always_follow_on_dnd\"] = {on} }})"));
+/// How long a drag is held on an app's tile in the dock before that app
+/// comes forward (the compositor's own hold over a window is 650 ms:
+/// `hyprland-dnd-hold-raise.patch`).
+const SPRING: std::time::Duration = std::time::Duration::from_millis(650);
+
+/// A drag over the dock: the tile it is on, and whether the dock was called
+/// up for it.
+#[derive(Debug, Default)]
+pub(crate) struct Spring {
+    /// The entry under the drag.
+    entry: Option<usize>,
+    /// Counts the changes of tile: a hold that was armed for an earlier one
+    /// does nothing.
+    turn: u64,
+    /// The dock was hidden and came up for this drag: it goes when it leaves.
+    called: bool,
 }
 
 /// A local path as a `file://` URI (percent-encoded), one line of a
@@ -4056,13 +4070,6 @@ impl App {
                 String::new()
             }
         );
-        // While something of the desktop's is carried, the windows it passes
-        // over are left as they are (Max, 2026-10-10: dragging to a window
-        // that lay under another, the one on the way took the focus, came
-        // to the top and hid it). The compositor makes focus follow the
-        // pointer during ANY drag (`misc:always_follow_on_dnd`), whatever
-        // Golem's click-to-focus says; that is off for the length of ours.
-        dnd_follow(false);
         self.desktop.drag = Some(Drag {
             items,
             grip,
@@ -4288,7 +4295,6 @@ impl App {
         let Some(drag) = self.desktop.drag.take() else {
             return;
         };
-        dnd_follow(true);
         info!(
             "desktop: {} {} (action {:?})",
             self.desktop.items.get(drag.items[0]).map_or("?", |it| it.name.as_str()),
@@ -4326,6 +4332,11 @@ impl App {
                 offer.source_actions
             );
         }
+        // Over the dock, any drag can be HELD on a running app's tile to
+        // bring that app forward (macOS's spring-loaded Dock).
+        if on_dock {
+            self.dock_spring_enter(own);
+        }
         if !has_files || (on_dock && !own) {
             offer.accept_mime_type(offer.serial, None);
             return;
@@ -4351,6 +4362,9 @@ impl App {
     /// The hovering drag moved: where it is decides the drop; over the dock
     /// the bin watches it come. Nothing on the desktop is redrawn for it.
     pub(crate) fn desktop_dnd_motion(&mut self, x: f32, y: f32) {
+        if self.desktop.spring.is_some() {
+            self.dock_spring_motion((x, y));
+        }
         if let Some(d) = self.desktop.dnd.as_mut() {
             d.pos = (x, y);
             if d.on_dock {
@@ -4368,6 +4382,7 @@ impl App {
     /// pipe. Throwing the offer away at that point lost the drop and left
     /// the other app's drag unfinished (Nautilus stuck mid-drag, 2026-10-07).
     pub(crate) fn desktop_dnd_leave(&mut self) {
+        self.dock_spring_end();
         let dropped = self
             .data_device
             .as_ref()
@@ -4516,6 +4531,71 @@ impl App {
             warn!("desktop: cannot wait for the drop's files");
             offer.destroy();
             self.request_desktop_draw();
+        }
+    }
+
+    /// A drag came over the dock. One that is not the desktop's own finds the
+    /// dock hidden: it is called up, so there are tiles to hold on.
+    fn dock_spring_enter(&mut self, own: bool) {
+        let called = !own && self.ui.target() == crate::state::Target::Hidden;
+        if called {
+            self.handle_command(waverunner_proto::Command::Show);
+        }
+        self.desktop.spring = Some(Spring { called, ..Default::default() });
+    }
+
+    /// The drag moved over the dock: onto another tile, the hold starts
+    /// again; held `SPRING` on a running app's tile, that app comes forward.
+    fn dock_spring_motion(&mut self, pos: (f32, f32)) {
+        let entry = match crate::content::hit_test(&self.current_layout(), pos, self.search.open, &self.apps_slots) {
+            Some(crate::content::Hit::DockIcon(slot)) => self.dock_order.get(slot).copied(),
+            _ => None,
+        };
+        let Some(spring) = self.desktop.spring.as_mut() else {
+            return;
+        };
+        if entry == spring.entry {
+            return;
+        }
+        spring.entry = entry;
+        spring.turn += 1;
+        let turn = spring.turn;
+        // Only an app that has a window has anything to bring forward.
+        let has_window = entry.and_then(|e| self.running.get(&e)).is_some_and(|w| !w.is_empty());
+        if !has_window {
+            return;
+        }
+        let hold = calloop::timer::Timer::from_duration(SPRING);
+        let _ = self.loop_handle.insert_source(hold, move |_, _, app: &mut App| {
+            let held = app.desktop.spring.as_ref().filter(|s| s.turn == turn).and_then(|s| s.entry);
+            if let Some(entry) = held {
+                app.dock_spring_open(entry);
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
+    }
+
+    /// Bring the app of dock entry `entry` forward: its window on screen, or
+    /// one put away, back.
+    fn dock_spring_open(&mut self, entry: usize) {
+        let windows = self.running.get(&entry).cloned().unwrap_or_default();
+        let name = self.entries.get(entry).map_or("?", |e| e.id.as_str()).to_owned();
+        if let Some(addr) = windows.iter().find(|a| !self.parked_windows.contains(*a)) {
+            info!("dock: a drag held on {name}: its window {addr} comes forward");
+            crate::hypr::focus_window(addr);
+        } else if let Some(addr) = windows.first() {
+            info!("dock: a drag held on {name}: its window {addr} is brought back");
+            self.restore_minimized(addr);
+        }
+    }
+
+    /// The drag left the dock (or was dropped): the hold is over, and a dock
+    /// that came up for it goes.
+    pub(crate) fn dock_spring_end(&mut self) {
+        if let Some(spring) = self.desktop.spring.take() {
+            if spring.called {
+                self.handle_command(waverunner_proto::Command::Hide);
+            }
         }
     }
 

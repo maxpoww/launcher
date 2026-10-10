@@ -1152,12 +1152,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // (A dock that went away mid-drag left focus-follows-a-drag off: back
-    // to the compositor's own.)
-    if app.desktop_layer.is_some() {
-        desktop::dnd_follow(true);
-    }
-
     // The phones synced over Wi-Fi are looked for every minute
     // (`desktop_config.rs`).
     if app.desktop_layer.is_some() {
@@ -7533,6 +7527,8 @@ impl DataDeviceHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
     ) {
+        // (A drag dropped over the dock: its hold on a tile is over.)
+        self.dock_spring_end();
         if self.card_dnd_active() {
             self.card_dnd_drop();
         } else {
