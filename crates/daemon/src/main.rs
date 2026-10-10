@@ -1152,6 +1152,12 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // (A dock that went away mid-drag left focus-follows-a-drag off: back
+    // to the compositor's own.)
+    if app.desktop_layer.is_some() {
+        desktop::dnd_follow(true);
+    }
+
     // The phones synced over Wi-Fi are looked for every minute
     // (`desktop_config.rs`).
     if app.desktop_layer.is_some() {

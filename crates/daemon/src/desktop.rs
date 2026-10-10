@@ -659,6 +659,12 @@ pub(crate) fn show_in_file_manager(folder: PathBuf) {
     });
 }
 
+/// Whether the compositor makes focus follow the pointer during a drag (its
+/// own default: yes). Off while the desktop's own drag lasts.
+pub(crate) fn dnd_follow(on: bool) {
+    crate::hypr::eval(&format!("hl.config({{ [\"misc.always_follow_on_dnd\"] = {on} }})"));
+}
+
 /// A local path as a `file://` URI (percent-encoded), one line of a
 /// `text/uri-list`.
 pub(crate) fn file_uri(path: &str) -> String {
@@ -4050,6 +4056,13 @@ impl App {
                 String::new()
             }
         );
+        // While something of the desktop's is carried, the windows it passes
+        // over are left as they are (Max, 2026-10-10: dragging to a window
+        // that lay under another, the one on the way took the focus, came
+        // to the top and hid it). The compositor makes focus follow the
+        // pointer during ANY drag (`misc:always_follow_on_dnd`), whatever
+        // Golem's click-to-focus says; that is off for the length of ours.
+        dnd_follow(false);
         self.desktop.drag = Some(Drag {
             items,
             grip,
@@ -4275,6 +4288,7 @@ impl App {
         let Some(drag) = self.desktop.drag.take() else {
             return;
         };
+        dnd_follow(true);
         info!(
             "desktop: {} {} (action {:?})",
             self.desktop.items.get(drag.items[0]).map_or("?", |it| it.name.as_str()),
