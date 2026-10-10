@@ -408,11 +408,14 @@ pub(crate) fn reach(serial: &str, addr: Option<&str>) -> Option<String> {
     // The cable first, and with a little patience: right after Wi-Fi was
     // allowed (`adb tcpip`) the phone's own side restarts and is off its
     // cable for a few seconds — a sync begun then went the slow way round.
-    for _ in 0..12 {
+    // (While it restarts it is not listed at all, so "is it plugged?" cannot
+    // be asked: with a Wi-Fi way to fall back on, the cable is simply given
+    // eight seconds to show up. A sync is background work; it can wait.)
+    for _ in 0..16 {
         if ready(serial) {
             return Some(serial.to_owned());
         }
-        if !plugged(serial) {
+        if addr.is_none() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -423,13 +426,6 @@ pub(crate) fn reach(serial: &str, addr: Option<&str>) -> Option<String> {
     }
     let _ = Command::new("adb").args(["connect", addr]).stdout(Stdio::null()).stderr(Stdio::null()).status();
     ready(addr).then(|| addr.to_owned())
-}
-
-/// Whether adb lists the phone on its cable at all (ready or not yet).
-fn plugged(serial: &str) -> bool {
-    Command::new("adb").arg("devices").stderr(Stdio::null()).output().is_ok_and(|out| {
-        String::from_utf8_lossy(&out.stdout).lines().any(|l| l.split_whitespace().next() == Some(serial))
-    })
 }
 
 /// Whether the phone is on a charger (cable, dock or pad).
