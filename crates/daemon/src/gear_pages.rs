@@ -66,6 +66,7 @@ pub(crate) enum SysHit {
     About,
     Float,
     Awake,
+    AutoBright,
     AllSettings,
     Lock,
     Sleep,
@@ -380,6 +381,17 @@ pub(crate) fn idle_with(config: &str, screen: Option<u32>, sleep: Option<u32>) -
     out
 }
 
+/// An ambient light sensor the kernel exposes through iio, the kind
+/// `golem-autobrightness` reads.
+fn has_light_sensor() -> bool {
+    std::fs::read_dir("/sys/bus/iio/devices").is_ok_and(|dir| {
+        dir.flatten().any(|d| {
+            let p = d.path();
+            p.join("in_illuminance_raw").exists() || p.join("in_illuminance_input").exists()
+        })
+    })
+}
+
 fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map_or_else(
         || PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"),
@@ -586,6 +598,23 @@ impl App {
 
     fn caffeine_path() -> PathBuf {
         config_home().join("golem/caffeine")
+    }
+
+    fn autobright_off_path() -> PathBuf {
+        config_home().join("golem/autobrightness-off")
+    }
+
+    /// The row under "Keep awake", only where it can do something: the
+    /// system has `golem-autobrightness` and the machine a light sensor.
+    fn autobright_row() -> Option<Item> {
+        (crate::launch::on_path("golem-autobrightness") && has_light_sensor()).then(|| {
+            Item::Toggle {
+                hit: sys(SysHit::AutoBright),
+                label: "Automatic brightness".into(),
+                hint: "The screen follows the room's light".into(),
+                on: !Self::autobright_off_path().exists(),
+            }
+        })
     }
 
     /// Write the idle config with the owner's times and point hypridle at it
@@ -966,6 +995,7 @@ impl App {
                 on: Self::caffeine_path().exists(),
             });
         }
+        items.extend(Self::autobright_row());
         items.extend(self.idle_rows());
         if b.design_wh > 1.0 {
             let health = (100.0 * b.full_wh / b.design_wh).round().clamp(0.0, 100.0) as u8;
@@ -1210,6 +1240,7 @@ impl App {
                 on: Self::caffeine_path().exists(),
             });
         }
+        items.extend(Self::autobright_row());
         if self.stats_page_for(PageKind::Battery).is_none() {
             items.extend(self.idle_rows());
         }
@@ -1807,6 +1838,23 @@ impl App {
                     let _ = std::fs::write(&path, "");
                 }
             }
+            SysHit::AutoBright => {
+                let path = Self::autobright_off_path();
+                let on = !path.exists();
+                run_detached(
+                    "golem-autobrightness",
+                    vec![if on { "off" } else { "on" }.into()],
+                );
+                // The command's own file is the truth; reflect it at once.
+                if on {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::write(&path, "");
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
             SysHit::AllSettings => {
                 self.set_stats_box(false);
                 self.toggle_control_panel();
@@ -2061,6 +2109,7 @@ impl App {
             ("saver", _) => SysHit::AutoSaver,
             ("limit", _) => SysHit::ChargeLimit,
             ("awake", _) => SysHit::Awake,
+            ("autobright", _) => SysHit::AutoBright,
             ("effects", _) => SysHit::Effects(arg == "light"),
             ("lid", _) => SysHit::Lid(arg == "nothing"),
             ("screen", _) => SysHit::ScreenOff(secs),
