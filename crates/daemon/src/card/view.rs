@@ -1798,6 +1798,7 @@ mod tests {
                     talk: None,
                     hint: "",
                     hint_lit: false,
+                    hint_red: false,
                     picking: None,
                     emoji: &[],
                     pick_query: "",

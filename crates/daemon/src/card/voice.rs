@@ -178,7 +178,7 @@ impl App {
         }
     }
 
-    fn card_record_start(&mut self, talk: bool) {
+    pub(super) fn card_record_start(&mut self, talk: bool) {
         if talk && engine().is_none() {
             self.card.say =
                 Some("Talk-to-text needs the speech engine (whisper), which is not installed");

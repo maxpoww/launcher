@@ -243,6 +243,9 @@ enum Undone {
     },
 }
 
+/// How long Space is held before it is a voice note and not a tap (ms).
+const HOLD_MS: u64 = 350;
+
 /// Why a card that has a window is not showing on it. Each cause comes and
 /// goes on its own; the card is back when none is left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,6 +383,10 @@ pub(crate) struct Card {
     /// The session being renamed in its row on Memory's page (`None`: the
     /// name being typed is the open session's own).
     renaming: Option<u64>,
+    /// Space is down since then (nothing being written): held long enough
+    /// it is a voice note, recorded until it is let go (`held`).
+    space: Option<Instant>,
+    held: bool,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -1806,6 +1813,11 @@ impl App {
     /// The keyboard left the card (a window was clicked): what was being
     /// typed stays where it is, the cursor is the window's again.
     pub(crate) fn card_keys_left(&mut self) {
+        // (Space was held for a voice note: it ends here, and is kept.)
+        self.card.space = None;
+        if std::mem::take(&mut self.card.held) {
+            self.card_record_stop(true);
+        }
         if self.card.field.take().is_some() {
             debug!("card: the keyboard left");
             if let Some(layer) = self.card_layer.as_ref() {
@@ -1873,6 +1885,22 @@ impl App {
         }
     }
 
+    /// A key let go. Space, after a hold: the voice note ends there and is
+    /// kept, in the list that is up.
+    pub(crate) fn card_key_release(
+        &mut self,
+        keysym: smithay_client_toolkit::seat::keyboard::Keysym,
+    ) {
+        if keysym != smithay_client_toolkit::seat::keyboard::Keysym::space {
+            return;
+        }
+        self.card.space = None;
+        if std::mem::take(&mut self.card.held) {
+            self.card_record_stop(true);
+            self.request_card_draw();
+        }
+    }
+
     /// Whether the card takes the keys right now.
     pub(crate) fn card_typing(&self) -> bool {
         self.card.field.is_some()
@@ -1896,6 +1924,26 @@ impl App {
             let letter = utf8
                 .filter(|s| !s.is_empty() && !s.chars().any(|c| c.is_control() || c == ' '))
                 .filter(|_| !ctrl);
+            // SPACE HELD is a voice note, for as long as it is held (Max,
+            // 2026-10-10: *"hold Space to talk"*); a tap of it is nothing —
+            // a search does not start with a space.
+            if keysym == Keysym::space && !ctrl {
+                if self.card.space.is_none()
+                    && matches!(self.card.page, Page::Session | Page::Pinned)
+                    && self.card.picking.is_none()
+                {
+                    let since = Instant::now();
+                    self.card.space = Some(since);
+                    self.after_ms(HOLD_MS, move |app| {
+                        if app.card.space == Some(since) && app.card.rec.is_none() {
+                            app.card.held = true;
+                            app.card_record_start(false);
+                            app.request_card_draw();
+                        }
+                    });
+                }
+                return;
+            }
             match (keysym, self.card.page) {
                 // A session being chosen: Escape goes back with nothing
                 // kept; Enter keeps the thing in a new one.
@@ -3372,7 +3420,18 @@ impl App {
         // (without them it says nothing — Max, 2026-10-10: *"they are not
         // useful when it is unfocused"*).
         let flash = self.card.flash.as_ref().map(|f| f.0.clone());
+        // (A voice note being recorded with Space held: its seconds.)
+        let held = recording
+            .filter(|(_, talk)| !talk && self.card.held)
+            .map(|(secs, _)| {
+                format!(
+                    "●  {}:{:02}   recording — let go to keep it",
+                    secs / 60,
+                    secs % 60
+                )
+            });
         let hint = match (hover, self.card.field, self.card.page) {
+            _ if held.is_some() => held.as_deref().unwrap_or(""),
             _ if flash.is_some() => flash.as_deref().unwrap_or(""),
             _ if self.card.say.is_some() => self.card.say.unwrap_or(""),
             (_, Some(_), _) if self.card.picking.is_some() => {
@@ -3385,11 +3444,11 @@ impl App {
             }
             (_, Some(Field::Name), _) => "Enter keeps the name · Escape leaves it",
             (_, _, Page::Session) if self.card.open.is_some() => {
-                "Type to search · press Enter to create"
+                "Type to search · press Enter to create · hold Space to talk"
             }
             (_, _, Page::Memory) => "Enter to create · type to search",
             (_, _, Page::Clipboard) => "Click to paste · type to search",
-            (_, _, Page::Pinned) => "Type to search · press Enter to create",
+            (_, _, Page::Pinned) => "Type to search · press Enter to create · hold Space to talk",
             (_, _, Page::Dictionary) => "Type a word",
             _ => "",
         };
@@ -3435,6 +3494,7 @@ impl App {
                     talk,
                     hint,
                     hint_lit: flash.is_some(),
+                    hint_red: held.is_some(),
                     picking: self.card.pick(),
                     emoji: &emoji,
                     pick_query: &self.card.pick_query,
@@ -4248,7 +4308,13 @@ impl App {
                     "escape" => Keysym::Escape,
                     "tab" => Keysym::Tab,
                     "backspace" => Keysym::BackSpace,
-                    _ => return "key enter|escape|tab|backspace".to_owned(),
+                    // (Space held: `space` is the press, `space-up` the letting go.)
+                    "space" => Keysym::space,
+                    "space-up" => {
+                        self.card_key_release(Keysym::space);
+                        return self.card_words();
+                    }
+                    _ => return "key enter|escape|tab|backspace|space|space-up".to_owned(),
                 };
                 self.card_key(key, None);
                 format!("field {:?}", self.card.field)

@@ -6860,6 +6860,8 @@ impl KeyboardHandler for App {
         if self.fast.open {
             self.fast_key_release(event.keysym);
         }
+        // (The card: Space held is a voice note for as long as it is held.)
+        self.card_key_release(event.keysym);
     }
 
     fn update_modifiers(

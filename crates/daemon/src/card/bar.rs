@@ -136,6 +136,8 @@ pub(crate) struct BarView<'a> {
     /// It says what was just done (in the accent's colour); and it is a
     /// way back ("… · Undo": a click on it takes the thing back).
     pub hint_lit: bool,
+    /// It counts a recording (in red).
+    pub hint_red: bool,
     /// The emoji picker, when it is open: how many emoji it shows and
     /// how far its grid is scrolled; the emoji themselves (all, or those
     /// its search found); what is being searched.
@@ -984,6 +986,7 @@ pub(super) fn draw(
             10.0,
             true,
             match (bar.hint_lit, hover == Some(Hover::Undo)) {
+                _ if bar.hint_red => [DANGER[0], DANGER[1], DANGER[2], 1.0],
                 (true, true) => accent(1.0),
                 (true, false) => accent(0.85),
                 _ => ink(0.5),
