@@ -6779,7 +6779,7 @@ impl KeyboardHandler for App {
             .as_ref()
             .is_some_and(|l| l.wl_surface() == surface)
         {
-            debug!("keyboard focus left the desktop");
+            info!("desktop: the keyboard left it");
             // A name still being typed when the keyboard goes (a click on a
             // window) keeps what was typed.
             if self.desktop.rename.is_some() {

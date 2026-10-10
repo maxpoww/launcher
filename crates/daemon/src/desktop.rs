@@ -3232,7 +3232,18 @@ impl App {
         let _ = self.conn.flush();
         self.cancel_keyboard_handback(crate::KbSurface::Desktop);
         self.desktop.keys = true;
-        debug!("desktop: has the keyboard");
+        info!("desktop: asks for the keyboard (exclusive until it arrives)");
+        // The grab is let go when the keyboard ARRIVES (`desktop_keys_arrived`)
+        // — and if the desktop had it already, nothing arrives: the grab
+        // stayed, the pointer pinned to the desktop with it, and no window
+        // could be clicked (Max, 2026-10-10: "the desktop doesn't let me focus
+        // windows after I focus it"). So it is let go a moment later whatever
+        // came.
+        let soon = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(350));
+        let _ = self.loop_handle.insert_source(soon, |_, _, app: &mut App| {
+            app.desktop_keys_arrived();
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 
     /// Give the keyboard back to the window it came from. A name being
@@ -3242,7 +3253,7 @@ impl App {
             return;
         }
         self.desktop.keys = false;
-        debug!("desktop: gives the keyboard back");
+        info!("desktop: gives the keyboard back");
         self.begin_keyboard_handback(crate::KbSurface::Desktop, None);
         if let Some(layer) = self.desktop_layer.as_ref() {
             crate::surface::set_interactive(layer, false);
@@ -3255,9 +3266,12 @@ impl App {
     /// keyboard kept "on demand" — it stays until a window is clicked,
     /// while the pointer is free to go and click one.
     pub(crate) fn desktop_keys_arrived(&mut self) {
-        if !self.desktop.keys || self.desktop.rename.is_some() {
+        // (A name being typed — an icon's, a phone's in its Configure box —
+        // holds the grab for as long as it is typed.)
+        if !self.desktop.keys || self.desktop.rename.is_some() || self.desktop_config_typing() {
             return;
         }
+        info!("desktop: has the keyboard; the grab is let go (on demand)");
         if let Some(layer) = self.desktop_layer.as_ref() {
             crate::surface::set_on_demand(layer);
         }
