@@ -175,6 +175,8 @@ pub(crate) enum Hover {
     Pin(u64),
     /// A row of the disk's menu.
     Menu(usize),
+    /// The hint, while it offers a way back ("Removed · Undo").
+    Undo,
     /// An item's pencil: it is opened again to be changed.
     Edit(u64),
     Foot(Foot),
@@ -236,6 +238,10 @@ pub(crate) struct FootView<'a> {
     pub choosing: bool,
     /// The disk's menu, when it is open.
     pub menu: Option<MenuView<'a>>,
+    /// On Memory's page: the session whose × was clicked once (it asks to
+    /// be clicked again), and the one being renamed with what is typed.
+    pub arming: Option<u64>,
+    pub renaming: Option<(u64, &'a str)>,
 }
 
 /// The id the list gives the tile of the box something is being written in
@@ -783,17 +789,47 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             // (The room at the right end is the ×'s, and a pencil's to come.)
             let tw = t.x + t.w - tx - when_w - 56.0;
             let mid = t.y + (t.h - 17.0) / 2.0;
-            put(name, (tx, mid), tw, 12.5, false, paint.ink_at(0.96));
-            put(
-                when,
-                (t.x + t.w - when_w / 2.0 - 52.0, mid + 2.0),
-                when_w,
-                NOTE_PX + 1.0,
-                true,
-                paint.ink_at(0.5),
-            );
+            // (Its × clicked once: it asks for the second click, in red.
+            // Being renamed: what is typed, with the cursor.)
+            let foot = view.foot.as_ref();
+            let arming = foot.is_some_and(|f| f.arming == Some(item.id));
+            let renaming = foot
+                .and_then(|f| f.renaming)
+                .filter(|(id, _)| *id == item.id)
+                .map(|(_, typed)| format!("{typed}|"));
+            let danger = [DANGER[0], DANGER[1], DANGER[2], 1.0];
+            match (&renaming, arming) {
+                (Some(typed), _) => put(
+                    typed,
+                    (tx, mid),
+                    tw,
+                    12.5,
+                    false,
+                    [acc[0], acc[1], acc[2], 1.0],
+                ),
+                (_, true) => put(
+                    "Forget this session? Click × again",
+                    (tx, mid),
+                    tw + when_w,
+                    12.5,
+                    false,
+                    danger,
+                ),
+                _ => put(name, (tx, mid), tw, 12.5, false, paint.ink_at(0.96)),
+            }
+            if !arming {
+                put(
+                    when,
+                    (t.x + t.w - when_w / 2.0 - 52.0, mid + 2.0),
+                    when_w,
+                    NOTE_PX + 1.0,
+                    true,
+                    paint.ink_at(0.5),
+                );
+            }
             let choosing = view.foot.as_ref().is_some_and(|f| f.choosing);
-            if !choosing && view.hover.is_some_and(|h| h.item() == Some(item.id)) {
+            let over = view.hover.is_some_and(|h| h.item() == Some(item.id));
+            if !choosing && (over || arming) {
                 let close = tile.close();
                 let hot = view.hover == Some(Hover::Close(item.id));
                 put(
@@ -802,12 +838,34 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     close.w,
                     15.0,
                     true,
-                    if hot {
-                        [DANGER[0], DANGER[1], DANGER[2], 1.0]
+                    if hot || arming {
+                        danger
                     } else {
                         paint.ink_at(0.45)
                     },
                 );
+            }
+            // The pencil, left of the ×: the session is renamed in its row.
+            if !choosing && over && !arming && renaming.is_none() {
+                let pen = tile.pin();
+                let hot = view.hover == Some(Hover::Edit(item.id));
+                list.labels.push(Label {
+                    text: GLYPH_EDIT.to_owned(),
+                    pos: (pen.x + pen.w / 2.0, pen.y + 3.0),
+                    max_w: pen.w,
+                    font_px: 12.0,
+                    line_px: CLOSE - 2.0,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    clip: Some(clip),
+                    family: Some(crate::options::NERD),
+                    color: Some(if hot {
+                        [acc[0], acc[1], acc[2], 1.0]
+                    } else {
+                        paint.ink_at(0.45)
+                    }),
+                });
             }
             continue;
         }
@@ -1739,6 +1797,7 @@ mod tests {
                     rec: None,
                     talk: None,
                     hint: "",
+                    hint_lit: false,
                     picking: None,
                     emoji: &[],
                     pick_query: "",
@@ -1751,6 +1810,8 @@ mod tests {
                 title: None,
                 choosing: false,
                 menu: None,
+                arming: None,
+                renaming: None,
             }),
             dnd_over: false,
             hidden: None,

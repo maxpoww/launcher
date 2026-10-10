@@ -133,6 +133,9 @@ pub(crate) struct BarView<'a> {
     pub talk: Option<&'a str>,
     /// The line under the input box.
     pub hint: &'a str,
+    /// It says what was just done (in the accent's colour); and it is a
+    /// way back ("… · Undo": a click on it takes the thing back).
+    pub hint_lit: bool,
     /// The emoji picker, when it is open: how many emoji it shows and
     /// how far its grid is scrolled; the emoji themselves (all, or those
     /// its search found); what is being searched.
@@ -271,6 +274,12 @@ pub(crate) fn box_h(lines: usize) -> f32 {
 }
 
 impl Bottom {
+    /// The line of hint, across the card (a click on it is "Undo" while it
+    /// offers one).
+    pub(crate) fn hint_rect(&self, rect: Rect) -> Rect {
+        Rect::new(rect.x, self.hint_y, rect.w, HINT_H)
+    }
+
     /// The same bottom with the writing box at `r` — where the list has it
     /// this frame (none: nothing is being written). Its buttons go with it.
     pub(crate) fn with_input(mut self, r: Option<Rect>) -> Bottom {
@@ -974,7 +983,11 @@ pub(super) fn draw(
             rect.w - 2.0 * GAP,
             10.0,
             true,
-            ink(0.5),
+            match (bar.hint_lit, hover == Some(Hover::Undo)) {
+                (true, true) => accent(1.0),
+                (true, false) => accent(0.85),
+                _ => ink(0.5),
+            },
             clip,
         ));
     }

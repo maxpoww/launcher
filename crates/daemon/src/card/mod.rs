@@ -226,6 +226,23 @@ struct Win {
     session: Option<u64>,
 }
 
+/// What was just removed, kept for as long as the hint offers it back
+/// ("Removed · Undo"): an item with its place in its list, or a whole
+/// session with its place in memory.
+enum Undone {
+    Item {
+        item: Item,
+        at: usize,
+        page: Page,
+        open: Option<u64>,
+    },
+    Session {
+        past: Past,
+        at: usize,
+        was_open: bool,
+    },
+}
+
 /// Why a card that has a window is not showing on it. Each cause comes and
 /// goes on its own; the card is back when none is left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,6 +373,13 @@ pub(crate) struct Card {
     picking: Option<(Item, Page)>,
     /// What was just done, said where the hint is for a moment ("Saved").
     flash: Option<(String, Instant)>,
+    /// What was just removed, while the hint still offers it back.
+    undo: Option<Undone>,
+    /// The session whose × was clicked once: a second click, soon, forgets it.
+    arming: Option<(u64, Instant)>,
+    /// The session being renamed in its row on Memory's page (`None`: the
+    /// name being typed is the open session's own).
+    renaming: Option<u64>,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -817,6 +841,9 @@ impl Card {
             return Some(Hover::Menu(row.min(self.menu_rows().len() - 1)));
         }
         let low = bottom(rect, self.page, self.seeking(), self.pick()).with_input(self.writer);
+        if self.undo.is_some() && self.flash.is_some() && low.hint_rect(rect).contains(pos) {
+            return Some(Hover::Undo);
+        }
         if let Some(hit) = low.hit(pos, self.seeking()) {
             return Some(hit);
         }
@@ -843,6 +870,10 @@ impl Card {
         // (Memory's rows are sessions: no disk; and while one is being
         // chosen, no × either — a row only chooses.)
         let pins = self.page != Page::Memory;
+        // (A session's row has a pencil too, in the disk's place: its name.)
+        if self.page == Page::Memory && self.picking.is_none() && tile.pin().contains(pos) {
+            return Some(Hover::Edit(tile.id));
+        }
         let pencil = matches!(self.page, Page::Session | Page::Pinned)
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Text);
         let closes = !(self.page.lent() || self.page == Page::Memory && self.picking.is_some());
@@ -1026,7 +1057,25 @@ impl Card {
         // (A search belongs to the page it was typed on.)
         self.query.clear();
         self.take_out();
+        self.prune();
         true
+    }
+
+    /// EMPTY SESSIONS DISAPPEAR (Max, 2026-10-10): a session with nothing
+    /// in it is in memory only while it is the one open on screen. Left
+    /// empty, it is gone — its windows and its title have nothing then, as
+    /// when it is forgotten.
+    fn prune(&mut self) {
+        let showing = (self.page == Page::Session).then_some(self.open).flatten();
+        let empty: Vec<u64> = self
+            .memory
+            .iter()
+            .filter(|p| p.items.is_empty() && Some(p.id) != showing)
+            .map(|p| p.id)
+            .collect();
+        for id in empty {
+            self.lose(id);
+        }
     }
 
     /// The card works with session `id` from now on, and shows it; with
@@ -1040,6 +1089,7 @@ impl Card {
             Page::Memory
         };
         self.take_out();
+        self.prune();
     }
 
     /// Start a session called `name`: it is in memory at once, first, with
@@ -1934,6 +1984,10 @@ impl App {
                         self.card.edit = None;
                         self.card_rest();
                     }
+                    Field::Name => {
+                        self.card.renaming = None;
+                        self.card_rest();
+                    }
                     _ => self.card_rest(),
                 }
             }
@@ -2014,7 +2068,7 @@ impl App {
             (Field::Name, Keysym::Return | Keysym::KP_Enter) => {
                 let name = self.card.naming.trim().to_owned();
                 self.card_rename(&name);
-                self.card.field = Some(Field::Box);
+                self.card_rest();
             }
             _ => match (field, typed) {
                 (Field::Box, Some(s)) => self.card.type_in(s),
@@ -2042,16 +2096,23 @@ impl App {
     /// The open memory is called `name` from now on (an empty one keeps
     /// what it had).
     fn card_rename(&mut self, name: &str) {
-        let Some(open) = self.card.open else {
+        // (The session being renamed in its row, else the open one.)
+        let Some(which) = self.card.renaming.take().or(self.card.open) else {
             return;
         };
         if name.is_empty() {
             return;
         }
-        if let Some(past) = self.card.memory.iter_mut().find(|p| p.id == open) {
+        if let Some(past) = self.card.memory.iter_mut().find(|p| p.id == which) {
             past.name = Some(name.to_owned());
-            info!("card: a memory renamed {name:?}");
+            info!("card: a session renamed {name:?}");
+            // (Memory's rows are made from the sessions: this one again.)
+            if self.card.page == Page::Memory {
+                self.card.items = self.card.memory.iter().map(session_row).collect();
+                self.card.lines.remove(&which);
+            }
             self.card_save();
+            self.card_flash("Renamed");
         }
     }
 
@@ -2071,6 +2132,28 @@ impl App {
     /// in the list, to be changed. Enter keeps the changes, Escape leaves it
     /// as it was.
     fn card_edit(&mut self, id: u64) {
+        // (A session's row: it is its NAME that is written again, there.)
+        if self.card.page == Page::Memory {
+            let Some(name) = self
+                .card
+                .memory
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone().unwrap_or_default())
+            else {
+                return;
+            };
+            if self.card.field.is_none() {
+                self.card_take_keys(Field::Name);
+            } else {
+                self.card.field = Some(Field::Name);
+            }
+            self.card.renaming = Some(id);
+            self.card.naming = name;
+            self.sync_card_input();
+            self.request_card_draw();
+            return;
+        }
         let Some(body) = self
             .card
             .item(id)
@@ -2251,6 +2334,7 @@ impl App {
                 self.request_card_draw();
             }
             Hover::Menu(row) => self.card_menu(row),
+            Hover::Undo => self.card_undo(),
             Hover::Edit(id) => self.card_edit(id),
             Hover::Foot(which) => self.card_foot(which),
             Hover::Seek => self.card_take_keys(Field::Seek),
@@ -2408,18 +2492,42 @@ impl App {
     /// The × of a session in memory: it is gone for good, with the
     /// pictures that were only its.
     fn card_forget(&mut self, id: u64) {
+        // A whole session goes with it: the first click only ASKS, for a
+        // few seconds (its row says so); the second forgets (Max,
+        // 2026-10-10). And the hint then offers it back for a moment.
+        let now = Instant::now();
+        let armed = self
+            .card
+            .arming
+            .is_some_and(|(which, at)| which == id && at.elapsed() < Duration::from_millis(3500));
+        if !armed {
+            self.card.arming = Some((id, now));
+            self.after_ms(3500, move |app| {
+                if app.card.arming.is_some_and(|a| a.1 == now) {
+                    app.card.arming = None;
+                    app.request_card_draw();
+                }
+            });
+            self.request_card_draw();
+            return;
+        }
+        self.card.arming = None;
+        self.card_undo_over();
+        let at = self.card.memory.iter().position(|p| p.id == id);
+        let was_open = self.card.open == Some(id);
         let Some(past) = self.card.lose(id) else {
             return;
         };
         info!("card: a session of {} forgotten", past.items.len());
         for item in &past.items {
             self.card.lines.remove(&item.id);
-            if let (true, Some(path)) = (item.owned, item.path.as_deref()) {
-                if !self.card.keeps(path) {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
         }
+        self.card.undo = Some(Undone::Session {
+            past,
+            at: at.unwrap_or(0),
+            was_open,
+        });
+        self.card_flash_long("Session forgotten · Undo");
         self.card_save();
         self.card_save_session();
         self.request_card_draw();
@@ -2462,6 +2570,7 @@ impl App {
 
     /// Say `words` where the hint is, for a moment: what was just done.
     fn card_flash(&mut self, words: &str) {
+        self.card_undo_over();
         let since = Instant::now();
         self.card.flash = Some((words.to_owned(), since));
         self.after_ms(1600, move |app| {
@@ -2497,6 +2606,7 @@ impl App {
         let Some(at) = self.card.items.iter().position(|it| it.id == id) else {
             return;
         };
+        self.card_undo_over();
         let item = self.card.items.remove(at);
         info!(
             "card: − {:?} {:?}",
@@ -2515,11 +2625,111 @@ impl App {
                 self.card.slots.remove(path);
                 self.card.asked.remove(path);
             }
-            if item.owned && !self.card.keeps(path) {
-                let _ = std::fs::remove_file(path);
+        }
+        // It is kept for a moment: the hint says "Removed · Undo", and a
+        // click on that puts it back where it was (Max, 2026-10-10). A
+        // picture of the card's own is deleted only once that is over.
+        self.card.undo = Some(Undone::Item {
+            item,
+            at,
+            page: self.card.page,
+            open: self.card.open,
+        });
+        self.card_flash_long("Removed · Undo");
+        self.card_save();
+        self.request_card_draw();
+    }
+
+    /// What the hint offered back is taken back: the item is where it was,
+    /// the session is in memory again.
+    fn card_undo(&mut self) {
+        let Some(undone) = self.card.undo.take() else {
+            return;
+        };
+        self.card.flash = None;
+        match undone {
+            Undone::Item {
+                item,
+                at,
+                page,
+                open,
+            } => {
+                let path = item.path.clone();
+                let here =
+                    self.card.page == page && (page != Page::Session || self.card.open == open);
+                let list = if here {
+                    Some(&mut self.card.items)
+                } else {
+                    match page {
+                        Page::Pinned => Some(&mut self.card.pinned),
+                        Page::Session => self
+                            .card
+                            .memory
+                            .iter_mut()
+                            .find(|p| Some(p.id) == open)
+                            .map(|p| &mut p.items),
+                        _ => None,
+                    }
+                };
+                if let Some(list) = list {
+                    list.insert(at.min(list.len()), item);
+                }
+                if let Some(path) = path {
+                    self.card_ask_picture(&path);
+                }
+            }
+            Undone::Session { past, at, was_open } => {
+                let id = past.id;
+                let at = at.min(self.card.memory.len());
+                self.card.memory.insert(at, past);
+                if was_open {
+                    let title = self.card_host_title();
+                    if let Some(host) = self.card.host.clone() {
+                        self.card.give(&host, title.as_deref(), id);
+                    }
+                    self.card.open = Some(id);
+                }
+                if self.card.page == Page::Memory {
+                    self.card.items = self.card.memory.iter().map(session_row).collect();
+                    self.card.lines.remove(&id);
+                }
+                self.card_save_session();
             }
         }
+        info!("card: taken back");
         self.card_save();
+        self.request_card_draw();
+    }
+
+    /// The hint's offer is over (its time ran out, or something else was
+    /// removed): what was removed is gone for good — a picture of the card's
+    /// own with the last thing that showed it.
+    fn card_undo_over(&mut self) {
+        let gone: Vec<Item> = match self.card.undo.take() {
+            Some(Undone::Item { item, .. }) => vec![item],
+            Some(Undone::Session { past, .. }) => past.items,
+            None => return,
+        };
+        for item in gone {
+            if let (true, Some(path)) = (item.owned, item.path.as_deref()) {
+                if !self.card.keeps(path) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+
+    /// As `card_flash`, for longer, and ending whatever it offered back.
+    fn card_flash_long(&mut self, words: &str) {
+        let since = Instant::now();
+        self.card.flash = Some((words.to_owned(), since));
+        self.after_ms(4500, move |app| {
+            if app.card.flash.as_ref().is_some_and(|f| f.1 == since) {
+                app.card.flash = None;
+                app.card_undo_over();
+                app.request_card_draw();
+            }
+        });
         self.request_card_draw();
     }
 
@@ -3224,6 +3434,7 @@ impl App {
                     rec: recording.filter(|(_, talk)| !talk).map(|(secs, _)| secs),
                     talk,
                     hint,
+                    hint_lit: flash.is_some(),
                     picking: self.card.pick(),
                     emoji: &emoji,
                     pick_query: &self.card.pick_query,
@@ -3243,6 +3454,12 @@ impl App {
                     .is_some()
                     .then_some("Keep in which session?"),
                 choosing: self.card.picking.is_some(),
+                arming: self.card.arming.map(|a| a.0),
+                renaming: self
+                    .card
+                    .renaming
+                    .filter(|_| self.card.field == Some(Field::Name))
+                    .map(|id| (id, self.card.naming.as_str())),
                 menu: self.card.menu_rect().map(|rect| MenuView {
                     rect,
                     rows: self.card.menu_rows(),
@@ -4002,6 +4219,11 @@ impl App {
                 self.card_menu(rest.parse::<usize>().unwrap_or(1).saturating_sub(1));
                 format!("page {:?}", self.card.page)
             }
+            // `undo`: what the hint offers back, taken back.
+            "undo" => {
+                self.card_undo();
+                self.card_words()
+            }
             // `edit <n>`: the pencil of item n of the list that is up.
             "edit" => {
                 let id = rest
@@ -4463,13 +4685,33 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_session_is_gone_once_it_is_left() {
+        let mut card = Card::default();
+        let a = card.begin(Some("A".to_owned()), 1);
+        card.turn_to(Some(a));
+        // Open on screen, with nothing in it yet: it is there.
+        assert_eq!((card.memory.len(), card.page), (1, Page::Session));
+        // Left empty (Memory's page is put up): gone, and nothing is open.
+        assert!(card.show(Page::Memory));
+        assert!(card.memory.is_empty() && card.open.is_none() && card.items.is_empty());
+        // With a thing in it, it stays when it is left.
+        let b = card.begin(Some("B".to_owned()), 2);
+        card.turn_to(Some(b));
+        card.items.push(note(1, "kept"));
+        assert!(card.show(Page::Memory));
+        assert_eq!((card.memory.len(), card.items.len()), (1, 1));
+    }
+
+    #[test]
     fn what_the_disk_keeps_is_a_copy_of_its_own() {
         let mut card = Card::default();
         let a = card.begin(Some("A".to_owned()), 1);
         let b = card.begin(Some("B".to_owned()), 1);
+        // (A session with nothing in it does not stay: this one has a thing.)
+        card.memory[0].items.push(note(50, "in b"));
         card.turn_to(Some(a));
         card.items = vec![note(1, "me@example.org"), note(2, "b")];
-        card.next_id = 10;
+        card.next_id = 100;
         // PINNED: a copy, with an id of its own; again, another copy (it
         // is not a switch any more).
         let item = card.items[0].clone();
@@ -4485,7 +4727,10 @@ mod tests {
             .iter()
             .map(|i| i.body.as_str())
             .collect();
-        assert_eq!((card.memory[0].id, in_b), (b, vec!["me@example.org"]));
+        assert_eq!(
+            (card.memory[0].id, in_b),
+            (b, vec!["in b", "me@example.org"])
+        );
         // …in the OPEN one: on the card, where its items are.
         assert!(card.keep_in(a, &item, 8));
         assert_eq!(card.items.len(), 3);
