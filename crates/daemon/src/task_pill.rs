@@ -20,8 +20,9 @@
 //! SEVERAL AT ONCE (Max, same day): the pill shows the last one started and
 //! `+N` for the others; a scroll down on it opens ITS BOX — the pill growing
 //! down into a list, the others a row each, the way the player's pill grows
-//! into the playing list (`playbox.rs`: same morph, same panel, same zebra) —
-//! and a scroll up, or leaving the bar, folds it back.
+//! into the playing list (`playbox.rs`: same morph, same panel) —
+//! and a scroll up, or leaving the bar, folds it back. `+N` is a chip in the
+//! pill's right cap, the bell's hidden-count chip.
 
 use std::time::Instant;
 
@@ -41,6 +42,10 @@ const MAX_W: f32 = 32.0;
 const STRETCH: f32 = 5.0 / 3.0;
 /// A row of the box, in pill-heights.
 const ROW_H: f32 = 1.0;
+/// The air between one task and the next in the box (Max, 2026-10-10).
+const AIR: f32 = 2.0;
+/// Between the number and the `+N` chip.
+const CHIP_GAP: f32 = 8.0;
 /// Between the words and the number.
 const GAP: f32 = 10.0;
 /// What the number's slot is measured from.
@@ -71,13 +76,21 @@ pub(crate) struct TaskPill {
 impl App {
     /// The words the pill says.
     fn task_pill_label(&self) -> String {
-        let Some(task) = self.task_pill.shown.as_ref() else {
-            return String::new();
-        };
-        match self.task_pill.others {
-            0 => task.label.clone(),
-            n => format!("{}  +{n}", task.label),
+        self.task_pill.shown.as_ref().map(|t| t.label.clone()).unwrap_or_default()
+    }
+
+    /// The chip that counts the other tasks (`+2`), and its size: the bell's
+    /// hidden-count chip (`notif.rs`), cut the same way. `None` with no others.
+    fn task_chip(&self) -> Option<(String, f32, f32)> {
+        let n = self.task_pill.others;
+        if n == 0 {
+            return None;
         }
+        let s = self.options_scale();
+        let text = format!("+{n}");
+        let h = LINE_PX * s;
+        let w = (text.chars().count() as f32 * FONT_PX * s * 0.6 + 12.0).max(h);
+        Some((text, w, h))
     }
 
     /// The list of tasks changed (one began, moved on, ended, left): the
@@ -145,8 +158,9 @@ impl App {
     /// The pill's width when nothing holds it in: its words and its number,
     /// up to `MAX_W`.
     fn task_pill_full_w(&self) -> f32 {
+        let chip = self.task_chip().map_or(0.0, |(_, w, _)| w + CHIP_GAP);
         let wanted = 2.0 * PILL_PAD_X + self.task_pill.label_w + GAP + self.task_pill.pct_w;
-        (wanted * STRETCH).min(self.options_pill_h() * MAX_W)
+        (wanted * STRETCH + chip).min(self.options_pill_h() * MAX_W)
     }
 
     /// Where the pill is on the bar now (`None`: it is not there): centred
@@ -175,7 +189,7 @@ impl App {
     /// The pill's height now: its band, and under it as much of the box as
     /// is open — a row for each of the other tasks.
     fn task_box_h(&self, ph: f32) -> f32 {
-        lerp(ph, ph + self.tasks.others() as f32 * ph * ROW_H, self.task_pill.box_e)
+        lerp(ph, ph + self.tasks.others() as f32 * (ph * ROW_H + AIR), self.task_pill.box_e)
     }
 
     /// A scroll over the pill: down opens the box of the other tasks, up
@@ -210,7 +224,7 @@ impl App {
     /// How far down the pointer region must reach while the box is open.
     pub(crate) fn task_box_input_bottom(&self) -> f32 {
         let ph = self.options_pill_h();
-        crate::options::PILL_MARGIN_Y + ph + self.tasks.others() as f32 * ph * ROW_H
+        crate::options::PILL_MARGIN_Y + ph + self.tasks.others() as f32 * (ph * ROW_H + AIR)
     }
 
     /// Draw it: the ground every pill has, the fill, the words, the number.
@@ -248,10 +262,12 @@ impl App {
         // The player's track fill: the pill itself, filling from the left.
         let fill = self.task_pill.fill.clamp(0.0, 1.0);
         if fill > 0.0 {
-            let fw = (band.w * fill).max(2.0 * radius).min(band.w);
+            // (Round-ended always: the box's corner is not the bar's end.)
+            let cap = band.h / 2.0;
+            let fw = (band.w * fill).max(2.0 * cap).min(band.w);
             scene.rects.push(RectInst {
                 rect: Rect::new(band.x, band.y, fw, band.h),
-                radius,
+                radius: cap,
                 color: [ink[0], ink[1], ink[2], 0.14 * a],
                 glass: 0.0,
                 border: 0.0,
@@ -261,7 +277,45 @@ impl App {
         let rect = band;
         let ty = rect.y + (rect.h - line_px) / 2.0;
         let slot = self.task_pill.pct_w;
-        let slot_x = rect.x + rect.w - PILL_PAD_X - slot;
+        // The `+N` chip nests in the pill's right cap, as the bell's does, and
+        // fades as the box opens (the others are then in plain sight); the
+        // number stands left of it.
+        let chip = self.task_chip();
+        let chip_x = chip.as_ref().map(|(_, w, h)| rect.x + rect.w - (ph - h) / 2.0 - w);
+        // (As the box opens and the chip goes, the number slides to the edge,
+        // into line with the rows' numbers under it.)
+        let at_edge = rect.x + rect.w - PILL_PAD_X - slot;
+        let slot_x = match chip_x {
+            Some(x) => lerp(x - CHIP_GAP - slot, at_edge, e),
+            None => at_edge,
+        };
+        if let (Some((text, w, h)), Some(x)) = (chip, chip_x) {
+            let fade = (1.0 - e) * a;
+            if fade > 0.004 {
+                let cr = Rect::new(x, rect.y + (rect.h - h) / 2.0, w, h);
+                let amber = crate::notif::AMBER;
+                scene.rects.push(RectInst {
+                    rect: cr,
+                    radius: h / 2.0,
+                    color: [amber[0], amber[1], amber[2], 0.2 * fade],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                scene.labels.push(Label {
+                    text,
+                    pos: (cr.x + cr.w / 2.0, cr.y + (cr.h - line_px) / 2.0),
+                    max_w: cr.w + 4.0,
+                    font_px,
+                    line_px,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: TEXT_FONT,
+                    color: Some([ink[0], ink[1], ink[2], fade]),
+                    clip: Some(cr),
+                });
+            }
+        }
         let color = Some([ink[0], ink[1], ink[2], ink[3] * a]);
         // The words, left, cut where the number's slot begins.
         let words_w = (slot_x - GAP - (rect.x + PILL_PAD_X)).max(0.0);
@@ -296,8 +350,10 @@ impl App {
         });
     }
 
-    /// The box's rows: the other tasks, each its words, its fill and its
-    /// number, as the band above them — cut to the opening box.
+    /// The box's rows: the other tasks, each a line of its own like the band
+    /// above them — its words, its number, and its fill a round-ended bar as
+    /// the band's is — with `AIR` between one and the next. A row is drawn
+    /// once the opening box has room for all of it.
     fn push_task_rows(&self, scene: &mut Scene, rect: Rect, solid: f32, ink: [f32; 4]) {
         if self.task_pill.box_e < 0.01 {
             return;
@@ -306,26 +362,20 @@ impl App {
         let (font_px, line_px) = (FONT_PX * s, LINE_PX * s);
         let ph = self.options_pill_h();
         let row_h = ph * ROW_H;
-        let (panel, _) = self.clip_box_surface();
-        let stripe = self.zebra_stripe(panel);
+        let radius = row_h / 2.0;
         let slot = self.task_pill.pct_w;
         let color = Some([ink[0], ink[1], ink[2], ink[3] * solid]);
         for (idx, task) in self.tasks.rest().iter().enumerate() {
-            let rr = Rect::new(rect.x, rect.y + ph + idx as f32 * row_h, rect.w, row_h);
-            let (top, bot) = (rr.y.max(rect.y + ph), (rr.y + rr.h).min(rect.y + rect.h));
-            if bot <= top {
-                continue;
+            let rr = Rect::new(rect.x, rect.y + ph + AIR + idx as f32 * (row_h + AIR), rect.w, row_h);
+            if rr.y + rr.h > rect.y + rect.h + 0.5 {
+                break;
             }
-            let clip = Rect::new(rr.x, top, rr.w, bot - top);
-            // Zebra on odd rows, as in every list on this bar.
-            if idx % 2 == 1 {
-                scene.rects.push(RectInst { rect: clip, radius: 0.0, color: stripe, glass: 0.0, border: 0.0 });
-            }
-            let fw = rr.w * task.fraction();
-            if fw > 0.5 {
+            let fraction = task.fraction();
+            if fraction > 0.0 {
+                let fw = (rr.w * fraction).max(2.0 * radius).min(rr.w);
                 scene.rects.push(RectInst {
-                    rect: Rect::new(rr.x, top, fw, bot - top),
-                    radius: 0.0,
+                    rect: Rect::new(rr.x, rr.y, fw, rr.h),
+                    radius,
                     color: [ink[0], ink[1], ink[2], 0.14 * solid],
                     glass: 0.0,
                     border: 0.0,
@@ -343,7 +393,7 @@ impl App {
                 centered: false,
                 dim: false,
                 cache: false,
-                clip: Some(Rect::new(rr.x + PILL_PAD_X, top, words_w, bot - top)),
+                clip: Some(Rect::new(rr.x + PILL_PAD_X, rr.y, words_w, rr.h)),
                 family: TEXT_FONT,
                 color,
             });
@@ -356,7 +406,7 @@ impl App {
                 centered: true,
                 dim: false,
                 cache: false,
-                clip: Some(clip),
+                clip: Some(rr),
                 family: TEXT_FONT,
                 color,
             });

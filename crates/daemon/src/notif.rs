@@ -180,7 +180,7 @@ const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
 /// Unread-indicator colour — the bell-pill tint/glow and the "+N" count badge.
 /// Matched to the user's Hyprland active window-border colour (`#ffbe98`, a warm
 /// peach) so the unread cue speaks the same accent as the rest of the desktop.
-const AMBER: [f32; 4] = [1.0, 0.745, 0.596, 1.0];
+pub(crate) const AMBER: [f32; 4] = [1.0, 0.745, 0.596, 1.0];
 /// The battery alarm's red (the bell accent while low/beating/critical).
 const BATTERY_RED: [f32; 4] = [0.92, 0.26, 0.21, 1.0];
 /// fa-triangle-exclamation — the battery awareness symbol.
