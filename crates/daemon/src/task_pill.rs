@@ -16,10 +16,16 @@
 //! pushing no neighbour); what that ground cannot hold of its words is cut.
 //! A box that grows over the bar covers it as it covers anything
 //! (`clear_under`). It does nothing when clicked.
+//!
+//! SEVERAL AT ONCE (Max, same day): the pill shows the last one started and
+//! `+N` for the others; a scroll down on it opens ITS BOX — the pill growing
+//! down into a list, the others a row each, the way the player's pill grows
+//! into the playing list (`playbox.rs`: same morph, same panel, same zebra) —
+//! and a scroll up, or leaving the bar, folds it back.
 
 use std::time::Instant;
 
-use crate::animation::{self, ease_toward, lerp};
+use crate::animation::{self, ease_toward, lerp, lerp4};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{push_neumorph, FONT_PX, LINE_PX, OPTION_GAP, PILL_PAD_X, TEXT_FONT};
 use crate::tasks::Task;
@@ -33,6 +39,8 @@ const MAX_W: f32 = 32.0;
 /// further to go, so it is seen to move (Max, 2026-10-09: "make it longer so
 /// it goes faster, like another 1/3 longer" — then a quarter longer again).
 const STRETCH: f32 = 5.0 / 3.0;
+/// A row of the box, in pill-heights.
+const ROW_H: f32 = 1.0;
 /// Between the words and the number.
 const GAP: f32 = 10.0;
 /// What the number's slot is measured from.
@@ -55,6 +63,9 @@ pub(crate) struct TaskPill {
     label_w: f32,
     pct_w: f32,
     measured: String,
+    /// The box of the other tasks: asked open, and how far open it is.
+    box_open: bool,
+    box_e: f32,
 }
 
 impl App {
@@ -109,11 +120,19 @@ impl App {
         let want = self.task_pill.shown.as_ref().map_or(0.0, Task::fraction);
         let (fill, filling) = ease_toward(self.task_pill.fill, want, dt, animation::MORPH_RATE, animation::settle_t(span));
         self.task_pill.fill = fill;
-        if coming {
+        // Nothing left to list: the box folds by itself.
+        if self.tasks.others() == 0 {
+            self.task_pill.box_open = false;
+        }
+        let open = f32::from(u8::from(self.task_pill.box_open));
+        let (box_e, boxing) = ease_toward(self.task_pill.box_e, open, dt, animation::MORPH_RATE, animation::SETTLE_ALPHA);
+        self.task_pill.box_e = box_e;
+        if coming || boxing {
             self.sync_options_input();
         }
         self.draw_options();
-        if coming || filling {
+        // (While the box is open its rows fill as their tasks go.)
+        if coming || filling || boxing || (self.task_pill.box_open && !self.tasks.is_empty()) {
             self.schedule_task_pill_frame();
         } else {
             self.task_pill.last = None;
@@ -146,11 +165,52 @@ impl App {
             let full = self.task_pill_full_w().min(ground).max(number);
             let w = lerp(ph.min(full), full, t);
             let centre = (band_right + window_left) / 2.0;
-            return Some(Rect::new(centre - w / 2.0, y, w, ph));
+            return Some(Rect::new(centre - w / 2.0, y, w, self.task_box_h(ph)));
         }
         let right = self.options_clock_rest_left() - OPTION_GAP - ph - OPTION_GAP;
         let w = lerp(ph, self.task_pill_full_w().max(ph), t);
-        Some(Rect::new(right - w, y, w, ph))
+        Some(Rect::new(right - w, y, w, self.task_box_h(ph)))
+    }
+
+    /// The pill's height now: its band, and under it as much of the box as
+    /// is open — a row for each of the other tasks.
+    fn task_box_h(&self, ph: f32) -> f32 {
+        lerp(ph, ph + self.tasks.others() as f32 * ph * ROW_H, self.task_pill.box_e)
+    }
+
+    /// A scroll over the pill: down opens the box of the other tasks, up
+    /// folds it (the playing box's gesture and its sign).
+    pub(crate) fn task_pill_axis(&mut self, value: f32) {
+        // A scroll's end arrives as an axis event of zero: only a push counts.
+        if value.abs() < crate::options::SCROLL_DEADZONE {
+            return;
+        }
+        let open = value < 0.0 && self.tasks.others() > 0;
+        if open != self.task_pill.box_open {
+            self.task_pill.box_open = open;
+            self.schedule_task_pill_frame();
+            self.sync_options_input();
+            self.draw_options();
+        }
+    }
+
+    /// The box is open (the bar's pointer region reaches down over it).
+    pub(crate) fn task_box_open(&self) -> bool {
+        self.task_pill.box_open
+    }
+
+    /// Fold the box (the pointer left the bar: the visit is over).
+    pub(crate) fn task_box_close(&mut self) {
+        if self.task_pill.box_open {
+            self.task_pill.box_open = false;
+            self.schedule_task_pill_frame();
+        }
+    }
+
+    /// How far down the pointer region must reach while the box is open.
+    pub(crate) fn task_box_input_bottom(&self) -> f32 {
+        let ph = self.options_pill_h();
+        crate::options::PILL_MARGIN_Y + ph + self.tasks.others() as f32 * ph * ROW_H
     }
 
     /// Draw it: the ground every pill has, the fill, the words, the number.
@@ -162,28 +222,43 @@ impl App {
         let (font_px, line_px) = (FONT_PX * s, LINE_PX * s);
         let a = ((self.task_pill.t - 0.15) / 0.6).clamp(0.0, 1.0);
         let ink = self.options_text_color();
-        let radius = rect.h / 2.0;
+        // The band is the pill; under it, the box. The player's morph: the
+        // corner runs from the stadium to the box's, the fill from the pill's
+        // wash to the panel's colour, opacity leading the height.
+        let ph = self.options_pill_h();
+        let e = self.task_pill.box_e;
+        let solid = 1.0 - (1.0 - e).powi(3);
+        let band = Rect::new(rect.x, rect.y, rect.w, ph.min(rect.h));
+        let radius = lerp(ph / 2.0, crate::clipboard::BOX_RADIUS, e);
         push_neumorph(scene, rect, radius, self.options_bar_is_bright(), a);
         let wash = self.options_rest_wash();
+        let (panel, box_ink) = self.clip_box_surface();
         scene.rects.push(RectInst {
             rect,
             radius,
-            color: [wash[0], wash[1], wash[2], wash[3] * a],
+            color: lerp4(
+                [wash[0], wash[1], wash[2], wash[3] * a],
+                [panel[0], panel[1], panel[2], self.box_panel_alpha() * a],
+                solid,
+            ),
             glass: 0.0,
             border: 0.0,
         });
+        let ink = lerp4(ink, box_ink, solid);
         // The player's track fill: the pill itself, filling from the left.
         let fill = self.task_pill.fill.clamp(0.0, 1.0);
         if fill > 0.0 {
-            let fw = (rect.w * fill).max(2.0 * radius).min(rect.w);
+            let fw = (band.w * fill).max(2.0 * radius).min(band.w);
             scene.rects.push(RectInst {
-                rect: Rect::new(rect.x, rect.y, fw, rect.h),
+                rect: Rect::new(band.x, band.y, fw, band.h),
                 radius,
                 color: [ink[0], ink[1], ink[2], 0.14 * a],
                 glass: 0.0,
                 border: 0.0,
             });
         }
+        self.push_task_rows(scene, rect, solid, ink);
+        let rect = band;
         let ty = rect.y + (rect.h - line_px) / 2.0;
         let slot = self.task_pill.pct_w;
         let slot_x = rect.x + rect.w - PILL_PAD_X - slot;
@@ -219,5 +294,72 @@ impl App {
             family: TEXT_FONT,
             color,
         });
+    }
+
+    /// The box's rows: the other tasks, each its words, its fill and its
+    /// number, as the band above them — cut to the opening box.
+    fn push_task_rows(&self, scene: &mut Scene, rect: Rect, solid: f32, ink: [f32; 4]) {
+        if self.task_pill.box_e < 0.01 {
+            return;
+        }
+        let s = self.options_scale();
+        let (font_px, line_px) = (FONT_PX * s, LINE_PX * s);
+        let ph = self.options_pill_h();
+        let row_h = ph * ROW_H;
+        let (panel, _) = self.clip_box_surface();
+        let stripe = self.zebra_stripe(panel);
+        let slot = self.task_pill.pct_w;
+        let color = Some([ink[0], ink[1], ink[2], ink[3] * solid]);
+        for (idx, task) in self.tasks.rest().iter().enumerate() {
+            let rr = Rect::new(rect.x, rect.y + ph + idx as f32 * row_h, rect.w, row_h);
+            let (top, bot) = (rr.y.max(rect.y + ph), (rr.y + rr.h).min(rect.y + rect.h));
+            if bot <= top {
+                continue;
+            }
+            let clip = Rect::new(rr.x, top, rr.w, bot - top);
+            // Zebra on odd rows, as in every list on this bar.
+            if idx % 2 == 1 {
+                scene.rects.push(RectInst { rect: clip, radius: 0.0, color: stripe, glass: 0.0, border: 0.0 });
+            }
+            let fw = rr.w * task.fraction();
+            if fw > 0.5 {
+                scene.rects.push(RectInst {
+                    rect: Rect::new(rr.x, top, fw, bot - top),
+                    radius: 0.0,
+                    color: [ink[0], ink[1], ink[2], 0.14 * solid],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            let ty = rr.y + (row_h - line_px) / 2.0;
+            let slot_x = rr.x + rr.w - PILL_PAD_X - slot;
+            let words_w = (slot_x - GAP - (rr.x + PILL_PAD_X)).max(1.0);
+            scene.labels.push(Label {
+                text: task.label.clone(),
+                pos: (rr.x + PILL_PAD_X, ty),
+                max_w: 4096.0,
+                font_px,
+                line_px,
+                centered: false,
+                dim: false,
+                cache: false,
+                clip: Some(Rect::new(rr.x + PILL_PAD_X, top, words_w, bot - top)),
+                family: TEXT_FONT,
+                color,
+            });
+            scene.labels.push(Label {
+                text: format!("{}%", task.percent()),
+                pos: (slot_x + slot / 2.0, ty),
+                max_w: slot.max(1.0),
+                font_px,
+                line_px,
+                centered: true,
+                dim: false,
+                cache: false,
+                clip: Some(clip),
+                family: TEXT_FONT,
+                color,
+            });
+        }
     }
 }

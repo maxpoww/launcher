@@ -4984,6 +4984,7 @@ impl App {
             || self.clip.expanded
             || self.module_box_open
             || self.play_box_open
+            || self.task_box_open()
             || self.stats.open
         {
             // Extend the pointer-sensitive region down over whichever box is
@@ -4999,6 +5000,9 @@ impl App {
             }
             if self.play_box_open {
                 bottom = bottom.max(self.play_box_input_bottom());
+            }
+            if self.task_box_open() {
+                bottom = bottom.max(self.task_box_input_bottom());
             }
             if self.module_box_open {
                 bottom = bottom.max(self.module_box_input_bottom());
@@ -5144,6 +5148,7 @@ impl App {
                                                // on this bar — it stays for as long as the hand is on the
                                                // surface (§2) and folds away when it leaves.
                     self.play_box_open = false;
+                    self.task_box_close(); // and the task pill's
                     self.update_cava_reveal(); // tuck the cava children back
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
                     self.update_clip_hit(); // drop any clip row hover (ptr gone)
@@ -5297,6 +5302,15 @@ impl App {
                     self.draw_options();
                 }
             }
+            // Scroll over the task pill: its box of the other tasks, open or
+            // folded (`task_pill.rs`).
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } if !self.options_hidden && (self.options_hover == Some(PillId::Task) || self.task_box_open()) => {
+                self.task_pill_axis(value as f32);
+            }
             // Scroll over the transport pill: volume on the vertical axis,
             // tracks on the horizontal one. The pill and its three symbols
             // only — the track name and the output do not take gestures.
@@ -5405,6 +5419,7 @@ impl App {
                         PillId::Notif
                             | PillId::ClipboardBox
                             | PillId::CavaNow
+                            | PillId::Task
                             | PillId::SettingsStats
                     ) {
                         Rect::new(pill.rect.x, 0.0, pill.rect.w, pill.rect.y + pill.rect.h)

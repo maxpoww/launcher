@@ -234,7 +234,11 @@ The big daemon files are cohesive but long — go straight to the function:
   its thread (reports thin themselves out), and dropping the handle ends it — the pill shows the
   newest running task (`+N` for the others), a finished one lingers `LINGER` at 100%. Wired so far:
   the photo import (bytes) and files dropped on a phone. Pointer-free: `waverunner-ctl debug-desktop
-  "task <seconds> [what]"`.
+  "task <seconds> [what | another | …]"` (one task a name), `debug-desktop "taskbox open|close"`.
+  It stands CENTRED between the left band's end and the window's pill (else left of the bell),
+  a `STRETCH` longer than its words need. SEVERAL: a scroll down on it opens its BOX — the pill
+  growing down into the other tasks, a row each (`push_task_rows`, the playing box's morph and
+  zebra); a scroll up or leaving the bar folds it.
 - `desktop.rs` — the DESKTOP: `~/Desktop` as icons behind the windows (macOS/Windows style) on
   its own `Bottom`-layer surface (`surface::create_desktop_surface`; Bottom, not Background, so
   swww can never map over it) with its own renderer + icon array (layer = item index). Lists the

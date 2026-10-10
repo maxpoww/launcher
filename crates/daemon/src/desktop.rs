@@ -4453,19 +4453,30 @@ impl App {
                 None => "props <n>".to_owned(),
             };
         }
+        // `taskbox open|close`: the task pill's box, without a scroll.
+        if let Some(rest) = what.strip_prefix("taskbox ") {
+            self.task_pill_axis(if rest.trim() == "open" { -1.0 } else { 1.0 });
+            return format!("task box: {}", self.task_box_open());
+        }
         // `task <seconds> [what]`: a task that takes that long, for the
         // OPTIONS bar's task pill to show (no phone needed).
         if let Some(rest) = what.strip_prefix("task ") {
             let (secs, label) = rest.trim().split_once(' ').unwrap_or((rest.trim(), "Importing photos from Pixel 8 Pro"));
-            let steps = secs.parse::<u64>().unwrap_or(5).clamp(1, 600) * 20;
-            let task = self.task_begin(label);
-            std::thread::spawn(move || {
-                for step in 0..=steps {
-                    task.set(step, steps);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            });
-            return format!("a task of {} s", steps / 20);
+            let secs = secs.parse::<u64>().unwrap_or(5).clamp(1, 600);
+            // `a | b | c`: one task each, started a moment apart, each a
+            // little longer than the last.
+            let labels: Vec<String> = label.split('|').map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect();
+            for (n, label) in labels.iter().enumerate() {
+                let steps = (secs + 4 * n as u64) * 20;
+                let task = self.task_begin(label);
+                std::thread::spawn(move || {
+                    for step in 0..=steps {
+                        task.set(step, steps);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                });
+            }
+            return format!("{} task(s) of {secs} s and more", labels.len());
         }
         if let Some(rest) = what.strip_prefix("pick ") {
             let Some(menu) = self.desktop.menu.take() else {

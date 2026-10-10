@@ -131,6 +131,13 @@ impl Tasks {
             .or_else(|| self.list.iter().max_by_key(|t| t.ended))
     }
 
+    /// The running ones beside the one shown, newest first: the rows of the
+    /// pill's box.
+    pub fn rest(&self) -> Vec<&Task> {
+        let shown = self.shown().map(|t| t.id);
+        self.list.iter().rev().filter(|t| t.ended.is_none() && Some(t.id) != shown).collect()
+    }
+
     /// How many are running beside the one shown.
     pub fn others(&self) -> usize {
         self.list.iter().filter(|t| t.ended.is_none()).count().saturating_sub(1)
@@ -267,6 +274,7 @@ mod tests {
         let iso = tasks.begin("Moving golem.iso to Home");
         assert_eq!(tasks.shown().unwrap().id, iso);
         assert_eq!(tasks.others(), 1);
+        assert_eq!(tasks.rest().iter().map(|t| t.id).collect::<Vec<_>>(), vec![photos]);
         // The newer one ends: the older, still running, is the one to show.
         tasks.report(Report::End { id: iso }, t0);
         assert_eq!(tasks.shown().unwrap().id, photos);
