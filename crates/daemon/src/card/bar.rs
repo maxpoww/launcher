@@ -95,6 +95,8 @@ const BTN_STEP: f32 = 22.0;
 /// How far its buttons are from its edges, and its words from them.
 const BTN_EDGE: f32 = -4.0;
 const BTN_GAP: f32 = -5.0;
+/// …and from the + on the left, which keeps the same room all round.
+const PLUS_GAP: f32 = 6.0;
 pub(super) const BOX_LINES: usize = 5;
 const HINT_H: f32 = 16.0;
 const PAD: f32 = 8.0;
@@ -240,8 +242,10 @@ pub(crate) fn bottom(
     let seek_clear = Rect::new(seek.x + seek.w - 24.0, seek.y + 4.0, 20.0, 20.0);
     y -= STEP;
     let btn_y = input.map_or(0.0, |r| r.y + r.h - BTN - (BOX_MIN - BTN) / 2.0);
-    // (The + stands a little in from the edge: Max, 2026-10-10.)
-    let left = x + BTN_EDGE + 7.0;
+    // (The + has the same room on every side — to the box's left edge, to
+    // its top and bottom, to the words: Max, 2026-10-10. Its mark is about
+    // 13 px in a box 48 tall, so that room is about 17.)
+    let left = x + BTN_EDGE + 11.0;
     let right = x + w - BTN_EDGE - BTN;
     let btns = [
         (BoxBtn::Clip, Rect::new(left, btn_y, BTN, BTN)),
@@ -286,7 +290,7 @@ impl Bottom {
     /// The part of the input box the words are in.
     pub(crate) fn text(&self) -> Option<Rect> {
         let r = self.input?;
-        let left = self.btns[0].1.x + BTN + BTN_GAP;
+        let left = self.btns[0].1.x + BTN + PLUS_GAP;
         let right = self.btns[1].1.x - BTN_GAP;
         Some(Rect::new(left, r.y, (right - left).max(0.0), r.h))
     }
