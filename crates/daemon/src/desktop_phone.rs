@@ -143,28 +143,21 @@ fn import_photos_said(name: &str, serial: Option<&str>, mount: Option<&Path>, ta
             None => None,
         },
     };
-    let photos = |n: usize| match n {
-        1 => format!("1 {}", tr("photo")),
-        n => format!("{n} {}", tr("photos")),
-    };
+    // What it says is what the click does (Max: "Pixel 8 Pro: click to view
+    // imported photos").
+    let view = tr("Click to view imported photos");
     // Cancelled from the bar: what came is kept, and said.
     if task.cancelled() {
         return match brought.map_or(0, |(n, _)| n) {
             0 => tr("Import stopped.").to_owned(),
-            n => format!("{} {} {}", tr("Import stopped."), photos(n), tr("imported so far. Click to view.")),
+            _ => format!("{} {view}.", tr("Import stopped.")),
         };
     }
     match brought {
         None => tr("Its photos could not be read. Unlock it and choose File transfer, or turn on USB debugging.").to_owned(),
         Some((0, 0)) => tr("No new photos.").to_owned(),
-        Some((n, 0)) => format!("{} {}", photos(n), tr("imported. Click to view.")),
-        Some((n, failed)) => format!(
-            "{} {} {failed} {} {}",
-            photos(n),
-            tr("imported,"),
-            tr("could not be copied."),
-            tr("Click to view.")
-        ),
+        Some((_, 0)) => view.to_owned(),
+        Some((_, failed)) => format!("{view}. {failed} {}", tr("could not be copied.")),
     }
 }
 
