@@ -118,7 +118,19 @@ fn folder_name(name: &str) -> String {
 /// Bring the phone's new photos and videos to `Pictures/<its name>/`, album
 /// by album: only what is not there yet, so every time after the first is a
 /// top-up. What to tell the owner.
-pub(crate) fn import_photos(name: &str, serial: Option<&str>, mount: Option<&Path>, task: &TaskHandle) -> String {
+pub(crate) fn import_photos(
+    name: &str,
+    serial: Option<&str>,
+    mount: Option<&Path>,
+    task: &TaskHandle,
+) -> (String, Option<PathBuf>) {
+    let dest = pictures_dir().join(folder_name(name));
+    let said = import_photos_said(name, serial, mount, task);
+    // The folder to show for it, once there is one.
+    (said, dest.is_dir().then_some(dest))
+}
+
+fn import_photos_said(name: &str, serial: Option<&str>, mount: Option<&Path>, task: &TaskHandle) -> String {
     let dest = pictures_dir().join(folder_name(name));
     let shown = format!(
         "{}/{}",

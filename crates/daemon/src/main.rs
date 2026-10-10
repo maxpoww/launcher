@@ -2476,24 +2476,38 @@ pub(crate) const BTN_RIGHT: u32 = 0x111;
 /// or a send to a phone finishes after the menu is long gone). Through the
 /// session's notification service; a failure to say it is only logged.
 pub(crate) fn desktop_send_notify(body: &str) {
-    let sent = std::process::Command::new("busctl")
-        .args([
-            "--user",
-            "call",
-            "org.freedesktop.Notifications",
-            "/org/freedesktop/Notifications",
-            "org.freedesktop.Notifications",
-            "Notify",
-            "susssasa{sv}i",
-            "waverunner",
-            "0",
-            "folder",
-            i18n::tr("Desktop"),
-            body,
-            "0",
-            "0",
-            "6000",
-        ])
+    desktop_send_notify_open(body, None);
+}
+
+/// What an action's key starts with when clicking the notification is to
+/// open a folder (the rest of the key is the folder): the card of a finished
+/// photo import opens the folder the photos went to (`notif.rs::notif_open`).
+pub(crate) const NOTIFY_OPEN: &str = "golem-open:";
+
+/// The same, with a folder that a click on the notification opens.
+pub(crate) fn desktop_send_notify_open(body: &str, open: Option<&std::path::Path>) {
+    let mut cmd = std::process::Command::new("busctl");
+    cmd.args([
+        "--user",
+        "call",
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify",
+        "susssasa{sv}i",
+        "waverunner",
+        "0",
+        "folder",
+        i18n::tr("Desktop"),
+        body,
+    ]);
+    // The actions (pairs of key and label), the hints (none), the stay.
+    match open {
+        Some(dir) => cmd.arg("2").arg(format!("{NOTIFY_OPEN}{}", dir.display())).arg(i18n::tr("View")),
+        None => cmd.arg("0"),
+    };
+    let sent = cmd
+        .args(["0", "6000"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();

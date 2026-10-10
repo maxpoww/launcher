@@ -2378,6 +2378,30 @@ impl App {
         let Some(n) = self.notif.history.get(idx) else {
             return;
         };
+        // One of the desktop's own outcomes that has something to show (a
+        // finished photo import: the folder the photos went to): the click
+        // opens that folder in the file manager.
+        let folder = n
+            .actions
+            .iter()
+            .find_map(|key| key.strip_prefix(crate::NOTIFY_OPEN))
+            .filter(|_| n.app_name == "waverunner")
+            .map(str::to_owned);
+        if let Some(folder) = folder {
+            tracing::info!("notif: opening {folder}");
+            let uri = crate::desktop::file_uri(&folder);
+            let exec = format!(
+                "busctl --user call org.freedesktop.FileManager1 /org/freedesktop/FileManager1 \
+                 org.freedesktop.FileManager1 ShowFolders ass 1 {} '' || xdg-open {}",
+                crate::launch::shell_quote(&uri),
+                crate::launch::shell_quote(&folder)
+            );
+            if let Err(e) = crate::launch::launch(&exec, false, "") {
+                tracing::warn!("notif: cannot open {folder}: {e:#}");
+            }
+            self.notif_dismiss(idx);
+            return;
+        }
         // One of Golem's own records: the card remembers an offer it made and
         // what you answered, so opening it runs that offer again — there is no
         // app behind it to route to. See [`crate::action_track`].

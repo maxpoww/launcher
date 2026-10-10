@@ -2570,8 +2570,10 @@ impl App {
                 let task = self.task_begin(&format!("{} {name}", crate::i18n::tr("Importing photos from")));
                 self.desktop_off_loop(
                     move || {
-                        let said = crate::desktop_phone::import_photos(&name, serial.as_deref(), mount.as_deref(), &task);
-                        crate::desktop_send_notify(&said);
+                        let (said, folder) =
+                            crate::desktop_phone::import_photos(&name, serial.as_deref(), mount.as_deref(), &task);
+                        // A click on it opens the folder the photos went to.
+                        crate::desktop_send_notify_open(&said, folder.as_deref());
                         said
                     },
                     move |app, said| {
