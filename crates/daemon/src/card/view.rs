@@ -44,9 +44,6 @@ pub(super) const CLOSE: f32 = 22.0;
 
 pub(super) const CLOSE_INSET: f32 = 4.0;
 
-/// The mockup's orange: the kind word, and the rim while a drag is over.
-pub(super) const ACCENT: [f32; 3] = [0.910, 0.576, 0.353];
-
 pub(super) const DANGER: [f32; 3] = [0.878, 0.322, 0.322];
 
 /// An item's box as last drawn, in surface coordinates.
@@ -323,7 +320,70 @@ impl Paint {
     fn ink_at(&self, a: f32) -> [f32; 4] {
         [self.ink[0], self.ink[1], self.ink[2], self.ink[3] * a]
     }
+
+    /// The card's colour as hue, saturation and lightness (in sRGB, where
+    /// a step of lightness looks like one).
+    fn hsl(&self) -> (f32, f32, f32) {
+        use crate::options::{linear_to_srgb, rgb_to_hsl};
+        rgb_to_hsl(
+            linear_to_srgb(self.fill[0]).clamp(0.0, 1.0),
+            linear_to_srgb(self.fill[1]).clamp(0.0, 1.0),
+            linear_to_srgb(self.fill[2]).clamp(0.0, 1.0),
+        )
+    }
+
+    /// THE ACCENT is the card's own colour, stronger and brighter (Max,
+    /// 2026-10-10 — it was a fixed orange): the same hue, pushed up in
+    /// saturation and lightness, so a blue-grey card has a bright blue one
+    /// and a green card a bright green one. A card with no hue of its own
+    /// (a grey) gets none invented for it. On a light card it is the deep
+    /// tone instead of the bright one, to stand out as well.
+    pub(super) fn accent(&self) -> [f32; 3] {
+        use crate::options::hsl_to_rgb;
+        let (h, s, _) = self.hsl();
+        let hued = ((s - 0.02) / 0.06).clamp(0.0, 1.0);
+        let (sat, light) = if self.bright() {
+            (0.70, 0.36)
+        } else {
+            (0.78, 0.76)
+        };
+        // (As the ink is given: these are the values the words are drawn
+        // with — linearised, the bright blue came out a dark one.)
+        let (r, g, b) = hsl_to_rgb(h, sat * hued, light);
+        [r, g, b]
+    }
+
+    /// The card's colour a step of lightness away from itself (lighter on
+    /// a dark card, darker on a light one), solid.
+    fn tone(&self, step: f32) -> [f32; 4] {
+        use crate::options::{hsl_to_rgb, srgb_to_linear};
+        let (h, s, l) = self.hsl();
+        let l = if self.bright() { l - step } else { l + step };
+        let (r, g, b) = hsl_to_rgb(h, s, l.clamp(0.0, 1.0));
+        [
+            srgb_to_linear(r),
+            srgb_to_linear(g),
+            srgb_to_linear(b),
+            ITEM,
+        ]
+    }
+
+    /// THE ZEBRA (Max, 2026-10-10: *"we need three colors, the card color,
+    /// and then zebra 1 and 2"*): what sits on the card is drawn in two
+    /// tones of the card's own colour. The LIGHTER (`true`) is the buttons'
+    /// and every second item's; the other is the button's of the page that
+    /// is up and the first item's — the alternation runs down from the
+    /// buttons. (The steps were settled by eye on ~/terminal-mockup/card.)
+    pub(super) fn zebra(&self, lighter: bool) -> [f32; 4] {
+        self.tone(if lighter { ZEBRA_2 } else { ZEBRA_1 })
+    }
 }
+
+/// The two zebra tones, as steps of lightness from the card's colour.
+const ZEBRA_1: f32 = 0.025;
+const ZEBRA_2: f32 = 0.07;
+/// A button under the pointer: a step past the lighter tone.
+const ZEBRA_HOT: f32 = 0.11;
 
 /// How solid an item's box (and the input box, and the picker) is.
 pub(super) const ITEM: f32 = 0.96;
@@ -432,6 +492,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     }
     let paint = &view.paint;
     let bright = paint.bright();
+    let acc = paint.accent();
     let zoom = view.zoom;
     // The items' own sizes, at the card's zoom.
     let (text_px, text_line) = (TEXT_PX * zoom, (TEXT_LINE * zoom).round());
@@ -469,7 +530,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         border: 0.0,
     });
     let rim = if view.dnd_over {
-        [ACCENT[0], ACCENT[1], ACCENT[2], 0.7]
+        [acc[0], acc[1], acc[2], 0.7]
     } else if bright {
         [0.0, 0.0, 0.0, 0.12]
     } else {
@@ -548,7 +609,10 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     // window behind show through the items too — Max, 2026-10-09: *"the
     // card looks good, but not the items. those need to be less
     // transparent"*.)
-    let tile_fill = solid(paint, bright);
+    //
+    // In ZEBRA tones (Max, 2026-10-10): the first item the darker of the
+    // two, the second the lighter, and so on down what is on screen.
+    let tile_fills = [paint.zebra(false), paint.zebra(true)];
     let tile_rim = if bright {
         [0.0, 0.0, 0.0, 0.10]
     } else {
@@ -561,7 +625,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     };
     let mut tiles = Vec::with_capacity(shown_items.len());
     let mut y = body.y + LIST_PAD + over - scroll;
-    for (item, h) in shown_items.iter().copied().zip(heights) {
+    for (nth, (item, h)) in shown_items.iter().copied().zip(heights).enumerate() {
         let shift = view.shifts.get(&item.id).copied().unwrap_or(0.0);
         let tile = Tile {
             id: item.id,
@@ -577,7 +641,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         list.rects.push(RectInst {
             rect: t,
             radius: TILE_RADIUS,
-            color: tile_fill,
+            color: tile_fills[nth % 2],
             glass: 0.0,
             border: 0.0,
         });
@@ -590,7 +654,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             rect: t,
             radius: TILE_RADIUS,
             color: if mine {
-                [ACCENT[0], ACCENT[1], ACCENT[2], 0.55]
+                [acc[0], acc[1], acc[2], 0.55]
             } else {
                 tile_rim
             },
@@ -695,7 +759,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 cache: true,
                 clip: Some(clip),
                 family: None,
-                color: Some([ACCENT[0], ACCENT[1], ACCENT[2], 0.85]),
+                color: Some([acc[0], acc[1], acc[2], 0.85]),
             });
             line_y += kind_line;
         }
@@ -712,7 +776,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             list.rects.push(RectInst {
                 rect: play,
                 radius: 7.0,
-                color: [ACCENT[0], ACCENT[1], ACCENT[2], 0.92],
+                color: [acc[0], acc[1], acc[2], 0.92],
                 glass: 0.0,
                 border: 0.0,
             });
@@ -760,7 +824,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     ),
                     radius: 1.0,
                     color: if lit {
-                        [ACCENT[0], ACCENT[1], ACCENT[2], 1.0]
+                        [acc[0], acc[1], acc[2], 1.0]
                     } else {
                         paint.ink_at(0.42)
                     },
@@ -927,7 +991,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     12.0,
                     on,
                     over == Some(Hover::Pin(item.id)),
-                    ACCENT,
+                    acc,
                 );
             }
         }
@@ -967,12 +1031,12 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 } else {
                     TILE_RADIUS
                 },
-                color: match (up, hot, bright) {
-                    (true, _, _) => [ACCENT[0], ACCENT[1], ACCENT[2], 0.07],
-                    (_, true, true) => [0.0, 0.0, 0.0, 0.14],
-                    (_, true, false) => [1.0, 1.0, 1.0, 0.10],
-                    (_, _, true) => [0.0, 0.0, 0.0, 0.07],
-                    (_, _, false) => [0.0, 0.0, 0.0, 0.28],
+                // (Zebra: a button is the lighter tone, the one of the page
+                // that is up the other.)
+                color: match (up, hot) {
+                    (true, _) => paint.zebra(false),
+                    (_, true) => paint.tone(ZEBRA_HOT),
+                    _ => paint.zebra(true),
                 },
                 glass: 0.0,
                 border: 0.0,
@@ -992,7 +1056,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 clip: Some(window),
                 family: which.round().then_some(crate::options::NERD),
                 color: Some(if up {
-                    [ACCENT[0], ACCENT[1], ACCENT[2], 1.0]
+                    [acc[0], acc[1], acc[2], 1.0]
                 } else {
                     paint.ink_at(if hot { 0.95 } else { 0.72 })
                 }),
@@ -1149,12 +1213,14 @@ pub(crate) fn tile_picture(
     width: f32,
     scale: f32,
     zoom: f32,
+    lighter: bool,
     paint: &Paint,
     thumb: Option<&[u8]>,
     thumb_side: usize,
     text: &mut DrawText,
 ) -> Canvas {
     let bright = paint.bright();
+    let acc = paint.accent();
     // The items' own sizes, at the card's zoom.
     let (text_px, text_line) = (TEXT_PX * zoom, (TEXT_LINE * zoom).round());
     let (kind_px, kind_line) = (KIND_PX * zoom, (KIND_LINE * zoom).round());
@@ -1169,12 +1235,13 @@ pub(crate) fn tile_picture(
     // (Max, 2026-10-08: *"i dont want the item to change color when im
     // draging it"*).
     canvas.round_rect(whole, s(TILE_RADIUS), paint.fill, None);
-    let (inset, rim) = if bright {
-        ([0.0, 0.0, 0.0, 0.07], [0.0, 0.0, 0.0, 0.10])
+    let rim = if bright {
+        [0.0, 0.0, 0.0, 0.10]
     } else {
-        ([0.0, 0.0, 0.0, 0.28], [1.0, 1.0, 1.0, 0.06])
+        [1.0, 1.0, 1.0, 0.06]
     };
-    canvas.round_rect(whole, s(TILE_RADIUS), inset, None);
+    // (Its own zebra tone: `lighter` is the one it has in the list.)
+    canvas.round_rect(whole, s(TILE_RADIUS), paint.zebra(lighter), None);
     canvas.round_rect(whole, s(TILE_RADIUS), rim, Some(s(1.0)));
 
     let x = TILE_PAD_X;
@@ -1186,7 +1253,7 @@ pub(crate) fn tile_picture(
             word,
             s(kind_px),
             None,
-            [ACCENT[0], ACCENT[1], ACCENT[2], 0.85],
+            [acc[0], acc[1], acc[2], 0.85],
             (s(x), s(y)),
         );
         y += kind_line;
@@ -1339,7 +1406,7 @@ mod tests {
         assert_eq!(scene.grids[0].clip.h, 100.0);
         // The card under the clip is whole, and wears the drag's rim.
         assert_eq!(scene.grids[0].rects[0].rect.h, 400.0);
-        assert_eq!(scene.grids[0].rects[1].color[..3], ACCENT);
+        assert_eq!(scene.grids[0].rects[1].color[..3], PAINT.accent());
     }
 
     #[test]
@@ -1402,6 +1469,7 @@ mod tests {
             200.0,
             2.0,
             1.0,
+            false,
             &PAINT,
             None,
             0,

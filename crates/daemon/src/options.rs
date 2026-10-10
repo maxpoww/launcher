@@ -1511,7 +1511,7 @@ pub(crate) fn linear_to_srgb(c: f32) -> f32 {
 }
 
 /// RGB (any consistent space, here sRGB 0..1) → HSL. Standard formula.
-fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+pub(crate) fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     let l = (max + min) / 2.0;
@@ -1554,7 +1554,7 @@ fn hue_to_rgb(p: f32, q: f32, t: f32) -> f32 {
 }
 
 /// HSL → RGB (sRGB 0..1). Standard formula, the inverse of [`rgb_to_hsl`].
-fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+pub(crate) fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     if s.abs() < 1e-6 {
         return (l, l, l);
     }

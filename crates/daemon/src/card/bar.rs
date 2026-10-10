@@ -4,9 +4,7 @@
 //! input box a memory is written in (on Memory's page: New, in its place);
 //! at the TOP of an open memory its name, floating over the items.
 
-use super::view::{
-    Hover, Page, Paint, ACCENT, DANGER, FOOT_H, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX,
-};
+use super::view::{Hover, Page, Paint, DANGER, FOOT_H, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX};
 use crate::content::{GridContent, Label, Rect, RectInst};
 use crate::options::NERD;
 
@@ -516,7 +514,8 @@ pub(super) fn draw(
     hover: Option<Hover>,
 ) {
     let ink = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * a];
-    let accent = |a: f32| [ACCENT[0], ACCENT[1], ACCENT[2], a];
+    let acc = paint.accent();
+    let accent = |a: f32| [acc[0], acc[1], acc[2], a];
     // (Solid, as the items' boxes are: the card's ground is see-through.)
     let well = super::view::solid(paint, bright);
     let rim = if bright {

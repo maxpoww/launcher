@@ -91,6 +91,12 @@ impl App {
             // times that, as it shows on the card.)
             scale * zoom,
             1.0,
+            // (Its zebra tone: the one of its place in the list.)
+            self.card
+                .tiles
+                .iter()
+                .position(|t| t.id == item.id)
+                .is_some_and(|i| i % 2 == 1),
             &paint,
             thumb.map(|chain| &chain[..(side * side * 4).min(chain.len())]),
             side,
