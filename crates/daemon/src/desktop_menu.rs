@@ -43,17 +43,11 @@ pub(crate) enum Action {
     Eject,
     /// A phone: its screen in a window here (scrcpy).
     Mirror,
-    /// A phone as this computer's camera: turn the page to its lenses.
+    /// A phone as this computer's camera (its lens, its picture and its
+    /// flash are chosen on the bar's camera pill)…
     Camera,
-    /// …through the `n`th lens of that page.
-    Lens(usize),
-    /// …with the `k`th picture (size and pictures a second) of lens `n`'s
-    /// page: `Picture(n, k)`.
-    Picture(usize, usize),
     /// …and off again.
     CameraStop,
-    /// The phone's flash (its torch), on or off, while it is the camera.
-    Torch,
     /// A phone: its new photos and videos, to this computer's Pictures.
     ImportPhotos,
     /// A phone: its internet for this computer over the cable, on or off.
@@ -170,14 +164,8 @@ pub(crate) struct Volume {
     /// A phone that is plugged in but not open (locked, charge only): no
     /// folder to open a terminal in, nothing to eject.
     pub closed: bool,
-    /// That phone is being used as a camera, through these lenses' `n`th
-    /// (`current`): they are rows of the menu itself then.
+    /// That phone is being used as a camera.
     pub camera: bool,
-    pub lenses: Vec<String>,
-    pub current: Option<usize>,
-    /// Its flash while it is the camera: on, off, or `None` — the lens in
-    /// use has none (the front one).
-    pub torch: Option<bool>,
     /// That phone is giving this computer its internet.
     pub tether: bool,
 }
@@ -189,30 +177,16 @@ fn volume_rows(v: &Volume) -> Vec<Row> {
         rows.push(Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false });
     }
     // A phone: its screen, here (Max, 2026-10-09). And its camera as this
-    // computer's: the row turns the page to its lenses. While it is on, a
-    // row ends it and the lenses stand right under that one, the one in use
-    // ticked — a change of lens is one click (Max, same day).
+    // computer's, on and off — the rest of it (lens, picture, flash) is on
+    // the bar's camera pill (Max, 2026-10-10: "let's keep the menu simple").
     if v.phone {
         rows.push(Row::Item { label: "Mirror screen", action: Action::Mirror, danger: false });
         // The camera is a group of its own (Max, 2026-10-09).
         rows.push(Row::Sep);
-        if !v.camera {
-            rows.push(Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
-        } else {
+        if v.camera {
             rows.push(Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
-            // The flash, between Stop and the lenses (Max, 2026-10-10).
-            if let Some(on) = v.torch {
-                let label = if on { "Turn flash off" } else { "Turn flash on" };
-                rows.push(Row::Item { label, action: Action::Torch, danger: false });
-            }
-            for (n, name) in v.lenses.iter().enumerate() {
-                let label = if v.current == Some(n) { format!("{name}  ✓") } else { name.clone() };
-                rows.push(Row::Target { label, action: Action::Lens(n) });
-            }
-            // (Not known what it has: the page that asks it.)
-            if v.lenses.is_empty() {
-                rows.push(Row::Item { label: "Change lens", action: Action::Camera, danger: false });
-            }
+        } else {
+            rows.push(Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
         }
     }
     // What a phone has for this computer (Max, 2026-10-09): its photos, its
@@ -246,10 +220,6 @@ pub(crate) struct Menu {
     pub many: bool,
     /// Showing the "Move to" page (see `show_targets`).
     pub targets: bool,
-    /// Showing a phone's lenses (see `show_lenses`).
-    pub lenses: bool,
-    /// Showing the pictures a lens can be used with (see `show_pictures`).
-    pub pictures: bool,
     /// A plugged-in volume's menu (`for_volume`) — what Back goes back to.
     pub volume: Option<Volume>,
     /// Where the pointer was: a new folder goes in that cell.
@@ -279,8 +249,6 @@ impl Menu {
             item,
             many,
             targets: false,
-            lenses: false,
-            pictures: false,
             volume: None,
             at,
             rows,
@@ -346,41 +314,6 @@ impl Menu {
         self
     }
 
-    /// Turn the page to a phone's lenses (Max, 2026-10-09: "I want to choose
-    /// the lens"): `‹ Back`, then each by its name — the `n`th is
-    /// `Action::Lens(n)`, the one in use ticked. `looking`: the phone is
-    /// still being asked what it has.
-    pub fn show_lenses(&mut self, names: &[String], current: Option<usize>, looking: bool, h: f32) {
-        let mut rows = vec![Row::Item { label: "‹  Back", action: Action::Back, danger: false }, Row::Sep];
-        for (n, name) in names.iter().enumerate() {
-            let label = if current == Some(n) { format!("{name}  ✓") } else { name.clone() };
-            rows.push(Row::Target { label, action: Action::Lens(n) });
-        }
-        if looking {
-            rows.push(Row::Note("Asking the phone…"));
-        } else if names.is_empty() {
-            rows.push(Row::Note("No camera found"));
-        }
-        self.lenses = true;
-        self.pictures = false;
-        self.set_rows(rows, h);
-    }
-
-    /// Turn the page from a lens to how its picture should be (Max,
-    /// 2026-10-10: "after I choose the lens I choose the resolution and the
-    /// fps"): `‹ Back`, then each by its label — the `k`th is
-    /// `Action::Picture(lens, k)`, the one last used ticked.
-    pub fn show_pictures(&mut self, lens: usize, labels: &[String], current: Option<usize>, h: f32) {
-        let mut rows = vec![Row::Item { label: "‹  Back", action: Action::Back, danger: false }, Row::Sep];
-        for (k, name) in labels.iter().enumerate() {
-            let label = if current == Some(k) { format!("{name}  ✓") } else { name.clone() };
-            rows.push(Row::Target { label, action: Action::Picture(lens, k) });
-        }
-        self.lenses = false;
-        self.pictures = true;
-        self.set_rows(rows, h);
-    }
-
     /// On a shortcut that is not yet let run: that, first.
     pub fn with_allow(mut self, h: f32) -> Self {
         let mut rows = vec![Row::Item { label: "Allow to run", action: Action::AllowRun, danger: false }, Row::Sep];
@@ -392,8 +325,6 @@ impl Menu {
     /// Back to the first page.
     pub fn show_main(&mut self, h: f32) {
         self.targets = false;
-        self.lenses = false;
-        self.pictures = false;
         let rows = match &self.volume {
             Some(volume) => volume_rows(volume),
             None => rows(self.item.is_some(), self.many),
@@ -634,42 +565,11 @@ mod tests {
         assert_eq!(phone.action(2), Some(Action::Mirror), "a phone's screen can be mirrored");
         assert_eq!(phone.rows[3], Row::Sep);
         assert_eq!(phone.rows[4], Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
-        // While it is the camera: Stop, and the lenses right under it.
-        let lenses = vec!["Main".to_owned(), "Front".to_owned()];
-        let using = Volume { phone: true, camera: true, lenses: lenses.clone(), current: Some(1), ..Default::default() };
-        let mut on = open().for_volume(using.clone(), 800.0);
+        // While it is the camera: Stop, and nothing else of the camera's
+        // (its lens, picture and flash are the bar's pill's).
+        let on = open().for_volume(Volume { phone: true, camera: true, ..Default::default() }, 800.0);
         assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
-        assert_eq!(on.rows[5], Row::Target { label: "Main".into(), action: Action::Lens(0) });
-        assert_eq!(on.rows[6], Row::Target { label: "Front  ✓".into(), action: Action::Lens(1) });
-        assert_eq!(on.rows[7], Row::Sep);
-        let blind = open().for_volume(Volume { phone: true, camera: true, ..Default::default() }, 800.0);
-        assert_eq!(blind.rows[5], Row::Item { label: "Change lens", action: Action::Camera, danger: false });
-        // The lens page: Back, then each lens, the one in use ticked.
-        on.show_lenses(&lenses, Some(1), false, 800.0);
-        assert!(on.lenses);
-        assert_eq!(on.action(0), Some(Action::Back));
-        assert_eq!(on.rows[2], Row::Target { label: "Main".into(), action: Action::Lens(0) });
-        assert_eq!(on.rows[3], Row::Target { label: "Front  ✓".into(), action: Action::Lens(1) });
-        // A lens's pictures: Back, then each, the one last used ticked.
-        on.show_pictures(1, &["1080p · 60".to_owned(), "720p · 30".to_owned()], Some(1), 800.0);
-        assert!(on.pictures && !on.lenses);
-        assert_eq!(on.rows[2], Row::Target { label: "1080p · 60".into(), action: Action::Picture(1, 0) });
-        assert_eq!(on.rows[3], Row::Target { label: "720p · 30  ✓".into(), action: Action::Picture(1, 1) });
-        on.show_lenses(&[], None, true, 800.0);
-        assert!(!on.pictures);
-        // The flash: a row between Stop and the lenses, only where the lens has one.
-        let lit = Volume { torch: Some(true), ..using.clone() };
-        let lit = open().for_volume(lit, 800.0);
-        assert_eq!(lit.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
-        assert_eq!(lit.rows[5], Row::Item { label: "Turn flash off", action: Action::Torch, danger: false });
-        assert_eq!(lit.rows[6], Row::Target { label: "Main".into(), action: Action::Lens(0) });
-        let dark = open().for_volume(Volume { torch: Some(false), ..using.clone() }, 800.0);
-        assert_eq!(dark.rows[5], Row::Item { label: "Turn flash on", action: Action::Torch, danger: false });
-        assert_eq!(on.rows.last(), Some(&Row::Note("Asking the phone…")));
-        // Back is the VOLUME's first page, not a file's.
-        on.show_main(800.0);
-        assert!(!on.lenses);
-        assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+        assert_eq!(on.rows[5], Row::Sep);
         // A phone that is not open: no terminal, no eject.
         let shut = open().for_volume(Volume { phone: true, closed: true, ..Default::default() }, 800.0);
         let actions: Vec<Action> = (0..shut.rows.len()).filter_map(|i| shut.action(i)).collect();

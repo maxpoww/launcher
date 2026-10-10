@@ -91,6 +91,7 @@ mod module_box;
 mod stats;
 mod surface;
 mod sys;
+mod camera_pill;
 mod task_pill;
 mod task_title;
 mod tasks;
@@ -656,6 +657,7 @@ fn main() -> anyhow::Result<()> {
         task_tx: None,
         task_pill: task_pill::TaskPill::default(),
         bar_zoom_keys: false,
+        camera_pill: camera_pill::CameraPill::default(),
         desktop_layer,
         desktop_renderer: None,
         desktop_size: (0, 0),
@@ -1537,6 +1539,8 @@ pub struct App {
     task_pill: task_pill::TaskPill,
     /// Ctrl +/−/0 are bound to the bar's zoom (the pointer is on it).
     bar_zoom_keys: bool,
+    /// The bar's camera pill (`camera_pill.rs`).
+    camera_pill: camera_pill::CameraPill,
     desktop_layer: Option<LayerSurface>,
     desktop_renderer: Option<Renderer>,
     /// The desktop surface's logical size.

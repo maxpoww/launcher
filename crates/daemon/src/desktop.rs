@@ -408,10 +408,11 @@ pub(crate) struct Desktop {
     pub cameras: std::sync::Arc<std::sync::Mutex<HashMap<String, u32>>>,
     /// What lenses each phone said it has (volume path → them), asked once.
     pub lenses: HashMap<String, Vec<Lens>>,
-    /// The lens each phone's camera was last started through.
-    pub lens_on: HashMap<String, usize>,
-    /// The phones whose camera was last started with the flash on.
-    pub torch_on: HashSet<String>,
+    /// The phone that is this computer's camera now, and how (what the
+    /// bar's camera pill shows and changes).
+    pub camera_on: Option<CameraOn>,
+    /// Counts the camera's starts: an old one's end is not the new one's.
+    pub camera_gen: u64,
     /// The phones whose photos are being brought right now (volume paths).
     pub importing: HashSet<String>,
     /// What is plugged in and mounted, standing on the desktop as icons.
@@ -1034,8 +1035,8 @@ pub(crate) struct Picture {
 }
 
 impl Picture {
-    /// What its row says: "1080p · 60".
-    fn label(&self) -> String {
+    /// What it is called: "1080p · 60".
+    pub(crate) fn label(&self) -> String {
         format!("{}p · {}", self.size * 9 / 16, self.fps)
     }
 }
@@ -1066,6 +1067,21 @@ fn camera_pictures(lens: &Lens, chip: bool) -> Vec<Picture> {
         }
     }
     all
+}
+
+/// A phone in use as the camera: which, through which lens, with what
+/// picture, its flash on or not.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CameraOn {
+    pub path: String,
+    pub lens: usize,
+    pub picture: Picture,
+    pub torch: bool,
+}
+
+/// The lens last used, by its name (kept across restarts).
+fn camera_lens_known() -> Option<String> {
+    std::fs::read_to_string(crate::persist::data_path("camera-lens")).ok().map(|s| s.trim().to_owned())
 }
 
 /// Whether a lens has the phone's flash beside it: the back ones.
@@ -2473,20 +2489,13 @@ impl App {
                 .and_then(|i| self.desktop.items.get(i))
                 .is_some_and(|it| self.desktop.volumes.iter().any(|v| v.phone && v.path.as_os_str() == it.path.as_str()));
             let path = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()).unwrap_or_default();
-            let camera = self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
-            let lenses = match (camera, self.desktop.lenses.get(&path)) {
-                (true, Some(lenses)) => lenses.iter().map(|l| l.name.clone()).collect(),
-                _ => Vec::new(),
-            };
-            let current = self.desktop.lens_on.get(&path).copied();
+            // (Its lens, its picture and its flash are the bar's camera
+            // pill's: the menu only turns it on and off.)
+            let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path)
+                || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
             let closed = self.desktop.volumes.iter().any(|v| v.closed && v.path.as_os_str() == path.as_str());
             let tether = self.desktop.volumes.iter().any(|v| v.tether && v.path.as_os_str() == path.as_str());
-            // The flash is the back camera's.
-            let has_torch = current
-                .and_then(|n| self.desktop.lenses.get(&path).and_then(|l| l.get(n)))
-                .is_some_and(lens_has_torch);
-            let torch = (camera && has_torch).then(|| self.desktop.torch_on.contains(&path));
-            let volume = crate::desktop_menu::Volume { phone, closed, camera, lenses, current, torch, tether };
+            let volume = crate::desktop_menu::Volume { phone, closed, camera, tether };
             menu = menu.for_volume(volume, h as f32);
         }
         // On a shortcut nothing vouches for: letting it run comes first.
@@ -2584,21 +2593,17 @@ impl App {
         }
     }
 
-    /// Turn the menu to a phone's lenses: at once if it has said what it
-    /// has, else when it answers (asked off the loop, once per phone).
-    fn desktop_show_lenses(&mut self) {
-        let Some(path) = self
-            .desktop
-            .menu
-            .as_ref()
-            .and_then(|m| m.item)
-            .and_then(|i| self.desktop.items.get(i))
-            .map(|it| it.path.clone())
-        else {
+    /// "Use as camera" on the phone that is item `item`: through the lens
+    /// last used (else the main one), with the picture last chosen (else the
+    /// best). A phone that has not yet said what lenses it has is asked
+    /// first, off the loop.
+    fn desktop_camera_use(&mut self, item: Option<usize>) {
+        let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
             return;
         };
+        self.desktop.selected.clear();
         if self.desktop.lenses.contains_key(&path) {
-            self.desktop_fill_lenses(&path, false);
+            self.desktop_camera_default(&path);
             return;
         }
         let serial = self
@@ -2607,70 +2612,65 @@ impl App {
             .iter()
             .find(|v| v.path.as_os_str() == path.as_str())
             .and_then(phone_serial_of);
-        self.desktop_fill_lenses(&path, true);
-        let asked = path.clone();
         self.desktop_off_loop(
             move || phone_lenses(serial.as_deref()),
             move |app, lenses| {
-                // A phone that would not say is asked again next time.
-                if !lenses.is_empty() {
-                    app.desktop.lenses.insert(asked.clone(), lenses);
+                if lenses.is_empty() {
+                    crate::desktop_send_notify(crate::i18n::tr(
+                        "Its camera could not be used (this needs Android 12 or newer).",
+                    ));
+                    return;
                 }
-                // Only if that page is still the one up, on that phone.
-                let still = app.desktop.menu.as_ref().is_some_and(|m| {
-                    m.lenses && m.item.and_then(|i| app.desktop.items.get(i)).is_some_and(|it| it.path == asked)
-                });
-                if still {
-                    app.desktop_fill_lenses(&asked, false);
-                }
+                app.desktop.lenses.insert(path.clone(), lenses);
+                app.desktop_camera_default(&path);
             },
         );
     }
 
-    /// Use the phone that is item `item` as the camera through its `n`th
-    /// lens, with the `k`th picture of that lens's page (`None`: the one
-    /// last chosen, else the best).
-    /// Whether the phone that is item `item` is the camera with its flash on.
-    fn desktop_camera_torch(&self, item: Option<usize>) -> bool {
-        item.and_then(|i| self.desktop.items.get(i)).is_some_and(|it| {
-            self.desktop.torch_on.contains(&it.path)
-                && self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&it.path))
-        })
+    /// Start a phone's camera as it was last used.
+    fn desktop_camera_default(&mut self, path: &str) {
+        let Some(lenses) = self.desktop.lenses.get(path) else {
+            return;
+        };
+        let known = camera_lens_known();
+        let n = lenses
+            .iter()
+            .position(|l| Some(&l.name) == known.as_ref())
+            .or_else(|| lenses.iter().position(|l| l.name == "Main"))
+            .unwrap_or(0);
+        self.desktop_camera_start(path, n, None, false);
     }
 
-    fn desktop_camera_start(&mut self, item: Option<usize>, n: usize, k: Option<usize>, torch: bool) {
-        let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
+    /// Use the phone at `path` as the camera through its `n`th lens, with
+    /// `picture` (`None`: the one last chosen, else the best), its flash on
+    /// or not. On already: that one ends first.
+    pub(crate) fn desktop_camera_start(&mut self, path: &str, n: usize, picture: Option<Picture>, torch: bool) {
+        let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path) else {
             return;
         };
-        let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
-            return;
-        };
-        let Some(lens) = self.desktop.lenses.get(&path).and_then(|l| l.get(n)).cloned() else {
+        let Some(lens) = self.desktop.lenses.get(path).and_then(|l| l.get(n)).cloned() else {
             return;
         };
         let offered = camera_pictures(&lens, camera_chip());
-        let picture = match k {
-            Some(k) => {
-                let Some(picture) = offered.get(k).copied() else {
-                    return;
-                };
+        let picture = match picture.filter(|p| offered.contains(p)) {
+            Some(picture) => {
                 camera_picture_keep(picture);
                 picture
             }
-            None => camera_picture_known().filter(|p| offered.contains(p)).or_else(|| offered.first().copied()).unwrap_or(Picture { size: 1920, fps: 30 }),
+            None => camera_picture_known()
+                .filter(|p| offered.contains(p))
+                .or_else(|| offered.first().copied())
+                .unwrap_or(Picture { size: 1920, fps: 30 }),
         };
+        let _ = std::fs::write(crate::persist::data_path("camera-lens"), &lens.name);
         let (name, serial) = (v.name.clone(), phone_serial_of(v));
-        self.desktop.selected.clear();
-        // On already, through another lens: that one ends first (the
-        // new one waits for the device to be let go).
+        let path = path.to_owned();
+        // (The new one waits for the device to be let go.)
         self.desktop_camera_stop(&path);
-        self.desktop.lens_on.insert(path.clone(), n);
         let torch = torch && lens_has_torch(&lens);
-        if torch {
-            self.desktop.torch_on.insert(path.clone());
-        } else {
-            self.desktop.torch_on.remove(&path);
-        }
+        self.desktop.camera_gen += 1;
+        let gen = self.desktop.camera_gen;
+        self.desktop.camera_on = Some(CameraOn { path: path.clone(), lens: n, picture, torch });
         info!(
             "desktop: {name} as the camera, {}, {}{} (serial {serial:?})",
             lens.name,
@@ -2678,57 +2678,62 @@ impl App {
             if torch { ", flash on" } else { "" }
         );
         let cameras = self.desktop.cameras.clone();
-        std::thread::spawn(move || {
-            if let Some(said) = camera(&name, serial.as_deref(), &path, &cameras, &lens, picture, torch) {
-                crate::desktop_send_notify(&said);
-            }
-        });
+        self.desktop_off_loop(
+            move || camera(&name, serial.as_deref(), &path, &cameras, &lens, picture, torch),
+            move |app, said| {
+                if let Some(said) = said {
+                    crate::desktop_send_notify(&said);
+                }
+                // It ended (stopped, unplugged, failed) — unless a newer
+                // start has taken its place meanwhile.
+                if app.desktop.camera_gen == gen {
+                    app.desktop.camera_on = None;
+                    app.camera_pill_sync();
+                }
+            },
+        );
+        self.camera_pill_sync();
     }
 
-    /// Turn the menu from the page of lenses to lens `n`'s pictures.
-    fn desktop_show_pictures(&mut self, n: usize) {
-        let Some(path) = self
-            .desktop
-            .menu
-            .as_ref()
-            .and_then(|m| m.item)
-            .and_then(|i| self.desktop.items.get(i))
-            .map(|it| it.path.clone())
-        else {
-            return;
-        };
-        let Some(lens) = self.desktop.lenses.get(&path).and_then(|l| l.get(n)) else {
-            return;
-        };
-        let offered = camera_pictures(lens, camera_chip());
-        let labels: Vec<String> = offered.iter().map(Picture::label).collect();
-        let current = camera_picture_known().and_then(|p| offered.iter().position(|o| *o == p));
-        let h = self.desktop_size.1 as f32;
-        let at = self.desktop.ptr;
-        if let Some(menu) = self.desktop.menu.as_mut() {
-            menu.show_pictures(n, &labels, current, h);
-            menu.hover = at.and_then(|p| menu.hit(p));
-        }
-        self.request_desktop_draw();
+    /// The camera in use, for the bar's pill: its lenses' names and the
+    /// pictures the lens in use is offered with.
+    pub(crate) fn camera_choices(&self) -> Option<(&CameraOn, Vec<String>, Vec<Picture>)> {
+        let on = self.desktop.camera_on.as_ref()?;
+        let lenses = self.desktop.lenses.get(&on.path)?;
+        let lens = lenses.get(on.lens)?;
+        Some((on, lenses.iter().map(|l| l.name.clone()).collect(), camera_pictures(lens, camera_chip())))
     }
 
-    /// Write the lens page from what is known now.
-    fn desktop_fill_lenses(&mut self, path: &str, looking: bool) {
-        let h = self.desktop_size.1 as f32;
-        let names: Vec<String> = self
-            .desktop
-            .lenses
-            .get(path)
-            .map(|l| l.iter().map(|l| l.name.clone()).collect())
-            .unwrap_or_default();
-        let on = self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(path));
-        let current = on.then(|| self.desktop.lens_on.get(path).copied()).flatten();
-        let at = self.desktop.ptr;
-        if let Some(menu) = self.desktop.menu.as_mut() {
-            menu.show_lenses(&names, current, looking, h);
-            menu.hover = at.and_then(|p| menu.hit(p));
+    /// Whether the lens in use has a flash.
+    pub(crate) fn camera_has_torch(&self) -> bool {
+        self.desktop.camera_on.as_ref().is_some_and(|on| {
+            self.desktop.lenses.get(&on.path).and_then(|l| l.get(on.lens)).is_some_and(lens_has_torch)
+        })
+    }
+
+    /// From the pill: another lens (the flash stays as it is), another
+    /// picture, the flash on or off. Each starts the camera again as asked —
+    /// scrcpy sets all three as the camera starts.
+    pub(crate) fn camera_set(&mut self, lens: Option<usize>, picture: Option<Picture>, torch: Option<bool>) {
+        let Some(on) = self.desktop.camera_on.clone() else {
+            return;
+        };
+        let (n, pic, flash) = (lens.unwrap_or(on.lens), picture.unwrap_or(on.picture), torch.unwrap_or(on.torch));
+        if (n, pic, flash) == (on.lens, on.picture, on.torch) {
+            return;
         }
-        self.request_desktop_draw();
+        // Another lens keeps the picture only if it is offered with it.
+        self.desktop_camera_start(&on.path, n, Some(pic), flash);
+    }
+
+    /// Stop the camera in use (the menu's row, by its phone).
+    pub(crate) fn camera_stop(&mut self, path: &str) {
+        if self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path) {
+            self.desktop.camera_on = None;
+            self.desktop.camera_gen += 1;
+        }
+        self.desktop_camera_stop(path);
+        self.camera_pill_sync();
     }
 
     /// Turn the menu to its "Move to" page: the sticks at once, the paired
@@ -2886,27 +2891,8 @@ impl App {
                 }
             }
             // (Turning the page is the release handler's: the menu stays up.)
-            Action::MoveTo | Action::Back | Action::Camera => {}
-            // A lens of the page of lenses turns the page to its pictures
-            // (the release handler's); a lens of the first page — the
-            // camera is on — changes lens with the picture in use.
-            Action::Lens(n) => {
-                // (The flash stays as it is through a change of lens.)
-                let torch = self.desktop_camera_torch(item);
-                self.desktop_camera_start(item, n, None, torch);
-            }
-            Action::Picture(n, k) => self.desktop_camera_start(item, n, Some(k), false),
-            // The flash: the camera is started again with it on, or off
-            // (scrcpy sets it as the camera starts) — same lens, same picture.
-            Action::Torch => {
-                let torch = !self.desktop_camera_torch(item);
-                let lens = item
-                    .and_then(|i| self.desktop.items.get(i))
-                    .and_then(|it| self.desktop.lens_on.get(&it.path).copied());
-                if let Some(n) = lens {
-                    self.desktop_camera_start(item, n, None, torch);
-                }
-            }
+            Action::MoveTo | Action::Back => {}
+            Action::Camera => self.desktop_camera_use(item),
             Action::Configure => {
                 if let Some(i) = item {
                     self.desktop_open_config(i, at);
@@ -2998,7 +2984,7 @@ impl App {
                     return;
                 };
                 self.desktop.selected.clear();
-                self.desktop_camera_stop(&path);
+                self.camera_stop(&path);
             }
             Action::Eject => {
                 if let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) {
@@ -4005,14 +3991,6 @@ impl App {
                                 match action {
                                     Action::MoveTo => {
                                         self.desktop_show_targets();
-                                        return;
-                                    }
-                                    Action::Camera => {
-                                        self.desktop_show_lenses();
-                                        return;
-                                    }
-                                    Action::Lens(n) if menu.lenses => {
-                                        self.desktop_show_pictures(n);
                                         return;
                                     }
                                     Action::Back => {
@@ -5059,6 +5037,10 @@ impl App {
         if let Some(rest) = what.strip_prefix("taskbox ") {
             return self.task_pill_debug(rest.trim());
         }
+        // `campill …`: the bar's camera pill, without a pointer.
+        if let Some(rest) = what.strip_prefix("campill ") {
+            return self.camera_pill_debug(rest.trim());
+        }
         // `task <seconds> [what]`: a task that takes that long, for the
         // OPTIONS bar's task pill to show (no phone needed).
         if let Some(rest) = what.strip_prefix("task ") {
@@ -5092,16 +5074,6 @@ impl App {
                     self.desktop.menu = Some(menu);
                     self.desktop_show_targets();
                     "MoveTo".to_owned()
-                }
-                Some(Action::Camera) => {
-                    self.desktop.menu = Some(menu);
-                    self.desktop_show_lenses();
-                    "Camera".to_owned()
-                }
-                Some(Action::Lens(n)) if menu.lenses => {
-                    self.desktop.menu = Some(menu);
-                    self.desktop_show_pictures(n);
-                    format!("Lens({n}) → its pictures")
                 }
                 Some(Action::Back) => {
                     let mut menu = menu;
