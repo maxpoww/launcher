@@ -2476,7 +2476,7 @@ pub(crate) const BTN_RIGHT: u32 = 0x111;
 /// or a send to a phone finishes after the menu is long gone). Through the
 /// session's notification service; a failure to say it is only logged.
 pub(crate) fn desktop_send_notify(body: &str) {
-    desktop_send_notify_open(body, None);
+    desktop_send_notify_open(i18n::tr("Desktop"), body, None);
 }
 
 /// What an action's key starts with when clicking the notification is to
@@ -2484,8 +2484,9 @@ pub(crate) fn desktop_send_notify(body: &str) {
 /// photo import opens the folder the photos went to (`notif.rs::notif_open`).
 pub(crate) const NOTIFY_OPEN: &str = "golem-open:";
 
-/// The same, with a folder that a click on the notification opens.
-pub(crate) fn desktop_send_notify_open(body: &str, open: Option<&std::path::Path>) {
+/// The same under a title of its own (a phone's name, for what was done
+/// with that phone), with a folder that a click on the notification opens.
+pub(crate) fn desktop_send_notify_open(title: &str, body: &str, open: Option<&std::path::Path>) {
     let mut cmd = std::process::Command::new("busctl");
     cmd.args([
         "--user",
@@ -2498,7 +2499,7 @@ pub(crate) fn desktop_send_notify_open(body: &str, open: Option<&std::path::Path
         "waverunner",
         "0",
         "folder",
-        i18n::tr("Desktop"),
+        title,
         body,
     ]);
     // The actions (pairs of key and label), the hints (none), the stay.

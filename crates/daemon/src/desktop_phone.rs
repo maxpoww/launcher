@@ -130,13 +130,12 @@ pub(crate) fn import_photos(
     (said, dest.is_dir().then_some(dest))
 }
 
+/// The notification's words. Its TITLE is the phone's name, so they do not
+/// repeat it (Max, 2026-10-10: not "Desktop" — "Pixel 8 Pro: 121 photos
+/// imported, click to view").
 fn import_photos_said(name: &str, serial: Option<&str>, mount: Option<&Path>, task: &TaskHandle) -> String {
+    use crate::i18n::tr;
     let dest = pictures_dir().join(folder_name(name));
-    let shown = format!(
-        "{}/{}",
-        pictures_dir().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-        folder_name(name)
-    );
     let brought = match serial.filter(|s| ready(s)) {
         Some(serial) => import_over_adb(serial, &dest, task),
         None => match mount {
@@ -144,22 +143,27 @@ fn import_photos_said(name: &str, serial: Option<&str>, mount: Option<&Path>, ta
             None => None,
         },
     };
+    let photos = |n: usize| match n {
+        1 => format!("1 {}", tr("photo")),
+        n => format!("{n} {}", tr("photos")),
+    };
     // Cancelled from the bar: what came is kept, and said.
     if task.cancelled() {
-        let n = brought.map_or(0, |(n, _)| n);
-        return format!("{name}: {} {n} {} {shown}", crate::i18n::tr("import stopped."), crate::i18n::tr("photos and videos copied so far, in"));
+        return match brought.map_or(0, |(n, _)| n) {
+            0 => tr("Import stopped.").to_owned(),
+            n => format!("{} {} {}", tr("Import stopped."), photos(n), tr("imported so far. Click to view.")),
+        };
     }
     match brought {
-        None => format!(
-            "{name}: {}",
-            crate::i18n::tr("its photos could not be read. Unlock it and choose File transfer, or turn on USB debugging.")
-        ),
-        Some((0, 0)) => format!("{name}: {}", crate::i18n::tr("no new photos.")),
-        Some((n, 0)) => format!("{name}: {n} {} {shown}", crate::i18n::tr("new photos and videos, in")),
+        None => tr("Its photos could not be read. Unlock it and choose File transfer, or turn on USB debugging.").to_owned(),
+        Some((0, 0)) => tr("No new photos.").to_owned(),
+        Some((n, 0)) => format!("{} {}", photos(n), tr("imported. Click to view.")),
         Some((n, failed)) => format!(
-            "{name}: {n} {} {shown}; {failed} {}",
-            crate::i18n::tr("new photos and videos, in"),
-            crate::i18n::tr("could not be copied.")
+            "{} {} {failed} {} {}",
+            photos(n),
+            tr("imported,"),
+            tr("could not be copied."),
+            tr("Click to view.")
         ),
     }
 }

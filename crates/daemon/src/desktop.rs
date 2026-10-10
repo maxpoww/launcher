@@ -2573,8 +2573,8 @@ impl App {
                         let (said, folder) =
                             crate::desktop_phone::import_photos(&name, serial.as_deref(), mount.as_deref(), &task);
                         // A click on it opens the folder the photos went to.
-                        crate::desktop_send_notify_open(&said, folder.as_deref());
-                        said
+                        crate::desktop_send_notify_open(&name, &said, folder.as_deref());
+                        format!("{name}: {said}")
                     },
                     move |app, said| {
                         info!("desktop: {said}");
