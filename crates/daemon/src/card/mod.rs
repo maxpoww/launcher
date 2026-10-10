@@ -236,6 +236,10 @@ enum Away {
     Nudge = 2,
     /// The workspaces are being swiped.
     Swipe = 4,
+    /// Another window has the focus: the card is its own window's, and is
+    /// not drawn over the others (Max, 2026-10-10: *"the card is always on
+    /// top of other windows"*). It is back when its window is focused again.
+    Focus = 8,
 }
 
 /// The moments the card waits for: each is "a while after the LAST time
@@ -334,6 +338,8 @@ pub(crate) struct Card {
     /// on the card: they come back on a click on it, or when the pointer
     /// leaves and comes in again — not on a mere movement.
     tabbed: bool,
+    /// The window that has the focus, as last heard from the compositor.
+    active: Option<String>,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -1765,7 +1771,16 @@ impl App {
             .ptr
             .zip(self.card.rect)
             .is_some_and(|(at, r)| r.contains(at));
-        if on && self.card.field.is_none() && !self.card.tabbed && self.card_present() {
+        // ONLY WHILE ITS WINDOW IS THE FOCUSED ONE (Max, 2026-10-10: *"the card
+        // should not get focus by mouse by itself, it should only work when
+        // the window is focused"* — by a click on it, or just opened): the
+        // pointer passing over the card of a window one is not working in
+        // takes nothing.
+        if self.card.active.is_none() {
+            self.card.active = crate::hypr::active_window();
+        }
+        let focused = self.card.host.is_some() && self.card.active == self.card.host;
+        if on && focused && self.card.field.is_none() && !self.card.tabbed && self.card_present() {
             self.card_take_keys(Field::Card);
         }
     }
@@ -2434,12 +2449,20 @@ impl App {
         let Some(addr) = addr else {
             return;
         };
+        self.card.active = Some(addr.to_owned());
         if self.card.follows(addr) {
             // (A window opened since the master switch has not heard yet.)
             if self.card.all {
                 self.card_tell_bar(addr, true);
             }
             self.card_summon(addr);
+        } else if self.card.host.as_deref() == Some(addr) {
+            // Its own window again: it is back.
+            self.card_back(Away::Focus);
+        } else {
+            // A window it is not on for: the card steps away rather than
+            // stand over it, until its own is focused again.
+            self.card_away(Away::Focus);
         }
     }
 
