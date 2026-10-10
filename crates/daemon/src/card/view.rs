@@ -100,12 +100,6 @@ impl Page {
             Page::Emoji => Some("Emoji"),
         }
     }
-
-    /// A page of things that are not the card's own (clipboard rows, a
-    /// word's answers): they have no ×, and their pin's place is "keep".
-    pub(crate) fn lent(self) -> bool {
-        matches!(self, Page::Clipboard | Page::Dictionary)
-    }
 }
 
 /// The buttons along the card's HEAD (they were its foot until Max,
@@ -1102,7 +1096,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 acc,
             );
         }
-        if over.is_some() && !page.lent() {
+        if over.is_some() && page != Page::Dictionary {
             button(
                 tile.close(),
                 "×",
@@ -1128,6 +1122,72 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 hot,
                 acc,
             );
+        }
+    }
+    // AN EMPTY LIST: a dashed frame filling it, saying what a drop there
+    // does (Max, 2026-10-10: *"one of those '----' frames with the hint,
+    // 'drag here to'… on every empty tab"*, then *"make the frame use all
+    // the card, and the text a little bigger"*). It wears the accent while
+    // something is held over the card.
+    let words = match page {
+        Page::Session => Some("Drag here to keep"),
+        Page::Pinned => Some("Drag here to pin"),
+        _ => None,
+    };
+    if let (true, None, Some(words)) = (shown_items.is_empty(), writing, words) {
+        let f = Rect::new(
+            rect.x + LIST_PAD,
+            body.y + LIST_PAD + over,
+            tile_w,
+            (body.h - 2.0 * LIST_PAD - over).max(0.0),
+        );
+        let color = if view.dnd_over {
+            [acc[0], acc[1], acc[2], 0.9]
+        } else {
+            paint.ink_at(0.2)
+        };
+        let (dash, gap, thick) = (7.0f32, 6.0f32, 1.5f32);
+        let mut put = |r: Rect| {
+            list.rects.push(RectInst {
+                rect: r,
+                radius: 0.0,
+                color,
+                glass: 0.0,
+                border: 0.0,
+            })
+        };
+        // (Its corners are left open, about the pills' rounding.)
+        let inset = RADIUS;
+        let mut x = f.x + inset;
+        while x + dash <= f.x + f.w - inset {
+            put(Rect::new(x, f.y, dash, thick));
+            put(Rect::new(x, f.y + f.h - thick, dash, thick));
+            x += dash + gap;
+        }
+        let mut y = f.y + inset;
+        while y + dash <= f.y + f.h - inset {
+            put(Rect::new(f.x, y, thick, dash));
+            put(Rect::new(f.x + f.w - thick, y, thick, dash));
+            y += dash + gap;
+        }
+        if f.h > 40.0 {
+            list.labels.push(Label {
+                text: words.to_owned(),
+                pos: (f.x + f.w / 2.0, f.y + f.h / 2.0 - 10.0),
+                max_w: f.w - 20.0,
+                font_px: 14.0,
+                line_px: 20.0,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(clip),
+                family: None,
+                color: Some(if view.dnd_over {
+                    [acc[0], acc[1], acc[2], 1.0]
+                } else {
+                    paint.ink_at(0.5)
+                }),
+            });
         }
     }
     // A new thing being written: its box after the last item.

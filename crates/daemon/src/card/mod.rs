@@ -883,7 +883,10 @@ impl Card {
         }
         let pencil = matches!(self.page, Page::Session | Page::Pinned)
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Text);
-        let closes = !(self.page.lent() || self.page == Page::Memory && self.picking.is_some());
+        // (The clipboard's rows too: a copied password must be removable.
+        // A word's answers are not things to remove.)
+        let closes =
+            !(self.page == Page::Dictionary || self.page == Page::Memory && self.picking.is_some());
         Some(if closes && tile.close().contains(pos) {
             Hover::Close(tile.id)
         } else if pencil && tile.edit(true).contains(pos) {
@@ -1971,6 +1974,19 @@ impl App {
                     self.card.field = Some(Field::Box);
                 }
                 _ => match letter {
+                    // (An empty list: there is nothing to search — the hint
+                    // says so for a moment and is back. At rest it still
+                    // says "type to search": that is there to teach.)
+                    Some(_)
+                        if self.card.items.is_empty()
+                            && matches!(
+                                self.card.page,
+                                Page::Session | Page::Pinned | Page::Clipboard | Page::Memory
+                            ) =>
+                    {
+                        self.card_flash("Nothing to search");
+                        return;
+                    }
                     Some(s) if self.card.page != Page::Emoji => {
                         self.card.field = Some(Field::Seek);
                         self.card.query.push_str(s);
@@ -2649,6 +2665,18 @@ impl App {
     fn card_remove(&mut self, id: u64) {
         if self.card.page == Page::Memory {
             self.card_forget(id);
+            return;
+        }
+        // (A row of the clipboard's page: the clip itself goes, from the
+        // clipboard's own history — there is no taking that back.)
+        if self.card.page == Page::Clipboard {
+            let clip = id.wrapping_sub(CLIP_IDS);
+            if let Some(idx) = self.clip.history.iter().position(|c| c.id == clip) {
+                self.delete_clip(idx);
+            }
+            self.card.items = self.card_clip_rows();
+            self.card.lines.remove(&id);
+            self.card_flash("Removed");
             return;
         }
         let Some(at) = self.card.items.iter().position(|it| it.id == id) else {

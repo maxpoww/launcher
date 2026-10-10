@@ -4184,7 +4184,7 @@ impl App {
         self.schedule_clip_frame();
     }
 
-    fn delete_clip(&mut self, idx: usize) {
+    pub(crate) fn delete_clip(&mut self, idx: usize) {
         if idx >= self.clip.history.len() {
             return;
         }
