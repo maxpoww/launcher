@@ -272,21 +272,11 @@ const NAME_SPACE: f32 = 30.0;
 const WAVE_BARS: usize = 30;
 /// A voice note's play button.
 pub(super) const PLAY: f32 = 28.0;
-/// A memory's row on Memory's page: its picture, its name, its last thing.
-pub(super) const ROW_H: f32 = 54.0;
-const AVATAR: f32 = 36.0;
+/// A session's row on Memory's page: its name, and when its last thing was.
+pub(super) const ROW_H: f32 = 38.0;
 /// The line at the foot of an item (when it is from).
 const NOTE_PX: f32 = 9.5;
 const NOTE_LINE: f32 = 12.0;
-/// The colours a memory's picture can have (one is picked by its id).
-const AVATARS: [[f32; 3]; 6] = [
-    [0.871, 0.376, 0.106],
-    [0.275, 0.462, 0.807],
-    [0.345, 0.651, 0.353],
-    [0.686, 0.361, 0.745],
-    [0.807, 0.585, 0.243],
-    [0.243, 0.651, 0.651],
-];
 
 impl Tile {
     /// Where its pin is: beside the ×.
@@ -698,25 +688,12 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         });
         let note = view.foot.as_ref().and_then(|f| f.notes.get(&item.id));
         if page == Page::Memory {
-            // A memory, as a messenger lists a chat: its picture (the
-            // first letter of its name on its colour), its name, the last
-            // thing in it, and when that was.
+            // A SESSION's row: its name only, and at the right when its
+            // last thing was (Max, 2026-10-10: *"get rid of the avatar on
+            // the memories, and the content, i want only the title"*, then
+            // the date and time at the right, to tell two of one name apart).
             let row = view.lines.get(&item.id).map(Vec::as_slice).unwrap_or(&[]);
             let name = row.first().map(String::as_str).unwrap_or("");
-            let hue = AVATARS[(item.id % AVATARS.len() as u64) as usize];
-            let av = Rect::new(t.x + 9.0, t.y + (t.h - AVATAR) / 2.0, AVATAR, AVATAR);
-            list.rects.push(RectInst {
-                rect: av,
-                radius: TILE_RADIUS,
-                color: [hue[0], hue[1], hue[2], 0.9],
-                glass: 0.0,
-                border: 0.0,
-            });
-            let first: String = name
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().collect())
-                .unwrap_or_default();
             let mut put =
                 |text: &str, pos: (f32, f32), w: f32, px: f32, centered: bool, color: [f32; 4]| {
                     list.labels.push(Label {
@@ -733,30 +710,16 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                         color: Some(color),
                     });
                 };
-            put(
-                &first,
-                (av.x + av.w / 2.0, av.y + 9.0),
-                av.w,
-                13.0,
-                true,
-                [0.08, 0.07, 0.10, 1.0],
-            );
-            let tx = av.x + av.w + 11.0;
+            let tx = t.x + 13.0;
             let when = note.map(String::as_str).unwrap_or("");
             let when_w = super::bar::about(when.chars().count(), NOTE_PX + 1.0) + 8.0;
-            let tw = t.x + t.w - tx - when_w - 34.0;
-            put(name, (tx, t.y + 10.0), tw, 12.5, false, paint.ink_at(0.96));
-            put(
-                row.get(1).map(String::as_str).unwrap_or(""),
-                (tx, t.y + 29.0),
-                tw + when_w,
-                11.5,
-                false,
-                paint.ink_at(0.52),
-            );
+            // (The room at the right end is the ×'s, and a pencil's to come.)
+            let tw = t.x + t.w - tx - when_w - 56.0;
+            let mid = t.y + (t.h - 17.0) / 2.0;
+            put(name, (tx, mid), tw, 12.5, false, paint.ink_at(0.96));
             put(
                 when,
-                (t.x + t.w - when_w / 2.0 - 30.0, t.y + 11.0),
+                (t.x + t.w - when_w / 2.0 - 52.0, mid + 2.0),
                 when_w,
                 NOTE_PX + 1.0,
                 true,

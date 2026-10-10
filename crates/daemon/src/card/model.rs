@@ -179,12 +179,26 @@ pub(super) fn session_row(session: &Past) -> Item {
     }
 }
 
-/// When `at` was, as a messenger says it next to `now`: the time for
-/// today, the day for anything older ("14:02", "Oct 6"). Local time.
+/// When `at` was, next to `now`, as SHORT as it can be said (Max,
+/// 2026-10-10): today the time ("14:21"); the last six days "1d ago"; then
+/// the date and the time ("8/30 10:30"), with the year only when it is
+/// another one ("9/25/25 12:15"). Local time. The month comes first where
+/// the system's language writes it so (`month_first`).
 pub(crate) fn when_text(at: u64, now: u64) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
+    when_text_in(at, now, month_first())
+}
+
+/// Whether dates are written month first here: the United States' way
+/// (`en_US`, and the bare C locale); everywhere else the day comes first.
+fn month_first() -> bool {
+    let locale = ["LC_ALL", "LC_TIME", "LANG"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_default();
+    locale.is_empty() || locale.starts_with("en_US") || locale == "C" || locale == "POSIX"
+}
+
+fn when_text_in(at: u64, now: u64, month_first: bool) -> String {
     if at == 0 {
         return String::new();
     }
@@ -199,14 +213,28 @@ pub(crate) fn when_text(at: u64, now: u64) -> String {
     let (Some(then), Some(today)) = (local(at), local(now)) else {
         return String::new();
     };
-    if (then.tm_year, then.tm_yday) == (today.tm_year, today.tm_yday) {
-        format!("{:02}:{:02}", then.tm_hour, then.tm_min)
+    let hm = format!("{:02}:{:02}", then.tm_hour, then.tm_min);
+    // Whole days between the two, by the calendar (midnight to midnight).
+    let midnight = |secs: u64, tm: &libc::tm| {
+        secs as i64 - (tm.tm_hour as i64 * 3600 + tm.tm_min as i64 * 60 + tm.tm_sec as i64)
+    };
+    let days = ((midnight(now, &today) - midnight(at, &then)) as f64 / 86_400.0).round() as i64;
+    if days <= 0 {
+        return hm;
+    }
+    if days < 7 {
+        return format!("{days}d ago");
+    }
+    let (month, day) = (then.tm_mon + 1, then.tm_mday);
+    let date = if month_first {
+        format!("{month}/{day}")
     } else {
-        format!(
-            "{} {}",
-            MONTHS[(then.tm_mon as usize).min(11)],
-            then.tm_mday
-        )
+        format!("{day}/{month}")
+    };
+    if then.tm_year == today.tm_year {
+        format!("{date} {hm}")
+    } else {
+        format!("{date}/{:02} {hm}", (then.tm_year + 1900) % 100)
     }
 }
 
@@ -667,16 +695,35 @@ mod tests {
     }
 
     #[test]
-    fn a_time_reads_as_the_hour_today_and_as_the_day_before() {
+    fn a_time_is_said_as_short_as_it_can_be() {
         let now = 1_700_000_000;
-        let today = when_text(now - 60, now);
+        let today = when_text_in(now - 60, now, true);
         // (Unless the minute before crossed midnight where this runs.)
         assert!(
-            today.len() == 5 && today.as_bytes()[2] == b':' || today.contains(' '),
+            today.len() == 5 && today.as_bytes()[2] == b':' || today == "1d ago",
             "{today}"
         );
-        let old = when_text(now - 40 * 86_400, now);
-        assert!(old.contains(' ') && !old.contains(':'), "{old}");
+        // The last six days by their count, then the date with its time…
+        assert_eq!(when_text_in(now - 3 * 86_400, now, true), "3d ago");
+        let old = when_text_in(now - 40 * 86_400, now, true);
+        assert!(
+            old.contains('/') && old.contains(':') && old.matches('/').count() == 1,
+            "{old}"
+        );
+        // …and its year too when it is another one.
+        let older = when_text_in(now - 400 * 86_400, now, true);
+        assert_eq!(older.matches('/').count(), 2, "{older}");
+        // Day first where that is how it is written.
+        let (us, eu) = (
+            when_text_in(now - 40 * 86_400, now, true),
+            when_text_in(now - 40 * 86_400, now, false),
+        );
+        let swap = |s: &str| {
+            let (date, time) = s.split_once(' ').unwrap();
+            let (a, b) = date.split_once('/').unwrap();
+            format!("{b}/{a} {time}")
+        };
+        assert_eq!(swap(&us), eu);
         assert_eq!(when_text(0, now), "");
     }
 
