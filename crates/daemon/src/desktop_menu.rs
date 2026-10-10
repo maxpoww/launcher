@@ -47,6 +47,9 @@ pub(crate) enum Action {
     Camera,
     /// …through the `n`th lens of that page.
     Lens(usize),
+    /// …with the `k`th picture (size and pictures a second) of lens `n`'s
+    /// page: `Picture(n, k)`.
+    Picture(usize, usize),
     /// …and off again.
     CameraStop,
     /// A phone: its new photos and videos, to this computer's Pictures.
@@ -235,6 +238,8 @@ pub(crate) struct Menu {
     pub targets: bool,
     /// Showing a phone's lenses (see `show_lenses`).
     pub lenses: bool,
+    /// Showing the pictures a lens can be used with (see `show_pictures`).
+    pub pictures: bool,
     /// A plugged-in volume's menu (`for_volume`) — what Back goes back to.
     pub volume: Option<Volume>,
     /// Where the pointer was: a new folder goes in that cell.
@@ -265,6 +270,7 @@ impl Menu {
             many,
             targets: false,
             lenses: false,
+            pictures: false,
             volume: None,
             at,
             rows,
@@ -346,6 +352,22 @@ impl Menu {
             rows.push(Row::Note("No camera found"));
         }
         self.lenses = true;
+        self.pictures = false;
+        self.set_rows(rows, h);
+    }
+
+    /// Turn the page from a lens to how its picture should be (Max,
+    /// 2026-10-10: "after I choose the lens I choose the resolution and the
+    /// fps"): `‹ Back`, then each by its label — the `k`th is
+    /// `Action::Picture(lens, k)`, the one last used ticked.
+    pub fn show_pictures(&mut self, lens: usize, labels: &[String], current: Option<usize>, h: f32) {
+        let mut rows = vec![Row::Item { label: "‹  Back", action: Action::Back, danger: false }, Row::Sep];
+        for (k, name) in labels.iter().enumerate() {
+            let label = if current == Some(k) { format!("{name}  ✓") } else { name.clone() };
+            rows.push(Row::Target { label, action: Action::Picture(lens, k) });
+        }
+        self.lenses = false;
+        self.pictures = true;
         self.set_rows(rows, h);
     }
 
@@ -361,6 +383,7 @@ impl Menu {
     pub fn show_main(&mut self, h: f32) {
         self.targets = false;
         self.lenses = false;
+        self.pictures = false;
         let rows = match &self.volume {
             Some(volume) => volume_rows(volume),
             None => rows(self.item.is_some(), self.many),
@@ -617,7 +640,13 @@ mod tests {
         assert_eq!(on.action(0), Some(Action::Back));
         assert_eq!(on.rows[2], Row::Target { label: "Main".into(), action: Action::Lens(0) });
         assert_eq!(on.rows[3], Row::Target { label: "Front  ✓".into(), action: Action::Lens(1) });
+        // A lens's pictures: Back, then each, the one last used ticked.
+        on.show_pictures(1, &["1080p · 60".to_owned(), "720p · 30".to_owned()], Some(1), 800.0);
+        assert!(on.pictures && !on.lenses);
+        assert_eq!(on.rows[2], Row::Target { label: "1080p · 60".into(), action: Action::Picture(1, 0) });
+        assert_eq!(on.rows[3], Row::Target { label: "720p · 30  ✓".into(), action: Action::Picture(1, 1) });
         on.show_lenses(&[], None, true, 800.0);
+        assert!(!on.pictures);
         assert_eq!(on.rows.last(), Some(&Row::Note("Asking the phone…")));
         // Back is the VOLUME's first page, not a file's.
         on.show_main(800.0);

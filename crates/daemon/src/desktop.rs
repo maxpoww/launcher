@@ -1023,6 +1023,65 @@ pub(crate) struct Lens {
     pub fps: Option<u32>,
 }
 
+/// How a phone's camera picture is asked for: its longer side, and how many
+/// a second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Picture {
+    pub size: u32,
+    pub fps: u32,
+}
+
+impl Picture {
+    /// What its row says: "1080p · 60".
+    fn label(&self) -> String {
+        format!("{}p · {}", self.size * 9 / 16, self.fps)
+    }
+}
+
+/// The pictures a lens is offered with, the best first (Max, 2026-10-10:
+/// "after I choose the lens I choose the resolution and the fps").
+/// `chip`: this computer decodes the phone's video on its graphics chip
+/// (GOLEM_CAMERA_FEED — old Intel, two slow cores). There 60 a second is
+/// offered only small: at 720p and up the camera app stopped taking
+/// pictures at 60 and the picture froze (MacBook Air 2013), while 540p at
+/// 60 ran with the app at 13 % of a core.
+fn camera_pictures(lens: &Lens, chip: bool) -> Vec<Picture> {
+    let most = lens.fps.unwrap_or(30);
+    let mut all = Vec::new();
+    if chip {
+        all.push(Picture { size: 1920, fps: most.min(30) });
+        all.push(Picture { size: 1280, fps: most.min(30) });
+        if most > 30 {
+            all.push(Picture { size: 960, fps: most });
+        }
+    } else {
+        for size in [1920, 1280] {
+            all.push(Picture { size, fps: most });
+            if most > 30 {
+                all.push(Picture { size, fps: 30 });
+            }
+        }
+    }
+    all
+}
+
+/// Whether this computer feeds a phone's camera through the system's own
+/// feeder (see `camera`).
+fn camera_chip() -> bool {
+    std::env::var_os("GOLEM_CAMERA_FEED").is_some_and(|f| !f.is_empty())
+}
+
+/// The picture last chosen (kept across restarts), if any.
+fn camera_picture_known() -> Option<Picture> {
+    let said = std::fs::read_to_string(crate::persist::data_path("camera-picture")).ok()?;
+    let (size, fps) = said.trim().split_once(' ')?;
+    Some(Picture { size: size.parse().ok()?, fps: fps.parse().ok()? })
+}
+
+fn camera_picture_keep(picture: Picture) {
+    let _ = std::fs::write(crate::persist::data_path("camera-picture"), format!("{} {}", picture.size, picture.fps));
+}
+
 /// The lenses a phone has (`scrcpy --list-cameras`). Empty when it would
 /// not say.
 fn phone_lenses(serial: Option<&str>) -> Vec<Lens> {
@@ -1182,6 +1241,7 @@ fn camera(
     path: &str,
     cameras: &std::sync::Mutex<HashMap<String, u32>>,
     lens: &Lens,
+    picture: Picture,
 ) -> Option<String> {
     use crate::i18n::tr;
     if let Some(said) = serial.and_then(|s| phone_refuses(name, s)) {
@@ -1208,7 +1268,7 @@ fn camera(
     // at 16M, all 30 at 8M with the core still flat out, all 30 at 4M with
     // room to spare). 720p is the last resort.
     let steps: [(Option<u32>, u32, &str); 4] =
-        [(lens.fps, 1920, "16M"), (Some(30), 1920, "8M"), (Some(30), 1920, "4M"), (Some(30), 1280, "8M")];
+        [(lens.fps.map(|_| picture.fps), picture.size, "16M"), (Some(30), 1920, "8M"), (Some(30), 1920, "4M"), (Some(30), 1280, "8M")];
     // Only where the SYSTEM says the hardware is of that kind (Golem's
     // gpu/intel-legacy sets GOLEM_CAMERA_ADAPTIVE): everywhere else the
     // camera is asked for at its best and left there, whatever a busy
@@ -1221,6 +1281,10 @@ fn camera(
     // step — the MacBook's 23 pictures a second became all 60 at 13 % of a
     // core. It ending before the device is fed sends us back to scrcpy.
     let mut feed = std::env::var_os("GOLEM_CAMERA_FEED").filter(|f| !f.is_empty());
+    // (A picture chosen smaller than the ladder's later steps is not
+    // "stepped down" to a bigger one: it starts at the top and stays.)
+    let small = picture.size < 1920;
+    let adaptive = adaptive && !small;
     let mut step = if adaptive && feed.is_none() { camera_step_known().min(steps.len() - 1) } else { 0 };
     let (mut child, early) = loop {
         let (fps, size, rate) = steps[step];
@@ -2546,6 +2610,72 @@ impl App {
         );
     }
 
+    /// Use the phone that is item `item` as the camera through its `n`th
+    /// lens, with the `k`th picture of that lens's page (`None`: the one
+    /// last chosen, else the best).
+    fn desktop_camera_start(&mut self, item: Option<usize>, n: usize, k: Option<usize>) {
+        let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
+            return;
+        };
+        let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
+            return;
+        };
+        let Some(lens) = self.desktop.lenses.get(&path).and_then(|l| l.get(n)).cloned() else {
+            return;
+        };
+        let offered = camera_pictures(&lens, camera_chip());
+        let picture = match k {
+            Some(k) => {
+                let Some(picture) = offered.get(k).copied() else {
+                    return;
+                };
+                camera_picture_keep(picture);
+                picture
+            }
+            None => camera_picture_known().filter(|p| offered.contains(p)).or_else(|| offered.first().copied()).unwrap_or(Picture { size: 1920, fps: 30 }),
+        };
+        let (name, serial) = (v.name.clone(), phone_serial_of(v));
+        self.desktop.selected.clear();
+        // On already, through another lens: that one ends first (the
+        // new one waits for the device to be let go).
+        self.desktop_camera_stop(&path);
+        self.desktop.lens_on.insert(path.clone(), n);
+        info!("desktop: {name} as the camera, {}, {} (serial {serial:?})", lens.name, picture.label());
+        let cameras = self.desktop.cameras.clone();
+        std::thread::spawn(move || {
+            if let Some(said) = camera(&name, serial.as_deref(), &path, &cameras, &lens, picture) {
+                crate::desktop_send_notify(&said);
+            }
+        });
+    }
+
+    /// Turn the menu from the page of lenses to lens `n`'s pictures.
+    fn desktop_show_pictures(&mut self, n: usize) {
+        let Some(path) = self
+            .desktop
+            .menu
+            .as_ref()
+            .and_then(|m| m.item)
+            .and_then(|i| self.desktop.items.get(i))
+            .map(|it| it.path.clone())
+        else {
+            return;
+        };
+        let Some(lens) = self.desktop.lenses.get(&path).and_then(|l| l.get(n)) else {
+            return;
+        };
+        let offered = camera_pictures(lens, camera_chip());
+        let labels: Vec<String> = offered.iter().map(Picture::label).collect();
+        let current = camera_picture_known().and_then(|p| offered.iter().position(|o| *o == p));
+        let h = self.desktop_size.1 as f32;
+        let at = self.desktop.ptr;
+        if let Some(menu) = self.desktop.menu.as_mut() {
+            menu.show_pictures(n, &labels, current, h);
+            menu.hover = at.and_then(|p| menu.hit(p));
+        }
+        self.request_desktop_draw();
+    }
+
     /// Write the lens page from what is known now.
     fn desktop_fill_lenses(&mut self, path: &str, looking: bool) {
         let h = self.desktop_size.1 as f32;
@@ -2721,6 +2851,11 @@ impl App {
             }
             // (Turning the page is the release handler's: the menu stays up.)
             Action::MoveTo | Action::Back | Action::Camera => {}
+            // A lens of the page of lenses turns the page to its pictures
+            // (the release handler's); a lens of the first page — the
+            // camera is on — changes lens with the picture in use.
+            Action::Lens(n) => self.desktop_camera_start(item, n, None),
+            Action::Picture(n, k) => self.desktop_camera_start(item, n, Some(k)),
             Action::Configure => {
                 if let Some(i) = item {
                     self.desktop_open_config(i, at);
@@ -2813,30 +2948,6 @@ impl App {
                 };
                 self.desktop.selected.clear();
                 self.desktop_camera_stop(&path);
-            }
-            Action::Lens(n) => {
-                let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
-                    return;
-                };
-                let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path.as_str()) else {
-                    return;
-                };
-                let Some(lens) = self.desktop.lenses.get(&path).and_then(|l| l.get(n)).cloned() else {
-                    return;
-                };
-                let (name, serial) = (v.name.clone(), phone_serial_of(v));
-                self.desktop.selected.clear();
-                // On already, through another lens: that one ends first (the
-                // new one waits for the device to be let go).
-                self.desktop_camera_stop(&path);
-                self.desktop.lens_on.insert(path.clone(), n);
-                info!("desktop: {name} as the camera, {} (serial {serial:?})", lens.name);
-                let cameras = self.desktop.cameras.clone();
-                std::thread::spawn(move || {
-                    if let Some(said) = camera(&name, serial.as_deref(), &path, &cameras, &lens) {
-                        crate::desktop_send_notify(&said);
-                    }
-                });
             }
             Action::Eject => {
                 if let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) {
@@ -3847,6 +3958,10 @@ impl App {
                                     }
                                     Action::Camera => {
                                         self.desktop_show_lenses();
+                                        return;
+                                    }
+                                    Action::Lens(n) if menu.lenses => {
+                                        self.desktop_show_pictures(n);
                                         return;
                                     }
                                     Action::Back => {
@@ -4932,6 +5047,11 @@ impl App {
                     self.desktop_show_lenses();
                     "Camera".to_owned()
                 }
+                Some(Action::Lens(n)) if menu.lenses => {
+                    self.desktop.menu = Some(menu);
+                    self.desktop_show_pictures(n);
+                    format!("Lens({n}) → its pictures")
+                }
                 Some(Action::Back) => {
                     let mut menu = menu;
                     menu.show_main(self.desktop_size.1 as f32);
@@ -5491,6 +5611,19 @@ mod tests {
         assert_eq!(usb_serial("/dev/bus/usb/003/044", &sys), None);
         assert_eq!(usb_serial("nonsense", &sys), None);
         let _ = std::fs::remove_dir_all(&sys);
+    }
+
+    #[test]
+    fn a_lens_is_offered_with_its_pictures() {
+        let lens = |fps| Lens { name: "Main".into(), id: "0".into(), zoom: None, fps };
+        let said = |l: &Lens, chip| camera_pictures(l, chip).iter().map(Picture::label).collect::<Vec<_>>();
+        // The best first — what it was always asked for before there was a choice.
+        assert_eq!(said(&lens(Some(60)), false), ["1080p · 60", "1080p · 30", "720p · 60", "720p · 30"]);
+        assert_eq!(said(&lens(Some(30)), false), ["1080p · 30", "720p · 30"]);
+        assert_eq!(said(&lens(None), false), ["1080p · 30", "720p · 30"]);
+        // Decoded on the graphics chip (old Intel): 60 only small.
+        assert_eq!(said(&lens(Some(60)), true), ["1080p · 30", "720p · 30", "540p · 60"]);
+        assert_eq!(said(&lens(Some(30)), true), ["1080p · 30", "720p · 30"]);
     }
 
     #[test]
