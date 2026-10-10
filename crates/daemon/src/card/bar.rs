@@ -40,8 +40,23 @@ impl BoxBtn {
         match self {
             BoxBtn::Emoji => "\u{f118}", // fa-smile-o
             BoxBtn::Clip => "\u{f0c6}",  // fa-paperclip
-            BoxBtn::Talk => "\u{f27a}",  // fa-commenting
-            BoxBtn::Mic => "\u{f130}",   // fa-microphone
+            // (Looked at, each one, in the font itself: a microphone with a
+            // speech bubble for "talk and it is written" — the plain speech
+            // bubble said nothing of talking; and the font's larger, solid
+            // microphone for a voice note — the other was a size smaller
+            // than its neighbours.)
+            BoxBtn::Talk => "\u{f050a}", // md-microphone-message
+            BoxBtn::Mic => "\u{f036c}",  // md-microphone
+        }
+    }
+
+    /// How big its icon is drawn: each to look the same size as the rest
+    /// (the icons are not all drawn to the same scale in the font).
+    fn px(self) -> f32 {
+        match self {
+            BoxBtn::Talk => 25.0,
+            BoxBtn::Mic => 22.0,
+            BoxBtn::Emoji | BoxBtn::Clip => 20.0,
         }
     }
 
@@ -833,7 +848,7 @@ pub(super) fn draw(
                 ink(if hot { 0.95 } else { 0.55 })
             };
             grid.labels
-                .push(glyph(which.glyph(), br, 20.0, color, clip));
+                .push(glyph(which.glyph(), br, which.px(), color, clip));
         }
         let top = r.y + (r.h - bar.draft.len().clamp(1, BOX_LINES) as f32 * TEXT_LINE) / 2.0;
         if let Some(secs) = bar.rec {
