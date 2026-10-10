@@ -2474,8 +2474,6 @@ impl App {
             self.card_away(Away::Focus);
         }
     }
-        }
-    }
 
     /// Bring the card onto `addr`: it unrolls there from the top.
     fn card_summon(&mut self, addr: &str) {
