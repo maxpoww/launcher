@@ -52,6 +52,8 @@ pub(crate) enum Action {
     Picture(usize, usize),
     /// …and off again.
     CameraStop,
+    /// The phone's flash (its torch), on or off, while it is the camera.
+    Torch,
     /// A phone: its new photos and videos, to this computer's Pictures.
     ImportPhotos,
     /// A phone: its internet for this computer over the cable, on or off.
@@ -173,6 +175,9 @@ pub(crate) struct Volume {
     pub camera: bool,
     pub lenses: Vec<String>,
     pub current: Option<usize>,
+    /// Its flash while it is the camera: on, off, or `None` — the lens in
+    /// use has none (the front one).
+    pub torch: Option<bool>,
     /// That phone is giving this computer its internet.
     pub tether: bool,
 }
@@ -195,6 +200,11 @@ fn volume_rows(v: &Volume) -> Vec<Row> {
             rows.push(Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
         } else {
             rows.push(Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+            // The flash, between Stop and the lenses (Max, 2026-10-10).
+            if let Some(on) = v.torch {
+                let label = if on { "Turn flash off" } else { "Turn flash on" };
+                rows.push(Row::Item { label, action: Action::Torch, danger: false });
+            }
             for (n, name) in v.lenses.iter().enumerate() {
                 let label = if v.current == Some(n) { format!("{name}  ✓") } else { name.clone() };
                 rows.push(Row::Target { label, action: Action::Lens(n) });
@@ -647,6 +657,14 @@ mod tests {
         assert_eq!(on.rows[3], Row::Target { label: "720p · 30  ✓".into(), action: Action::Picture(1, 1) });
         on.show_lenses(&[], None, true, 800.0);
         assert!(!on.pictures);
+        // The flash: a row between Stop and the lenses, only where the lens has one.
+        let lit = Volume { torch: Some(true), ..using.clone() };
+        let lit = open().for_volume(lit, 800.0);
+        assert_eq!(lit.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
+        assert_eq!(lit.rows[5], Row::Item { label: "Turn flash off", action: Action::Torch, danger: false });
+        assert_eq!(lit.rows[6], Row::Target { label: "Main".into(), action: Action::Lens(0) });
+        let dark = open().for_volume(Volume { torch: Some(false), ..using.clone() }, 800.0);
+        assert_eq!(dark.rows[5], Row::Item { label: "Turn flash on", action: Action::Torch, danger: false });
         assert_eq!(on.rows.last(), Some(&Row::Note("Asking the phone…")));
         // Back is the VOLUME's first page, not a file's.
         on.show_main(800.0);

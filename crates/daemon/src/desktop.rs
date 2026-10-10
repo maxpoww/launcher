@@ -410,6 +410,8 @@ pub(crate) struct Desktop {
     pub lenses: HashMap<String, Vec<Lens>>,
     /// The lens each phone's camera was last started through.
     pub lens_on: HashMap<String, usize>,
+    /// The phones whose camera was last started with the flash on.
+    pub torch_on: HashSet<String>,
     /// The phones whose photos are being brought right now (volume paths).
     pub importing: HashSet<String>,
     /// What is plugged in and mounted, standing on the desktop as icons.
@@ -1066,6 +1068,11 @@ fn camera_pictures(lens: &Lens, chip: bool) -> Vec<Picture> {
     all
 }
 
+/// Whether a lens has the phone's flash beside it: the back ones.
+fn lens_has_torch(lens: &Lens) -> bool {
+    !matches!(lens.name.as_str(), "Front" | "External" | "Camera")
+}
+
 /// Whether this computer feeds a phone's camera through the system's own
 /// feeder (see `camera`).
 fn camera_chip() -> bool {
@@ -1243,6 +1250,7 @@ fn camera(
     cameras: &std::sync::Mutex<HashMap<String, u32>>,
     lens: &Lens,
     picture: Picture,
+    torch: bool,
 ) -> Option<String> {
     use crate::i18n::tr;
     if let Some(said) = serial.and_then(|s| phone_refuses(name, s)) {
@@ -1293,6 +1301,9 @@ fn camera(
         cmd.arg("--video-source=camera").arg(format!("--camera-id={}", lens.id));
         if let Some(zoom) = lens.zoom {
             cmd.arg(format!("--camera-zoom={zoom}"));
+        }
+        if torch {
+            cmd.arg("--camera-torch");
         }
         if let Some(fps) = fps.map(|f| lens.fps.map_or(f, |most| f.min(most))) {
             cmd.arg(format!("--camera-fps={fps}"));
@@ -2470,7 +2481,12 @@ impl App {
             let current = self.desktop.lens_on.get(&path).copied();
             let closed = self.desktop.volumes.iter().any(|v| v.closed && v.path.as_os_str() == path.as_str());
             let tether = self.desktop.volumes.iter().any(|v| v.tether && v.path.as_os_str() == path.as_str());
-            let volume = crate::desktop_menu::Volume { phone, closed, camera, lenses, current, tether };
+            // The flash is the back camera's.
+            let has_torch = current
+                .and_then(|n| self.desktop.lenses.get(&path).and_then(|l| l.get(n)))
+                .is_some_and(lens_has_torch);
+            let torch = (camera && has_torch).then(|| self.desktop.torch_on.contains(&path));
+            let volume = crate::desktop_menu::Volume { phone, closed, camera, lenses, current, torch, tether };
             menu = menu.for_volume(volume, h as f32);
         }
         // On a shortcut nothing vouches for: letting it run comes first.
@@ -2614,7 +2630,15 @@ impl App {
     /// Use the phone that is item `item` as the camera through its `n`th
     /// lens, with the `k`th picture of that lens's page (`None`: the one
     /// last chosen, else the best).
-    fn desktop_camera_start(&mut self, item: Option<usize>, n: usize, k: Option<usize>) {
+    /// Whether the phone that is item `item` is the camera with its flash on.
+    fn desktop_camera_torch(&self, item: Option<usize>) -> bool {
+        item.and_then(|i| self.desktop.items.get(i)).is_some_and(|it| {
+            self.desktop.torch_on.contains(&it.path)
+                && self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&it.path))
+        })
+    }
+
+    fn desktop_camera_start(&mut self, item: Option<usize>, n: usize, k: Option<usize>, torch: bool) {
         let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) else {
             return;
         };
@@ -2641,10 +2665,21 @@ impl App {
         // new one waits for the device to be let go).
         self.desktop_camera_stop(&path);
         self.desktop.lens_on.insert(path.clone(), n);
-        info!("desktop: {name} as the camera, {}, {} (serial {serial:?})", lens.name, picture.label());
+        let torch = torch && lens_has_torch(&lens);
+        if torch {
+            self.desktop.torch_on.insert(path.clone());
+        } else {
+            self.desktop.torch_on.remove(&path);
+        }
+        info!(
+            "desktop: {name} as the camera, {}, {}{} (serial {serial:?})",
+            lens.name,
+            picture.label(),
+            if torch { ", flash on" } else { "" }
+        );
         let cameras = self.desktop.cameras.clone();
         std::thread::spawn(move || {
-            if let Some(said) = camera(&name, serial.as_deref(), &path, &cameras, &lens, picture) {
+            if let Some(said) = camera(&name, serial.as_deref(), &path, &cameras, &lens, picture, torch) {
                 crate::desktop_send_notify(&said);
             }
         });
@@ -2855,8 +2890,23 @@ impl App {
             // A lens of the page of lenses turns the page to its pictures
             // (the release handler's); a lens of the first page — the
             // camera is on — changes lens with the picture in use.
-            Action::Lens(n) => self.desktop_camera_start(item, n, None),
-            Action::Picture(n, k) => self.desktop_camera_start(item, n, Some(k)),
+            Action::Lens(n) => {
+                // (The flash stays as it is through a change of lens.)
+                let torch = self.desktop_camera_torch(item);
+                self.desktop_camera_start(item, n, None, torch);
+            }
+            Action::Picture(n, k) => self.desktop_camera_start(item, n, Some(k), false),
+            // The flash: the camera is started again with it on, or off
+            // (scrcpy sets it as the camera starts) — same lens, same picture.
+            Action::Torch => {
+                let torch = !self.desktop_camera_torch(item);
+                let lens = item
+                    .and_then(|i| self.desktop.items.get(i))
+                    .and_then(|it| self.desktop.lens_on.get(&it.path).copied());
+                if let Some(n) = lens {
+                    self.desktop_camera_start(item, n, None, torch);
+                }
+            }
             Action::Configure => {
                 if let Some(i) = item {
                     self.desktop_open_config(i, at);
