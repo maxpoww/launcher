@@ -23,10 +23,11 @@ pub(crate) enum Field {
     Pick,
 }
 
-/// The input box's own buttons: two on its left, two on its right.
+/// The input box's own buttons: the paperclip on its left, the two of the
+/// voice on its right. (It had an emoji button too; emoji have their own
+/// page — the head's round button — and are for the WINDOW: Max, 2026-10-10.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoxBtn {
-    Emoji,
     /// The paperclip: a file from this computer.
     Clip,
     /// Talk and it is written.
@@ -38,8 +39,7 @@ pub(crate) enum BoxBtn {
 impl BoxBtn {
     fn glyph(self) -> &'static str {
         match self {
-            BoxBtn::Emoji => "\u{f118}", // fa-smile-o
-            BoxBtn::Clip => "\u{f0c6}",  // fa-paperclip
+            BoxBtn::Clip => "\u{f0c6}", // fa-paperclip
             // (Looked at, each one, in the font itself: a microphone with a
             // speech bubble for "talk and it is written" — the plain speech
             // bubble said nothing of talking; and the font's larger, solid
@@ -56,13 +56,12 @@ impl BoxBtn {
         match self {
             BoxBtn::Talk => 25.0,
             BoxBtn::Mic => 22.0,
-            BoxBtn::Emoji | BoxBtn::Clip => 20.0,
+            BoxBtn::Clip => 20.0,
         }
     }
 
     pub(super) fn hint(self) -> &'static str {
         match self {
-            BoxBtn::Emoji => "Emoji",
             BoxBtn::Clip => "Add a file from this computer",
             BoxBtn::Talk => "Talk and it is written here",
             BoxBtn::Mic => "Record a voice note",
@@ -158,7 +157,7 @@ pub(crate) struct Bottom {
     pub seek_clear: Rect,
     /// The input box (an open memory only).
     pub input: Option<Rect>,
-    pub btns: [(BoxBtn, Rect); 4],
+    pub btns: [(BoxBtn, Rect); 3],
     /// New (Memory's page only).
     pub new: Option<Rect>,
     /// The emoji picker, open over the input box.
@@ -220,7 +219,7 @@ pub(crate) fn bottom(
                 seek: Rect::new(rect.x, rect.y, 0.0, 0.0),
                 seek_clear: Rect::new(rect.x, rect.y, 0.0, 0.0),
                 input: None,
-                btns: [BoxBtn::Emoji, BoxBtn::Clip, BoxBtn::Talk, BoxBtn::Mic]
+                btns: [BoxBtn::Clip, BoxBtn::Talk, BoxBtn::Mic]
                     .map(|b| (b, Rect::new(rect.x, rect.y, 0.0, 0.0))),
                 new: None,
                 tray: Some(tray),
@@ -244,8 +243,7 @@ pub(crate) fn bottom(
     let left = x + BTN_EDGE;
     let right = x + w - BTN_EDGE - BTN;
     let btns = [
-        (BoxBtn::Emoji, Rect::new(left, btn_y, BTN, BTN)),
-        (BoxBtn::Clip, Rect::new(left + BTN_STEP, btn_y, BTN, BTN)),
+        (BoxBtn::Clip, Rect::new(left, btn_y, BTN, BTN)),
         (BoxBtn::Talk, Rect::new(right - BTN_STEP, btn_y, BTN, BTN)),
         (BoxBtn::Mic, Rect::new(right, btn_y, BTN, BTN)),
     ];
@@ -287,8 +285,8 @@ impl Bottom {
     /// The part of the input box the words are in.
     pub(crate) fn text(&self) -> Option<Rect> {
         let r = self.input?;
-        let left = self.btns[1].1.x + BTN + BTN_GAP;
-        let right = self.btns[2].1.x - BTN_GAP;
+        let left = self.btns[0].1.x + BTN + BTN_GAP;
+        let right = self.btns[1].1.x - BTN_GAP;
         Some(Rect::new(left, r.y, (right - left).max(0.0), r.h))
     }
 
@@ -823,7 +821,6 @@ pub(super) fn draw(
             let live = match which {
                 BoxBtn::Mic => bar.rec.is_some(),
                 BoxBtn::Talk => bar.talk.is_some(),
-                BoxBtn::Emoji => bar.picking.is_some(),
                 BoxBtn::Clip => false,
             };
             if bar.rec.is_some() && which != BoxBtn::Mic {
@@ -968,8 +965,8 @@ mod tests {
             let mid = r.x + r.w / 2.0;
             assert!(mid > input.x + 8.0 && mid < input.x + input.w - 8.0 && r.y >= input.y);
             // (Their icons — their middles — are to each side of the words.)
-            assert_eq!(r.x + r.w / 2.0 < text.x, n < 2);
-            assert_eq!(r.x + r.w / 2.0 > text.x + text.w, n >= 2);
+            assert_eq!(r.x + r.w / 2.0 < text.x, n < 1);
+            assert_eq!(r.x + r.w / 2.0 > text.x + text.w, n >= 1);
         }
         // It grows with what is written, to a point; the search rides up with it.
         let tall = bottom(rect, Page::Session, 4, false, None);
@@ -1000,7 +997,7 @@ mod tests {
         let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
         assert_eq!(b.hit(mid(b.seek), false), Some(Hover::Seek));
         assert_eq!(
-            b.hit(mid(b.btns[3].1), false),
+            b.hit(mid(b.btns[2].1), false),
             Some(Hover::Btn(BoxBtn::Mic))
         );
         assert_eq!(b.hit(mid(b.text().unwrap()), false), Some(Hover::Input));

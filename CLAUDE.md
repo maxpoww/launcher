@@ -442,8 +442,8 @@ The big daemon files are cohesive but long — go straight to the function:
   `clipboard.rs`). `bar.rs` is the BOTTOM (`bottom()` lays it out, `draw()` paints it, `Bottom::hit`
   tests it): the SEARCH — a circle with the magnifier that opens into a field (`Field::Seek`,
   `Card::query`, `Card::matches`; a memory is found by its name or anything in it) — and under it
-  the INPUT BOX (an open memory only): emoji and paperclip on its left, talk-to-text and record on
-  its right, all inside it. THE KEYBOARD: the card has none until the input box, the search or the
+  the INPUT BOX (an open memory only): the paperclip on its left, talk-to-text and record on its
+  right, all inside it (no emoji button: emoji are for the WINDOW, from their own page). THE KEYBOARD: the card has none until the input box, the search or the
   name is clicked (`card_take_keys`: an exclusive grab that drops to on-demand the moment the
   keyboard arrives, as the desktop does; while it has it the WHOLE surface takes the pointer and a
   click off the card gives it back — `card_drop_keys` — because the card's window is still the

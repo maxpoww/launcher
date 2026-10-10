@@ -356,10 +356,9 @@ pub(crate) struct Card {
     rec: Option<voice::Rec>,
     playing: Option<voice::Playing>,
     writing: bool,
-    /// The emoji picker is open over the input box; what its search
-    /// holds, the emoji it shows for that (`emoji_table::EMOJI` by place),
-    /// how far its grid is scrolled.
-    picking: bool,
+    /// The emoji page's picker: what its search holds, the emoji it shows
+    /// for that (`emoji_table::EMOJI` by place), how far its grid is
+    /// scrolled.
     pick_query: String,
     picked: Vec<usize>,
     pick_scroll: f32,
@@ -597,7 +596,7 @@ impl Card {
 
     /// The emoji picker, when it is open: how many it shows, how far down.
     fn pick(&self) -> Option<(usize, f32)> {
-        (self.picking || self.page == Page::Emoji).then_some((self.picked.len(), self.pick_scroll))
+        (self.page == Page::Emoji).then_some((self.picked.len(), self.pick_scroll))
     }
 
     /// Which emoji the picker shows: all, or those its search names.
@@ -1929,16 +1928,6 @@ impl App {
         match which {
             BoxBtn::Mic => self.card_voice_button(false),
             BoxBtn::Talk => self.card_voice_button(true),
-            BoxBtn::Emoji => {
-                self.card.picking = !self.card.picking;
-                self.card.pick_query.clear();
-                self.card.repick();
-                if !self.card.picking && self.card.field == Some(Field::Pick) {
-                    self.card.field = Some(Field::Box);
-                }
-                self.sync_card_input();
-                self.request_card_draw();
-            }
             BoxBtn::Clip => self.card_pick_file(),
         }
     }
@@ -1962,25 +1951,17 @@ impl App {
         // opens: the grid does not jump under the pointer now.)
         self.card.used(at);
         self.card_save();
-        if self.card.page == Page::Emoji {
-            // The emoji's own page: straight into the window, whatever has
-            // the cursor (the picker's search gives the keyboard back first).
-            let typing = self.card.field.is_some();
-            self.serve_transient_text(emoji);
-            self.card_drop_keys();
-            let wait = if typing {
-                PASTE_FOCUS + 60
-            } else {
-                PASTE_SETTLE
-            };
-            self.after_ms(wait, |_| card_paste_key());
-        } else if matches!(self.card.field, Some(Field::Box | Field::Pick)) {
-            self.card.type_in(emoji);
-            self.request_card_draw();
-        } else if self.card.field.is_none() {
-            self.serve_transient_text(emoji);
-            self.after_ms(PASTE_SETTLE, |_| card_paste_key());
-        }
+        // Straight into the window, whatever has the cursor (the picker's
+        // search gives the keyboard back first).
+        let typing = self.card.field.is_some();
+        self.serve_transient_text(emoji);
+        self.card_drop_keys();
+        let wait = if typing {
+            PASTE_FOCUS + 60
+        } else {
+            PASTE_SETTLE
+        };
+        self.after_ms(wait, |_| card_paste_key());
     }
 
     /// The paperclip: the desktop's file picker, and what is picked is
