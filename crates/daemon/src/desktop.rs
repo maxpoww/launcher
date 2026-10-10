@@ -4209,6 +4209,24 @@ impl App {
                     .map(|it| PathBuf::from(&it.path))
                     .collect();
                 self.desktop_drop_on_volume(onto, paths);
+            } else if let Some(onto) = self.desktop_folder_under(at.pos, &items) {
+                // Let go over a FOLDER of the desktop: into it (a move — it
+                // is the same disk; a name already in there gets its
+                // number). It used to land in the cell beside the folder,
+                // which is not what a hand letting go on a folder means.
+                let dir = PathBuf::from(&self.desktop.items[onto].path);
+                let paths: Vec<PathBuf> = items
+                    .iter()
+                    .filter_map(|&i| self.desktop.items.get(i))
+                    .filter(|it| it.kind != Kind::Volume)
+                    .map(|it| PathBuf::from(&it.path))
+                    .collect();
+                for p in &paths {
+                    self.desktop.remembered.remove(&p.to_string_lossy().into_owned());
+                    self.desktop.selected.remove(&p.to_string_lossy().into_owned());
+                }
+                let (moved, failed) = crate::desktop_send::put(&paths, &dir, true);
+                info!("desktop: {} item(s) into {} ({failed} could not go)", moved.len(), dir.display());
             } else {
                 self.desktop_settle_group(&items, at.pos);
             }
@@ -4287,6 +4305,12 @@ impl App {
     fn desktop_volume_under(&self, pos: (f32, f32), carried: &[usize]) -> Option<usize> {
         let i = self.desktop.hit(pos)?;
         (!carried.contains(&i) && self.desktop.items.get(i)?.kind == Kind::Volume).then_some(i)
+    }
+
+    /// The folder of the desktop under `pos`, if any (never one being carried).
+    fn desktop_folder_under(&self, pos: (f32, f32), carried: &[usize]) -> Option<usize> {
+        let i = self.desktop.hit(pos)?;
+        (!carried.contains(&i) && self.desktop.items.get(i)?.kind == Kind::Folder).then_some(i)
     }
 
     /// Copy `paths` onto the volume that is item `i`: a phone's Download
