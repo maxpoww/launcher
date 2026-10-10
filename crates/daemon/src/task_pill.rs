@@ -38,12 +38,12 @@ use crate::App;
 const MAX_W: f32 = 40.0;
 /// How much longer than its words and number need the pill is: the fill has
 /// further to go, so it is seen to move (Max, 2026-10-09: "make it longer so
-/// it goes faster, like another 1/3 longer" — then a quarter longer, twice).
-const STRETCH: f32 = 25.0 / 12.0;
+/// it goes faster, like another 1/3 longer" — then a quarter longer, twice, then "a little shorter").
+const STRETCH: f32 = 1.9;
 /// A row of the box, in pill-heights.
 const ROW_H: f32 = 1.0;
 /// The air between one task and the next in the box (Max, 2026-10-10).
-const AIR: f32 = 2.0;
+const AIR: f32 = 3.0;
 /// Between the number and the `+N` chip.
 const CHIP_GAP: f32 = 8.0;
 /// Between the words and the number.
