@@ -1187,7 +1187,13 @@ fn camera(
     // room to spare). 720p is the last resort.
     let steps: [(Option<u32>, u32, &str); 4] =
         [(lens.fps, 1920, "16M"), (Some(30), 1920, "8M"), (Some(30), 1920, "4M"), (Some(30), 1280, "8M")];
-    let mut step = camera_step_known().min(steps.len() - 1);
+    // Only where the SYSTEM says the hardware is of that kind (Golem's
+    // gpu/intel-legacy sets GOLEM_CAMERA_ADAPTIVE): everywhere else the
+    // camera is asked for at its best and left there, whatever a busy
+    // moment's reading says (Max, 2026-10-10: "it has to be specific to
+    // that kind of hardware" — the other laptops' picture must not change).
+    let adaptive = std::env::var_os("GOLEM_CAMERA_ADAPTIVE").is_some();
+    let mut step = if adaptive { camera_step_known().min(steps.len() - 1) } else { 0 };
     let (mut child, early) = loop {
         let (fps, size, rate) = steps[step];
         let mut cmd = std::process::Command::new("scrcpy");
@@ -1254,7 +1260,7 @@ fn camera(
             other => other,
         };
         // Keeping up? One core flat out on the decoding means it is not.
-        if early.is_none() && step + 1 < steps.len() && camera_overworked(child.id()) {
+        if adaptive && early.is_none() && step + 1 < steps.len() && camera_overworked(child.id()) {
             // Ours may have been ended by hand meanwhile (the menu's row).
             let still_ours = cameras.lock().ok().is_some_and(|on| on.get(path) == Some(&child.id()));
             let _ = child.kill();
@@ -1270,7 +1276,9 @@ fn camera(
             }
             continue;
         }
-        camera_step_keep(step);
+        if adaptive {
+            camera_step_keep(step);
+        }
         break (child, early);
     };
     let mut relay = None;
