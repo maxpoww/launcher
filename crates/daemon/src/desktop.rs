@@ -1103,7 +1103,26 @@ const CAMERA_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 /// The step of the camera's quality ladder that this computer kept up with
 /// last (0 = the lens's best), so the next start does not try again what
 /// was too much.
-static CAMERA_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CAMERA_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// ...and across restarts: it is a fact about the computer, found once (the
+/// finding costs a few seconds each step at the camera's first start).
+fn camera_step_known() -> usize {
+    let known = CAMERA_STEP.load(std::sync::atomic::Ordering::Relaxed);
+    if known != usize::MAX {
+        return known;
+    }
+    std::fs::read_to_string(crate::persist::data_path("camera-step"))
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn camera_step_keep(step: usize) {
+    if CAMERA_STEP.swap(step, std::sync::atomic::Ordering::Relaxed) != step {
+        let _ = std::fs::write(crate::persist::data_path("camera-step"), step.to_string());
+    }
+}
 
 /// Whether the process decoding the phone's video has a core flat out: its
 /// processor time over two and a half seconds, after a second to settle.
@@ -1127,7 +1146,9 @@ fn camera_overworked(pid: u32) -> bool {
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
     let share = (after - before) as f64 / ticks / at.elapsed().as_secs_f64();
     debug!("desktop: the camera's decoder uses {:.0}% of a core", share * 100.0);
-    share > 0.88
+    // (Above one whole core: the decoder's own thread is flat out and the
+    // rest of the program adds to it. At 81 % the same machine lost nothing.)
+    share > 0.95
 }
 
 /// Use a phone's back camera as this computer's (scrcpy into the loopback
@@ -1160,8 +1181,13 @@ fn camera(
     // through at 18–23 pictures a second with that core at 107 % — Snapshot
     // showed the Pixel in slow motion (2026-10-10); 720p at 30 came through
     // whole. What worked is remembered for as long as the dock runs.
-    let steps: [(Option<u32>, u32, &str); 3] = [(lens.fps, 1920, "16M"), (Some(30), 1920, "12M"), (Some(30), 1280, "8M")];
-    let mut step = CAMERA_STEP.load(std::sync::atomic::Ordering::Relaxed).min(steps.len() - 1);
+    // The steps keep the SIZE as long as they can: it is the bit rate that
+    // costs most to decode (same MacBook, 1080p at 30: 18 pictures a second
+    // at 16M, all 30 at 8M with the core still flat out, all 30 at 4M with
+    // room to spare). 720p is the last resort.
+    let steps: [(Option<u32>, u32, &str); 4] =
+        [(lens.fps, 1920, "16M"), (Some(30), 1920, "8M"), (Some(30), 1920, "4M"), (Some(30), 1280, "8M")];
+    let mut step = camera_step_known().min(steps.len() - 1);
     let (mut child, early) = loop {
         let (fps, size, rate) = steps[step];
         let mut cmd = std::process::Command::new("scrcpy");
@@ -1244,7 +1270,7 @@ fn camera(
             }
             continue;
         }
-        CAMERA_STEP.store(step, std::sync::atomic::Ordering::Relaxed);
+        camera_step_keep(step);
         break (child, early);
     };
     let mut relay = None;
