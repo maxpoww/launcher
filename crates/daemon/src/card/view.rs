@@ -668,6 +668,12 @@ pub(crate) fn draw_pieces(
 pub(crate) struct Paint {
     pub fill: [f32; 4],
     pub ink: [f32; 4],
+    /// The colour the ACCENT is made from: the one read from what is behind
+    /// the screen's boxes (the wallpaper's side). The card's own colour
+    /// (`fill`) is its window's title bar's (Max, 2026-10-10: *"use the
+    /// color we sample for the title bar instead of the bg, and use the
+    /// color we sample from the BG for the accent color"*).
+    pub tint: [f32; 4],
 }
 
 impl Paint {
@@ -700,7 +706,15 @@ impl Paint {
     /// tone instead of the bright one, to stand out as well.
     pub(super) fn accent(&self) -> [f32; 3] {
         use crate::options::hsl_to_rgb;
-        let (h, s, _) = self.hsl();
+        // (Its hue is the background's — `tint` — not the card's own.)
+        let (h, s, _) = {
+            use crate::options::{linear_to_srgb, rgb_to_hsl};
+            rgb_to_hsl(
+                linear_to_srgb(self.tint[0]).clamp(0.0, 1.0),
+                linear_to_srgb(self.tint[1]).clamp(0.0, 1.0),
+                linear_to_srgb(self.tint[2]).clamp(0.0, 1.0),
+            )
+        };
         let hued = ((s - 0.02) / 0.06).clamp(0.0, 1.0);
         let (sat, light) = if self.bright() {
             (0.70, 0.36)
@@ -1995,6 +2009,7 @@ mod tests {
     const PAINT: Paint = Paint {
         fill: [0.16, 0.14, 0.19, 1.0],
         ink: [0.95, 0.94, 0.96, 1.0],
+        tint: [0.16, 0.14, 0.19, 1.0],
     };
 
     #[test]

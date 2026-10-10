@@ -243,6 +243,35 @@ enum Undone {
     },
 }
 
+/// Where the compositor's side notes the colours it samples for the
+/// windows' title bars.
+const BAR_TRACE: &str = "/tmp/waveview-trace.log";
+
+/// The colour last sampled for the title bar of the window titled `title`
+/// (sRGB, 0..1), from the end of `BAR_TRACE` — its lines read
+/// `… bar-sample <title>: R G B a=…`.
+fn bar_color_of(title: &str) -> Option<[f32; 3]> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(BAR_TRACE).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(512 * 1024)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    bar_color_in(&tail, title)
+}
+
+fn bar_color_in(trace: &str, title: &str) -> Option<[f32; 3]> {
+    let mark = format!("bar-sample {title}: ");
+    trace.lines().rev().find_map(|line| {
+        let rest = &line[line.find(&mark)? + mark.len()..];
+        let mut n = rest.split_whitespace().take(3).map(str::parse::<u8>);
+        let (r, g, b) = (n.next()?.ok()?, n.next()?.ok()?, n.next()?.ok()?);
+        Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+    })
+}
+
 /// How long Space is held before it is a voice note and not a tap (ms).
 const HOLD_MS: u64 = 350;
 
@@ -360,6 +389,9 @@ pub(crate) struct Card {
     tabbed: bool,
     /// The window that has the focus, as last heard from the compositor.
     active: Option<String>,
+    /// The colour of the card's window's TITLE BAR (sRGB), as the compositor
+    /// side last sampled it: the card's own colour.
+    bar_color: Option<[f32; 3]>,
     /// The width the items' words were last wrapped to (`lines`): another
     /// one, and they are wrapped again.
     wrapped_w: f32,
@@ -3103,6 +3135,8 @@ impl App {
         // The text is wrapped to the card's width, which is the window's.
         let before = self.card.width();
         self.card.host = Some(addr.to_owned());
+        // (Another window: its bar's colour is to be read afresh.)
+        self.card.bar_color = None;
         if self.card.width() != before {
             self.card.lines.clear();
         }
@@ -3178,6 +3212,7 @@ impl App {
             }
             Some(spot) => {
                 self.card.spot = Some(spot);
+                self.card_read_bar();
                 // A card in the hand keeps to the pointer, not to memory.
                 if !matches!(
                     self.card.press,
@@ -3248,6 +3283,8 @@ impl App {
                 // mid-drag). The card comes back rather than staying lost.
                 let lost = app.card.away & Away::Drag as u8 != 0
                     && app.card.away_since.is_some_and(|t| t.elapsed() > LOST_DRAG);
+                // (Its title bar may have changed colour meanwhile.)
+                app.card_read_bar();
                 if now == app.card.spot && lost {
                     app.card_back(Away::Drag);
                 } else if now != app.card.spot {
@@ -3870,8 +3907,51 @@ impl App {
             Some(s) => Rect::new(s.x, s.y, s.w, s.h),
             None => self.card.rect.unwrap_or_default(),
         };
-        let (fill, ink) = self.box_surface_at(side);
-        Paint { fill, ink }
+        // What is read behind the screen's boxes: the accent's hue.
+        let (tint, ink) = self.box_surface_at(side);
+        // The card's OWN colour is its window's title bar's (Max,
+        // 2026-10-10), so the card reads as part of its window; where that
+        // is not known (no bar, nothing sampled yet) it is the boxes'.
+        match self.card.bar_color {
+            Some(c) => {
+                use crate::options::srgb_to_linear;
+                let fill = [
+                    srgb_to_linear(c[0]),
+                    srgb_to_linear(c[1]),
+                    srgb_to_linear(c[2]),
+                    tint[3],
+                ];
+                Paint {
+                    fill,
+                    ink: crate::options::ink_on(fill),
+                    tint,
+                }
+            }
+            None => Paint {
+                fill: tint,
+                ink,
+                tint,
+            },
+        }
+    }
+
+    /// Read the title bar's colour of the card's window again. The
+    /// compositor's side (the waveview plugin) samples it for the bar it
+    /// draws and notes each change in its trace; the last note for this
+    /// window's title is its colour. (A reading of that file's end: no
+    /// compositor round trip, nothing for the plugin to be asked.)
+    fn card_read_bar(&mut self) {
+        let title = self
+            .card
+            .host
+            .as_deref()
+            .and_then(crate::hypr::window_class_title)
+            .map(|(_, title)| title);
+        let color = title.as_deref().and_then(bar_color_of);
+        if color.is_some() && color != self.card.bar_color {
+            self.card.bar_color = color;
+            self.request_card_draw();
+        }
     }
 
     /// Route a pointer event on the card's surface.
@@ -5001,6 +5081,22 @@ mod tests {
         assert_eq!(card.items.len(), 1);
         assert_eq!(card.session_for("0x2", Some("Desktop")), Some(a));
         assert!(card.titles.get("Desktop").is_none());
+    }
+
+    #[test]
+    fn a_bars_colour_is_its_windows_last_note_in_the_trace() {
+        let trace = "1.0 bar-sample foot: 29 32 33 a=1.000 (mode 1024/1024, 1 layer)\n\
+                     2.0 bar-sample Send a file: 42 42 42 a=1.000 (mode 498/1024, 1 layer)\n\
+                     3.0 bar-sample rejected (a=0.000), keeping the last colour; retrying\n\
+                     4.0 bar-sample foot: 255 0 51 a=1.000 (mode 1024/1024, 1 layer)\n";
+        assert_eq!(bar_color_in(trace, "foot"), Some([1.0, 0.0, 0.2]));
+        assert_eq!(
+            bar_color_in(trace, "Send a file"),
+            Some([42.0 / 255.0, 42.0 / 255.0, 42.0 / 255.0])
+        );
+        // (A window never sampled; and "rejected" is no window's title.)
+        assert_eq!(bar_color_in(trace, "Seam"), None);
+        assert_eq!(bar_color_in(trace, "rejected"), None);
     }
 
     #[test]
