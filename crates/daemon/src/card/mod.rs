@@ -236,10 +236,9 @@ enum Away {
     Nudge = 2,
     /// The workspaces are being swiped.
     Swipe = 4,
-    /// The focused window lies over where the card is: the card is its own
-    /// window's, and is not drawn over another (Max, 2026-10-10: *"the card
-    /// is always on top of other windows"*). It is back when the focus goes
-    /// to its window, or to one that does not cover it.
+    /// Its window is not the focused one: the card is its own window's, and
+    /// is not drawn over the others (Max, 2026-10-10). It is back when its
+    /// window is focused again.
     Focus = 8,
 }
 
@@ -2464,27 +2463,17 @@ impl App {
             // Its own window again: it is back.
             self.card_back(Away::Focus);
         } else {
-            // A window it is not on for. The card STAYS on its own window
-            // (Max, 2026-10-10: *"i like the card staying on unfocused
-            // windows… i like to drag from another window there"*) — unless
-            // this window lies over where the card is: then the card would
-            // be drawn on top of it, and it steps away until that is over.
-            let under = self
-                .card
-                .rect
-                .zip(crate::hypr::window_spot(addr))
-                .is_some_and(|(r, w)| {
-                    w.visible
-                        && r.x < w.x + w.w
-                        && w.x < r.x + r.w
-                        && r.y < w.y + w.h
-                        && w.y < r.y + r.h
-                });
-            if under {
-                self.card_away(Away::Focus);
-            } else {
-                self.card_back(Away::Focus);
-            }
+            // A window it is not on for: the card is HIDDEN for as long as
+            // its own window is not the focused one (Max, 2026-10-10: *"we
+            // keep it always hidden when i abandon the window, if i want it
+            // i call it from the other one. that is simple, easy to
+            // understand"*). It is a layer, drawn over every window: left
+            // showing, it stood on top of whatever was moved over it.
+            // (Staying unless covered, and not drawing its covered part,
+            // were both tried that day and dropped.)
+            self.card_away(Away::Focus);
+        }
+    }
         }
     }
 
