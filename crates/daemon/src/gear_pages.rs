@@ -392,6 +392,15 @@ fn has_light_sensor() -> bool {
     })
 }
 
+/// A lit keyboard the kernel exposes as an LED (`*::kbd_backlight`), which
+/// `golem-autobrightness` turns on in the dark.
+fn has_keyboard_light() -> bool {
+    std::fs::read_dir("/sys/class/leds").is_ok_and(|dir| {
+        dir.flatten()
+            .any(|d| d.file_name().to_string_lossy().ends_with("kbd_backlight"))
+    })
+}
+
 fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map_or_else(
         || PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"),
@@ -611,7 +620,11 @@ impl App {
             Item::Toggle {
                 hit: sys(SysHit::AutoBright),
                 label: "Automatic brightness".into(),
-                hint: "The screen follows the room's light".into(),
+                hint: if has_keyboard_light() {
+                    "Screen and keyboard follow the room's light".into()
+                } else {
+                    "The screen follows the room's light".into()
+                },
                 on: !Self::autobright_off_path().exists(),
             }
         })
