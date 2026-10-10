@@ -96,7 +96,7 @@ impl App {
     /// The surface takes the pointer everywhere while a menu or a box is
     /// up, and nowhere otherwise.
     fn sync_desktop_top_input(&mut self) {
-        let up = self.desktop.menu.is_some() || self.desktop.props.is_some();
+        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop.config.is_some();
         if up == self.desktop_top.input_on {
             return;
         }
@@ -116,7 +116,7 @@ impl App {
             return;
         }
         self.sync_desktop_top_input();
-        let up = self.desktop.menu.is_some() || self.desktop.props.is_some();
+        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop.config.is_some();
         if !up && !self.desktop_top.drawn {
             return;
         }
@@ -152,6 +152,11 @@ impl App {
             props.t = t;
             moving |= m;
         }
+        if let Some(config) = self.desktop.config.as_mut() {
+            let (t, m) = crate::animation::ease_toward(config.t, 1.0, dt, 16.0, 0.004);
+            config.t = t;
+            moving |= m;
+        }
         moving
     }
 
@@ -162,6 +167,9 @@ impl App {
         }
         if let Some(props) = self.desktop.props.as_ref() {
             props.push(scene, &self.desktop_panel_paint(props.rect));
+        }
+        if let Some(config) = self.desktop.config.as_ref() {
+            config.push(scene, &self.desktop_panel_paint(config.rect));
         }
     }
 

@@ -226,6 +226,28 @@ The big daemon files are cohesive but long — go straight to the function:
   the dock holds; apps on the fast card get NVIDIA's offload variables at launch (`gpu_exec`).
   Pointer-free: `waverunner-ctl debug-gear <open net|bt|gear|disk|cpu|ram|gpu|bat>`, then
   `detail|hotspot|files|page <about|health|clean|drive|folder|card|app|system>|close|…`.
+- `phones.rs` + `desktop_config.rs` — a PHONE'S SETTINGS and its CONFIGURE box (Max, 2026-10-10,
+  mockup `~/phone-configure-mockup`): the "Configure" row of a phone's menu (above Properties, a
+  click) opens the box, on the menus' surface; nothing changes until Apply. A phone is known by
+  its SERIAL (`phones.json` in the data dir, `Phones::of`); its things are kept in ONE folder
+  `~/Phones/<name>` (the name typed by its owner — two phones of one model are two phones), a
+  subfolder a KIND (`phones::KINDS`: Photos ← DCIM/Pictures/Movies, Music, Downloads, Documents,
+  Recordings, WhatsApp; `phones::place`). The box: one `build()` places every part and its click
+  rect (draw and pointer both walk it); the name is a field (the desktop takes the keyboard while
+  it is typed, as for an icon's name); a choice is a pill that a click turns. SYNC OVER WI-FI:
+  Apply allows the plugged-in phone over adb TCP (`desktop_phone::wifi_allow`: `adb tcpip 5555`,
+  its wlan0 address kept); every `SYNC_TICK` (60 s) `phone_sync_tick` knocks on each synced
+  phone (`wifi_there`, a 1 s TCP connect), and one that is there and due (`Every`, or just
+  arrived) and charging if asked is synced (`phone_sync` → `desktop_phone::transfer`, on the task
+  pill, a notification only if something came); on its cable and silent over Wi-Fi, it is allowed
+  again (a phone forgets at restart). CLEAN: asked once more in the box, then `transfer(…,
+  remove = true)`: everything of the ticked kinds comes here and each file leaves the phone ONLY
+  once its copy here is whole (`Item::here`, by size; `rm` a batch, names quoted) — run against a
+  real phone by the ignored test `a_real_phone_is_copied_from_and_cleaned`
+  (`GOLEM_TEST_PHONE=<serial> cargo test -- --ignored a_real_phone`). "Import photos" is the same
+  transfer for the photos kind into `<folder>/Photos`; an older import's `~/Pictures/<phone>` is
+  adopted there by a rename (`adopt_pictures`). Pointer-free: `debug-desktop "config <n>|sync|kind
+  <i>|every|charging|after|clean|really|notnow|apply|cancel|name <text>"`.
 - `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar
   (what on the left, the pill filling like the player's track, the percentage on the right in a
   slot reserved at "100%"; left of the bell, growing out of its right end so it moves no other

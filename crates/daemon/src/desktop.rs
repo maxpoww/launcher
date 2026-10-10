@@ -416,6 +416,12 @@ pub(crate) struct Desktop {
     pub volumes: Vec<crate::mounts::Mounted>,
     /// The Properties box, while it is up.
     pub props: Option<Props>,
+    /// A phone's Configure box that is up (`desktop_config.rs`).
+    pub config: Option<crate::desktop_config::Config>,
+    /// The phones being synced over Wi-Fi right now (serials), and whether
+    /// each was there at the last look.
+    pub syncing: HashSet<String>,
+    pub phones_there: HashMap<String, bool>,
     /// The last plain click on an item (its path, and when): a second one
     /// on the same item soon enough is a double click, which opens it.
     pub last_click: Option<(String, std::time::Instant)>,
@@ -693,7 +699,7 @@ pub(crate) fn phone_serial(uri: &str) -> Option<String> {
 /// A mounted phone's serial, for `adb` and `scrcpy`: read off its USB node
 /// (what every brand gives the same way — and with two phones on the desk
 /// it is what tells them apart), else out of its mount's name.
-fn phone_serial_of(v: &crate::mounts::Mounted) -> Option<String> {
+pub(crate) fn phone_serial_of(v: &crate::mounts::Mounted) -> Option<String> {
     v.port
         .as_deref()
         .and_then(|port| usb_serial(port, std::path::Path::new("/sys/bus/usb/devices")))
@@ -1870,7 +1876,7 @@ impl App {
     /// Do `job` off the loop (a copy takes as long as it takes, and the
     /// whole shell waits on this thread) and `then` with what it gives,
     /// back here.
-    fn desktop_off_loop<R: Send + 'static>(
+    pub(crate) fn desktop_off_loop<R: Send + 'static>(
         &mut self,
         job: impl FnOnce() -> R + Send + 'static,
         mut then: impl FnMut(&mut App, R) + 'static,
@@ -2547,6 +2553,11 @@ impl App {
             }
             // (Turning the page is the release handler's: the menu stays up.)
             Action::MoveTo | Action::Back | Action::Camera => {}
+            Action::Configure => {
+                if let Some(i) = item {
+                    self.desktop_open_config(i, at);
+                }
+            }
             Action::Cut | Action::Copy => {
                 let paths = self.desktop_selected_paths();
                 let cut = action == Action::Cut;
@@ -2585,12 +2596,22 @@ impl App {
                 }
                 let (name, serial) = (v.name.clone(), phone_serial_of(v));
                 let mount = (!v.closed).then(|| v.path.clone());
-                info!("desktop: importing the photos of {name}");
+                // Into the phone's own folder here (the one its owner named
+                // in Configure, else one of its name).
+                let known = crate::phones::Phones::load().of(serial.as_deref().unwrap_or(""), &name);
+                let (folder, title) = (known.folder(), known.name.clone());
+                info!("desktop: importing the photos of {name} into {}", folder.display());
                 let task = self.task_begin(&format!("{} {name}", crate::i18n::tr("Importing photos from")));
                 self.desktop_off_loop(
                     move || {
-                        let (said, show) =
-                            crate::desktop_phone::import_photos(&name, serial.as_deref(), mount.as_deref(), &task);
+                        let (said, show) = crate::desktop_phone::import_photos(
+                            &name,
+                            serial.as_deref(),
+                            mount.as_deref(),
+                            &folder,
+                            &task,
+                        );
+                        let name = title;
                         // A click on it opens the folder they went to. (Under
                         // the phone's name and the icon it has on the desktop.)
                         crate::desktop_send_notify_open(&name, "phone", &said, show.as_deref());
@@ -3087,10 +3108,11 @@ impl App {
     pub(crate) fn desktop_shortcut(&mut self, keysym: Keysym) {
         let at = self.desktop.ptr.unwrap_or((self.desktop.grid.x0, MARGIN));
         // A menu or a box up: Escape puts it away; nothing else is for it.
-        if self.desktop.menu.is_some() || self.desktop.props.is_some() {
+        if self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop.config.is_some() {
             if keysym == Keysym::Escape {
                 self.desktop.menu = None;
                 self.desktop.props = None;
+                self.desktop.config = None;
                 self.request_desktop_draw();
             }
             return;
@@ -3206,7 +3228,12 @@ impl App {
     /// Draw now, or once the frame in flight has been shown. Every change
     /// of state comes through here, so the pointer's shape is settled here
     /// too (see `desktop_cursor`).
-    fn request_desktop_draw(&mut self) {
+    /// The same, for a caller in another file.
+    pub(crate) fn request_desktop_draw_soon(&mut self) {
+        self.request_desktop_draw();
+    }
+
+    pub(crate) fn request_desktop_draw(&mut self) {
         self.desktop_cursor();
         // (The menus' own surface follows every change too.)
         self.request_desktop_top_draw();
@@ -3406,6 +3433,11 @@ impl App {
             )
         {
             self.desktop_end_rename(true);
+        }
+        // A phone's Configure box is up: the pointer is its.
+        if self.desktop.config.is_some() {
+            self.desktop_config_pointer(&event);
+            return;
         }
         match event {
             wl_pointer::Event::Enter {
@@ -4476,6 +4508,12 @@ impl App {
             };
         }
         // `taskbox open|close`: the task pill's box, without a scroll.
+        // `config <n>`: the Configure box of the phone that is item n;
+        // `config sync|kind <i>|every|charging|after|clean|really|notnow|
+        // apply|cancel|name <text>`: a click on that part of it.
+        if let Some(rest) = what.strip_prefix("config ") {
+            return self.desktop_config_debug(rest.trim());
+        }
         // (`collapse`, `peek`, `unpeek`, `cancel`: what a click and the
         // pointer do to the pill.)
         if let Some(rest) = what.strip_prefix("taskbox ") {

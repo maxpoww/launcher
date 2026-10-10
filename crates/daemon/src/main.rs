@@ -25,6 +25,7 @@ mod deck;
 mod deck_thumbs;
 mod card;
 mod desktop;
+mod desktop_config;
 mod desktop_menu;
 mod desktop_phone;
 mod desktop_props;
@@ -76,6 +77,7 @@ mod perf;
 mod pager;
 mod pages;
 mod persist;
+mod phones;
 mod pins;
 mod play_art;
 mod playbox;
@@ -1145,6 +1147,18 @@ fn main() -> anyhow::Result<()> {
             }
         } else {
             warn!("cannot watch {}: desktop icons will not follow changes", dir.display());
+        }
+    }
+
+    // The phones synced over Wi-Fi are looked for every minute
+    // (`desktop_config.rs`).
+    if app.desktop_layer.is_some() {
+        let every = calloop::timer::Timer::from_duration(desktop_config::SYNC_TICK);
+        if let Err(e) = event_loop.handle().insert_source(every, |_, _, app: &mut App| {
+            app.phone_sync_tick();
+            calloop::timer::TimeoutAction::ToDuration(desktop_config::SYNC_TICK)
+        }) {
+            warn!("phones cannot be synced over Wi-Fi: {e}");
         }
     }
 
@@ -6011,6 +6025,11 @@ impl App {
             self.card_key(keysym, utf8);
             return;
         }
+        // A phone's name being typed in its Configure box takes every key.
+        if self.desktop_config_typing() {
+            self.desktop_config_key(keysym, utf8);
+            return;
+        }
         // A desktop icon's name being typed takes every key.
         if self.desktop.rename.is_some() {
             self.desktop_key(keysym, utf8);
@@ -6753,6 +6772,12 @@ impl KeyboardHandler for App {
             // window) keeps what was typed.
             if self.desktop.rename.is_some() {
                 self.desktop_end_rename(true);
+            }
+            // (…and so does a phone's name in its Configure box.)
+            if let Some(config) = self.desktop.config.as_mut().filter(|c| c.editing) {
+                config.editing = false;
+                config.all = false;
+                self.request_desktop_draw_soon();
             }
             // Taken from us (the launcher opened, a lock): we are not
             // holding it any more, and must not ask for it back.

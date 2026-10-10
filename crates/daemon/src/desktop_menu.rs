@@ -53,6 +53,8 @@ pub(crate) enum Action {
     ImportPhotos,
     /// A phone: its internet for this computer over the cable, on or off.
     Tether,
+    /// A phone: the box where what this computer does with it is set.
+    Configure,
     /// Out of the desktop, into the home folder.
     MoveToHome,
     MoveToBin,
@@ -212,8 +214,12 @@ fn volume_rows(v: &Volume) -> Vec<Row> {
         rows.push(Row::Sep);
         rows.push(Row::Item { label: "Eject", action: Action::Eject, danger: false });
     }
-    // Last, and opened by coming onto it, as on a file's menu.
+    // Last: a phone's Configure box (a click), and Properties, opened by
+    // coming onto it as on a file's menu.
     rows.push(Row::Sep);
+    if v.phone {
+        rows.push(Row::Item { label: "Configure", action: Action::Configure, danger: false });
+    }
     rows.push(Row::Item { label: "Properties", action: Action::Properties, danger: false });
     rows
 }
@@ -622,7 +628,15 @@ mod tests {
         let actions: Vec<Action> = (0..shut.rows.len()).filter_map(|i| shut.action(i)).collect();
         assert_eq!(
             actions,
-            vec![Action::Open, Action::Mirror, Action::Camera, Action::ImportPhotos, Action::Tether, Action::Properties]
+            vec![
+                Action::Open,
+                Action::Mirror,
+                Action::Camera,
+                Action::ImportPhotos,
+                Action::Tether,
+                Action::Configure,
+                Action::Properties
+            ]
         );
         let sharing = open().for_volume(Volume { phone: true, tether: true, ..Default::default() }, 800.0);
         assert!(sharing.rows.contains(&Row::Item { label: "Stop phone's internet", action: Action::Tether, danger: false }));
