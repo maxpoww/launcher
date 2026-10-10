@@ -796,7 +796,7 @@ impl Card {
         if let Some(hit) = low.hit(pos, self.seeking()) {
             return Some(hit);
         }
-        let list = list_rect(rect, true, low.h);
+        let list = list_rect(rect, Some(self.page), low.h);
         if pos.1 < list.y {
             return foot_buttons(rect)
                 .into_iter()

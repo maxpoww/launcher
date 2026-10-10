@@ -86,6 +86,21 @@ pub(crate) enum Page {
 }
 
 impl Page {
+    /// Its name, shown small under the head's buttons while it is up — the
+    /// lit button is an arrow then, and says nothing of where one is. (An
+    /// open session has its own name floating there instead. "Memory" is
+    /// the whole thing; one of its lists is a SESSION — Max, 2026-10-10.)
+    pub(crate) fn title(self) -> Option<&'static str> {
+        match self {
+            Page::Session => None,
+            Page::Memory => Some("Sessions"),
+            Page::Pinned => Some("Pinned"),
+            Page::Clipboard => Some("Clipboard"),
+            Page::Dictionary => Some("Dictionary"),
+            Page::Emoji => Some("Emoji"),
+        }
+    }
+
     /// A page of things that are not the card's own (clipboard rows, a
     /// word's answers): they have no ×, and their pin's place is "keep".
     pub(crate) fn lent(self) -> bool {
@@ -95,10 +110,12 @@ impl Page {
 
 /// The buttons along the card's HEAD (they were its foot until Max,
 /// 2026-10-09: *"the buttons have to be on the top"* — the card is called
-/// from the title bar, and they are then right under the pointer): Memory
-/// and Pinned by name, then three round ones with an icon — the clipboard,
-/// the dictionary, the emoji (Max, 2026-10-09: *"replace the clipboard for
-/// three circular buttons with icons"*).
+/// from the title bar, and they are then right under the pointer). From
+/// the left (Max, 2026-10-10, settled on ~/terminal-mockup/card): the round
+/// ones with an icon — emoji, pinned, the clipboard, the dictionary — then
+/// MEMORY by name, at the right, with what the round ones leave. (The
+/// mockup has two more round ones, voice-to-text first and the translator
+/// before the dictionary: they come with their pages.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Foot {
     Memory,
@@ -108,20 +125,24 @@ pub(crate) enum Foot {
     Emoji,
 }
 
+/// The button of the page that is up is an ARROW POINTING UP: a click on it
+/// goes back to the session (fa-arrow-up).
+const GLYPH_UP: &str = "\u{f062}";
+
 impl Foot {
     const ALL: [Foot; 5] = [
-        Foot::Memory,
+        Foot::Emoji,
         Foot::Pinned,
         Foot::Clipboard,
         Foot::Dictionary,
-        Foot::Emoji,
+        Foot::Memory,
     ];
 
-    /// Its word (the two that are named) or its icon (the round three).
+    /// Its icon (the round ones) or its word (Memory).
     fn word(self) -> &'static str {
         match self {
             Foot::Memory => "Memory",
-            Foot::Pinned => "Pinned",
+            Foot::Pinned => GLYPH_PIN,
             Foot::Clipboard => "\u{f0ea}",  // fa-clipboard
             Foot::Dictionary => "\u{f02d}", // fa-book
             Foot::Emoji => "\u{f118}",      // fa-smile-o
@@ -129,7 +150,7 @@ impl Foot {
     }
 
     fn round(self) -> bool {
-        matches!(self, Foot::Clipboard | Foot::Dictionary | Foot::Emoji)
+        !matches!(self, Foot::Memory)
     }
 
     /// The page this button shows.
@@ -206,10 +227,20 @@ const FOOT_BUTTON_H: f32 = 28.0;
 /// The pin glyph (fa-thumb-tack, in the Nerd font).
 const GLYPH_PIN: &str = "\u{f08d}";
 
-/// The part of the card the list has: all of it but the head and what is
-/// at the bottom (`bottom`: how tall that is).
-pub(crate) fn list_rect(rect: Rect, foot: bool, bottom: f32) -> Rect {
-    let head = if foot { FOOT_H.min(rect.h) } else { 0.0 };
+/// The line a page's title has under the head's buttons.
+pub(super) const TITLE_H: f32 = 16.0;
+
+/// How tall the head is with `page` up: its buttons, and the page's title
+/// under them when it has one.
+pub(crate) fn head_h(page: Page) -> f32 {
+    FOOT_H + page.title().map_or(0.0, |_| TITLE_H)
+}
+
+/// The part of the card the list has: all of it but the head (`page`: the
+/// one that is up; `None`, a card without a head) and what is at the
+/// bottom (`bottom`: how tall that is).
+pub(crate) fn list_rect(rect: Rect, page: Option<Page>, bottom: f32) -> Rect {
+    let head = page.map_or(0.0, |p| head_h(p).min(rect.h));
     Rect::new(
         rect.x,
         rect.y + head,
@@ -556,7 +587,11 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             f.bar.picking,
         )
     });
-    let body = list_rect(rect, view.foot.is_some(), low.map_or(0.0, |b| b.h));
+    let body = list_rect(
+        rect,
+        view.foot.as_ref().map(|f| f.page),
+        low.map_or(0.0, |b| b.h),
+    );
     let inner = Rect::new(body.x + 1.0, body.y + 1.0, body.w - 2.0, body.h - 2.0);
     let clip = Rect::new(
         inner.x,
@@ -1012,7 +1047,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         bar.rects.push(RectInst {
             rect: Rect::new(
                 rect.x + LIST_PAD,
-                body.y - 1.0,
+                rect.y + FOOT_H - 1.0,
                 rect.w - 2.0 * LIST_PAD,
                 1.0,
             ),
@@ -1021,6 +1056,22 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             glass: 0.0,
             border: 0.0,
         });
+        // The page's name, small, centred under the buttons.
+        if let Some(title) = foot.page.title() {
+            bar.labels.push(Label {
+                text: title.to_owned(),
+                pos: (rect.x + rect.w / 2.0, rect.y + FOOT_H + 2.0),
+                max_w: rect.w - 2.0 * LIST_PAD,
+                font_px: NOTE_PX + 0.5,
+                line_px: NOTE_LINE,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(window),
+                family: None,
+                color: Some(paint.ink_at(0.5)),
+            });
+        }
         for (which, r) in foot_buttons(rect) {
             let up = which.page() == foot.page;
             let hot = view.hover == Some(Hover::Foot(which));
@@ -1041,11 +1092,13 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 glass: 0.0,
                 border: 0.0,
             });
+            // (The one that is up: an arrow pointing up — back to the session.)
+            let icon = which.round() || up;
             bar.labels.push(Label {
-                text: which.word().to_owned(),
+                text: if up { GLYPH_UP } else { which.word() }.to_owned(),
                 pos: (
                     r.x + r.w / 2.0,
-                    r.y + (r.h - TEXT_LINE) / 2.0 + if which.round() { 1.0 } else { 0.0 },
+                    r.y + (r.h - TEXT_LINE) / 2.0 + if icon { 1.0 } else { 0.0 },
                 ),
                 max_w: r.w,
                 font_px: TEXT_PX,
@@ -1054,7 +1107,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 dim: false,
                 cache: true,
                 clip: Some(window),
-                family: which.round().then_some(crate::options::NERD),
+                family: icon.then_some(crate::options::NERD),
                 color: Some(if up {
                     [acc[0], acc[1], acc[2], 1.0]
                 } else {
@@ -1564,22 +1617,28 @@ mod tests {
         assert_eq!(
             buttons.map(|(f, _)| f),
             [
-                Foot::Memory,
+                Foot::Emoji,
                 Foot::Pinned,
                 Foot::Clipboard,
                 Foot::Dictionary,
-                Foot::Emoji
+                Foot::Memory
             ]
         );
-        // The two named ones are as wide as each other; the three with an
-        // icon are round, at the right.
-        assert_eq!(buttons[0].1.w, buttons[1].1.w);
-        for (_, r) in &buttons[2..] {
+        // The ones with an icon are round, from the left; Memory, by name,
+        // has the rest of the row at the right.
+        for (_, r) in &buttons[..4] {
             assert_eq!((r.w, r.h), (FOOT_BUTTON_H, FOOT_BUTTON_H));
         }
+        assert!(buttons[4].1.w > 3.0 * FOOT_BUTTON_H);
         assert!(buttons[4].1.x + buttons[4].1.w <= rect.x + rect.w - LIST_PAD + 1.0);
-        let list = list_rect(rect, true, low.h);
+        let list = list_rect(rect, Some(Page::Session), low.h);
         assert_eq!(list.y, rect.y + FOOT_H);
+        // A page with a name has it under the buttons: its list starts lower.
+        assert_eq!(
+            list_rect(rect, Some(Page::Pinned), 0.0).y,
+            rect.y + FOOT_H + TITLE_H
+        );
+        assert_eq!(Page::Memory.title(), Some("Sessions"));
         assert!(list.y + list.h <= low.seek.y);
         for (_, r) in buttons {
             assert!(r.y >= rect.y && r.y + r.h <= rect.y + FOOT_H);

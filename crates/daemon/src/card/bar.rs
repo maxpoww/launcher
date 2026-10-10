@@ -4,7 +4,7 @@
 //! input box a memory is written in (on Memory's page: New, in its place);
 //! at the TOP of an open memory its name, floating over the items.
 
-use super::view::{Hover, Page, Paint, DANGER, FOOT_H, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX};
+use super::view::{head_h, Hover, Page, Paint, DANGER, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX};
 use crate::content::{GridContent, Label, Rect, RectInst};
 use crate::options::NERD;
 
@@ -209,13 +209,13 @@ pub(crate) fn bottom(
         // The emoji's own page: the picker is all of it, under the head
         // (it has its own search; the card's is not shown).
         Page::Emoji => {
-            let top = rect.y + FOOT_H + STEP;
+            let top = rect.y + head_h(Page::Emoji) + STEP;
             let tray = Rect::new(x, top.round(), w, (y - top).max(0.0).round());
             let rows = ((tray.h - PICK_SEEK - PICK_KINDS - 14.0) / EMOJI_CELL)
                 .floor()
                 .max(1.0);
             return Bottom {
-                h: rect.h - FOOT_H,
+                h: rect.h - head_h(Page::Emoji),
                 seek: Rect::new(rect.x, rect.y, 0.0, 0.0),
                 seek_clear: Rect::new(rect.x, rect.y, 0.0, 0.0),
                 input: None,
@@ -1048,9 +1048,9 @@ mod tests {
         // head: more rows, no card search, nothing left for a list.
         let page = bottom(rect, Page::Emoji, 1, false, Some((1800, 0.0)));
         let all = page.tray.unwrap();
-        assert!(all.y >= rect.y + FOOT_H && all.y + all.h <= rect.y + rect.h);
+        assert!(all.y >= rect.y + head_h(Page::Emoji) && all.y + all.h <= rect.y + rect.h);
         assert!(page.emoji().count() > p.emoji().count());
-        assert_eq!((page.seek.w, page.h), (0.0, rect.h - FOOT_H));
+        assert_eq!((page.seek.w, page.h), (0.0, rect.h - head_h(Page::Emoji)));
         assert!(page.kinds().all(|(_, r)| r.y + r.h <= all.y + all.h));
         assert!(b.tray.is_none() && b.emoji().next().is_none());
         // The input box shows the lines up to the one the cursor is on; a
