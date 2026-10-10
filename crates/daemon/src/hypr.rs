@@ -843,11 +843,7 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
     };
     let pair = |v: &serde_json::Value| {
         let a = v.as_array();
-        let at = |i: usize| {
-            a.and_then(|a| a.get(i))
-                .and_then(|n| n.as_f64())
-                .unwrap_or(0.0)
-        };
+        let at = |i: usize| a.and_then(|a| a.get(i)).and_then(|n| n.as_f64()).unwrap_or(0.0);
         (at(0), at(1))
     };
     clients
@@ -875,10 +871,9 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
                 fullscreen: c["fullscreen"].as_i64().unwrap_or(0) != 0
                     || c["fullscreen"].as_bool().unwrap_or(false),
                 special: c["workspace"]["id"].as_i64().unwrap_or(1) < 0,
-                staged: c["tags"].as_array().is_some_and(|t| {
-                    t.iter()
-                        .any(|t| t.as_str().is_some_and(|t| t.starts_with("golem-stage")))
-                }),
+                staged: c["tags"]
+                    .as_array()
+                    .is_some_and(|t| t.iter().any(|t| t.as_str().is_some_and(|t| t.starts_with("golem-stage")))),
             })
         })
         .collect()
@@ -895,56 +890,6 @@ pub struct WindowSpot {
     pub h: f32,
     /// Mapped, on the workspace its monitor is showing, and not fullscreen.
     pub visible: bool,
-}
-
-/// The windows that lie OVER `addr` on screen, each as where it is on the
-/// monitor (x, y, w, h) — for what rides `addr` and must pass behind them
-/// (the card). The compositor does not say the stacking, so it is told
-/// from what it does say: on the same workspace, a FLOATING window is over
-/// a tiled one; over a floating one, the floating windows focused since.
-pub fn windows_over(addr: &str) -> Vec<(f32, f32, f32, f32)> {
-    let Some(clients) = reply_json("j/clients") else {
-        return Vec::new();
-    };
-    let Some(all) = clients.as_array() else {
-        return Vec::new();
-    };
-    let Some(me) = all.iter().find(|c| c["address"].as_str() == Some(addr)) else {
-        return Vec::new();
-    };
-    let monitors = reply_json("j/monitors");
-    let origin = monitors
-        .as_ref()
-        .and_then(|m| m.as_array())
-        .and_then(|m| {
-            m.iter()
-                .find(|m| m["id"].as_i64() == me["monitor"].as_i64())
-        })
-        .map_or((0.0, 0.0), |m| {
-            (
-                m["x"].as_f64().unwrap_or(0.0),
-                m["y"].as_f64().unwrap_or(0.0),
-            )
-        });
-    let floating = |c: &serde_json::Value| c["floating"].as_bool().unwrap_or(false);
-    let seen = |c: &serde_json::Value| c["focusHistoryID"].as_i64().unwrap_or(i64::MAX);
-    let num = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.0);
-    all.iter()
-        .filter(|c| c["address"].as_str() != Some(addr))
-        .filter(|c| c["workspace"]["id"] == me["workspace"]["id"])
-        .filter(|c| {
-            c["mapped"].as_bool().unwrap_or(false) && !c["hidden"].as_bool().unwrap_or(false)
-        })
-        .filter(|c| floating(c) && (!floating(me) || seen(c) < seen(me)))
-        .map(|c| {
-            (
-                (num(&c["at"], 0) - origin.0) as f32,
-                (num(&c["at"], 1) - origin.1) as f32,
-                num(&c["size"], 0) as f32,
-                num(&c["size"], 1) as f32,
-            )
-        })
-        .collect()
 }
 
 /// Find `addr` among the windows and say where it is (`j/clients` +
@@ -965,8 +910,8 @@ pub fn window_spot(addr: &str) -> Option<WindowSpot> {
         .as_array()?
         .iter()
         .find(|m| m["id"].as_i64() == Some(mon))?;
-    let fullscreen =
-        c["fullscreen"].as_i64().unwrap_or(0) != 0 || c["fullscreen"].as_bool().unwrap_or(false);
+    let fullscreen = c["fullscreen"].as_i64().unwrap_or(0) != 0
+        || c["fullscreen"].as_bool().unwrap_or(false);
     let visible = c["mapped"].as_bool().unwrap_or(false)
         && !c["hidden"].as_bool().unwrap_or(false)
         && m["activeWorkspace"]["id"].as_i64() == Some(ws)
@@ -1015,11 +960,7 @@ pub fn minimized_windows() -> Vec<ParkedWindow> {
         .filter(|c| c["workspace"]["name"].as_str() == Some(MINIMIZED_WS))
         .filter_map(|c| {
             let size = c["size"].as_array();
-            let dim = |i: usize| {
-                size.and_then(|s| s.get(i))
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0)
-            };
+            let dim = |i: usize| size.and_then(|s| s.get(i)).and_then(|v| v.as_f64()).unwrap_or(0.0);
             let (w, h) = (dim(0), dim(1));
             Some(ParkedWindow {
                 address: c["address"].as_str()?.to_owned(),
@@ -1031,11 +972,7 @@ pub fn minimized_windows() -> Vec<ParkedWindow> {
                     .unwrap_or("?")
                     .to_owned(),
                 title: c["title"].as_str().unwrap_or("").to_owned(),
-                aspect: if w > 0.0 && h > 0.0 {
-                    (w / h) as f32
-                } else {
-                    1.0
-                },
+                aspect: if w > 0.0 && h > 0.0 { (w / h) as f32 } else { 1.0 },
             })
         })
         .collect()
@@ -1249,11 +1186,7 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 app.remember_window_opened(&addr);
                                 // FAST LAUNCH's several instances: the next
                                 // one goes now the cascade has stepped.
-                                let class = line
-                                    .split(">>")
-                                    .nth(1)
-                                    .and_then(|d| d.split(',').nth(2))
-                                    .unwrap_or("");
+                                let class = line.split(">>").nth(1).and_then(|d| d.split(',').nth(2)).unwrap_or("");
                                 app.fast_batch_window_opened(class.trim());
                             }
                         }
@@ -1331,10 +1264,13 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         // mapped tiled). Heal both halves: the rule, and the
                         // window that slipped past it.
                         if name.starts_with("openwindow") {
-                            if let Some(addr) =
-                                line.split(">>").nth(1).and_then(|d| d.split(',').next())
+                            if let Some(addr) = line
+                                .split(">>")
+                                .nth(1)
+                                .and_then(|d| d.split(',').next())
                             {
-                                let addr = format!("0x{}", addr.trim().trim_start_matches("0x"));
+                                let addr =
+                                    format!("0x{}", addr.trim().trim_start_matches("0x"));
                                 app.heal_floating_map(&addr);
                             }
                         }
@@ -1615,11 +1551,7 @@ pub fn running_windows() -> Vec<RunningWindow> {
                 .unwrap_or("")
                 .to_owned();
             let parked = c["workspace"]["name"].as_str() == Some(MINIMIZED_WS);
-            (!class.is_empty()).then_some(RunningWindow {
-                address,
-                class,
-                parked,
-            })
+            (!class.is_empty()).then_some(RunningWindow { address, class, parked })
         })
         .collect();
     if let Some(active) = active {
@@ -1666,11 +1598,7 @@ pub fn cursor_pos() -> Option<(f64, f64)> {
 
 /// Put the pointer at a global logical position.
 pub fn move_cursor(x: f64, y: f64) {
-    dispatch(&format!(
-        "hl.dsp.cursor.move({{ x = {}, y = {} }})",
-        x.round(),
-        y.round()
-    ));
+    dispatch(&format!("hl.dsp.cursor.move({{ x = {}, y = {} }})", x.round(), y.round()));
 }
 
 /// Have the compositor read its config again — the only way to drop a
@@ -1824,8 +1752,7 @@ impl KbWorker {
 
     /// One of our surfaces took the keyboard: nothing queued may move it.
     pub fn invalidate(&self) {
-        self.generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

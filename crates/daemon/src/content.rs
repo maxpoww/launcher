@@ -134,7 +134,7 @@ pub struct Label {
 }
 
 /// Scrollable grid content, clipped to `clip` by the renderer.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct GridContent {
     pub clip: Rect,
     pub rects: Vec<RectInst>,
