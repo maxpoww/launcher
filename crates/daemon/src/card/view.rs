@@ -1575,6 +1575,18 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 glass: 0.0,
                 border: 0.0,
             });
+            // (…with the rim the items have: Max, 2026-10-10.)
+            bar.rects.push(RectInst {
+                rect: r,
+                radius: if which.round() {
+                    r.h / 2.0
+                } else {
+                    TILE_RADIUS
+                },
+                color: tile_rim,
+                glass: 0.0,
+                border: 1.0,
+            });
             // (The one that is up: an arrow pointing up — back to the session.)
             let icon = which.round() || up;
             bar.labels.push(Label {
