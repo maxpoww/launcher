@@ -637,7 +637,7 @@ mod tests {
         // While it is the camera: Stop, and the lenses right under it.
         let lenses = vec!["Main".to_owned(), "Front".to_owned()];
         let using = Volume { phone: true, camera: true, lenses: lenses.clone(), current: Some(1), ..Default::default() };
-        let mut on = open().for_volume(using, 800.0);
+        let mut on = open().for_volume(using.clone(), 800.0);
         assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
         assert_eq!(on.rows[5], Row::Target { label: "Main".into(), action: Action::Lens(0) });
         assert_eq!(on.rows[6], Row::Target { label: "Front  ✓".into(), action: Action::Lens(1) });
