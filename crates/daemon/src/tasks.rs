@@ -15,11 +15,18 @@
 //! });
 //! ```
 //!
+//! A task can be CANCELLED from its pill: the worker asks `task.cancelled()`
+//! wherever it can stop (between two files, each turn of a wait) and stops;
+//! one that never asks simply runs on unseen — the pill lets it go at once.
+//!
 //! The handle is all a worker needs: it is `Send`, it thins its own reports
 //! out, and letting go of it is the end of the task — a worker that returns
 //! early or panics cannot leave a pill behind. The list lives on the loop
 //! (`App::tasks`); this file knows nothing of how the pill is drawn.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use calloop::channel::Sender;
@@ -81,14 +88,33 @@ impl Task {
 pub(crate) struct Tasks {
     list: Vec<Task>,
     next: u64,
+    /// Each running task's "stop" flag, shared with its worker's handle.
+    stops: HashMap<u64, Arc<AtomicBool>>,
 }
 
 impl Tasks {
-    /// A new task; its id.
-    pub fn begin(&mut self, label: &str) -> u64 {
+    /// A new task: its id, and the flag its worker reads to know it was
+    /// cancelled.
+    pub fn begin(&mut self, label: &str) -> (u64, Arc<AtomicBool>) {
         self.next += 1;
         self.list.push(Task { id: self.next, label: label.to_owned(), done: 0, total: 0, ended: None });
-        self.next
+        let stop = Arc::new(AtomicBool::new(false));
+        self.stops.insert(self.next, stop.clone());
+        (self.next, stop)
+    }
+
+    /// Cancel a running task: its worker is told, and it leaves the list at
+    /// once (it does not linger at 100%: it did not get there). Whether there
+    /// was such a task.
+    pub fn cancel(&mut self, id: u64) -> bool {
+        let Some(at) = self.list.iter().position(|t| t.id == id && t.ended.is_none()) else {
+            return false;
+        };
+        if let Some(stop) = self.stops.remove(&id) {
+            stop.store(true, Ordering::Relaxed);
+        }
+        self.list.remove(at);
+        true
     }
 
     /// Take a worker's report in. Whether anything the pill shows changed.
@@ -106,6 +132,7 @@ impl Tasks {
                 }
             }
             Report::End { id } => {
+                self.stops.remove(&id);
                 if let Some(t) = self.list.iter_mut().find(|t| t.id == id && t.ended.is_none()) {
                     t.ended = Some(now);
                 }
@@ -159,11 +186,23 @@ pub(crate) struct TaskHandle {
     id: u64,
     tx: Sender<Report>,
     last: std::sync::Mutex<Option<Instant>>,
+    stop: Arc<AtomicBool>,
 }
 
 impl TaskHandle {
-    pub(crate) fn new(id: u64, tx: Sender<Report>) -> Self {
-        Self { id, tx, last: std::sync::Mutex::new(None) }
+    pub(crate) fn new(id: u64, tx: Sender<Report>, stop: Arc<AtomicBool>) -> Self {
+        Self { id, tx, last: std::sync::Mutex::new(None), stop }
+    }
+
+    /// A handle to nothing: for work that runs with no task to show (tests).
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self::new(0, calloop::channel::channel::<Report>().0, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// The owner cancelled it from the bar: stop where you can.
+    pub fn cancelled(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
     }
 
     /// `done` of `total` so far. Called as often as the work likes: reports
@@ -215,12 +254,12 @@ impl crate::App {
             }
             self.task_tx = Some(tx);
         }
-        let id = self.tasks.begin(label);
+        let (id, stop) = self.tasks.begin(label);
         tracing::info!("tasks: {label} (#{id})");
         self.tasks_changed();
         // (The sender is there: made just above.)
         let tx = self.task_tx.clone().unwrap_or_else(|| calloop::channel::channel::<Report>().0);
-        TaskHandle::new(id, tx)
+        TaskHandle::new(id, tx, stop)
     }
 
     /// A finished task leaves the bar once it has lingered.
@@ -251,7 +290,7 @@ mod tests {
         let mut tasks = Tasks::default();
         let t0 = Instant::now();
         assert!(tasks.shown().is_none());
-        let photos = tasks.begin("Importing photos from Pixel 8 Pro");
+        let (photos, _) = tasks.begin("Importing photos from Pixel 8 Pro");
         assert_eq!(tasks.shown().map(|t| (t.label.as_str(), t.percent())), Some(("Importing photos from Pixel 8 Pro", 0)));
         assert!(tasks.report(Report::Progress { id: photos, done: 218, total: 2059 }, t0));
         assert_eq!(tasks.shown().unwrap().percent(), 10);
@@ -270,8 +309,8 @@ mod tests {
     fn of_several_the_newest_running_one_is_shown() {
         let mut tasks = Tasks::default();
         let t0 = Instant::now();
-        let photos = tasks.begin("Importing photos from Pixel 8 Pro");
-        let iso = tasks.begin("Moving golem.iso to Home");
+        let (photos, _) = tasks.begin("Importing photos from Pixel 8 Pro");
+        let (iso, _) = tasks.begin("Moving golem.iso to Home");
         assert_eq!(tasks.shown().unwrap().id, iso);
         assert_eq!(tasks.others(), 1);
         assert_eq!(tasks.rest().iter().map(|t| t.id).collect::<Vec<_>>(), vec![photos]);
@@ -286,9 +325,26 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_task_tells_its_worker_and_leaves_at_once() {
+        let mut tasks = Tasks::default();
+        let (photos, _) = tasks.begin("Importing photos from Pixel 8 Pro");
+        let (iso, stop) = tasks.begin("Moving golem.iso to Home");
+        let (tx, _rx) = calloop::channel::channel::<Report>();
+        let worker = TaskHandle::new(iso, tx, stop);
+        assert!(!worker.cancelled());
+        assert!(tasks.cancel(iso));
+        assert!(worker.cancelled(), "the worker is told");
+        assert_eq!(tasks.shown().map(|t| t.id), Some(photos), "and it is gone, not lingering");
+        assert_eq!(tasks.others(), 0);
+        assert!(!tasks.cancel(iso), "once");
+        // Its worker's last word changes nothing.
+        assert!(!tasks.report(Report::End { id: iso }, Instant::now()));
+    }
+
+    #[test]
     fn letting_go_of_the_handle_ends_the_task() {
         let (tx, rx) = calloop::channel::channel::<Report>();
-        let handle = TaskHandle::new(7, tx);
+        let handle = TaskHandle::new(7, tx, Arc::new(AtomicBool::new(false)));
         handle.set(1, 10);
         handle.set(2, 10); // too soon after: dropped
         handle.set(10, 10); // the last is always said

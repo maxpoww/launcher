@@ -238,7 +238,12 @@ The big daemon files are cohesive but long — go straight to the function:
   It stands CENTRED between the left band's end and the window's pill (else left of the bell),
   a `STRETCH` longer than its words need. SEVERAL: a scroll down on it opens its BOX — the pill
   growing down into the other tasks, a row each (`push_task_rows`, the playing box's morph and
-  zebra); a scroll up or leaving the bar folds it.
+  zebra); a scroll up or leaving the bar folds it. From the right in the pill: `+N` (the bell's
+  amber chip), `Cancel` (same chip; `Tasks::cancel` → the worker's `task.cancelled()` → it
+  stops where it can; the task leaves at once), the number. A CLICK on the band COLLAPSES it to
+  its number and `+N` (no words, no fill; `task_pill_click`); collapsed, hover shows it whole
+  and leaving puts it back, a click while whole keeps it whole (`update_task_hover`). The look
+  was settled on `~/task-pill-mockup`. `debug-desktop "taskbox open|close|collapse|peek|unpeek|cancel"`.
 - `desktop.rs` — the DESKTOP: `~/Desktop` as icons behind the windows (macOS/Windows style) on
   its own `Bottom`-layer surface (`surface::create_desktop_surface`; Bottom, not Background, so
   swww can never map over it) with its own renderer + icon array (layer = item index). Lists the

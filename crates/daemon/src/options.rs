@@ -3147,6 +3147,11 @@ impl App {
     /// The track pill's live rect — which is also the playing box's, since the
     /// box is the pill grown. An accessor rather than opening `Pill`'s fields
     /// to the crate.
+    /// Where the task pill is drawn now (its box included), if it is there.
+    pub(crate) fn task_pill_drawn(&self) -> Option<Rect> {
+        self.options_pills().iter().find(|p| p.id == PillId::Task).map(|p| p.rect)
+    }
+
     pub(crate) fn cava_now_rect(&self) -> Option<Rect> {
         self.options_pills()
             .iter()
@@ -5457,12 +5462,14 @@ impl App {
         self.update_clip_reveal();
         self.update_stats_reveal();
         self.update_cava_reveal();
+        // (The task pill's chips light under the pointer: a move on it redraws.)
+        let on_task = self.update_task_hover();
         // The hit target (card / control / footer) moves within the same box, so
         // redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
         let clip_hit_changed = self.update_clip_hit();
         let gear_hit_changed = self.update_gear_hit();
-        if changed || hit_changed || clip_hit_changed || gear_hit_changed {
+        if changed || hit_changed || clip_hit_changed || gear_hit_changed || on_task {
             self.draw_options();
         }
     }
@@ -6439,6 +6446,7 @@ impl App {
             Some(PillId::Fullscreen) if self.stage.is_on() => self.stage_toggle_fullscreen(),
             Some(PillId::Fullscreen) => self.set_window_mode(hypr::WindowMode::Fullscreen),
             Some(PillId::NotifMute) => self.toggle_notif_mute(),
+            Some(PillId::Task) => self.task_pill_click(),
             // Clicking the clipboard element pastes the current clip into the
             // focused window. Both ids resolve here because the box overlaps the
             // small pill at rest (a scrollable history box will split these in a
@@ -6666,8 +6674,7 @@ impl App {
                 _ => Shape::Default,
             },
             // The small clipboard pill is clickable (paste) → pointer.
-            // (The task pill says, it does not do.)
-            Some(PillId::Clock | PillId::Task) | None => Shape::Default,
+            Some(PillId::Clock) | None => Shape::Default,
             Some(_) => Shape::Pointer, // control circle / small clipboard pill
         };
         if self.cursor_now != Some(shape) {

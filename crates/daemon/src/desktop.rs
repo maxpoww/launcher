@@ -4454,9 +4454,10 @@ impl App {
             };
         }
         // `taskbox open|close`: the task pill's box, without a scroll.
+        // (`collapse`, `peek`, `unpeek`, `cancel`: what a click and the
+        // pointer do to the pill.)
         if let Some(rest) = what.strip_prefix("taskbox ") {
-            self.task_pill_axis(if rest.trim() == "open" { -1.0 } else { 1.0 });
-            return format!("task box: {}", self.task_box_open());
+            return self.task_pill_debug(rest.trim());
         }
         // `task <seconds> [what]`: a task that takes that long, for the
         // OPTIONS bar's task pill to show (no phone needed).
@@ -4471,6 +4472,9 @@ impl App {
                 let task = self.task_begin(label);
                 std::thread::spawn(move || {
                     for step in 0..=steps {
+                        if task.cancelled() {
+                            break;
+                        }
                         task.set(step, steps);
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }

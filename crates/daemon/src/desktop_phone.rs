@@ -132,6 +132,11 @@ pub(crate) fn import_photos(name: &str, serial: Option<&str>, mount: Option<&Pat
             None => None,
         },
     };
+    // Cancelled from the bar: what came is kept, and said.
+    if task.cancelled() {
+        let n = brought.map_or(0, |(n, _)| n);
+        return format!("{name}: {} {n} {} {shown}", crate::i18n::tr("import stopped."), crate::i18n::tr("photos and videos copied so far, in"));
+    }
     match brought {
         None => format!(
             "{name}: {}",
@@ -200,12 +205,23 @@ fn import_over_adb(serial: &str, dest: &Path, task: &TaskHandle) -> Option<(usiz
                     while matches!(child.try_wait(), Ok(None)) {
                         std::thread::sleep(std::time::Duration::from_millis(200));
                         task.set(done + landed(), total);
+                        // Cancelled from the bar: the copy in hand is cut
+                        // (its half file is brought whole next time).
+                        if task.cancelled() {
+                            let _ = child.kill();
+                        }
                     }
                 }
                 Err(e) => warn!("phone: adb could not be run: {e}"),
             }
             done += landed();
             task.set(done, total);
+            if task.cancelled() {
+                break;
+            }
+        }
+        if task.cancelled() {
+            break;
         }
     }
     let left = missing(&shots, dest).len();
@@ -255,6 +271,9 @@ fn import_from_folder(mount: &Path, dest: &Path, task: &TaskHandle) -> Option<(u
     let (mut came, mut failed, mut done) = (0, 0, 0u64);
     task.set(0, total);
     for (path, to, size) in &wanted {
+        if task.cancelled() {
+            break;
+        }
         let copied = to.parent().map(std::fs::create_dir_all).transpose().and_then(|_| std::fs::copy(path, to));
         match copied {
             Ok(_) => came += 1,
@@ -287,6 +306,9 @@ pub(crate) fn push(
             let (mut came, mut tried) = (0, 0u64);
             // One at a time: the bar moves a file at a time.
             for path in paths {
+                if task.cancelled() {
+                    break;
+                }
                 let mut cmd = Command::new("adb");
                 cmd.args(["-s", serial, "push"]).arg(path).arg(DOWNLOAD);
                 if cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
@@ -439,8 +461,7 @@ mod tests {
         std::fs::write(camera.join("a.jpg"), b"aaaa").unwrap();
         std::fs::write(camera.join("b.jpg"), b"bb").unwrap();
         std::fs::write(mount.join("Internal storage/DCIM/.thumbnails/t.jpg"), b"t").unwrap();
-        let (tx, _rx) = calloop::channel::channel();
-        let task = TaskHandle::new(1, tx);
+        let task = TaskHandle::detached();
         assert_eq!(import_from_folder(&mount, &dest, &task), Some((2, 0)));
         assert_eq!(std::fs::read(dest.join("Camera/a.jpg")).unwrap(), b"aaaa");
         assert!(!dest.join(".thumbnails").exists());
