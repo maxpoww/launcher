@@ -133,7 +133,11 @@ pub(super) fn loudest(wav: &PathBuf) -> i32 {
 }
 
 /// Write out what is said in the recording at `wav`.
-fn transcribe(cli: &PathBuf, model: &PathBuf, wav: &PathBuf) -> Result<String, &'static str> {
+pub(super) fn transcribe(
+    cli: &PathBuf,
+    model: &PathBuf,
+    wav: &PathBuf,
+) -> Result<String, &'static str> {
     let out = Command::new(cli)
         .arg("-m")
         .arg(model)

@@ -369,6 +369,10 @@ pub(crate) struct Card {
     /// Where the writing box is in the list this frame (as the tiles are:
     /// in the space the card is laid out in).
     writer: Option<Rect>,
+    /// The items that are OPEN (a click on one made of parts): their voice
+    /// notes show what they say, and their pieces answer by themselves —
+    /// played, pasted or dragged alone.
+    wide: HashSet<u64>,
     /// The parts already put in what is being written: they stand in the
     /// box, over the line being written, in the order they were put in.
     sealed: Vec<Item>,
@@ -656,7 +660,24 @@ impl Card {
     }
 
     fn item(&self, id: u64) -> Option<&Item> {
-        self.items.iter().find(|it| it.id == id)
+        // (An item of the list, or a part of one.)
+        self.items
+            .iter()
+            .flat_map(|it| std::iter::once(it).chain(it.parts.iter()))
+            .find(|it| it.id == id)
+    }
+
+    /// The same, to be changed.
+    fn item_mut(&mut self, id: u64) -> Option<&mut Item> {
+        for it in &mut self.items {
+            if it.id == id {
+                return Some(it);
+            }
+            if let Some(part) = it.parts.iter_mut().find(|p| p.id == id) {
+                return Some(part);
+            }
+        }
+        None
     }
 
     /// The emoji picker, when it is open: how many it shows, how far down.
@@ -905,6 +926,30 @@ impl Card {
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
         {
             Hover::Play(tile.id)
+        } else if let Some((piece, r, voice)) = self
+            .item(tile.id)
+            .filter(|it| !it.parts.is_empty() && self.wide.contains(&it.id))
+            .and_then(|it| {
+                // An OPEN item: the piece under the pointer is what is
+                // played, pasted or carried off — not the whole item.
+                piece_rects(
+                    &it.parts,
+                    &self.lines,
+                    1.0,
+                    true,
+                    (tile.rect.x + TILE_PAD_X, tile.rect.y + TILE_PAD_Y),
+                    tile.rect.w - 2.0 * TILE_PAD_X,
+                )
+                .into_iter()
+                .find(|(_, r, _)| r.contains(pos))
+            })
+        {
+            // (A voice note: its play button, at the left of its row.)
+            if voice && pos.0 < r.x + 30.0 && pos.1 < r.y + 30.0 {
+                Hover::Play(piece)
+            } else {
+                Hover::Item(piece)
+            }
         } else {
             Hover::Item(tile.id)
         })
@@ -1549,6 +1594,7 @@ impl App {
                 at: now_secs(),
                 from: crate::hypr::active_window_where().map(|(class, _)| class),
                 parts: Vec::new(),
+                said: None,
             },
         );
         self.card.to_bottom = at == end;
@@ -1754,6 +1800,7 @@ impl App {
                     at: clip.timestamp_ms / 1000,
                     from: (!clip.source.is_empty()).then(|| clip.source.clone()),
                     parts: Vec::new(),
+                    said: None,
                 })
             })
             .collect()
@@ -1775,6 +1822,7 @@ impl App {
             at: 0,
             from,
             parts: Vec::new(),
+            said: None,
         };
         let rows = if word.is_empty() {
             vec![row(0, "Type a word in the search below.".to_owned(), None)]
@@ -2467,6 +2515,7 @@ impl App {
             at: now_secs(),
             from: None,
             parts: Vec::new(),
+            said: None,
         }
     }
 
@@ -2780,6 +2829,86 @@ impl App {
         self.card_save();
         self.card_save_session();
         self.request_card_draw();
+    }
+
+    /// A click on an item. One MADE OF PARTS opens (Max, 2026-10-10: *"click
+    /// expand (transcribe audios, etc), when an item is expanded, hover on
+    /// the pieces show a border as the individual items so i know what i
+    /// can drag or click to paste"*) — its voice notes are written out, its
+    /// pieces answer by themselves — and a click on its ground folds it
+    /// again. Anything else (a plain item, a piece of an open one) is pasted
+    /// into the window.
+    fn card_click(&mut self, id: u64) {
+        let composed = self
+            .card
+            .items
+            .iter()
+            .any(|it| it.id == id && !it.parts.is_empty());
+        if !composed {
+            self.card_paste(id);
+            return;
+        }
+        if !self.card.wide.remove(&id) {
+            self.card.wide.insert(id);
+            self.card_write_out(id);
+        }
+        self.request_card_draw();
+    }
+
+    /// Write out what the voice notes of item `id` say (those not written
+    /// out yet): each on a thread, as talk-to-text does it; its words stand
+    /// under its row once they are in.
+    fn card_write_out(&mut self, id: u64) {
+        const BUSY: &str = "Writing out what it says…";
+        let todo: Vec<(u64, PathBuf)> = self
+            .card
+            .items
+            .iter()
+            .filter(|it| it.id == id)
+            .flat_map(|it| it.parts.iter())
+            .filter(|p| p.kind == Kind::Voice)
+            // (Not yet, or it could not be: "(…)" is a reason, not its words —
+            // it is tried again the next time the item is opened.)
+            .filter(|p| {
+                p.said
+                    .as_deref()
+                    .is_none_or(|s| s == BUSY || s.starts_with('('))
+            })
+            .filter_map(|p| p.path.as_ref().map(|path| (p.id, PathBuf::from(path))))
+            .collect();
+        for (part, wav) in todo {
+            if let Some(p) = self.card.item_mut(part) {
+                p.said = Some(BUSY.to_owned());
+            }
+            self.card.lines.remove(&part);
+            let (tx, rx) = calloop::channel::channel::<String>();
+            std::thread::spawn(move || {
+                let said = match voice::engine() {
+                    Some((cli, model)) => match voice::transcribe(&cli, &model, &wav) {
+                        Ok(text) if text.trim().is_empty() => "(Nothing was made out)".to_owned(),
+                        Ok(text) => text,
+                        Err(why) => format!("({why})"),
+                    },
+                    None => "(The speech engine is not installed)".to_owned(),
+                };
+                let _ = tx.send(said);
+            });
+            let waiting = self
+                .loop_handle
+                .insert_source(rx, move |event, _, app: &mut App| {
+                    if let calloop::channel::Event::Msg(said) = event {
+                        if let Some(p) = app.card.item_mut(part) {
+                            p.said = Some(said);
+                        }
+                        app.card.lines.remove(&part);
+                        app.card_save();
+                        app.request_card_draw();
+                    }
+                });
+            if waiting.is_err() {
+                warn!("card: cannot wait for a voice note being written out");
+            }
+        }
     }
 
     /// A row of the disk's menu (Max, 2026-10-10): PIN — a copy of the item
@@ -3449,7 +3578,20 @@ impl App {
                 // (A memory's row: its name, its last thing — one line each.)
                 item.body.lines().take(2).map(str::to_owned).collect()
             } else if item.kind == Kind::Voice {
-                Vec::new()
+                // (A voice note that was written out: what it says.)
+                match item.said.as_deref() {
+                    Some(said) => {
+                        let n = said.chars().count().max(1);
+                        let w = renderer.measure_text(said, text_px, None);
+                        let cols = if w > 0.0 {
+                            ((text_w - 6.0) * 0.94 / (w / n as f32)).floor() as usize
+                        } else {
+                            40
+                        };
+                        wrap(said, cols, 30)
+                    }
+                    None => Vec::new(),
+                }
             } else if item.kind == Kind::Text {
                 let cols = if mono > 0.0 {
                     (text_w / mono).floor() as usize
@@ -3745,6 +3887,7 @@ impl App {
                     .then_some("Keep in which session?"),
                 choosing: self.card.picking.is_some(),
                 sealed: &self.card.sealed,
+                wide: &self.card.wide,
                 arming: self.card.arming.map(|a| a.0),
                 renaming: self
                     .card
@@ -4003,7 +4146,7 @@ impl App {
                 wl_pointer::ButtonState::Released => {
                     match self.card.press.take() {
                         // Pressed and let go without carrying it off: a click.
-                        Some(Press::Item { id, .. }) => self.card_paste(id),
+                        Some(Press::Item { id, .. }) => self.card_click(id),
                         Some(Press::Tap(what)) => {
                             if self.card_still_on(what) {
                                 self.card_tap(what);
@@ -4524,6 +4667,22 @@ impl App {
                 self.card_menu(rest.parse::<usize>().unwrap_or(1).saturating_sub(1));
                 format!("page {:?}", self.card.page)
             }
+            // `click <n>`: a click on item n of the list that is up (one
+            // made of parts opens or folds; another is pasted).
+            "click" => {
+                match rest
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| self.card.items.get(n.saturating_sub(1)))
+                    .map(|it| it.id)
+                {
+                    Some(id) => {
+                        self.card_click(id);
+                        format!("open {:?}", self.card.wide)
+                    }
+                    None => "click <n>".to_owned(),
+                }
+            }
             // `plus`: the +'s menu of the writing box, open (then `menu <row>`).
             "plus" => {
                 self.card.plus = true;
@@ -4843,6 +5002,7 @@ mod tests {
             at: 0,
             from: None,
             parts: Vec::new(),
+            said: None,
         };
         let order = |c: &Card| c.items.iter().map(|it| it.id).collect::<Vec<_>>();
         let mut card = Card {
@@ -4959,6 +5119,7 @@ mod tests {
             at: 0,
             from: None,
             parts: Vec::new(),
+            said: None,
         }
     }
 

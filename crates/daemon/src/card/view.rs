@@ -1,7 +1,7 @@
 //! How the card is DRAWN: one frame as a scene, and the boxes its items
 //! landed in (what the pointer is tested against).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::bar::{BarView, BoxBtn, Field};
 use super::model::{Item, Kind};
@@ -234,6 +234,9 @@ pub(crate) struct FootView<'a> {
     pub menu: Option<MenuView<'a>>,
     /// The parts already put in what is being written (over the writing).
     pub sealed: &'a [Item],
+    /// The items that are OPEN: a click on one made of parts opened it —
+    /// its voice notes show what they say, its pieces answer by themselves.
+    pub wide: &'a HashSet<u64>,
     /// On Memory's page: the session whose × was clicked once (it asks to
     /// be clicked again), and the one being renamed with what is typed.
     pub arming: Option<u64>,
@@ -407,6 +410,7 @@ pub(crate) fn pieces(
     parts: &[Item],
     lines: &HashMap<u64, Vec<String>>,
     zoom: f32,
+    open: bool,
 ) -> (Vec<Piece>, f32) {
     let text_line = (TEXT_LINE * zoom).round();
     let mut out: Vec<Piece> = Vec::new();
@@ -432,7 +436,15 @@ pub(crate) fn pieces(
                 PieceKind::Words(n),
                 lines.get(&part.id).map_or(1, Vec::len).max(1) as f32 * text_line,
             ),
-            Kind::Voice => (PieceKind::Voice(n), VOICE_ROW),
+            // (Open: what is said in it stands under its row.)
+            Kind::Voice => (
+                PieceKind::Voice(n),
+                VOICE_ROW
+                    + match lines.get(&part.id).map_or(0, Vec::len) {
+                        said if open && said > 0 => 5.0 + said as f32 * text_line,
+                        _ => 0.0,
+                    },
+            ),
             _ => (PieceKind::Chips(vec![n]), THUMB + 3.0 + THUMB_NAME),
         };
         out.push(Piece { kind, y, h });
@@ -442,8 +454,45 @@ pub(crate) fn pieces(
 }
 
 /// How tall an item made of `parts` is.
-pub(crate) fn mixed_height(parts: &[Item], lines: &HashMap<u64, Vec<String>>, zoom: f32) -> f32 {
-    2.0 * TILE_PAD_Y - 3.0 + NOTE_LINE + pieces(parts, lines, zoom).1
+pub(crate) fn mixed_height(
+    parts: &[Item],
+    lines: &HashMap<u64, Vec<String>>,
+    zoom: f32,
+    open: bool,
+) -> f32 {
+    2.0 * TILE_PAD_Y - 3.0 + NOTE_LINE + pieces(parts, lines, zoom, open).1
+}
+
+/// Where each part of an item is on screen (its id, its box, whether it is
+/// a voice note), the item's contents starting at `at`, `w` wide: what the
+/// pointer is tested against once the item is OPEN and its pieces answer
+/// by themselves.
+pub(crate) fn piece_rects(
+    parts: &[Item],
+    lines: &HashMap<u64, Vec<String>>,
+    zoom: f32,
+    open: bool,
+    at: (f32, f32),
+    w: f32,
+) -> Vec<(u64, Rect, bool)> {
+    let mut out = Vec::new();
+    for piece in pieces(parts, lines, zoom, open).0 {
+        let y = at.1 + piece.y;
+        match piece.kind {
+            PieceKind::Words(n) => out.push((parts[n].id, Rect::new(at.0, y, w, piece.h), false)),
+            PieceKind::Voice(n) => out.push((parts[n].id, Rect::new(at.0, y, w, piece.h), true)),
+            PieceKind::Chips(row) => {
+                for (i, n) in row.iter().enumerate() {
+                    out.push((
+                        parts[*n].id,
+                        Rect::new(at.0 + i as f32 * (THUMB + THUMB_GAP), y, THUMB, piece.h),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Draw the pieces of `parts` into `grid`, their contents' top-left corner
@@ -459,9 +508,37 @@ pub(crate) fn draw_pieces(
     zoom: f32,
     paint: &Paint,
     clip: Rect,
+    // The item is OPEN (its voice notes show what they say); the part the
+    // pointer is on (it wears an item's rim then: it answers by itself);
+    // the voice note being played, and for how many seconds now.
+    open: bool,
+    hot: Option<u64>,
+    playing: Option<(u64, f32)>,
 ) {
     let (text_px, text_line) = (TEXT_PX * zoom, (TEXT_LINE * zoom).round());
     let bright = paint.bright();
+    // (A piece under the pointer: the rim an item has, a hair out from it.)
+    if let Some((_, r, _)) = hot.and_then(|id| {
+        piece_rects(parts, lines, zoom, open, at, w)
+            .into_iter()
+            .find(|(pid, ..)| *pid == id)
+    }) {
+        let around = Rect::new(r.x - 4.0, r.y - 3.0, r.w + 8.0, r.h + 6.0);
+        grid.rects.push(RectInst {
+            rect: around,
+            radius: 7.0,
+            color: paint.ink_at(0.05),
+            glass: 0.0,
+            border: 0.0,
+        });
+        grid.rects.push(RectInst {
+            rect: around,
+            radius: 7.0,
+            color: paint.ink_at(0.24),
+            glass: 0.0,
+            border: 1.0,
+        });
+    }
     let label = |grid: &mut GridContent,
                  text: &str,
                  pos: (f32, f32),
@@ -485,7 +562,7 @@ pub(crate) fn draw_pieces(
             color: Some(color),
         });
     };
-    for piece in pieces(parts, lines, zoom).0 {
+    for piece in pieces(parts, lines, zoom, open).0 {
         let y = at.1 + piece.y;
         match piece.kind {
             PieceKind::Words(n) => {
@@ -615,6 +692,9 @@ pub(crate) fn draw_pieces(
             PieceKind::Voice(n) => {
                 let part = &parts[n];
                 let row = Rect::new(at.0, y, w, VOICE_ROW);
+                let now = playing
+                    .filter(|(id, _)| *id == part.id)
+                    .map(|(_, secs)| secs);
                 grid.rects.push(RectInst {
                     rect: row,
                     radius: 7.0,
@@ -624,7 +704,11 @@ pub(crate) fn draw_pieces(
                 });
                 label(
                     grid,
-                    "\u{f04b}",
+                    if now.is_some() {
+                        "\u{f04d}"
+                    } else {
+                        "\u{f04b}"
+                    },
                     (row.x + 16.0, row.y + 8.0),
                     20.0,
                     10.0,
@@ -633,19 +717,36 @@ pub(crate) fn draw_pieces(
                     Some(crate::options::NERD),
                     paint.ink_at(0.9),
                 );
+                let track = Rect::new(
+                    row.x + 32.0,
+                    row.y + row.h / 2.0 - 1.0,
+                    (row.w - 84.0).max(0.0),
+                    2.0,
+                );
                 grid.rects.push(RectInst {
-                    rect: Rect::new(
-                        row.x + 32.0,
-                        row.y + row.h / 2.0 - 1.0,
-                        (row.w - 84.0).max(0.0),
-                        2.0,
-                    ),
+                    rect: track,
                     radius: 1.0,
                     color: paint.ink_at(0.2),
                     glass: 0.0,
                     border: 0.0,
                 });
-                let total = part.aspect.max(1.0).round() as u32;
+                let secs = part.aspect.max(1.0);
+                if let Some(heard) = now {
+                    let acc = paint.accent();
+                    grid.rects.push(RectInst {
+                        rect: Rect::new(
+                            track.x,
+                            track.y,
+                            track.w * (heard / secs).clamp(0.0, 1.0),
+                            track.h,
+                        ),
+                        radius: 1.0,
+                        color: [acc[0], acc[1], acc[2], 1.0],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+                let total = secs.round() as u32;
                 label(
                     grid,
                     &format!("{:02}:{:02}", total / 60, total % 60),
@@ -657,6 +758,22 @@ pub(crate) fn draw_pieces(
                     None,
                     paint.ink_at(0.65),
                 );
+                // What is said in it, under its row, while the item is open.
+                if open {
+                    for (i, line) in lines.get(&part.id).into_iter().flatten().enumerate() {
+                        label(
+                            grid,
+                            line,
+                            (at.0 + 3.0, row.y + VOICE_ROW + 5.0 + i as f32 * text_line),
+                            w - 6.0,
+                            text_px,
+                            text_line,
+                            false,
+                            None,
+                            paint.ink_at(0.9),
+                        );
+                    }
+                }
             }
         }
     }
@@ -952,7 +1069,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     let sealed_h = if sealed.is_empty() {
         0.0
     } else {
-        TILE_PAD_Y + pieces(sealed, view.lines, zoom).1
+        TILE_PAD_Y + pieces(sealed, view.lines, zoom, false).1
     };
     let box_h = sealed_h + draft_h;
     let heights: Vec<f32> = shown_items
@@ -960,7 +1077,12 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         .map(|it| match page {
             _ if writing == Some(Some(it.id)) => box_h,
             Page::Memory => ROW_H,
-            _ if !it.parts.is_empty() => mixed_height(&it.parts, view.lines, zoom),
+            _ if !it.parts.is_empty() => mixed_height(
+                &it.parts,
+                view.lines,
+                zoom,
+                view.foot.as_ref().is_some_and(|f| f.wide.contains(&it.id)),
+            ),
             _ => tile_height(it.kind, view.lines.get(&it.id).map_or(1, Vec::len), zoom),
         })
         .collect();
@@ -1178,6 +1300,17 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 zoom,
                 paint,
                 clip,
+                view.foot
+                    .as_ref()
+                    .is_some_and(|f| f.wide.contains(&item.id)),
+                // (Its pieces answer by themselves only once it is open.)
+                view.hover
+                    .and_then(|h| match h {
+                        Hover::Item(id) | Hover::Play(id) => Some(id),
+                        _ => None,
+                    })
+                    .filter(|id| item.parts.iter().any(|p| p.id == *id)),
+                view.foot.as_ref().and_then(|f| f.playing),
             );
         }
         if let Some(word) = item.kind.word() {
@@ -1632,6 +1765,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 zoom,
                 paint,
                 clip,
+                false,
+                None,
+                None,
             );
         }
         scene.grids.push(bar);
@@ -1975,6 +2111,7 @@ mod tests {
             at: 0,
             from: None,
             parts: Vec::new(),
+            said: None,
         }
     }
 
@@ -1989,6 +2126,7 @@ mod tests {
             at: 0,
             from: None,
             parts: Vec::new(),
+            said: None,
         }
     }
 
@@ -2177,6 +2315,7 @@ mod tests {
             .collect();
         let (shifts, slots) = (HashMap::new(), HashMap::new());
         let notes: HashMap<u64, String> = HashMap::new();
+        let wide: HashSet<u64> = HashSet::new();
         let rect = Rect::new(600.0, 60.0, WIDTH, 500.0);
         let view = |foot: bool| View {
             rect,
@@ -2218,6 +2357,7 @@ mod tests {
                 arming: None,
                 renaming: None,
                 sealed: &[],
+                wide: &wide,
             }),
             dnd_over: false,
             hidden: None,

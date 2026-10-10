@@ -96,6 +96,10 @@ pub(crate) struct Item {
     /// the whole pastes).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<Item>,
+    /// A voice note that is a part of an item: what is said in it, once it
+    /// has been written out (when its item was opened).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said: Option<String>,
 }
 
 impl Item {
@@ -191,6 +195,7 @@ pub(super) fn session_row(session: &Past) -> Item {
             .map_or(session.at, |it| it.at.max(session.at)),
         from: None,
         parts: Vec::new(),
+        said: None,
     }
 }
 
@@ -556,6 +561,7 @@ mod tests {
             at: 0,
             from: None,
             parts: Vec::new(),
+            said: None,
         }
     }
 
@@ -570,6 +576,7 @@ mod tests {
             at: 0,
             from: None,
             parts: Vec::new(),
+            said: None,
         }
     }
 
