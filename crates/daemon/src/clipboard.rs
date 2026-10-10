@@ -4906,7 +4906,9 @@ fn fmt_relative(ms: u64) -> String {
     let (day, hh, mm) = local_day_hm(ms);
     let (today, ..) = local_day_hm(now_ms());
     let diff = today - day;
-    if diff <= 0 {
+    // The clock time for anything of the last day, not only of today's
+    // date: at 00:01 a thing of 23:58 read "1d".
+    if diff <= 0 || now_ms().saturating_sub(ms) < 24 * 3_600_000 {
         format!("{hh:02}:{mm:02}")
     } else {
         format!("{diff}d")

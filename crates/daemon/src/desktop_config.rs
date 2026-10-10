@@ -760,7 +760,14 @@ impl App {
         }
         let mut phones = Phones::load();
         // A change of name is a change of folder: the old one goes with it.
-        let before = phones.by_serial.get(&config.serial).map(|p| p.folder());
+        // (A phone never configured has the folder its imports made, under
+        // the name it gave itself: that one comes along too — it stayed
+        // behind, and the first sync copied every photo a second time.)
+        let before = phones
+            .by_serial
+            .get(&config.serial)
+            .map(|p| p.folder())
+            .or_else(|| Some(crate::phones::phones_dir().join(crate::phones::folder_name(&config.model))));
         // (What the box does not set is as it is NOW, not as it was when the
         // box opened: a sync may have ended meanwhile.)
         if let Some(stored) = phones.by_serial.get(&config.serial) {

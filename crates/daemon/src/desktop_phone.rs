@@ -130,6 +130,9 @@ pub(crate) struct Moved {
 /// yet — and, with `remove`, take OFF the phone every file that is here
 /// whole (what came now, and what came before): a file leaves the phone only
 /// once its copy has been checked. `None`: the phone could not be asked.
+/// How long a copy may bring nothing before it is taken for dead.
+const STALLED: std::time::Duration = std::time::Duration::from_secs(45);
+
 pub(crate) fn transfer(target: &str, kinds: &[&Kind], folder: &Path, remove: bool, task: &TaskHandle) -> Option<Moved> {
     let items = list(target, kinds, folder)?;
     let wanted: Vec<&Item> = items.iter().filter(|i| !i.here()).collect();
@@ -161,15 +164,29 @@ pub(crate) fn transfer(target: &str, kinds: &[&Kind], folder: &Path, remove: boo
             // the files themselves (adb writes each as it comes).
             let landed =
                 || -> u64 { batch.iter().map(|i| std::fs::metadata(&i.to).map(|m| m.len().min(i.size)).unwrap_or(0)).sum() };
+            let mut stalled = false;
             match cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
                 Ok(mut child) => {
+                    // A copy that stops arriving is cut: over Wi-Fi a pull
+                    // hung for good on a phone that had dozed off, and the
+                    // sync with it (the Acer and a Samsung, 2026-10-10 — one
+                    // video, no byte in six minutes, the task pill frozen).
+                    let (mut seen, mut since) = (landed(), std::time::Instant::now());
                     while matches!(child.try_wait(), Ok(None)) {
                         std::thread::sleep(std::time::Duration::from_millis(200));
-                        task.set(done + landed(), total);
+                        let now = landed();
+                        if now != seen {
+                            (seen, since) = (now, std::time::Instant::now());
+                        }
+                        task.set(done + now, total);
                         // Cancelled from the bar: the copy in hand is cut
                         // (its half file is brought whole next time).
                         if task.cancelled() {
                             let _ = child.kill();
+                        } else if since.elapsed() > STALLED {
+                            warn!("phone: nothing has come from {target} for {} s; the copy is cut", STALLED.as_secs());
+                            let _ = child.kill();
+                            stalled = true;
                         }
                     }
                 }
@@ -177,7 +194,9 @@ pub(crate) fn transfer(target: &str, kinds: &[&Kind], folder: &Path, remove: boo
             }
             done += landed();
             task.set(done, total);
-            if task.cancelled() {
+            // (Stalled: the phone is not answering; what is missing comes
+            // at the next sync.)
+            if task.cancelled() || stalled {
                 break 'copy;
             }
         }
@@ -386,8 +405,17 @@ pub(crate) fn wifi_there(addr: &str) -> bool {
 /// How to reach the phone now: by its cable if it is on it, else over Wi-Fi
 /// if it answers there. What `adb -s` is told.
 pub(crate) fn reach(serial: &str, addr: Option<&str>) -> Option<String> {
-    if ready(serial) {
-        return Some(serial.to_owned());
+    // The cable first, and with a little patience: right after Wi-Fi was
+    // allowed (`adb tcpip`) the phone's own side restarts and is off its
+    // cable for a few seconds — a sync begun then went the slow way round.
+    for _ in 0..12 {
+        if ready(serial) {
+            return Some(serial.to_owned());
+        }
+        if !plugged(serial) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
     let addr = addr?;
     if !wifi_there(addr) {
@@ -395,6 +423,13 @@ pub(crate) fn reach(serial: &str, addr: Option<&str>) -> Option<String> {
     }
     let _ = Command::new("adb").args(["connect", addr]).stdout(Stdio::null()).stderr(Stdio::null()).status();
     ready(addr).then(|| addr.to_owned())
+}
+
+/// Whether adb lists the phone on its cable at all (ready or not yet).
+fn plugged(serial: &str) -> bool {
+    Command::new("adb").arg("devices").stderr(Stdio::null()).output().is_ok_and(|out| {
+        String::from_utf8_lossy(&out.stdout).lines().any(|l| l.split_whitespace().next() == Some(serial))
+    })
 }
 
 /// Whether the phone is on a charger (cable, dock or pad).
