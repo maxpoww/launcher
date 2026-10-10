@@ -1,7 +1,7 @@
 //! How the card is DRAWN: one frame as a scene, and the boxes its items
 //! landed in (what the pointer is tested against).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::bar::{BarView, BoxBtn, Field};
 use super::model::{Item, Kind};
@@ -171,8 +171,10 @@ pub(crate) enum Hover {
     Item(u64),
     /// An item's ×.
     Close(u64),
-    /// An item's pin.
+    /// An item's DISK (it was its pin): keep it somewhere — its menu.
     Pin(u64),
+    /// A row of the disk's menu.
+    Menu(usize),
     /// An item's pencil: it is opened again to be changed.
     Edit(u64),
     Foot(Foot),
@@ -214,7 +216,6 @@ impl Hover {
 /// are pinned (their pin stays lit).
 pub(crate) struct FootView<'a> {
     pub page: Page,
-    pub pinned: &'a HashSet<u64>,
     /// On Memory's page: the session this window is working with (its
     /// row is rimmed).
     pub current: Option<u64>,
@@ -228,11 +229,33 @@ pub(crate) struct FootView<'a> {
     /// Something is being written IN THE LIST: a new thing, at its end
     /// (`Some(None)`), or the item of this id, in its own place.
     pub writing: Option<Option<u64>>,
+    /// The page's name, when it is another than its own (Memory's while a
+    /// session is being CHOSEN to keep something in).
+    pub title: Option<&'a str>,
+    /// A session is being chosen: its rows only choose — no × on them.
+    pub choosing: bool,
+    /// The disk's menu, when it is open.
+    pub menu: Option<MenuView<'a>>,
 }
 
 /// The id the list gives the tile of the box something is being written in
 /// (`FootView::writing`): where that box is this frame.
 pub(crate) const WRITER: u64 = u64::MAX - 7;
+/// The disk (fa-floppy-o).
+const GLYPH_DISK: &str = "\u{f0c7}";
+/// The disk's menu: how wide it is, how tall a row, its inner margin.
+pub(crate) const MENU_W: f32 = 150.0;
+pub(crate) const MENU_ROW: f32 = 28.0;
+pub(crate) const MENU_PAD: f32 = 4.0;
+
+/// The disk's menu, open under an item's disk: where, its rows, the one
+/// the pointer is on.
+pub(crate) struct MenuView<'a> {
+    pub rect: Rect,
+    pub rows: &'a [&'static str],
+    pub hot: Option<usize>,
+}
+
 /// The pencil (fa-pencil).
 const GLYPH_EDIT: &str = "\u{f040}";
 
@@ -769,7 +792,8 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 true,
                 paint.ink_at(0.5),
             );
-            if view.hover.is_some_and(|h| h.item() == Some(item.id)) {
+            let choosing = view.foot.as_ref().is_some_and(|f| f.choosing);
+            if !choosing && view.hover.is_some_and(|h| h.item() == Some(item.id)) {
                 let close = tile.close();
                 let hot = view.hover == Some(Hover::Close(item.id));
                 put(
@@ -1008,11 +1032,10 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             });
         };
         // The pencil, on what can be written again: a text of one's own.
-        let pins = page == Page::Session;
         if over.is_some() && item.kind == Kind::Text && matches!(page, Page::Session | Page::Pinned)
         {
             button(
-                tile.edit(pins),
+                tile.edit(true),
                 GLYPH_EDIT,
                 Some(crate::options::NERD),
                 12.0,
@@ -1032,24 +1055,21 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 DANGER,
             );
         }
-        if page == Page::Session || page.lent() {
-            let pinned = view
-                .foot
-                .as_ref()
-                .is_some_and(|f| f.pinned.contains(&item.id));
-            if over.is_some() || pinned {
-                let on = pinned || over == Some(Hover::Pin(item.id));
-                button(
-                    tile.pin(),
-                    // (On the clipboard's page it is "keep this in the memory".)
-                    if page.lent() { "\u{f067}" } else { GLYPH_PIN },
-                    Some(crate::options::NERD),
-                    12.0,
-                    on,
-                    over == Some(Hover::Pin(item.id)),
-                    acc,
-                );
-            }
+        // THE DISK, on every item of every list (Max, 2026-10-10: *"add the
+        // floppy everywhere, everything can be saved to memory… get rid of
+        // the pin button"*): its menu keeps the item somewhere — Pin ·
+        // Memory · New session.
+        if over.is_some() {
+            let hot = over == Some(Hover::Pin(item.id));
+            button(
+                tile.pin(),
+                GLYPH_DISK,
+                Some(crate::options::NERD),
+                12.0,
+                hot,
+                hot,
+                acc,
+            );
         }
     }
     // A new thing being written: its box after the last item.
@@ -1087,7 +1107,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             border: 0.0,
         });
         // The page's name, small, centred under the buttons.
-        if let Some(title) = foot.page.title() {
+        if let Some(title) = foot.title.or(foot.page.title()) {
             bar.labels.push(Label {
                 text: title.to_owned(),
                 pos: (rect.x + rect.w / 2.0, rect.y + FOOT_H + 2.0),
@@ -1157,6 +1177,100 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         scene.grids.push(bar);
         if writer.is_some() {
             scene.grids.push(well);
+        }
+        // The disk's menu: a small box of rows under the disk, over the list.
+        if let Some(menu) = &foot.menu {
+            // (Every label is drawn in one late pass, over every box: the
+            // words under the menu are left out, not painted over.)
+            // A line that starts left of the menu is cut where the menu
+            // begins; one that starts under it is not drawn.
+            let m = menu.rect;
+            for grid in &mut scene.grids {
+                let within = grid.clip;
+                grid.labels.retain_mut(|l| {
+                    let (x0, x1) = if l.centered {
+                        (l.pos.0 - l.max_w / 2.0, l.pos.0 + l.max_w / 2.0)
+                    } else {
+                        (l.pos.0, l.pos.0 + l.max_w)
+                    };
+                    if l.pos.1 + l.line_px <= m.y
+                        || l.pos.1 >= m.y + m.h
+                        || x1 <= m.x
+                        || x0 >= m.x + m.w
+                    {
+                        return true;
+                    }
+                    if x0 >= m.x || l.centered {
+                        return false;
+                    }
+                    let c = l.clip.unwrap_or(within);
+                    l.clip = Some(Rect::new(c.x, c.y, (m.x - c.x).max(0.0), c.h));
+                    true
+                });
+            }
+            let mut over = GridContent {
+                clip: window,
+                ..Default::default()
+            };
+            scene.shadows.push(ShadowInst {
+                rect: menu.rect,
+                radius: RADIUS,
+                blur: 18.0,
+                color: [0.0, 0.0, 0.0, 0.9],
+                edges: [0.2, 0.4, 0.3, 0.3],
+            });
+            let mut fill = paint.tone(ZEBRA_HOT);
+            fill[3] = 1.0;
+            over.rects.push(RectInst {
+                rect: menu.rect,
+                radius: RADIUS,
+                color: fill,
+                glass: 0.0,
+                border: 0.0,
+            });
+            over.rects.push(RectInst {
+                rect: menu.rect,
+                radius: RADIUS,
+                color: paint.ink_at(0.14),
+                glass: 0.0,
+                border: 1.0,
+            });
+            for (n, row) in menu.rows.iter().enumerate() {
+                let r = Rect::new(
+                    menu.rect.x + MENU_PAD,
+                    menu.rect.y + MENU_PAD + n as f32 * MENU_ROW,
+                    menu.rect.w - 2.0 * MENU_PAD,
+                    MENU_ROW,
+                );
+                let hot = menu.hot == Some(n);
+                if hot {
+                    over.rects.push(RectInst {
+                        rect: r,
+                        radius: 7.0,
+                        color: [acc[0], acc[1], acc[2], 0.2],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+                over.labels.push(Label {
+                    text: (*row).to_owned(),
+                    pos: (r.x + 9.0, r.y + (r.h - TEXT_LINE) / 2.0),
+                    max_w: r.w - 12.0,
+                    font_px: TEXT_PX + 0.5,
+                    line_px: TEXT_LINE,
+                    centered: false,
+                    dim: false,
+                    cache: true,
+                    clip: Some(window),
+                    family: None,
+                    color: Some(if hot {
+                        [acc[0], acc[1], acc[2], 1.0]
+                    } else {
+                        paint.ink_at(0.95)
+                    }),
+                });
+            }
+            scene.grids.push(over);
         }
     }
     (scene, tiles, max_scroll)
@@ -1599,7 +1713,7 @@ mod tests {
             .iter()
             .map(|it| (it.id, vec![it.body.clone()]))
             .collect();
-        let (shifts, slots, pinned) = (HashMap::new(), HashMap::new(), HashSet::from([2u64]));
+        let (shifts, slots) = (HashMap::new(), HashMap::new());
         let notes: HashMap<u64, String> = HashMap::new();
         let rect = Rect::new(600.0, 60.0, WIDTH, 500.0);
         let view = |foot: bool| View {
@@ -1611,7 +1725,6 @@ mod tests {
             hover: None,
             foot: foot.then_some(FootView {
                 page: Page::Session,
-                pinned: &pinned,
                 current: None,
                 bar: BarView {
                     name: Some("Golem new feature"),
@@ -1635,6 +1748,9 @@ mod tests {
                 notes: &notes,
                 playing: None,
                 writing: None,
+                title: None,
+                choosing: false,
+                menu: None,
             }),
             dnd_over: false,
             hidden: None,
@@ -1686,15 +1802,16 @@ mod tests {
             assert!(r.x >= rect.x && r.x + r.w <= rect.x + rect.w);
         }
         assert!(buttons[0].1.x + buttons[0].1.w <= buttons[1].1.x);
-        // A pinned item wears its pin without the pointer on it.
-        let pins = |s: &Scene| {
+        // No item wears a mark of its own at rest: its buttons (the pencil,
+        // the disk, the ×) show under the pointer only.
+        let marks = |s: &Scene| {
             s.grids[1]
                 .labels
                 .iter()
-                .filter(|l| l.text == GLYPH_PIN)
+                .filter(|l| l.text == GLYPH_DISK || l.text == GLYPH_EDIT)
                 .count()
         };
-        assert_eq!((pins(&bare), pins(&with)), (0, 1));
+        assert_eq!((marks(&bare), marks(&with)), (0, 0));
     }
 
     #[test]

@@ -89,13 +89,7 @@ pub(crate) struct Item {
     pub from: Option<String>,
 }
 
-impl Item {
-    /// Whether `other` is the same THING (a pinned copy of it, say),
-    /// whatever its id.
-    pub(super) fn same(&self, other: &Item) -> bool {
-        self.kind == other.kind && self.body == other.body && self.path == other.path
-    }
-}
+impl Item {}
 
 /// A session: one working set of things, named after the window it was
 /// started in. MEMORY is the list of them all; each window shows the one it

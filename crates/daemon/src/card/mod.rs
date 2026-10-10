@@ -349,6 +349,13 @@ pub(crate) struct Card {
     /// Where the writing box is in the list this frame (as the tiles are:
     /// in the space the card is laid out in).
     writer: Option<Rect>,
+    /// The item whose disk's menu is open.
+    menu: Option<u64>,
+    /// A session is being CHOSEN on Memory's page, to keep this in; and the
+    /// page to go back to once it is (or once it is given up).
+    picking: Option<(Item, Page)>,
+    /// What was just done, said where the hint is for a moment ("Saved").
+    flash: Option<(String, Instant)>,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -805,6 +812,10 @@ impl Card {
         // (Everything is tested where it was laid out: see `view::virt`.)
         let rect = self.vrect()?;
         let pos = self.inside(pos);
+        if let Some(menu) = self.menu_rect().filter(|r| r.contains(pos)) {
+            let row = ((pos.1 - menu.y - MENU_PAD) / MENU_ROW).floor().max(0.0) as usize;
+            return Some(Hover::Menu(row.min(self.menu_rows().len() - 1)));
+        }
         let low = bottom(rect, self.page, self.seeking(), self.pick()).with_input(self.writer);
         if let Some(hit) = low.hit(pos, self.seeking()) {
             return Some(hit);
@@ -829,12 +840,15 @@ impl Card {
             }
         }
         let tile = self.tiles.iter().find(|t| t.rect.contains(pos))?;
-        let pins = self.page == Page::Session || self.page.lent();
+        // (Memory's rows are sessions: no disk; and while one is being
+        // chosen, no × either — a row only chooses.)
+        let pins = self.page != Page::Memory;
         let pencil = matches!(self.page, Page::Session | Page::Pinned)
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Text);
-        Some(if !self.page.lent() && tile.close().contains(pos) {
+        let closes = !(self.page.lent() || self.page == Page::Memory && self.picking.is_some());
+        Some(if closes && tile.close().contains(pos) {
             Hover::Close(tile.id)
-        } else if pencil && tile.edit(self.page == Page::Session).contains(pos) {
+        } else if pencil && tile.edit(true).contains(pos) {
             Hover::Edit(tile.id)
         } else if pins && tile.pin().contains(pos) {
             Hover::Pin(tile.id)
@@ -869,25 +883,66 @@ impl Card {
         }
     }
 
-    /// Keep a copy of `item` in the memory the card is working with, while
-    /// another page is up (the clipboard's "keep"). Whether there was one.
-    fn keep(&mut self, item: &Item, now: u64) -> bool {
-        if self.page == Page::Session {
-            return false;
+    /// The rows of the disk's menu on the page that is up: Pin (not for
+    /// what is pinned already), Memory, New session.
+    fn menu_rows(&self) -> &'static [&'static str] {
+        match self.page {
+            Page::Pinned => &["Memory", "New session"],
+            _ => &["Pin", "Memory", "New session"],
         }
-        let Some(open) = self.open else {
-            return false;
+    }
+
+    /// Where the disk's menu is: under the disk of its item, its right edge
+    /// on the disk's (over it where there is no room under).
+    fn menu_rect(&self) -> Option<Rect> {
+        let tile = self.tiles.iter().find(|t| Some(t.id) == self.menu)?;
+        let (disk, card) = (tile.pin(), self.vrect()?);
+        let h = self.menu_rows().len() as f32 * MENU_ROW + 2.0 * MENU_PAD;
+        let x = (disk.x + disk.w - MENU_W).max(card.x + 6.0);
+        let under = disk.y + disk.h + 4.0;
+        let y = if under + h > card.y + card.h - 26.0 {
+            disk.y - 4.0 - h
+        } else {
+            under
         };
+        Some(Rect::new(x.round(), y.round(), MENU_W, h))
+    }
+
+    /// A copy of `item` of its own (a new id, made now): what is kept
+    /// somewhere else is never tied to where it came from.
+    fn copy_of(&mut self, item: &Item, now: u64) -> Item {
         let id = self.next_id.max(1);
         self.next_id = id + 1;
-        let Some(past) = self.memory.iter_mut().find(|p| p.id == open) else {
-            return false;
-        };
-        past.items.push(Item {
+        Item {
             id,
             at: now,
             ..item.clone()
-        });
+        }
+    }
+
+    /// Pin a copy of `item`.
+    fn pin_copy(&mut self, item: &Item, now: u64) {
+        let copy = self.copy_of(item, now);
+        // (On Pinned's own page the pins are the list on screen.)
+        if self.page == Page::Pinned {
+            self.items.push(copy);
+        } else {
+            self.pinned.push(copy);
+        }
+    }
+
+    /// Keep a copy of `item` in session `id`. Whether there is such a one.
+    fn keep_in(&mut self, id: u64, item: &Item, now: u64) -> bool {
+        if !self.memory.iter().any(|p| p.id == id) {
+            return false;
+        }
+        let copy = self.copy_of(item, now);
+        // (The open session's items are out on the card while its page is up.)
+        if self.page == Page::Session && self.open == Some(id) {
+            self.items.push(copy);
+        } else if let Some(past) = self.memory.iter_mut().find(|p| p.id == id) {
+            past.items.push(copy);
+        }
         true
     }
 
@@ -1056,24 +1111,6 @@ impl Card {
         }
         self.lines.remove(&id);
         Some(past)
-    }
-
-    /// Pin item `id` of the session, or take its pin off. Whether it is
-    /// pinned now. (The pinned one is a copy: it stays when the session
-    /// goes — Max, 2026-10-09.)
-    fn pin(&mut self, id: u64) -> Option<bool> {
-        if self.page != Page::Session {
-            return None;
-        }
-        let item = self.item(id)?.clone();
-        if let Some(at) = self.pinned.iter().position(|p| p.same(&item)) {
-            self.pinned.remove(at);
-            return Some(false);
-        }
-        let new = self.next_id.max(1);
-        self.next_id = new + 1;
-        self.pinned.push(Item { id: new, ..item });
-        Some(true)
     }
 
     /// Whether anything the card keeps — on it, pinned, or in memory — is
@@ -1544,6 +1581,11 @@ impl App {
     /// Put page `page` up.
     fn card_show(&mut self, page: Page) {
         self.card_load();
+        self.card.menu = None;
+        // (Choosing a session is Memory's page's: leaving it gives it up.)
+        if page != Page::Memory {
+            self.card.picking = None;
+        }
         if self.card.show(page) {
             // (The input box and the name are a memory's.)
             // (What was being written was the other page's.)
@@ -1676,27 +1718,6 @@ impl App {
         }
     }
 
-    /// The pin of a clipboard row: a copy of it is kept in the memory the
-    /// card is working with (one is started if the window has none).
-    fn card_keep_clip(&mut self, id: u64) {
-        let Some(item) = self.card.item(id).cloned() else {
-            return;
-        };
-        if self.card.open.is_none() {
-            let title = self.card_host_title();
-            let new = self.card.begin(title.clone(), now_secs());
-            if let Some(host) = self.card.host.clone() {
-                self.card.give(&host, title.as_deref(), new);
-            }
-            self.card.open = Some(new);
-        }
-        if self.card.keep(&item, now_secs()) {
-            info!("card: kept from the clipboard");
-            self.card_save();
-            self.card_show(Page::Session);
-        }
-    }
-
     // ---- the keyboard: the input box, the search, the name ----
 
     /// The card takes the keyboard for `field` (a click on the input box,
@@ -1826,6 +1847,18 @@ impl App {
                 .filter(|s| !s.is_empty() && !s.chars().any(|c| c.is_control() || c == ' '))
                 .filter(|_| !ctrl);
             match (keysym, self.card.page) {
+                // A session being chosen: Escape goes back with nothing
+                // kept; Enter keeps the thing in a new one.
+                (Keysym::Escape, _) if self.card.picking.is_some() => {
+                    self.card_picked(None);
+                    return;
+                }
+                (Keysym::Return | Keysym::KP_Enter, _) if self.card.picking.is_some() => {
+                    let title = self.card_host_title();
+                    let new = self.card.begin(title, now_secs());
+                    self.card_picked(Some(new));
+                    return;
+                }
                 (Keysym::Tab | Keysym::Escape, _) => {
                     self.card.tabbed = true;
                     self.card_drop_keys();
@@ -2212,8 +2245,12 @@ impl App {
         self.card.say = None;
         match what {
             Hover::Close(id) => self.card_remove(id),
-            Hover::Pin(id) if self.card.page.lent() => self.card_keep_clip(id),
-            Hover::Pin(id) => self.card_pin(id),
+            // The disk: its menu opens under it (a second click closes it).
+            Hover::Pin(id) => {
+                self.card.menu = (self.card.menu != Some(id)).then_some(id);
+                self.request_card_draw();
+            }
+            Hover::Menu(row) => self.card_menu(row),
             Hover::Edit(id) => self.card_edit(id),
             Hover::Foot(which) => self.card_foot(which),
             Hover::Seek => self.card_take_keys(Field::Seek),
@@ -2330,6 +2367,11 @@ impl App {
     /// the one already up (if the window has one).
     fn card_foot(&mut self, which: Foot) {
         self.card_load();
+        // (The arrow, while a session is being chosen: back, nothing kept.)
+        if self.card.picking.is_some() && which.page() == self.card.page {
+            self.card_picked(None);
+            return;
+        }
         match which.page() {
             page if page != self.card.page => self.card_show(page),
             _ if self.card.open.is_some() => self.card_show(Page::Session),
@@ -2341,6 +2383,12 @@ impl App {
     /// on (and so will a window of the same title, another day).
     fn card_recall(&mut self, id: u64) {
         if !self.card.memory.iter().any(|p| p.id == id) {
+            return;
+        }
+        // (While a session is being chosen to keep something in, a click
+        // on one keeps it there — the window's own session stays.)
+        if self.card.picking.is_some() {
+            self.card_picked(Some(id));
             return;
         }
         let title = self.card_host_title();
@@ -2377,15 +2425,70 @@ impl App {
         self.request_card_draw();
     }
 
-    /// The pin of an item: pinned, or not any more.
-    fn card_pin(&mut self, id: u64) {
-        if let Some(on) = self.card.pin(id) {
-            info!("card: an item {}", if on { "pinned" } else { "unpinned" });
-            self.card_save();
-            self.request_card_draw();
+    /// A row of the disk's menu (Max, 2026-10-10): PIN — a copy of the item
+    /// is pinned; MEMORY — the card turns to Memory's page for a session to
+    /// be CHOSEN (`picking`), and comes back once one is; NEW SESSION — a
+    /// session is started with a copy of it in it. Always a copy of its own.
+    fn card_menu(&mut self, row: usize) {
+        let Some(id) = self.card.menu.take() else {
+            return;
+        };
+        let (Some(item), Some(what)) = (
+            self.card.item(id).cloned(),
+            self.card.menu_rows().get(row).copied(),
+        ) else {
+            return;
+        };
+        match what {
+            "Pin" => {
+                self.card.pin_copy(&item, now_secs());
+                self.card_flash("Pinned");
+            }
+            "Memory" => {
+                let back = self.card.page;
+                self.card_show(Page::Memory);
+                self.card.picking = Some((item, back));
+            }
+            _ => {
+                let title = self.card_host_title();
+                let new = self.card.begin(title, now_secs());
+                self.card.keep_in(new, &item, now_secs());
+                self.card_flash("Saved");
+            }
         }
+        self.card_save();
+        self.request_card_draw();
     }
 
+    /// Say `words` where the hint is, for a moment: what was just done.
+    fn card_flash(&mut self, words: &str) {
+        let since = Instant::now();
+        self.card.flash = Some((words.to_owned(), since));
+        self.after_ms(1600, move |app| {
+            if app.card.flash.as_ref().is_some_and(|f| f.1 == since) {
+                app.card.flash = None;
+                app.request_card_draw();
+            }
+        });
+        self.request_card_draw();
+    }
+
+    /// A session was being chosen and is not any more: back to the page the
+    /// card was on, with `into` (if any) holding a copy of the thing.
+    fn card_picked(&mut self, into: Option<u64>) {
+        let Some((item, back)) = self.card.picking.take() else {
+            return;
+        };
+        let kept = into.is_some_and(|id| self.card.keep_in(id, &item, now_secs()));
+        self.card_show(back);
+        if kept {
+            self.card_save();
+            self.card_flash("Saved");
+        }
+        self.request_card_draw();
+    }
+
+    /// An item's ×: it is gone from the list that is up.
     fn card_remove(&mut self, id: u64) {
         if self.card.page == Page::Memory {
             self.card_forget(id);
@@ -2928,17 +3031,6 @@ impl App {
             self.card_last_frame = Some(now);
         }
         let hover = self.card.ptr.and_then(|p| self.card.hit(p));
-        // The items of the session that are pinned too: their pin is lit.
-        let pinned: HashSet<u64> = match self.card.page {
-            Page::Session => self
-                .card
-                .items
-                .iter()
-                .filter(|it| self.card.pinned.iter().any(|p| p.same(it)))
-                .map(|it| it.id)
-                .collect(),
-            _ => HashSet::new(),
-        };
         // A list that was showing its newest item keeps showing it when
         // the card's height changes under it (its window was resized).
         if self.card.max_scroll > 0.0 && self.card.scroll >= self.card.max_scroll - 0.5 {
@@ -3017,7 +3109,6 @@ impl App {
         // The line at the foot of each item: when it is from (and, on the
         // clipboard's page, which app).
         let now_s = now_secs();
-        let pinned_too = &pinned;
         let notes: HashMap<u64, String> = listed
             .iter()
             .map(|it| {
@@ -3028,7 +3119,6 @@ impl App {
                         let from: String = from.chars().take(26).collect();
                         format!("{from} · {when}")
                     }
-                    _ if pinned_too.contains(&it.id) => format!("pinned · {when}"),
                     _ => when,
                 };
                 (it.id, note)
@@ -3071,8 +3161,13 @@ impl App {
         // THE HINT: what the keys do here, for as long as the card has them
         // (without them it says nothing — Max, 2026-10-10: *"they are not
         // useful when it is unfocused"*).
+        let flash = self.card.flash.as_ref().map(|f| f.0.clone());
         let hint = match (hover, self.card.field, self.card.page) {
+            _ if flash.is_some() => flash.as_deref().unwrap_or(""),
             _ if self.card.say.is_some() => self.card.say.unwrap_or(""),
+            (_, Some(_), _) if self.card.picking.is_some() => {
+                "Click a session · Enter for a new one · Escape goes back"
+            }
             (Some(Hover::Btn(which)), ..) => which.hint(),
             (_, None, _) => "",
             (_, Some(Field::Box), _) => {
@@ -3105,7 +3200,6 @@ impl App {
             },
             foot: Some(FootView {
                 page: self.card.page,
-                pinned: &pinned,
                 current: self
                     .card
                     .host
@@ -3143,6 +3237,20 @@ impl App {
                 notes: &notes,
                 playing,
                 writing: (self.card.field == Some(Field::Box)).then_some(self.card.edit),
+                title: self
+                    .card
+                    .picking
+                    .is_some()
+                    .then_some("Keep in which session?"),
+                choosing: self.card.picking.is_some(),
+                menu: self.card.menu_rect().map(|rect| MenuView {
+                    rect,
+                    rows: self.card.menu_rows(),
+                    hot: match hover {
+                        Some(Hover::Menu(row)) => Some(row),
+                        _ => None,
+                    },
+                }),
             }),
             dnd_over: self.card.dnd_over,
             hidden,
@@ -3281,6 +3389,7 @@ impl App {
                 // The keys go with the pointer — unless something is being
                 // written: that keeps them until it is done.
                 self.card.tabbed = false;
+                self.card.menu = None;
                 if self.card.field == Some(Field::Card) {
                     self.card_drop_keys();
                 }
@@ -3312,6 +3421,13 @@ impl App {
                     {
                         self.card_drop_keys();
                         return;
+                    }
+                    // (A press anywhere but on the disk's menu closes it.)
+                    if self.card.menu.is_some()
+                        && !matches!(self.card.hit(at), Some(Hover::Menu(_) | Hover::Pin(_)))
+                    {
+                        self.card.menu = None;
+                        self.request_card_draw();
                     }
                     // A click on the card of a window that is not the focused
                     // one FOCUSES that window (Max, 2026-10-10: *"clicking the
@@ -3871,6 +3987,21 @@ impl App {
                 self.card_keep_draft();
                 self.card_words()
             }
+            // `disk <n>`: the disk's menu of item n of the list that is up,
+            // open · `menu <row>`: that row of it (from 1).
+            "disk" => {
+                self.card.menu = rest
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| self.card.items.get(n.saturating_sub(1)))
+                    .map(|it| it.id);
+                self.request_card_draw();
+                format!("menu {:?}", self.card.menu_rows())
+            }
+            "menu" => {
+                self.card_menu(rest.parse::<usize>().unwrap_or(1).saturating_sub(1));
+                format!("page {:?}", self.card.page)
+            }
             // `edit <n>`: the pencil of item n of the list that is up.
             "edit" => {
                 let id = rest
@@ -3948,11 +4079,13 @@ impl App {
                 self.card_load();
                 let n = rest.parse::<usize>().ok();
                 let done = match verb {
+                    // `pin <n>`: a copy of item n of the session, pinned.
                     "pin" => {
                         self.card_show(Page::Session);
-                        n.and_then(|n| self.card.items.get(n))
-                            .map(|it| it.id)
-                            .map(|id| self.card_pin(id))
+                        n.and_then(|n| self.card.items.get(n)).cloned().map(|it| {
+                            self.card.pin_copy(&it, now_secs());
+                            self.card_save();
+                        })
                     }
                     "open" => n
                         .and_then(|n| self.card.memory.get(n))
@@ -4330,30 +4463,43 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_is_a_copy_that_outlives_the_session() {
+    fn what_the_disk_keeps_is_a_copy_of_its_own() {
         let mut card = Card::default();
-        let a = card.begin(None, 1);
+        let a = card.begin(Some("A".to_owned()), 1);
+        let b = card.begin(Some("B".to_owned()), 1);
         card.turn_to(Some(a));
         card.items = vec![note(1, "me@example.org"), note(2, "b")];
-        card.next_id = 3;
-        assert_eq!(card.pin(1), Some(true));
-        assert_eq!(card.pinned.len(), 1);
-        assert_ne!(card.pinned[0].id, 1);
-        assert!(card.pinned[0].same(&card.items[0]));
-        // The session goes; the pin stays, and is the list of its page.
+        card.next_id = 10;
+        // PINNED: a copy, with an id of its own; again, another copy (it
+        // is not a switch any more).
+        let item = card.items[0].clone();
+        card.pin_copy(&item, 5);
+        card.pin_copy(&item, 6);
+        assert_eq!(card.pinned.len(), 2);
+        assert!(card.pinned.iter().all(|p| p.id != 1 && p.body == item.body));
+        // Kept in ANOTHER SESSION: there, not here.
+        assert!(card.keep_in(b, &item, 7));
+        assert_eq!(card.items.len(), 2);
+        let in_b: Vec<&str> = card.memory[0]
+            .items
+            .iter()
+            .map(|i| i.body.as_str())
+            .collect();
+        assert_eq!((card.memory[0].id, in_b), (b, vec!["me@example.org"]));
+        // …in the OPEN one: on the card, where its items are.
+        assert!(card.keep_in(a, &item, 8));
+        assert_eq!(card.items.len(), 3);
+        // (No such session: nothing.)
+        assert!(!card.keep_in(999, &item, 9));
+        // The session goes; the pins stay, and are the list of their page —
+        // where the disk has no "Pin" row.
         card.lose(a);
         assert!(card.show(Page::Pinned));
-        assert_eq!(card.items.len(), 1);
-        assert_eq!(card.pinned_items().len(), 1);
-        // (No pinning from the pinned page itself.)
-        let pid = card.items[0].id;
-        assert_eq!(card.pin(pid), None);
-        // On a session that has the same thing: its pin comes off.
-        let b = card.begin(None, 2);
-        card.turn_to(Some(b));
-        card.items.push(note(7, "me@example.org"));
-        assert_eq!(card.pin(7), Some(false));
-        assert!(card.pinned.is_empty());
+        assert_eq!(card.items.len(), 2);
+        assert_eq!(card.menu_rows(), ["Memory", "New session"]);
+        // The copies are apart: changing one leaves the other.
+        card.items[0].body = "changed".to_owned();
+        assert_eq!(card.items[1].body, "me@example.org");
     }
 
     #[test]
@@ -4369,7 +4515,8 @@ mod tests {
         card.turn_to(Some(a));
         card.items = vec![pic(1)];
         card.next_id = 5;
-        card.pin(1);
+        let own = card.items[0].clone();
+        card.pin_copy(&own, 2);
         // Off the screen (Memory's page is up), but pinned and in memory.
         card.turn_to(None);
         assert!(card.keeps("/tmp/card/p.png"));
