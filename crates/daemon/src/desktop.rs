@@ -1100,6 +1100,36 @@ const CAMERA_BUFFER_MS: u32 = 50;
 /// How long scrcpy is given to start feeding the camera device.
 const CAMERA_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// The step of the camera's quality ladder that this computer kept up with
+/// last (0 = the lens's best), so the next start does not try again what
+/// was too much.
+static CAMERA_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether the process decoding the phone's video has a core flat out: its
+/// processor time over two and a half seconds, after a second to settle.
+fn camera_overworked(pid: u32) -> bool {
+    let spent = || -> Option<u64> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // (After the name in brackets, which may hold spaces.)
+        let mut rest = stat.rsplit_once(')')?.1.split_whitespace();
+        let (utime, stime) = (rest.nth(11)?.parse::<u64>().ok()?, rest.next()?.parse::<u64>().ok()?);
+        Some(utime + stime)
+    };
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    let (Some(before), at) = (spent(), std::time::Instant::now()) else {
+        return false;
+    };
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let Some(after) = spent() else {
+        return false;
+    };
+    // SAFETY: a plain query of a system constant.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+    let share = (after - before) as f64 / ticks / at.elapsed().as_secs_f64();
+    debug!("desktop: the camera's decoder uses {:.0}% of a core", share * 100.0);
+    share > 0.88
+}
+
 /// Use a phone's back camera as this computer's (scrcpy into the loopback
 /// camera device, no window), until it is stopped from the same menu row
 /// or the phone goes. What to tell the owner — that it is on, or why not.
@@ -1124,64 +1154,98 @@ fn camera(
     while camera_busy(&device) && waited.elapsed() < std::time::Duration::from_secs(4) {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    let mut cmd = std::process::Command::new("scrcpy");
-    cmd.arg("--video-source=camera").arg(format!("--camera-id={}", lens.id));
-    if let Some(zoom) = lens.zoom {
-        cmd.arg(format!("--camera-zoom={zoom}"));
-    }
-    if let Some(fps) = lens.fps {
-        cmd.arg(format!("--camera-fps={fps}"));
-    }
-    cmd.args(["--camera-ar=16:9", "--max-size=1920"])
-        // 60 pictures a second, where a webcam gives 30 (Max, 2026-10-09: at
-        // 30 it "feels even less smooth" than the built-in one); the phone
-        // was measured sending 1080p at 60 with none late or repeated. And
-        // twice scrcpy's usual bit rate, for the picture's sake.
-        .args(["--video-bit-rate=16M", "--no-audio", "--no-window"])
-        // Frames come off the phone up to 20 ms early or late (measured);
-        // held this long they go out evenly. (80 ms was tried first, on a
-        // day the picture was choppy for another reason, and judged worse.)
-        .arg(format!("--v4l2-buffer={CAMERA_BUFFER_MS}"))
-        .arg(format!("--v4l2-sink={}", device.display()));
-    if let Some(serial) = serial {
-        cmd.arg(format!("--serial={serial}"));
-    }
-    // It goes when the dock goes: left behind, it kept the phone's camera
-    // on with no row anywhere to stop it.
-    // SAFETY: only an async-signal-safe call between fork and exec.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        });
-    }
-    let mut child = match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            warn!("desktop: scrcpy could not be run: {e}");
-            return Some(tr("The screen mirror (scrcpy) is not installed.").to_owned());
+    // The picture is asked for at the best the lens gives, and stepped down
+    // when THIS computer cannot keep up: the phone's video is decoded on the
+    // processor, one core's work. On the 2013 MacBook Air 1080p at 60 came
+    // through at 18–23 pictures a second with that core at 107 % — Snapshot
+    // showed the Pixel in slow motion (2026-10-10); 720p at 30 came through
+    // whole. What worked is remembered for as long as the dock runs.
+    let steps: [(Option<u32>, u32, &str); 3] = [(lens.fps, 1920, "16M"), (Some(30), 1920, "12M"), (Some(30), 1280, "8M")];
+    let mut step = CAMERA_STEP.load(std::sync::atomic::Ordering::Relaxed).min(steps.len() - 1);
+    let (mut child, early) = loop {
+        let (fps, size, rate) = steps[step];
+        let mut cmd = std::process::Command::new("scrcpy");
+        cmd.arg("--video-source=camera").arg(format!("--camera-id={}", lens.id));
+        if let Some(zoom) = lens.zoom {
+            cmd.arg(format!("--camera-zoom={zoom}"));
         }
-    };
-    if let Ok(mut on) = cameras.lock() {
-        on.insert(path.to_owned(), child.id());
-    }
-    // It is a camera from the moment the device says it is fed, not
-    // before (announced on a fixed wait, it was sometimes not a camera yet
-    // and the apps got nothing).
-    let asked = std::time::Instant::now();
-    let mut started = false;
-    while !started && asked.elapsed() < CAMERA_PATIENCE && matches!(child.try_wait(), Ok(None)) {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        started = camera_fed(&device);
-    }
-    let early = match child.try_wait().ok().flatten() {
-        None if !started => {
-            warn!("desktop: scrcpy never fed the camera device for {name}");
+        if let Some(fps) = fps.map(|f| lens.fps.map_or(f, |most| f.min(most))) {
+            cmd.arg(format!("--camera-fps={fps}"));
+        }
+        cmd.arg("--camera-ar=16:9")
+            .arg(format!("--max-size={size}"))
+            // 60 pictures a second, where a webcam gives 30 (Max, 2026-10-09:
+            // at 30 it "feels even less smooth" than the built-in one); the
+            // phone was measured sending 1080p at 60 with none late or
+            // repeated. And twice scrcpy's usual bit rate, for the picture's
+            // sake.
+            .arg(format!("--video-bit-rate={rate}"))
+            .args(["--no-audio", "--no-window"])
+            // Frames come off the phone up to 20 ms early or late (measured);
+            // held this long they go out evenly. (80 ms was tried first, on
+            // a day the picture was choppy for another reason, and judged
+            // worse.)
+            .arg(format!("--v4l2-buffer={CAMERA_BUFFER_MS}"))
+            .arg(format!("--v4l2-sink={}", device.display()));
+        if let Some(serial) = serial {
+            cmd.arg(format!("--serial={serial}"));
+        }
+        // It goes when the dock goes: left behind, it kept the phone's
+        // camera on with no row anywhere to stop it.
+        // SAFETY: only an async-signal-safe call between fork and exec.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let mut child = match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                warn!("desktop: scrcpy could not be run: {e}");
+                return Some(tr("The screen mirror (scrcpy) is not installed.").to_owned());
+            }
+        };
+        if let Ok(mut on) = cameras.lock() {
+            on.insert(path.to_owned(), child.id());
+        }
+        // It is a camera from the moment the device says it is fed, not
+        // before (announced on a fixed wait, it was sometimes not a camera
+        // yet and the apps got nothing).
+        let asked = std::time::Instant::now();
+        let mut started = false;
+        while !started && asked.elapsed() < CAMERA_PATIENCE && matches!(child.try_wait(), Ok(None)) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            started = camera_fed(&device);
+        }
+        let early = match child.try_wait().ok().flatten() {
+            None if !started => {
+                warn!("desktop: scrcpy never fed the camera device for {name}");
+                let _ = child.kill();
+                child.wait().ok()
+            }
+            other => other,
+        };
+        // Keeping up? One core flat out on the decoding means it is not.
+        if early.is_none() && step + 1 < steps.len() && camera_overworked(child.id()) {
+            // Ours may have been ended by hand meanwhile (the menu's row).
+            let still_ours = cameras.lock().ok().is_some_and(|on| on.get(path) == Some(&child.id()));
             let _ = child.kill();
-            child.wait().ok()
+            let _ = child.wait();
+            if !still_ours {
+                return None;
+            }
+            step += 1;
+            info!("desktop: this computer cannot keep up with {name}'s camera at {size}; trying {}", steps[step].1);
+            let waited = std::time::Instant::now();
+            while camera_busy(&device) && waited.elapsed() < std::time::Duration::from_secs(4) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            continue;
         }
-        other => other,
+        CAMERA_STEP.store(step, std::sync::atomic::Ordering::Relaxed);
+        break (child, early);
     };
     let mut relay = None;
     if early.is_none() {
