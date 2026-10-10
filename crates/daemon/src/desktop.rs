@@ -3276,6 +3276,12 @@ impl App {
             if !busy && app.desktop.keys {
                 info!("desktop: the pointer is on a window");
                 app.desktop_drop_keys();
+                // …and what was selected is let go with it (Max,
+                // 2026-10-10): the desktop is left.
+                if !app.desktop.selected.is_empty() {
+                    app.desktop.selected.clear();
+                    app.request_desktop_draw();
+                }
             }
             calloop::timer::TimeoutAction::Drop
         });
