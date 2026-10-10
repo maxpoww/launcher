@@ -872,6 +872,14 @@ fn phone_refuses(name: &str, serial: &str) -> Option<String> {
     Some(format!("{name}: {}", crate::i18n::tr(what)))
 }
 
+/// Where the pointer is on the desktop's surface, asked of the compositor
+/// (the surface covers its output from the output's own corner).
+fn desktop_pointer_now() -> Option<(f32, f32)> {
+    let (x, y) = crate::hypr::cursor_pos()?;
+    let m = crate::hypr::focused_monitor().ok()?;
+    Some(((x - m.x) as f32, (y - m.y) as f32))
+}
+
 /// The camera device a phone's picture is fed into: a loopback one
 /// (Golem's is "Android WebCam", /dev/video10), which every app then sees
 /// as a camera. `None` on a system without one.
@@ -2966,7 +2974,22 @@ impl App {
             }
             let _ = self.conn.flush();
         }
-        let renamed = commit && self.desktop_apply_rename(rename.item, rename.text.trim());
+        // A FILE whose new name was typed without an ending keeps the one it
+        // had: the whole name is selected as the field opens, so "notes"
+        // typed over "notes.txt" made a file nothing would open any more.
+        // (To take the ending off on purpose, end the name with a dot.)
+        let typed = rename.text.trim();
+        let kept = self
+            .desktop
+            .items
+            .get(rename.item)
+            .filter(|it| it.kind == Kind::File && !typed.is_empty() && !typed.contains('.'))
+            .and_then(|it| Path::new(&it.path).extension().map(|e| e.to_string_lossy().into_owned()));
+        let name = match kept {
+            Some(ext) => format!("{typed}.{ext}"),
+            None => typed.strip_suffix('.').filter(|n| !n.is_empty() && !n.contains('.')).unwrap_or(typed).to_owned(),
+        };
+        let renamed = commit && self.desktop_apply_rename(rename.item, &name);
         if renamed {
             self.reload_desktop();
         } else {
@@ -3507,9 +3530,24 @@ impl App {
                 ..
             } if button == crate::BTN_LEFT => match state {
                 wl_pointer::ButtonState::Pressed => {
-                    let Some(at) = self.desktop.ptr else {
-                        debug!("desktop: press with no pointer position (no enter yet); ignored");
-                        return;
+                    // No position yet: after a drag of ours ends on the
+                    // desktop the compositor sends neither an enter nor a
+                    // motion until a button goes down — so the first press
+                    // after every drag was thrown away (every second drag
+                    // or click did nothing; found with a real pointer on the
+                    // ASUS, 2026-10-10). The compositor is asked where it is.
+                    let at = match self.desktop.ptr {
+                        Some(at) => at,
+                        None => match desktop_pointer_now() {
+                            Some(at) => {
+                                self.desktop.ptr = Some(at);
+                                at
+                            }
+                            None => {
+                                debug!("desktop: press with no pointer position (no enter yet); ignored");
+                                return;
+                            }
+                        },
                     };
                     // A click on the desktop gives it the keyboard (not one
                     // on the menus' surface, which lies over the windows too).
