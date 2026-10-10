@@ -425,6 +425,8 @@ pub(crate) struct Desktop {
     /// The phones to sync at the next look whatever the clock says (their
     /// settings were just applied).
     pub sync_now: HashSet<String>,
+    /// The pointer is on a surface of ours (any of them).
+    pub pointer_ours: bool,
     /// The last plain click on an item (its path, and when): a second one
     /// on the same item soon enough is a double click, which opens it.
     pub last_click: Option<(String, std::time::Instant)>,
@@ -3242,6 +3244,39 @@ impl App {
         let soon = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(350));
         let _ = self.loop_handle.insert_source(soon, |_, _, app: &mut App| {
             app.desktop_keys_arrived();
+            calloop::timer::TimeoutAction::Drop
+        });
+    }
+
+    /// The pointer left a surface of ours. If, a moment later, it is on none
+    /// of them, it is on a WINDOW — and the desktop gives the keyboard back.
+    ///
+    /// The compositor will not do it for us: a click on a window takes the
+    /// keyboard only if that window is not the one it already counts as
+    /// focused (`processMouseDownNormal`: "window should change"), and while a
+    /// layer holds the keyboard the window that had it before still counts.
+    /// So with the desktop focused, clicking the window one came from did
+    /// nothing, for as long as one stayed on the workspace (Max, 2026-10-10:
+    /// "the desktop doesn't let me focus windows after I focus it"; the log
+    /// showed the keyboard arrive, be held on demand, and never leave).
+    pub(crate) fn desktop_pointer_went(&mut self) {
+        if !self.desktop.keys {
+            return;
+        }
+        // (A moment: going from the desktop to its own menu, the dock or the
+        // bar is a leave and then an enter.)
+        let soon = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(90));
+        let _ = self.loop_handle.insert_source(soon, |_, _, app: &mut App| {
+            let busy = app.desktop.pointer_ours
+                || app.desktop.drag.is_some()
+                || app.desktop.rename.is_some()
+                || app.desktop.menu.is_some()
+                || app.desktop.props.is_some()
+                || app.desktop.config.is_some();
+            if !busy && app.desktop.keys {
+                info!("desktop: the pointer is on a window");
+                app.desktop_drop_keys();
+            }
             calloop::timer::TimeoutAction::Drop
         });
     }

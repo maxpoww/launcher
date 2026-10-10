@@ -6994,6 +6994,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         if let wl_pointer::Event::Enter { surface, .. } = &event {
             app.pointer_surface = app.classify_pointer_surface(surface);
         }
+        // Whether the pointer is on ANY surface of ours: off all of them it is
+        // on a window, and the desktop must not keep the keyboard from it.
+        match &event {
+            wl_pointer::Event::Enter { .. } => app.desktop.pointer_ours = true,
+            wl_pointer::Event::Leave { .. } => {
+                app.desktop.pointer_ours = false;
+                app.desktop_pointer_went();
+            }
+            _ => {}
+        }
         if app.pointer_surface == options::PointerSurface::Deck {
             app.deck_pointer(event);
             return;
