@@ -165,6 +165,69 @@ impl Foot {
     }
 }
 
+/// `r` without the part of it that `c` covers: up to four pieces.
+pub(crate) fn minus(r: Rect, c: Rect) -> Vec<Rect> {
+    let (x0, y0) = (r.x.max(c.x), r.y.max(c.y));
+    let (x1, y1) = ((r.x + r.w).min(c.x + c.w), (r.y + r.h).min(c.y + c.h));
+    if x1 <= x0 || y1 <= y0 {
+        return vec![r];
+    }
+    let mut out = Vec::with_capacity(4);
+    if y0 > r.y {
+        out.push(Rect::new(r.x, r.y, r.w, y0 - r.y));
+    }
+    if y1 < r.y + r.h {
+        out.push(Rect::new(r.x, y1, r.w, r.y + r.h - y1));
+    }
+    if x0 > r.x {
+        out.push(Rect::new(r.x, y0, x0 - r.x, y1 - y0));
+    }
+    if x1 < r.x + r.w {
+        out.push(Rect::new(x1, y0, r.x + r.w - x1, y1 - y0));
+    }
+    out
+}
+
+/// What is left of `r` once every one of `covers` is taken out of it.
+pub(crate) fn uncovered(r: Rect, covers: &[Rect]) -> Vec<Rect> {
+    covers.iter().fold(vec![r], |pieces, c| {
+        pieces.into_iter().flat_map(|p| minus(p, *c)).collect()
+    })
+}
+
+/// THE CARD PASSES BEHIND the windows that lie over its own (Max,
+/// 2026-10-10: *"the card should stay where it is, and be behind if not
+/// focused, as any other window"*). It is a layer of its own, which the
+/// compositor draws over every window — so what a window covers of it is
+/// simply NOT DRAWN: each part of the scene is cut down to the pieces of
+/// itself that no covering window (`covers`) is over. (Its shadow goes
+/// too while anything is over it: a shadow cast onto a nearer window.)
+pub(crate) fn cut_scene(scene: &mut Scene, card: Rect, covers: &[Rect]) {
+    let over = |r: Rect, c: &Rect| {
+        r.x < c.x + c.w && c.x < r.x + r.w && r.y < c.y + c.h && c.y < r.y + r.h
+    };
+    if !covers.iter().any(|c| over(card, c)) {
+        return;
+    }
+    let meet = |a: Rect, b: Rect| {
+        let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
+        let (x1, y1) = ((a.x + a.w).min(b.x + b.w), (a.y + a.h).min(b.y + b.h));
+        Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+    };
+    scene.shadows.clear();
+    let grids = std::mem::take(&mut scene.grids);
+    for grid in grids {
+        for piece in uncovered(grid.clip, covers) {
+            let mut part = grid.clone();
+            part.clip = piece;
+            for label in &mut part.labels {
+                label.clip = Some(meet(label.clip.unwrap_or(grid.clip), piece));
+            }
+            scene.grids.push(part);
+        }
+    }
+}
+
 /// What the pointer is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Hover {
@@ -1395,6 +1458,44 @@ mod tests {
         // Rolled up: nothing at all.
         let (scene, tiles, _) = super::scene(&view(0.0, 0.0));
         assert!(scene.grids.is_empty() && tiles.is_empty());
+    }
+
+    #[test]
+    fn the_card_is_not_drawn_where_a_window_lies_over_it() {
+        let card = Rect::new(600.0, 100.0, 400.0, 600.0);
+        // Nothing over it: all of it, in one piece.
+        assert_eq!(uncovered(card, &[]), vec![card]);
+        assert_eq!(
+            uncovered(card, &[Rect::new(0.0, 0.0, 100.0, 100.0)]),
+            vec![card]
+        );
+        // A window over its lower right corner: what is left is the card
+        // without that corner, nothing counted twice.
+        let window = Rect::new(800.0, 400.0, 500.0, 500.0);
+        let left = uncovered(card, &[window]);
+        let area = |rs: &[Rect]| rs.iter().map(|r| r.w * r.h).sum::<f32>();
+        assert_eq!(area(&left), 400.0 * 600.0 - 200.0 * 300.0);
+        assert!(left.iter().all(|p| !p.contains((900.0, 500.0))));
+        assert!(left.iter().any(|p| p.contains((650.0, 150.0))));
+        // A window over all of it: nothing is left.
+        assert!(uncovered(card, &[Rect::new(0.0, 0.0, 2000.0, 2000.0)]).is_empty());
+        // The scene's parts are cut to those pieces, their labels with them.
+        let mut scene = Scene::default();
+        scene.shadows.push(ShadowInst {
+            rect: card,
+            radius: 10.0,
+            blur: 26.0,
+            color: [0.0; 4],
+            edges: [0.0; 4],
+        });
+        scene.grids.push(GridContent {
+            clip: card,
+            ..Default::default()
+        });
+        cut_scene(&mut scene, card, &[window]);
+        assert_eq!(scene.grids.len(), left.len());
+        assert!(scene.shadows.is_empty());
+        assert!(scene.grids.iter().all(|g| !g.clip.contains((900.0, 500.0))));
     }
 
     #[test]

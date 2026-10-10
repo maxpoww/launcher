@@ -236,11 +236,6 @@ enum Away {
     Nudge = 2,
     /// The workspaces are being swiped.
     Swipe = 4,
-    /// The focused window lies over where the card is: the card is its own
-    /// window's, and is not drawn over another (Max, 2026-10-10: *"the card
-    /// is always on top of other windows"*). It is back when the focus goes
-    /// to its window, or to one that does not cover it.
-    Focus = 8,
 }
 
 /// The moments the card waits for: each is "a while after the LAST time
@@ -341,6 +336,12 @@ pub(crate) struct Card {
     tabbed: bool,
     /// The window that has the focus, as last heard from the compositor.
     active: Option<String>,
+    /// Where the windows that lie over the card's own are: the card is not
+    /// drawn, and takes no pointer, where one of them covers it.
+    covers: Vec<Rect>,
+    /// The width the items' words were last wrapped to (`lines`): another
+    /// one, and they are wrapped again.
+    wrapped_w: f32,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -2457,31 +2458,12 @@ impl App {
                 self.card_tell_bar(addr, true);
             }
             self.card_summon(addr);
-        } else if self.card.host.as_deref() == Some(addr) {
-            // Its own window again: it is back.
-            self.card_back(Away::Focus);
-        } else {
-            // A window it is not on for. The card STAYS on its own window
-            // (Max, 2026-10-10: *"i like the card staying on unfocused
-            // windows… i like to drag from another window there"*) — unless
-            // this window lies over where the card is: then the card would
-            // be drawn on top of it, and it steps away until that is over.
-            let under = self
-                .card
-                .rect
-                .zip(crate::hypr::window_spot(addr))
-                .is_some_and(|(r, w)| {
-                    w.visible
-                        && r.x < w.x + w.w
-                        && w.x < r.x + r.w
-                        && r.y < w.y + w.h
-                        && w.y < r.y + r.h
-                });
-            if under {
-                self.card_away(Away::Focus);
-            } else {
-                self.card_back(Away::Focus);
-            }
+        } else if self.card.host.is_some() {
+            // The card STAYS where it is, on its own window (Max,
+            // 2026-10-10) — only what lies over it has changed: it passes
+            // behind the windows that are over its own (`card.covers`).
+            self.sync_card();
+            self.request_card_draw();
         }
     }
 
@@ -2566,6 +2548,14 @@ impl App {
             }
             Some(spot) => {
                 self.card.spot = Some(spot);
+                let covers: Vec<Rect> = crate::hypr::windows_over(&host)
+                    .into_iter()
+                    .map(|(x, y, w, h)| Rect::new(x, y, w, h))
+                    .collect();
+                if covers != self.card.covers {
+                    self.card.covers = covers;
+                    self.request_card_draw();
+                }
                 // A card in the hand keeps to the pointer, not to memory.
                 if !matches!(
                     self.card.press,
@@ -2603,7 +2593,11 @@ impl App {
             Some(_) if self.card.field.is_some_and(|f| f != Field::Card) => {
                 vec![(0, 0, w as i32, h as i32)]
             }
-            Some(r) => vec![(r.x as i32, r.y as i32, r.w as i32, r.h as i32)],
+            // (Not where a window lies over it: that part is the window's.)
+            Some(r) => uncovered(r, &self.card.covers)
+                .into_iter()
+                .map(|p| (p.x as i32, p.y as i32, p.w as i32, p.h as i32))
+                .collect(),
             None => Vec::new(),
         };
         if self.card_input != rects {
@@ -2636,10 +2630,16 @@ impl App {
                 // mid-drag). The card comes back rather than staying lost.
                 let lost = app.card.away & Away::Drag as u8 != 0
                     && app.card.away_since.is_some_and(|t| t.elapsed() > LOST_DRAG);
+                // (…or a window was moved over the card, or off it.)
+                let over: Vec<Rect> = crate::hypr::windows_over(&host)
+                    .into_iter()
+                    .map(|(x, y, w, h)| Rect::new(x, y, w, h))
+                    .collect();
                 if now == app.card.spot && lost {
                     app.card_back(Away::Drag);
-                } else if now != app.card.spot {
+                } else if now != app.card.spot || over != app.card.covers {
                     app.sync_card();
+                    app.sync_card_input();
                 }
                 app.card_poll_arm();
                 calloop::timer::TimeoutAction::Drop
@@ -2812,6 +2812,12 @@ impl App {
         let real = rect;
         let rect = virt(rect, zoom);
         let text_w = rect.w - 2.0 * LIST_PAD - 2.0 * TILE_PAD_X;
+        // (Wrapped for another width — a frame drawn before the card had
+        // its place, a window resized: all of it again.)
+        if (text_w - self.card.wrapped_w).abs() > 0.5 {
+            self.card.lines.clear();
+            self.card.wrapped_w = text_w;
+        }
         let text_px = TEXT_PX;
         let mono = renderer.measure_text("MMMMMMMMMM", text_px, Some(crate::options::NERD)) / 10.0;
         for item in &self.card.items {
@@ -3109,6 +3115,7 @@ impl App {
         };
         let (mut scene, tiles, max_scroll) = scene(&view);
         zoom_scene(&mut scene, (real.x, real.y), zoom);
+        cut_scene(&mut scene, real, &self.card.covers);
         if shown > 0.0 {
             self.card.max_scroll = max_scroll;
             self.card.scroll = if self.card.to_bottom {
@@ -3265,6 +3272,17 @@ impl App {
                     {
                         self.card_drop_keys();
                         return;
+                    }
+                    // A click on the card of a window that is not the focused
+                    // one FOCUSES that window (Max, 2026-10-10: *"clicking the
+                    // card from another window activates the card on the
+                    // calling window"*): the card is its window's, and from
+                    // then on the pointer gives it the keys.
+                    if let Some(host) = self.card.host.clone() {
+                        if self.card.active.as_deref() != Some(host.as_str()) {
+                            crate::hypr::focus_window(&host);
+                            self.card.active = Some(host);
+                        }
                     }
                     // A click on the card brings the keys back after a Tab.
                     self.card.tabbed = false;
