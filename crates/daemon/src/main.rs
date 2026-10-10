@@ -6085,6 +6085,13 @@ impl App {
                     self.apply_icon_size_change();
                     return;
                 }
+                // …and Ctrl+0 puts it back as shipped, as on the bar and
+                // the desktop (Max, 2026-10-10).
+                Keysym::_0 | Keysym::KP_0 => {
+                    self.icon_size = 1;
+                    self.apply_icon_size_change();
+                    return;
+                }
                 _ => {}
             }
         }

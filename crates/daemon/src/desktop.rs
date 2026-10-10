@@ -1615,6 +1615,9 @@ struct Tile<'a> {
     /// This item's name is being typed: `(text, all selected, text width)`
     /// — a field replaces the name.
     rename: Option<(&'a str, bool, f32)>,
+    /// How much bigger than its own size the name is written (the desktop's
+    /// zoom; 0 = as it is).
+    text: f32,
 }
 
 /// The name field while typing: its pad around the text, corner, colours.
@@ -1650,9 +1653,12 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
             scene.icons.push(inst);
         }
     }
+    // The name grows with the icons (Max, 2026-10-10).
+    let k = if tile.text > 0.0 { tile.text } else { 1.0 };
+    let (font_px, line_px) = (LABEL_FONT_PX * k, LABEL_LINE_PX * k);
     let cx = icon.x + icon.w / 2.0;
     let top = icon.y + icon.h + LABEL_GAP;
-    let name_rect = Rect::new(cx - tile.max_w / 2.0, top, tile.max_w, LABEL_LINE_PX + 1.0);
+    let name_rect = Rect::new(cx - tile.max_w / 2.0, top, tile.max_w, line_px + 1.0);
     if tile.cover.is_some_and(|c| intersects(&c, &name_rect)) {
         return;
     }
@@ -1664,7 +1670,7 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
             cx - inner_w / 2.0 - FIELD_PAD_X,
             top - FIELD_PAD_Y,
             inner_w + 2.0 * FIELD_PAD_X,
-            LABEL_LINE_PX + 2.0 * FIELD_PAD_Y,
+            line_px + 2.0 * FIELD_PAD_Y,
         );
         for (color, border) in [(FIELD_BG, 0.0), (FIELD_RIM, 1.0)] {
             scene.rects.push(crate::content::RectInst {
@@ -1677,7 +1683,7 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
         }
         if all && w > 0.0 {
             scene.rects.push(crate::content::RectInst {
-                rect: Rect::new(cx - w / 2.0, top + 1.0, w, LABEL_LINE_PX - 2.0),
+                rect: Rect::new(cx - w / 2.0, top + 1.0, w, line_px - 2.0),
                 radius: 2.0,
                 color: FIELD_SEL,
                 glass: 0.0,
@@ -1685,7 +1691,7 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
             });
         }
         scene.rects.push(crate::content::RectInst {
-            rect: Rect::new(cx + w / 2.0 + 1.0, top + 2.0, 1.0, LABEL_LINE_PX - 4.0),
+            rect: Rect::new(cx + w / 2.0 + 1.0, top + 2.0, 1.0, line_px - 4.0),
             radius: 0.0,
             color: INK,
             glass: 0.0,
@@ -1695,8 +1701,8 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
             text: text.to_owned(),
             pos: (cx, top),
             max_w: inner_w + 2.0,
-            font_px: LABEL_FONT_PX,
-            line_px: LABEL_LINE_PX,
+            font_px,
+            line_px,
             centered: true,
             dim: false,
             cache: false,
@@ -1711,8 +1717,8 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
             text: tile.name.to_owned(),
             pos: (cx, top + dy),
             max_w: tile.max_w,
-            font_px: LABEL_FONT_PX,
-            line_px: LABEL_LINE_PX,
+            font_px,
+            line_px,
             centered: true,
             dim: false,
             cache: true,
@@ -1750,6 +1756,8 @@ pub(crate) struct Live<'a> {
     pub menu: Option<(&'a Menu, MenuPaint)>,
     /// The Properties box that is up, drawn the same way.
     pub props: Option<(&'a Props, MenuPaint)>,
+    /// How much bigger than its own size a name is written (0 = as it is).
+    pub text: f32,
     /// A name being typed: the item, the text, whether all of it is
     /// selected, and the text's measured width.
     pub rename: Option<(usize, &'a str, bool, f32)>,
@@ -1810,6 +1818,7 @@ pub(crate) fn scene(
                     max_w: label_max_w(&grid.rect(slot)),
                     has_icon: i != lead && has_icon.get(i).copied().unwrap_or(false),
                     overlay: true,
+                    text: live.text,
                     cover: None,
                     rename: None,
                 },
@@ -1842,6 +1851,7 @@ pub(crate) fn scene(
                 max_w: label_max_w(&cell),
                 has_icon: has_icon.get(i).copied().unwrap_or(false),
                 overlay: false,
+                text: live.text,
                 cover: live.menu.map(|(m, _)| m.rect).or(live.props.map(|(p, _)| p.rect)),
                 rename: live
                     .rename
@@ -3475,6 +3485,9 @@ impl App {
         let panel_paint = |rect: Option<Rect>| rect.filter(|_| !on_top).map(|r| self.desktop_panel_paint(r));
         let menu_paint = panel_paint(self.desktop.menu.as_ref().map(|m| m.rect));
         let props_paint = panel_paint(self.desktop.props.as_ref().map(|p| p.rect));
+        // Names are written, and so measured, at the desktop's zoom.
+        let zoom = self.desktop_zoom();
+        let name_px = LABEL_FONT_PX * zoom;
         let Some(renderer) = self.desktop_renderer.as_mut() else {
             return;
         };
@@ -3482,7 +3495,7 @@ impl App {
             .desktop
             .rename
             .as_ref()
-            .map(|r| (r.item, r.text.as_str(), r.all, renderer.measure_text(&r.text, LABEL_FONT_PX, None)));
+            .map(|r| (r.item, r.text.as_str(), r.all, renderer.measure_text(&r.text, name_px, None)));
         let max_w = label_max_w(&self.desktop.grid.rect((0, 0)));
         let names: Vec<String> = self
             .desktop
@@ -3490,7 +3503,7 @@ impl App {
             .iter()
             .map(|item| {
                 fit_label(&item.name, max_w, &mut |t| {
-                    renderer.measure_text(t, LABEL_FONT_PX, None)
+                    renderer.measure_text(t, name_px, None)
                 })
             })
             .collect();
@@ -3510,6 +3523,7 @@ impl App {
                 only: only.as_ref(),
                 menu: self.desktop.menu.as_ref().zip(menu_paint),
                 props: self.desktop.props.as_ref().zip(props_paint),
+                text: zoom,
                 rename: rename_view,
             },
         );
@@ -5173,6 +5187,7 @@ mod tests {
             band: None,
             menu: None,
             props: None,
+            text: 0.0,
             rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
@@ -5192,6 +5207,7 @@ mod tests {
             band: Some(band),
             menu: None,
             props: None,
+            text: 0.0,
             rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
@@ -5219,6 +5235,7 @@ mod tests {
             band: None,
             menu: None,
             props: None,
+            text: 0.0,
             rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
@@ -5242,6 +5259,7 @@ mod tests {
             band: None,
             menu: None,
             props: None,
+            text: 0.0,
             rename: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, away);

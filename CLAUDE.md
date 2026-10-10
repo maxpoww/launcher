@@ -233,7 +233,7 @@ The big daemon files are cohesive but long — go straight to the function:
   rest, as for a change of screen). The DESKTOP when FOCUSED: the keys come through
   `desktop_shortcut`; its zoom multiplies the icon scale of its grid (`desktop_icon_scale`), an
   icon keeps its cell. Both kept in `settings.json` (`bar_zoom`, `desktop_zoom`; 0.7–2.0 by
-  tenths). The desktop's NAMES do not grow yet.
+  tenths). The desktop's names grow with its icons (`Live::text`). The DOCK box has its own Ctrl +/− (four icon sizes, while it holds the keyboard) and Ctrl 0 puts it back.
 - `phones.rs` + `desktop_config.rs` — a PHONE'S SETTINGS and its CONFIGURE box (Max, 2026-10-10,
   mockup `~/phone-configure-mockup`): the "Configure" row of a phone's menu (above Properties, a
   click) opens the box, on the menus' surface; nothing changes until Apply. A phone is known by
