@@ -422,6 +422,9 @@ pub(crate) struct Desktop {
     /// each was there at the last look.
     pub syncing: HashSet<String>,
     pub phones_there: HashMap<String, bool>,
+    /// The phones to sync at the next look whatever the clock says (their
+    /// settings were just applied).
+    pub sync_now: HashSet<String>,
     /// The last plain click on an item (its path, and when): a second one
     /// on the same item soon enough is a double click, which opens it.
     pub last_click: Option<(String, std::time::Instant)>,

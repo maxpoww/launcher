@@ -531,6 +531,13 @@ impl App {
 
     /// The box driven without a pointer (`debug-desktop "config …"`).
     pub(crate) fn desktop_config_debug(&mut self, what: &str) -> String {
+        if what == "syncnow" {
+            // Every synced phone, now.
+            let all: Vec<String> = Phones::load().by_serial.into_iter().filter(|(_, p)| p.sync).map(|(s, _)| s).collect();
+            self.desktop.sync_now.extend(all.iter().cloned());
+            self.phone_sync_tick();
+            return format!("syncing now: {all:?}");
+        }
         if let Ok(i) = what.parse::<usize>() {
             self.desktop_open_config(i, (240.0, 60.0));
         } else if let Some(name) = what.strip_prefix("name ") {
@@ -754,6 +761,12 @@ impl App {
         let mut phones = Phones::load();
         // A change of name is a change of folder: the old one goes with it.
         let before = phones.by_serial.get(&config.serial).map(|p| p.folder());
+        // (What the box does not set is as it is NOW, not as it was when the
+        // box opened: a sync may have ended meanwhile.)
+        if let Some(stored) = phones.by_serial.get(&config.serial) {
+            phone.addr = stored.addr.clone();
+            phone.last_sync = stored.last_sync;
+        }
         phones.by_serial.insert(config.serial.clone(), phone.clone());
         phones.save();
         info!("desktop: {} is configured: {phone:?}", config.serial);
@@ -786,7 +799,7 @@ impl App {
                 }
                 (serial, allowed)
             },
-            |_, (serial, allowed)| {
+            |app, (serial, allowed)| {
                 if let Some(addr) = allowed {
                     let mut phones = Phones::load();
                     if let Some(p) = phones.by_serial.get_mut(&serial) {
@@ -795,6 +808,11 @@ impl App {
                         phones.save();
                     }
                 }
+                // Applied: what was just set is done NOW, not at the next
+                // hour (Max, 2026-10-10: ticked WhatsApp media, applied —
+                // "the phone should sync that right away").
+                app.desktop.sync_now.insert(serial);
+                app.phone_sync_tick();
             },
         );
         Some((config.serial, phone))
@@ -846,6 +864,9 @@ impl App {
                 continue;
             }
             let was_there = self.desktop.phones_there.get(&serial).copied().unwrap_or(false);
+            // Asked for now (an Apply): due whatever the clock says, and
+            // whether or not it is charging — its owner is at it.
+            let now = self.desktop.sync_now.remove(&serial);
             let probed = serial.clone();
             self.desktop_off_loop(
                 move || {
@@ -858,11 +879,11 @@ impl App {
                         return (probed, phone, Probe { there: false, target: None, addr });
                     }
                     let since = now_secs().saturating_sub(phone.last_sync.unwrap_or(0));
-                    let due = since >= phone.every.secs() || (!was_there && since >= SYNC_AGAIN);
+                    let due = now || since >= phone.every.secs() || (!was_there && since >= SYNC_AGAIN);
                     let target = due
                         .then(|| crate::desktop_phone::reach(&probed, phone.addr.as_deref()))
                         .flatten()
-                        .filter(|t| !phone.charging_only || crate::desktop_phone::charging(t));
+                        .filter(|t| now || !phone.charging_only || crate::desktop_phone::charging(t));
                     (probed, phone, Probe { there: true, target, addr })
                 },
                 |app, (serial, phone, probe)| {
