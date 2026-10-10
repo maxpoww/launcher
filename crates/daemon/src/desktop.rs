@@ -3549,11 +3549,12 @@ impl App {
                             }
                         },
                     };
-                    // A click on the desktop gives it the keyboard (not one
-                    // on the menus' surface, which lies over the windows too).
-                    if self.pointer_surface == crate::options::PointerSurface::Desktop {
-                        self.desktop_take_keys();
-                    }
+                    // (The desktop takes the keyboard when the button comes
+                    // UP, not here: asking for it on the press made the
+                    // compositor let go of the button at once — a release
+                    // 4 ms after the press, the finger still down — so the
+                    // first press on the desktop after working in a window
+                    // could select but never drag. ASUS, 2026-10-10.)
                     debug!(
                         "desktop: press at ({:.0},{:.0}) on {} (menu {}, hidden {})",
                         at.0,
@@ -3641,6 +3642,11 @@ impl App {
                             }
                         }
                         return;
+                    }
+                    // A click on the desktop gives it the keyboard (not one
+                    // on the menus' surface, which lies over the windows too).
+                    if self.pointer_surface == crate::options::PointerSurface::Desktop && self.desktop.drag.is_none() {
+                        self.desktop_take_keys();
                     }
                     let press = self.desktop.press.take();
                     debug!(
