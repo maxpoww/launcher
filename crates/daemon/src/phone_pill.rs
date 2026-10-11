@@ -54,8 +54,7 @@ const LONGER: f32 = 4.0 / 3.0;
 struct Shown {
     /// The volume's path (what is ejected).
     path: String,
-    /// "Max's Pixel · Synced 2 h ago" — and " · " after it when its battery
-    /// follows.
+    /// "Max's Pixel · Synced 2 h ago".
     says: String,
     /// Its battery in hundredths, once it has said: a battery and the
     /// number, after the words.
@@ -130,7 +129,7 @@ impl App {
         let battery = serial.as_ref().and_then(|s| self.phone_pill.battery.get(s)).copied();
         Some(Shown {
             path: v.path.to_string_lossy().into_owned(),
-            says: format!("{name} · {state}{}", if battery.is_some() { " · " } else { "" }),
+            says: format!("{name} · {state}"),
             battery,
             known: known.is_some(),
             serial,
@@ -358,7 +357,7 @@ impl App {
                 let words = if words.is_empty() { "Max's Pixel · Synced 2 h ago" } else { words };
                 self.phone_pill.fake = Some(Shown {
                     path: "/nowhere/a-phone".to_owned(),
-                    says: format!("{words} · "),
+                    says: words.to_owned(),
                     battery: level,
                     serial: None,
                     known: true,
@@ -408,12 +407,14 @@ impl App {
                 glass: 0.0,
                 border: 0.0,
             });
-            // The words, then the battery (a glyph of the bar's icon font)
-            // and its number — one run, standing in the pill's middle.
+            // The words at the pill's left end, the battery (a glyph of the
+            // bar's icon font) and its number at its right end, the pill's
+            // spare length between them (Max, 2026-10-11: "separate the
+            // battery from the state, leave the air in the middle").
             let clip = Some(Rect::new(long.x + PILL_PAD_X, long.y, (long.w - 2.0 * PILL_PAD_X).max(0.0), long.h));
             let color = Some([ink[0], ink[1], ink[2], ink[3] * out]);
             let ty = long.y + (long.h - LINE_PX * s) / 2.0;
-            let mut x = long.x + (long.w - self.phone_pill_words_w()) / 2.0;
+            let mut x = long.x + PILL_PAD_X;
             let mut write = |scene: &mut Scene, text: String, w: f32, family: Option<&'static str>| {
                 let k = if family.is_some() { BATTERY_SIZE } else { 1.0 };
                 scene.labels.push(Label {
@@ -431,7 +432,9 @@ impl App {
                 });
                 x += w;
             };
-            write(scene, shown.says.clone(), p.says_w, TEXT_FONT);
+            // (The words' step carries the pen to where the battery begins.)
+            let battery_w = p.glyph_w + BATTERY_GAP + p.level_w;
+            write(scene, shown.says.clone(), (long.w - 2.0 * PILL_PAD_X - battery_w).max(0.0), TEXT_FONT);
             if let Some(level) = shown.battery {
                 write(scene, battery_glyph(level).to_owned(), p.glyph_w + BATTERY_GAP, Some(crate::options::NERD));
                 write(scene, format!("{level}%"), p.level_w, TEXT_FONT);
