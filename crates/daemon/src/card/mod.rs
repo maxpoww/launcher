@@ -101,6 +101,8 @@ const SLIDE_START: f32 = 6.0;
 /// grab that did not take, not a click: nothing is pasted (Max, 2026-10-11:
 /// *"i click a lot on the items when i'm trying to grab them"*).
 const CLICK_MS: u128 = 300;
+/// Two clicks on an item this close together are a double click.
+const TWICE_MS: u128 = 450;
 /// A click's paste waits this long for the clipboard to be the item's (and
 /// longer when the card's window has to be given the keyboard first).
 const PASTE_SETTLE: u64 = 70;
@@ -641,6 +643,9 @@ pub(crate) struct Card {
     playing: Option<voice::Playing>,
     /// The voice note that is paused, and how many seconds in it stopped.
     paused: Option<(u64, f32)>,
+    /// The item clicked once, and when: a second click on it soon after
+    /// pastes it (`card_click`).
+    clicked: Option<(u64, Instant)>,
     /// How the drag in hand is going, this second (`draw_card`).
     drag_pace: Option<DragPace>,
     /// The timer that redraws the card while something records or plays
@@ -3564,7 +3569,43 @@ impl App {
             .iter()
             .any(|it| it.id == id && !it.parts.is_empty());
         if !composed {
-            self.card_paste(id);
+            // A session's row is opened by one click. A THING is pasted (a
+            // voice note played) by TWO, one after the other (Max,
+            // 2026-10-11: *"i click on an item trying to drag it and it
+            // pastes it… i like to drag more than click"* — a grab that
+            // misses is one click, and must do nothing).
+            if id == PINNED_ROW || self.card.is_row(id) {
+                self.card_paste(id);
+                return;
+            }
+            let now = Instant::now();
+            let twice = self.card.clicked.take().is_some_and(|(was, at)| {
+                was == id && now.duration_since(at).as_millis() < TWICE_MS
+            });
+            if twice {
+                self.card.flash = None;
+                self.card_paste(id);
+            } else {
+                self.card.clicked = Some((id, now));
+                // (Said in the hint's line, for as long as the second click
+                // would still count — without touching what can be undone.)
+                let voice = self.card.item(id).is_some_and(|it| it.kind == Kind::Voice);
+                let words = if voice {
+                    "Double-click plays it"
+                } else {
+                    "Double-click pastes it"
+                };
+                if self.card.undo.is_none() {
+                    self.card.flash = Some((words.to_owned(), now));
+                    self.after_ms(900, move |app| {
+                        if app.card.flash.as_ref().is_some_and(|f| f.1 == now) {
+                            app.card.flash = None;
+                            app.request_card_draw();
+                        }
+                    });
+                }
+            }
+            self.request_card_draw();
             return;
         }
         if !self.card.wide.remove(&id) {
@@ -4679,7 +4720,7 @@ impl App {
                 "Type to search · press Enter to create · hold Space to talk"
             }
             (_, _, Page::Memory) => "Enter to create · type to search",
-            (_, _, Page::Clipboard) => "Click to paste · type to search",
+            (_, _, Page::Clipboard) => "Double-click to paste · type to search",
             (_, _, Page::Pinned) => "Type to search · press Enter to create · hold Space to talk",
             (_, _, Page::Dictionary) => "Type to search · press Enter to look a word up",
             (_, _, Page::Translate) => "Type to search · press Enter to translate",
