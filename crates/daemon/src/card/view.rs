@@ -1106,6 +1106,8 @@ const ZEBRA_1: f32 = 0.025;
 const ZEBRA_2: f32 = 0.07;
 /// A button under the pointer: a step past the lighter tone.
 const ZEBRA_HOT: f32 = 0.11;
+/// An item under the pointer: this much past its own tone.
+const ZEBRA_OVER: f32 = 0.035;
 
 /// How solid an item's box (and the input box, and the picker) is.
 pub(super) const ITEM: f32 = 0.96;
@@ -1403,10 +1405,17 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         if t.y > clip.y + clip.h || t.y + t.h < clip.y {
             continue;
         }
+        // (The item under the pointer is a step brighter, as a button
+        // under it is — Max, 2026-10-11: the border alone was weak.)
+        let hovered = view.hover.is_some_and(|h| h.item() == Some(item.id));
         list.rects.push(RectInst {
             rect: t,
             radius: TILE_RADIUS,
-            color: tile_fills[nth % 2],
+            color: if hovered {
+                paint.tone([ZEBRA_1, ZEBRA_2][nth % 2] + ZEBRA_OVER)
+            } else {
+                tile_fills[nth % 2]
+            },
             glass: 0.0,
             border: 0.0,
         });
