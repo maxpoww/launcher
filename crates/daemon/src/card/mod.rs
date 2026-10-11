@@ -3563,52 +3563,62 @@ impl App {
     /// again. Anything else (a plain item, a piece of an open one) is pasted
     /// into the window.
     fn card_click(&mut self, id: u64) {
+        // EVERYTHING in the list answers to TWO clicks, one after the other
+        // (Max, 2026-10-11: *"i click on an item trying to drag it and it
+        // pastes it… i like to drag more than click"*, then *"we need double
+        // click everywhere now"*): a grab that misses is one click, and one
+        // click does nothing but say what two would do.
+        let row = id == PINNED_ROW || self.card.is_row(id);
         let composed = self
             .card
             .items
             .iter()
             .any(|it| it.id == id && !it.parts.is_empty());
-        if !composed {
-            // A session's row is opened by one click. A THING is pasted (a
-            // voice note played) by TWO, one after the other (Max,
-            // 2026-10-11: *"i click on an item trying to drag it and it
-            // pastes it… i like to drag more than click"* — a grab that
-            // misses is one click, and must do nothing).
-            if id == PINNED_ROW || self.card.is_row(id) {
-                self.card_paste(id);
-                return;
-            }
-            let now = Instant::now();
-            let twice = self.card.clicked.take().is_some_and(|(was, at)| {
+        let voice = self.card.item(id).is_some_and(|it| it.kind == Kind::Voice);
+        // (On voice to text's page what was said is COPIED: it is in the
+        // window already — Max: *"i want to copy it if i need it"*.)
+        let copies = self.card.page == Page::Talk && !row && !composed && !voice;
+        let now = Instant::now();
+        let twice =
+            self.card.clicked.take().is_some_and(|(was, at)| {
                 was == id && now.duration_since(at).as_millis() < TWICE_MS
             });
-            if twice {
-                self.card.flash = None;
-                self.card_paste(id);
+        if !twice {
+            self.card.clicked = Some((id, now));
+            // (Said in the hint's line, for as long as the second click
+            // would still count — without touching what can be undone.)
+            let words = if row || composed {
+                "Double-click opens it"
+            } else if voice {
+                "Double-click plays it"
+            } else if copies {
+                "Double-click copies it"
             } else {
-                self.card.clicked = Some((id, now));
-                // (Said in the hint's line, for as long as the second click
-                // would still count — without touching what can be undone.)
-                let voice = self.card.item(id).is_some_and(|it| it.kind == Kind::Voice);
-                let words = if voice {
-                    "Double-click plays it"
-                } else {
-                    "Double-click pastes it"
-                };
-                if self.card.undo.is_none() {
-                    self.card.flash = Some((words.to_owned(), now));
-                    self.after_ms(900, move |app| {
-                        if app.card.flash.as_ref().is_some_and(|f| f.1 == now) {
-                            app.card.flash = None;
-                            app.request_card_draw();
-                        }
-                    });
-                }
+                "Double-click pastes it"
+            };
+            if self.card.undo.is_none() {
+                self.card.flash = Some((words.to_owned(), now));
+                self.after_ms(900, move |app| {
+                    if app.card.flash.as_ref().is_some_and(|f| f.1 == now) {
+                        app.card.flash = None;
+                        app.request_card_draw();
+                    }
+                });
             }
             self.request_card_draw();
             return;
         }
-        if !self.card.wide.remove(&id) {
+        if self.card.undo.is_none() {
+            self.card.flash = None;
+        }
+        if copies {
+            if let Some(body) = self.card.item(id).map(|it| it.body.clone()) {
+                self.copy_text(&body);
+                self.card_flash("Copied");
+            }
+        } else if !composed {
+            self.card_paste(id);
+        } else if !self.card.wide.remove(&id) {
             self.card.wide.insert(id);
             self.card_write_out(id);
         }
@@ -4719,7 +4729,7 @@ impl App {
             (_, _, Page::Session) if self.card.open.is_some() => {
                 "Type to search · press Enter to create · hold Space to talk"
             }
-            (_, _, Page::Memory) => "Enter to create · type to search",
+            (_, _, Page::Memory) => "Double-click to open · Enter to create · type to search",
             (_, _, Page::Clipboard) => "Double-click to paste · type to search",
             (_, _, Page::Pinned) => "Type to search · press Enter to create · hold Space to talk",
             (_, _, Page::Dictionary) => "Type to search · press Enter to look a word up",
