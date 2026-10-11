@@ -45,6 +45,8 @@ const CHIP_AIR: f32 = 10.0;
 
 /// The air over a group of the box's rows (where the menu has a line).
 const GROUP_AIR: f32 = 6.0;
+/// The air over a step of a way to do something.
+const STEP_AIR: f32 = 10.0;
 /// The air under the box's last row.
 const BOX_FOOT: f32 = 6.0;
 
@@ -116,10 +118,58 @@ struct Line {
     act: Act,
     /// Air over it: it begins a group.
     air: bool,
+    /// A step of a way to do something: its number, in a round chip before
+    /// its words (0: not a step).
+    step: u8,
+    /// Said under a step, lighter and set in under the step's words.
+    sub: bool,
+    /// Said lighter (a heading's second line, a closing remark).
+    dim: bool,
 }
 
 fn line(label: &str, value: &str, act: Act) -> Line {
-    Line { label: label.to_owned(), value: value.to_owned(), act, air: false }
+    Line { label: label.to_owned(), value: value.to_owned(), act, air: false, step: 0, sub: false, dim: false }
+}
+
+/// How USB debugging is turned on — or, `asked`, this computer allowed on a
+/// phone that has it on and is asking. One thing to do a step, a round
+/// number before each, air between the steps, what is seen on the phone
+/// under the step that shows it (Max, 2026-10-11: the first cut, six lines
+/// one under the other, was "all close together, hard to understand and
+/// follow").
+fn debugging_lines(asked: bool) -> Vec<Line> {
+    let say = |label: &str| line(label, "", Act::Nothing);
+    let mut lines = vec![line("‹  Back", "", Act::Turn(Page::Menu))];
+    let head = |title: &str, under: &str, lines: &mut Vec<Line>| {
+        lines.push(Line { air: true, ..say(title) });
+        lines.push(Line { dim: true, ..say(under) });
+    };
+    let mut n = 0;
+    let mut step = |text: &str, under: &str, lines: &mut Vec<Line>| {
+        n += 1;
+        lines.push(Line { air: true, step: n, ..say(text) });
+        if !under.is_empty() {
+            lines.push(Line { sub: true, ..say(under) });
+        }
+    };
+    if asked {
+        head("Allow this computer", "The phone is waiting for your answer", &mut lines);
+        step("Look at the phone's screen", "It asks: Allow USB debugging?", &mut lines);
+        step("Tick \"Always allow from this computer\"", "", &mut lines);
+        step("Tap Allow", "", &mut lines);
+        lines.push(Line { air: true, dim: true, ..say("No question on its screen? Unplug it and plug it in again.") });
+    } else {
+        head("Turn on USB debugging", "Once, on the phone. It takes a minute.", &mut lines);
+        step("Open Settings, then About phone", "", &mut lines);
+        step("Tap \"Build number\" 7 times", "It says: You are now a developer", &mut lines);
+        step("Go back to Settings, then System", "Open Developer options", &mut lines);
+        step("Switch on \"USB debugging\"", "", &mut lines);
+        step("Unplug the phone and plug it in again", "", &mut lines);
+        step("On the phone, tap Allow", "Tick \"Always allow from this computer\"", &mut lines);
+    }
+    lines.push(Line { air: true, dim: true, ..say("Then it can be mirrored, used as a camera and synced,") });
+    lines.push(Line { dim: true, ..say("and it shows its battery and shares its internet.") });
+    lines
 }
 
 /// What the box of a phone that is not there shows
@@ -165,15 +215,7 @@ fn fake_lines(page: Page) -> Vec<Line> {
             ("Name and clean-up…", "", true),
             ("Apply", "", false),
         ],
-        Page::Debugging => &[
-            ("On the phone:", "", true),
-            ("1. Settings › About phone", "", false),
-            ("2. Tap Build number seven times", "", false),
-            ("3. Settings › System › Developer options", "", false),
-            ("4. Turn on USB debugging", "", false),
-            ("5. Unplug it, plug it in again, and allow this computer", "", false),
-            ("Then: mirror, camera, sync, its internet, its battery", "", true),
-        ],
+        Page::Debugging => return debugging_lines(false),
         Page::Properties => &[
             ("Model", "Google Pixel 8 Pro", true),
             ("Android", "17", false),
@@ -189,7 +231,7 @@ fn fake_lines(page: Page) -> Vec<Line> {
             "Properties" => Act::Turn(Page::Properties),
             _ => Act::Nothing,
         };
-        Line { label: (*label).to_owned(), value: (*value).to_owned(), act, air: *air }
+        Line { air: *air, ..line(label, value, act) }
     }));
     lines
 }
@@ -471,7 +513,10 @@ impl App {
         let widest = self
             .phone_box_lines()
             .iter()
-            .map(|l| w(&l.label) + if l.value.is_empty() { 0.0 } else { w(&l.value) + 2.0 * PILL_PAD_X })
+            .map(|l| {
+                let indent = if l.step > 0 || l.sub { self.phone_step_indent() } else { 0.0 };
+                indent + w(&l.label) + if l.value.is_empty() { 0.0 } else { w(&l.value) + 2.0 * PILL_PAD_X }
+            })
             .fold(0.0, f32::max);
         lerp(band, band.max(widest + 2.0 * PILL_PAD_X), self.phone_pill.box_e)
     }
@@ -604,7 +649,7 @@ impl App {
                         Action::Properties => Act::Turn(Page::Properties),
                         other => Act::Menu(other),
                     };
-                    lines.push(Line { label, value: String::new(), act, air });
+                    lines.push(Line { air, ..line(&label, "", act) });
                     air = false;
                     if action == Action::CameraStop {
                         lines.push(line("Configure camera", "", Act::Turn(Page::Camera)));
@@ -622,35 +667,7 @@ impl App {
                 lines
             }
             Page::Debugging => {
-                let allowed = self.phone_pill.shown.as_ref().is_some_and(|s| s.debugging == Debugging::NotAllowed);
-                let says: &[&str] = if allowed {
-                    &[
-                        "The phone is asking: Allow USB debugging?",
-                        "Tick Always allow from this computer",
-                        "Tap Allow",
-                        "No question on its screen? Unplug it and plug it in again",
-                    ]
-                } else {
-                    &[
-                        "On the phone:",
-                        "1. Settings › About phone",
-                        "2. Tap Build number seven times",
-                        "3. Settings › System › Developer options",
-                        "4. Turn on USB debugging",
-                        "5. Unplug it, plug it in again, and allow this computer",
-                    ]
-                };
-                let mut lines = vec![back];
-                lines.extend(says.iter().enumerate().map(|(n, text)| {
-                    let l = line(text, "", Act::Nothing);
-                    if n == 0 {
-                        group(l)
-                    } else {
-                        l
-                    }
-                }));
-                lines.push(group(line("Then: mirror, camera, sync, its internet, its battery", "", Act::Nothing)));
-                lines
+                debugging_lines(self.phone_pill.shown.as_ref().is_some_and(|s| s.debugging == Debugging::NotAllowed))
             }
             Page::Camera => {
                 let mut lines = vec![back];
@@ -710,6 +727,12 @@ impl App {
         }
     }
 
+    /// How far a step's words stand in from the line's own start: its
+    /// number's chip and a gap.
+    fn phone_step_indent(&self) -> f32 {
+        LINE_PX * self.options_scale() + 8.0
+    }
+
     /// Measure the words at the lines' right ends that are not measured yet
     /// (they are set from the right, by their width).
     fn phone_box_measure(&mut self) {
@@ -740,7 +763,7 @@ impl App {
             .into_iter()
             .map(|l| {
                 if l.air {
-                    y += GROUP_AIR;
+                    y += if l.step > 0 { STEP_AIR } else { GROUP_AIR };
                 }
                 let rect = Rect::new(long.x, y, long.w, ph);
                 y += ph;
@@ -756,7 +779,11 @@ impl App {
         if lines.is_empty() {
             return 0.0;
         }
-        lines.iter().map(|l| ph + if l.air { GROUP_AIR } else { 0.0 }).sum::<f32>() + BOX_FOOT
+        lines
+            .iter()
+            .map(|l| ph + if !l.air { 0.0 } else if l.step > 0 { STEP_AIR } else { GROUP_AIR })
+            .sum::<f32>()
+            + BOX_FOOT
     }
 
     /// The box's height now (it eases from one page's to the next's).
@@ -1119,6 +1146,35 @@ impl App {
                         });
                     }
                     let ty = row.y + (row.h - LINE_PX * s) / 2.0;
+                    // A step: its number in a round chip (the bell's amber),
+                    // its words set in after it; what is said under a
+                    // step, lighter, in line with the step's words.
+                    let indent = if l.step > 0 || l.sub { self.phone_step_indent() } else { 0.0 };
+                    if l.step > 0 {
+                        let d = LINE_PX * s;
+                        let chip = Rect::new(row.x + PILL_PAD_X, row.y + (row.h - d) / 2.0, d, d);
+                        let amber = crate::notif::AMBER;
+                        scene.rects.push(RectInst {
+                            rect: chip,
+                            radius: d / 2.0,
+                            color: [amber[0], amber[1], amber[2], 0.3 * solid * out],
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                        scene.labels.push(Label {
+                            text: l.step.to_string(),
+                            pos: (chip.x + chip.w / 2.0, ty),
+                            max_w: 4096.0,
+                            font_px: FONT_PX * s,
+                            line_px: LINE_PX * s,
+                            centered: true,
+                            dim: false,
+                            cache: true,
+                            family: TEXT_FONT,
+                            color: Some([ink[0], ink[1], ink[2], ink[3] * solid * out]),
+                            clip: Some(row),
+                        });
+                    }
                     let mut word = |text: String, x: f32, alpha: f32| {
                         scene.labels.push(Label {
                             text,
@@ -1134,7 +1190,7 @@ impl App {
                             clip: Some(row),
                         });
                     };
-                    word(l.label, row.x + PILL_PAD_X, 1.0);
+                    word(l.label, row.x + PILL_PAD_X + indent, if l.sub || l.dim { 0.6 } else { 1.0 });
                     if !l.value.is_empty() {
                         // (Set from the right, by its measured width.)
                         let w = p.value_w.get(&l.value).copied().unwrap_or(l.value.chars().count() as f32 * FONT_PX * s * 0.56);
