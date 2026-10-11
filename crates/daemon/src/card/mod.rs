@@ -3372,7 +3372,7 @@ impl App {
                 self.card.pick_scroll = Bottom::pick_row(recent + first).min(self.card_pick_span());
                 self.request_card_draw();
             }
-            Hover::Item(_) => {}
+            Hover::Item(_) | Hover::Corner(_) => {}
         }
     }
 
@@ -4632,7 +4632,19 @@ impl App {
             hover: if self.card.drag.is_some() {
                 None
             } else {
-                hover
+                // (On an item, near its top right corner: its buttons show.)
+                match (hover, self.card.ptr.map(|p| self.card.inside(p))) {
+                    (Some(Hover::Item(id)), Some(at))
+                        if self
+                            .card
+                            .tiles
+                            .iter()
+                            .any(|t| t.id == id && t.corner().contains(at)) =>
+                    {
+                        Some(Hover::Corner(id))
+                    }
+                    _ => hover,
+                }
             },
             foot: Some(FootView {
                 page: self.card.page,

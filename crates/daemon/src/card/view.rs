@@ -234,6 +234,10 @@ pub(crate) enum Hover {
     Play(u64),
     /// A voice note's speed ("x1").
     Speed(u64),
+    /// An item, with the pointer near its top right CORNER: its buttons
+    /// show (only what is drawn is told this — a click there is the
+    /// item's, as anywhere else on it).
+    Corner(u64),
     /// One of the picker's emoji (its place among those shown), its
     /// search, and the rest of it.
     Emoji(usize),
@@ -254,6 +258,7 @@ impl Hover {
             | Hover::More(id)
             | Hover::Line(id)
             | Hover::Speed(id)
+            | Hover::Corner(id)
             | Hover::Lang(id) => Some(id),
             _ => None,
         }
@@ -465,6 +470,20 @@ impl Tile {
             self.rect.y + TILE_PAD_Y - 1.0,
             PLAY,
             PLAY,
+        )
+    }
+
+    /// Its top right corner, where its buttons are and a little round
+    /// them: they show only while the pointer is there (Max, 2026-10-11:
+    /// *"i like to place my pointer on it and read"*).
+    pub(super) fn corner(&self) -> Rect {
+        let (first, last) = (self.edit(true), self.close());
+        let x = first.x - 16.0;
+        Rect::new(
+            x,
+            self.rect.y,
+            self.rect.x + self.rect.w - x,
+            last.y + last.h + 10.0 - self.rect.y,
         )
     }
 
@@ -1874,7 +1893,15 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         // (Its buttons stand over its first line: the words there are cut
         // round them, not seen through them — Max, 2026-10-11. The item's
         // own colour is what is left under them.)
-        if over.is_some() {
+        // (They show only with the pointer near that corner: anywhere else
+        // on the item nothing stands over what is read.)
+        let tools = over.filter(|h| {
+            matches!(
+                h,
+                Hover::Corner(_) | Hover::Close(_) | Hover::Pin(_) | Hover::Edit(_)
+            )
+        });
+        if tools.is_some() {
             let pencil = matches!(
                 page,
                 Page::Session | Page::Pinned | Page::Dictionary | Page::Translate
@@ -1929,7 +1956,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             });
         };
         // The pencil, on what can be written again: a text of one's own.
-        if over.is_some()
+        if tools.is_some()
             && matches!(
                 page,
                 Page::Session | Page::Pinned | Page::Dictionary | Page::Translate
@@ -1945,7 +1972,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 acc,
             );
         }
-        if over.is_some() {
+        if tools.is_some() {
             button(
                 tile.close(),
                 "×",
@@ -1960,7 +1987,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         // floppy everywhere, everything can be saved to memory… get rid of
         // the pin button"*): its menu keeps the item somewhere — Pin ·
         // Memory · New session.
-        if over.is_some() {
+        if tools.is_some() {
             let hot = over == Some(Hover::Pin(item.id));
             button(
                 tile.pin(),
