@@ -405,13 +405,22 @@ impl App {
             (p.id, p.started.elapsed().as_secs_f32())
         });
         let paused = self.card.paused.take();
-        self.request_card_draw();
+        // (Drawn only once it is known what it is now: drawn in between —
+        // neither playing nor paused — its line was at the start for a
+        // frame, a blink.)
         if let Some((_, at)) = was.filter(|w| w.0 == id) {
             self.card.paused = Some((id, at));
+            self.request_card_draw();
             return;
         }
         let from = paused.filter(|p| p.0 == id).map_or(0.0, |p| p.1);
+        // (Should the player not start, it stays paused where it was.)
+        self.card.paused = paused.filter(|p| p.0 == id);
         self.card_play_at(id, from);
+        if self.card.playing.is_some() {
+            self.card.paused = None;
+        }
+        self.request_card_draw();
     }
 
     /// Play voice note `id` from `from` seconds in. (The player has no way
