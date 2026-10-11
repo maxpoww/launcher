@@ -1189,6 +1189,16 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     // creates a new item and i can type on it"*): a new thing has its box
     // after the last item; an item being changed has it in its own place.
     let writing = view.foot.as_ref().and_then(|f| f.writing);
+    // A VOICE NOTE being given its title stays what it is — its player —
+    // and the title is written in its own place (Max, 2026-10-11: *"it
+    // should show me the audio with the dimmed hint 'type the title'"*):
+    // no box takes its place.
+    let titling = writing.flatten().filter(|id| {
+        shown_items
+            .iter()
+            .any(|it| it.id == *id && it.kind == Kind::Voice)
+    });
+    let writing = if titling.is_some() { None } else { writing };
     // (The box: the parts already put in, then the line being written.)
     let sealed: &[Item] = view.foot.as_ref().map_or(&[], |f| f.sealed);
     let draft_h = view
@@ -1306,6 +1316,8 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             radius: TILE_RADIUS,
             color: if mine {
                 [acc[0], acc[1], acc[2], 0.55]
+            } else if titling == Some(item.id) {
+                [acc[0], acc[1], acc[2], 0.6]
             } else {
                 tile_rim
             },
@@ -1511,19 +1523,50 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             );
             // Its title (one of its own, or what it is: dimmer).
             let named = !item.body.starts_with(VOICE_NAME);
+            // (Its title being written: what is written so far, the cursor
+            // in it; nothing yet, a dimmed word that asks for it.)
+            let bar = view.foot.as_ref().map(|f| &f.bar);
+            let written = bar
+                .filter(|_| titling == Some(item.id))
+                .map(|b| b.draft.first().map(String::as_str).unwrap_or(""));
             put(
-                if named {
-                    item.body.as_str()
-                } else {
-                    VOICE_NAME
+                match written {
+                    Some("") => "Type a title",
+                    Some(words) => words,
+                    None if named => item.body.as_str(),
+                    None => VOICE_NAME,
                 },
                 (x + 32.0, t.y + TILE_PAD_Y + 1.0),
                 text_w - 32.0 - 3.0 * CLOSE,
                 TEXT_PX + 0.5,
                 false,
                 None,
-                paint.ink_at(if named { 0.95 } else { 0.5 }),
+                paint.ink_at(match written {
+                    Some("") => 0.4,
+                    Some(_) => 0.95,
+                    None if named => 0.95,
+                    None => 0.5,
+                }),
             );
+            if written.is_some() {
+                let at = bar
+                    .and_then(|b| b.caret)
+                    .filter(|c| c.0 == 0)
+                    .map_or(0.0, |c| c.1)
+                    .min(text_w - 32.0 - 3.0 * CLOSE);
+                list.rects.push(RectInst {
+                    rect: Rect::new(
+                        (x + 32.0 + at).round(),
+                        t.y + TILE_PAD_Y + 2.0,
+                        1.5,
+                        TEXT_LINE - 3.0,
+                    ),
+                    radius: 0.0,
+                    color: paint.ink_at(0.95),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
             let secs = item.aspect.max(1.0);
             let heard = now.unwrap_or(0.0).min(secs);
             let clock = |s: f32| {
