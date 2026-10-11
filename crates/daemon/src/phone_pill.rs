@@ -307,10 +307,13 @@ impl App {
         let mut wash = lerp4(self.options_rest_wash(), self.options_hover_wash(), lift);
         wash[3] *= a;
         scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: wash, glass: 0.0, border: 0.0 });
-        // (fa-mobile sits small in its box: drawn a little larger.)
-        let (font, line) = (FONT_PX * s * 1.35, LINE_PX * s * 1.35);
+        // Under the pointer it says what a click does: an X (the phone is
+        // ejected) — Max, 2026-10-11. (fa-mobile sits small in its box:
+        // drawn a little larger than the pills' own glyphs.)
+        let (glyph, k) = if on_round { (crate::options::GLYPH_CLOSE, 1.0) } else { (GLYPH_PHONE, 1.15) };
+        let (font, line) = (FONT_PX * s * k, LINE_PX * s * k);
         scene.labels.push(Label {
-            text: GLYPH_PHONE.to_owned(),
+            text: glyph.to_owned(),
             pos: (r.x + r.w / 2.0, r.y + (r.h - line) / 2.0),
             max_w: r.w + 4.0,
             font_px: font,
