@@ -29,6 +29,9 @@ use crate::App;
 /// fa-mobile.
 const GLYPH_PHONE: &str = "\u{f10b}";
 
+/// How much longer than its words need the long pill is.
+const LONGER: f32 = 4.0 / 3.0;
+
 /// What the pill shows.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct Shown {
@@ -140,9 +143,11 @@ impl App {
         }
     }
 
-    /// The long pill's width: its words and the pills' padding.
+    /// The long pill's width: its words and the pills' padding, and a
+    /// third as much again (Max, 2026-10-11: "make the long pill 1/3
+    /// longer") — the words stand in its middle.
     fn phone_pill_long_w(&self) -> f32 {
-        self.phone_pill.says_w + 2.0 * PILL_PAD_X
+        (self.phone_pill.says_w + 2.0 * PILL_PAD_X) * LONGER
     }
 
     /// How much of the bar left of the bell the round pill takes (what the
@@ -275,11 +280,11 @@ impl App {
             });
             scene.labels.push(Label {
                 text: shown.says.clone(),
-                pos: (long.x + PILL_PAD_X, long.y + (long.h - LINE_PX * s) / 2.0),
+                pos: (long.x + long.w / 2.0, long.y + (long.h - LINE_PX * s) / 2.0),
                 max_w: 4096.0,
                 font_px: FONT_PX * s,
                 line_px: LINE_PX * s,
-                centered: false,
+                centered: true,
                 dim: false,
                 cache: true,
                 family: TEXT_FONT,
