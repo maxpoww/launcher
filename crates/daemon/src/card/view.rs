@@ -215,6 +215,8 @@ pub(crate) enum Hover {
     Mic,
     /// A voice note's line: a click on it plays from there.
     Line(u64),
+    /// The line of languages over a translation: a click opens their menu.
+    Lang(u64),
     /// An item's pencil: it is opened again to be changed.
     Edit(u64),
     Foot(Foot),
@@ -248,7 +250,8 @@ impl Hover {
             | Hover::Play(id)
             | Hover::Edit(id)
             | Hover::More(id)
-            | Hover::Line(id) => Some(id),
+            | Hover::Line(id)
+            | Hover::Lang(id) => Some(id),
             _ => None,
         }
     }
@@ -484,7 +487,7 @@ const THUMB_GAP: f32 = 8.0;
 const VOICE_ROW: f32 = 30.0;
 /// The line over an ANSWER — a part that says where it is from (a word's
 /// entry in one language): a rule across, that name in its middle.
-const ANSWER_HEAD: f32 = 18.0;
+pub(crate) const ANSWER_HEAD: f32 = 18.0;
 /// Between two pieces of an item.
 const PIECE_GAP: f32 = 7.0;
 

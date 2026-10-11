@@ -272,6 +272,38 @@ fn language_of(text: &str) -> &'static str {
         .0
 }
 
+/// The rows of a translation's menu of languages, and the code each stands
+/// for (the first four: what it goes into; the last four: what it is in).
+const LANG_ROWS: [&str; 8] = [
+    "To English",
+    "To Spanish",
+    "To French",
+    "To German",
+    "It is English",
+    "It is Spanish",
+    "It is French",
+    "It is German",
+];
+const LANG_CODES: [&str; 4] = ["en", "es", "fr", "de"];
+
+/// The two languages of a translation: the ones picked for it by hand (its
+/// `from` keeps them, "es>en"), else the ones its words are told to be in.
+fn pair_of(item: &Item) -> (&'static str, &'static str) {
+    let known = |code: &str| {
+        ["en", "es", "fr", "de", "pt", "it"]
+            .into_iter()
+            .find(|c| *c == code)
+    };
+    item.from
+        .as_deref()
+        .and_then(|f| f.split_once('>'))
+        .and_then(|(a, b)| known(a).zip(known(b)))
+        .unwrap_or_else(|| {
+            let from = language_of(&item.body);
+            (from, if from == "en" { "es" } else { "en" })
+        })
+}
+
 /// A language's name, from its code.
 fn language_name(code: &str) -> &'static str {
     match code {
@@ -292,6 +324,19 @@ fn language_name(code: &str) -> &'static str {
 /// What comes back is the translation — or, in brackets, why there is
 /// none: a reason, not words.
 fn translate(text: &str, from: &str, to: &str) -> String {
+    // (The pairs it has all go through English: one that has none of it on
+    // either side is done in two steps.)
+    if from != "en" && to != "en" {
+        let english = translate_pair(text, from, "en");
+        if english.starts_with('(') {
+            return english;
+        }
+        return translate_pair(&english, "en", to);
+    }
+    translate_pair(text, from, to)
+}
+
+fn translate_pair(text: &str, from: &str, to: &str) -> String {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let Some(engine) = voice::tool("WAVERUNNER_TRANSLATE", "translateLocally") else {
@@ -490,6 +535,8 @@ pub(crate) struct Card {
     keeping: bool,
     /// The item whose disk's menu is open.
     menu: Option<u64>,
+    /// The translation whose menu of languages is open.
+    lang: Option<u64>,
     /// A session is being CHOSEN on Memory's page, to keep this in; and the
     /// page to go back to once it is (or once it is given up).
     picking: Option<(Item, Page)>,
@@ -1051,6 +1098,8 @@ impl Card {
             Hover::Edit(tile.id)
         } else if pins && tile.pin().contains(pos) {
             Hover::Pin(tile.id)
+        } else if self.lang_strip(tile.id).is_some_and(|r| r.contains(pos)) {
+            Hover::Lang(tile.id)
         } else if tile.line().contains(pos)
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
         {
@@ -1132,6 +1181,28 @@ impl Card {
                 .is_some_and(|it| it.kind == Kind::Voice)
     }
 
+    /// Where the line of languages of translation `id` is on the card: the
+    /// rule over its last part (the translator's page only).
+    fn lang_strip(&self, id: u64) -> Option<Rect> {
+        if self.page != Page::Translate {
+            return None;
+        }
+        let tile = self.tiles.iter().find(|t| t.id == id)?;
+        let item = self.items.iter().find(|it| it.id == id)?;
+        let answer = item.parts.last().filter(|p| p.from.is_some())?.id;
+        piece_rects(
+            &item.parts,
+            &self.lines,
+            1.0,
+            self.wide.contains(&id),
+            (tile.rect.x + TILE_PAD_X, tile.rect.y + TILE_PAD_Y),
+            tile.rect.w - 2.0 * TILE_PAD_X,
+        )
+        .into_iter()
+        .find(|(pid, ..)| *pid == answer)
+        .map(|(_, r, _)| Rect::new(r.x, r.y, r.w, ANSWER_HEAD))
+    }
+
     /// Whether item `id` of Memory's page is a ROW (a session, "Pinned") and
     /// not a thing a search found.
     fn is_row(&self, id: u64) -> bool {
@@ -1192,6 +1263,10 @@ impl Card {
         if self.plus {
             return &["Image", "File", "Voice note", "Voice to text"];
         }
+        // (A translation's languages: what it goes into, what it is in.)
+        if self.lang.is_some() {
+            return &LANG_ROWS;
+        }
         match self.page {
             Page::Pinned => &["Memory", "New session"],
             _ => &["Pin", "Memory", "New session"],
@@ -1209,6 +1284,14 @@ impl Card {
                 .with_input(self.writer)
                 .btns[0]
                 .1
+        } else if let Some(strip) = self.lang.and_then(|id| self.lang_strip(id)) {
+            // (Under the middle of the line of languages.)
+            Rect::new(
+                strip.x + strip.w / 2.0 - 10.0,
+                strip.y,
+                MENU_W / 2.0 + 10.0,
+                strip.h,
+            )
         } else {
             self.tiles.iter().find(|t| Some(t.id) == self.menu)?.pin()
         };
@@ -1960,6 +2043,7 @@ impl App {
         self.card_load();
         self.card.menu = None;
         self.card.plus = false;
+        self.card.lang = None;
         // (Choosing a session is Memory's page's: leaving it gives it up.)
         if page != Page::Memory {
             self.card.picking = None;
@@ -2076,28 +2160,78 @@ impl App {
     /// an engine on this computer (`translate`: translateLocally, offline)
     /// on a thread; where there is none, or it has not that pair of
     /// languages, the answer says so.
+    /// A row of a translation's menu of languages: "To …" is the language
+    /// it goes into, "It is …" the one it is in (where the guess was wrong).
+    /// It is translated again.
+    fn card_lang(&mut self, id: u64, row: usize) {
+        let Some(item) = self.card.items.iter().find(|it| it.id == id) else {
+            return;
+        };
+        let words = item.body.clone();
+        let (mut from, mut to) = pair_of(item);
+        let code = LANG_CODES[row % LANG_CODES.len()];
+        if row < LANG_CODES.len() {
+            to = code;
+        } else {
+            from = code;
+        }
+        // (Into itself is nothing: the other way round, then.)
+        if from == to {
+            if row < LANG_CODES.len() {
+                from = if to == "en" { "es" } else { "en" };
+            } else {
+                to = if from == "en" { "es" } else { "en" };
+            }
+        }
+        self.card_translate_as(&words, Some(id), Some((from, to)));
+    }
+
     fn card_keep_translation(&mut self, text: &str, edit: Option<u64>) {
+        // (One translated before keeps the languages it was given.)
+        let pair = edit
+            .and_then(|id| self.card.items.iter().find(|it| it.id == id))
+            .filter(|it| it.from.is_some())
+            .map(pair_of);
+        self.card_translate_as(text, edit, pair);
+    }
+
+    fn card_translate_as(
+        &mut self,
+        text: &str,
+        edit: Option<u64>,
+        pair: Option<(&'static str, &'static str)>,
+    ) {
         let text = text.trim();
         if text.is_empty() {
             return;
         }
-        let from = language_of(text);
-        let to = if from == "en" { "es" } else { "en" };
+        let chosen = pair.is_some();
+        let (from, to) = pair.unwrap_or_else(|| {
+            let from = language_of(text);
+            (from, if from == "en" { "es" } else { "en" })
+        });
         let mut words = self.card_part(Kind::Text, text.to_owned(), None, false, 0.0);
         words.from = None;
         let mut answer = self.card_part(Kind::Text, "Translating…".to_owned(), None, false, 0.0);
         answer.from = Some(format!("{} → {}", language_name(from), language_name(to)));
         let answer_id = answer.id;
         let parts = vec![words, answer];
+        // (Languages picked by hand are the item's own from then on: its
+        // `from` keeps them, "es>en".)
+        let kept = chosen.then(|| format!("{from}>{to}"));
         let id = match edit.and_then(|id| self.card.items.iter_mut().find(|it| it.id == id)) {
             Some(item) => {
                 item.body = text.to_owned();
                 item.parts = parts;
+                if kept.is_some() {
+                    item.from = kept;
+                }
                 item.id
             }
             None => {
                 let mut item = self.card_part(Kind::Text, text.to_owned(), None, false, 0.0);
                 item.parts = parts;
+                item.from = kept;
                 let id = item.id;
                 self.card.items.push(item);
                 self.card.to_bottom = true;
@@ -3079,6 +3213,14 @@ impl App {
                 self.request_card_draw();
             }
             Hover::Menu(row) => self.card_menu(row),
+            // The line of languages over a translation: their menu.
+            Hover::Lang(id) => {
+                let open = self.card.lang == Some(id);
+                self.card.menu = None;
+                self.card.plus = false;
+                self.card.lang = (!open).then_some(id);
+                self.request_card_draw();
+            }
             Hover::Undo => self.card_undo(),
             // The big microphone: talk; again, and it is written.
             Hover::Mic => self.card_voice_button(true),
@@ -3409,6 +3551,10 @@ impl App {
     fn card_menu(&mut self, row: usize) {
         if std::mem::take(&mut self.card.plus) {
             self.card_plus(row);
+            return;
+        }
+        if let Some(id) = self.card.lang.take() {
+            self.card_lang(id, row);
             return;
         }
         let Some(id) = self.card.menu.take() else {
@@ -4586,7 +4732,9 @@ impl App {
                 self.card.tabbed = false;
                 self.card.menu = None;
                 self.card.plus = false;
+                self.card.lang = None;
                 self.card.plus = false;
+                self.card.lang = None;
                 if self.card.field == Some(Field::Card) {
                     self.card_drop_keys();
                 }
@@ -4620,16 +4768,19 @@ impl App {
                         return;
                     }
                     // (A press anywhere but on the disk's menu closes it.)
-                    if (self.card.menu.is_some() || self.card.plus)
+                    if (self.card.menu.is_some() || self.card.plus || self.card.lang.is_some())
                         && !matches!(
                             self.card.hit(at),
-                            Some(Hover::Menu(_) | Hover::Pin(_) | Hover::Btn(_))
+                            Some(Hover::Menu(_) | Hover::Pin(_) | Hover::Btn(_) | Hover::Lang(_))
                         )
                     {
                         self.card.menu = None;
                         self.card.plus = false;
+                        self.card.lang = None;
                         self.card.plus = false;
+                        self.card.lang = None;
                         self.card.plus = false;
+                        self.card.lang = None;
                         self.request_card_draw();
                     }
                     // A click on the card of a window that is not the focused
@@ -5281,6 +5432,23 @@ impl App {
                 self.card.lines.clear();
                 self.request_card_draw();
                 self.card_words()
+            }
+            // `lang <n> <row>`: row of the menu of languages of translation n.
+            "lang" => {
+                let mut n = rest
+                    .split_whitespace()
+                    .filter_map(|x| x.parse::<usize>().ok());
+                let id = n
+                    .next()
+                    .and_then(|i| self.card.items.get(i.saturating_sub(1)))
+                    .map(|it| it.id);
+                match (id, n.next()) {
+                    (Some(id), Some(row)) => {
+                        self.card_lang(id, row.saturating_sub(1));
+                        "translating".to_owned()
+                    }
+                    _ => "lang <n> <row>".to_owned(),
+                }
             }
             // `translate [words]`: the translator's page (and those words kept).
             "translate" => {

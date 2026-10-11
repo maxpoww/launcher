@@ -608,7 +608,19 @@ The big daemon files are cohesive but long — go straight to the function:
   kept as an item whose parts are the word and one ANSWER a language. Pointer-free too: `card undo`,
   `card key space|space-up`, `card plus`, `card click <n>`, `card talk`, `card said <words>`,
   `card dictionary <word>`. ⚠ never `rustfmt crates/daemon/src/main.rs` (it reformats the whole
-  crate): format `card/*.rs` only. NOT BUILT YET from the mockup: the search across sessions showing
-  the items themselves, seeking on a voice note's line, the dragged picture of an item made of parts,
-  the translator (no engine chosen) and its button.
+  crate): format `card/*.rs` only. THEN (2026-10-11): Memory's search lists the THINGS found under
+  their session's row, then "Pinned" (`Card::finds/find_rows`, `search_all`, `is_row`, `PINNED_ROW`,
+  `FootView::rows`); a click on a voice note's line plays from there (`Hover::Line`, `Tile::line`,
+  `card_play_from`, `voice::tail_wav` — the player is given a copy that begins there); an item made
+  of parts is carried as its first words. THE TRANSLATOR (`Page::Translate`, `Foot::Translate`
+  before the dictionary's, `FEET` 7, `Card::translated`, saved): the Pinned flow, what is written
+  kept with its translation as an ANSWER named by the two languages; told from its words
+  (`language_of`), else the pair picked from the menu a click on that rule opens (`Hover::Lang`,
+  `Card::lang`, `lang_strip`, `LANG_ROWS`, `card_lang`; kept in the item's `from` as "es>en",
+  `pair_of`); done by `translate()` on a thread — `translateLocally -m <from>-<to>-tiny`, the
+  words on its input, through English when neither side is English — the engine being the flake's
+  `translate` package (pkgs.translatelocally + the es/fr/de↔en tiny models), out-linked by
+  `waverunner-dev` at `~/.local/state/waverunner/translate` and named by `WAVERUNNER_TRANSLATE`.
+  Pointer-free: `card translate <words>`, `card lang <n> <row>`. The whole mockup is in; what it
+  has that this has not: Portuguese and Italian (no packaged model), a download on a click.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
