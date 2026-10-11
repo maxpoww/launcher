@@ -129,6 +129,63 @@ impl App {
         self.drag_picture(&canvas.bytes(), canvas.w, canvas.h, scale as i32, grip)
     }
 
+    /// `card carry <n>` · `carry to <y>` · `carry end`: item n in hand OVER
+    /// THE CARD with no pointer and no compositor in it (the list hides it
+    /// and opens a place, as for a real drag of ours) — to look at what the
+    /// list does under a drag.
+    pub(super) fn card_carry(&mut self, what: &str) -> String {
+        let mut words = what.split_whitespace();
+        match (
+            words.next(),
+            words.next().and_then(|n| n.parse::<f32>().ok()),
+        ) {
+            (Some("to"), Some(y)) => self.card.drop_y = Some(y),
+            (Some("end"), _) => {
+                if self.card.drag.take().is_some() {
+                    self.card.dnd_over = false;
+                    self.card.drop_own = false;
+                    self.card.drop_y = None;
+                    self.card.shifts.clear();
+                }
+            }
+            (Some(n), _) => {
+                let item = n
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| self.card.items.get(n.saturating_sub(1)))
+                    .cloned();
+                let (Some(item), Some(manager)) = (item, self.data_device_manager.as_ref()) else {
+                    return "carry <n> | carry to <y> | carry end".to_owned();
+                };
+                let from_y = self
+                    .card
+                    .tiles
+                    .iter()
+                    .find(|t| t.id == item.id)
+                    .map_or(0.0, |t| t.rect.y + t.rect.h / 2.0);
+                let source = manager.create_drag_and_drop_source(
+                    &self.qh,
+                    out_mimes(&item),
+                    DndAction::Copy,
+                );
+                self.card.drag = Some(Drag {
+                    id: item.id,
+                    item,
+                    from_y,
+                    source,
+                    _icon: None,
+                });
+                self.card.dnd_over = true;
+                self.card.drop_own = true;
+                self.card.drop_y = Some(from_y);
+                self.card_carried_steps(1.0);
+            }
+            _ => return "carry <n> | carry to <y> | carry end".to_owned(),
+        }
+        self.request_card_draw();
+        format!("carried {:?}", self.card.opening())
+    }
+
     pub(super) fn card_lift(&mut self, id: u64, serial: u32) {
         self.card.press = None;
         // Where it is picked up: the middle of its own box.

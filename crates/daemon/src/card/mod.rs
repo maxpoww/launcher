@@ -622,6 +622,9 @@ pub(crate) struct Card {
     playing: Option<voice::Playing>,
     /// The voice note that is paused, and how many seconds in it stopped.
     paused: Option<(u64, f32)>,
+    /// The timer that redraws the card while something records or plays
+    /// is running (`card_voice_tick`: one at a time).
+    voice_ticking: bool,
     /// How fast voice notes play (its place in `voice::SPEEDS`).
     voice_speed: usize,
     writing: bool,
@@ -5806,6 +5809,7 @@ impl App {
                 self.card_swipe_back();
                 String::new()
             }
+            "carry" => self.card_carry(rest),
             "lifted" => {
                 self.card_window_lifted(rest);
                 String::new()

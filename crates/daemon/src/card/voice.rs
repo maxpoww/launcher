@@ -630,6 +630,12 @@ impl App {
     /// second (the seconds count, the played part of the wave), and a note
     /// that has played to its end is let go.
     fn card_voice_tick(&mut self) {
+        // (ONE of these runs at a time. Each start of the player asked for
+        // another — a note sought or sped up while it played had two, then
+        // three… each redrawing the card thirty times a second.)
+        if std::mem::replace(&mut self.card.voice_ticking, true) {
+            return;
+        }
         // (A note that PLAYS is redrawn every frame or so: its line glides,
         // and where it is paused is where it was seen — at a few times a
         // second it went in steps, and jumped ahead when it was paused.)
@@ -639,6 +645,7 @@ impl App {
             TICK_MS
         };
         self.after_ms(every, |app| {
+            app.card.voice_ticking = false;
             if let Some(playing) = app.card.playing.as_mut() {
                 if !matches!(playing.child.try_wait(), Ok(None)) {
                     app.card.playing = None;
