@@ -791,8 +791,8 @@ fn phone_shape(serial: Option<&str>) -> (f64, f64) {
 }
 
 /// Whether a phone lets this computer in over `adb`.
-#[derive(Debug, PartialEq)]
-enum Debugging {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Debugging {
     Ready,
     /// The phone is plugged in but `adb` does not see it: debugging is off.
     Off,
@@ -802,7 +802,7 @@ enum Debugging {
     Unknown,
 }
 
-fn phone_debugging(serial: &str) -> Debugging {
+pub(crate) fn phone_debugging(serial: &str) -> Debugging {
     // The first call starts adb's server and a phone takes a moment to
     // show up in it: ask again before saying it is not there.
     for attempt in 0..3 {
@@ -2570,7 +2570,7 @@ impl App {
         }
         self.desktop.mounts_seen = true;
         self.desktop.volumes = list;
-        self.phone_pill_sync();
+        self.phone_pill_plugged();
         self.save_desktop_positions();
         self.reload_desktop();
     }

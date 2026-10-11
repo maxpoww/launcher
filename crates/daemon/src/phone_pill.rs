@@ -22,6 +22,7 @@
 use std::time::Instant;
 
 use crate::animation::{self, ease_toward, lerp, lerp4};
+use crate::desktop::Debugging;
 use crate::desktop_menu::{Action, Row};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{hover_grow, push_neumorph, PillId, FONT_PX, LINE_PX, OPTION_GAP, PILL_PAD_X, TEXT_FONT};
@@ -34,6 +35,7 @@ const GLYPH_PHONE: &str = "\u{f10b}";
 const SYNC: &str = "Sync";
 const SET_UP: &str = "Set up";
 const STOP: &str = "Stop";
+const HOW: &str = "How";
 /// How much longer than its word the button is (the task pill's chips
 /// have 12; Max, 2026-10-11: "make the button slightly longer").
 const CHIP_PAD: f32 = 24.0;
@@ -79,6 +81,9 @@ enum Page {
     Configure,
     /// What the phone says of itself.
     Properties,
+    /// How USB debugging is turned on (or this computer allowed): what a
+    /// phone without it is missing here.
+    Debugging,
 }
 
 /// What a click on a line of the box does.
@@ -159,6 +164,15 @@ fn fake_lines(page: Page) -> Vec<Line> {
             ("Name and clean-up…", "", true),
             ("Apply", "", false),
         ],
+        Page::Debugging => &[
+            ("On the phone:", "", true),
+            ("1. Settings › About phone", "", false),
+            ("2. Tap Build number seven times", "", false),
+            ("3. Settings › System › Developer options", "", false),
+            ("4. Turn on USB debugging", "", false),
+            ("5. Unplug it, plug it in again, and allow this computer", "", false),
+            ("Then: mirror, camera, sync, its internet, its battery", "", true),
+        ],
         Page::Properties => &[
             ("Model", "Google Pixel 8 Pro", true),
             ("Android", "17", false),
@@ -188,7 +202,7 @@ fn yes(on: bool) -> &'static str {
 }
 
 /// What the pill shows.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 struct Shown {
     /// The volume's path (what is ejected).
     path: String,
@@ -204,6 +218,9 @@ struct Shown {
     /// The word on its button (`None`: none now — it is being synced, or
     /// it is locked).
     button: Option<&'static str>,
+    /// Whether it lets this computer in over adb (most of what a phone is
+    /// good for here goes that way).
+    debugging: Debugging,
 }
 
 /// The pill's state.
@@ -234,6 +251,8 @@ pub(crate) struct PhonePill {
     /// asked right now.
     battery: std::collections::HashMap<String, u8>,
     asking: Option<String>,
+    /// Whether each phone lets this computer in (by serial), as last asked.
+    debugging: std::collections::HashMap<String, Debugging>,
     /// Its box (all a phone's menu has): asked open, and how far open.
     box_open: bool,
     box_e: f32,
@@ -273,9 +292,16 @@ impl App {
         let syncing = serial.as_ref().is_some_and(|s| self.desktop.syncing.contains(s));
         let path = v.path.to_string_lossy().into_owned();
         let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path);
+        // A phone that gives no serial has no adb to be asked by.
+        let debugging = match &serial {
+            Some(s) => self.phone_pill.debugging.get(s).copied().unwrap_or(Debugging::Unknown),
+            None => Debugging::Off,
+        };
         let state = match &known {
             _ if camera => "Using as a camera".to_owned(),
             _ if v.closed => "Locked".to_owned(),
+            _ if debugging == Debugging::Off => "USB debugging off".to_owned(),
+            _ if debugging == Debugging::NotAllowed => "Not allowed on the phone".to_owned(),
             _ if syncing => "Syncing…".to_owned(),
             None => "Not set up".to_owned(),
             Some(p) if !p.sync => "Sync off".to_owned(),
@@ -294,16 +320,19 @@ impl App {
             button: match &known {
                 _ if camera => Some(STOP),
                 _ if v.closed || syncing => None,
+                _ if matches!(debugging, Debugging::Off | Debugging::NotAllowed) => Some(HOW),
                 None => Some(SET_UP),
                 Some(_) => Some(SYNC),
             },
             known: known.is_some(),
             serial,
+            debugging,
         })
     }
 
-    /// Ask the plugged-in phone how full its battery is (off the loop); the
-    /// pill is written again when it answers.
+    /// Ask whether the plugged-in phone lets this computer in, and how full
+    /// its battery is (off the loop); the pill is written again when it
+    /// answers.
     fn phone_pill_ask_battery(&mut self) {
         let Some(serial) = self.phone_pill_now().and_then(|s| s.serial) else {
             return;
@@ -314,15 +343,19 @@ impl App {
         self.phone_pill.asking = Some(serial.clone());
         self.desktop_off_loop(
             move || {
-                let level = crate::desktop_phone::battery(&serial);
-                (serial, level)
+                let debugging = crate::desktop::phone_debugging(&serial);
+                let level = (debugging == Debugging::Ready).then(|| crate::desktop_phone::battery(&serial)).flatten();
+                (serial, debugging, level)
             },
-            |app, (serial, level)| {
+            |app, (serial, debugging, level)| {
                 app.phone_pill.asking = None;
-                if let Some(level) = level {
-                    if app.phone_pill.battery.insert(serial, level) != Some(level) {
-                        app.phone_pill_sync();
-                    }
+                let mut changed = app.phone_pill.debugging.insert(serial.clone(), debugging) != Some(debugging);
+                match level {
+                    Some(level) => changed |= app.phone_pill.battery.insert(serial, level) != Some(level),
+                    None => changed |= app.phone_pill.battery.remove(&serial).is_some(),
+                }
+                if changed {
+                    app.phone_pill_sync();
                 }
             },
         );
@@ -349,13 +382,21 @@ impl App {
                 }
             }
             // A phone not asked yet (it has just been plugged in).
-            if now.serial.as_ref().is_some_and(|s| !self.phone_pill.battery.contains_key(s)) {
+            if now.serial.as_ref().is_some_and(|s| !self.phone_pill.debugging.contains_key(s)) {
                 self.phone_pill_ask_battery();
             }
             self.phone_pill.shown = Some(now);
         }
         self.schedule_phone_pill_frame();
         self.draw_options();
+    }
+
+    /// What is plugged in changed: the pill follows, and the phone is asked
+    /// again whether it lets this computer in (turning USB debugging on
+    /// makes it drop off its cable and come back).
+    pub(crate) fn phone_pill_plugged(&mut self) {
+        self.phone_pill_sync();
+        self.phone_pill_ask_battery();
     }
 
     fn schedule_phone_pill_frame(&mut self) {
@@ -419,7 +460,19 @@ impl App {
         let base = self.phone_pill_words_w() + 2.0 * PILL_PAD_X;
         // (The air it leaves in its middle holds the button.)
         let chip = self.phone_pill.chip_w;
-        (base * LONGER).max(base + if chip > 0.0 { chip + 2.0 * CHIP_AIR } else { 0.0 })
+        let band = (base * LONGER).max(base + if chip > 0.0 { chip + 2.0 * CHIP_AIR } else { 0.0 });
+        // Its box is as wide as it is: while that is open the pill is at
+        // least as long as the box's longest line needs.
+        if self.phone_pill.box_e <= 0.0 && !self.phone_pill.box_open {
+            return band;
+        }
+        let w = |text: &str| self.phone_pill.value_w.get(text).copied().unwrap_or(0.0);
+        let widest = self
+            .phone_box_lines()
+            .iter()
+            .map(|l| w(&l.label) + if l.value.is_empty() { 0.0 } else { w(&l.value) + 2.0 * PILL_PAD_X })
+            .fold(0.0, f32::max);
+        lerp(band, band.max(widest + 2.0 * PILL_PAD_X), self.phone_pill.box_e)
     }
 
     /// The button in the long pill's air (Max, 2026-10-11: "a sync button
@@ -511,9 +564,31 @@ impl App {
                 let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path)
                     || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
                 let volume = crate::desktop_menu::Volume { phone: true, closed: v.closed, camera, tether: v.tether };
+                // Without adb: what the cable alone can do (its folder, its
+                // photos by that folder), and the way to the rest (Max,
+                // 2026-10-11: "find out if it's not able, offer what is
+                // possible, and show the option… for more features").
+                let limited = self.phone_pill.shown.as_ref().map(|s| s.debugging);
+                let limited = limited.filter(|d| matches!(d, Debugging::Off | Debugging::NotAllowed));
                 let mut lines = Vec::new();
                 let mut air = false;
                 for row in crate::desktop_menu::volume_rows(&volume) {
+                    if limited.is_some()
+                        && matches!(
+                            row,
+                            Row::Item {
+                                action: Action::Mirror
+                                    | Action::Camera
+                                    | Action::CameraStop
+                                    | Action::Tether
+                                    | Action::Configure
+                                    | Action::Properties,
+                                ..
+                            }
+                        )
+                    {
+                        continue;
+                    }
                     let (label, action) = match row {
                         Row::Sep => {
                             air = true;
@@ -534,6 +609,46 @@ impl App {
                         lines.push(line("Configure camera", "", Act::Turn(Page::Camera)));
                     }
                 }
+                match limited {
+                    Some(Debugging::NotAllowed) => {
+                        lines.push(group(line("Allow this computer on the phone for more features", "", Act::Turn(Page::Debugging))));
+                    }
+                    Some(_) => {
+                        lines.push(group(line("Turn on USB debugging for more features", "", Act::Turn(Page::Debugging))));
+                    }
+                    None => {}
+                }
+                lines
+            }
+            Page::Debugging => {
+                let allowed = self.phone_pill.shown.as_ref().is_some_and(|s| s.debugging == Debugging::NotAllowed);
+                let says: &[&str] = if allowed {
+                    &[
+                        "The phone is asking: Allow USB debugging?",
+                        "Tick Always allow from this computer",
+                        "Tap Allow",
+                        "No question on its screen? Unplug it and plug it in again",
+                    ]
+                } else {
+                    &[
+                        "On the phone:",
+                        "1. Settings › About phone",
+                        "2. Tap Build number seven times",
+                        "3. Settings › System › Developer options",
+                        "4. Turn on USB debugging",
+                        "5. Unplug it, plug it in again, and allow this computer",
+                    ]
+                };
+                let mut lines = vec![back];
+                lines.extend(says.iter().enumerate().map(|(n, text)| {
+                    let l = line(text, "", Act::Nothing);
+                    if n == 0 {
+                        group(l)
+                    } else {
+                        l
+                    }
+                }));
+                lines.push(group(line("Then: mirror, camera, sync, its internet, its battery", "", Act::Nothing)));
                 lines
             }
             Page::Camera => {
@@ -604,7 +719,7 @@ impl App {
         let new: Vec<String> = self
             .phone_box_lines()
             .into_iter()
-            .map(|l| l.value)
+            .flat_map(|l| [l.value, l.label])
             .filter(|v| !v.is_empty() && !self.phone_pill.value_w.contains_key(v))
             .collect();
         if let Some(r) = self.options_renderer.as_mut() {
@@ -677,7 +792,7 @@ impl App {
                     self.phone_pill.facts = Some(Vec::new());
                 }
             }
-            Page::Menu | Page::Camera => {}
+            Page::Menu | Page::Camera | Page::Debugging => {}
         }
         self.schedule_phone_pill_frame();
         self.sync_options_input();
@@ -852,6 +967,10 @@ impl App {
                     self.phone_pill.box_open = true;
                     self.phone_box_turn(Page::Configure);
                 }
+                Some(HOW) => {
+                    self.phone_pill.box_open = true;
+                    self.phone_box_turn(Page::Debugging);
+                }
                 Some(_) => self.phone_pill_sync_now(),
                 None => {}
             }
@@ -901,6 +1020,7 @@ impl App {
                     says: words.to_owned(),
                     battery: level,
                     button: Some(SYNC),
+                    debugging: Debugging::Ready,
                     serial: None,
                     known: true,
                 });
@@ -914,6 +1034,7 @@ impl App {
             "camera" => self.phone_box_turn(Page::Camera),
             "configure" => self.phone_box_turn(Page::Configure),
             "properties" => self.phone_box_turn(Page::Properties),
+            "debugging" => self.phone_box_turn(Page::Debugging),
             "menu" => self.phone_box_turn(Page::Menu),
             "line" => {
                 let act = rest.trim().parse::<usize>().ok().and_then(|n| self.phone_box_lines().into_iter().nth(n)).map(|l| l.act);
