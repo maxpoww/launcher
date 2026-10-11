@@ -29,6 +29,12 @@ use crate::App;
 /// fa-mobile.
 const GLYPH_PHONE: &str = "\u{f10b}";
 
+/// The button in the long pill's air: what a click on it does.
+const SYNC: &str = "Sync";
+const SET_UP: &str = "Set up";
+/// The least air either side of that button.
+const CHIP_AIR: f32 = 10.0;
+
 /// Between the battery and its number.
 const BATTERY_GAP: f32 = 5.0;
 /// The battery's glyph beside the words' size: the icon font's glyphs are
@@ -63,6 +69,9 @@ struct Shown {
     serial: Option<String>,
     /// It is known here (in `phones.json`).
     known: bool,
+    /// The word on its button (`None`: none now — it is being synced, or
+    /// it is locked).
+    button: Option<&'static str>,
 }
 
 /// The pill's state.
@@ -83,6 +92,8 @@ pub(crate) struct PhonePill {
     /// The battery's glyph and its number, measured.
     glyph_w: f32,
     level_w: f32,
+    /// The button's word, measured (0: no button now).
+    chip_w: f32,
     /// A phone that is not there (`debug-desktop "phonepill fake"`), and the
     /// pill stood open or shut without a pointer.
     fake: Option<Shown>,
@@ -131,6 +142,11 @@ impl App {
             path: v.path.to_string_lossy().into_owned(),
             says: format!("{name} · {state}"),
             battery,
+            button: match &known {
+                _ if v.closed || syncing => None,
+                None => Some(SET_UP),
+                Some(_) => Some(SYNC),
+            },
             known: known.is_some(),
             serial,
         })
@@ -166,7 +182,7 @@ impl App {
     /// the pill follows.
     pub(crate) fn phone_pill_sync(&mut self) {
         if let Some(now) = self.phone_pill_now() {
-            let key = format!("{}{:?}", now.says, now.battery);
+            let key = format!("{}{:?}{:?}", now.says, now.battery, now.button);
             if key != self.phone_pill.measured {
                 let font_px = FONT_PX * self.options_scale();
                 if let Some(r) = self.options_renderer.as_mut() {
@@ -178,6 +194,7 @@ impl App {
                         ),
                         None => (0.0, 0.0),
                     };
+                    self.phone_pill.chip_w = now.button.map_or(0.0, |word| r.measure_text(word, font_px, TEXT_FONT) + 12.0);
                     self.phone_pill.measured = key;
                 }
             }
@@ -228,7 +245,30 @@ impl App {
     /// third as much again (Max, 2026-10-11: "make the long pill 1/3
     /// longer") — the words stand in its middle.
     fn phone_pill_long_w(&self) -> f32 {
-        (self.phone_pill_words_w() + 2.0 * PILL_PAD_X) * LONGER
+        let base = self.phone_pill_words_w() + 2.0 * PILL_PAD_X;
+        // (The air it leaves in its middle holds the button.)
+        let chip = self.phone_pill.chip_w;
+        (base * LONGER).max(base + if chip > 0.0 { chip + 2.0 * CHIP_AIR } else { 0.0 })
+    }
+
+    /// The button in the long pill's air (Max, 2026-10-11: "a sync button
+    /// on the air between the status and the battery"): the bell's amber
+    /// chip, in the middle of what the words and the battery leave.
+    fn phone_pill_chip(&self, long: Rect) -> Option<Rect> {
+        let p = &self.phone_pill;
+        if p.chip_w <= 0.0 {
+            return None;
+        }
+        let battery_w = if p.level_w > 0.0 { p.glyph_w + BATTERY_GAP + p.level_w } else { 0.0 };
+        let (left, right) = (long.x + PILL_PAD_X + p.says_w, long.x + long.w - PILL_PAD_X - battery_w);
+        let h = LINE_PX * self.options_scale();
+        (right - left >= p.chip_w).then(|| Rect::new((left + right - p.chip_w) / 2.0, long.y + (long.h - h) / 2.0, p.chip_w, h))
+    }
+
+    /// The long pill within the whole, fully out.
+    fn phone_pill_long(&self, rect: Rect) -> Rect {
+        let round = Self::phone_pill_round(rect);
+        Rect::new(rect.x, rect.y, (rect.w - round.w - OPTION_GAP * self.phone_pill.open).max(0.0), rect.h)
     }
 
     /// All the long pill writes, end to end: the words, and after them the
@@ -359,6 +399,7 @@ impl App {
                     path: "/nowhere/a-phone".to_owned(),
                     says: words.to_owned(),
                     battery: level,
+                    button: Some(SYNC),
                     serial: None,
                     known: true,
                 });
@@ -395,9 +436,8 @@ impl App {
 
         // The long pill: from behind the round one, leftward.
         let out = a * ((p.open - 0.1) / 0.6).clamp(0.0, 1.0);
-        let long_w = rect.w - round.w - OPTION_GAP * p.open;
-        if out > 0.004 && long_w > 2.0 {
-            let long = Rect::new(rect.x, rect.y, long_w, rect.h);
+        let long = self.phone_pill_long(rect);
+        if out > 0.004 && long.w > 2.0 {
             push_neumorph(scene, long, long.h / 2.0, bright, out);
             let wash = self.options_rest_wash();
             scene.rects.push(RectInst {
@@ -438,6 +478,32 @@ impl App {
             if let Some(level) = shown.battery {
                 write(scene, battery_glyph(level).to_owned(), p.glyph_w + BATTERY_GAP, Some(crate::options::NERD));
                 write(scene, format!("{level}%"), p.level_w, TEXT_FONT);
+            }
+            // The button: the bell's amber chip, a little stronger under
+            // the pointer (the task pill's Cancel is the same chip).
+            if let (Some(chip), Some(word)) = (self.phone_pill_chip(long), shown.button) {
+                let lit = ptr.is_some_and(|p| chip.contains(p));
+                let amber = crate::notif::AMBER;
+                scene.rects.push(RectInst {
+                    rect: chip,
+                    radius: chip.h / 2.0,
+                    color: [amber[0], amber[1], amber[2], if lit { 0.38 } else { 0.2 } * out],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                scene.labels.push(Label {
+                    text: word.to_owned(),
+                    pos: (chip.x + chip.w / 2.0, ty),
+                    max_w: 4096.0,
+                    font_px: FONT_PX * s,
+                    line_px: LINE_PX * s,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: TEXT_FONT,
+                    color,
+                    clip: Some(chip),
+                });
             }
         }
 
