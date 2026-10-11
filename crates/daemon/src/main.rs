@@ -92,6 +92,7 @@ mod stats;
 mod surface;
 mod sys;
 mod camera_pill;
+mod phone_pill;
 mod task_pill;
 mod task_title;
 mod tasks;
@@ -658,6 +659,7 @@ fn main() -> anyhow::Result<()> {
         task_pill: task_pill::TaskPill::default(),
         bar_zoom_keys: false,
         camera_pill: camera_pill::CameraPill::default(),
+        phone_pill: phone_pill::PhonePill::default(),
         desktop_layer,
         desktop_renderer: None,
         desktop_size: (0, 0),
@@ -1541,6 +1543,8 @@ pub struct App {
     bar_zoom_keys: bool,
     /// The bar's camera pill (`camera_pill.rs`).
     camera_pill: camera_pill::CameraPill,
+    /// The bar's phone pill (`phone_pill.rs`).
+    phone_pill: phone_pill::PhonePill,
     desktop_layer: Option<LayerSurface>,
     desktop_renderer: Option<Renderer>,
     /// The desktop surface's logical size.

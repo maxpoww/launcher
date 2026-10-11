@@ -2570,6 +2570,7 @@ impl App {
         }
         self.desktop.mounts_seen = true;
         self.desktop.volumes = list;
+        self.phone_pill_sync();
         self.save_desktop_positions();
         self.reload_desktop();
     }
@@ -2580,7 +2581,7 @@ impl App {
     }
 
     /// Let the volume at `path` go.
-    fn desktop_eject(&mut self, path: &str) {
+    pub(crate) fn desktop_eject(&mut self, path: &str) {
         if let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path && !v.closed) {
             info!("desktop: eject {}", v.name);
             crate::mounts::eject(v.uri.clone(), v.name.clone());
@@ -5086,6 +5087,10 @@ impl App {
         if let Some(name) = what.strip_prefix("syncfixed ") {
             self.phone_sync_stuck("debug", name.trim(), false, true, true);
             return format!("{} is fixed", name.trim());
+        }
+        // `phonepill …`: the bar's phone pill, without a pointer.
+        if let Some(rest) = what.strip_prefix("phonepill ") {
+            return self.phone_pill_debug(rest.trim());
         }
         // `campill …`: the bar's camera pill, without a pointer.
         if let Some(rest) = what.strip_prefix("campill ") {
