@@ -2504,7 +2504,16 @@ impl App {
                 || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
             let closed = self.desktop.volumes.iter().any(|v| v.closed && v.path.as_os_str() == path.as_str());
             let tether = self.desktop.volumes.iter().any(|v| v.tether && v.path.as_os_str() == path.as_str());
-            let volume = crate::desktop_menu::Volume { phone, closed, camera, tether };
+            // (What this phone cannot do here: the same answer the bar's
+            // phone pill works from, so the two never offer different things.)
+            let limits = self
+                .desktop
+                .volumes
+                .iter()
+                .find(|v| v.phone && v.path.as_os_str() == path.as_str())
+                .map(|v| self.phone_limits(v))
+                .unwrap_or_default();
+            let volume = crate::desktop_menu::Volume { phone, closed, camera, tether, limits };
             menu = menu.for_volume(volume, h as f32);
         }
         // On a shortcut nothing vouches for: letting it run comes first.
@@ -2920,6 +2929,8 @@ impl App {
             // (Turning the page is the release handler's: the menu stays up.)
             Action::MoveTo | Action::Back => {}
             Action::Camera => self.desktop_camera_use(item),
+            // (Pages of the bar's phone pill's box.)
+            Action::CameraSettings | Action::HelpDebugging | Action::HelpFiles => self.phone_pill_show(action),
             Action::Configure => {
                 if let Some(i) = item {
                     self.desktop_open_config(i, at);

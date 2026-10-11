@@ -576,11 +576,13 @@ impl App {
                 indent + w(&l.label) + if l.value.is_empty() { 0.0 } else { w(&l.value) + 2.0 * PILL_PAD_X }
             })
             .fold(0.0, f32::max);
-        let wanted = if self.phone_pill.page == Page::Configure && self.phone_config().is_some() {
-            crate::desktop_config::WIDTH
-        } else {
-            (widest + 2.0 * BOX_PAD).max(BOX_MIN_W)
-        };
+        // ONE width for every page, the Configure box's (a page wider
+        // than that makes it wider): a box that changed size from page to
+        // page shrank from under the pointer that had just clicked, and
+        // with the pointer off it the visit was over — Max, 2026-10-11:
+        // "clicking properties the box gets smaller, when I move my
+        // pointer it goes away".
+        let wanted = crate::desktop_config::WIDTH.max(widest + 2.0 * BOX_PAD).max(BOX_MIN_W);
         lerp(band, band.max(wanted), self.phone_pill.box_e)
     }
 
@@ -650,6 +652,37 @@ impl App {
         Some((v, crate::desktop::phone_serial_of(v), item))
     }
 
+    /// What the plugged-in phone `v` cannot do here, as last found out
+    /// (`phone_pill_ask_battery`): for its menu on the desktop and for this
+    /// pill's box alike.
+    pub(crate) fn phone_limits(&self, v: &crate::mounts::Mounted) -> crate::desktop_menu::Limits {
+        let serial = crate::desktop::phone_serial_of(v);
+        let debugging = match &serial {
+            Some(s) => self.phone_pill.debugging.get(s).copied().unwrap_or(Debugging::Unknown),
+            None => Debugging::Off,
+        };
+        crate::desktop_menu::Limits {
+            debugging_off: debugging == Debugging::Off,
+            not_allowed: debugging == Debugging::NotAllowed,
+            no_files: self.phone_pill.no_files.contains(v.path.to_string_lossy().as_ref()),
+            old_camera: serial.and_then(|s| self.phone_pill.android.get(&s).copied()).is_some_and(|level| level < 31),
+        }
+    }
+
+    /// From the phone's menu on the desktop: this pill's box, open at the
+    /// page that menu's row is about (the camera's settings, how USB
+    /// debugging is turned on, how the phone is made to show its files).
+    pub(crate) fn phone_pill_show(&mut self, action: Action) {
+        let page = match action {
+            Action::CameraSettings => Page::Camera,
+            Action::HelpDebugging => Page::Debugging,
+            Action::HelpFiles => Page::Files,
+            _ => return,
+        };
+        self.phone_pill.box_open = true;
+        self.phone_box_turn(page);
+    }
+
     /// The lines of the box's page.
     fn phone_box_lines(&self) -> Vec<Line> {
         // (A phone that is not there has a box to look at all the same.)
@@ -669,78 +702,42 @@ impl App {
             // The phone's own menu (`desktop_menu::volume_rows` — one list
             // for both), with what it opened elsewhere turned into pages
             // of this box, and the camera's settings under its Stop.
+            // The phone's menu — the very rows its menu on the desktop has
+            // (`desktop_menu::volume_rows`, told what this phone cannot do),
+            // with what that menu opens elsewhere turned into pages of this
+            // box.
             Page::Menu => {
                 let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path)
                     || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
-                let volume = crate::desktop_menu::Volume { phone: true, closed: v.closed, camera, tether: v.tether };
-                // Without adb: what the cable alone can do (its folder, its
-                // photos by that folder), and the way to the rest (Max,
-                // 2026-10-11: "find out if it's not able, offer what is
-                // possible, and show the option… for more features").
-                let limited = self.phone_pill.shown.as_ref().map(|s| s.debugging);
-                let limited = limited.filter(|d| matches!(d, Debugging::Off | Debugging::NotAllowed));
-                // (Its camera can be used from Android 12 on.)
-                let serial = self.phone_pill.shown.as_ref().and_then(|s| s.serial.clone());
-                let old = serial.and_then(|s| self.phone_pill.android.get(&s).copied()).is_some_and(|level| level < 31);
+                let limits = self.phone_limits(v);
+                let volume =
+                    crate::desktop_menu::Volume { phone: true, closed: v.closed, camera, tether: v.tether, limits };
                 let mut lines = Vec::new();
                 let mut air = false;
                 for row in crate::desktop_menu::volume_rows(&volume) {
-                    if limited.is_some()
-                        && matches!(
-                            row,
-                            Row::Item {
-                                action: Action::Mirror
-                                    | Action::Camera
-                                    | Action::CameraStop
-                                    | Action::Tether
-                                    | Action::Configure
-                                    | Action::Properties,
-                                ..
-                            }
-                        )
-                    {
-                        continue;
-                    }
-                    // (Said, not left out: a row that is simply not there
-                    // reads as something broken — Max, 2026-10-11: "there
-                    // is no use as camera on the pill box".)
-                    if old && matches!(row, Row::Item { action: Action::Camera, .. }) {
-                        let said = line("Use as camera: needs Android 12 or newer", "", Act::Nothing);
-                        lines.push(Line { air, dim: true, ..said });
-                        air = false;
-                        continue;
-                    }
-                    let (label, action) = match row {
+                    let l = match row {
                         Row::Sep => {
                             air = true;
                             continue;
                         }
-                        Row::Note(_) => continue,
-                        Row::Item { label, action, .. } => (crate::i18n::tr(label).to_owned(), action),
-                        Row::Target { label, action } => (label, action),
+                        // (Said, not left out: a row that is simply not
+                        // there reads as something broken.)
+                        Row::Note(text) => Line { dim: true, ..line(crate::i18n::tr(text), "", Act::Nothing) },
+                        Row::Target { label, action } => line(&label, "", Act::Menu(action)),
+                        Row::Item { label, action, .. } => {
+                            let act = match action {
+                                Action::Configure => Act::Turn(Page::Configure),
+                                Action::Properties => Act::Turn(Page::Properties),
+                                Action::CameraSettings => Act::Turn(Page::Camera),
+                                Action::HelpDebugging => Act::Turn(Page::Debugging),
+                                Action::HelpFiles => Act::Turn(Page::Files),
+                                other => Act::Menu(other),
+                            };
+                            line(crate::i18n::tr(label), "", act)
+                        }
                     };
-                    let act = match action {
-                        Action::Configure => Act::Turn(Page::Configure),
-                        Action::Properties => Act::Turn(Page::Properties),
-                        other => Act::Menu(other),
-                    };
-                    lines.push(Line { air, ..line(&label, "", act) });
+                    lines.push(Line { air, ..l });
                     air = false;
-                    if action == Action::CameraStop {
-                        lines.push(line("Configure camera", "", Act::Turn(Page::Camera)));
-                    }
-                }
-                if self.phone_pill.shown.as_ref().is_some_and(|s| s.no_files) {
-                    lines.push(group(line("It shows no files: what to do on the phone", "", Act::Turn(Page::Files))));
-                }
-                match limited {
-                    Some(Debugging::NotAllowed) => {
-                        lines.push(group(line("Allow this computer on the phone for more features", "", Act::Turn(Page::Debugging))));
-                    }
-                    Some(_) => {
-                        lines.push(group(line("Turn on USB debugging for more features", "", Act::Turn(Page::Debugging))));
-                    }
-                    None => {}
                 }
                 lines
             }
@@ -861,14 +858,11 @@ impl App {
         // its parts, the phone's answer adds a line): the box is as tall as
         // it is NOW, not as it was when last eased — its Cancel and Apply,
         // at its foot, were cut off (Max, 2026-10-11).
-        if self.phone_config().is_some() {
-            return self.phone_box_page_h().min(self.phone_box_max_h());
-        }
-        if self.phone_pill.box_h > 0.0 {
-            self.phone_pill.box_h
-        } else {
-            self.phone_box_page_h().min(self.phone_box_max_h())
-        }
+        // ONE height for every page: the height every open box on this
+        // bar grows to ("one drawer, one height"). A page taller than it
+        // scrolls; a shorter one leaves the rest empty — and the box is
+        // never taken from under the pointer.
+        self.phone_box_max_h()
     }
 
     /// The Configure box shown in this box, if it is.

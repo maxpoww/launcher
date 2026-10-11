@@ -54,6 +54,14 @@ pub(crate) enum Action {
     Tether,
     /// A phone: the box where what this computer does with it is set.
     Configure,
+    /// A phone that is the camera: its flash, lens and picture (a page of
+    /// the bar's phone pill).
+    CameraSettings,
+    /// A phone that does not let this computer in over adb: how USB
+    /// debugging is turned on, or this computer allowed (same place).
+    HelpDebugging,
+    /// A phone that shows no files: how it is made to (same place).
+    HelpFiles,
     /// Out of the desktop, into the home folder.
     MoveToHome,
     MoveToBin,
@@ -168,46 +176,91 @@ pub(crate) struct Volume {
     pub camera: bool,
     /// That phone is giving this computer its internet.
     pub tether: bool,
+    /// What that phone cannot do here, and why (`phone_pill.rs` finds out):
+    /// the rows that would not work are not offered, and the way to them is.
+    pub limits: Limits,
+}
+
+/// What a plugged-in phone cannot do with this computer.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Limits {
+    /// It does not let this computer in over adb: USB debugging is off…
+    pub debugging_off: bool,
+    /// …or on, and the phone has not allowed this computer yet.
+    pub not_allowed: bool,
+    /// It is mounted and shows no files (locked, or on "charge only").
+    pub no_files: bool,
+    /// Its Android is older than 12: its camera cannot be used.
+    pub old_camera: bool,
+}
+
+impl Limits {
+    /// Nothing that goes over adb works.
+    pub fn no_adb(&self) -> bool {
+        self.debugging_off || self.not_allowed
+    }
 }
 
 /// The rows of a plugged-in volume's menu.
 pub(crate) fn volume_rows(v: &Volume) -> Vec<Row> {
-    let mut rows = vec![Row::Item { label: "Open", action: Action::Open, danger: false }];
+    let item = |label: &'static str, action: Action| Row::Item { label, action, danger: false };
+    let mut rows = vec![item("Open", Action::Open)];
     if !v.closed {
-        rows.push(Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false });
+        rows.push(item("Open in terminal", Action::OpenTerminal));
     }
-    // A phone: its screen, here (Max, 2026-10-09). And its camera as this
-    // computer's, on and off — the rest of it (lens, picture, flash) is on
-    // the bar's camera pill (Max, 2026-10-10: "let's keep the menu simple").
+    // A phone. ONE list for its menu on the desktop and for the box of the
+    // bar's phone pill (Max, 2026-10-11: "the box and the menu are not the
+    // same… the menu is offering me to use the camera, but not the pill":
+    // the box left out what would not work and the menu did not). What a
+    // phone cannot do here is not offered in either; why, and the way to
+    // it, is said in both.
     if v.phone {
-        rows.push(Row::Item { label: "Mirror screen", action: Action::Mirror, danger: false });
-        // The camera is a group of its own (Max, 2026-10-09).
+        let no_adb = v.limits.no_adb();
+        if !no_adb {
+            rows.push(item("Mirror screen", Action::Mirror));
+            // The camera is a group of its own (Max, 2026-10-09). On: its
+            // Stop, and its settings (flash, lens, picture).
+            rows.push(Row::Sep);
+            if v.limits.old_camera {
+                rows.push(Row::Note("Use as camera: needs Android 12 or newer"));
+            } else if v.camera {
+                rows.push(item("Stop camera", Action::CameraStop));
+                rows.push(item("Configure camera", Action::CameraSettings));
+            } else {
+                rows.push(item("Use as camera", Action::Camera));
+            }
+        }
+        // What a phone has for this computer (Max, 2026-10-09): its photos
+        // (by its folder, when there is no adb), its internet.
         rows.push(Row::Sep);
-        if v.camera {
-            rows.push(Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
-        } else {
-            rows.push(Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
+        rows.push(item("Import photos", Action::ImportPhotos));
+        if !no_adb {
+            rows.push(item(if v.tether { "Stop phone's internet" } else { "Use phone's internet" }, Action::Tether));
         }
     }
-    // What a phone has for this computer (Max, 2026-10-09): its photos, its
-    // internet.
-    if v.phone {
-        rows.push(Row::Sep);
-        rows.push(Row::Item { label: "Import photos", action: Action::ImportPhotos, danger: false });
-        let label = if v.tether { "Stop phone's internet" } else { "Use phone's internet" };
-        rows.push(Row::Item { label, action: Action::Tether, danger: false });
-    }
     if !v.closed {
         rows.push(Row::Sep);
-        rows.push(Row::Item { label: "Eject", action: Action::Eject, danger: false });
+        rows.push(item("Eject", Action::Eject));
+    }
+    // What stands between this phone and the rest, and how it is got past.
+    if v.phone && (v.limits.no_files || v.limits.no_adb()) {
+        rows.push(Row::Sep);
+        if v.limits.no_files {
+            rows.push(item("It shows no files: what to do on the phone", Action::HelpFiles));
+        }
+        if v.limits.not_allowed {
+            rows.push(item("Allow this computer on the phone for more features", Action::HelpDebugging));
+        } else if v.limits.debugging_off {
+            rows.push(item("Turn on USB debugging for more features", Action::HelpDebugging));
+        }
     }
     // Last: a phone's Configure box (a click), and Properties, opened by
-    // coming onto it as on a file's menu.
+    // coming onto it as on a file's menu. (Both ask the phone over adb.)
     rows.push(Row::Sep);
-    if v.phone {
-        rows.push(Row::Item { label: "Configure", action: Action::Configure, danger: false });
+    if v.phone && !v.limits.no_adb() {
+        rows.push(item("Configure", Action::Configure));
     }
-    rows.push(Row::Item { label: "Properties", action: Action::Properties, danger: false });
+    rows.push(item("Properties", Action::Properties));
     rows
 }
 
@@ -565,11 +618,44 @@ mod tests {
         assert_eq!(phone.action(2), Some(Action::Mirror), "a phone's screen can be mirrored");
         assert_eq!(phone.rows[3], Row::Sep);
         assert_eq!(phone.rows[4], Row::Item { label: "Use as camera", action: Action::Camera, danger: false });
-        // While it is the camera: Stop, and nothing else of the camera's
-        // (its lens, picture and flash are the bar's pill's).
+        // While it is the camera: Stop, and the way to its settings (a page
+        // of the bar's phone pill's box).
         let on = open().for_volume(Volume { phone: true, camera: true, ..Default::default() }, 800.0);
         assert_eq!(on.rows[4], Row::Item { label: "Stop camera", action: Action::CameraStop, danger: false });
-        assert_eq!(on.rows[5], Row::Sep);
+        assert_eq!(on.rows[5], Row::Item { label: "Configure camera", action: Action::CameraSettings, danger: false });
+        assert_eq!(on.rows[6], Row::Sep);
+        // What a phone cannot do here is not offered, and why is said. No
+        // adb (USB debugging off): what its cable alone does, and the way to
+        // the rest.
+        let rows_of = |limits: Limits| volume_rows(&Volume { phone: true, limits, ..Default::default() });
+        let actions_of = |rows: &[Row]| -> Vec<Action> {
+            rows.iter()
+                .filter_map(|r| match r {
+                    Row::Item { action, .. } | Row::Target { action, .. } => Some(*action),
+                    _ => None,
+                })
+                .collect()
+        };
+        let off = rows_of(Limits { debugging_off: true, ..Default::default() });
+        assert_eq!(
+            actions_of(&off),
+            vec![Action::Open, Action::OpenTerminal, Action::ImportPhotos, Action::Eject, Action::HelpDebugging, Action::Properties]
+        );
+        assert!(off.contains(&Row::Item {
+            label: "Turn on USB debugging for more features",
+            action: Action::HelpDebugging,
+            danger: false
+        }));
+        // Seen, and not allowed yet: the same, said as it is.
+        let waiting = rows_of(Limits { not_allowed: true, ..Default::default() });
+        assert!(waiting.iter().any(|r| matches!(r, Row::Item { label, .. } if label.starts_with("Allow this computer"))));
+        // An Android too old for the camera: the row says so, in its place.
+        let old = rows_of(Limits { old_camera: true, ..Default::default() });
+        assert_eq!(old[4], Row::Note("Use as camera: needs Android 12 or newer"));
+        assert!(!actions_of(&old).contains(&Action::Camera));
+        // Showing no files: how it is made to.
+        let empty = rows_of(Limits { no_files: true, ..Default::default() });
+        assert!(actions_of(&empty).contains(&Action::HelpFiles));
         // A phone that is not open: no terminal, no eject.
         let shut = open().for_volume(Volume { phone: true, closed: true, ..Default::default() }, 800.0);
         let actions: Vec<Action> = (0..shut.rows.len()).filter_map(|i| shut.action(i)).collect();
