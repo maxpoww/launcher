@@ -43,8 +43,11 @@ use crate::tasks::Task;
 use crate::App;
 
 /// The pill at its widest, in pill-heights. Wider than the player's pill is
-/// let be (13): that one scrolls a long name, this one would cut it.
-const MAX_W: f32 = 40.0;
+/// let be (13): that one scrolls a long name, this one would cut it. (40
+/// until 2026-10-11: a long sentence — "Max's Pixel can't sync over Wi-Fi —
+/// plug it in to fix it" — stretched to some 36, and Max: "it is very
+/// long… make it a third shorter, and leave that length as the most".)
+const MAX_W: f32 = 24.0;
 /// How much longer than its words and number need the pill is: the fill has
 /// further to go, so it is seen to move (Max: "make it longer so it goes
 /// faster"; settled at this on the mockup).
