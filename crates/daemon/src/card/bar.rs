@@ -587,6 +587,8 @@ pub(super) fn draw(
     writer: Option<Rect>,
     // (All of the box, when it holds parts over the writing; else `writer`.)
     frame: Option<Rect>,
+    // (Its colour: the zebra tone of its place in the list.)
+    well: [f32; 4],
     rect: Rect,
     list: Rect,
     clip: Rect,
@@ -599,8 +601,6 @@ pub(super) fn draw(
     let ink = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * a];
     let acc = paint.accent();
     let accent = |a: f32| [acc[0], acc[1], acc[2], a];
-    // (Solid, as the items' boxes are: the card's ground is see-through.)
-    let well = super::view::solid(paint, bright);
     let rim = if bright {
         [0.0, 0.0, 0.0, 0.12]
     } else {

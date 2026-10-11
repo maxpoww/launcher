@@ -1006,18 +1006,6 @@ const ZEBRA_HOT: f32 = 0.11;
 /// How solid an item's box (and the input box, and the picker) is.
 pub(super) const ITEM: f32 = 0.96;
 
-/// The colour of a box that sits on the card: the card's own, a shade
-/// darker, solid.
-pub(super) fn solid(paint: &Paint, bright: bool) -> [f32; 4] {
-    let shade = if bright { 0.93 } else { 0.72 };
-    [
-        paint.fill[0] * shade,
-        paint.fill[1] * shade,
-        paint.fill[2] * shade,
-        ITEM,
-    ]
-}
-
 /// Everything one frame of the card is drawn from.
 pub(crate) struct View<'a> {
     pub rect: Rect,
@@ -1973,6 +1961,8 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         });
     }
     let writer = tiles.iter().find(|t| t.id == WRITER).map(|t| t.rect);
+    // (The writing box wears the zebra tone of its place in the list.)
+    let writer_tone = tile_fills[tiles.iter().position(|t| t.id == WRITER).unwrap_or(0) % 2];
     scene.grids.push(list);
 
     // The foot: New · Memory · Pinned, the page that is up lit.
@@ -2077,8 +2067,19 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         // (The writing is the lower part of the box; the parts over it.)
         let draft = writer.map(|w| Rect::new(w.x, w.y + w.h - draft_h, w.w, draft_h));
         super::bar::draw(
-            &mut bar, &mut well, draft, writer, rect, body, window, foot.page, &foot.bar, paint,
-            bright, view.hover,
+            &mut bar,
+            &mut well,
+            draft,
+            writer,
+            writer_tone,
+            rect,
+            body,
+            window,
+            foot.page,
+            &foot.bar,
+            paint,
+            bright,
+            view.hover,
         );
         if let (Some(w), false) = (writer, sealed.is_empty()) {
             draw_pieces(
