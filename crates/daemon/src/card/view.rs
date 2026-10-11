@@ -271,6 +271,8 @@ pub(crate) struct FootView<'a> {
     pub notes: &'a HashMap<u64, String>,
     /// The voice note being played, and for how many seconds now.
     pub playing: Option<(u64, f32)>,
+    /// The voice note that is PAUSED, and how many seconds in.
+    pub paused: Option<(u64, f32)>,
     /// Something is being written IN THE LIST: a new thing, at its end
     /// (`Some(None)`), or the item of this id, in its own place.
     pub writing: Option<Option<u64>>,
@@ -1509,8 +1511,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     });
                 };
             put(
+                // (Playing, its button PAUSES it — Max, 2026-10-11.)
                 if now.is_some() {
-                    "\u{f04d}"
+                    "\u{f04c}"
                 } else {
                     "\u{f04b}"
                 },
@@ -1568,7 +1571,14 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 });
             }
             let secs = item.aspect.max(1.0);
-            let heard = now.unwrap_or(0.0).min(secs);
+            // (Paused, its line and its clock stay where it stopped.)
+            let paused = view
+                .foot
+                .as_ref()
+                .and_then(|f| f.paused)
+                .filter(|(id, _)| *id == item.id)
+                .map(|(_, secs)| secs);
+            let heard = now.or(paused).unwrap_or(0.0).min(secs);
             let clock = |s: f32| {
                 let s = s.round() as u32;
                 format!("{:02}:{:02}", s / 60, s % 60)
@@ -2723,6 +2733,7 @@ mod tests {
                 },
                 notes: &notes,
                 playing: None,
+                paused: None,
                 writing: None,
                 title: None,
                 choosing: false,

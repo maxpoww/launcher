@@ -620,6 +620,8 @@ pub(crate) struct Card {
     /// what was said is being written out right now (`voice.rs`).
     rec: Option<voice::Rec>,
     playing: Option<voice::Playing>,
+    /// The voice note that is paused, and how many seconds in it stopped.
+    paused: Option<(u64, f32)>,
     writing: bool,
     /// The emoji page's picker: what its search holds, the emoji it shows
     /// for that (`emoji_table::EMOJI` by place), how far its grid is
@@ -4677,6 +4679,7 @@ impl App {
                 },
                 notes: &notes,
                 playing,
+                paused: self.card.paused,
                 writing: (self.card.field == Some(Field::Box)).then_some(self.card.edit),
                 title: self
                     .card

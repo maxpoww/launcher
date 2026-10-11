@@ -380,7 +380,6 @@ impl App {
         self.request_card_draw();
     }
 
-    /// Play voice note `id`, or stop it if it is the one playing.
     /// A click on a voice note's line: it plays FROM THERE (`along`: how
     /// far along the line, 0..1).
     pub(super) fn card_play_from(&mut self, id: u64, along: f32) {
@@ -390,20 +389,28 @@ impl App {
             let _ = p.child.kill();
             let _ = p.child.wait();
         }
+        self.card.paused = None;
         self.card_play_at(id, (along.clamp(0.0, 0.98) * secs).max(0.0));
     }
 
+    /// A voice note's button: it plays; playing, it PAUSES (Max,
+    /// 2026-10-11: play/pause, not play/stop) and the next click goes on
+    /// from there. (The player cannot be held: it is let go, and started
+    /// again from where it was — `card_play_at`.)
     pub(super) fn card_play(&mut self, id: u64) {
         let was = self.card.playing.take().map(|mut p| {
             let _ = p.child.kill();
             let _ = p.child.wait();
-            p.id
+            (p.id, p.started.elapsed().as_secs_f32())
         });
+        let paused = self.card.paused.take();
         self.request_card_draw();
-        if was == Some(id) {
+        if let Some((_, at)) = was.filter(|w| w.0 == id) {
+            self.card.paused = Some((id, at));
             return;
         }
-        self.card_play_at(id, 0.0);
+        let from = paused.filter(|p| p.0 == id).map_or(0.0, |p| p.1);
+        self.card_play_at(id, from);
     }
 
     /// Play voice note `id` from `from` seconds in. (The player has no way
@@ -462,6 +469,7 @@ impl App {
     /// The card is going away: nothing goes on recording or playing.
     pub(super) fn card_voice_quiet(&mut self) {
         self.card_record_stop(false);
+        self.card.paused = None;
         if let Some(mut playing) = self.card.playing.take() {
             let _ = playing.child.kill();
             let _ = playing.child.wait();
