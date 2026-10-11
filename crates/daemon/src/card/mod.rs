@@ -549,6 +549,13 @@ pub(crate) struct Card {
     scroll_vel: f32,
     scroll_last: Option<Instant>,
     gliding: bool,
+    /// The scroll comes from fingers on a touchpad (not a wheel's notches):
+    /// the list then FOLLOWS them, step for step — easing after them felt
+    /// elastic on a short scroll (Max, 2026-10-11).
+    finger: bool,
+    /// How far this scroll has gone since it began (px): a short one does
+    /// not glide.
+    scroll_run: f32,
     /// A drag is held over this button of the head, since then: held long
     /// enough, the card turns to its page (so a thing can be carried from
     /// any page to any other).
@@ -4944,6 +4951,10 @@ impl App {
                 axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
                 ..
             } => self.card_fling(),
+            // (What the scroll that follows comes from: fingers, or a wheel.)
+            wl_pointer::Event::AxisSource {
+                axis_source: WEnum::Value(source),
+            } => self.card.finger = source == wl_pointer::AxisSource::Finger,
             wl_pointer::Event::Axis {
                 axis: WEnum::Value(axis),
                 value,
@@ -5027,6 +5038,7 @@ impl App {
                     _ => self.card.scroll,
                 };
                 self.card.gliding = false;
+                self.card.scroll_run += step.abs();
                 let now = Instant::now();
                 let dt = self
                     .card
@@ -5035,7 +5047,15 @@ impl App {
                     .clamp(0.004, 0.1);
                 self.card.scroll_vel = 0.55 * self.card.scroll_vel + 0.45 * (step / dt);
                 self.card.scroll_last = Some(now);
-                self.card.scroll_to = Some((from + step).clamp(0.0, self.card.max_scroll));
+                let to = (from + step).clamp(0.0, self.card.max_scroll);
+                if self.card.finger {
+                    // Fingers: the list is under them, exactly.
+                    self.card.scroll = to;
+                    self.card.scroll_to = None;
+                } else {
+                    // A wheel's notch: eased to.
+                    self.card.scroll_to = Some(to);
+                }
                 self.request_card_draw();
             }
             _ => {}
@@ -5072,7 +5092,11 @@ impl App {
     /// comes to rest, as a page does under a flick. (A wheel that had
     /// already stopped under the fingers does not.)
     fn card_fling(&mut self) {
-        const FAST: f32 = 500.0;
+        // (Fast, and after some travel: a short scroll, however quick, just
+        // stops where it was let go.)
+        const FAST: f32 = 900.0;
+        const FAR: f32 = 90.0;
+        let far = std::mem::take(&mut self.card.scroll_run) >= FAR;
         let fresh = self
             .card
             .scroll_last
@@ -5080,7 +5104,7 @@ impl App {
         let v = self.card.scroll_vel;
         self.card.scroll_vel = 0.0;
         self.card.scroll_last = None;
-        if !fresh || v.abs() < FAST || self.card.wheel.sideways == Some(true) {
+        if !fresh || !far || v.abs() < FAST || self.card.wheel.sideways == Some(true) {
             return;
         }
         // (How far it carries: its speed for about a third of a second.)
@@ -5097,6 +5121,7 @@ impl App {
             self.card.scroll_vel = 0.0;
             self.card.scroll_last = None;
         }
+        self.card.scroll_run = 0.0;
         let was_sideways = self.card.wheel.sideways == Some(true);
         self.card.wheel = Wheel::default();
         if was_sideways {
