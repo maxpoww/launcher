@@ -199,6 +199,10 @@ struct Wheel {
 /// An item in hand: a Wayland drag of ours.
 pub(crate) struct Drag {
     pub id: u64,
+    /// The item itself, as it was when it was picked up: it may be let go
+    /// on ANOTHER page of the card (held over a button of the head, the
+    /// card turns to that page), where its list no longer has it.
+    pub item: Item,
     /// How far down the surface it was picked up: where the list's
     /// opening is until the drag's first motion says better.
     pub from_y: f32,
@@ -537,6 +541,13 @@ pub(crate) struct Card {
     menu: Option<u64>,
     /// The translation whose menu of languages is open.
     lang: Option<u64>,
+    /// A drag is held over this button of the head, since then: held long
+    /// enough, the card turns to its page (so a thing can be carried from
+    /// any page to any other).
+    dnd_foot: Option<(Foot, Instant)>,
+    /// A drag was let go on this session's row (Memory's page): what it
+    /// brought is kept in that session.
+    drop_session: Option<u64>,
     /// A session is being CHOSEN on Memory's page, to keep this in; and the
     /// page to go back to once it is (or once it is given up).
     picking: Option<(Item, Page)>,
@@ -1085,9 +1096,7 @@ impl Card {
         let pencil = matches!(
             self.page,
             Page::Session | Page::Pinned | Page::Dictionary | Page::Translate
-        ) && self
-            .item(tile.id)
-            .is_some_and(|it| matches!(it.kind, Kind::Text | Kind::Voice));
+        ) && self.item(tile.id).is_some();
         // (Every list's items have a ×; a session's row has none while a
         // session is being chosen.)
         let closes =
@@ -1872,6 +1881,33 @@ impl App {
             let part = self.card_part(kind, body, path, owned, aspect);
             self.card_seal(part);
             return;
+        }
+        // What arrives on a page that DOES something with it (Max,
+        // 2026-10-10: drag and drop from everywhere to everywhere): words
+        // on the translator's are translated, on the dictionary's looked
+        // up; anything let go on a session's row is kept in that session.
+        match self.card.page {
+            Page::Translate if kind == Kind::Text => {
+                self.card_keep_translation(&body, None);
+                return;
+            }
+            Page::Dictionary if kind == Kind::Text => {
+                self.card_keep_word(&body, None);
+                return;
+            }
+            Page::Memory => {
+                if let Some(session) = self.card.drop_session {
+                    let item = self.card_part(kind, body, path, owned, aspect);
+                    if self.card.keep_in(session, &item, now_secs()) {
+                        self.card.items = self.card.memory.iter().map(session_row).collect();
+                        self.card.lines.remove(&session);
+                        self.card_flash("Saved");
+                        self.card_save();
+                    }
+                    return;
+                }
+            }
+            _ => {}
         }
         // What arrives is a session's: the window's own, or — where none
         // was picked yet — a new one of its name.
@@ -2861,12 +2897,7 @@ impl App {
             self.request_card_draw();
             return;
         }
-        let Some(item) = self
-            .card
-            .item(id)
-            .filter(|it| matches!(it.kind, Kind::Text | Kind::Voice))
-            .cloned()
-        else {
+        let Some(item) = self.card.item(id).cloned() else {
             return;
         };
         self.card.take_draft();
@@ -2910,6 +2941,9 @@ impl App {
                 self.card.type_in(&words);
             }
             Some(_) => {}
+            // (A file, a folder, a picture of its own: it is the first part,
+            // and words can be written round it — Max, 2026-10-10.)
+            None if item.kind != Kind::Text => parts.push(item.clone()),
             None => self.card.type_in(&item.body),
         }
         self.card.sealed = parts;

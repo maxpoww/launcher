@@ -1767,7 +1767,6 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         };
         // The pencil, on what can be written again: a text of one's own.
         if over.is_some()
-            && matches!(item.kind, Kind::Text | Kind::Voice)
             && matches!(
                 page,
                 Page::Session | Page::Pinned | Page::Dictionary | Page::Translate
@@ -1904,6 +1903,8 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     let words = match page {
         Page::Session => Some("Drag here to keep"),
         Page::Pinned => Some("Drag here to pin"),
+        Page::Translate => Some("Drag here to translate"),
+        Page::Dictionary => Some("Drag here to look up"),
         _ => None,
     };
     if let (true, None, Some(words)) = (shown_items.is_empty(), writing, words) {

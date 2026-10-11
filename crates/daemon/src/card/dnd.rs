@@ -172,6 +172,7 @@ impl App {
         );
         self.card.drag = Some(Drag {
             id,
+            item: item.clone(),
             from_y,
             source,
             _icon: image,
@@ -233,13 +234,10 @@ impl App {
     pub(crate) fn card_dnd_enter(&mut self, offer: DragOffer) {
         let mimes = offer.with_mime_types(|m| m.to_vec());
         let own = self.card.drag.is_some();
-        // Something brought to the card while Memory is up is for the
-        // session: its page comes back to take it.
-        // (A window with no session yet keeps Memory up: the drop starts
-        // one, `card_push`.)
-        if self.card.page == super::view::Page::Memory && self.card.open.is_some() {
-            self.card_show(super::view::Page::Session);
-        }
+        // (Memory's page stays up: a thing let go on a session's row is kept
+        // in that session.)
+        self.card.drop_session = None;
+        self.card.dnd_foot = None;
         let first = if mimes.iter().any(|m| m == URI_LIST) {
             Some(URI_LIST)
         } else {
@@ -296,7 +294,32 @@ impl App {
 
     /// The drag over the card moved: the list opens a place where it would
     /// land now.
-    pub(crate) fn card_dnd_motion(&mut self, _x: f32, y: f32) {
+    pub(crate) fn card_dnd_motion(&mut self, x: f32, y: f32) {
+        // HELD OVER A BUTTON OF THE HEAD, the card turns to that page (Max,
+        // 2026-10-10): so a thing can go from any page to any other.
+        if self.card.dnd_over {
+            let pos = self.card.inside((x, y));
+            let foot = self.card.vrect().and_then(|rect| {
+                super::view::foot_buttons(rect)
+                    .into_iter()
+                    .find(|(_, r)| r.contains(pos))
+                    .map(|(f, _)| f)
+            });
+            if foot != self.card.dnd_foot.map(|d| d.0) {
+                let since = std::time::Instant::now();
+                self.card.dnd_foot = foot.map(|f| (f, since));
+                if let Some(f) = foot {
+                    self.after_ms(450, move |app| {
+                        if app.card.dnd_over
+                            && app.card.dnd_foot == Some((f, since))
+                            && f.page() != app.card.page
+                        {
+                            app.card_show(f.page());
+                        }
+                    });
+                }
+            }
+        }
         if self.card.dnd_over {
             // (Where the items are laid out: see `view::virt`.)
             self.card.drop_y = Some(self.card.inside((0.0, y)).1);
@@ -343,6 +366,17 @@ impl App {
         }
         let index = self.card.opening().map(|(index, _)| index);
         let own = self.card.drop_own;
+        // (On Memory's page: the session whose row it was let go on.)
+        self.card.drop_session = (self.card.page == super::view::Page::Memory)
+            .then(|| {
+                let at = index
+                    .unwrap_or(0)
+                    .min(self.card.items.len().saturating_sub(1));
+                self.card.items.get(at).map(|row| row.id)
+            })
+            .flatten()
+            .filter(|id| self.card.memory.iter().any(|p| p.id == *id));
+        self.card.dnd_foot = None;
         self.card.dnd_over = false;
         self.card.drop_own = false;
         self.card.drop_y = None;
@@ -369,6 +403,42 @@ impl App {
                 } else if self.card.move_to(id, index) {
                     info!("card: an item moved to place {index}");
                     self.card_save();
+                } else if !self.card.items.iter().any(|it| it.id == id) {
+                    // (Carried to ANOTHER page of the card: it lands there
+                    // as what arrives from anywhere does — a copy.)
+                    if let Some(item) = self.card.drag.as_ref().map(|d| d.item.clone()) {
+                        let parts = item.parts.clone();
+                        let before = self.card.items.len();
+                        self.card_push(
+                            item.kind,
+                            item.body,
+                            item.path,
+                            item.owned,
+                            item.aspect,
+                            Some(index),
+                        );
+                        // (One made of parts keeps them, on a list of things.)
+                        if !parts.is_empty()
+                            && self.card.items.len() > before
+                            && matches!(
+                                self.card.page,
+                                super::view::Page::Session | super::view::Page::Pinned
+                            )
+                        {
+                            let at = index.min(self.card.items.len() - 1);
+                            let copy = self.card.copy_of(
+                                &Item {
+                                    parts,
+                                    ..self.card.items[at].clone()
+                                },
+                                super::now_secs(),
+                            );
+                            let id = self.card.items[at].id;
+                            self.card.items[at].parts = copy.parts;
+                            self.card.lines.remove(&id);
+                            self.card_save();
+                        }
+                    }
                 }
             }
             // → our source's `dnd_finished` → `card_drag_end`.
