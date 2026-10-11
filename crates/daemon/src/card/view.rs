@@ -1621,7 +1621,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             list.rects.push(RectInst {
                 rect: Rect::new((track.x + at - 1.0).round(), track.y - 4.0, 2.0, 10.0),
                 radius: 1.0,
-                color: if now.is_some() {
+                // (Paused, it keeps the colour it had playing: only the
+                // button changes.)
+                color: if now.or(paused).is_some() {
                     [acc[0], acc[1], acc[2], 1.0]
                 } else {
                     paint.ink_at(0.9)

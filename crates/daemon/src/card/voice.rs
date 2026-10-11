@@ -56,6 +56,7 @@ enum Done {
 
 /// How often the card is redrawn while it records or plays.
 const TICK_MS: u64 = 200;
+const PLAY_TICK_MS: u64 = 33;
 /// Shorter than this is a slip of the finger, not a note.
 const SHORTEST: f32 = 0.4;
 
@@ -453,7 +454,15 @@ impl App {
     /// second (the seconds count, the played part of the wave), and a note
     /// that has played to its end is let go.
     fn card_voice_tick(&mut self) {
-        self.after_ms(TICK_MS, |app| {
+        // (A note that PLAYS is redrawn every frame or so: its line glides,
+        // and where it is paused is where it was seen — at a few times a
+        // second it went in steps, and jumped ahead when it was paused.)
+        let every = if self.card.playing.is_some() {
+            PLAY_TICK_MS
+        } else {
+            TICK_MS
+        };
+        self.after_ms(every, |app| {
             if let Some(playing) = app.card.playing.as_mut() {
                 if !matches!(playing.child.try_wait(), Ok(None)) {
                     app.card.playing = None;
