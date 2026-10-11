@@ -245,6 +245,12 @@ struct Win {
     /// is found for it or picked.
     #[serde(default)]
     session: Option<u64>,
+    /// The page the card was on, on this window (Max, 2026-10-11: *"the
+    /// tab should stay where i left it, along with the size and position;
+    /// it resets only when i close the window"*). Not written to disk: a
+    /// dock that starts again opens on the window's session.
+    #[serde(skip)]
+    page: Option<Page>,
 }
 
 /// What was just removed, kept for as long as the hint offers it back
@@ -3441,7 +3447,15 @@ impl App {
             // (Not remembered by title: nobody chose it.)
             self.card.give(&host, None, id);
         }
+        // (The page it was on, on this window, before it went away — its
+        // window's workspace left, another window's card was called.)
+        let left_on = self.card.wins.get(&host).and_then(|w| w.page);
         self.card.turn_to(id);
+        match left_on {
+            Some(Page::Session) | None => {}
+            Some(page) if page != self.card.page => self.card_show(page),
+            Some(_) => {}
+        }
         for path in self.card_pictures() {
             self.card_ask_picture(&path);
         }
@@ -4330,6 +4344,22 @@ impl App {
     }
 
     fn draw_card_frame(&mut self) {
+        // (The page that is up is kept for this window: see `Win::page`.)
+        if let Some(host) = self.card.host.as_deref() {
+            let page = self.card.page;
+            match self.card.wins.get_mut(host) {
+                Some(win) => win.page = Some(page),
+                None => {
+                    self.card.wins.insert(
+                        host.to_owned(),
+                        Win {
+                            page: Some(page),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
         self.card_dirty = false;
         // No card anywhere and its renderer put away: nothing to draw, and
         // drawing would only bring the renderer back to full size.
@@ -6182,6 +6212,7 @@ mod tests {
                 place: Some(Place::FromLeft(-432.0)),
                 width: Some(500.0),
                 session: Some(7),
+                page: None,
             },
         );
         wins.insert("0x2".to_owned(), Win::default());
