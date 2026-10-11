@@ -402,13 +402,30 @@ impl Tile {
         )
     }
 
-    /// Where a voice note's speed is ("x1"): in its foot, to the right of
-    /// "Transcribe" (Max, 2026-10-11).
+    /// Where a voice note's speed is ("x1"): on the row of "Transcribe",
+    /// half way between that word and the note's time (Max, 2026-10-11).
     pub(super) fn speed(&self) -> Rect {
+        let (from, to) = (
+            self.rect.x + self.rect.w / 2.0 + 30.0,
+            self.rect.x + self.rect.w - TILE_PAD_X - 34.0,
+        );
         Rect::new(
-            self.rect.x + self.rect.w / 2.0 + 32.0,
-            self.rect.y + self.rect.h - NOTE_LINE - 8.0,
+            (from + to) / 2.0 - 22.0,
+            self.rect.y + VOICE_FOOT,
             44.0,
+            NOTE_LINE + 6.0,
+        )
+    }
+
+    /// Where a voice note's "Transcribe" is: under its line, in the middle
+    /// — counted from the note's TOP, so it (and the speed beside it) stays
+    /// where it is when what is said comes out under it (Max, 2026-10-11:
+    /// *"it should stay there when transcribed, don't go down"*).
+    pub(super) fn voice_more(&self) -> Rect {
+        Rect::new(
+            self.rect.x + self.rect.w / 2.0 - 45.0,
+            self.rect.y + VOICE_FOOT,
+            90.0,
             NOTE_LINE + 6.0,
         )
     }
@@ -480,7 +497,7 @@ pub(crate) fn tile_height(kind: Kind, lines: usize, zoom: f32) -> f32 {
             Kind::Voice => {
                 VOICE_HEAD
                     + if lines > 0 {
-                        4.0 + lines as f32 * text_line
+                        VOICE_SAID + lines as f32 * text_line
                     } else {
                         0.0
                     }
@@ -491,6 +508,11 @@ pub(crate) fn tile_height(kind: Kind, lines: usize, zoom: f32) -> f32 {
 /// A voice note's own rows: the title beside the play button, and the line
 /// with its two times ("00:00 ——|—— 01:13").
 const VOICE_HEAD: f32 = 35.0;
+/// How far under a voice note's top its row of "Transcribe" and speed is
+/// (where the foot of one with nothing written out is), and how far under
+/// its head what is said in it begins (under that row).
+const VOICE_FOOT: f32 = 2.0 * TILE_PAD_Y - 3.0 + VOICE_HEAD - 8.0;
+const VOICE_SAID: f32 = 4.0 + NOTE_LINE + 6.0;
 /// What a voice note with no title of its own is called (its body starts
 /// so: "Voice note · 0:07").
 pub(crate) const VOICE_NAME: &str = "Voice note";
@@ -1669,7 +1691,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 .foot
                 .as_ref()
                 .is_some_and(|f| f.wide.contains(&item.id));
-            let more = tile.more();
+            let more = tile.voice_more();
             let hot = view.hover == Some(Hover::More(item.id));
             let busy = item.said.as_deref() == Some(WRITING_OUT);
             put(
@@ -1690,7 +1712,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 },
             );
             // (What is said in it comes under these rows, as lines.)
-            line_y = t.y + TILE_PAD_Y + VOICE_HEAD + 4.0;
+            line_y = t.y + TILE_PAD_Y + VOICE_HEAD + VOICE_SAID;
         }
         if item.kind == Kind::Image {
             let frame = Rect::new(x, line_y, text_w, pic_h);

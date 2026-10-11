@@ -1145,18 +1145,19 @@ impl Card {
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
         {
             Hover::Speed(tile.id)
-        } else if tile.more().contains(pos)
-            && self.item(tile.id).is_some_and(|it| {
-                // (A voice note's "Transcribe"; a long text's "Show all".)
-                it.kind == Kind::Voice
-                    || it.kind == Kind::Text
-                        && it.parts.is_empty()
-                        && has_more(
-                            self.lines.get(&it.id).map_or(&[][..], Vec::as_slice),
-                            self.wide.contains(&it.id),
-                        )
-            })
-        {
+        } else if self.item(tile.id).is_some_and(|it| {
+            // (A voice note's "Transcribe"; a long text's "Show all".)
+            if it.kind == Kind::Voice {
+                return tile.voice_more().contains(pos);
+            }
+            tile.more().contains(pos)
+                && it.kind == Kind::Text
+                && it.parts.is_empty()
+                && has_more(
+                    self.lines.get(&it.id).map_or(&[][..], Vec::as_slice),
+                    self.wide.contains(&it.id),
+                )
+        }) {
             Hover::More(tile.id)
         } else if tile.play().contains(pos)
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
