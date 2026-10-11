@@ -2581,6 +2581,12 @@ impl App {
     }
 
     /// Let the volume at `path` go.
+    /// A Configure box is up ON THE DESKTOP (one shown in the bar's phone
+    /// pill is that pill's).
+    pub(crate) fn desktop_config_up(&self) -> bool {
+        self.desktop.config.as_ref().is_some_and(|c| !c.hosted)
+    }
+
     pub(crate) fn desktop_eject(&mut self, path: &str) {
         if let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == path && !v.closed) {
             info!("desktop: eject {}", v.name);
@@ -3513,7 +3519,7 @@ impl App {
     pub(crate) fn desktop_shortcut(&mut self, keysym: Keysym) {
         let at = self.desktop.ptr.unwrap_or((self.desktop.grid.x0, MARGIN));
         // A menu or a box up: Escape puts it away; nothing else is for it.
-        if self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop.config.is_some() {
+        if self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() {
             if keysym == Keysym::Escape {
                 self.desktop.menu = None;
                 self.desktop.props = None;
@@ -3854,7 +3860,7 @@ impl App {
             self.desktop_end_rename(true);
         }
         // A phone's Configure box is up: the pointer is its.
-        if self.desktop.config.is_some() {
+        if self.desktop_config_up() {
             self.desktop_config_pointer(&event);
             return;
         }

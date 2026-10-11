@@ -82,27 +82,18 @@ pub(crate) struct Config {
     /// Its entrance, 0..1.
     pub t: f32,
     pub hover: Option<Hit>,
+    /// It is shown in the box of the bar's phone pill, not on the desktop's
+    /// menus' surface: that box draws it (`built`) and gives it its
+    /// pointer; the desktop does not count it as a box of its own.
+    pub hosted: bool,
 }
 
 impl Config {
-    /// A phone's settings as they are to be applied, with no box up (the
-    /// bar's phone pill sets them on a page of its own and applies them the
-    /// one way there is).
-    pub(crate) fn of(path: String, serial: String, model: String, phone: Phone) -> Self {
-        Config {
-            path,
-            serial,
-            model,
-            sub: String::new(),
-            phone,
-            sizes: HashMap::new(),
-            editing: false,
-            all: false,
-            confirm: false,
-            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
-            t: 1.0,
-            hover: None,
-        }
+    /// Everything the box is made of, placed at its `rect` — for whoever
+    /// draws it elsewhere than on the desktop (the bar's phone pill).
+    pub(crate) fn built(&self, ink: [f32; 4], wash: [f32; 4]) -> (Vec<RectInst>, Vec<Label>, f32) {
+        let b = self.build(ink, wash);
+        (b.rects, b.labels, b.height)
     }
 }
 
@@ -148,6 +139,7 @@ impl Config {
             rect: Rect::new(0.0, 0.0, WIDTH, 0.0),
             t: 0.0,
             hover: None,
+            hosted: false,
         };
         let height = config.build([1.0; 4], [0.0; 4]).height;
         let x = if at.0 + 8.0 + WIDTH <= w { at.0 + 8.0 } else { (at.0 - 8.0 - WIDTH).max(0.0) };
@@ -655,7 +647,7 @@ impl App {
     }
 
     /// A click on a part of the box.
-    fn desktop_config_act(&mut self, hit: Hit) {
+    pub(crate) fn desktop_config_act(&mut self, hit: Hit) {
         let h = self.desktop_size.1 as f32;
         let Some(config) = self.desktop.config.as_mut() else {
             return;
@@ -718,6 +710,21 @@ impl App {
         config.all = on;
         if !on {
             config.phone.name = crate::phones::folder_name(&config.phone.name);
+        }
+        // In the bar's phone pill: the bar's surface takes the keyboard for
+        // as long as the name is typed, as it does for its other boxes.
+        if config.hosted {
+            if on {
+                self.cancel_keyboard_handback(crate::KbSurface::Options);
+            } else {
+                self.begin_keyboard_handback(crate::KbSurface::Options, None);
+            }
+            if let Some(layer) = self.options_layer.as_ref() {
+                crate::surface::set_interactive(layer, on);
+                let _ = self.conn.flush();
+            }
+            self.draw_options();
+            return;
         }
         if let Some(layer) = self.desktop_layer.as_ref() {
             if on {

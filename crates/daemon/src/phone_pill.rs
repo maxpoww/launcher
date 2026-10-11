@@ -46,11 +46,21 @@ const CHIP_PAD: f32 = 24.0;
 const CHIP_AIR: f32 = 10.0;
 
 /// The air over a group of the box's rows (where the menu has a line).
-const GROUP_AIR: f32 = 6.0;
+/// (6, with rows as low as the pill, until Max, 2026-10-11: "the pill box
+/// is too small, everything is too close".)
+const GROUP_AIR: f32 = 12.0;
+/// A row of the box, in pill-heights.
+const ROW_H: f32 = 1.35;
+/// The air between the long pill and its box's first row.
+const BOX_HEAD: f32 = 8.0;
+/// The box at its narrowest.
+const BOX_MIN_W: f32 = 340.0;
+/// How far the box's words stand in from its edge.
+const BOX_PAD: f32 = 18.0;
 /// The air over a step of a way to do something.
-const STEP_AIR: f32 = 10.0;
+const STEP_AIR: f32 = 14.0;
 /// The air under the box's last row.
-const BOX_FOOT: f32 = 6.0;
+const BOX_FOOT: f32 = 12.0;
 
 /// Between the battery and its number.
 const BATTERY_GAP: f32 = 5.0;
@@ -81,8 +91,10 @@ enum Page {
     Menu,
     /// The camera in use: its flash, its lens, its picture.
     Camera,
-    /// What this computer does with the phone (`phones.json`), on a copy
-    /// until Apply.
+    /// The phone's Configure box itself — the one its menu opens
+    /// (`desktop_config.rs`) — shown here in place of the lines (Max,
+    /// 2026-10-11: "the configure box has to be the same one as the one on
+    /// the menu").
     Configure,
     /// What the phone says of itself.
     Properties,
@@ -103,14 +115,6 @@ enum Act {
     Flash,
     Lens(usize),
     Picture(crate::desktop::Picture),
-    Sync,
-    Kind(usize),
-    Every,
-    Charging,
-    After,
-    Apply,
-    /// The whole Configure box (the name, Clean).
-    Whole,
     Nothing,
 }
 
@@ -238,20 +242,7 @@ fn fake_lines(page: Page) -> Vec<Line> {
             ("720p · 60", "", false),
             ("720p · 30", "", false),
         ],
-        Page::Configure => &[
-            ("Sync over Wi-Fi", "On", true),
-            ("Photos and videos", "✓", true),
-            ("Music", "✓", false),
-            ("Downloads", "✓", false),
-            ("Documents", "✓", false),
-            ("Recordings", "", false),
-            ("WhatsApp media", "✓", false),
-            ("How often", "Hourly", true),
-            ("Only while charging", "Yes", false),
-            ("Take off the phone once synced", "No", false),
-            ("Name and clean-up…", "", true),
-            ("Apply", "", false),
-        ],
+        Page::Configure => &[("(The phone's Configure box, with a phone plugged in)", "", true)],
         Page::Debugging => return debugging_lines(false),
         Page::Files => return files_lines(),
         Page::Properties => &[
@@ -350,9 +341,9 @@ pub(crate) struct PhonePill {
     /// What the box shows, and its height easing after its page's.
     page: Page,
     box_h: f32,
-    /// The Configure page's copy of the phone's settings (its own until
-    /// Apply).
-    config: Option<crate::phones::Phone>,
+    /// How far its page is scrolled (a page taller than the bar's boxes
+    /// may be — the Configure box is).
+    scroll: f32,
     /// What the phone said of itself, for the Properties page (`None`: it
     /// is being asked).
     facts: Option<Vec<(&'static str, String)>>,
@@ -536,10 +527,12 @@ impl App {
         // (Folded: the next opening starts at the menu.)
         if box_e <= 0.01 && !self.phone_pill.box_open {
             self.phone_pill.page = Page::Menu;
-            self.phone_pill.config = None;
+            self.phone_pill.scroll = 0.0;
+            self.phone_config_drop();
         }
         self.phone_box_measure();
-        let want_h = self.phone_box_page_h();
+        self.phone_config_place();
+        let want_h = self.phone_box_page_h().min(self.phone_box_max_h());
         let (box_h, c2) = if self.phone_pill.box_h <= 0.0 {
             (want_h, false)
         } else {
@@ -583,7 +576,12 @@ impl App {
                 indent + w(&l.label) + if l.value.is_empty() { 0.0 } else { w(&l.value) + 2.0 * PILL_PAD_X }
             })
             .fold(0.0, f32::max);
-        lerp(band, band.max(widest + 2.0 * PILL_PAD_X), self.phone_pill.box_e)
+        let wanted = if self.phone_pill.page == Page::Configure && self.phone_config().is_some() {
+            crate::desktop_config::WIDTH
+        } else {
+            (widest + 2.0 * BOX_PAD).max(BOX_MIN_W)
+        };
+        lerp(band, band.max(wanted), self.phone_pill.box_e)
     }
 
     /// The button in the long pill's air (Max, 2026-10-11: "a sync button
@@ -763,28 +761,8 @@ impl App {
                 }
                 lines
             }
-            Page::Configure => {
-                let mut lines = vec![back];
-                let Some(phone) = self.phone_pill.config.as_ref() else {
-                    return lines;
-                };
-                lines.push(group(line("Sync over Wi-Fi", if phone.sync { "On" } else { "Off" }, Act::Sync)));
-                for (i, kind) in crate::phones::KINDS.iter().enumerate() {
-                    let l = line(kind.label, yes(phone.kinds.iter().any(|k| k == kind.key)), Act::Kind(i));
-                    lines.push(if i == 0 { group(l) } else { l });
-                }
-                let every = match phone.every {
-                    crate::phones::Every::Hour => "Hourly",
-                    crate::phones::Every::Quarter => "Every 15 min",
-                    crate::phones::Every::Day => "Daily",
-                };
-                lines.push(group(line("How often", every, Act::Every)));
-                lines.push(line("Only while charging", if phone.charging_only { "Yes" } else { "No" }, Act::Charging));
-                lines.push(line("Take off the phone once synced", if phone.remove_after_sync { "Yes" } else { "No" }, Act::After));
-                lines.push(group(line("Name and clean-up…", "", Act::Whole)));
-                lines.push(line("Apply", "", Act::Apply));
-                lines
-            }
+            // (The Configure box draws itself: no lines of this box's.)
+            Page::Configure => Vec::new(),
             Page::Properties => {
                 let mut lines = vec![back];
                 match &self.phone_pill.facts {
@@ -833,15 +811,19 @@ impl App {
     /// the long pill and its box, whole).
     fn phone_box_placed(&self, long: Rect) -> Vec<(Rect, Line)> {
         let ph = self.options_pill_h();
-        let mut y = long.y + ph;
+        let mut y = long.y + ph + BOX_HEAD - self.phone_pill.scroll;
+        let mut first = true;
         self.phone_box_lines()
             .into_iter()
             .map(|l| {
-                if l.air {
+                if l.air && !first {
                     y += if l.step > 0 { STEP_AIR } else { GROUP_AIR };
                 }
-                let rect = Rect::new(long.x, y, long.w, ph);
-                y += ph;
+                first = false;
+                // (What is said under a step keeps close to it.)
+                let h = if l.sub || l.dim { ph } else { ph * ROW_H };
+                let rect = Rect::new(long.x, y, long.w, h);
+                y += h;
                 (rect, l)
             })
             .collect()
@@ -849,16 +831,22 @@ impl App {
 
     /// The height of the box's page, fully open.
     fn phone_box_page_h(&self) -> f32 {
-        let ph = self.options_pill_h();
-        let lines = self.phone_box_lines();
-        if lines.is_empty() {
-            return 0.0;
+        if let Some(config) = self.phone_config() {
+            return config.built([1.0; 4], [0.0; 4]).2;
         }
-        lines
-            .iter()
-            .map(|l| ph + if !l.air { 0.0 } else if l.step > 0 { STEP_AIR } else { GROUP_AIR })
-            .sum::<f32>()
-            + BOX_FOOT
+        // (Laid out from nowhere in particular: only how far down the last
+        // line ends is wanted — and where the pill is depends on this.)
+        let ph = self.options_pill_h();
+        match self.phone_box_placed(Rect::new(0.0, 0.0, 1.0, ph)).last() {
+            Some((last, _)) => last.y + last.h - ph + BOX_FOOT + self.phone_pill.scroll,
+            None => 0.0,
+        }
+    }
+
+    /// The tallest the box may be: what the bar's boxes are, under the
+    /// pill.
+    fn phone_box_max_h(&self) -> f32 {
+        crate::options::BOX_DRAWER_H * self.options_scale() - self.options_pill_h()
     }
 
     /// The box's height now (it eases from one page's to the next's).
@@ -866,18 +854,57 @@ impl App {
         if self.phone_pill.box_h > 0.0 {
             self.phone_pill.box_h
         } else {
-            self.phone_box_page_h()
+            self.phone_box_page_h().min(self.phone_box_max_h())
+        }
+    }
+
+    /// The Configure box shown in this box, if it is.
+    fn phone_config(&self) -> Option<&crate::desktop_config::Config> {
+        self.desktop.config.as_ref().filter(|c| c.hosted && self.phone_pill.page == Page::Configure)
+    }
+
+    /// Put the Configure box shown here away (nothing of it is kept: it
+    /// applies only by its own Apply).
+    fn phone_config_drop(&mut self) {
+        if self.desktop.config.as_ref().is_some_and(|c| c.hosted) {
+            self.desktop_config_edit(false);
+            self.desktop.config = None;
+        }
+    }
+
+    /// Place the Configure box shown here under the long pill (called each
+    /// frame of the pill's motion, and before it is pointed at).
+    fn phone_config_place(&mut self) {
+        if self.phone_pill.page != Page::Configure {
+            return;
+        }
+        let Some(rect) = self.phone_pill_on_bar() else {
+            return;
+        };
+        let long = self.phone_pill_long(rect);
+        let ph = self.options_pill_h();
+        if let Some(config) = self.desktop.config.as_mut().filter(|c| c.hosted) {
+            let h = config.built([1.0; 4], [0.0; 4]).2;
+            config.rect = Rect::new(long.x, long.y + ph - self.phone_pill.scroll, long.w, h);
         }
     }
 
     /// Turn the box's page; what the page needs is fetched.
     fn phone_box_turn(&mut self, page: Page) {
+        if page != Page::Configure {
+            self.phone_config_drop();
+        }
         self.phone_pill.page = page;
+        self.phone_pill.scroll = 0.0;
         match page {
             Page::Configure => {
-                if let Some((v, serial, _)) = self.phone_pill_volume() {
-                    let phone = crate::phones::Phones::load().of(serial.as_deref().unwrap_or_default(), &v.name);
-                    self.phone_pill.config = Some(phone);
+                if let Some(item) = self.phone_pill_volume().and_then(|(_, _, item)| item) {
+                    self.desktop_open_config(item, (0.0, 0.0));
+                    if let Some(config) = self.desktop.config.as_mut() {
+                        config.hosted = true;
+                        config.t = 1.0;
+                    }
+                    self.request_desktop_draw();
                 }
             }
             Page::Properties => {
@@ -928,48 +955,6 @@ impl App {
             }
             Act::Lens(n) => self.camera_set(Some(n), None, None),
             Act::Picture(picture) => self.camera_set(None, Some(picture), None),
-            Act::Sync | Act::Kind(_) | Act::Every | Act::Charging | Act::After => {
-                if let Some(phone) = self.phone_pill.config.as_mut() {
-                    match act {
-                        Act::Sync => phone.sync = !phone.sync,
-                        Act::Kind(i) => {
-                            if let Some(kind) = crate::phones::KINDS.get(i) {
-                                match phone.kinds.iter().position(|k| k == kind.key) {
-                                    Some(at) => {
-                                        phone.kinds.remove(at);
-                                    }
-                                    None => phone.kinds.push(kind.key.to_owned()),
-                                }
-                            }
-                        }
-                        Act::Every => phone.every = phone.every.next(),
-                        Act::Charging => phone.charging_only = !phone.charging_only,
-                        _ => phone.remove_after_sync = !phone.remove_after_sync,
-                    }
-                }
-            }
-            // Apply: by the Configure box's own way of applying (it allows
-            // the phone over Wi-Fi, saves, and syncs what was just set).
-            Act::Apply => {
-                let (Some(phone), Some((v, serial, _))) = (self.phone_pill.config.take(), self.phone_pill_volume()) else {
-                    return;
-                };
-                let config = crate::desktop_config::Config::of(
-                    v.path.to_string_lossy().into_owned(),
-                    serial.unwrap_or_default(),
-                    v.name.clone(),
-                    phone,
-                );
-                self.desktop.config = Some(config);
-                self.desktop_config_apply();
-                self.phone_box_turn(Page::Menu);
-            }
-            Act::Whole => {
-                fold(self);
-                if let Some(i) = item {
-                    self.desktop_open_config(i, at);
-                }
-            }
         }
         self.phone_pill_sync();
     }
@@ -980,7 +965,22 @@ impl App {
         if value.abs() < crate::options::SCROLL_DEADZONE {
             return;
         }
-        let open = value < 0.0 && !self.phone_box_lines().is_empty();
+        // Open, on a page taller than the box: the wheel moves the page;
+        // only at its top does a scroll up fold the box.
+        if self.phone_pill.box_open {
+            let over = (self.phone_box_page_h() - self.phone_box_max_h()).max(0.0);
+            let to = (self.phone_pill.scroll - value * 1.6).clamp(0.0, over);
+            if to != self.phone_pill.scroll {
+                self.phone_pill.scroll = to;
+                self.phone_config_place();
+                self.draw_options();
+                return;
+            }
+            if value < 0.0 {
+                return;
+            }
+        }
+        let open = value < 0.0 && self.phone_pill.shown.is_some();
         if open != self.phone_pill.box_open {
             self.phone_pill.box_open = open;
             self.schedule_phone_pill_frame();
@@ -1014,6 +1014,18 @@ impl App {
             }
             self.schedule_phone_pill_frame();
         }
+        // The Configure box shown here: what of it is under the pointer.
+        if self.phone_pill.page == Page::Configure {
+            self.phone_config_place();
+            let ptr = self.options_ptr.filter(|_| on);
+            if let Some(config) = self.desktop.config.as_mut().filter(|c| c.hosted) {
+                let hover = ptr.and_then(|p| config.hit(p));
+                if hover != config.hover {
+                    config.hover = hover;
+                    self.draw_options();
+                }
+            }
+        }
         on
     }
 
@@ -1024,6 +1036,11 @@ impl App {
 
     /// The pointer left the bar: the long pill goes back in.
     pub(crate) fn phone_pill_close(&mut self) {
+        // (Its name is being typed: the visit is not over because the hand
+        // went to the keyboard.)
+        if self.desktop.config.as_ref().is_some_and(|c| c.hosted && c.editing) {
+            return;
+        }
         if self.phone_pill.box_open {
             self.phone_pill.box_open = false;
             self.schedule_phone_pill_frame();
@@ -1050,6 +1067,24 @@ impl App {
         // box folds (a box it opens — Configure, Properties — stands under
         // the pill).
         if ptr.1 > round.y + round.h {
+            // The Configure box shown here: the click is its (as on the
+            // desktop: a press anywhere but the name settles the name).
+            // Applied or cancelled, it is gone and the menu is back.
+            if self.phone_pill.page == Page::Configure {
+                self.phone_config_place();
+                let hit = self.phone_config().and_then(|c| c.hit(ptr));
+                if hit != Some(crate::desktop_config::Hit::Name) {
+                    self.desktop_config_edit(false);
+                }
+                if let Some(hit) = hit {
+                    self.desktop_config_act(hit);
+                }
+                if self.desktop.config.is_none() {
+                    self.phone_box_turn(Page::Menu);
+                }
+                self.phone_pill_sync();
+                return;
+            }
             let long = self.phone_pill_long(rect);
             let hit = self.phone_box_placed(long).into_iter().find(|(r, _)| r.contains(ptr));
             if let Some((_, l)) = hit {
@@ -1143,6 +1178,11 @@ impl App {
             "configure" => self.phone_box_turn(Page::Configure),
             "properties" => self.phone_box_turn(Page::Properties),
             "debugging" => self.phone_box_turn(Page::Debugging),
+            // The wheel over the open box: `scroll <px>` down, negative up.
+            "scroll" => {
+                let by: f32 = rest.trim().parse().unwrap_or(0.0);
+                self.phone_pill_axis(-by / 1.6);
+            }
             // What the box's page lists.
             "lines" => {
                 let lines: Vec<String> = self
@@ -1223,12 +1263,17 @@ impl App {
             if e > 0.01 {
                 let hover = self.options_hover_wash();
                 for (row, l) in self.phone_box_placed(long) {
+                    // (Scrolled up past the pill, or not yet in the opening
+                    // box: not drawn.)
+                    if row.y < long.y + ph - 0.5 {
+                        continue;
+                    }
                     if row.y + row.h > long.y + long.h + 0.5 {
                         break;
                     }
                     if l.act != Act::Nothing && ptr.is_some_and(|p| row.contains(p)) {
                         scene.rects.push(RectInst {
-                            rect: Rect::new(row.x + 3.0, row.y, row.w - 6.0, row.h),
+                            rect: Rect::new(row.x + 6.0, row.y, row.w - 12.0, row.h),
                             radius: row.h / 2.0,
                             color: [hover[0], hover[1], hover[2], hover[3] * solid * out],
                             glass: 0.0,
@@ -1242,7 +1287,7 @@ impl App {
                     let indent = if l.step > 0 || l.sub { self.phone_step_indent() } else { 0.0 };
                     if l.step > 0 {
                         let d = LINE_PX * s;
-                        let chip = Rect::new(row.x + PILL_PAD_X, row.y + (row.h - d) / 2.0, d, d);
+                        let chip = Rect::new(row.x + BOX_PAD, row.y + (row.h - d) / 2.0, d, d);
                         let amber = crate::notif::AMBER;
                         scene.rects.push(RectInst {
                             rect: chip,
@@ -1280,13 +1325,42 @@ impl App {
                             clip: Some(row),
                         });
                     };
-                    word(l.label, row.x + PILL_PAD_X + indent, if l.sub || l.dim { 0.6 } else { 1.0 });
+                    word(l.label, row.x + BOX_PAD + indent, if l.sub || l.dim { 0.6 } else { 1.0 });
                     if !l.value.is_empty() {
                         // (Set from the right, by its measured width.)
                         let w = p.value_w.get(&l.value).copied().unwrap_or(l.value.chars().count() as f32 * FONT_PX * s * 0.56);
-                        word(l.value, row.x + row.w - PILL_PAD_X - w, 0.7);
+                        word(l.value, row.x + row.w - BOX_PAD - w, 0.7);
                     }
                 }
+            }
+            // The Configure box, in place of lines: all it is made of, as it
+            // places it itself — what the opening box has room for.
+            if let Some(config) = self.phone_config() {
+                let alpha = solid * out;
+                let wash = self.options_rest_wash();
+                let (rects, labels, _) = config.built(
+                    [ink[0], ink[1], ink[2], ink[3] * alpha],
+                    [wash[0], wash[1], wash[2], wash[3] * alpha],
+                );
+                // (Cut to the box under the pill, as the bar's other boxes
+                // cut their lists: a part half scrolled away is half drawn,
+                // not a knob left standing without its switch.)
+                let clip = Rect::new(long.x, long.y + ph, long.w, (long.h - ph).max(0.0));
+                // (Each word keeps to its own clip AND the box's.)
+                let within = |r: Rect| {
+                    let (x0, y0) = (r.x.max(clip.x), r.y.max(clip.y));
+                    let (x1, y1) = ((r.x + r.w).min(clip.x + clip.w), (r.y + r.h).min(clip.y + clip.h));
+                    (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
+                };
+                let labels: Vec<Label> = labels
+                    .into_iter()
+                    .filter_map(|mut l| {
+                        let own = l.clip.unwrap_or(Rect::new(l.pos.0, l.pos.1, l.max_w, l.line_px));
+                        l.clip = Some(within(own)?);
+                        Some(l)
+                    })
+                    .collect();
+                scene.grids.push(crate::content::GridContent { clip, rects, labels, ..Default::default() });
             }
             // (From here on, the band: the long pill itself.)
             let long = Rect::new(long.x, long.y, long.w, ph);
