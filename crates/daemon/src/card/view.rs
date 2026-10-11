@@ -479,6 +479,51 @@ impl Tile {
     }
 }
 
+/// Every label is drawn in one late pass, over every box: words that
+/// pass under something drawn over them (a session's title, an item's
+/// buttons) are CUT round it — each label that reaches into `m` is drawn in
+/// the up to four parts of its clip (`within`, when it has none of its
+/// own) that are clear of it.
+fn cut_labels(labels: &mut Vec<Label>, within: Rect, m: Rect) {
+    let mut cut = Vec::with_capacity(labels.len());
+    for l in labels.drain(..) {
+        let c = l.clip.unwrap_or(within);
+        let (x0, x1) = if l.centered {
+            (l.pos.0 - l.max_w / 2.0, l.pos.0 + l.max_w / 2.0)
+        } else {
+            (l.pos.0, l.pos.0 + l.max_w)
+        };
+        let clear = l.pos.1 >= m.y + m.h
+            || x1 <= m.x
+            || x0 >= m.x + m.w
+            || c.y >= m.y + m.h
+            || c.y + c.h <= m.y;
+        if clear {
+            cut.push(l);
+            continue;
+        }
+        let (top, bottom) = (c.y.max(m.y), (c.y + c.h).min(m.y + m.h));
+        let parts = [
+            Rect::new(c.x, c.y, c.w, (m.y - c.y).max(0.0)),
+            Rect::new(c.x, m.y + m.h, c.w, (c.y + c.h - m.y - m.h).max(0.0)),
+            Rect::new(c.x, top, (m.x - c.x).max(0.0), (bottom - top).max(0.0)),
+            Rect::new(
+                m.x + m.w,
+                top,
+                (c.x + c.w - m.x - m.w).max(0.0),
+                (bottom - top).max(0.0),
+            ),
+        ];
+        for part in parts.into_iter().filter(|p| p.w > 0.0 && p.h > 0.0) {
+            cut.push(Label {
+                clip: Some(part),
+                ..l.clone()
+            });
+        }
+    }
+    *labels = cut;
+}
+
 /// How tall an item with `lines` lines of text is.
 pub(crate) fn tile_height(kind: Kind, lines: usize, zoom: f32) -> f32 {
     // The items' own sizes, at the card's zoom.
@@ -1826,6 +1871,26 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         // The × shows on the item under the pointer only; the pin beside
         // it too, and on a pinned item all the time (lit).
         let over = view.hover.filter(|h| h.item() == Some(item.id));
+        // (Its buttons stand over its first line: the words there are cut
+        // round them, not seen through them — Max, 2026-10-11. The item's
+        // own colour is what is left under them.)
+        if over.is_some() {
+            let pencil = matches!(
+                page,
+                Page::Session | Page::Pinned | Page::Dictionary | Page::Translate
+            );
+            let (first, last) = (
+                if pencil { tile.edit(true) } else { tile.pin() },
+                tile.close(),
+            );
+            let strip = Rect::new(
+                first.x - 6.0,
+                first.y - 2.0,
+                last.x + last.w - first.x + 8.0,
+                first.h + 4.0,
+            );
+            cut_labels(&mut list.labels, clip, strip);
+        }
         let mut button = |rect: Rect,
                           glyph: &str,
                           family: Option<&'static str>,
@@ -2218,44 +2283,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 grids[1] = Some(std::mem::take(&mut well));
             }
             for grid in grids.iter_mut().flatten() {
-                let within = grid.clip;
-                let mut cut = Vec::with_capacity(grid.labels.len());
-                for l in grid.labels.drain(..) {
-                    let c = l.clip.unwrap_or(within);
-                    let (x0, x1) = if l.centered {
-                        (l.pos.0 - l.max_w / 2.0, l.pos.0 + l.max_w / 2.0)
-                    } else {
-                        (l.pos.0, l.pos.0 + l.max_w)
-                    };
-                    let clear = l.pos.1 >= m.y + m.h
-                        || x1 <= m.x
-                        || x0 >= m.x + m.w
-                        || c.y >= m.y + m.h
-                        || c.y + c.h <= m.y;
-                    if clear {
-                        cut.push(l);
-                        continue;
-                    }
-                    let (top, bottom) = (c.y.max(m.y), (c.y + c.h).min(m.y + m.h));
-                    let parts = [
-                        Rect::new(c.x, c.y, c.w, (m.y - c.y).max(0.0)),
-                        Rect::new(c.x, m.y + m.h, c.w, (c.y + c.h - m.y - m.h).max(0.0)),
-                        Rect::new(c.x, top, (m.x - c.x).max(0.0), (bottom - top).max(0.0)),
-                        Rect::new(
-                            m.x + m.w,
-                            top,
-                            (c.x + c.w - m.x - m.w).max(0.0),
-                            (bottom - top).max(0.0),
-                        ),
-                    ];
-                    for part in parts.into_iter().filter(|p| p.w > 0.0 && p.h > 0.0) {
-                        cut.push(Label {
-                            clip: Some(part),
-                            ..l.clone()
-                        });
-                    }
-                }
-                grid.labels = cut;
+                cut_labels(&mut grid.labels, grid.clip, m);
             }
             let mut grids = grids.into_iter();
             if let Some(list) = grids.next().flatten() {
