@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tracing::{info, warn};
 
@@ -42,7 +42,18 @@ impl Rec {
 pub(super) struct Playing {
     pub id: u64,
     child: Child,
-    pub started: Instant,
+    /// When the player began, how far into the note that was, and how
+    /// fast it goes.
+    started: Instant,
+    from: f32,
+    speed: f32,
+}
+
+impl Playing {
+    /// How many seconds INTO THE NOTE it is now.
+    pub(super) fn at(&self) -> f32 {
+        self.from + self.started.elapsed().as_secs_f32() * self.speed
+    }
 }
 
 /// What comes back from the thread that finishes a recording.
@@ -71,10 +82,21 @@ pub(super) fn tool(env: &str, name: &str) -> Option<PathBuf> {
     })
 }
 
-/// A copy of the recording at `wav` that begins `from` seconds in: its
-/// head as it is, its sound from there on (a plain PCM recording — what
-/// `pw-record` writes). `None`: it is not one, or cannot be written.
-fn tail_wav(wav: &str, from: f32) -> Option<PathBuf> {
+/// How fast a voice note plays: the speeds its "x1" goes round (Max,
+/// 2026-10-11: *"x1 | x1.5 | x0.75"*).
+pub(super) const SPEEDS: [f32; 3] = [1.0, 1.5, 0.75];
+
+/// What a speed is called on the note.
+pub(super) fn speed_name(speed: usize) -> &'static str {
+    ["x1", "x1.5", "x0.75"][speed % SPEEDS.len()]
+}
+
+/// A copy of the recording at `wav` that begins `from` seconds in and
+/// plays `speed` times as fast: its head as it is, its sound from there on
+/// (a plain PCM recording — what `pw-record` writes), made shorter or
+/// longer WITHOUT its pitch changing (`stretch`). `None`: it is not one, or
+/// cannot be written.
+fn tail_wav(wav: &str, from: f32, speed: f32) -> Option<PathBuf> {
     let all = std::fs::read(wav).ok()?;
     if all.len() < 44 || &all[0..4] != b"RIFF" || &all[8..12] != b"WAVE" {
         return None;
@@ -82,13 +104,21 @@ fn tail_wav(wav: &str, from: f32) -> Option<PathBuf> {
     let u32_at = |at: usize| -> Option<u32> {
         Some(u32::from_le_bytes(all.get(at..at + 4)?.try_into().ok()?))
     };
+    let u16_at = |at: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(all.get(at..at + 2)?.try_into().ok()?))
+    };
     // Its chunks: the format (how many bytes a second), then the sound.
     let (mut at, mut rate, mut align) = (12usize, 0u32, 1u32);
+    let (mut kind, mut channels, mut hz, mut bits) = (0u16, 1u16, 0u32, 0u16);
     let data = loop {
         let (name, size) = (all.get(at..at + 4)?, u32_at(at + 4)? as usize);
         if name == b"fmt " {
+            kind = u16_at(at + 8)?;
+            channels = u16_at(at + 10)?;
+            hz = u32_at(at + 12)?;
             rate = u32_at(at + 16)?;
-            align = u16::from_le_bytes(all.get(at + 20..at + 22)?.try_into().ok()?) as u32;
+            align = u16_at(at + 20)? as u32;
+            bits = u16_at(at + 22)?;
         }
         if name == b"data" {
             break at + 8;
@@ -100,8 +130,29 @@ fn tail_wav(wav: &str, from: f32) -> Option<PathBuf> {
     }
     let skip = ((from * rate as f32) as usize / align as usize) * align as usize;
     let start = (data + skip).min(all.len());
-    let sound = &all[start..];
     let mut out = all[..data].to_vec();
+    let stretched;
+    let sound: &[u8] = if (speed - 1.0).abs() < 0.01 {
+        &all[start..]
+    } else if kind == 1 && bits == 16 && channels > 0 && hz > 0 {
+        let samples: Vec<i16> = all[start..]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        stretched = stretch(&samples, channels as usize, hz, speed)
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<u8>>();
+        &stretched
+    } else {
+        // (Not sound this can stretch: it is played at another rate — its
+        // pitch goes with it.)
+        let fmt = at_fmt(&all)?;
+        let faster = |v: u32| ((v as f32 * speed) as u32).to_le_bytes();
+        out[fmt + 12..fmt + 16].copy_from_slice(&faster(hz));
+        out[fmt + 16..fmt + 20].copy_from_slice(&faster(rate));
+        &all[start..]
+    };
     // (The two sizes in its head, for what is left.)
     out[4..8].copy_from_slice(&((data - 8 + sound.len()) as u32).to_le_bytes());
     let size_at = data - 4;
@@ -111,6 +162,92 @@ fn tail_wav(wav: &str, from: f32) -> Option<PathBuf> {
         std::env::temp_dir().join(format!("waverunner-card-from-{}.wav", std::process::id()));
     std::fs::write(&path, out).ok()?;
     Some(path)
+}
+
+/// Where a recording's `fmt ` chunk begins.
+fn at_fmt(all: &[u8]) -> Option<usize> {
+    let mut at = 12usize;
+    loop {
+        let name = all.get(at..at + 4)?;
+        let size = u32::from_le_bytes(all.get(at + 4..at + 8)?.try_into().ok()?) as usize;
+        if name == b"fmt " {
+            return Some(at);
+        }
+        at += 8 + size + (size & 1);
+    }
+}
+
+/// `samples` (16-bit, `channels` of them side by side, `hz` a second)
+/// `speed` times as fast, AT THE SAME PITCH: short windows of the sound
+/// are laid down again closer together or further apart, each taken from
+/// the spot near where it should come from that carries on best from the
+/// one before (WSOLA) — a voice stays a voice, not a chipmunk.
+fn stretch(samples: &[i16], channels: usize, hz: u32, speed: f32) -> Vec<i16> {
+    let frames = samples.len() / channels;
+    // (A window of 30 ms, laid every 15; the spot looked for within 8 ms.)
+    let win = ((hz as usize * 30 / 1000) & !1).max(2);
+    let hop = win / 2;
+    let reach = (hz as usize * 8 / 1000).max(1);
+    if frames < 2 * win {
+        return samples.to_vec();
+    }
+    // One channel of it, thinned, to compare spots by.
+    let thin = (hz as usize / 6000).max(1);
+    let mono: Vec<f32> = (0..frames / thin)
+        .map(|i| {
+            let f = i * thin * channels;
+            samples[f..f + channels]
+                .iter()
+                .map(|s| *s as f32)
+                .sum::<f32>()
+                / channels as f32
+        })
+        .collect();
+    let like = |a: usize, b: usize| -> f32 {
+        let (a, b, n) = (a / thin, b / thin, hop / thin);
+        if a + n > mono.len() || b + n > mono.len() {
+            return f32::MIN;
+        }
+        let (mut dot, mut power) = (0.0f32, 1.0f32);
+        for i in 0..n {
+            dot += mono[a + i] * mono[b + i];
+            power += mono[b + i] * mono[b + i];
+        }
+        dot / power.sqrt()
+    };
+    let shape: Vec<f32> = (0..win)
+        .map(|n| 0.5 - 0.5 * (std::f32::consts::TAU * n as f32 / win as f32).cos())
+        .collect();
+    let count = ((frames - win) as f32 / (hop as f32 * speed)) as usize + 1;
+    let mut out = vec![0.0f32; (count * hop + win) * channels];
+    let mut last = 0usize;
+    for k in 0..count {
+        let ideal = (k as f32 * hop as f32 * speed) as usize;
+        let from = if k == 0 {
+            0
+        } else {
+            // (What would have come next, had nothing been moved.)
+            let next = last + hop;
+            let (lo, hi) = (
+                ideal.saturating_sub(reach),
+                (ideal + reach).min(frames - win),
+            );
+            (lo..=hi.max(lo))
+                .step_by(thin)
+                .max_by(|a, b| like(next, *a).total_cmp(&like(next, *b)))
+                .unwrap_or(ideal)
+                .min(frames - win)
+        };
+        last = from;
+        for (n, w) in shape.iter().enumerate() {
+            for c in 0..channels {
+                out[(k * hop + n) * channels + c] += samples[(from + n) * channels + c] as f32 * w;
+            }
+        }
+    }
+    out.into_iter()
+        .map(|v| v.clamp(i16::MIN as f32, i16::MAX as f32) as i16)
+        .collect()
 }
 
 /// The speech engine and its model, when both are there:
@@ -405,6 +542,23 @@ impl App {
         self.request_card_draw();
     }
 
+    /// A voice note's "x1": the next speed (they go round — `SPEEDS`), for
+    /// every note. One that is playing goes on from where it is, that fast.
+    pub(super) fn card_speed(&mut self) {
+        self.card.voice_speed = (self.card.voice_speed + 1) % SPEEDS.len();
+        if let Some(mut p) = self.card.playing.take() {
+            let (id, at) = (p.id, p.at());
+            let _ = p.child.kill();
+            let _ = p.child.wait();
+            self.card.paused = Some((id, at));
+            self.card_play_at(id, at);
+            if self.card.playing.is_some() {
+                self.card.paused = None;
+            }
+        }
+        self.request_card_draw();
+    }
+
     /// A voice note's button: it plays; playing, it PAUSES (Max,
     /// 2026-10-11: play/pause, not play/stop) and the next click goes on
     /// from there. (The player cannot be held: it is let go, and started
@@ -413,7 +567,7 @@ impl App {
         let was = self.card.playing.take().map(|mut p| {
             let _ = p.child.kill();
             let _ = p.child.wait();
-            (p.id, p.started.elapsed().as_secs_f32())
+            (p.id, p.at())
         });
         let paused = self.card.paused.take();
         // (Drawn only once it is known what it is now: drawn in between —
@@ -445,9 +599,11 @@ impl App {
             self.card.say = Some("No player found (pw-play)");
             return;
         };
-        let (path, from) = match (from > 0.05).then(|| tail_wav(&path, from)).flatten() {
-            Some(tail) => (tail.to_string_lossy().into_owned(), from),
-            None => (path, 0.0),
+        let speed = SPEEDS[self.card.voice_speed % SPEEDS.len()];
+        let whole = from <= 0.05 && (speed - 1.0).abs() < 0.01;
+        let (path, from, speed) = match (!whole).then(|| tail_wav(&path, from, speed)).flatten() {
+            Some(tail) => (tail.to_string_lossy().into_owned(), from, speed),
+            None => (path, 0.0, 1.0),
         };
         match Command::new(player)
             .arg(&path)
@@ -460,9 +616,9 @@ impl App {
                 self.card.playing = Some(Playing {
                     id,
                     child,
-                    // (As if it had begun that long ago: its line and its
-                    // clock go on from there.)
-                    started: Instant::now() - Duration::from_secs_f32(from),
+                    started: Instant::now(),
+                    from,
+                    speed,
                 });
                 self.card_voice_tick();
             }
@@ -509,6 +665,70 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note played faster or slower is that much shorter or longer, and
+    /// its PITCH is what it was (a tone of 200 Hz crosses zero as often a
+    /// second as before).
+    /// The copy the player is given: from a second in, half as fast again
+    /// — a recording as `pw-record` writes one (16 kHz, one channel).
+    #[test]
+    fn the_copy_played_begins_there_and_is_that_fast() {
+        let hz = 16000u32;
+        let sound: Vec<u8> = (0..hz * 4)
+            .map(|n| ((n as f32 * 0.07).sin() * 8000.0) as i16)
+            .flat_map(i16::to_le_bytes)
+            .collect();
+        let mut wav = b"RIFF".to_vec();
+        wav.extend((36 + sound.len() as u32).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(hz.to_le_bytes());
+        wav.extend((hz * 2).to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend((sound.len() as u32).to_le_bytes());
+        wav.extend(&sound);
+        let path = std::env::temp_dir().join(format!("card-speed-test-{}.wav", std::process::id()));
+        std::fs::write(&path, &wav).unwrap();
+        let copy = tail_wav(path.to_str().unwrap(), 1.0, 1.5).unwrap();
+        let out = std::fs::read(&copy).unwrap();
+        let _ = (std::fs::remove_file(&path), std::fs::remove_file(&copy));
+        // (Three seconds are left, played in two.)
+        let secs = (out.len() - 44) as f32 / (hz * 2) as f32;
+        assert!((secs - 2.0).abs() < 0.1, "{secs}");
+        assert_eq!(&out[0..4], b"RIFF");
+        assert_eq!(
+            u32::from_le_bytes(out[40..44].try_into().unwrap()) as usize,
+            out.len() - 44
+        );
+    }
+
+    #[test]
+    fn a_stretched_note_keeps_its_pitch() {
+        let hz = 16000u32;
+        let tone: Vec<i16> = (0..hz * 2)
+            .map(|n| ((n as f32 * 200.0 * std::f32::consts::TAU / hz as f32).sin() * 9000.0) as i16)
+            .collect();
+        let crossings = |s: &[i16]| {
+            s.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count() as f32 / s.len() as f32
+        };
+        for speed in [1.5f32, 0.75] {
+            let out = stretch(&tone, 1, hz, speed);
+            let long = out.len() as f32 / tone.len() as f32;
+            assert!((long - 1.0 / speed).abs() < 0.05, "{speed}: {long}");
+            // (Its middle: the ends fade in and out.)
+            let mid = &out[out.len() / 4..out.len() * 3 / 4];
+            let was = crossings(&tone);
+            assert!(
+                (crossings(mid) - was).abs() / was < 0.04,
+                "{speed}: {}",
+                crossings(mid) / was
+            );
+        }
+    }
 
     #[test]
     fn a_recording_can_be_cut_to_begin_later() {

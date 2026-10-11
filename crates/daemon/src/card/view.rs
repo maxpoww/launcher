@@ -232,6 +232,8 @@ pub(crate) enum Hover {
     Name,
     /// A voice note's play button.
     Play(u64),
+    /// A voice note's speed ("x1").
+    Speed(u64),
     /// One of the picker's emoji (its place among those shown), its
     /// search, and the rest of it.
     Emoji(usize),
@@ -251,6 +253,7 @@ impl Hover {
             | Hover::Edit(id)
             | Hover::More(id)
             | Hover::Line(id)
+            | Hover::Speed(id)
             | Hover::Lang(id) => Some(id),
             _ => None,
         }
@@ -273,6 +276,8 @@ pub(crate) struct FootView<'a> {
     pub playing: Option<(u64, f32)>,
     /// The voice note that is PAUSED, and how many seconds in.
     pub paused: Option<(u64, f32)>,
+    /// How fast voice notes play, as the note says it ("x1").
+    pub speed: &'a str,
     /// Something is being written IN THE LIST: a new thing, at its end
     /// (`Some(None)`), or the item of this id, in its own place.
     pub writing: Option<Option<u64>>,
@@ -394,6 +399,17 @@ impl Tile {
             self.rect.y + TILE_PAD_Y + 22.0,
             (self.rect.w - 2.0 * TILE_PAD_X - 72.0).max(0.0),
             14.0,
+        )
+    }
+
+    /// Where a voice note's speed is ("x1"): at the left of its foot, under
+    /// its first time.
+    pub(super) fn speed(&self) -> Rect {
+        Rect::new(
+            self.rect.x + TILE_PAD_X - 4.0,
+            self.rect.y + self.rect.h - NOTE_LINE - 8.0,
+            44.0,
+            NOTE_LINE + 6.0,
         )
     }
 
@@ -1631,6 +1647,23 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 glass: 0.0,
                 border: 0.0,
             });
+            // Its speed, at the left of its foot: a click goes to the next
+            // (in the accent when it is not the plain one).
+            let speed = view.foot.as_ref().map_or("x1", |f| f.speed);
+            let at = tile.speed();
+            put(
+                speed,
+                (at.x + at.w / 2.0, at.y + 3.0),
+                at.w,
+                NOTE_PX + 1.0,
+                true,
+                None,
+                if view.hover == Some(Hover::Speed(item.id)) || speed != "x1" {
+                    [acc[0], acc[1], acc[2], 1.0]
+                } else {
+                    paint.ink_at(0.6)
+                },
+            );
             // "Transcribe", in the middle of its foot (the word alone).
             let wide = view
                 .foot
@@ -2736,6 +2769,7 @@ mod tests {
                 notes: &notes,
                 playing: None,
                 paused: None,
+                speed: "x1",
                 writing: None,
                 title: None,
                 choosing: false,

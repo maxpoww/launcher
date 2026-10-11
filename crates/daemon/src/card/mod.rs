@@ -622,6 +622,8 @@ pub(crate) struct Card {
     playing: Option<voice::Playing>,
     /// The voice note that is paused, and how many seconds in it stopped.
     paused: Option<(u64, f32)>,
+    /// How fast voice notes play (its place in `voice::SPEEDS`).
+    voice_speed: usize,
     writing: bool,
     /// The emoji page's picker: what its search holds, the emoji it shows
     /// for that (`emoji_table::EMOJI` by place), how far its grid is
@@ -1139,6 +1141,10 @@ impl Card {
             && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
         {
             Hover::Line(tile.id)
+        } else if tile.speed().contains(pos)
+            && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
+        {
+            Hover::Speed(tile.id)
         } else if tile.more().contains(pos)
             && self.item(tile.id).is_some_and(|it| {
                 // (A voice note's "Transcribe"; a long text's "Show all".)
@@ -3338,6 +3344,7 @@ impl App {
             Hover::New => self.card_begin(),
             Hover::Name => self.card_take_keys(Field::Name),
             Hover::Play(id) => self.card_play(id),
+            Hover::Speed(_) => self.card_speed(),
             // A voice note's line: it plays from where it was clicked.
             Hover::Line(id) => {
                 let along = self
@@ -4559,11 +4566,7 @@ impl App {
             (_, true) => Some("Writing what you said…"),
             _ => None,
         };
-        let playing = self
-            .card
-            .playing
-            .as_ref()
-            .map(|p| (p.id, p.started.elapsed().as_secs_f32()));
+        let playing = self.card.playing.as_ref().map(|p| (p.id, p.at()));
         // THE HINT: what the keys do here, for as long as the card has them
         // (without them it says nothing — Max, 2026-10-10: *"they are not
         // useful when it is unfocused"*).
@@ -4680,6 +4683,7 @@ impl App {
                 notes: &notes,
                 playing,
                 paused: self.card.paused,
+                speed: voice::speed_name(self.card.voice_speed),
                 writing: (self.card.field == Some(Field::Box)).then_some(self.card.edit),
                 title: self
                     .card
