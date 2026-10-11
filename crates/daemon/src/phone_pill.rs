@@ -32,6 +32,9 @@ const GLYPH_PHONE: &str = "\u{f10b}";
 /// The button in the long pill's air: what a click on it does.
 const SYNC: &str = "Sync";
 const SET_UP: &str = "Set up";
+/// How much longer than its word the button is (the task pill's chips
+/// have 12; Max, 2026-10-11: "make the button slightly longer").
+const CHIP_PAD: f32 = 24.0;
 /// The least air either side of that button.
 const CHIP_AIR: f32 = 10.0;
 
@@ -194,7 +197,7 @@ impl App {
                         ),
                         None => (0.0, 0.0),
                     };
-                    self.phone_pill.chip_w = now.button.map_or(0.0, |word| r.measure_text(word, font_px, TEXT_FONT) + 12.0);
+                    self.phone_pill.chip_w = now.button.map_or(0.0, |word| r.measure_text(word, font_px, TEXT_FONT) + CHIP_PAD);
                     self.phone_pill.measured = key;
                 }
             }
