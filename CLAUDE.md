@@ -297,6 +297,16 @@ The big daemon files are cohesive but long — go straight to the function:
   (`camera_parts`). Pointer-free: `debug-desktop "campill fake|gone"` (a camera that is not there,
   to look at the pill without a phone), `campill open|picture|lens|close|free`, `campill flash|p
   <k>|l <k>` (a click on that part).
+- `phone_pill.rs` — the PHONE pill (Max, 2026-10-11; the start of "a proper phones pill, not only
+  for the cam but the whole menu"): on the OPTIONS bar while a phone is plugged in
+  (`Desktop::volumes`), a ROUND pill with a phone on it, left of the bell. The pointer on it
+  brings a LONG pill out from behind it, leftward, the way the bell's preview comes out: whose
+  phone and how it stands — `Max's Pixel · Synced 2 h ago` / `Syncing…` / `Sync off` / `Not set
+  up` (not in `phones.json`) / `Locked` (plugged in, not open). A CLICK on the round pill EJECTS
+  the phone (`desktop_eject`). One `PillId::Phone`; what stands by the bell stops short of it
+  (`phone_pill_reserve`: the task pill's fallback place, the camera pill's right end), and what
+  it opens over leaves the bar while it is out (`options_pills`, as for the bell). Pointer-free:
+  `debug-desktop "phonepill fake [words]|gone|open|close|free"` — never a click (it ejects).
 - `desktop.rs` — the DESKTOP: `~/Desktop` as icons behind the windows (macOS/Windows style) on
   its own `Bottom`-layer surface (`surface::create_desktop_surface`; Bottom, not Background, so
   swww can never map over it) with its own renderer + icon array (layer = item index). Lists the
