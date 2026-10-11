@@ -381,17 +381,28 @@ impl App {
         self.request_card_draw();
     }
 
-    /// A click on a voice note's line: it plays FROM THERE (`along`: how
-    /// far along the line, 0..1).
+    /// A click on a voice note's line (`along`: how far along it, 0..1):
+    /// PLAYING, it plays from there; not playing, it is paused there, and
+    /// its button plays from that spot (Max, 2026-10-11).
     pub(super) fn card_play_from(&mut self, id: u64, along: f32) {
         let secs = self.card.item(id).map_or(0.0, |it| it.aspect.max(1.0));
-        // (Whatever is playing stops first: this is not a toggle.)
+        let at = (along.clamp(0.0, 0.98) * secs).max(0.0);
+        if self.card.playing.as_ref().is_none_or(|p| p.id != id) {
+            self.card.paused = Some((id, at));
+            self.request_card_draw();
+            return;
+        }
         if let Some(mut p) = self.card.playing.take() {
             let _ = p.child.kill();
             let _ = p.child.wait();
         }
-        self.card.paused = None;
-        self.card_play_at(id, (along.clamp(0.0, 0.98) * secs).max(0.0));
+        // (Should the player not start, it is paused there.)
+        self.card.paused = Some((id, at));
+        self.card_play_at(id, at);
+        if self.card.playing.is_some() {
+            self.card.paused = None;
+        }
+        self.request_card_draw();
     }
 
     /// A voice note's button: it plays; playing, it PAUSES (Max,
