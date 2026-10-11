@@ -337,6 +337,10 @@ pub(crate) struct PhonePill {
     asking: Option<String>,
     /// Whether each phone lets this computer in (by serial), as last asked.
     debugging: std::collections::HashMap<String, Debugging>,
+    /// Each phone's Android (its API level, by serial): the camera needs 12
+    /// (level 31) — an Android 7 Huawei was offered it and scrcpy gave up
+    /// (2026-10-11).
+    android: std::collections::HashMap<String, u32>,
     /// The phones (by their folder) that were showing no files when last
     /// looked at.
     no_files: std::collections::HashSet<String>,
@@ -442,10 +446,16 @@ impl App {
                 // (Its folder is there and has nothing in it: a phone shows
                 // its storage as a folder once it lets its files be seen.)
                 let empty = std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_none());
-                (serial, debugging, level, path, empty)
+                let android = (debugging == Debugging::Ready)
+                    .then(|| crate::desktop_phone::android_level(&serial))
+                    .flatten();
+                (serial, debugging, level, path, empty, android)
             },
-            |app, (serial, debugging, level, path, empty)| {
+            |app, (serial, debugging, level, path, empty, android)| {
                 app.phone_pill.asking = None;
+                if let Some(android) = android {
+                    app.phone_pill.android.insert(serial.clone(), android);
+                }
                 let mut changed = app.phone_pill.debugging.insert(serial.clone(), debugging) != Some(debugging);
                 changed |= if empty { app.phone_pill.no_files.insert(path) } else { app.phone_pill.no_files.remove(&path) };
                 match level {
@@ -671,6 +681,9 @@ impl App {
                 // possible, and show the option… for more features").
                 let limited = self.phone_pill.shown.as_ref().map(|s| s.debugging);
                 let limited = limited.filter(|d| matches!(d, Debugging::Off | Debugging::NotAllowed));
+                // (Its camera can be used from Android 12 on.)
+                let serial = self.phone_pill.shown.as_ref().and_then(|s| s.serial.clone());
+                let old = serial.and_then(|s| self.phone_pill.android.get(&s).copied()).is_some_and(|level| level < 31);
                 let mut lines = Vec::new();
                 let mut air = false;
                 for row in crate::desktop_menu::volume_rows(&volume) {
@@ -688,6 +701,9 @@ impl App {
                             }
                         )
                     {
+                        continue;
+                    }
+                    if old && matches!(row, Row::Item { action: Action::Camera, .. }) {
                         continue;
                     }
                     let (label, action) = match row {
@@ -1127,6 +1143,15 @@ impl App {
             "configure" => self.phone_box_turn(Page::Configure),
             "properties" => self.phone_box_turn(Page::Properties),
             "debugging" => self.phone_box_turn(Page::Debugging),
+            // What the box's page lists.
+            "lines" => {
+                let lines: Vec<String> = self
+                    .phone_box_lines()
+                    .into_iter()
+                    .map(|l| if l.value.is_empty() { l.label } else { format!("{} = {}", l.label, l.value) })
+                    .collect();
+                return format!("{:?}: {lines:?}", self.phone_pill.page);
+            }
             "files" => self.phone_box_turn(Page::Files),
             "menu" => self.phone_box_turn(Page::Menu),
             "line" => {

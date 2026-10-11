@@ -469,6 +469,11 @@ pub(crate) fn battery(target: &str) -> Option<u8> {
     battery_level(&adb(target, &["shell", "dumpsys battery"])?)
 }
 
+/// Its Android, as an API level (31 is Android 12).
+pub(crate) fn android_level(target: &str) -> Option<u32> {
+    adb(target, &["shell", "getprop ro.build.version.sdk"])?.trim().parse().ok()
+}
+
 /// `  level: 66` among what `dumpsys battery` says.
 fn battery_level(said: &str) -> Option<u8> {
     said.lines().find_map(|l| l.trim().strip_prefix("level:")?.trim().parse::<u8>().ok()).filter(|l| *l <= 100)
