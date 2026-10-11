@@ -267,6 +267,10 @@ pub(crate) struct FootView<'a> {
     pub menu: Option<MenuView<'a>>,
     /// The parts already put in what is being written (over the writing).
     pub sealed: &'a [Item],
+    /// Memory's page while it is SEARCHED: the ids that are rows — a
+    /// session's name, "Pinned" — over the things found in each, which are
+    /// drawn as the items they are. `None`: every item of the page is a row.
+    pub rows: Option<&'a HashSet<u64>>,
     /// The items that are OPEN: a click on one made of parts opened it —
     /// its voice notes show what they say, its pieces answer by themselves.
     pub wide: &'a HashSet<u64>,
@@ -1182,11 +1186,15 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         TILE_PAD_Y + pieces(sealed, view.lines, zoom, false).1
     };
     let box_h = sealed_h + draft_h;
+    // (On Memory's page an item is a session's ROW — unless the page is being
+    // searched: then only some are, and the rest are the things found.)
+    let rows = view.foot.as_ref().and_then(|f| f.rows);
+    let is_row = |id: u64| page == Page::Memory && rows.is_none_or(|r| r.contains(&id));
     let heights: Vec<f32> = shown_items
         .iter()
         .map(|it| match page {
             _ if writing == Some(Some(it.id)) => box_h,
-            Page::Memory => ROW_H,
+            Page::Memory if is_row(it.id) => ROW_H,
             _ if !it.parts.is_empty() => mixed_height(
                 &it.parts,
                 view.lines,
@@ -1290,7 +1298,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             border: 1.0,
         });
         let note = view.foot.as_ref().and_then(|f| f.notes.get(&item.id));
-        if page == Page::Memory {
+        if is_row(item.id) {
             // A SESSION's row: its name only, and at the right when its
             // last thing was (Max, 2026-10-10: *"get rid of the avatar on
             // the memories, and the content, i want only the title"*, then
@@ -2628,6 +2636,7 @@ mod tests {
                     hint: "",
                     hint_lit: false,
                     hint_red: false,
+                    plain: false,
                     picking: None,
                     emoji: &[],
                     pick_query: "",
@@ -2644,6 +2653,7 @@ mod tests {
                 renaming: None,
                 sealed: &[],
                 wide: &wide,
+                rows: None,
             }),
             dnd_over: false,
             hidden: None,

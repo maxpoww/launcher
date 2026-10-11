@@ -134,6 +134,8 @@ pub(crate) struct BarView<'a> {
     pub hint_lit: bool,
     /// It counts a recording (in red).
     pub hint_red: bool,
+    /// What is written is words alone (a title): the box has no +.
+    pub plain: bool,
     /// The emoji picker, when it is open: how many emoji it shows and
     /// how far its grid is scrolled; the emoji themselves (all, or those
     /// its search found); what is being searched.
@@ -278,6 +280,12 @@ pub(crate) fn box_h(lines: usize) -> f32 {
 impl Bottom {
     /// The line of hint, across the card (a click on it is "Undo" while it
     /// offers one).
+    /// The box holds words alone here (a voice note's title): no +.
+    pub(crate) fn plain_if(mut self, yes: bool) -> Bottom {
+        self.plain |= yes;
+        self
+    }
+
     pub(crate) fn hint_rect(&self, rect: Rect) -> Rect {
         Rect::new(rect.x, self.hint_y, rect.w, HINT_H)
     }
@@ -589,7 +597,9 @@ pub(super) fn draw(
         paint.fill[2] * 0.72,
         0.94,
     ];
-    let b = bottom(rect, page, bar.seeking(), bar.picking).with_input(writer);
+    let b = bottom(rect, page, bar.seeking(), bar.picking)
+        .plain_if(bar.plain)
+        .with_input(writer);
 
     // The name of the memory, floating at the top.
     if let (Page::Session, Some(name)) = (page, bar.name) {

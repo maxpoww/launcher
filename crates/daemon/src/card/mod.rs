@@ -239,6 +239,9 @@ enum Undone {
     },
 }
 
+/// The id of the row "Pinned" among what a search of Memory's page finds.
+const PINNED_ROW: u64 = u64::MAX - 9;
+
 /// How many lines a text opened whole ("Show all") shows at the most.
 const ALL_LINES: usize = 400;
 
@@ -344,6 +347,11 @@ pub(crate) struct Card {
     /// (Memory's page is up for one to be picked).
     open: Option<u64>,
     pinned: Vec<Item>,
+    /// Memory's page, SEARCHED: what is listed instead of its rows — each
+    /// session that has something of what is typed (its row, then those
+    /// things), then "Pinned" and its own; and which of them are rows.
+    finds: Vec<Item>,
+    find_rows: HashSet<u64>,
     /// The words looked up in the dictionary (its page's list), where they
     /// are kept while another page is up.
     looked: Vec<Item>,
@@ -673,8 +681,10 @@ impl Card {
 
     fn item(&self, id: u64) -> Option<&Item> {
         // (An item of the list, or a part of one.)
+        // (…or a thing a search of Memory's page found.)
         self.items
             .iter()
+            .chain(self.finds.iter())
             .flat_map(|it| std::iter::once(it).chain(it.parts.iter()))
             .find(|it| it.id == id)
     }
@@ -888,7 +898,9 @@ impl Card {
             let row = ((pos.1 - menu.y - MENU_PAD) / MENU_ROW).floor().max(0.0) as usize;
             return Some(Hover::Menu(row.min(self.menu_rows().len() - 1)));
         }
-        let low = bottom(rect, self.page, self.seeking(), self.pick()).with_input(self.writer);
+        let low = bottom(rect, self.page, self.seeking(), self.pick())
+            .plain_if(self.titling())
+            .with_input(self.writer);
         if self.undo.is_some() && self.flash.is_some() && low.hint_rect(rect).contains(pos) {
             return Some(Hover::Undo);
         }
@@ -920,9 +932,13 @@ impl Card {
         let tile = self.tiles.iter().find(|t| t.rect.contains(pos))?;
         // (Memory's rows are sessions: no disk; and while one is being
         // chosen, no × either — a row only chooses.)
-        let pins = self.page != Page::Memory;
+        let pins = !self.is_row(tile.id);
         // (A session's row has a pencil too, in the disk's place: its name.)
-        if self.page == Page::Memory && self.picking.is_none() && tile.pin().contains(pos) {
+        if self.is_row(tile.id)
+            && tile.id != PINNED_ROW
+            && self.picking.is_none()
+            && tile.pin().contains(pos)
+        {
             return Some(Hover::Edit(tile.id));
         }
         let pencil = matches!(self.page, Page::Session | Page::Pinned | Page::Dictionary)
@@ -931,7 +947,8 @@ impl Card {
                 .is_some_and(|it| matches!(it.kind, Kind::Text | Kind::Voice));
         // (Every list's items have a ×; a session's row has none while a
         // session is being chosen.)
-        let closes = !(self.page == Page::Memory && self.picking.is_some());
+        let closes =
+            !(self.page == Page::Memory && self.picking.is_some()) && tile.id != PINNED_ROW;
         Some(if closes && tile.close().contains(pos) {
             Hover::Close(tile.id)
         } else if pencil && tile.edit(true).contains(pos) {
@@ -1005,6 +1022,69 @@ impl Card {
         }
     }
 
+    /// What is being written is a voice note's TITLE (its pencil, or just
+    /// recorded): words alone — the box has no + then.
+    fn titling(&self) -> bool {
+        self.field == Some(Field::Box)
+            && self
+                .edit
+                .and_then(|id| self.item(id))
+                .is_some_and(|it| it.kind == Kind::Voice)
+    }
+
+    /// Whether item `id` of Memory's page is a ROW (a session, "Pinned") and
+    /// not a thing a search found.
+    fn is_row(&self, id: u64) -> bool {
+        self.page == Page::Memory && (self.finds.is_empty() || self.find_rows.contains(&id))
+    }
+
+    /// MEMORY'S PAGE, SEARCHED (Max, 2026-10-10: *"that address i saved
+    /// somewhere"*): the THINGS that match, each group under the row of
+    /// where it is kept — every session, then Pinned. (A session whose
+    /// name matches is listed too, with nothing under it.)
+    fn search_all(&self) -> (Vec<Item>, HashSet<u64>) {
+        let query = self.query.trim().to_lowercase();
+        let has = |it: &Item| {
+            it.body.to_lowercase().contains(&query)
+                || it
+                    .from
+                    .as_ref()
+                    .is_some_and(|f| f.to_lowercase().contains(&query))
+                || (it.kind == Kind::Voice && "voice note".contains(&query))
+        };
+        let (mut out, mut rows) = (Vec::new(), HashSet::new());
+        for past in &self.memory {
+            let named = past
+                .name
+                .as_deref()
+                .is_some_and(|n| n.to_lowercase().contains(&query));
+            let hits: Vec<Item> = past.items.iter().filter(|it| has(it)).cloned().collect();
+            if named || !hits.is_empty() {
+                rows.insert(past.id);
+                out.push(session_row(past));
+                out.extend(hits);
+            }
+        }
+        let pins: Vec<Item> = self.pinned.iter().filter(|it| has(it)).cloned().collect();
+        if !pins.is_empty() {
+            rows.insert(PINNED_ROW);
+            out.push(Item {
+                id: PINNED_ROW,
+                kind: Kind::Text,
+                body: "Pinned".to_owned(),
+                path: None,
+                aspect: 0.0,
+                owned: false,
+                at: pins.iter().map(|p| p.at).max().unwrap_or(0),
+                from: None,
+                parts: Vec::new(),
+                said: None,
+            });
+            out.extend(pins);
+        }
+        (out, rows)
+    }
+
     /// The rows of the disk's menu on the page that is up: Pin (not for
     /// what is pinned already), Memory, New session.
     fn menu_rows(&self) -> &'static [&'static str] {
@@ -1025,6 +1105,7 @@ impl Card {
         // (Under the + of the writing box, or under an item's disk.)
         let disk = if self.plus {
             bottom(card, self.page, self.seeking(), self.pick())
+                .plain_if(self.titling())
                 .with_input(self.writer)
                 .btns[0]
                 .1
@@ -1721,7 +1802,11 @@ impl App {
     /// grab) to paste the item as copy and paste will do"*). A text goes as
     /// text, anything else as its file. It stays on the clipboard.
     fn card_paste(&mut self, id: u64) {
-        if self.card.page == Page::Memory {
+        if id == PINNED_ROW {
+            self.card_show(Page::Pinned);
+            return;
+        }
+        if self.card.is_row(id) {
             self.card_recall(id);
             return;
         }
@@ -2746,6 +2831,7 @@ impl App {
         };
         let pos = self.card.inside(ptr);
         let low = bottom(rect, self.card.page, self.card.seeking(), self.card.pick())
+            .plain_if(self.card.titling())
             .with_input(self.card.writer);
         let spans = self.card.spans();
         let first = self.card.draft_top();
@@ -3168,6 +3254,18 @@ impl App {
 
     /// An item's ×: it is gone from the list that is up.
     fn card_remove(&mut self, id: u64) {
+        // (Memory's page: a session's row — or, while it is searched, a
+        // thing found: that goes from where it is kept.)
+        if self.card.page == Page::Memory && !self.card.is_row(id) {
+            for past in &mut self.card.memory {
+                past.items.retain(|it| it.id != id);
+            }
+            self.card.pinned.retain(|it| it.id != id);
+            self.card.lines.remove(&id);
+            self.card_flash("Removed");
+            self.card_save();
+            return;
+        }
         if self.card.page == Page::Memory {
             self.card_forget(id);
             return;
@@ -3751,10 +3849,23 @@ impl App {
         let mono = renderer.measure_text("MMMMMMMMMM", text_px, Some(crate::options::NERD)) / 10.0;
         // (`whole`: a part of an item, or of what is being written — its
         // words are never cut short; an item's own are, unless it is open.)
+        // Memory's page, searched: the things found, under their rows.
+        let searching = self.card.page == Page::Memory
+            && !self.card.query.trim().is_empty()
+            && self.card.picking.is_none();
+        if searching {
+            let (finds, rows) = self.card.search_all();
+            self.card.finds = finds;
+            self.card.find_rows = rows;
+        } else {
+            self.card.finds.clear();
+            self.card.find_rows.clear();
+        }
         let all = self
             .card
             .items
             .iter()
+            .chain(self.card.finds.iter())
             .flat_map(|it| std::iter::once((it, false)).chain(it.parts.iter().map(|p| (p, true))))
             .chain(self.card.sealed.iter().map(|p| (p, true)));
         for (item, whole) in all {
@@ -3764,7 +3875,9 @@ impl App {
             let lines = if !item.parts.is_empty() {
                 // (Made of parts: it has no lines of its own.)
                 Vec::new()
-            } else if self.card.page == Page::Memory {
+            } else if self.card.page == Page::Memory
+                && (!searching || self.card.find_rows.contains(&item.id))
+            {
                 // (A memory's row: its name, its last thing — one line each.)
                 item.body.lines().take(2).map(str::to_owned).collect()
             } else if item.kind == Kind::Voice {
@@ -3916,7 +4029,9 @@ impl App {
         }
         // The search narrows the list to what matches.
         let found: Vec<Item>;
-        let listed: &[Item] = if self.card.query.trim().is_empty() {
+        let listed: &[Item] = if searching {
+            &self.card.finds
+        } else if self.card.query.trim().is_empty() {
             &self.card.items
         } else {
             found = self
@@ -4073,6 +4188,7 @@ impl App {
                     hint,
                     hint_lit: flash.is_some(),
                     hint_red: held.is_some(),
+                    plain: self.card.titling(),
                     picking: self.card.pick(),
                     emoji: &emoji,
                     pick_query: &self.card.pick_query,
@@ -4094,6 +4210,7 @@ impl App {
                 choosing: self.card.picking.is_some(),
                 sealed: &self.card.sealed,
                 wide: &self.card.wide,
+                rows: searching.then_some(&self.card.find_rows),
                 arming: self.card.arming.map(|a| a.0),
                 renaming: self
                     .card
