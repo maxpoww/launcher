@@ -388,7 +388,9 @@ impl App {
         scene.labels.push(Label {
             text: text.to_owned(),
             pos: (slot.x + slot.w / 2.0, slot.y + (slot.h - LINE_PX * s) / 2.0),
-            max_w: slot.w.max(1.0) + 64.0,
+            // (Never the slot's width: a word is shaped once and kept, and
+            // one first drawn in a slot still growing would be kept broken.)
+            max_w: 4096.0,
             font_px: FONT_PX * s,
             line_px: LINE_PX * s,
             centered: true,
