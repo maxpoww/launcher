@@ -407,8 +407,22 @@ fn listing() -> Option<String> {
 }
 
 /// Mount what has newly appeared and wants it; the list as it is after.
+/// Whether a volume is the "driver disc" a phone shows beside itself: the
+/// USB gadget's CD-ROM (a Huawei's has HiSuite's Windows installer on it —
+/// an icon with nothing in it for this computer, every file locked, that
+/// its owner took for the phone: Max, 2026-10-11). `/sys/block/sr0/device/
+/// model` says so.
+fn gadget_cd(vol: &Volume) -> bool {
+    let Some(node) = vol.device.as_deref().and_then(|d| d.strip_prefix("/dev/")).filter(|n| n.starts_with("sr")) else {
+        return false;
+    };
+    std::fs::read_to_string(format!("/sys/block/{node}/device/model")).is_ok_and(|m| m.trim() == "File-CD Gadget")
+}
+
 fn scan(tried: &mut HashSet<String>, refused: &mut HashSet<String>) -> Option<Vec<Volume>> {
-    let volumes = parse_listing(&listing()?);
+    let mut volumes = parse_listing(&listing()?);
+    // A phone's driver disc is not a thing to mount or to show.
+    volumes.retain(|v| !gadget_cd(v));
     // Gone from the port: next time it comes, it is mounted again.
     let present: HashSet<String> = volumes.iter().map(Volume::id).collect();
     tried.retain(|id| present.contains(id));

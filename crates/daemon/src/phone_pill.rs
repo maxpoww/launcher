@@ -37,6 +37,8 @@ const SET_UP: &str = "Set up";
 const STOP: &str = "Stop";
 /// (A click on it shows how: Max, 2026-10-11.)
 const HOW: &str = "Turn ON";
+/// On a phone that shows no files: a click shows how it is made to.
+const FILES: &str = "How";
 /// How much longer than its word the button is (the task pill's chips
 /// have 12; Max, 2026-10-11: "make the button slightly longer").
 const CHIP_PAD: f32 = 24.0;
@@ -87,6 +89,9 @@ enum Page {
     /// How USB debugging is turned on (or this computer allowed): what a
     /// phone without it is missing here.
     Debugging,
+    /// How the phone is made to show its files (it is plugged in and its
+    /// folder is empty).
+    Files,
 }
 
 /// What a click on a line of the box does.
@@ -131,45 +136,77 @@ fn line(label: &str, value: &str, act: Act) -> Line {
     Line { label: label.to_owned(), value: value.to_owned(), act, air: false, step: 0, sub: false, dim: false }
 }
 
-/// How USB debugging is turned on — or, `asked`, this computer allowed on a
-/// phone that has it on and is asking. One thing to do a step, a round
-/// number before each, air between the steps, what is seen on the phone
-/// under the step that shows it (Max, 2026-10-11: the first cut, six lines
-/// one under the other, was "all close together, hard to understand and
+/// A way to do something, as a page of the box: what and what it costs,
+/// then one thing to do a step — a round number before each, air between
+/// the steps, what is seen on the phone under the step that shows it — and
+/// what it is for, last (Max, 2026-10-11: the first cut, six lines one
+/// under the other, was "all close together, hard to understand and
 /// follow").
-fn debugging_lines(asked: bool) -> Vec<Line> {
+fn guide(title: &str, under: &str, steps: &[(&str, &str)], last: &[&str]) -> Vec<Line> {
     let say = |label: &str| line(label, "", Act::Nothing);
     let mut lines = vec![line("‹  Back", "", Act::Turn(Page::Menu))];
-    let head = |title: &str, under: &str, lines: &mut Vec<Line>| {
-        lines.push(Line { air: true, ..say(title) });
-        lines.push(Line { dim: true, ..say(under) });
-    };
-    let mut n = 0;
-    let mut step = |text: &str, under: &str, lines: &mut Vec<Line>| {
-        n += 1;
-        lines.push(Line { air: true, step: n, ..say(text) });
-        if !under.is_empty() {
-            lines.push(Line { sub: true, ..say(under) });
+    lines.push(Line { air: true, ..say(title) });
+    lines.push(Line { dim: true, ..say(under) });
+    for (n, (text, seen)) in steps.iter().enumerate() {
+        lines.push(Line { air: true, step: n as u8 + 1, ..say(text) });
+        if !seen.is_empty() {
+            lines.push(Line { sub: true, ..say(seen) });
         }
-    };
-    if asked {
-        head("Allow this computer", "The phone is waiting for your answer", &mut lines);
-        step("Look at the phone's screen", "It asks: Allow USB debugging?", &mut lines);
-        step("Tick \"Always allow from this computer\"", "", &mut lines);
-        step("Tap Allow", "", &mut lines);
-        lines.push(Line { air: true, dim: true, ..say("No question on its screen? Unplug it and plug it in again.") });
-    } else {
-        head("Turn on USB debugging", "Once, on the phone. It takes a minute.", &mut lines);
-        step("Open Settings, then About phone", "", &mut lines);
-        step("Tap \"Build number\" 7 times", "It says: You are now a developer", &mut lines);
-        step("Go back to Settings, then System", "Open Developer options", &mut lines);
-        step("Switch on \"USB debugging\"", "", &mut lines);
-        step("Unplug the phone and plug it in again", "", &mut lines);
-        step("On the phone, tap Allow", "Tick \"Always allow from this computer\"", &mut lines);
     }
-    lines.push(Line { air: true, dim: true, ..say("Then it can be mirrored, used as a camera and synced,") });
-    lines.push(Line { dim: true, ..say("and it shows its battery and shares its internet.") });
+    for (n, text) in last.iter().enumerate() {
+        lines.push(Line { air: n == 0, dim: true, ..say(text) });
+    }
     lines
+}
+
+/// How USB debugging is turned on — or, `asked`, this computer allowed on a
+/// phone that has it on and is asking.
+fn debugging_lines(asked: bool) -> Vec<Line> {
+    const FOR: [&str; 2] =
+        ["Then it can be mirrored, used as a camera and synced,", "and it shows its battery and shares its internet."];
+    if asked {
+        guide(
+            "Allow this computer",
+            "The phone is waiting for your answer.",
+            &[
+                ("Look at the phone's screen", "It asks: Allow USB debugging?"),
+                ("Tick \"Always allow from this computer\"", ""),
+                ("Tap Allow", ""),
+            ],
+            &["No question on its screen? Unplug it and plug it in again."],
+        )
+    } else {
+        guide(
+            "Turn on USB debugging",
+            "Once, on the phone. It takes a minute.",
+            &[
+                ("Open Settings, then About phone", ""),
+                ("Tap \"Build number\" 7 times", "It says: You are now a developer"),
+                ("Go back to Settings, then System", "Open Developer options"),
+                ("Switch on \"USB debugging\"", ""),
+                ("Unplug the phone and plug it in again", ""),
+                ("On the phone, tap Allow", "Tick \"Always allow from this computer\""),
+            ],
+            &FOR,
+        )
+    }
+}
+
+/// How a phone that is plugged in and shows nothing is made to show its
+/// files (Max, 2026-10-11, an old Huawei: "i open one, it is empty… i dont
+/// know how to paste a folder or a file on this device").
+fn files_lines() -> Vec<Line> {
+    guide(
+        "See the phone's files",
+        "It is plugged in, but it is not showing them yet.",
+        &[
+            ("Unlock the phone's screen", ""),
+            ("Pull down its notifications", "Tap the one about USB: \"Charging this device\""),
+            ("Choose \"Transfer files\"", "Some phones call it \"File transfer\" or \"MTP\""),
+            ("If it asks to allow access to its data, tap Allow", ""),
+        ],
+        &["Then open the phone from its icon: its storage is a folder,", "and files are copied and pasted there like anywhere."],
+    )
 }
 
 /// What the box of a phone that is not there shows
@@ -216,6 +253,7 @@ fn fake_lines(page: Page) -> Vec<Line> {
             ("Apply", "", false),
         ],
         Page::Debugging => return debugging_lines(false),
+        Page::Files => return files_lines(),
         Page::Properties => &[
             ("Model", "Google Pixel 8 Pro", true),
             ("Android", "17", false),
@@ -264,6 +302,9 @@ struct Shown {
     /// Whether it lets this computer in over adb (most of what a phone is
     /// good for here goes that way).
     debugging: Debugging,
+    /// It is mounted and its folder is empty: it is not showing its files
+    /// (locked, or still "charging only").
+    no_files: bool,
 }
 
 /// The pill's state.
@@ -296,6 +337,9 @@ pub(crate) struct PhonePill {
     asking: Option<String>,
     /// Whether each phone lets this computer in (by serial), as last asked.
     debugging: std::collections::HashMap<String, Debugging>,
+    /// The phones (by their folder) that were showing no files when last
+    /// looked at.
+    no_files: std::collections::HashSet<String>,
     /// Its box (all a phone's menu has): asked open, and how far open.
     box_open: bool,
     box_e: f32,
@@ -340,9 +384,11 @@ impl App {
             Some(s) => self.phone_pill.debugging.get(s).copied().unwrap_or(Debugging::Unknown),
             None => Debugging::Off,
         };
+        let no_files = self.phone_pill.no_files.contains(&path);
         let state = match &known {
             _ if camera => "Using as a camera".to_owned(),
             _ if v.closed => "Locked".to_owned(),
+            _ if no_files => "Not showing its files".to_owned(),
             _ if debugging == Debugging::Off => "USB debugging off".to_owned(),
             _ if debugging == Debugging::NotAllowed => "Not allowed on the phone".to_owned(),
             _ if syncing => "Syncing…".to_owned(),
@@ -363,6 +409,7 @@ impl App {
             button: match &known {
                 _ if camera => Some(STOP),
                 _ if v.closed || syncing => None,
+                _ if no_files => Some(FILES),
                 _ if matches!(debugging, Debugging::Off | Debugging::NotAllowed) => Some(HOW),
                 None => Some(SET_UP),
                 Some(_) => Some(SYNC),
@@ -370,6 +417,7 @@ impl App {
             known: known.is_some(),
             serial,
             debugging,
+            no_files,
         })
     }
 
@@ -377,7 +425,10 @@ impl App {
     /// its battery is (off the loop); the pill is written again when it
     /// answers.
     fn phone_pill_ask_battery(&mut self) {
-        let Some(serial) = self.phone_pill_now().and_then(|s| s.serial) else {
+        let Some(now) = self.phone_pill_now() else {
+            return;
+        };
+        let (Some(serial), path) = (now.serial, now.path) else {
             return;
         };
         if self.phone_pill.fake.is_some() || self.phone_pill.asking.as_ref() == Some(&serial) {
@@ -388,11 +439,15 @@ impl App {
             move || {
                 let debugging = crate::desktop::phone_debugging(&serial);
                 let level = (debugging == Debugging::Ready).then(|| crate::desktop_phone::battery(&serial)).flatten();
-                (serial, debugging, level)
+                // (Its folder is there and has nothing in it: a phone shows
+                // its storage as a folder once it lets its files be seen.)
+                let empty = std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_none());
+                (serial, debugging, level, path, empty)
             },
-            |app, (serial, debugging, level)| {
+            |app, (serial, debugging, level, path, empty)| {
                 app.phone_pill.asking = None;
                 let mut changed = app.phone_pill.debugging.insert(serial.clone(), debugging) != Some(debugging);
+                changed |= if empty { app.phone_pill.no_files.insert(path) } else { app.phone_pill.no_files.remove(&path) };
                 match level {
                     Some(level) => changed |= app.phone_pill.battery.insert(serial, level) != Some(level),
                     None => changed |= app.phone_pill.battery.remove(&serial).is_some(),
@@ -655,6 +710,9 @@ impl App {
                         lines.push(line("Configure camera", "", Act::Turn(Page::Camera)));
                     }
                 }
+                if self.phone_pill.shown.as_ref().is_some_and(|s| s.no_files) {
+                    lines.push(group(line("It shows no files: what to do on the phone", "", Act::Turn(Page::Files))));
+                }
                 match limited {
                     Some(Debugging::NotAllowed) => {
                         lines.push(group(line("Allow this computer on the phone for more features", "", Act::Turn(Page::Debugging))));
@@ -669,6 +727,7 @@ impl App {
             Page::Debugging => {
                 debugging_lines(self.phone_pill.shown.as_ref().is_some_and(|s| s.debugging == Debugging::NotAllowed))
             }
+            Page::Files => files_lines(),
             Page::Camera => {
                 let mut lines = vec![back];
                 let Some((on, lenses, pictures)) = self.camera_choices() else {
@@ -820,7 +879,7 @@ impl App {
                     self.phone_pill.facts = Some(Vec::new());
                 }
             }
-            Page::Menu | Page::Camera | Page::Debugging => {}
+            Page::Menu | Page::Camera | Page::Debugging | Page::Files => {}
         }
         self.schedule_phone_pill_frame();
         self.sync_options_input();
@@ -999,6 +1058,10 @@ impl App {
                     self.phone_pill.box_open = true;
                     self.phone_box_turn(Page::Debugging);
                 }
+                Some(FILES) => {
+                    self.phone_pill.box_open = true;
+                    self.phone_box_turn(Page::Files);
+                }
                 Some(_) => self.phone_pill_sync_now(),
                 None => {}
             }
@@ -1049,6 +1112,7 @@ impl App {
                     battery: level,
                     button: Some(SYNC),
                     debugging: Debugging::Ready,
+                    no_files: false,
                     serial: None,
                     known: true,
                 });
@@ -1063,6 +1127,7 @@ impl App {
             "configure" => self.phone_box_turn(Page::Configure),
             "properties" => self.phone_box_turn(Page::Properties),
             "debugging" => self.phone_box_turn(Page::Debugging),
+            "files" => self.phone_box_turn(Page::Files),
             "menu" => self.phone_box_turn(Page::Menu),
             "line" => {
                 let act = rest.trim().parse::<usize>().ok().and_then(|n| self.phone_box_lines().into_iter().nth(n)).map(|l| l.act);
