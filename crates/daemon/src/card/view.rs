@@ -213,6 +213,8 @@ pub(crate) enum Hover {
     More(u64),
     /// The big microphone of voice-to-text's page.
     Mic,
+    /// A voice note's line: a click on it plays from there.
+    Line(u64),
     /// An item's pencil: it is opened again to be changed.
     Edit(u64),
     Foot(Foot),
@@ -245,7 +247,8 @@ impl Hover {
             | Hover::Pin(id)
             | Hover::Play(id)
             | Hover::Edit(id)
-            | Hover::More(id) => Some(id),
+            | Hover::More(id)
+            | Hover::Line(id) => Some(id),
             _ => None,
         }
     }
@@ -378,6 +381,17 @@ pub(crate) fn has_more(lines: &[String], wide: bool) -> bool {
 }
 
 impl Tile {
+    /// Where a voice note's line is (a band round it, for the pointer): a
+    /// click along it plays from there.
+    pub(super) fn line(&self) -> Rect {
+        Rect::new(
+            self.rect.x + TILE_PAD_X + 36.0,
+            self.rect.y + TILE_PAD_Y + 22.0,
+            (self.rect.w - 2.0 * TILE_PAD_X - 72.0).max(0.0),
+            14.0,
+        )
+    }
+
     /// Where a long text's "Show all" is: in the middle of its foot, on
     /// the line its time is on.
     pub(super) fn more(&self) -> Rect {

@@ -1051,6 +1051,10 @@ impl Card {
             Hover::Edit(tile.id)
         } else if pins && tile.pin().contains(pos) {
             Hover::Pin(tile.id)
+        } else if tile.line().contains(pos)
+            && self.item(tile.id).is_some_and(|it| it.kind == Kind::Voice)
+        {
+            Hover::Line(tile.id)
         } else if tile.more().contains(pos)
             && self.item(tile.id).is_some_and(|it| {
                 // (A voice note's "Transcribe"; a long text's "Show all".)
@@ -3117,6 +3121,16 @@ impl App {
             }
             Hover::Name => self.card_take_keys(Field::Name),
             Hover::Play(id) => self.card_play(id),
+            // A voice note's line: it plays from where it was clicked.
+            Hover::Line(id) => {
+                let along = self
+                    .card
+                    .ptr
+                    .map(|p| self.card.inside(p))
+                    .zip(self.card.tiles.iter().find(|t| t.id == id).map(Tile::line))
+                    .map_or(0.0, |(p, line)| (p.0 - line.x) / line.w.max(1.0));
+                self.card_play_from(id, along);
+            }
             Hover::Emoji(n) => self.card_emoji(n),
             Hover::PickSeek => self.card_take_keys(Field::Pick),
             Hover::Tray => {}

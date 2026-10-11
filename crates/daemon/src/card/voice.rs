@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -68,6 +68,48 @@ pub(super) fn tool(env: &str, name: &str) -> Option<PathBuf> {
             .map(|dir| dir.join(name))
             .find(|p| p.is_file())
     })
+}
+
+/// A copy of the recording at `wav` that begins `from` seconds in: its
+/// head as it is, its sound from there on (a plain PCM recording — what
+/// `pw-record` writes). `None`: it is not one, or cannot be written.
+fn tail_wav(wav: &str, from: f32) -> Option<PathBuf> {
+    let all = std::fs::read(wav).ok()?;
+    if all.len() < 44 || &all[0..4] != b"RIFF" || &all[8..12] != b"WAVE" {
+        return None;
+    }
+    let u32_at = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(all.get(at..at + 4)?.try_into().ok()?))
+    };
+    // Its chunks: the format (how many bytes a second), then the sound.
+    let (mut at, mut rate, mut align) = (12usize, 0u32, 1u32);
+    let data = loop {
+        let (name, size) = (all.get(at..at + 4)?, u32_at(at + 4)? as usize);
+        if name == b"fmt " {
+            rate = u32_at(at + 16)?;
+            align = u16::from_le_bytes(all.get(at + 20..at + 22)?.try_into().ok()?) as u32;
+        }
+        if name == b"data" {
+            break at + 8;
+        }
+        at += 8 + size + (size & 1);
+    };
+    if rate == 0 || align == 0 {
+        return None;
+    }
+    let skip = ((from * rate as f32) as usize / align as usize) * align as usize;
+    let start = (data + skip).min(all.len());
+    let sound = &all[start..];
+    let mut out = all[..data].to_vec();
+    // (The two sizes in its head, for what is left.)
+    out[4..8].copy_from_slice(&((data - 8 + sound.len()) as u32).to_le_bytes());
+    let size_at = data - 4;
+    out[size_at..data].copy_from_slice(&(sound.len() as u32).to_le_bytes());
+    out.extend_from_slice(sound);
+    let path =
+        std::env::temp_dir().join(format!("waverunner-card-from-{}.wav", std::process::id()));
+    std::fs::write(&path, out).ok()?;
+    Some(path)
 }
 
 /// The speech engine and its model, when both are there:
@@ -339,6 +381,18 @@ impl App {
     }
 
     /// Play voice note `id`, or stop it if it is the one playing.
+    /// A click on a voice note's line: it plays FROM THERE (`along`: how
+    /// far along the line, 0..1).
+    pub(super) fn card_play_from(&mut self, id: u64, along: f32) {
+        let secs = self.card.item(id).map_or(0.0, |it| it.aspect.max(1.0));
+        // (Whatever is playing stops first: this is not a toggle.)
+        if let Some(mut p) = self.card.playing.take() {
+            let _ = p.child.kill();
+            let _ = p.child.wait();
+        }
+        self.card_play_at(id, (along.clamp(0.0, 0.98) * secs).max(0.0));
+    }
+
     pub(super) fn card_play(&mut self, id: u64) {
         let was = self.card.playing.take().map(|mut p| {
             let _ = p.child.kill();
@@ -349,12 +403,23 @@ impl App {
         if was == Some(id) {
             return;
         }
+        self.card_play_at(id, 0.0);
+    }
+
+    /// Play voice note `id` from `from` seconds in. (The player has no way
+    /// to start in the middle: it is given a copy of the recording that
+    /// begins there — `tail_wav`.)
+    fn card_play_at(&mut self, id: u64, from: f32) {
         let Some(path) = self.card.item(id).and_then(|it| it.path.clone()) else {
             return;
         };
         let Some(player) = tool("WAVERUNNER_PW_PLAY", "pw-play") else {
             self.card.say = Some("No player found (pw-play)");
             return;
+        };
+        let (path, from) = match (from > 0.05).then(|| tail_wav(&path, from)).flatten() {
+            Some(tail) => (tail.to_string_lossy().into_owned(), from),
+            None => (path, 0.0),
         };
         match Command::new(player)
             .arg(&path)
@@ -367,7 +432,9 @@ impl App {
                 self.card.playing = Some(Playing {
                     id,
                     child,
-                    started: Instant::now(),
+                    // (As if it had begun that long ago: its line and its
+                    // clock go on from there.)
+                    started: Instant::now() - Duration::from_secs_f32(from),
                 });
                 self.card_voice_tick();
             }
@@ -405,6 +472,39 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_recording_can_be_cut_to_begin_later() {
+        // One second of 16 kHz mono 16-bit sound: 32000 bytes, each sample its own number.
+        let sound: Vec<u8> = (0..16000u32)
+            .flat_map(|n| (n as u16).to_le_bytes())
+            .collect();
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + sound.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&32000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(sound.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&sound);
+        let path = std::env::temp_dir().join(format!("card-cut-test-{}.wav", std::process::id()));
+        std::fs::write(&path, &wav).unwrap();
+        let cut = tail_wav(path.to_str().unwrap(), 0.5).unwrap();
+        let back = std::fs::read(&cut).unwrap();
+        // Half of it is left, beginning at the sample half a second in.
+        assert_eq!(back.len(), 44 + 16000);
+        assert_eq!(u32::from_le_bytes(back[40..44].try_into().unwrap()), 16000);
+        assert_eq!(u16::from_le_bytes(back[44..46].try_into().unwrap()), 8000);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(cut);
+        assert!(tail_wav("/nonexistent.wav", 1.0).is_none());
+    }
 
     #[test]
     fn the_engines_output_is_one_run_of_words() {

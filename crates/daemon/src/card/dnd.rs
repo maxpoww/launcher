@@ -80,7 +80,16 @@ impl App {
         let paint = self.card_paint();
         let zoom = self.card.zoom();
         let renderer = self.card_renderer.as_mut()?;
-        let lines = self.card.lines.get(&item.id).map_or(&[][..], Vec::as_slice);
+        // (An item made of parts has no lines of its own: it travels as its
+        // words — the first of them.)
+        let words: Vec<String>;
+        let lines = match self.card.lines.get(&item.id) {
+            Some(lines) if item.parts.is_empty() => lines.as_slice(),
+            _ => {
+                words = item.body.lines().take(4).map(str::to_owned).collect();
+                words.as_slice()
+            }
+        };
         let thumb = item.path.as_ref().and_then(|p| self.card.chains.get(p));
         let side = crate::apps::ICON_SIZE as usize;
         let canvas = tile_picture(
@@ -123,7 +132,15 @@ impl App {
     pub(super) fn card_lift(&mut self, id: u64, serial: u32) {
         self.card.press = None;
         // Where it is picked up: the middle of its own box.
-        let tile = self.card.tiles.iter().find(|t| t.id == id).map(|t| t.rect);
+        // (A PIECE of an open item has no box of its own in the list: it
+        // travels in one as wide as the items are.)
+        let tile = self
+            .card
+            .tiles
+            .iter()
+            .find(|t| t.id == id)
+            .or_else(|| self.card.tiles.first())
+            .map(|t| t.rect);
         let from_y = tile.map_or(0.0, |r| r.y + r.h / 2.0);
         let Some(item) = self.card.item(id).cloned() else {
             return;
