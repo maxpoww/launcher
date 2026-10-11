@@ -755,7 +755,10 @@ pub(super) fn draw(
 
     // The emoji picker, over the input box.
     if let (Some(tray), Some(seek), Some(cells)) = (b.tray, b.pick_seek(), b.pick_grid()) {
-        boxed(grid, tray, RADIUS, well, rim, 1.0);
+        // (In the card's own colours, as the items are — Max, 2026-10-11:
+        // the panel is the darker zebra tone, what is lit on it the lighter.)
+        let lit_tone = paint.zebra(true);
+        boxed(grid, tray, RADIUS, paint.zebra(false), rim, 1.0);
         // Its search — only once something is typed; till then a line of
         // hint in its place (while the card has the keys).
         let searching = bar.field == Some(Field::Pick);
@@ -764,7 +767,7 @@ pub(super) fn draw(
                 grid,
                 seek,
                 7.0,
-                ink(0.04),
+                lit_tone,
                 if searching { accent(0.7) } else { rim },
                 1.0,
             );
@@ -830,7 +833,7 @@ pub(super) fn draw(
                 grid.rects.push(RectInst {
                     rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
                     radius: 7.0,
-                    color: ink(0.10),
+                    color: lit_tone,
                     glass: 0.0,
                     border: 0.0,
                 });
@@ -863,7 +866,7 @@ pub(super) fn draw(
                 grid.rects.push(RectInst {
                     rect: band,
                     radius: 7.0,
-                    color: accent(0.06),
+                    color: lit_tone,
                     glass: 0.0,
                     border: 0.0,
                 });
@@ -880,7 +883,7 @@ pub(super) fn draw(
                 grid.rects.push(RectInst {
                     rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
                     radius: 7.0,
-                    color: ink(0.10),
+                    color: lit_tone,
                     glass: 0.0,
                     border: 0.0,
                 });
