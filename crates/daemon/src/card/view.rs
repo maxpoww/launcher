@@ -1645,7 +1645,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 } else {
                     "\u{f04b}"
                 },
-                (x + 14.0, t.y + TILE_PAD_Y - 3.0),
+                (x + 14.0, t.y + TILE_PAD_Y - 1.0),
                 play.w,
                 PLAY_PX,
                 true,
@@ -1667,7 +1667,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     None if named => item.body.as_str(),
                     None => VOICE_NAME,
                 },
-                (x + 32.0, t.y + TILE_PAD_Y + 1.0),
+                (x + 32.0, t.y + TILE_PAD_Y + 3.0),
                 text_w - 32.0 - 3.0 * CLOSE,
                 TEXT_PX + 0.5,
                 false,
@@ -1688,7 +1688,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 list.rects.push(RectInst {
                     rect: Rect::new(
                         (x + 32.0 + at).round(),
-                        t.y + TILE_PAD_Y + 2.0,
+                        t.y + TILE_PAD_Y + 4.0,
                         1.5,
                         TEXT_LINE - 3.0,
                     ),
@@ -2672,7 +2672,7 @@ pub(crate) fn tile_picture(
             s(PLAY_PX),
             Some(crate::options::NERD),
             paint.ink_at(0.92),
-            (s(x + 6.0), s(y - 3.0)),
+            (s(x + 6.0), s(y - 1.0)),
         );
         let named = !item.body.starts_with(VOICE_NAME);
         text(
@@ -2685,7 +2685,7 @@ pub(crate) fn tile_picture(
             s(TEXT_PX + 0.5),
             None,
             paint.ink_at(if named { 0.95 } else { 0.5 }),
-            (s(x + 32.0), s(y + 1.0)),
+            (s(x + 32.0), s(y + 3.0)),
         );
         let secs = item.aspect.max(1.0).round() as u32;
         let row = y + 22.0;
