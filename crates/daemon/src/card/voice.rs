@@ -59,7 +59,7 @@ const TICK_MS: u64 = 200;
 /// Shorter than this is a slip of the finger, not a note.
 const SHORTEST: f32 = 0.4;
 
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
+pub(super) fn tool(env: &str, name: &str) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(env).map(PathBuf::from) {
         return path.exists().then_some(path);
     }

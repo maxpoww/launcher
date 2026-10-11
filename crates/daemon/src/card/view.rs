@@ -83,6 +83,11 @@ pub(crate) enum Page {
     /// Every emoji, the whole card of them: for when a few emoji are all
     /// that is wanted (they go straight into the window).
     Emoji,
+    /// THE TRANSLATOR (Max, 2026-10-10: *"same flow as the pinned… the only
+    /// difference is that the card has a divider and shows the translation
+    /// under the divider"*): what is written there is kept with its
+    /// translation under a rule that names the two languages.
+    Translate,
     /// VOICE TO TEXT (Max, 2026-10-10): the whole card for talking — what
     /// is said is written into the window, and the last thing said stays
     /// under the microphone until the next one, to be kept or pasted again.
@@ -101,6 +106,7 @@ impl Page {
             Page::Pinned => Some("Pinned"),
             Page::Clipboard => Some("Clipboard"),
             Page::Dictionary => Some("Dictionary"),
+            Page::Translate => Some("Translator"),
             Page::Emoji => Some("Emoji"),
             Page::Talk => Some("Voice to text"),
         }
@@ -123,10 +129,11 @@ pub(crate) enum Foot {
     Dictionary,
     Emoji,
     Talk,
+    Translate,
 }
 
 /// How many buttons the head has.
-pub(crate) const FEET: usize = 6;
+pub(crate) const FEET: usize = 7;
 /// The microphone (fa-microphone).
 const GLYPH_MIC: &str = "\u{f130}";
 /// The room the big microphone takes at the top of voice-to-text's page,
@@ -154,6 +161,7 @@ impl Foot {
         Foot::Emoji,
         Foot::Pinned,
         Foot::Clipboard,
+        Foot::Translate,
         Foot::Dictionary,
         Foot::Memory,
     ];
@@ -165,6 +173,7 @@ impl Foot {
             Foot::Pinned => GLYPH_PIN,
             Foot::Clipboard => "\u{f0ea}",  // fa-clipboard
             Foot::Dictionary => "\u{f02d}", // fa-book
+            Foot::Translate => "\u{f1ab}",  // fa-language
             Foot::Emoji => "\u{f118}",      // fa-smile-o
             Foot::Talk => GLYPH_MIC,
         }
@@ -181,6 +190,7 @@ impl Foot {
             Foot::Pinned => Page::Pinned,
             Foot::Clipboard => Page::Clipboard,
             Foot::Dictionary => Page::Dictionary,
+            Foot::Translate => Page::Translate,
             Foot::Emoji => Page::Emoji,
             Foot::Talk => Page::Talk,
         }
@@ -1741,7 +1751,10 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         // The pencil, on what can be written again: a text of one's own.
         if over.is_some()
             && matches!(item.kind, Kind::Text | Kind::Voice)
-            && matches!(page, Page::Session | Page::Pinned | Page::Dictionary)
+            && matches!(
+                page,
+                Page::Session | Page::Pinned | Page::Dictionary | Page::Translate
+            )
         {
             button(
                 tile.edit(true),
@@ -2680,6 +2693,7 @@ mod tests {
                 Foot::Emoji,
                 Foot::Pinned,
                 Foot::Clipboard,
+                Foot::Translate,
                 Foot::Dictionary,
                 Foot::Memory
             ]

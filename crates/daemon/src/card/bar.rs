@@ -266,7 +266,7 @@ pub(crate) fn bottom(
         pick: picking.unwrap_or((0, 0.0)),
         rows: PICK_ROWS,
         hint_y,
-        plain: page == Page::Dictionary,
+        plain: matches!(page, Page::Dictionary | Page::Translate),
     }
 }
 

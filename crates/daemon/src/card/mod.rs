@@ -239,6 +239,82 @@ enum Undone {
     },
 }
 
+/// Which language `text` is in, told from its own common words (the one
+/// most of them belong to; English when none says otherwise). A guess from
+/// a few words — good for a sentence, not for a single word.
+fn language_of(text: &str) -> &'static str {
+    const WORDS: [(&str, &str); 6] = [
+        ("es", " el la los las de que y en un una es no por con para como está esto hola qué más pero muy "),
+        ("en", " the of and to in is you that it for with as this are how what hello need thanks your not "),
+        ("fr", " le la les des et est un une que pour dans avec vous je bonjour comment ça merci pas très "),
+        ("de", " der die das und ist ein eine nicht ich du wie guten morgen danke mit für auch sehr "),
+        ("pt", " o os as um uma que não com para você como está obrigado olá isso muito mas também "),
+        ("it", " il lo gli le un una che non per con come stai grazie ciao questo sono molto anche "),
+    ];
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+        .collect();
+    WORDS
+        .iter()
+        .map(|(code, list)| {
+            let n = words
+                .iter()
+                .filter(|w| list.contains(&format!(" {w} ")))
+                .count();
+            (*code, n)
+        })
+        .fold(
+            ("en", 0),
+            |best, now| if now.1 > best.1 { now } else { best },
+        )
+        .0
+}
+
+/// A language's name, from its code.
+fn language_name(code: &str) -> &'static str {
+    match code {
+        "es" => "Spanish",
+        "en" => "English",
+        "fr" => "French",
+        "de" => "German",
+        "pt" => "Portuguese",
+        "it" => "Italian",
+        _ => "?",
+    }
+}
+
+/// Translate `text` from one language into another with the engine on this
+/// computer: `argos-translate` (offline; `WAVERUNNER_TRANSLATE` names
+/// another place for it). What comes back is the translation — or, in
+/// brackets, why there is none: a reason, not words.
+fn translate(text: &str, from: &str, to: &str) -> String {
+    let Some(engine) = voice::tool("WAVERUNNER_TRANSLATE", "argos-translate") else {
+        return "(No translation engine on this computer yet)".to_owned();
+    };
+    let out = std::process::Command::new(engine)
+        .args(["--from-lang", from, "--to-lang", to, text])
+        .stdin(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {
+            let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if said.is_empty() {
+                "(Nothing came back)".to_owned()
+            } else {
+                said
+            }
+        }
+        Ok(_) => format!(
+            "({} → {} is not on this computer yet)",
+            language_name(from),
+            language_name(to)
+        ),
+        Err(_) => "(The translation engine did not start)".to_owned(),
+    }
+}
+
 /// The id of the row "Pinned" among what a search of Memory's page finds.
 const PINNED_ROW: u64 = u64::MAX - 9;
 
@@ -355,6 +431,9 @@ pub(crate) struct Card {
     /// The words looked up in the dictionary (its page's list), where they
     /// are kept while another page is up.
     looked: Vec<Item>,
+    /// The things translated (the translator's list), where they are kept
+    /// while another page is up.
+    translated: Vec<Item>,
     /// The words whose entries could not be read yet (the dictionary was
     /// still being opened): looked up again once it is.
     looking: Vec<u64>,
@@ -941,10 +1020,12 @@ impl Card {
         {
             return Some(Hover::Edit(tile.id));
         }
-        let pencil = matches!(self.page, Page::Session | Page::Pinned | Page::Dictionary)
-            && self
-                .item(tile.id)
-                .is_some_and(|it| matches!(it.kind, Kind::Text | Kind::Voice));
+        let pencil = matches!(
+            self.page,
+            Page::Session | Page::Pinned | Page::Dictionary | Page::Translate
+        ) && self
+            .item(tile.id)
+            .is_some_and(|it| matches!(it.kind, Kind::Text | Kind::Voice));
         // (Every list's items have a ×; a session's row has none while a
         // session is being chosen.)
         let closes =
@@ -1211,6 +1292,7 @@ impl Card {
             }
             Page::Pinned => self.pinned = shown,
             Page::Dictionary => self.looked = shown,
+            Page::Translate => self.translated = shown,
             Page::Talk => self.said_last = shown.into_iter().next(),
             Page::Memory | Page::Clipboard | Page::Emoji => {}
         }
@@ -1232,6 +1314,7 @@ impl Card {
             // (The clipboard's rows are the dock's to list: `card_show`.)
             Page::Talk => self.said_last.take().into_iter().collect(),
             Page::Dictionary => std::mem::take(&mut self.looked),
+            Page::Translate => std::mem::take(&mut self.translated),
             Page::Clipboard | Page::Emoji => Vec::new(),
         };
         // (A session's row is wrapped afresh: it may have changed.)
@@ -1550,6 +1633,7 @@ impl App {
             .iter()
             .chain(&saved.pinned)
             .chain(&saved.looked)
+            .chain(&saved.translated)
             .chain(saved.memory.iter().flat_map(|p| &p.items))
             .map(|it| it.id)
             .chain(saved.memory.iter().map(|p| p.id));
@@ -1559,6 +1643,7 @@ impl App {
         self.card.items = Vec::new();
         self.card.pinned = saved.pinned;
         self.card.looked = saved.looked;
+        self.card.translated = saved.translated;
         self.card.memory = saved.memory;
         self.card.titles = saved.titles;
         self.card.zoom = saved.zoom;
@@ -1592,6 +1677,11 @@ impl App {
                     self.card.items.clone()
                 } else {
                     self.card.looked.clone()
+                },
+                translated: if self.card.page == Page::Translate {
+                    self.card.items.clone()
+                } else {
+                    self.card.translated.clone()
                 },
                 memory: self.card.sessions(),
                 titles: self.card.titles.clone(),
@@ -1940,6 +2030,77 @@ impl App {
             .collect()
     }
 
+    /// THE TRANSLATOR works as Pinned does, with the translation under a
+    /// rule (Max, 2026-10-10). What is written is kept as an item of two
+    /// parts: the words, and their translation — an ANSWER whose name is
+    /// the two languages ("Spanish → English"). The language is told from
+    /// the words themselves (`language_of`); anything but English goes
+    /// into English, English into Spanish. The translating is the work of
+    /// an engine on this computer (`translate::engine`: `argos-translate`,
+    /// offline) on a thread; where there is none, or it has not that pair
+    /// of languages, the answer says so.
+    fn card_keep_translation(&mut self, text: &str, edit: Option<u64>) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let from = language_of(text);
+        let to = if from == "en" { "es" } else { "en" };
+        let mut words = self.card_part(Kind::Text, text.to_owned(), None, false, 0.0);
+        words.from = None;
+        let mut answer = self.card_part(Kind::Text, "Translating…".to_owned(), None, false, 0.0);
+        answer.from = Some(format!("{} → {}", language_name(from), language_name(to)));
+        let answer_id = answer.id;
+        let parts = vec![words, answer];
+        let id = match edit.and_then(|id| self.card.items.iter_mut().find(|it| it.id == id)) {
+            Some(item) => {
+                item.body = text.to_owned();
+                item.parts = parts;
+                item.id
+            }
+            None => {
+                let mut item = self.card_part(Kind::Text, text.to_owned(), None, false, 0.0);
+                item.parts = parts;
+                let id = item.id;
+                self.card.items.push(item);
+                self.card.to_bottom = true;
+                id
+            }
+        };
+        self.card.wide.insert(id);
+        self.card.lines.remove(&id);
+        let (tx, rx) = calloop::channel::channel::<String>();
+        let (text, from, to) = (text.to_owned(), from.to_owned(), to.to_owned());
+        std::thread::spawn(move || {
+            let _ = tx.send(translate(&text, &from, &to));
+        });
+        let waiting = self
+            .loop_handle
+            .insert_source(rx, move |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(said) = event {
+                    // (Wherever it is by now: on the card, or put away.)
+                    let part = app
+                        .card
+                        .items
+                        .iter_mut()
+                        .chain(app.card.translated.iter_mut())
+                        .flat_map(|it| it.parts.iter_mut())
+                        .find(|p| p.id == answer_id);
+                    if let Some(part) = part {
+                        part.body = said;
+                    }
+                    app.card.lines.remove(&answer_id);
+                    app.card_save();
+                    app.request_card_draw();
+                }
+            });
+        if waiting.is_err() {
+            warn!("card: cannot wait for a translation");
+        }
+        self.card_save();
+        self.request_card_draw();
+    }
+
     /// THE DICTIONARY works as Pinned does (Max, 2026-10-10: *"the
     /// dictionary: same flow"*): a word is written in the box and kept — as
     /// an item whose first part is the word and whose other parts are its
@@ -2253,9 +2414,10 @@ impl App {
                 (Keysym::Return | Keysym::KP_Enter, Page::Session) if self.card.open.is_some() => {
                     self.card_write_new("");
                 }
-                (Keysym::Return | Keysym::KP_Enter, Page::Pinned | Page::Dictionary) => {
-                    self.card_write_new("")
-                }
+                (
+                    Keysym::Return | Keysym::KP_Enter,
+                    Page::Pinned | Page::Dictionary | Page::Translate,
+                ) => self.card_write_new(""),
                 (Keysym::Return | Keysym::KP_Enter, Page::Memory) => {
                     self.card_begin();
                     self.card.field = Some(Field::Box);
@@ -2429,8 +2591,10 @@ impl App {
             // Enter in the search of an open session: what was typed
             // becomes a new thing, to be finished in the box.
             (Field::Seek, Keysym::Return | Keysym::KP_Enter)
-                if matches!(self.card.page, Page::Pinned | Page::Dictionary)
-                    || (self.card.page == Page::Session && self.card.open.is_some()) =>
+                if matches!(
+                    self.card.page,
+                    Page::Pinned | Page::Dictionary | Page::Translate
+                ) || (self.card.page == Page::Session && self.card.open.is_some()) =>
             {
                 let words = std::mem::take(&mut self.card.query);
                 self.card_write_new(&words);
@@ -2536,8 +2700,9 @@ impl App {
         };
         self.card.take_draft();
         self.card_unseal();
-        // (A word of the dictionary: the word itself is written again.)
-        if self.card.page == Page::Dictionary {
+        // (A word of the dictionary, a thing translated: what was written
+        // is written again.)
+        if matches!(self.card.page, Page::Dictionary | Page::Translate) {
             self.card.type_in(&item.body);
             self.card.edit = Some(id);
             if self.card.field.is_none() {
@@ -2591,10 +2756,16 @@ impl App {
     /// the list that is up, or as the new words of the item being changed.
     fn card_keep_draft(&mut self) {
         let text = self.card.take_draft();
-        // (On the dictionary's page what is written is a word to look up.)
+        // (On the dictionary's page what is written is a word to look up;
+        // on the translator's, something to translate.)
         if self.card.page == Page::Dictionary {
             let edit = self.card.edit.take();
             self.card_keep_word(&text, edit);
+            return;
+        }
+        if self.card.page == Page::Translate {
+            let edit = self.card.edit.take();
+            self.card_keep_translation(&text, edit);
             return;
         }
         let mut parts = std::mem::take(&mut self.card.sealed);
@@ -3342,6 +3513,7 @@ impl App {
                     match page {
                         Page::Pinned => Some(&mut self.card.pinned),
                         Page::Dictionary => Some(&mut self.card.looked),
+                        Page::Translate => Some(&mut self.card.translated),
                         Page::Session => self
                             .card
                             .memory
@@ -4142,6 +4314,7 @@ impl App {
             (_, _, Page::Clipboard) => "Click to paste · type to search",
             (_, _, Page::Pinned) => "Type to search · press Enter to create · hold Space to talk",
             (_, _, Page::Dictionary) => "Type to search · press Enter to look a word up",
+            (_, _, Page::Translate) => "Type to search · press Enter to translate",
             (_, _, Page::Talk) => "Press the microphone, or hold Space to talk",
             _ => "",
         };
@@ -4173,12 +4346,7 @@ impl App {
                     naming: Some(&self.card.naming),
                     draft: &self.card.draft_lines,
                     query: &self.card.query,
-                    // (The dictionary's search is a word, not a filter.)
-                    found: if self.card.page == Page::Dictionary {
-                        usize::MAX
-                    } else {
-                        listed.len()
-                    },
+                    found: listed.len(),
                     field: self.card.field,
                     caret,
                     first: self.card.draft_top(),
@@ -5067,6 +5235,14 @@ impl App {
                 self.request_card_draw();
                 self.card_words()
             }
+            // `translate [words]`: the translator's page (and those words kept).
+            "translate" => {
+                self.card_show(Page::Translate);
+                if !rest.trim().is_empty() {
+                    self.card_keep_translation(rest, None);
+                }
+                format!("{} things", self.card.items.len())
+            }
             // `talk`: voice-to-text's page · `said <words>`: as if that had
             // just been said there (written into the window, kept as its last).
             "talk" => {
@@ -5497,6 +5673,26 @@ mod tests {
         assert_eq!(card.items.len(), 1);
         assert_eq!(card.session_for("0x2", Some("Desktop")), Some(a));
         assert!(card.titles.get("Desktop").is_none());
+    }
+
+    #[test]
+    fn a_sentences_language_is_told_from_its_common_words() {
+        assert_eq!(
+            language_of("hola, ¿cómo estás? necesito ayuda con esto"),
+            "es"
+        );
+        assert_eq!(
+            language_of("the card follows you through the windows"),
+            "en"
+        );
+        assert_eq!(
+            language_of("bonjour, comment ça va ? merci pour tout"),
+            "fr"
+        );
+        assert_eq!(language_of("guten morgen, wie geht es dir? danke"), "de");
+        // (Nothing to go by: English.)
+        assert_eq!(language_of("xyzzy"), "en");
+        assert_eq!(language_name("pt"), "Portuguese");
     }
 
     #[test]
