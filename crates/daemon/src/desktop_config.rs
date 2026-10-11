@@ -481,6 +481,9 @@ struct Probe {
     addr: Option<String>,
     /// It is on the Wi-Fi, due, and will not let us in: restarted.
     shut: bool,
+    /// It was to be synced at this look whatever the clock says (and over
+    /// Wi-Fi first), and was not to be found: at the next look, then.
+    again: (bool, bool),
 }
 
 /// A phone that has not been synced for this long (and three of its own
@@ -892,6 +895,7 @@ impl App {
             // Asked for now (an Apply): due whatever the clock says, and
             // whether or not it is charging — its owner is at it.
             let now = self.desktop.sync_now.remove(&serial);
+            let wifi_first = self.desktop.sync_over_wifi.remove(&serial);
             let probed = serial.clone();
             self.desktop_off_loop(
                 move || {
@@ -913,24 +917,43 @@ impl App {
                         let long = since >= (3 * phone.every.secs()).max(SYNC_MISSED);
                         let shut = due
                             && phone.addr.as_deref().is_some_and(|a| long || crate::desktop_phone::wifi_shut(a));
-                        return (probed, phone, Probe { there: false, target: None, addr, shut });
+                        return (probed, phone, Probe { there: false, target: None, addr, shut, again: (now, wifi_first) });
                     }
                     let due = now || since >= phone.every.secs() || (!was_there && since >= SYNC_AGAIN);
                     let target = due
-                        .then(|| crate::desktop_phone::reach(&probed, phone.addr.as_deref()))
+                        .then(|| {
+                            wifi_first
+                                .then(|| crate::desktop_phone::reach_wifi(phone.addr.as_deref()))
+                                .flatten()
+                                .or_else(|| crate::desktop_phone::reach(&probed, phone.addr.as_deref()))
+                        })
                         .flatten()
                         .filter(|t| now || !phone.charging_only || crate::desktop_phone::charging(t));
-                    (probed, phone, Probe { there: true, target, addr, shut: false })
+                    (probed, phone, Probe { there: true, target, addr, shut: false, again: (false, false) })
                 },
                 |app, (serial, phone, probe)| {
                     app.desktop.phones_there.insert(serial.clone(), probe.there);
-                    app.phone_sync_stuck(&serial, &phone.name, probe.shut, probe.there, probe.addr.is_some());
+                    if probe.again.0 {
+                        app.desktop.sync_now.insert(serial.clone());
+                    }
+                    if probe.again.1 {
+                        app.desktop.sync_over_wifi.insert(serial.clone());
+                    }
+                    let mended =
+                        app.phone_sync_stuck(&serial, &phone.name, probe.shut, probe.there, probe.addr.is_some());
                     if let Some(addr) = probe.addr {
                         let mut phones = Phones::load();
                         if let Some(p) = phones.by_serial.get_mut(&serial) {
                             p.addr = Some(addr);
                             phones.save();
                         }
+                    }
+                    // Just mended: its sync is the next look's, over Wi-Fi —
+                    // one begun now on the cable would die with the cable
+                    // its owner has just been told to take out (Max's did,
+                    // six seconds in, 2026-10-11).
+                    if mended {
+                        return;
                     }
                     if let Some(target) = probe.target {
                         app.phone_sync(serial, phone, target);
@@ -947,11 +970,22 @@ impl App {
     /// task pill says so — a task standing at nothing, with its Cancel as
     /// always. Plugged in, it is `allowed` again by the look that finds it,
     /// and the pill says that for a moment.
-    pub(crate) fn phone_sync_stuck(&mut self, serial: &str, name: &str, shut: bool, there: bool, allowed: bool) {
+    /// Whether it was mended just now (its sync follows, over Wi-Fi).
+    pub(crate) fn phone_sync_stuck(&mut self, serial: &str, name: &str, shut: bool, there: bool, allowed: bool) -> bool {
         use crate::i18n::tr;
         if allowed {
             self.desktop.sync_unasked.remove(serial);
             if self.desktop.sync_stuck.remove(serial).is_some() {
+                // What it missed comes now, whatever the clock and the
+                // charger say (its owner is at it), over Wi-Fi, once the
+                // phone's own side has restarted.
+                self.desktop.sync_now.insert(serial.to_owned());
+                self.desktop.sync_over_wifi.insert(serial.to_owned());
+                let soon = calloop::timer::Timer::from_duration(std::time::Duration::from_secs(8));
+                let _ = self.loop_handle.insert_source(soon, |_, _, app: &mut App| {
+                    app.phone_sync_tick();
+                    calloop::timer::TimeoutAction::Drop
+                });
                 info!("desktop: {name} can be synced over Wi-Fi again");
                 let said = self.task_begin(&format!("{name} {}", tr("is fixed — you can unplug it, it will keep syncing over Wi-Fi")));
                 said.set(1, 1);
@@ -962,6 +996,7 @@ impl App {
                     },
                     |_, said| drop(said),
                 );
+                return true;
             }
         } else if shut {
             if !self.desktop.sync_stuck.contains_key(serial) && !self.desktop.sync_unasked.contains(serial) {
@@ -973,6 +1008,7 @@ impl App {
             // It answers after all (it was let in some other way).
             self.desktop.sync_stuck.remove(serial);
         }
+        false
     }
 
     /// Sync one phone now: what it has that is not here comes here (and,

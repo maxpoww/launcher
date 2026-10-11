@@ -402,6 +402,23 @@ pub(crate) fn wifi_there(addr: &str) -> bool {
         .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_secs(1)).is_ok())
 }
 
+/// The phone over Wi-Fi and nothing else, with ten seconds' patience: it was
+/// allowed a moment ago and its own side is still restarting. What `adb -s`
+/// is told.
+pub(crate) fn reach_wifi(addr: Option<&str>) -> Option<String> {
+    let addr = addr?;
+    for _ in 0..20 {
+        if wifi_there(addr) {
+            let _ = Command::new("adb").args(["connect", addr]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            if ready(addr) {
+                return Some(addr.to_owned());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    None
+}
+
 /// Whether the machine at `addr` is THERE and says no: a phone on the Wi-Fi
 /// whose door for us is shut — it was restarted and has forgotten that this
 /// computer may come in (a phone that is away does not answer at all).

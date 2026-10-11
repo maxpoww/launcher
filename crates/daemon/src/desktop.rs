@@ -430,6 +430,10 @@ pub(crate) struct Desktop {
     /// that says so on the bar; and the ones whose owner cancelled that.
     pub sync_stuck: HashMap<String, crate::tasks::TaskHandle>,
     pub sync_unasked: HashSet<String>,
+    /// The phones mended a moment ago: their next sync goes over Wi-Fi even
+    /// if they are still on their cable (their owner was just told that the
+    /// cable can go).
+    pub sync_over_wifi: HashSet<String>,
     /// The phones to sync at the next look whatever the clock says (their
     /// settings were just applied).
     pub sync_now: HashSet<String>,
