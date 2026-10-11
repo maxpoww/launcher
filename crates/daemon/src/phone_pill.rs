@@ -701,7 +701,13 @@ impl App {
                     {
                         continue;
                     }
+                    // (Said, not left out: a row that is simply not there
+                    // reads as something broken — Max, 2026-10-11: "there
+                    // is no use as camera on the pill box".)
                     if old && matches!(row, Row::Item { action: Action::Camera, .. }) {
+                        let said = line("Use as camera: needs Android 12 or newer", "", Act::Nothing);
+                        lines.push(Line { air, dim: true, ..said });
+                        air = false;
                         continue;
                     }
                     let (label, action) = match row {
