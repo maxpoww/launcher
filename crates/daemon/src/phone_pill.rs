@@ -29,6 +29,23 @@ use crate::App;
 /// fa-mobile.
 const GLYPH_PHONE: &str = "\u{f10b}";
 
+/// Between the battery and its number.
+const BATTERY_GAP: f32 = 5.0;
+/// The battery's glyph beside the words' size: the icon font's glyphs are
+/// held to one narrow cell, and at the words' size it was a speck.
+const BATTERY_SIZE: f32 = 1.7;
+
+/// fa-battery-full … fa-battery-empty: the one that is as full as `level`.
+fn battery_glyph(level: u8) -> &'static str {
+    match level {
+        88..=u8::MAX => "\u{f240}",
+        63..=87 => "\u{f241}",
+        38..=62 => "\u{f242}",
+        13..=37 => "\u{f243}",
+        _ => "\u{f244}",
+    }
+}
+
 /// How much longer than its words need the long pill is.
 const LONGER: f32 = 4.0 / 3.0;
 
@@ -37,8 +54,12 @@ const LONGER: f32 = 4.0 / 3.0;
 struct Shown {
     /// The volume's path (what is ejected).
     path: String,
-    /// "Max's Pixel · Synced 2 h ago · 66%".
+    /// "Max's Pixel · Synced 2 h ago" — and " · " after it when its battery
+    /// follows.
     says: String,
+    /// Its battery in hundredths, once it has said: a battery and the
+    /// number, after the words.
+    battery: Option<u8>,
     /// What `adb -s` is told for it (`None`: it has no adb to ask).
     serial: Option<String>,
     /// It is known here (in `phones.json`).
@@ -60,6 +81,9 @@ pub(crate) struct PhonePill {
     /// The words' measured width, and what was measured.
     says_w: f32,
     measured: String,
+    /// The battery's glyph and its number, measured.
+    glyph_w: f32,
+    level_w: f32,
     /// A phone that is not there (`debug-desktop "phonepill fake"`), and the
     /// pill stood open or shut without a pointer.
     fake: Option<Shown>,
@@ -103,10 +127,11 @@ impl App {
         };
         // Its battery, once it has said (Max, 2026-10-11: "the battery on
         // the big pill").
-        let battery = serial.as_ref().and_then(|s| self.phone_pill.battery.get(s)).map(|b| format!(" · {b}%"));
+        let battery = serial.as_ref().and_then(|s| self.phone_pill.battery.get(s)).copied();
         Some(Shown {
             path: v.path.to_string_lossy().into_owned(),
-            says: format!("{name} · {state}{}", battery.unwrap_or_default()),
+            says: format!("{name} · {state}{}", if battery.is_some() { " · " } else { "" }),
+            battery,
             known: known.is_some(),
             serial,
         })
@@ -142,11 +167,19 @@ impl App {
     /// the pill follows.
     pub(crate) fn phone_pill_sync(&mut self) {
         if let Some(now) = self.phone_pill_now() {
-            if now.says != self.phone_pill.measured {
+            let key = format!("{}{:?}", now.says, now.battery);
+            if key != self.phone_pill.measured {
                 let font_px = FONT_PX * self.options_scale();
                 if let Some(r) = self.options_renderer.as_mut() {
                     self.phone_pill.says_w = r.measure_text(&now.says, font_px, TEXT_FONT);
-                    self.phone_pill.measured = now.says.clone();
+                    (self.phone_pill.glyph_w, self.phone_pill.level_w) = match now.battery {
+                        Some(b) => (
+                            r.measure_text(battery_glyph(b), font_px * BATTERY_SIZE, Some(crate::options::NERD)),
+                            r.measure_text(&format!("{b}%"), font_px, TEXT_FONT),
+                        ),
+                        None => (0.0, 0.0),
+                    };
+                    self.phone_pill.measured = key;
                 }
             }
             // A phone not asked yet (it has just been plugged in).
@@ -196,7 +229,15 @@ impl App {
     /// third as much again (Max, 2026-10-11: "make the long pill 1/3
     /// longer") — the words stand in its middle.
     fn phone_pill_long_w(&self) -> f32 {
-        (self.phone_pill.says_w + 2.0 * PILL_PAD_X) * LONGER
+        (self.phone_pill_words_w() + 2.0 * PILL_PAD_X) * LONGER
+    }
+
+    /// All the long pill writes, end to end: the words, and after them the
+    /// battery and its number.
+    fn phone_pill_words_w(&self) -> f32 {
+        let p = &self.phone_pill;
+        let battery = if p.level_w > 0.0 { p.glyph_w + BATTERY_GAP + p.level_w } else { 0.0 };
+        p.says_w + battery
     }
 
     /// How much of the bar left of the bell the round pill takes (what the
@@ -309,9 +350,19 @@ impl App {
         let (verb, rest) = what.split_once(' ').unwrap_or((what, ""));
         match verb {
             "fake" => {
-                let says = if rest.trim().is_empty() { "Max's Pixel · Synced 2 h ago · 66%" } else { rest.trim() };
-                self.phone_pill.fake =
-                    Some(Shown { path: "/nowhere/a-phone".to_owned(), says: says.to_owned(), serial: None, known: true });
+                // (`fake 35 Some words`: a battery at 35.)
+                let (level, words) = match rest.trim().split_once(' ') {
+                    Some((n, words)) if n.parse::<u8>().is_ok() => (n.parse::<u8>().ok(), words.trim()),
+                    _ => (Some(66), rest.trim()),
+                };
+                let words = if words.is_empty() { "Max's Pixel · Synced 2 h ago" } else { words };
+                self.phone_pill.fake = Some(Shown {
+                    path: "/nowhere/a-phone".to_owned(),
+                    says: format!("{words} · "),
+                    battery: level,
+                    serial: None,
+                    known: true,
+                });
             }
             "gone" => self.phone_pill.fake = None,
             "open" => self.phone_pill.forced = Some(true),
@@ -323,7 +374,7 @@ impl App {
         self.update_phone_hover();
         format!(
             "phone pill: {:?}, at {:?}",
-            self.phone_pill_now().map(|s| s.says),
+            self.phone_pill_now().map(|s| (s.says, s.battery)),
             self.phone_pill_on_bar().map(|r| (r.x.round(), r.w.round()))
         )
     }
@@ -357,19 +408,34 @@ impl App {
                 glass: 0.0,
                 border: 0.0,
             });
-            scene.labels.push(Label {
-                text: shown.says.clone(),
-                pos: (long.x + long.w / 2.0, long.y + (long.h - LINE_PX * s) / 2.0),
-                max_w: 4096.0,
-                font_px: FONT_PX * s,
-                line_px: LINE_PX * s,
-                centered: true,
-                dim: false,
-                cache: true,
-                family: TEXT_FONT,
-                color: Some([ink[0], ink[1], ink[2], ink[3] * out]),
-                clip: Some(Rect::new(long.x + PILL_PAD_X, long.y, (long.w - 2.0 * PILL_PAD_X).max(0.0), long.h)),
-            });
+            // The words, then the battery (a glyph of the bar's icon font)
+            // and its number — one run, standing in the pill's middle.
+            let clip = Some(Rect::new(long.x + PILL_PAD_X, long.y, (long.w - 2.0 * PILL_PAD_X).max(0.0), long.h));
+            let color = Some([ink[0], ink[1], ink[2], ink[3] * out]);
+            let ty = long.y + (long.h - LINE_PX * s) / 2.0;
+            let mut x = long.x + (long.w - self.phone_pill_words_w()) / 2.0;
+            let mut write = |scene: &mut Scene, text: String, w: f32, family: Option<&'static str>| {
+                let k = if family.is_some() { BATTERY_SIZE } else { 1.0 };
+                scene.labels.push(Label {
+                    text,
+                    pos: (x, ty - LINE_PX * s * (k - 1.0) / 2.0),
+                    max_w: 4096.0,
+                    font_px: FONT_PX * s * k,
+                    line_px: LINE_PX * s * k,
+                    centered: false,
+                    dim: false,
+                    cache: true,
+                    family,
+                    color,
+                    clip,
+                });
+                x += w;
+            };
+            write(scene, shown.says.clone(), p.says_w, TEXT_FONT);
+            if let Some(level) = shown.battery {
+                write(scene, battery_glyph(level).to_owned(), p.glyph_w + BATTERY_GAP, Some(crate::options::NERD));
+                write(scene, format!("{level}%"), p.level_w, TEXT_FONT);
+            }
         }
 
         // The round pill: every pill's ground, lifted under the pointer as
