@@ -1541,6 +1541,20 @@ impl App {
     /// emoji picker's "type this" (you asked to type a character, not to copy
     /// one). It still takes the clipboard over, exactly as any copy does, so a
     /// second Ctrl+V repeats it.
+    /// Put `text` on the clipboard as a COPY of one's own: served, and
+    /// filed in the history as anything copied is (unlike
+    /// `serve_transient_text`, which keeps out of it).
+    pub(crate) fn copy_text(&mut self, text: &str) {
+        let Some(mut entry) = classify_text(text, "text/plain;charset=utf-8".into()) else {
+            return;
+        };
+        entry.id = 0;
+        if self.clip.served_hash == Some(entry.hash) {
+            return;
+        }
+        self.serve_clip(entry);
+    }
+
     pub(crate) fn serve_transient_text(&mut self, text: &str) {
         let Some(mut entry) = classify_text(text, "text/plain;charset=utf-8".into()) else {
             return;

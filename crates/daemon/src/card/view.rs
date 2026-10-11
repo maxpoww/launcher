@@ -1904,6 +1904,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         Page::Session => Some("Drag here to keep"),
         Page::Pinned => Some("Drag here to pin"),
         Page::Translate => Some("Drag here to translate"),
+        Page::Clipboard => Some("Drag here to copy"),
         Page::Dictionary => Some("Drag here to look up"),
         _ => None,
     };

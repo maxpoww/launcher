@@ -541,6 +541,14 @@ pub(crate) struct Card {
     menu: Option<u64>,
     /// The translation whose menu of languages is open.
     lang: Option<u64>,
+    /// SMOOTH SCROLLING THAT KEEPS GOING (Max, 2026-10-11): where the list is
+    /// easing to (a wheel step adds to it; the list follows on the frames),
+    /// how fast the wheel was going (px/s) and when its last step was — a
+    /// fast scroll let go of glides on from there (`gliding`), slowing down.
+    scroll_to: Option<f32>,
+    scroll_vel: f32,
+    scroll_last: Option<Instant>,
+    gliding: bool,
     /// A drag is held over this button of the head, since then: held long
     /// enough, the card turns to its page (so a thing can be carried from
     /// any page to any other).
@@ -1895,6 +1903,16 @@ impl App {
                 self.card_keep_word(&body, None);
                 return;
             }
+            // (The clipboard's page: it is COPIED — on the clipboard, and
+            // so in its history, as anything copied is.)
+            Page::Clipboard => {
+                match path {
+                    Some(path) => self.serve_files(std::slice::from_ref(&path), false),
+                    None => self.copy_text(&body),
+                }
+                self.card_flash("Copied");
+                return;
+            }
             Page::Memory => {
                 if let Some(session) = self.card.drop_session {
                     let item = self.card_part(kind, body, path, owned, aspect);
@@ -2647,6 +2665,7 @@ impl App {
                         self.card.field = Some(Field::Seek);
                         self.card.query.push_str(s);
                         self.card.scroll = 0.0;
+                        self.card.scroll_to = None;
                     }
                     Some(s) => {
                         self.card.field = Some(Field::Pick);
@@ -4215,6 +4234,24 @@ impl App {
                 moving = true;
             }
         }
+        // The list on its way to where the wheel sent it: quickly after a
+        // step of the wheel, slowly through a glide.
+        if self.card.to_bottom {
+            self.card.scroll_to = None;
+            self.card.gliding = false;
+        }
+        if let Some(to) = self.card.scroll_to {
+            let to = to.clamp(0.0, self.card.max_scroll);
+            let rate = if self.card.gliding { 4.5 } else { 24.0 };
+            let (at, going) = crate::animation::ease_toward(self.card.scroll, to, dt, rate, 0.4);
+            self.card.scroll = at;
+            if going {
+                moving = true;
+            } else {
+                self.card.scroll_to = None;
+                self.card.gliding = false;
+            }
+        }
         self.card_last_frame = moving.then_some(now);
         if self.card.leaving && shown <= 0.0 {
             self.card_let_go();
@@ -4903,6 +4940,10 @@ impl App {
                 axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
                 ..
             } => self.card_swipe_judge(),
+            wl_pointer::Event::AxisStop {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                ..
+            } => self.card_fling(),
             wl_pointer::Event::Axis {
                 axis: WEnum::Value(axis),
                 value,
@@ -4976,11 +5017,26 @@ impl App {
                 }
             }
             Some(false) if along != 0.0 => {
-                let to = (self.card.scroll + along * 2.4).clamp(0.0, self.card.max_scroll);
-                if to != self.card.scroll {
-                    self.card.scroll = to;
-                    self.request_card_draw();
-                }
+                // The list EASES to where the wheel says, instead of jumping
+                // there; and how fast the wheel goes is kept, for the glide
+                // when it is let go (`card_fling`).
+                let step = along * 2.4;
+                // (A glide under way is taken over from where the list is.)
+                let from = match (self.card.gliding, self.card.scroll_to) {
+                    (false, Some(to)) => to,
+                    _ => self.card.scroll,
+                };
+                self.card.gliding = false;
+                let now = Instant::now();
+                let dt = self
+                    .card
+                    .scroll_last
+                    .map_or(0.1, |last| (now - last).as_secs_f32())
+                    .clamp(0.004, 0.1);
+                self.card.scroll_vel = 0.55 * self.card.scroll_vel + 0.45 * (step / dt);
+                self.card.scroll_last = Some(now);
+                self.card.scroll_to = Some((from + step).clamp(0.0, self.card.max_scroll));
+                self.request_card_draw();
             }
             _ => {}
         }
@@ -5011,7 +5067,36 @@ impl App {
 
     /// The scroll gesture is over: the next one chooses its way afresh, and
     /// the pointer is the card's box's alone again.
+    /// The fingers left the touchpad on an up-and-down scroll: one that was
+    /// going FAST keeps going — the list glides on in the same direction and
+    /// comes to rest, as a page does under a flick. (A wheel that had
+    /// already stopped under the fingers does not.)
+    fn card_fling(&mut self) {
+        const FAST: f32 = 500.0;
+        let fresh = self
+            .card
+            .scroll_last
+            .is_some_and(|last| last.elapsed() < Duration::from_millis(90));
+        let v = self.card.scroll_vel;
+        self.card.scroll_vel = 0.0;
+        self.card.scroll_last = None;
+        if !fresh || v.abs() < FAST || self.card.wheel.sideways == Some(true) {
+            return;
+        }
+        // (How far it carries: its speed for about a third of a second.)
+        let from = self.card.scroll_to.unwrap_or(self.card.scroll);
+        self.card.scroll_to = Some((from + v * 0.32).clamp(0.0, self.card.max_scroll));
+        self.card.gliding = true;
+        self.request_card_draw();
+    }
+
     fn card_wheel_end(&mut self) {
+        // (A wheel with no "fingers left" of its own — a mouse's: its speed
+        // is not carried into the next scroll.)
+        if !self.card.gliding {
+            self.card.scroll_vel = 0.0;
+            self.card.scroll_last = None;
+        }
         let was_sideways = self.card.wheel.sideways == Some(true);
         self.card.wheel = Wheel::default();
         if was_sideways {
