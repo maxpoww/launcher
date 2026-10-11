@@ -752,7 +752,7 @@ mod tests {
         wav.extend_from_slice(&sound);
         let path = std::env::temp_dir().join(format!("card-cut-test-{}.wav", std::process::id()));
         std::fs::write(&path, &wav).unwrap();
-        let cut = tail_wav(path.to_str().unwrap(), 0.5).unwrap();
+        let cut = tail_wav(path.to_str().unwrap(), 0.5, 1.0).unwrap();
         let back = std::fs::read(&cut).unwrap();
         // Half of it is left, beginning at the sample half a second in.
         assert_eq!(back.len(), 44 + 16000);
@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(u16::from_le_bytes(back[44..46].try_into().unwrap()), 8000);
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(cut);
-        assert!(tail_wav("/nonexistent.wav", 1.0).is_none());
+        assert!(tail_wav("/nonexistent.wav", 1.0, 1.0).is_none());
     }
 
     #[test]
