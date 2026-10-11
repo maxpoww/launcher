@@ -70,6 +70,15 @@ if [ -n "$SPEECH" ]; then
   export WAVERUNNER_WHISPER_MODEL="$SPEECH/share/waverunner/ggml-base.bin"
 fi
 
+# The card's translator: the offline engine and its language pairs, built by
+# the flake and rooted via the out-link, as the speech engine is. Without it
+# a translation says there is no engine on this computer.
+TRANSLATE="$(timeout $WAIT nix build --out-link "$STATE/translate" --print-out-paths /home/max/launcher#translate 2>/dev/null)"
+[ -z "$TRANSLATE" ] && [ -e "$STATE/translate" ] && TRANSLATE="$STATE/translate"
+if [ -n "$TRANSLATE" ]; then
+  export WAVERUNNER_TRANSLATE="$TRANSLATE/bin/translateLocally"
+fi
+
 # Which build to run: release by default — Hyprland runs this at login, and a
 # debug default once brought the desk up on a stale debug binary after a
 # reboot (2026-09-30). Set WAVERUNNER_PROFILE=debug for the dev loop (verify-ui

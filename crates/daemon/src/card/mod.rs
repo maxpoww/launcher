@@ -286,18 +286,32 @@ fn language_name(code: &str) -> &'static str {
 }
 
 /// Translate `text` from one language into another with the engine on this
-/// computer: `argos-translate` (offline; `WAVERUNNER_TRANSLATE` names
-/// another place for it). What comes back is the translation — or, in
-/// brackets, why there is none: a reason, not words.
+/// computer: `translateLocally` (offline — marian with the Bergamot models;
+/// the flake's `translate` package, pointed at by `WAVERUNNER_TRANSLATE`),
+/// given the words on its input and the pair as its model ("es-en-tiny").
+/// What comes back is the translation — or, in brackets, why there is
+/// none: a reason, not words.
 fn translate(text: &str, from: &str, to: &str) -> String {
-    let Some(engine) = voice::tool("WAVERUNNER_TRANSLATE", "argos-translate") else {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let Some(engine) = voice::tool("WAVERUNNER_TRANSLATE", "translateLocally") else {
         return "(No translation engine on this computer yet)".to_owned();
     };
-    let out = std::process::Command::new(engine)
-        .args(["--from-lang", from, "--to-lang", to, text])
-        .stdin(std::process::Stdio::null())
-        .output();
-    match out {
+    let child = Command::new(engine)
+        .args(["-m", &format!("{from}-{to}-tiny")])
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return "(The translation engine did not start)".to_owned();
+    };
+    if let Some(mut input) = child.stdin.take() {
+        let _ = input.write_all(text.as_bytes());
+        let _ = input.write_all(b"\n");
+    }
+    match child.wait_with_output() {
         Ok(out) if out.status.success() => {
             let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
             if said.is_empty() {
@@ -306,12 +320,13 @@ fn translate(text: &str, from: &str, to: &str) -> String {
                 said
             }
         }
+        // (It has no model for that pair.)
         Ok(_) => format!(
             "({} → {} is not on this computer yet)",
             language_name(from),
             language_name(to)
         ),
-        Err(_) => "(The translation engine did not start)".to_owned(),
+        Err(_) => "(The translation engine did not finish)".to_owned(),
     }
 }
 
@@ -1958,6 +1973,24 @@ impl App {
                 self.card.pick_query.clear();
                 self.card.repick();
             }
+            // (The translator's page: a thing that could not be translated —
+            // no engine then, or not that pair — is tried again now.)
+            if page == Page::Translate {
+                let again: Vec<(u64, String)> = self
+                    .card
+                    .items
+                    .iter()
+                    .filter(|it| {
+                        it.parts
+                            .last()
+                            .is_some_and(|p| p.from.is_some() && p.body.starts_with('('))
+                    })
+                    .map(|it| (it.id, it.body.clone()))
+                    .collect();
+                for (id, words) in again {
+                    self.card_keep_translation(&words, Some(id));
+                }
+            }
             // (The dictionary's page: a word left waiting for the dictionary
             // — the dock was closed meanwhile — is looked up now.)
             if page == Page::Dictionary {
@@ -2036,9 +2069,9 @@ impl App {
     /// the two languages ("Spanish → English"). The language is told from
     /// the words themselves (`language_of`); anything but English goes
     /// into English, English into Spanish. The translating is the work of
-    /// an engine on this computer (`translate::engine`: `argos-translate`,
-    /// offline) on a thread; where there is none, or it has not that pair
-    /// of languages, the answer says so.
+    /// an engine on this computer (`translate`: translateLocally, offline)
+    /// on a thread; where there is none, or it has not that pair of
+    /// languages, the answer says so.
     fn card_keep_translation(&mut self, text: &str, edit: Option<u64>) {
         let text = text.trim();
         if text.is_empty() {

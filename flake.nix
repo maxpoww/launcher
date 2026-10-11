@@ -74,6 +74,34 @@
             ln -s ${model} $out/share/waverunner/ggml-base.bin
           '';
 
+        # The card's translator: an offline engine (translateLocally — marian
+        # and the Bergamot models, the ones Firefox translates with) and the
+        # language pairs it knows here, pinned: Spanish, French and German,
+        # each to and from English (the small "tiny" models, some 15 MB a
+        # pair). The engine finds its models under share/translateLocally in
+        # the data dirs; it is run with no window. Pointed at by
+        # $WAVERUNNER_TRANSLATE (`crates/daemon/src/card/mod.rs`, `translate`).
+        translate =
+          let
+            models = with pkgs.translatelocally-models; [
+              es-en-tiny
+              en-es-tiny
+              fr-en-tiny
+              en-fr-tiny
+              de-en-tiny
+              en-de-tiny
+            ];
+          in
+          pkgs.runCommand "waverunner-translate" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+            mkdir -p $out/bin $out/share/translateLocally/models
+            for m in ${toString models}; do
+              ln -s $m/share/translateLocally/models/* $out/share/translateLocally/models/
+            done
+            makeWrapper ${pkgs.translatelocally}/bin/translateLocally $out/bin/translateLocally \
+              --prefix XDG_DATA_DIRS : $out/share \
+              --set-default QT_QPA_PLATFORM offscreen
+          '';
+
         dictionaries =
           let
             english = pkgs.fetchurl {
@@ -133,7 +161,8 @@
               --set-default WAVERUNNER_DICT ${dictionaries}/share/waverunner/dictionary.json \
               --set-default WAVERUNNER_DICT_ES ${dictionaries}/share/waverunner/dictionary-es.json \
               --set-default WAVERUNNER_WHISPER ${speech}/bin/whisper-cli \
-              --set-default WAVERUNNER_WHISPER_MODEL ${speech}/share/waverunner/ggml-base.bin
+              --set-default WAVERUNNER_WHISPER_MODEL ${speech}/share/waverunner/ggml-base.bin \
+              --set-default WAVERUNNER_TRANSLATE ${translate}/bin/translateLocally
           '';
         };
 
