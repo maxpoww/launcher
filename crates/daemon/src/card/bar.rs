@@ -182,6 +182,8 @@ pub(crate) struct Bottom {
     /// How many rows of them are in view.
     rows: f32,
     hint_y: f32,
+    /// What is written here is words alone: the box has no +.
+    plain: bool,
 }
 
 /// Lay the bottom out for `page`, from the card's lower edge up (Max,
@@ -223,6 +225,7 @@ pub(crate) fn bottom(
                 pick: picking.unwrap_or((0, 0.0)),
                 rows,
                 hint_y: y,
+                plain: false,
             };
         }
         _ => {
@@ -261,6 +264,7 @@ pub(crate) fn bottom(
         pick: picking.unwrap_or((0, 0.0)),
         rows: PICK_ROWS,
         hint_y,
+        plain: page == Page::Dictionary,
     }
 }
 
@@ -294,7 +298,14 @@ impl Bottom {
             let right = r.x + r.w - BTN - 11.0 - BTN_EDGE;
             let nowhere = Rect::new(r.x, r.y, 0.0, 0.0);
             self.btns = [
-                (BoxBtn::Clip, Rect::new(right, btn_y, BTN, BTN)),
+                (
+                    BoxBtn::Clip,
+                    if self.plain {
+                        nowhere
+                    } else {
+                        Rect::new(right, btn_y, BTN, BTN)
+                    },
+                ),
                 (BoxBtn::Talk, nowhere),
                 (BoxBtn::Mic, nowhere),
             ];
@@ -326,7 +337,11 @@ impl Bottom {
     pub(crate) fn text(&self) -> Option<Rect> {
         let r = self.input?;
         let left = r.x + 14.0;
-        let right = self.btns[0].1.x - PLUS_GAP + 6.0;
+        let right = if self.plain {
+            r.x + r.w - 14.0
+        } else {
+            self.btns[0].1.x - PLUS_GAP + 6.0
+        };
         Some(Rect::new(left, r.y, (right - left).max(0.0), r.h))
     }
 

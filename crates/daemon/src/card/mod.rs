@@ -132,10 +132,6 @@ const ZOOM_KEYS: [(&str, &str); 8] = [
 /// The ids of the clipboard page's rows start here (a clip's own id is
 /// added): far from the card's own.
 const CLIP_IDS: u64 = 1 << 62;
-/// The most lines an answer of the dictionary is shown with.
-const DICT_LINES: usize = 120;
-/// …and the dictionary page's rows here.
-const DICT_IDS: u64 = 1 << 61;
 
 /// How many emoji the picker remembers as used lately (two rows).
 const RECENT_EMOJI: usize = 16;
@@ -348,6 +344,12 @@ pub(crate) struct Card {
     /// (Memory's page is up for one to be picked).
     open: Option<u64>,
     pinned: Vec<Item>,
+    /// The words looked up in the dictionary (its page's list), where they
+    /// are kept while another page is up.
+    looked: Vec<Item>,
+    /// The words whose entries could not be read yet (the dictionary was
+    /// still being opened): looked up again once it is.
+    looking: Vec<u64>,
     memory: Vec<Past>,
     /// The session each window title was given (see `model::Saved`).
     titles: HashMap<String, u64>,
@@ -923,14 +925,13 @@ impl Card {
         if self.page == Page::Memory && self.picking.is_none() && tile.pin().contains(pos) {
             return Some(Hover::Edit(tile.id));
         }
-        let pencil = matches!(self.page, Page::Session | Page::Pinned)
+        let pencil = matches!(self.page, Page::Session | Page::Pinned | Page::Dictionary)
             && self
                 .item(tile.id)
                 .is_some_and(|it| matches!(it.kind, Kind::Text | Kind::Voice));
-        // (The clipboard's rows too: a copied password must be removable.
-        // A word's answers are not things to remove.)
-        let closes =
-            !(self.page == Page::Dictionary || self.page == Page::Memory && self.picking.is_some());
+        // (Every list's items have a ×; a session's row has none while a
+        // session is being chosen.)
+        let closes = !(self.page == Page::Memory && self.picking.is_some());
         Some(if closes && tile.close().contains(pos) {
             Hover::Close(tile.id)
         } else if pencil && tile.edit(true).contains(pos) {
@@ -986,8 +987,7 @@ impl Card {
     /// Whether `item` (of the page that is up) matches what is searched.
     fn matches(&self, item: &Item) -> bool {
         let query = self.query.trim().to_lowercase();
-        // (On the dictionary's page what is typed is the word looked up.)
-        if query.is_empty() || self.page == Page::Dictionary {
+        if query.is_empty() {
             return true;
         }
         let has = |it: &Item| {
@@ -1129,8 +1129,9 @@ impl Card {
                 }
             }
             Page::Pinned => self.pinned = shown,
+            Page::Dictionary => self.looked = shown,
             Page::Talk => self.said_last = shown.into_iter().next(),
-            Page::Memory | Page::Clipboard | Page::Dictionary | Page::Emoji => {}
+            Page::Memory | Page::Clipboard | Page::Emoji => {}
         }
     }
 
@@ -1149,7 +1150,8 @@ impl Card {
             Page::Memory => self.memory.iter().map(session_row).collect(),
             // (The clipboard's rows are the dock's to list: `card_show`.)
             Page::Talk => self.said_last.take().into_iter().collect(),
-            Page::Clipboard | Page::Dictionary | Page::Emoji => Vec::new(),
+            Page::Dictionary => std::mem::take(&mut self.looked),
+            Page::Clipboard | Page::Emoji => Vec::new(),
         };
         // (A session's row is wrapped afresh: it may have changed.)
         for past in &self.memory {
@@ -1466,6 +1468,7 @@ impl App {
             .items
             .iter()
             .chain(&saved.pinned)
+            .chain(&saved.looked)
             .chain(saved.memory.iter().flat_map(|p| &p.items))
             .map(|it| it.id)
             .chain(saved.memory.iter().map(|p| p.id));
@@ -1474,6 +1477,7 @@ impl App {
         self.card.open = None;
         self.card.items = Vec::new();
         self.card.pinned = saved.pinned;
+        self.card.looked = saved.looked;
         self.card.memory = saved.memory;
         self.card.titles = saved.titles;
         self.card.zoom = saved.zoom;
@@ -1503,6 +1507,11 @@ impl App {
                 next_id: self.card.next_id,
                 items: Vec::new(),
                 pinned: self.card.pinned_items().to_vec(),
+                looked: if self.card.page == Page::Dictionary {
+                    self.card.items.clone()
+                } else {
+                    self.card.looked.clone()
+                },
                 memory: self.card.sessions(),
                 titles: self.card.titles.clone(),
                 zoom: self.card.zoom,
@@ -1770,18 +1779,28 @@ impl App {
                 self.card.edit = None;
                 self.card_rest();
             }
-            match page {
-                // The dictionary: the search is where the word is typed,
-                // so it has the cursor at once.
-                Page::Dictionary => {
-                    self.card_dict_rows();
-                    self.card_take_keys(Field::Seek);
+            if page == Page::Emoji {
+                self.card.pick_query.clear();
+                self.card.repick();
+            }
+            // (The dictionary's page: a word left waiting for the dictionary
+            // — the dock was closed meanwhile — is looked up now.)
+            if page == Page::Dictionary {
+                let waiting: Vec<u64> = self
+                    .card
+                    .items
+                    .iter()
+                    .filter(|it| {
+                        it.parts
+                            .iter()
+                            .any(|p| p.from.as_deref() == Some("Dictionary"))
+                    })
+                    .map(|it| it.id)
+                    .collect();
+                if !waiting.is_empty() {
+                    self.card.looking = waiting;
+                    self.card_dict_loaded();
                 }
-                Page::Emoji => {
-                    self.card.pick_query.clear();
-                    self.card.repick();
-                }
-                _ => {}
             }
             if page == Page::Clipboard {
                 self.card.items = self.card_clip_rows();
@@ -1836,58 +1855,115 @@ impl App {
             .collect()
     }
 
-    /// The dictionary's page: the word in the search, looked up — one row
-    /// a language that has it (its origin first, where one is recorded),
-    /// or a row that says what to do / that it is not there. Rows are
-    /// lent: a click pastes the answer, the + keeps it in the memory.
-    fn card_dict_rows(&mut self) {
-        let word = self.card.query.trim().to_owned();
-        let row = |n: u64, body: String, from: Option<String>| Item {
-            id: DICT_IDS + n,
-            kind: Kind::Text,
-            body,
-            path: None,
-            aspect: 0.0,
-            owned: false,
-            at: 0,
-            from,
-            parts: Vec::new(),
-            said: None,
+    /// THE DICTIONARY works as Pinned does (Max, 2026-10-10: *"the
+    /// dictionary: same flow"*): a word is written in the box and kept — as
+    /// an item whose first part is the word and whose other parts are its
+    /// entries, one a language, each under a rule with that language on it.
+    /// The entries of `word`, as parts.
+    fn card_look_up(&mut self, word: &str) -> Vec<Item> {
+        let word = word.trim();
+        let mut parts = vec![self.card_part(Kind::Text, word.to_owned(), None, false, 0.0)];
+        let mut answer = |app: &mut Self, from: &str, body: String| {
+            let mut part = app.card_part(Kind::Text, body, None, false, 0.0);
+            part.from = Some(from.to_owned());
+            parts.push(part);
         };
-        let rows = if word.is_empty() {
-            vec![row(0, "Type a word in the search below.".to_owned(), None)]
-        } else {
-            match self.dict_define(&word) {
-                None => vec![row(0, "Opening the dictionary…".to_owned(), None)],
-                Some(found) if found.is_empty() => {
-                    vec![row(0, format!("No entry for “{word}”."), None)]
+        if word.split_whitespace().count() > 1 {
+            answer(
+                self,
+                "One word",
+                "The dictionary can define one word at a time.".to_owned(),
+            );
+            return parts;
+        }
+        match self.dict_define(word) {
+            // (Still being opened: `card_dict_loaded` looks it up again.)
+            None => answer(self, "Dictionary", "Opening the dictionary…".to_owned()),
+            Some(found) if found.is_empty() => {
+                answer(self, "Not found", format!("No entry for “{word}”."))
+            }
+            Some(found) => {
+                for (lang, definition, origin) in found {
+                    let body = match origin {
+                        Some(origin) => format!("{origin}\n{definition}"),
+                        None => definition,
+                    };
+                    answer(self, &lang, body);
                 }
-                Some(found) => found
-                    .into_iter()
-                    .enumerate()
-                    .map(|(n, (lang, definition, origin))| {
-                        let body = match origin {
-                            Some(origin) => format!("{origin}\n{definition}"),
-                            None => definition,
-                        };
-                        row(n as u64 + 1, body, Some(lang))
-                    })
-                    .collect(),
+            }
+        }
+        parts
+    }
+
+    /// Enter in the box on the dictionary's page: `word` is looked up and
+    /// kept (or, with its pencil, the item `edit` is looked up anew).
+    fn card_keep_word(&mut self, word: &str, edit: Option<u64>) {
+        let word = word.trim();
+        if word.is_empty() {
+            return;
+        }
+        let parts = self.card_look_up(word);
+        let waiting = parts
+            .iter()
+            .any(|p| p.from.as_deref() == Some("Dictionary"));
+        let id = match edit.and_then(|id| self.card.items.iter_mut().find(|it| it.id == id)) {
+            Some(item) => {
+                item.body = word.to_owned();
+                item.parts = parts;
+                item.id
+            }
+            None => {
+                let mut item = self.card_part(Kind::Text, word.to_owned(), None, false, 0.0);
+                item.parts = parts;
+                let id = item.id;
+                self.card.items.push(item);
+                self.card.to_bottom = true;
+                id
             }
         };
-        for item in &rows {
-            self.card.lines.remove(&item.id);
+        if waiting {
+            self.card.looking.push(id);
         }
-        self.card.items = rows;
-        self.card.scroll = 0.0;
+        // (Its answers are to be read: it opens at once.)
+        self.card.wide.insert(id);
+        self.card.lines.remove(&id);
+        self.card_save();
         self.request_card_draw();
     }
 
     /// The dictionary is in memory now: its page, if it is up, answers.
     pub(crate) fn card_dict_loaded(&mut self) {
-        if self.card.page == Page::Dictionary && self.card.host.is_some() {
-            self.card_dict_rows();
+        // (The words that were waiting for it are looked up now.)
+        for id in std::mem::take(&mut self.card.looking) {
+            let word = self
+                .card
+                .items
+                .iter()
+                .chain(self.card.looked.iter())
+                .find(|it| it.id == id)
+                .map(|it| it.body.clone());
+            let Some(word) = word else { continue };
+            let parts = self.card_look_up(&word);
+            // (Still not open: it goes on waiting.)
+            if parts
+                .iter()
+                .any(|p| p.from.as_deref() == Some("Dictionary"))
+            {
+                self.card.looking.push(id);
+            }
+            let item = self
+                .card
+                .items
+                .iter_mut()
+                .chain(self.card.looked.iter_mut())
+                .find(|it| it.id == id);
+            if let Some(item) = item {
+                item.parts = parts;
+            }
+            self.card.lines.remove(&id);
         }
+        self.card_save();
+        self.request_card_draw();
     }
 
     /// The clipboard's history changed: its page, if it is up, lists it anew.
@@ -2092,7 +2168,9 @@ impl App {
                 (Keysym::Return | Keysym::KP_Enter, Page::Session) if self.card.open.is_some() => {
                     self.card_write_new("");
                 }
-                (Keysym::Return | Keysym::KP_Enter, Page::Pinned) => self.card_write_new(""),
+                (Keysym::Return | Keysym::KP_Enter, Page::Pinned | Page::Dictionary) => {
+                    self.card_write_new("")
+                }
                 (Keysym::Return | Keysym::KP_Enter, Page::Memory) => {
                     self.card_begin();
                     self.card.field = Some(Field::Box);
@@ -2115,9 +2193,6 @@ impl App {
                         self.card.field = Some(Field::Seek);
                         self.card.query.push_str(s);
                         self.card.scroll = 0.0;
-                        if self.card.page == Page::Dictionary {
-                            self.card_dict_rows();
-                        }
                     }
                     Some(s) => {
                         self.card.field = Some(Field::Pick);
@@ -2257,7 +2332,7 @@ impl App {
             (Field::Seek, Keysym::BackSpace) => {
                 self.card.query.pop();
                 // (Nothing left of it: the hint is back in its place.)
-                if self.card.query.is_empty() && self.card.page != Page::Dictionary {
+                if self.card.query.is_empty() {
                     self.card_rest();
                 }
             }
@@ -2269,7 +2344,7 @@ impl App {
             // Enter in the search of an open session: what was typed
             // becomes a new thing, to be finished in the box.
             (Field::Seek, Keysym::Return | Keysym::KP_Enter)
-                if self.card.page == Page::Pinned
+                if matches!(self.card.page, Page::Pinned | Page::Dictionary)
                     || (self.card.page == Page::Session && self.card.open.is_some()) =>
             {
                 let words = std::mem::take(&mut self.card.query);
@@ -2294,9 +2369,6 @@ impl App {
                 }
                 _ => return,
             },
-        }
-        if field == Field::Seek && self.card.page == Page::Dictionary {
-            self.card_dict_rows();
         }
         self.card.scroll = if self.card.field == Some(Field::Seek) {
             0.0
@@ -2379,6 +2451,19 @@ impl App {
         };
         self.card.take_draft();
         self.card_unseal();
+        // (A word of the dictionary: the word itself is written again.)
+        if self.card.page == Page::Dictionary {
+            self.card.type_in(&item.body);
+            self.card.edit = Some(id);
+            if self.card.field.is_none() {
+                self.card_take_keys(Field::Box);
+            } else {
+                self.card.field = Some(Field::Box);
+            }
+            self.sync_card_input();
+            self.request_card_draw();
+            return;
+        }
         // (A voice note: it is its TITLE that is written — none yet, an
         // empty line.)
         if item.kind == Kind::Voice {
@@ -2421,6 +2506,12 @@ impl App {
     /// the list that is up, or as the new words of the item being changed.
     fn card_keep_draft(&mut self) {
         let text = self.card.take_draft();
+        // (On the dictionary's page what is written is a word to look up.)
+        if self.card.page == Page::Dictionary {
+            let edit = self.card.edit.take();
+            self.card_keep_word(&text, edit);
+            return;
+        }
         let mut parts = std::mem::take(&mut self.card.sealed);
         if !text.trim().is_empty() {
             let words = self.card_part(Kind::Text, text.trim_end().to_owned(), None, false, 0.0);
@@ -3152,6 +3243,7 @@ impl App {
                 } else {
                     match page {
                         Page::Pinned => Some(&mut self.card.pinned),
+                        Page::Dictionary => Some(&mut self.card.looked),
                         Page::Session => self
                             .card
                             .memory
@@ -3704,9 +3796,7 @@ impl App {
                 };
                 // (A word's answer is read whole; a text on the card keeps
                 // its first lines.)
-                let most = if self.card.page == Page::Dictionary {
-                    DICT_LINES
-                } else if whole || self.card.wide.contains(&item.id) {
+                let most = if whole || self.card.wide.contains(&item.id) {
                     ALL_LINES
                 } else {
                     MAX_LINES
@@ -3936,7 +4026,7 @@ impl App {
             (_, _, Page::Memory) => "Enter to create · type to search",
             (_, _, Page::Clipboard) => "Click to paste · type to search",
             (_, _, Page::Pinned) => "Type to search · press Enter to create · hold Space to talk",
-            (_, _, Page::Dictionary) => "Type a word",
+            (_, _, Page::Dictionary) => "Type to search · press Enter to look a word up",
             (_, _, Page::Talk) => "Press the microphone, or hold Space to talk",
             _ => "",
         };
@@ -4878,9 +4968,10 @@ impl App {
             // `dictionary [word]` · `emojis`: their pages.
             "dictionary" => {
                 self.card_show(Page::Dictionary);
-                self.card.query = rest.to_owned();
-                self.card_dict_rows();
-                format!("{} rows", self.card.items.len())
+                if !rest.trim().is_empty() {
+                    self.card_keep_word(rest, None);
+                }
+                format!("{} words", self.card.items.len())
             }
             "emojis" => {
                 self.card_show(Page::Emoji);

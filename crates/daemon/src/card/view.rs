@@ -454,6 +454,9 @@ const THUMB_NAME: f32 = 14.0;
 const THUMB_GAP: f32 = 8.0;
 /// A voice note as a part of an item: a row with play, a line, its length.
 const VOICE_ROW: f32 = 30.0;
+/// The line over an ANSWER — a part that says where it is from (a word's
+/// entry in one language): a rule across, that name in its middle.
+const ANSWER_HEAD: f32 = 18.0;
 /// Between two pieces of an item.
 const PIECE_GAP: f32 = 7.0;
 
@@ -503,9 +506,15 @@ pub(crate) fn pieces(
             y += PIECE_GAP;
         }
         let (kind, h) = match part.kind {
+            // (An answer has its rule and its name over its words.)
             Kind::Text => (
                 PieceKind::Words(n),
-                lines.get(&part.id).map_or(1, Vec::len).max(1) as f32 * text_line,
+                lines.get(&part.id).map_or(1, Vec::len).max(1) as f32 * text_line
+                    + if part.from.is_some() {
+                        ANSWER_HEAD
+                    } else {
+                        0.0
+                    },
             ),
             // (Open: what is said in it stands under its row.)
             Kind::Voice => (
@@ -638,6 +647,36 @@ pub(crate) fn draw_pieces(
         match piece.kind {
             PieceKind::Words(n) => {
                 let part = &parts[n];
+                // An ANSWER (a word's entry, a translation): a rule across
+                // with where it is from in its middle, then its words.
+                let y = match part.from.as_deref() {
+                    Some(from) => {
+                        let half = (super::bar::about(from.chars().count(), 10.0) + 14.0) / 2.0;
+                        let mid = at.0 + w / 2.0;
+                        for (x0, x1) in [(at.0, mid - half), (mid + half, at.0 + w)] {
+                            grid.rects.push(RectInst {
+                                rect: Rect::new(x0, y + 8.0, (x1 - x0).max(0.0), 1.0),
+                                radius: 0.0,
+                                color: paint.ink_at(0.12),
+                                glass: 0.0,
+                                border: 0.0,
+                            });
+                        }
+                        label(
+                            grid,
+                            from,
+                            (mid, y + 2.0),
+                            2.0 * half,
+                            10.0,
+                            13.0,
+                            true,
+                            None,
+                            paint.ink_at(0.5),
+                        );
+                        y + ANSWER_HEAD
+                    }
+                    None => y,
+                };
                 for (i, line) in lines.get(&part.id).into_iter().flatten().enumerate() {
                     if !line.is_empty() {
                         label(
@@ -1694,7 +1733,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         // The pencil, on what can be written again: a text of one's own.
         if over.is_some()
             && matches!(item.kind, Kind::Text | Kind::Voice)
-            && matches!(page, Page::Session | Page::Pinned)
+            && matches!(page, Page::Session | Page::Pinned | Page::Dictionary)
         {
             button(
                 tile.edit(true),
@@ -1706,7 +1745,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 acc,
             );
         }
-        if over.is_some() && page != Page::Dictionary {
+        if over.is_some() {
             button(
                 tile.close(),
                 "×",

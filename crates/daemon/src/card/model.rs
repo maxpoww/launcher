@@ -141,6 +141,10 @@ pub(super) struct Saved {
     pub items: Vec<Item>,
     #[serde(default)]
     pub pinned: Vec<Item>,
+    /// The words looked up in the dictionary: each an item, its entries
+    /// its parts. They stay until removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looked: Vec<Item>,
     #[serde(default)]
     pub memory: Vec<Past>,
     #[serde(default)]
@@ -665,6 +669,7 @@ mod tests {
             next_id: 9,
             items: vec![text(1, "a\nb"), file(2, Kind::Folder, "/tmp/d")],
             pinned: vec![text(3, "me@example.org")],
+            looked: Vec::new(),
             titles: [("Golem new feature".to_owned(), 4)].into(),
             zoom: 1.2,
             emoji: vec!["👍".to_owned()],
