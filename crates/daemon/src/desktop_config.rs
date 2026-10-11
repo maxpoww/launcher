@@ -483,6 +483,10 @@ struct Probe {
     shut: bool,
 }
 
+/// A phone that has not been synced for this long (and three of its own
+/// periods) is said to need its cable, wherever it is.
+const SYNC_MISSED: u64 = 6 * 3600;
+
 /// How long the bar says that a phone can be synced again.
 const FIXED_SHOWN: std::time::Duration = std::time::Duration::from_secs(8);
 
@@ -900,8 +904,15 @@ impl App {
                     if !(on_cable || on_wifi) {
                         // Not reachable. Away — or right here on the Wi-Fi
                         // with its door shut, when a sync is due.
-                        let shut = (now || since >= phone.every.secs())
-                            && phone.addr.as_deref().is_some_and(crate::desktop_phone::wifi_shut);
+                        // (Or nowhere to be found for a long while: a phone
+                        // that was restarted may come back at another
+                        // address, and then nothing refuses anything — Max's
+                        // Pixel did, 2026-10-11. A phone that is only away
+                        // is said too, then; it mends itself by answering.)
+                        let due = now || since >= phone.every.secs();
+                        let long = since >= (3 * phone.every.secs()).max(SYNC_MISSED);
+                        let shut = due
+                            && phone.addr.as_deref().is_some_and(|a| long || crate::desktop_phone::wifi_shut(a));
                         return (probed, phone, Probe { there: false, target: None, addr, shut });
                     }
                     let due = now || since >= phone.every.secs() || (!was_there && since >= SYNC_AGAIN);
