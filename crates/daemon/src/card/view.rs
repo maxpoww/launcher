@@ -2656,6 +2656,76 @@ pub(crate) fn tile_picture(
         }
         y += pic_h + PIC_GAP;
     }
+    // A VOICE NOTE travels as it looks in the list: its button, its title,
+    // its line with the two times, "Transcribe" (Max, 2026-10-11: it was
+    // an empty box in the hand); what is said in it, when shown, under.
+    if item.kind == Kind::Voice {
+        let about = super::bar::about;
+        let dim = paint.ink_at(0.6);
+        text(
+            &mut canvas,
+            "\u{f04b}",
+            s(11.0),
+            Some(crate::options::NERD),
+            paint.ink_at(0.92),
+            (s(x + 9.0), s(y + 2.0)),
+        );
+        let named = !item.body.starts_with(VOICE_NAME);
+        text(
+            &mut canvas,
+            if named {
+                item.body.as_str()
+            } else {
+                VOICE_NAME
+            },
+            s(TEXT_PX + 0.5),
+            None,
+            paint.ink_at(if named { 0.95 } else { 0.5 }),
+            (s(x + 32.0), s(y + 1.0)),
+        );
+        let secs = item.aspect.max(1.0).round() as u32;
+        let row = y + 22.0;
+        let end = format!("{:02}:{:02}", secs / 60, secs % 60);
+        text(&mut canvas, "00:00", s(10.0), None, dim, (s(x), s(row)));
+        text(
+            &mut canvas,
+            &end,
+            s(10.0),
+            None,
+            dim,
+            (s(x + text_w - about(end.chars().count(), 10.0)), s(row)),
+        );
+        let track = Rect::new(x + 36.0, row + 6.0, (text_w - 72.0).max(0.0), 2.0);
+        canvas.round_rect(
+            Rect::new(s(track.x), s(track.y), s(track.w), s(track.h)),
+            s(1.0),
+            paint.ink_at(0.18),
+            None,
+        );
+        canvas.round_rect(
+            Rect::new(s(track.x - 1.0), s(track.y - 4.0), s(2.0), s(10.0)),
+            s(1.0),
+            paint.ink_at(0.9),
+            None,
+        );
+        let word = if lines.is_empty() {
+            "Transcribe"
+        } else {
+            "Hide text"
+        };
+        text(
+            &mut canvas,
+            word,
+            s(NOTE_PX + 1.0),
+            None,
+            dim,
+            (
+                s(width / 2.0 - about(word.chars().count(), NOTE_PX + 1.0) / 2.0),
+                s(VOICE_FOOT + 3.0),
+            ),
+        );
+        y += VOICE_HEAD + VOICE_SAID;
+    }
     let family = (item.kind == Kind::Text).then_some(crate::options::NERD);
     let ink = paint.ink_at(0.92);
     for line in lines {

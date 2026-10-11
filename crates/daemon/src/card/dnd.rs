@@ -126,6 +126,15 @@ impl App {
             Some((x, y)) => ((x - corner.0).clamp(0.0, w), (y - corner.1).clamp(0.0, h)),
             None => (w / 2.0, h / 2.0),
         };
+        // (`WAVERUNNER_CARD_DUMP=<file>`: the picture is also written there,
+        // raw — to look at what is in the hand without a pointer.)
+        if let Ok(to) = std::env::var("WAVERUNNER_CARD_DUMP") {
+            let _ = std::fs::write(&to, canvas.bytes());
+            info!(
+                "card: the picture in hand is {}x{} in {to}",
+                canvas.w, canvas.h
+            );
+        }
         self.drag_picture(&canvas.bytes(), canvas.w, canvas.h, scale as i32, grip)
     }
 
@@ -154,15 +163,20 @@ impl App {
                     .ok()
                     .and_then(|n| self.card.items.get(n.saturating_sub(1)))
                     .cloned();
-                let (Some(item), Some(manager)) = (item, self.data_device_manager.as_ref()) else {
+                let Some(item) = item else {
                     return "carry <n> | carry to <y> | carry end".to_owned();
                 };
-                let from_y = self
+                let tile = self
                     .card
                     .tiles
                     .iter()
                     .find(|t| t.id == item.id)
-                    .map_or(0.0, |t| t.rect.y + t.rect.h / 2.0);
+                    .map(|t| t.rect);
+                let from_y = tile.map_or(0.0, |r| r.y + r.h / 2.0);
+                let image = tile.and_then(|tile| self.card_drag_picture(&item, tile));
+                let Some(manager) = self.data_device_manager.as_ref() else {
+                    return String::new();
+                };
                 let source = manager.create_drag_and_drop_source(
                     &self.qh,
                     out_mimes(&item),
@@ -173,7 +187,7 @@ impl App {
                     item,
                     from_y,
                     source,
-                    _icon: None,
+                    _icon: image,
                 });
                 self.card.dnd_over = true;
                 self.card.drop_own = true;
