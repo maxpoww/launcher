@@ -580,7 +580,7 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         PillId::Settings | PillId::SettingsStats => PillGroup::Settings,
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
         // The task pill stands by the bell and, like it, is led by nothing.
-        PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Camera | PillId::Phone => PillGroup::Notif,
+        PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone => PillGroup::Notif,
         PillId::Clock => PillGroup::Clock,
         // A doorway belongs to whatever it stands in for; today only the window
         // controls can go sticky. It never reflows anyway — a sticky pair is a
@@ -861,7 +861,6 @@ fn draw_z(id: PillId) -> u8 {
         PillId::NotifMute => 8,
         // Under the bell's preview, which grows over it.
         PillId::Task => 6,
-        PillId::Camera => 6,
         PillId::Phone => 6,
         // Mirror of the bell on the left edge: the box + copy-link pill draw
         // first (emerging from behind), then the small fixed glyph pill on top.
@@ -997,9 +996,6 @@ pub(crate) enum PillId {
     CavaOut,
     /// What this computer is busy with, and how far along (`task_pill.rs`).
     Task,
-    /// A phone is this computer's camera: its flash, picture and lens
-    /// (`camera_pill.rs`).
-    Camera,
     /// A phone is plugged in: whose, how it stands, and its eject
     /// (`phone_pill.rs`).
     Phone,
@@ -1372,7 +1368,7 @@ fn presence(id: PillId) -> Presence {
         PillId::Window | PillId::Close | PillId::Clock => BOTH,
         // A notification arriving while you pick a window is still worth
         // seeing, and the bell doesn't act on the focused window.
-        PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Camera | PillId::Phone => BOTH,
+        PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone => BOTH,
         // Window-mode controls act on the FOCUSED window — meaningless while
         // you're above the desktop choosing one.
         PillId::Pseudo | PillId::Float | PillId::Fullscreen => DESKTOP_ONLY,
@@ -2223,30 +2219,12 @@ impl App {
         if let Some(rect) = self.task_pill_rect(band_right, window_left, y, ph) {
             pills.push(Pill { id: PillId::Task, rect, text: String::new(), family: None, glyph_color: None });
         }
-        // The CAMERA pill (`camera_pill.rs`): between the window's pills and
-        // the bell, growing to the right (Max, 2026-10-10).
-        let window_right = pills
-            .iter()
-            .filter(|p| group_of(p.id) == PillGroup::Window)
-            .map(|p| p.rect.x + p.rect.w)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let bell_left = self.options_clock_rest_left() - OPTION_GAP - ph;
         // The PHONE pill (`phone_pill.rs`): a round pill left of the bell
-        // while a phone is plugged in (Max, 2026-10-11); what stands by the
-        // bell stops short of it.
+        // while a phone is plugged in (Max, 2026-10-11); the task pill's
+        // place by the bell stops short of it.
+        let bell_left = self.options_clock_rest_left() - OPTION_GAP - ph;
         if let Some(rect) = self.phone_pill_rect(bell_left, y, ph) {
             pills.push(Pill { id: PillId::Phone, rect, text: String::new(), family: None, glyph_color: None });
-        }
-        let bell_left = bell_left - self.phone_pill_reserve();
-        let window_right = if window_right.is_finite() { window_right } else { bell_left / 2.0 };
-        // (With no window's pill the task pill stands by the bell: the
-        // camera pill's ground ends where that one begins.)
-        let bell_left = pills
-            .iter()
-            .find(|p| p.id == PillId::Task && p.rect.x >= window_right)
-            .map_or(bell_left, |p| bell_left.min(p.rect.x));
-        if let Some(rect) = self.camera_pill_rect(window_right, bell_left, y, ph) {
-            pills.push(Pill { id: PillId::Camera, rect, text: String::new(), family: None, glyph_color: None });
         }
         pills
     }
@@ -2349,14 +2327,9 @@ impl App {
                 matches!(id, PillId::Notif | PillId::NotifMute)
             });
         }
-        // The camera pill's children and the phone pill's long one come out
-        // over whatever stands by the bell (the task pill, with no window's
-        // pill on the bar): the same rule.
-        if self.camera_pill_out() {
-            if let Some(rect) = pills.iter().find(|p| p.id == PillId::Camera).map(|p| p.rect) {
-                clear_under(&mut pills, rect, |id| id == PillId::Camera);
-            }
-        }
+        // The phone pill's long one and its box come out over whatever
+        // stands by the bell (the task pill, with no window's pill on the
+        // bar): the same rule.
         if self.phone_pill_out() {
             if let Some(rect) = pills.iter().find(|p| p.id == PillId::Phone).map(|p| p.rect) {
                 clear_under(&mut pills, rect, |id| id == PillId::Phone);
@@ -3198,10 +3171,6 @@ impl App {
         self.options_pills().iter().find(|p| p.id == PillId::Phone).map(|p| p.rect)
     }
 
-    pub(crate) fn camera_pill_on_bar(&self) -> Option<Rect> {
-        self.options_pills().iter().find(|p| p.id == PillId::Camera).map(|p| p.rect)
-    }
-
     /// Where the task pill is drawn now (its box included), if it is there.
     pub(crate) fn task_pill_drawn(&self) -> Option<Rect> {
         self.options_pills().iter().find(|p| p.id == PillId::Task).map(|p| p.rect)
@@ -3761,10 +3730,6 @@ impl App {
             }
             if pill.id == PillId::Task {
                 self.push_task_pill(scene, pill.rect);
-                continue;
-            }
-            if pill.id == PillId::Camera {
-                self.push_camera_pill(scene, pill.rect);
                 continue;
             }
             if pill.id == PillId::Phone {
@@ -5224,7 +5189,6 @@ impl App {
                                                // surface (§2) and folds away when it leaves.
                     self.play_box_open = false;
                     self.task_box_close(); // and the task pill's
-                    self.camera_pill_close(); // the camera pill's children go back in
                     self.phone_pill_close(); // and the phone pill's long one
                     self.update_cava_reveal(); // tuck the cava children back
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
@@ -5545,7 +5509,7 @@ impl App {
         self.update_stats_reveal();
         self.update_cava_reveal();
         // (The task pill's chips light under the pointer: a move on it redraws.)
-        let on_task = self.update_task_hover() | self.update_camera_hover() | self.update_phone_hover();
+        let on_task = self.update_task_hover() | self.update_phone_hover();
         // The hit target (card / control / footer) moves within the same box, so
         // redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
@@ -6529,7 +6493,6 @@ impl App {
             Some(PillId::Fullscreen) => self.set_window_mode(hypr::WindowMode::Fullscreen),
             Some(PillId::NotifMute) => self.toggle_notif_mute(),
             Some(PillId::Task) => self.task_pill_click(),
-            Some(PillId::Camera) => self.camera_pill_click(),
             Some(PillId::Phone) => self.phone_pill_click(),
             // Clicking the clipboard element pastes the current clip into the
             // focused window. Both ids resolve here because the box overlaps the

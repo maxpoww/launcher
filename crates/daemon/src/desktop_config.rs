@@ -84,6 +84,28 @@ pub(crate) struct Config {
     pub hover: Option<Hit>,
 }
 
+impl Config {
+    /// A phone's settings as they are to be applied, with no box up (the
+    /// bar's phone pill sets them on a page of its own and applies them the
+    /// one way there is).
+    pub(crate) fn of(path: String, serial: String, model: String, phone: Phone) -> Self {
+        Config {
+            path,
+            serial,
+            model,
+            sub: String::new(),
+            phone,
+            sizes: HashMap::new(),
+            editing: false,
+            all: false,
+            confirm: false,
+            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            t: 1.0,
+            hover: None,
+        }
+    }
+}
+
 /// Everything the box is made of, placed.
 struct Built {
     rects: Vec<RectInst>,
@@ -758,7 +780,7 @@ impl App {
     /// Take what the box holds as the phone's settings from now on; the box
     /// goes. Its folder is made, and with sync on the phone is allowed over
     /// Wi-Fi (it must be on its cable for that).
-    fn desktop_config_apply(&mut self) -> Option<(String, crate::phones::Phone)> {
+    pub(crate) fn desktop_config_apply(&mut self) -> Option<(String, crate::phones::Phone)> {
         self.desktop_config_edit(false);
         let config = self.desktop.config.take()?;
         self.request_desktop_draw();

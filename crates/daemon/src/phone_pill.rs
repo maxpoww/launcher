@@ -33,6 +33,7 @@ const GLYPH_PHONE: &str = "\u{f10b}";
 /// The button in the long pill's air: what a click on it does.
 const SYNC: &str = "Sync";
 const SET_UP: &str = "Set up";
+const STOP: &str = "Stop";
 /// How much longer than its word the button is (the task pill's chips
 /// have 12; Max, 2026-10-11: "make the button slightly longer").
 const CHIP_PAD: f32 = 24.0;
@@ -63,6 +64,128 @@ fn battery_glyph(level: u8) -> &'static str {
 
 /// How much longer than its words need the long pill is.
 const LONGER: f32 = 4.0 / 3.0;
+
+/// What the box shows: the phone's menu, or one of the things that menu
+/// used to open elsewhere (Max, 2026-10-11: "make the pieces be a part of
+/// the box too (properties, configure, and use as camera)").
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum Page {
+    #[default]
+    Menu,
+    /// The camera in use: its flash, its lens, its picture.
+    Camera,
+    /// What this computer does with the phone (`phones.json`), on a copy
+    /// until Apply.
+    Configure,
+    /// What the phone says of itself.
+    Properties,
+}
+
+/// What a click on a line of the box does.
+#[derive(Debug, Clone, PartialEq)]
+enum Act {
+    /// What that row of the phone's menu does.
+    Menu(Action),
+    Turn(Page),
+    Flash,
+    Lens(usize),
+    Picture(crate::desktop::Picture),
+    Sync,
+    Kind(usize),
+    Every,
+    Charging,
+    After,
+    Apply,
+    /// The whole Configure box (the name, Clean).
+    Whole,
+    Nothing,
+}
+
+/// A line of the box.
+#[derive(Debug, Clone, PartialEq)]
+struct Line {
+    label: String,
+    /// At the line's right end ("On", "✓").
+    value: String,
+    act: Act,
+    /// Air over it: it begins a group.
+    air: bool,
+}
+
+fn line(label: &str, value: &str, act: Act) -> Line {
+    Line { label: label.to_owned(), value: value.to_owned(), act, air: false }
+}
+
+/// What the box of a phone that is not there shows
+/// (`debug-desktop "phonepill fake"`): each page as it looks, acting on
+/// nothing.
+fn fake_lines(page: Page) -> Vec<Line> {
+    let back = line("‹  Back", "", Act::Turn(Page::Menu));
+    let rows: &[(&str, &str, bool)] = match page {
+        Page::Menu => &[
+            ("Open", "", false),
+            ("Open in terminal", "", false),
+            ("Mirror screen", "", false),
+            ("Stop camera", "", true),
+            ("Configure camera", "", false),
+            ("Import photos", "", true),
+            ("Use phone's internet", "", false),
+            ("Eject", "", true),
+            ("Configure", "", true),
+            ("Properties", "", false),
+        ],
+        Page::Camera => &[
+            ("Flash", "Off", true),
+            ("Ultra wide", "", true),
+            ("Main", "✓", false),
+            ("Telephoto", "", false),
+            ("Front", "", false),
+            ("1080p · 60", "✓", true),
+            ("1080p · 30", "", false),
+            ("720p · 60", "", false),
+            ("720p · 30", "", false),
+        ],
+        Page::Configure => &[
+            ("Sync over Wi-Fi", "On", true),
+            ("Photos and videos", "✓", true),
+            ("Music", "✓", false),
+            ("Downloads", "✓", false),
+            ("Documents", "✓", false),
+            ("Recordings", "", false),
+            ("WhatsApp media", "✓", false),
+            ("How often", "Hourly", true),
+            ("Only while charging", "Yes", false),
+            ("Take off the phone once synced", "No", false),
+            ("Name and clean-up…", "", true),
+            ("Apply", "", false),
+        ],
+        Page::Properties => &[
+            ("Model", "Google Pixel 8 Pro", true),
+            ("Android", "17", false),
+            ("Battery", "80%, charging", false),
+            ("Storage", "91 GB of 110 GB used", false),
+        ],
+    };
+    let mut lines: Vec<Line> = if page == Page::Menu { Vec::new() } else { vec![back] };
+    lines.extend(rows.iter().map(|(label, value, air)| {
+        let act = match *label {
+            "Configure camera" => Act::Turn(Page::Camera),
+            "Configure" => Act::Turn(Page::Configure),
+            "Properties" => Act::Turn(Page::Properties),
+            _ => Act::Nothing,
+        };
+        Line { label: (*label).to_owned(), value: (*value).to_owned(), act, air: *air }
+    }));
+    lines
+}
+
+fn yes(on: bool) -> &'static str {
+    if on {
+        "✓"
+    } else {
+        ""
+    }
+}
 
 /// What the pill shows.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -114,6 +237,17 @@ pub(crate) struct PhonePill {
     /// Its box (all a phone's menu has): asked open, and how far open.
     box_open: bool,
     box_e: f32,
+    /// What the box shows, and its height easing after its page's.
+    page: Page,
+    box_h: f32,
+    /// The Configure page's copy of the phone's settings (its own until
+    /// Apply).
+    config: Option<crate::phones::Phone>,
+    /// What the phone said of itself, for the Properties page (`None`: it
+    /// is being asked).
+    facts: Option<Vec<(&'static str, String)>>,
+    /// The measured widths of the words set at the lines' right ends.
+    value_w: std::collections::HashMap<String, f32>,
 }
 
 /// "5 min ago", "2 h ago", "3 days ago".
@@ -137,7 +271,10 @@ impl App {
         let known = serial.as_ref().and_then(|s| crate::phones::Phones::load().by_serial.get(s).cloned());
         let name = known.as_ref().map_or_else(|| v.name.clone(), |p| p.name.clone());
         let syncing = serial.as_ref().is_some_and(|s| self.desktop.syncing.contains(s));
+        let path = v.path.to_string_lossy().into_owned();
+        let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path);
         let state = match &known {
+            _ if camera => "Using as a camera".to_owned(),
             _ if v.closed => "Locked".to_owned(),
             _ if syncing => "Syncing…".to_owned(),
             None => "Not set up".to_owned(),
@@ -151,10 +288,11 @@ impl App {
         // the big pill").
         let battery = serial.as_ref().and_then(|s| self.phone_pill.battery.get(s)).copied();
         Some(Shown {
-            path: v.path.to_string_lossy().into_owned(),
+            path,
             says: format!("{name} · {state}"),
             battery,
             button: match &known {
+                _ if camera => Some(STOP),
                 _ if v.closed || syncing => None,
                 None => Some(SET_UP),
                 Some(_) => Some(SYNC),
@@ -246,6 +384,21 @@ impl App {
         let boxed = f32::from(u8::from(self.phone_pill.box_open));
         let (box_e, c) = ease_toward(self.phone_pill.box_e, boxed, dt, animation::MORPH_RATE, animation::SETTLE_ALPHA);
         self.phone_pill.box_e = box_e;
+        // (Folded: the next opening starts at the menu.)
+        if box_e <= 0.01 && !self.phone_pill.box_open {
+            self.phone_pill.page = Page::Menu;
+            self.phone_pill.config = None;
+        }
+        self.phone_box_measure();
+        let want_h = self.phone_box_page_h();
+        let (box_h, c2) = if self.phone_pill.box_h <= 0.0 {
+            (want_h, false)
+        } else {
+            let (h, moving) = ease_toward(self.phone_pill.box_h, want_h, dt, animation::MORPH_RATE, 0.5);
+            (h, moving)
+        };
+        self.phone_pill.box_h = box_h;
+        let c = c || c2;
         self.sync_options_input();
         self.draw_options();
         if a || b || c {
@@ -327,69 +480,289 @@ impl App {
         Rect::new(rect.x + rect.w - ph, rect.y, ph, ph)
     }
 
-    /// What its box lists: the rows of the phone's own menu
-    /// (`desktop_menu::volume_rows` — one list for both), and the desktop
-    /// item they act on.
-    fn phone_box_rows(&self) -> (Vec<Row>, Option<usize>) {
-        let Some(shown) = self.phone_pill.shown.as_ref() else {
-            return (Vec::new(), None);
-        };
-        let Some(v) = self.desktop.volumes.iter().find(|v| v.path.to_string_lossy() == shown.path.as_str()) else {
-            return (Vec::new(), None);
-        };
-        let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == shown.path)
-            || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&shown.path));
-        let volume = crate::desktop_menu::Volume { phone: true, closed: v.closed, camera, tether: v.tether };
+    /// The plugged-in phone's volume, its serial and the desktop item it is.
+    fn phone_pill_volume(&self) -> Option<(&crate::mounts::Mounted, Option<String>, Option<usize>)> {
+        let shown = self.phone_pill.shown.as_ref()?;
+        let v = self.desktop.volumes.iter().find(|v| v.path.to_string_lossy() == shown.path.as_str())?;
         let item = self.desktop.items.iter().position(|it| it.path == shown.path);
-        (crate::desktop_menu::volume_rows(&volume), item)
+        Some((v, crate::desktop::phone_serial_of(v), item))
     }
 
-    /// The box's rows that act, each with its place under the long pill
-    /// (`long`: the long pill and its box, whole).
-    fn phone_box_lines(&self, long: Rect) -> Vec<(Rect, String, Action)> {
+    /// The lines of the box's page.
+    fn phone_box_lines(&self) -> Vec<Line> {
+        // (A phone that is not there has a box to look at all the same.)
+        if self.phone_pill.fake.is_some() {
+            return fake_lines(self.phone_pill.page);
+        }
+        let Some((v, _, _)) = self.phone_pill_volume() else {
+            return Vec::new();
+        };
+        let path = v.path.to_string_lossy().into_owned();
+        let back = line("‹  Back", "", Act::Turn(Page::Menu));
+        let group = |mut l: Line| {
+            l.air = true;
+            l
+        };
+        match self.phone_pill.page {
+            // The phone's own menu (`desktop_menu::volume_rows` — one list
+            // for both), with what it opened elsewhere turned into pages
+            // of this box, and the camera's settings under its Stop.
+            Page::Menu => {
+                let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path)
+                    || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
+                let volume = crate::desktop_menu::Volume { phone: true, closed: v.closed, camera, tether: v.tether };
+                let mut lines = Vec::new();
+                let mut air = false;
+                for row in crate::desktop_menu::volume_rows(&volume) {
+                    let (label, action) = match row {
+                        Row::Sep => {
+                            air = true;
+                            continue;
+                        }
+                        Row::Note(_) => continue,
+                        Row::Item { label, action, .. } => (crate::i18n::tr(label).to_owned(), action),
+                        Row::Target { label, action } => (label, action),
+                    };
+                    let act = match action {
+                        Action::Configure => Act::Turn(Page::Configure),
+                        Action::Properties => Act::Turn(Page::Properties),
+                        other => Act::Menu(other),
+                    };
+                    lines.push(Line { label, value: String::new(), act, air });
+                    air = false;
+                    if action == Action::CameraStop {
+                        lines.push(line("Configure camera", "", Act::Turn(Page::Camera)));
+                    }
+                }
+                lines
+            }
+            Page::Camera => {
+                let mut lines = vec![back];
+                let Some((on, lenses, pictures)) = self.camera_choices() else {
+                    lines.push(group(line("The camera is off", "", Act::Nothing)));
+                    return lines;
+                };
+                if self.camera_has_torch() {
+                    lines.push(group(line("Flash", if on.torch { "On" } else { "Off" }, Act::Flash)));
+                }
+                for (n, name) in lenses.iter().enumerate() {
+                    let l = line(name, yes(n == on.lens), Act::Lens(n));
+                    lines.push(if n == 0 { group(l) } else { l });
+                }
+                for (k, picture) in pictures.iter().enumerate() {
+                    let l = line(&picture.label(), yes(*picture == on.picture), Act::Picture(*picture));
+                    lines.push(if k == 0 { group(l) } else { l });
+                }
+                lines
+            }
+            Page::Configure => {
+                let mut lines = vec![back];
+                let Some(phone) = self.phone_pill.config.as_ref() else {
+                    return lines;
+                };
+                lines.push(group(line("Sync over Wi-Fi", if phone.sync { "On" } else { "Off" }, Act::Sync)));
+                for (i, kind) in crate::phones::KINDS.iter().enumerate() {
+                    let l = line(kind.label, yes(phone.kinds.iter().any(|k| k == kind.key)), Act::Kind(i));
+                    lines.push(if i == 0 { group(l) } else { l });
+                }
+                let every = match phone.every {
+                    crate::phones::Every::Hour => "Hourly",
+                    crate::phones::Every::Quarter => "Every 15 min",
+                    crate::phones::Every::Day => "Daily",
+                };
+                lines.push(group(line("How often", every, Act::Every)));
+                lines.push(line("Only while charging", if phone.charging_only { "Yes" } else { "No" }, Act::Charging));
+                lines.push(line("Take off the phone once synced", if phone.remove_after_sync { "Yes" } else { "No" }, Act::After));
+                lines.push(group(line("Name and clean-up…", "", Act::Whole)));
+                lines.push(line("Apply", "", Act::Apply));
+                lines
+            }
+            Page::Properties => {
+                let mut lines = vec![back];
+                match &self.phone_pill.facts {
+                    None => lines.push(group(line("Asking the phone…", "", Act::Nothing))),
+                    Some(facts) if facts.is_empty() => lines.push(group(line("It would not say", "", Act::Nothing))),
+                    Some(facts) => {
+                        for (n, (key, value)) in facts.iter().enumerate() {
+                            let l = line(key, value, Act::Nothing);
+                            lines.push(if n == 0 { group(l) } else { l });
+                        }
+                    }
+                }
+                lines
+            }
+        }
+    }
+
+    /// Measure the words at the lines' right ends that are not measured yet
+    /// (they are set from the right, by their width).
+    fn phone_box_measure(&mut self) {
+        if self.phone_pill.box_e <= 0.0 && !self.phone_pill.box_open {
+            return;
+        }
+        let font_px = FONT_PX * self.options_scale();
+        let new: Vec<String> = self
+            .phone_box_lines()
+            .into_iter()
+            .map(|l| l.value)
+            .filter(|v| !v.is_empty() && !self.phone_pill.value_w.contains_key(v))
+            .collect();
+        if let Some(r) = self.options_renderer.as_mut() {
+            for value in new {
+                let w = r.measure_text(&value, font_px, TEXT_FONT);
+                self.phone_pill.value_w.insert(value, w);
+            }
+        }
+    }
+
+    /// The box's lines, each with its place under the long pill (`long`:
+    /// the long pill and its box, whole).
+    fn phone_box_placed(&self, long: Rect) -> Vec<(Rect, Line)> {
         let ph = self.options_pill_h();
         let mut y = long.y + ph;
-        let mut lines = Vec::new();
-        for row in self.phone_box_rows().0 {
-            match row {
-                Row::Sep => y += GROUP_AIR,
-                Row::Note(_) => {}
-                Row::Item { label, action, .. } => {
-                    lines.push((Rect::new(long.x, y, long.w, ph), crate::i18n::tr(label).to_owned(), action));
-                    y += ph;
+        self.phone_box_lines()
+            .into_iter()
+            .map(|l| {
+                if l.air {
+                    y += GROUP_AIR;
                 }
-                Row::Target { label, action } => {
-                    lines.push((Rect::new(long.x, y, long.w, ph), label, action));
-                    y += ph;
+                let rect = Rect::new(long.x, y, long.w, ph);
+                y += ph;
+                (rect, l)
+            })
+            .collect()
+    }
+
+    /// The height of the box's page, fully open.
+    fn phone_box_page_h(&self) -> f32 {
+        let ph = self.options_pill_h();
+        let lines = self.phone_box_lines();
+        if lines.is_empty() {
+            return 0.0;
+        }
+        lines.iter().map(|l| ph + if l.air { GROUP_AIR } else { 0.0 }).sum::<f32>() + BOX_FOOT
+    }
+
+    /// The box's height now (it eases from one page's to the next's).
+    fn phone_box_h(&self) -> f32 {
+        if self.phone_pill.box_h > 0.0 {
+            self.phone_pill.box_h
+        } else {
+            self.phone_box_page_h()
+        }
+    }
+
+    /// Turn the box's page; what the page needs is fetched.
+    fn phone_box_turn(&mut self, page: Page) {
+        self.phone_pill.page = page;
+        match page {
+            Page::Configure => {
+                if let Some((v, serial, _)) = self.phone_pill_volume() {
+                    let phone = crate::phones::Phones::load().of(serial.as_deref().unwrap_or_default(), &v.name);
+                    self.phone_pill.config = Some(phone);
+                }
+            }
+            Page::Properties => {
+                self.phone_pill.facts = None;
+                if let Some(serial) = self.phone_pill_volume().and_then(|(_, serial, _)| serial) {
+                    self.desktop_off_loop(
+                        move || crate::desktop_phone::facts(&serial),
+                        |app, facts| {
+                            app.phone_pill.facts = Some(facts);
+                            app.schedule_phone_pill_frame();
+                            app.draw_options();
+                        },
+                    );
+                } else {
+                    self.phone_pill.facts = Some(Vec::new());
+                }
+            }
+            Page::Menu | Page::Camera => {}
+        }
+        self.schedule_phone_pill_frame();
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    /// A click on a line of the box.
+    fn phone_box_act(&mut self, act: Act, at: (f32, f32)) {
+        let item = self.phone_pill_volume().and_then(|(_, _, item)| item);
+        let fold = |app: &mut App| {
+            app.phone_pill.box_open = false;
+            app.schedule_phone_pill_frame();
+        };
+        match act {
+            Act::Nothing => {}
+            Act::Turn(page) => self.phone_box_turn(page),
+            // Use as camera: it starts, and the box turns to its settings.
+            Act::Menu(Action::Camera) => {
+                self.desktop_menu_act(Action::Camera, item, at);
+                self.phone_box_turn(Page::Camera);
+            }
+            Act::Menu(Action::CameraStop) => self.desktop_menu_act(Action::CameraStop, item, at),
+            Act::Menu(action) => {
+                fold(self);
+                self.desktop_menu_act(action, item, at);
+            }
+            Act::Flash => {
+                let on = self.desktop.camera_on.as_ref().is_some_and(|c| c.torch);
+                self.camera_set(None, None, Some(!on));
+            }
+            Act::Lens(n) => self.camera_set(Some(n), None, None),
+            Act::Picture(picture) => self.camera_set(None, Some(picture), None),
+            Act::Sync | Act::Kind(_) | Act::Every | Act::Charging | Act::After => {
+                if let Some(phone) = self.phone_pill.config.as_mut() {
+                    match act {
+                        Act::Sync => phone.sync = !phone.sync,
+                        Act::Kind(i) => {
+                            if let Some(kind) = crate::phones::KINDS.get(i) {
+                                match phone.kinds.iter().position(|k| k == kind.key) {
+                                    Some(at) => {
+                                        phone.kinds.remove(at);
+                                    }
+                                    None => phone.kinds.push(kind.key.to_owned()),
+                                }
+                            }
+                        }
+                        Act::Every => phone.every = phone.every.next(),
+                        Act::Charging => phone.charging_only = !phone.charging_only,
+                        _ => phone.remove_after_sync = !phone.remove_after_sync,
+                    }
+                }
+            }
+            // Apply: by the Configure box's own way of applying (it allows
+            // the phone over Wi-Fi, saves, and syncs what was just set).
+            Act::Apply => {
+                let (Some(phone), Some((v, serial, _))) = (self.phone_pill.config.take(), self.phone_pill_volume()) else {
+                    return;
+                };
+                let config = crate::desktop_config::Config::of(
+                    v.path.to_string_lossy().into_owned(),
+                    serial.unwrap_or_default(),
+                    v.name.clone(),
+                    phone,
+                );
+                self.desktop.config = Some(config);
+                self.desktop_config_apply();
+                self.phone_box_turn(Page::Menu);
+            }
+            Act::Whole => {
+                fold(self);
+                if let Some(i) = item {
+                    self.desktop_open_config(i, at);
                 }
             }
         }
-        lines
-    }
-
-    /// The box's height, fully open.
-    fn phone_box_h(&self) -> f32 {
-        let ph = self.options_pill_h();
-        let rows = self.phone_box_rows().0;
-        if rows.is_empty() {
-            return 0.0;
-        }
-        rows.iter().map(|r| match r {
-            Row::Sep => GROUP_AIR,
-            Row::Note(_) => 0.0,
-            _ => ph,
-        })
-        .sum::<f32>()
-            + BOX_FOOT
+        self.phone_pill_sync();
     }
 
     /// A scroll over the pill: down opens its box, up folds it (the task
     /// pill's gesture and its sign).
     pub(crate) fn phone_pill_axis(&mut self, value: f32) {
-        if value.abs() < crate::options::SCROLL_DEADZONE || self.phone_pill.fake.is_some() {
+        if value.abs() < crate::options::SCROLL_DEADZONE {
             return;
         }
-        let open = value < 0.0 && !self.phone_box_rows().0.is_empty();
+        let open = value < 0.0 && !self.phone_box_lines().is_empty();
         if open != self.phone_pill.box_open {
             self.phone_pill.box_open = open;
             self.schedule_phone_pill_frame();
@@ -460,19 +833,28 @@ impl App {
         // the pill).
         if ptr.1 > round.y + round.h {
             let long = self.phone_pill_long(rect);
-            let hit = self.phone_box_lines(long).into_iter().find(|(r, _, _)| r.contains(ptr));
-            if let Some((_, label, action)) = hit {
-                let item = self.phone_box_rows().1;
-                tracing::info!("desktop: \"{label}\" from the bar's phone pill");
-                self.phone_pill.box_open = false;
-                self.schedule_phone_pill_frame();
-                self.desktop_menu_act(action, item, (long.x, round.y + round.h + 8.0));
-                self.phone_pill_sync();
+            let hit = self.phone_box_placed(long).into_iter().find(|(r, _)| r.contains(ptr));
+            if let Some((_, l)) = hit {
+                tracing::info!("desktop: \"{}\" from the bar's phone pill", l.label);
+                self.phone_box_act(l.act, (long.x, round.y + round.h + 8.0));
             }
             return;
         }
         if ptr.0 < round.x {
-            self.phone_pill_sync_now((rect.x, round.y + round.h + 8.0));
+            // The long pill: its button says what a click does.
+            match self.phone_pill.shown.as_ref().and_then(|s| s.button) {
+                Some(STOP) => {
+                    if let Some(path) = self.phone_pill.shown.as_ref().map(|s| s.path.clone()) {
+                        self.camera_stop(&path);
+                    }
+                }
+                Some(SET_UP) => {
+                    self.phone_pill.box_open = true;
+                    self.phone_box_turn(Page::Configure);
+                }
+                Some(_) => self.phone_pill_sync_now(),
+                None => {}
+            }
             return;
         }
         if let Some(path) = self.phone_pill.shown.as_ref().map(|s| s.path.clone()) {
@@ -482,15 +864,12 @@ impl App {
     }
 
     /// Sync the plugged-in phone now, by its cable, whatever its settings
-    /// say of when. `at`: where a Configure box would open.
-    fn phone_pill_sync_now(&mut self, at: (f32, f32)) {
+    /// say of when.
+    fn phone_pill_sync_now(&mut self) {
         let Some(shown) = self.phone_pill_now() else {
             return;
         };
         if !shown.known {
-            if let Some(i) = self.desktop.items.iter().position(|it| it.path == shown.path) {
-                self.desktop_open_config(i, at);
-            }
             return;
         }
         let Some(serial) = shown.serial else {
@@ -529,11 +908,24 @@ impl App {
             "gone" => self.phone_pill.fake = None,
             "open" => self.phone_pill.forced = Some(true),
             // The box, as a scroll down and a scroll up do.
-            "box" => self.phone_pill.box_open = !self.phone_box_rows().0.is_empty(),
+            "box" => self.phone_pill.box_open = !self.phone_box_lines().is_empty(),
+            // A page of the box, and a click on its `n`th line (never one
+            // of the menu's own rows: those act on the phone).
+            "camera" => self.phone_box_turn(Page::Camera),
+            "configure" => self.phone_box_turn(Page::Configure),
+            "properties" => self.phone_box_turn(Page::Properties),
+            "menu" => self.phone_box_turn(Page::Menu),
+            "line" => {
+                let act = rest.trim().parse::<usize>().ok().and_then(|n| self.phone_box_lines().into_iter().nth(n)).map(|l| l.act);
+                match act {
+                    Some(Act::Menu(_)) | None => return "phonepill line <n of a page's line that is not a menu row>".to_owned(),
+                    Some(act) => self.phone_box_act(act, (0.0, 0.0)),
+                }
+            }
             "fold" => self.phone_pill.box_open = false,
             "close" => self.phone_pill.forced = Some(false),
             "free" => self.phone_pill.forced = None,
-            _ => return "phonepill fake [words]|gone|open|close|free|box|fold".to_owned(),
+            _ => return "phonepill fake [words]|gone|open|close|free|box|fold|menu|camera|configure|properties|line <n>".to_owned(),
         }
         self.phone_pill_sync();
         self.update_phone_hover();
@@ -591,11 +983,11 @@ impl App {
             // box has room for all of it.
             if e > 0.01 {
                 let hover = self.options_hover_wash();
-                for (row, label, _) in self.phone_box_lines(long) {
+                for (row, l) in self.phone_box_placed(long) {
                     if row.y + row.h > long.y + long.h + 0.5 {
                         break;
                     }
-                    if ptr.is_some_and(|p| row.contains(p)) {
+                    if l.act != Act::Nothing && ptr.is_some_and(|p| row.contains(p)) {
                         scene.rects.push(RectInst {
                             rect: Rect::new(row.x + 3.0, row.y, row.w - 6.0, row.h),
                             radius: row.h / 2.0,
@@ -604,19 +996,28 @@ impl App {
                             border: 0.0,
                         });
                     }
-                    scene.labels.push(Label {
-                        text: label,
-                        pos: (row.x + PILL_PAD_X, row.y + (row.h - LINE_PX * s) / 2.0),
-                        max_w: 4096.0,
-                        font_px: FONT_PX * s,
-                        line_px: LINE_PX * s,
-                        centered: false,
-                        dim: false,
-                        cache: true,
-                        family: TEXT_FONT,
-                        color: Some([ink[0], ink[1], ink[2], ink[3] * solid * out]),
-                        clip: Some(row),
-                    });
+                    let ty = row.y + (row.h - LINE_PX * s) / 2.0;
+                    let mut word = |text: String, x: f32, alpha: f32| {
+                        scene.labels.push(Label {
+                            text,
+                            pos: (x, ty),
+                            max_w: 4096.0,
+                            font_px: FONT_PX * s,
+                            line_px: LINE_PX * s,
+                            centered: false,
+                            dim: false,
+                            cache: true,
+                            family: TEXT_FONT,
+                            color: Some([ink[0], ink[1], ink[2], ink[3] * solid * out * alpha]),
+                            clip: Some(row),
+                        });
+                    };
+                    word(l.label, row.x + PILL_PAD_X, 1.0);
+                    if !l.value.is_empty() {
+                        // (Set from the right, by its measured width.)
+                        let w = p.value_w.get(&l.value).copied().unwrap_or(l.value.chars().count() as f32 * FONT_PX * s * 0.56);
+                        word(l.value, row.x + row.w - PILL_PAD_X - w, 0.7);
+                    }
                 }
             }
             // (From here on, the band: the long pill itself.)

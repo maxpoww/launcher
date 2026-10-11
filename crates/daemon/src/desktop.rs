@@ -409,7 +409,7 @@ pub(crate) struct Desktop {
     /// What lenses each phone said it has (volume path → them), asked once.
     pub lenses: HashMap<String, Vec<Lens>>,
     /// The phone that is this computer's camera now, and how (what the
-    /// bar's camera pill shows and changes).
+    /// bar's phone pill shows and changes).
     pub camera_on: Option<CameraOn>,
     /// Counts the camera's starts: an old one's end is not the new one's.
     pub camera_gen: u64,
@@ -2709,11 +2709,11 @@ impl App {
                 // start has taken its place meanwhile.
                 if app.desktop.camera_gen == gen {
                     app.desktop.camera_on = None;
-                    app.camera_pill_sync();
+                    app.phone_pill_sync();
                 }
             },
         );
-        self.camera_pill_sync();
+        self.phone_pill_sync();
     }
 
     /// The camera in use, for the bar's pill: its lenses' names and the
@@ -2747,25 +2747,6 @@ impl App {
         self.desktop_camera_start(&on.path, n, Some(pic), flash);
     }
 
-    /// A camera that is not there, for the bar's pill to be looked at without
-    /// a phone (`debug-desktop "campill fake"`; `campill gone` takes it away).
-    pub(crate) fn camera_fake(&mut self, on: bool) {
-        const FAKE: &str = "/nowhere/a-phone";
-        self.desktop.camera_gen += 1;
-        if on {
-            let lens = |name: &str, zoom| Lens { name: name.to_owned(), id: "0".to_owned(), zoom, fps: Some(60) };
-            let mut lenses = vec![lens("Ultra wide", Some(0.5)), lens("Main", Some(1.0)), lens("Telephoto", Some(5.0))];
-            lenses.push(Lens { name: "Front".to_owned(), id: "1".to_owned(), zoom: None, fps: Some(60) });
-            let picture = camera_pictures(&lenses[1], camera_chip())[0];
-            self.desktop.lenses.insert(FAKE.to_owned(), lenses);
-            self.desktop.camera_on = Some(CameraOn { path: FAKE.to_owned(), lens: 1, picture, torch: false });
-        } else {
-            self.desktop.lenses.remove(FAKE);
-            self.desktop.camera_on = None;
-        }
-        self.camera_pill_sync();
-    }
-
     /// Stop the camera in use (the menu's row, by its phone).
     pub(crate) fn camera_stop(&mut self, path: &str) {
         if self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path) {
@@ -2773,7 +2754,7 @@ impl App {
             self.desktop.camera_gen += 1;
         }
         self.desktop_camera_stop(path);
-        self.camera_pill_sync();
+        self.phone_pill_sync();
     }
 
     /// Turn the menu to its "Move to" page: the sticks at once, the paired
@@ -5091,10 +5072,6 @@ impl App {
         // `phonepill …`: the bar's phone pill, without a pointer.
         if let Some(rest) = what.strip_prefix("phonepill ") {
             return self.phone_pill_debug(rest.trim());
-        }
-        // `campill …`: the bar's camera pill, without a pointer.
-        if let Some(rest) = what.strip_prefix("campill ") {
-            return self.camera_pill_debug(rest.trim());
         }
         // `task <seconds> [what]`: a task that takes that long, for the
         // OPTIONS bar's task pill to show (no phone needed).

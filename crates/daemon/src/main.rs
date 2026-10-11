@@ -91,7 +91,6 @@ mod module_box;
 mod stats;
 mod surface;
 mod sys;
-mod camera_pill;
 mod phone_pill;
 mod task_pill;
 mod task_title;
@@ -658,7 +657,6 @@ fn main() -> anyhow::Result<()> {
         task_tx: None,
         task_pill: task_pill::TaskPill::default(),
         bar_zoom_keys: false,
-        camera_pill: camera_pill::CameraPill::default(),
         phone_pill: phone_pill::PhonePill::default(),
         desktop_layer,
         desktop_renderer: None,
@@ -1541,8 +1539,6 @@ pub struct App {
     task_pill: task_pill::TaskPill,
     /// Ctrl +/−/0 are bound to the bar's zoom (the pointer is on it).
     bar_zoom_keys: bool,
-    /// The bar's camera pill (`camera_pill.rs`).
-    camera_pill: camera_pill::CameraPill,
     /// The bar's phone pill (`phone_pill.rs`).
     phone_pill: phone_pill::PhonePill,
     desktop_layer: Option<LayerSurface>,
