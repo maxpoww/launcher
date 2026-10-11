@@ -22,6 +22,9 @@ use crate::desktop_menu::MenuPaint;
 use crate::phones::{Phone, KINDS};
 
 pub(crate) const WIDTH: f32 = 520.0;
+/// The air over the box's buttons that goes with them (the line over them
+/// is in it).
+const FOOT_AIR: f32 = 16.0;
 const PAD: f32 = 18.0;
 const FONT_PX: f32 = 13.0;
 const LINE_PX: f32 = 17.0;
@@ -94,6 +97,15 @@ impl Config {
     pub(crate) fn built(&self, ink: [f32; 4], wash: [f32; 4]) -> (Vec<RectInst>, Vec<Label>, f32) {
         let b = self.build(ink, wash);
         (b.rects, b.labels, b.height)
+    }
+
+    /// Where its foot begins, from its top: the line over Cancel and Apply
+    /// (for a host that keeps the foot in sight while the rest scrolls).
+    pub(crate) fn foot_top(&self) -> Option<f32> {
+        let b = self.build([1.0; 4], [0.0; 4]);
+        let buttons = b.hits.iter().filter(|(hit, _)| matches!(hit, Hit::Cancel | Hit::Apply)).map(|(_, r)| r.y);
+        let top = buttons.fold(f32::INFINITY, f32::min);
+        top.is_finite().then(|| (top - self.rect.y - FOOT_AIR).max(0.0))
     }
 }
 
@@ -550,6 +562,9 @@ impl App {
                     config.sub = sub;
                     config.sizes = sizes;
                     app.request_desktop_draw();
+                    // (Shown in the bar's phone pill: that is what is drawn again.)
+                    app.phone_pill_sync();
+                    app.sync_options_input();
                 }
             },
         );

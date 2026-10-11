@@ -851,6 +851,13 @@ impl App {
 
     /// The box's height now (it eases from one page's to the next's).
     fn phone_box_h(&self) -> f32 {
+        // The Configure box grows and shrinks under the hand (Sync on adds
+        // its parts, the phone's answer adds a line): the box is as tall as
+        // it is NOW, not as it was when last eased — its Cancel and Apply,
+        // at its foot, were cut off (Max, 2026-10-11).
+        if self.phone_config().is_some() {
+            return self.phone_box_page_h().min(self.phone_box_max_h());
+        }
         if self.phone_pill.box_h > 0.0 {
             self.phone_pill.box_h
         } else {
@@ -861,6 +868,37 @@ impl App {
     /// The Configure box shown in this box, if it is.
     fn phone_config(&self) -> Option<&crate::desktop_config::Config> {
         self.desktop.config.as_ref().filter(|c| c.hosted && self.phone_pill.page == Page::Configure)
+    }
+
+    /// The Configure box shown here is taller than the box: its foot
+    /// (Cancel, Apply) is kept in sight at the box's bottom while the rest
+    /// scrolls — where the foot begins in the Configure box, and how tall it
+    /// is. (Scrolled out of sight, its owner found "no apply or cancel":
+    /// Max, 2026-10-11.)
+    fn phone_config_foot(&self) -> Option<(f32, f32)> {
+        let config = self.phone_config()?;
+        let height = config.built([1.0; 4], [0.0; 4]).2;
+        if height <= self.phone_box_max_h() {
+            return None;
+        }
+        let top = config.foot_top()?;
+        Some((top, height - top))
+    }
+
+    /// What of the Configure box shown here is under `ptr` (`long`: the
+    /// long pill and its box, whole): its foot where the foot is kept, the
+    /// rest above it.
+    fn phone_config_hit(&self, ptr: (f32, f32), long: Rect) -> Option<crate::desktop_config::Hit> {
+        let config = self.phone_config()?;
+        let Some((foot_top, foot_h)) = self.phone_config_foot() else {
+            return config.hit(ptr);
+        };
+        let strip_top = long.y + long.h - foot_h;
+        if ptr.1 >= strip_top {
+            config.hit((ptr.0, ptr.1 - strip_top + config.rect.y + foot_top))
+        } else {
+            config.hit(ptr)
+        }
     }
 
     /// Put the Configure box shown here away (nothing of it is kept: it
@@ -1018,8 +1056,9 @@ impl App {
         if self.phone_pill.page == Page::Configure {
             self.phone_config_place();
             let ptr = self.options_ptr.filter(|_| on);
+            let long = self.phone_pill_on_bar().map(|rect| self.phone_pill_long(rect));
+            let hover = ptr.zip(long).and_then(|(p, long)| self.phone_config_hit(p, long));
             if let Some(config) = self.desktop.config.as_mut().filter(|c| c.hosted) {
-                let hover = ptr.and_then(|p| config.hit(p));
                 if hover != config.hover {
                     config.hover = hover;
                     self.draw_options();
@@ -1072,13 +1111,19 @@ impl App {
             // Applied or cancelled, it is gone and the menu is back.
             if self.phone_pill.page == Page::Configure {
                 self.phone_config_place();
-                let hit = self.phone_config().and_then(|c| c.hit(ptr));
+                let hit = self.phone_config_hit(ptr, self.phone_pill_long(rect));
                 if hit != Some(crate::desktop_config::Hit::Name) {
                     self.desktop_config_edit(false);
                 }
                 if let Some(hit) = hit {
                     self.desktop_config_act(hit);
                 }
+                // (What was clicked may have made it taller or shorter.)
+                let over = (self.phone_box_page_h() - self.phone_box_max_h()).max(0.0);
+                self.phone_pill.scroll = self.phone_pill.scroll.min(over);
+                self.phone_config_place();
+                self.sync_options_input();
+                self.schedule_phone_pill_frame();
                 if self.desktop.config.is_none() {
                     self.phone_box_turn(Page::Menu);
                 }
@@ -1345,21 +1390,42 @@ impl App {
                 // (Cut to the box under the pill, as the bar's other boxes
                 // cut their lists: a part half scrolled away is half drawn,
                 // not a knob left standing without its switch.)
-                let clip = Rect::new(long.x, long.y + ph, long.w, (long.h - ph).max(0.0));
+                let foot = self.phone_config_foot();
+                let foot_h = foot.map_or(0.0, |(_, h)| h.min(long.h - ph));
+                let clip = Rect::new(long.x, long.y + ph, long.w, (long.h - ph - foot_h).max(0.0));
                 // (Each word keeps to its own clip AND the box's.)
-                let within = |r: Rect| {
+                let within = |r: Rect, clip: Rect| {
                     let (x0, y0) = (r.x.max(clip.x), r.y.max(clip.y));
                     let (x1, y1) = ((r.x + r.w).min(clip.x + clip.w), (r.y + r.h).min(clip.y + clip.h));
                     (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
                 };
-                let labels: Vec<Label> = labels
-                    .into_iter()
-                    .filter_map(|mut l| {
-                        let own = l.clip.unwrap_or(Rect::new(l.pos.0, l.pos.1, l.max_w, l.line_px));
-                        l.clip = Some(within(own)?);
-                        Some(l)
-                    })
-                    .collect();
+                let cut = |labels: &[Label], dy: f32, clip: Rect| -> Vec<Label> {
+                    labels
+                        .iter()
+                        .filter_map(|l| {
+                            let mut l = l.clone();
+                            let own = l.clip.unwrap_or(Rect::new(l.pos.0, l.pos.1, l.max_w, l.line_px));
+                            l.pos.1 += dy;
+                            l.clip = Some(within(Rect::new(own.x, own.y + dy, own.w, own.h), clip)?);
+                            Some(l)
+                        })
+                        .collect()
+                };
+                // Its foot, kept at the box's bottom: the same things, moved
+                // there, cut to that strip.
+                if let Some((foot_top, _)) = foot {
+                    let strip = Rect::new(long.x, long.y + long.h - foot_h, long.w, foot_h);
+                    let dy = strip.y - (config.rect.y + foot_top);
+                    let moved: Vec<RectInst> =
+                        rects.iter().map(|r| RectInst { rect: Rect::new(r.rect.x, r.rect.y + dy, r.rect.w, r.rect.h), ..*r }).collect();
+                    scene.grids.push(crate::content::GridContent {
+                        clip: strip,
+                        rects: moved,
+                        labels: cut(&labels, dy, strip),
+                        ..Default::default()
+                    });
+                }
+                let labels = cut(&labels, 0.0, clip);
                 scene.grids.push(crate::content::GridContent { clip, rects, labels, ..Default::default() });
             }
             // (From here on, the band: the long pill itself.)
