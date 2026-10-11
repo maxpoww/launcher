@@ -5480,11 +5480,14 @@ impl App {
         };
         let hit = self.card.ptr.and_then(|p| self.card.hit(p));
         let grip = self.card.ptr.and_then(|p| self.card.grip(p));
+        // (Max, 2026-10-11: the pointing hand on the items as on the
+        // buttons — an item is clicked and dragged — and the closed hand
+        // while one is carried.)
         let shape = match (self.card.press, hit) {
+            _ if self.card.drag.is_some() => Shape::Grabbing,
             (Some(Press::Resize { .. }), _) => Shape::EwResize,
             (Some(Press::Slide { .. }), _) => Shape::Grabbing,
             (None, _) if grip.is_some() => Shape::EwResize,
-            (_, Some(Hover::Item(_))) if self.card.page != Page::Memory => Shape::Default,
             (_, Some(Hover::Input | Hover::Name)) => Shape::Text,
             (_, Some(Hover::Seek)) if self.card.seeking() => Shape::Text,
             (_, Some(_)) => Shape::Pointer,

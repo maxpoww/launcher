@@ -1422,6 +1422,10 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 [acc[0], acc[1], acc[2], 0.55]
             } else if titling == Some(item.id) {
                 [acc[0], acc[1], acc[2], 0.6]
+            } else if view.hover.is_some_and(|h| h.item() == Some(item.id)) {
+                // (The item under the pointer: its border a little
+                // stronger — Max, 2026-10-11.)
+                [tile_rim[0], tile_rim[1], tile_rim[2], tile_rim[3] * 3.5]
             } else {
                 tile_rim
             },

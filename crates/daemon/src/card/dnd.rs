@@ -177,6 +177,12 @@ impl App {
             source,
             _icon: image,
         });
+        // (The closed hand, for as long as it is carried: set here — once
+        // it is in hand the pointer is the drag's, not the card's.)
+        if let Some(cursor) = &self.cursor_device {
+            cursor.set_shape(self.enter_serial, super::Shape::Grabbing);
+            self.cursor_now = Some(super::Shape::Grabbing);
+        }
         self.request_card_draw();
     }
 
@@ -222,6 +228,8 @@ impl App {
     /// The card's drag is over, dropped or not: the item never left.
     pub(crate) fn card_drag_end(&mut self, done: bool) {
         if self.card.drag.take().is_some() {
+            // (The hand opens again: the next move of the pointer says how.)
+            self.cursor_now = None;
             info!("card: {}", if done { "dropped" } else { "drag cancelled" });
             self.request_card_draw();
         }
