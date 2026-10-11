@@ -360,6 +360,16 @@ impl App {
     /// The drag over the card moved: the list opens a place where it would
     /// land now.
     pub(crate) fn card_dnd_motion(&mut self, x: f32, y: f32) {
+        if let Some(pace) = self.card.drag_pace.as_mut() {
+            let now = std::time::Instant::now();
+            if let Some(last) = pace.last_move {
+                pace.worst_wait = pace
+                    .worst_wait
+                    .max(now.duration_since(last).as_secs_f32() * 1000.0);
+            }
+            pace.last_move = Some(now);
+            pace.moves += 1;
+        }
         // HELD OVER A BUTTON OF THE HEAD, the card turns to that page (Max,
         // 2026-10-10): so a thing can go from any page to any other.
         if self.card.dnd_over {

@@ -196,6 +196,18 @@ struct Wheel {
     along: f32,
 }
 
+/// What a second of a drag was like (see `draw_card`).
+#[derive(Debug, Default, Clone, Copy)]
+struct DragPace {
+    since: Instant,
+    draws: u32,
+    worst_draw: f32,
+    all_draw: f32,
+    moves: u32,
+    worst_wait: f32,
+    last_move: Option<Instant>,
+}
+
 /// An item in hand: a Wayland drag of ours.
 pub(crate) struct Drag {
     pub id: u64,
@@ -622,6 +634,8 @@ pub(crate) struct Card {
     playing: Option<voice::Playing>,
     /// The voice note that is paused, and how many seconds in it stopped.
     paused: Option<(u64, f32)>,
+    /// How the drag in hand is going, this second (`draw_card`).
+    drag_pace: Option<DragPace>,
     /// The timer that redraws the card while something records or plays
     /// is running (`card_voice_tick`: one at a time).
     voice_ticking: bool,
@@ -4213,8 +4227,47 @@ impl App {
         }
     }
 
-    /// Draw one frame of the card.
+    /// Draw one frame of the card — and, WHILE AN ITEM IS CARRIED, measure
+    /// it: once a second the log says how many frames were drawn, how long
+    /// the longest took, how many moves of the drag came and the longest
+    /// wait between two (Max, 2026-10-11: a drag that lags — which side is
+    /// slow, the card's drawing or the moves it is sent?).
     pub(crate) fn draw_card(&mut self) {
+        if self.card.drag.is_none() {
+            self.card.drag_pace = None;
+            return self.draw_card_frame();
+        }
+        let began = Instant::now();
+        self.draw_card_frame();
+        let took = began.elapsed().as_secs_f32() * 1000.0;
+        let pace = self.card.drag_pace.get_or_insert(DragPace {
+            since: began,
+            ..Default::default()
+        });
+        pace.draws += 1;
+        pace.worst_draw = pace.worst_draw.max(took);
+        pace.all_draw += took;
+        if began.duration_since(pace.since).as_secs_f32() >= 1.0 {
+            info!(
+                "card: drag pace — {} frames (drawing: {:.1} ms each, longest {:.1}), {} moves (longest wait {:.0} ms), {} items, over the card {}",
+                pace.draws,
+                pace.all_draw / pace.draws.max(1) as f32,
+                pace.worst_draw,
+                pace.moves,
+                pace.worst_wait,
+                self.card.items.len(),
+                self.card.dnd_over,
+            );
+            let last_move = self.card.drag_pace.as_ref().and_then(|p| p.last_move);
+            self.card.drag_pace = Some(DragPace {
+                since: began,
+                last_move,
+                ..Default::default()
+            });
+        }
+    }
+
+    fn draw_card_frame(&mut self) {
         self.card_dirty = false;
         // No card anywhere and its renderer put away: nothing to draw, and
         // drawing would only bring the renderer back to full size.
