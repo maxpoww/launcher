@@ -35,7 +35,8 @@ const GLYPH_PHONE: &str = "\u{f10b}";
 const SYNC: &str = "Sync";
 const SET_UP: &str = "Set up";
 const STOP: &str = "Stop";
-const HOW: &str = "How";
+/// (A click on it shows how: Max, 2026-10-11.)
+const HOW: &str = "Turn ON";
 /// How much longer than its word the button is (the task pill's chips
 /// have 12; Max, 2026-10-11: "make the button slightly longer").
 const CHIP_PAD: f32 = 24.0;
