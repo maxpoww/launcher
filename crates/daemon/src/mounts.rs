@@ -359,8 +359,12 @@ fn adb_ready(serial: &str) -> bool {
 
 /// Switch the phones that are set to charge only, and let this computer in
 /// over `adb`, to file transfer — what their owner would do by hand on the
-/// phone. A phone the volume service already shows is left alone; each is
-/// switched `NUDGES` times at most (it drops off the bus and comes back as a
+/// phone. A phone the volume service already shows WITH ITS FILES is left
+/// alone — one that is shown and mounted with nothing in it is on charge
+/// only all the same (an old Huawei keeps its file-transfer interface up in
+/// that mode and hands over an empty folder: Max, 2026-10-11, "it is on
+/// charge only every time I plug it in; we handled that on the Pixel").
+/// Each is switched `NUDGES` times at most (it drops off the bus and comes back as a
 /// phone with files; one that does not is not asked for ever).
 fn nudge(usb: &[UsbPhone], volumes: &[Volume], nudged: &mut HashMap<String, u8>, asked: &mut HashSet<String>) {
     asked.retain(|port| usb.iter().any(|p| &p.port == port));
@@ -369,7 +373,17 @@ fn nudge(usb: &[UsbPhone], volumes: &[Volume], nudged: &mut HashMap<String, u8>,
             continue;
         };
         // (One that is giving its internet was put there on purpose.)
-        if !phone.adb || phone.tether || volumes.iter().any(|v| v.port.as_deref() == Some(phone.port.as_str())) {
+        let shown = volumes.iter().find(|v| v.port.as_deref() == Some(phone.port.as_str()));
+        let showing_files = shown.is_some_and(|v| match &v.mount {
+            // (Not mounted yet: it is looked at again once it is.)
+            None => true,
+            Some(uri) => {
+                let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+                mount_path(uri, &runtime)
+                    .is_none_or(|path| std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some()))
+            }
+        });
+        if !phone.adb || phone.tether || showing_files {
             continue;
         }
         // Once each time it is on the bus: `adb` is a process to run.
@@ -381,12 +395,18 @@ fn nudge(usb: &[UsbPhone], volumes: &[Volume], nudged: &mut HashMap<String, u8>,
             continue;
         }
         *times += 1;
-        let switched = Command::new("adb")
-            .args(["-s", serial, "shell", "svc", "usb", "setFunctions", "mtp"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // (`setFunctions` is Android 8's word for it; before that it was
+        // `setFunction`. The one a phone does not know does nothing.)
+        let switch = |verb: &str| {
+            Command::new("adb")
+                .args(["-s", serial, "shell", "svc", "usb", verb, "mtp"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        };
+        let switched = switch("setFunctions");
+        let _ = switch("setFunction");
         info!("mounts: {} was on charge only; switched to file transfer ({switched:?})", phone.name);
     }
 }
