@@ -4252,7 +4252,7 @@ impl App {
             .as_secs_f32()
             >= 1.0
         {
-            info!(
+            debug!(
                 "card: drag pace — {} frames (drawing: {:.1} ms each, longest {:.1}), {} moves (longest wait {:.0} ms), {} items, over the card {}",
                 pace.draws,
                 pace.all_draw / pace.draws.max(1) as f32,
@@ -4784,6 +4784,7 @@ impl App {
             }),
             dnd_over: self.card.dnd_over,
             hidden,
+            opening: opening.map_or(0.0, |o| o.1),
             shifts: &self.card.shifts,
             slots: &self.card.slots,
             paint,

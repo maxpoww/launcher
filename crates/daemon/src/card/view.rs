@@ -1126,6 +1126,10 @@ pub(crate) struct View<'a> {
     pub dnd_over: bool,
     /// An item not drawn at all: it is in the hand, over the card.
     pub hidden: Option<u64>,
+    /// How tall a place the list holds open for the drag over it (0: none)
+    /// — also when that place is AFTER THE LAST ITEM, where no item moves
+    /// aside to show it.
+    pub opening: f32,
     /// How far each item is moved down right now, by id, to open a place
     /// for what is being dragged in (eased by the caller).
     pub shifts: &'a HashMap<u64, f32>,
@@ -1336,10 +1340,15 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         })
         .collect();
     // (The opening for something dragged in is part of the list's length.)
+    // (ALL of it, wherever it is: were a place after the last item not
+    // counted — no item moves aside for that one — the list would be
+    // shorter there, it would scroll, the place under the pointer would be
+    // another, the list longer again… and the items never came to rest:
+    // Max, 2026-10-11, *"the items can't tell where to land"*.)
     let opening = shown_items
         .iter()
         .filter_map(|it| view.shifts.get(&it.id))
-        .fold(0.0f32, |a, s| a.max(*s));
+        .fold(view.opening, |a, s| a.max(*s));
     // (An open memory's name floats over the top of its list: the items
     // start under it, and slide behind it when the list is scrolled.)
     let named = view
@@ -2722,6 +2731,7 @@ mod tests {
             foot: None,
             dnd_over: false,
             hidden: None,
+            opening: 0.0,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -2767,6 +2777,7 @@ mod tests {
             foot: None,
             dnd_over: true,
             hidden: None,
+            opening: 0.0,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -2798,6 +2809,7 @@ mod tests {
                 foot: None,
                 dnd_over: true,
                 hidden,
+                opening: 0.0,
                 shifts,
                 slots: &slots,
                 paint: PAINT,
@@ -2930,6 +2942,7 @@ mod tests {
             }),
             dnd_over: false,
             hidden: None,
+            opening: 0.0,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -3010,6 +3023,7 @@ mod tests {
                 foot: None,
                 dnd_over: false,
                 hidden: None,
+                opening: 0.0,
                 shifts: &shifts,
                 slots: &slots,
                 paint: PAINT,
