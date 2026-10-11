@@ -581,8 +581,34 @@ The big daemon files are cohesive but long — go straight to the function:
   always a COPY of its own (`copy_of`, `pin_copy`, `keep_in`); Memory = choose a session on its page
   (`Card::picking`, `card_picked`; title "Keep in which session?"). `card_flash` says what was done
   where the hint is. Pointer-free: `card key enter|escape|tab|backspace`, `card edit <n>`,
-  `card disk <n>`, `card menu <row>`. NOT BUILT YET from the mockup: Removed · Undo, forget-twice,
-  renaming a session from its row, empty sessions disappearing, the search across sessions, hold Space,
-  items made of parts and the + menu (the box still has its three old buttons), the dashed empty
-  frames, the voice-to-text page, the dictionary on this flow, the translator (no engine chosen).
+  `card disk <n>`, `card menu <row>`. THEN (2026-10-10 night): "Removed · Undo" / "Session forgotten ·
+  Undo" in the hint (`Undone`, `card_undo`, `card_undo_over`, `card_flash_long`); a session is
+  forgotten at the SECOND click of its × (`Card::arming`), renamed by the pencil of its row
+  (`Card::renaming`); a session with nothing in it is gone once left (`Card::prune`); HOLD SPACE = a
+  voice note for as long as it is held (`Card::space/held`, `card_key_release`, `HOLD_MS`), talk on
+  voice-to-text's page; a dashed frame on an empty session / Pinned; "Nothing to search" on an empty
+  list; a × on the clipboard's rows (deletes the clip). AN ITEM CAN BE MADE OF PARTS
+  (`Item::parts`, each an item; `body` = their words): laid out and drawn by `view::pieces`,
+  `mixed_height`, `draw_pieces`, `piece_rects` (files as 64 px thumbnails side by side, a voice note
+  as a row, a part with `from` under a rule with that name = an ANSWER); the writing box holds the
+  parts already put in (`Card::sealed`, `card_seal`, `card_unseal`) over the line being written, and
+  has ONE button, the +, whose menu (`Card::plus`, `card_plus`) is Image · File · Voice note · Voice
+  to text; while `Field::Box` is up whatever `card_push` is given becomes a part (`Card::keeping`
+  guards the keep itself); Backspace on an empty line takes the last part back. A CLICK on an item
+  made of parts OPENS it (`Card::wide`, `card_click`): its voice notes are written out
+  (`card_write_out` → `Item::said`), and the piece under the pointer answers alone — `Card::item` /
+  `item_mut` look into parts, so paste, lift and play take a part's id. A long text shows
+  `MAX_LINES` (6) and "Show all" (`has_more`, `Tile::more`, `Hover::More`). THE VOICE NOTE: play
+  symbol, its title (`body`, unless it starts with `VOICE_NAME`), a line with its two times,
+  "Transcribe" (`Hover::More` on it); its pencil writes the title, one recorded with Space asks for
+  it (`Card::name_next`). VOICE TO TEXT has its own page (`Page::Talk`, `Foot::Talk` first in the
+  head, `talk_mic`, `Hover::Mic`, `card_said`): what is said goes into the WINDOW and stays as the
+  page's one item (`Card::said_last`). THE DICTIONARY works as Pinned (`Card::looked`, saved;
+  `card_look_up`, `card_keep_word`): a word is written in the box (no + there: `Bottom::plain`) and
+  kept as an item whose parts are the word and one ANSWER a language. Pointer-free too: `card undo`,
+  `card key space|space-up`, `card plus`, `card click <n>`, `card talk`, `card said <words>`,
+  `card dictionary <word>`. ⚠ never `rustfmt crates/daemon/src/main.rs` (it reformats the whole
+  crate): format `card/*.rs` only. NOT BUILT YET from the mockup: the search across sessions showing
+  the items themselves, seeking on a voice note's line, the dragged picture of an item made of parts,
+  the translator (no engine chosen) and its button.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
