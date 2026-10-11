@@ -621,7 +621,11 @@ The big daemon files are cohesive but long — go straight to the function:
   words on its input, through English when neither side is English — the engine being the flake's
   `translate` package (pkgs.translatelocally + the es/fr/de↔en tiny models), out-linked by
   `waverunner-dev` at `~/.local/state/waverunner/translate` and named by `WAVERUNNER_TRANSLATE`.
-  Pointer-free: `card translate <words>`, `card lang <n> <row>`. The whole mockup is in; what it
+  Pointer-free: `card translate <words>`, `card lang <n> <row>`. The translator knows six languages (en es fr de pt it; pt/it are
+  Mozilla's Firefox tiny models, the flake's `mozModel`). EVERYTHING on the card scrolls the same way
+  (`card_scroll_by`: fingers 1:1, a wheel's notch eased, a glide when let go fast) — the list and the emoji
+  grid (`Card::scroll_pick` says which); what is written in the box scrolls by the pixel
+  (`Card::draft_off`, `BarView.first_off`). The whole mockup is in; what it
   has that this has not: Portuguese and Italian (no packaged model), a download on a click.
   LAST (2026-10-11): a drag held over a button of the head turns the card to that page
   (`Card::dnd_foot`), and a drop does what its page does (`card_push`: translated, looked up, kept in

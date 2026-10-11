@@ -2662,6 +2662,7 @@ mod tests {
                     field: None,
                     caret: None,
                     first: 0,
+                    first_off: 0.0,
                     select: &[],
                     rec: None,
                     talk: None,

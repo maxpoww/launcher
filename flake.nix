@@ -76,20 +76,125 @@
 
         # The card's translator: an offline engine (translateLocally — marian
         # and the Bergamot models, the ones Firefox translates with) and the
-        # language pairs it knows here, pinned: Spanish, French and German,
-        # each to and from English (the small "tiny" models, some 15 MB a
-        # pair). The engine finds its models under share/translateLocally in
-        # the data dirs; it is run with no window. Pointed at by
-        # $WAVERUNNER_TRANSLATE (`crates/daemon/src/card/mod.rs`, `translate`).
+        # language pairs it knows here, pinned: Spanish, French, German,
+        # Portuguese and Italian, each to and from English (the small "tiny"
+        # models, some 15–20 MB a pair). Spanish, French and German are
+        # nixpkgs' own packages; Portuguese and Italian are not packaged
+        # there, so they are put together here from the files Mozilla serves
+        # to Firefox (the same kind of model: its three files, and the two
+        # small ones translateLocally reads beside them). The engine finds
+        # its models under share/translateLocally in the data dirs; it is run
+        # with no window. Pointed at by $WAVERUNNER_TRANSLATE
+        # (`crates/daemon/src/card/mod.rs`, `translate`).
         translate =
           let
-            models = with pkgs.translatelocally-models; [
+            mozModel =
+              {
+                from,
+                to,
+                src,
+                trg,
+                model,
+                lex,
+                vocab,
+              }:
+              let
+                pair = "${from}${to}";
+                files = {
+                  "model.${pair}.intgemm.alphas.bin" = pkgs.fetchurl model;
+                  "lex.50.50.${pair}.s2t.bin" = pkgs.fetchurl lex;
+                  "vocab.${pair}.spm" = pkgs.fetchurl vocab;
+                };
+                config = pkgs.writeText "config.intgemm8bitalpha.yml" ''
+                  relative-paths: true
+                  models:
+                    - model.${pair}.intgemm.alphas.bin
+                  vocabs:
+                    - vocab.${pair}.spm
+                    - vocab.${pair}.spm
+                  shortlist:
+                      - lex.50.50.${pair}.s2t.bin
+                      - false
+                  beam-size: 1
+                  normalize: 1.0
+                  word-penalty: 0
+                  mini-batch: 64
+                  maxi-batch: 1000
+                  maxi-batch-sort: src
+                  workspace: 2000
+                  max-length-factor: 2.0
+                  skip-cost: true
+                  gemm-precision: int8shiftAlphaAll
+                '';
+                info = pkgs.writeText "model_info.json" (
+                  builtins.toJSON {
+                    modelName = "${src}-${trg} tiny";
+                    shortName = "${from}-${to}-tiny";
+                    type = "tiny";
+                    inherit src trg;
+                    srcTags = {
+                      ${from} = src;
+                    };
+                    trgTag = to;
+                    repository = "Mozilla";
+                    version = 1;
+                    API = 1;
+                  }
+                );
+              in
+              pkgs.runCommand "translatelocally-model-${from}-${to}-tiny" { } ''
+                d=$out/share/translateLocally/models/${pair}.mozilla.tiny
+                mkdir -p $d
+                ${pkgs.lib.concatStringsSep "\n" (
+                  pkgs.lib.mapAttrsToList (name: file: "ln -s ${file} $d/${name}") files
+                )}
+                ln -s ${config} $d/config.intgemm8bitalpha.yml
+                ln -s ${info} $d/model_info.json
+              '';
+            models = (with pkgs.translatelocally-models; [
               es-en-tiny
               en-es-tiny
               fr-en-tiny
               en-fr-tiny
               de-en-tiny
               en-de-tiny
+            ]) ++ [
+              (mozModel {
+                from = "pt";
+                to = "en";
+                src = "Portuguese";
+                trg = "English";
+                model = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/dc4327ec-9ebc-4c12-8037-48cd30f3076d.bin"; sha256 = "b4a1fd101f59ca258bfb051a3a4e5762497b9f91d7e74f28b7a2d68dc075f8fa"; };
+                lex = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/013e0ebf-3d6b-4723-b83e-0e00ed29477f.bin"; sha256 = "702d9b09fbc020168998bb81afc927e74262f5a1455e9b443608a5d8efa4b52d"; };
+                vocab = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/75fa56af-540e-4a56-8a9f-1317ae7a9c61.spm"; sha256 = "2326a27577b5ffa0b822c55fe850986961728097521de35fcc186f7d6dce72d4"; };
+              })
+              (mozModel {
+                from = "en";
+                to = "pt";
+                src = "English";
+                trg = "Portuguese";
+                model = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/b268bf87-94b6-4893-9da1-c4e75284ace7.bin"; sha256 = "8fb05a27509bea3f67d2f59506485584d5cdbdcafa82b251576c27e91bd7011e"; };
+                lex = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/be3a2e24-b12e-4c0e-b07a-c7b0ba6ab421.bin"; sha256 = "dd0e64865277f0a1cf15a26a5b50e9e0570235afd8dab7c5e0249ad7057531d6"; };
+                vocab = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/745bff57-f929-41d9-8f0f-913513cfd334.spm"; sha256 = "2326a27577b5ffa0b822c55fe850986961728097521de35fcc186f7d6dce72d4"; };
+              })
+              (mozModel {
+                from = "it";
+                to = "en";
+                src = "Italian";
+                trg = "English";
+                model = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/1cf6a2f6-f430-4119-98d5-1ec0617beb0f.bin"; sha256 = "7dfdf189146d9353fdea264b9e4c8ac36441c770dc4353a8380b64e589dc035b"; };
+                lex = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/b38e032b-1b1a-4899-a0e5-80ef69a06814.bin"; sha256 = "e30ec549bd0da9ac42cccdcd3806d3be84d485f7fd329f90f6e40ee027e841d9"; };
+                vocab = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/fbc18b06-35c1-47fa-b2db-5b792366471b.spm"; sha256 = "603f3349657c3deb9736a0c567452d102a5a03c377dfdf1d32c428608f2cff1b"; };
+              })
+              (mozModel {
+                from = "en";
+                to = "it";
+                src = "English";
+                trg = "Italian";
+                model = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/efb14526-aff4-4826-8cf6-12e2bc44ac7d.bin"; sha256 = "3d7bbc4d7977e10b35f53faa79f5d5de8211f4f04baed9e7cd9dee1dcceda917"; };
+                lex = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/d683f5a2-7a75-444c-a581-22b3c3cfaecb.bin"; sha256 = "351ea80fb9f366f07533c7c4836248e72d9d4aa4eb7a05b5d74891a7abb4208c"; };
+                vocab = { url = "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/8d28b170-7607-4834-a548-2a1244f35576.spm"; sha256 = "603f3349657c3deb9736a0c567452d102a5a03c377dfdf1d32c428608f2cff1b"; };
+              })
             ];
           in
           pkgs.runCommand "waverunner-translate" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''

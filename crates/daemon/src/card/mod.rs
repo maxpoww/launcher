@@ -277,18 +277,22 @@ fn language_of(text: &str) -> &'static str {
 }
 
 /// The rows of a translation's menu of languages, and the code each stands
-/// for (the first four: what it goes into; the last four: what it is in).
-const LANG_ROWS: [&str; 8] = [
+/// for (the first six: what it goes into; the last six: what it is in).
+const LANG_ROWS: [&str; 12] = [
     "To English",
     "To Spanish",
     "To French",
     "To German",
+    "To Portuguese",
+    "To Italian",
     "It is English",
     "It is Spanish",
     "It is French",
     "It is German",
+    "It is Portuguese",
+    "It is Italian",
 ];
-const LANG_CODES: [&str; 4] = ["en", "es", "fr", "de"];
+const LANG_CODES: [&str; 6] = ["en", "es", "fr", "de", "pt", "it"];
 
 /// The two languages of a translation: the ones picked for it by hand (its
 /// `from` keeps them, "es>en"), else the ones its words are told to be in.
@@ -597,7 +601,12 @@ pub(crate) struct Card {
     /// (`None`: it follows the cursor), and the wheel's travel not yet
     /// worth a line.
     draft_first: Option<usize>,
-    draft_wheel: f32,
+    /// …and how far that line is scrolled out at the top (px, less than a
+    /// line): what is written scrolls smoothly, not a line at a time.
+    draft_off: f32,
+    /// The scroll that is eased, or glides (`scroll_to`), is the EMOJI
+    /// grid's, not the list's.
+    scroll_pick: bool,
     /// The other end of what is SELECTED in the input box (the cursor is
     /// one end); `None`, or the cursor's own place: nothing is.
     anchor: Option<usize>,
@@ -1330,6 +1339,8 @@ impl Card {
         } else {
             under
         };
+        // (A long menu — the languages — stays inside the card all the same.)
+        let y = y.min(card.y + card.h - 8.0 - h).max(card.y + 8.0);
         Some(Rect::new(x.round(), y.round(), MENU_W, h))
     }
 
@@ -3237,7 +3248,12 @@ impl App {
             .with_input(self.card.writer);
         let spans = self.card.spans();
         let first = self.card.draft_top();
-        let Some((line, x)) = low.text_at(pos, spans.len(), first) else {
+        let off = if self.card.draft_first.is_some() {
+            self.card.draft_off
+        } else {
+            0.0
+        };
+        let Some((line, x)) = low.text_at(pos, spans.len(), first, off) else {
             return;
         };
         let Some(renderer) = self.card_renderer.as_mut() else {
@@ -4243,15 +4259,26 @@ impl App {
         }
         // The list on its way to where the wheel sent it: quickly after a
         // step of the wheel, slowly through a glide.
-        if self.card.to_bottom {
+        if self.card.to_bottom && !self.card.scroll_pick {
             self.card.scroll_to = None;
             self.card.gliding = false;
         }
         if let Some(to) = self.card.scroll_to {
-            let to = to.clamp(0.0, self.card.max_scroll);
+            // (The list's scroll, or the emoji grid's.)
+            let pick = self.card.scroll_pick;
+            let (from, most) = if pick {
+                (self.card.pick_scroll, self.card_pick_span())
+            } else {
+                (self.card.scroll, self.card.max_scroll)
+            };
+            let to = to.clamp(0.0, most);
             let rate = if self.card.gliding { 4.5 } else { 24.0 };
-            let (at, going) = crate::animation::ease_toward(self.card.scroll, to, dt, rate, 0.4);
-            self.card.scroll = at;
+            let (at, going) = crate::animation::ease_toward(from, to, dt, rate, 0.4);
+            if pick {
+                self.card.pick_scroll = at;
+            } else {
+                self.card.scroll = at;
+            }
             if going {
                 moving = true;
             } else {
@@ -4621,6 +4648,13 @@ impl App {
                     field: self.card.field,
                     caret,
                     first: self.card.draft_top(),
+                    // (Only while the wheel chose the line: following the
+                    // cursor, a line is whole.)
+                    first_off: if self.card.draft_first.is_some() {
+                        self.card.draft_off
+                    } else {
+                        0.0
+                    },
                     select: &select,
                     rec: recording.filter(|(_, talk)| !talk).map(|(secs, _)| secs),
                     talk,
@@ -5005,59 +5039,32 @@ impl App {
             // Over the input box it is what is written that scrolls, a line
             // at a time (Max, 2026-10-09: *"i need to scroll on the text
             // when im over the input box too"*).
+            // Over the input box it is what is written that scrolls (Max,
+            // 2026-10-09: *"i need to scroll on the text when im over the
+            // input box too"*) — by the pixel, not a line at a time.
             Some(false) if along != 0.0 && self.card_over_box() => {
                 let lines = self.card.spans().len();
-                let most = lines.saturating_sub(BOX_LINES);
-                self.card.draft_wheel += along * 2.4;
-                let steps = (self.card.draft_wheel / TEXT_LINE).trunc();
-                if steps != 0.0 && most > 0 {
-                    self.card.draft_wheel -= steps * TEXT_LINE;
-                    let to =
-                        (self.card.draft_top() as f32 + steps).clamp(0.0, most as f32) as usize;
-                    self.card.draft_first = Some(to);
+                let most = lines.saturating_sub(BOX_LINES) as f32 * TEXT_LINE;
+                if most > 0.0 {
+                    let at = self.card.draft_top() as f32 * TEXT_LINE
+                        + if self.card.draft_first.is_some() {
+                            self.card.draft_off
+                        } else {
+                            0.0
+                        };
+                    let to = (at + along * 2.4).clamp(0.0, most);
+                    let first = (to / TEXT_LINE).floor();
+                    self.card.draft_first = Some(first as usize);
+                    self.card.draft_off = to - first * TEXT_LINE;
                     self.request_card_draw();
                 }
             }
-            // Over the emoji picker it is the emoji that scroll.
+            // Over the emoji picker it is the emoji that scroll; anywhere
+            // else, the list. Both the same way (`card_scroll_by`).
             Some(false) if along != 0.0 && self.card_over_tray() => {
-                let span = self.card_pick_span();
-                let to = (self.card.pick_scroll + along * 2.4).clamp(0.0, span);
-                if to != self.card.pick_scroll {
-                    self.card.pick_scroll = to;
-                    self.request_card_draw();
-                }
+                self.card_scroll_by(along, true)
             }
-            Some(false) if along != 0.0 => {
-                // The list EASES to where the wheel says, instead of jumping
-                // there; and how fast the wheel goes is kept, for the glide
-                // when it is let go (`card_fling`).
-                let step = along * 2.4;
-                // (A glide under way is taken over from where the list is.)
-                let from = match (self.card.gliding, self.card.scroll_to) {
-                    (false, Some(to)) => to,
-                    _ => self.card.scroll,
-                };
-                self.card.gliding = false;
-                self.card.scroll_run += step.abs();
-                let now = Instant::now();
-                let dt = self
-                    .card
-                    .scroll_last
-                    .map_or(0.1, |last| (now - last).as_secs_f32())
-                    .clamp(0.004, 0.1);
-                self.card.scroll_vel = 0.55 * self.card.scroll_vel + 0.45 * (step / dt);
-                self.card.scroll_last = Some(now);
-                let to = (from + step).clamp(0.0, self.card.max_scroll);
-                if self.card.finger {
-                    // Fingers: the list is under them, exactly.
-                    self.card.scroll = to;
-                    self.card.scroll_to = None;
-                } else {
-                    // A wheel's notch: eased to.
-                    self.card.scroll_to = Some(to);
-                }
-                self.request_card_draw();
-            }
+            Some(false) if along != 0.0 => self.card_scroll_by(along, false),
             _ => {}
         }
     }
@@ -5087,6 +5094,55 @@ impl App {
 
     /// The scroll gesture is over: the next one chooses its way afresh, and
     /// the pointer is the card's box's alone again.
+    /// A step of the wheel over the list (or, `pick`, over the emoji grid).
+    /// Under FINGERS what scrolls moves exactly as they do; a wheel's notch
+    /// is eased to; and how fast it goes is kept, for the glide when it is
+    /// let go (`card_fling`).
+    fn card_scroll_by(&mut self, along: f32, pick: bool) {
+        // (Another thing than the last scroll moved: nothing is carried over.)
+        if self.card.scroll_pick != pick {
+            self.card.scroll_pick = pick;
+            self.card.scroll_to = None;
+            self.card.gliding = false;
+            self.card.scroll_vel = 0.0;
+            self.card.scroll_last = None;
+            self.card.scroll_run = 0.0;
+        }
+        let (at, most) = if pick {
+            (self.card.pick_scroll, self.card_pick_span())
+        } else {
+            (self.card.scroll, self.card.max_scroll)
+        };
+        let step = along * 2.4;
+        // (A glide under way is taken over from where it is.)
+        let from = match (self.card.gliding, self.card.scroll_to) {
+            (false, Some(to)) => to,
+            _ => at,
+        };
+        self.card.gliding = false;
+        self.card.scroll_run += step.abs();
+        let now = Instant::now();
+        let dt = self
+            .card
+            .scroll_last
+            .map_or(0.1, |last| (now - last).as_secs_f32())
+            .clamp(0.004, 0.1);
+        self.card.scroll_vel = 0.55 * self.card.scroll_vel + 0.45 * (step / dt);
+        self.card.scroll_last = Some(now);
+        let to = (from + step).clamp(0.0, most);
+        if self.card.finger {
+            if pick {
+                self.card.pick_scroll = to;
+            } else {
+                self.card.scroll = to;
+            }
+            self.card.scroll_to = None;
+        } else {
+            self.card.scroll_to = Some(to);
+        }
+        self.request_card_draw();
+    }
+
     /// The fingers left the touchpad on an up-and-down scroll: one that was
     /// going FAST keeps going — the list glides on in the same direction and
     /// comes to rest, as a page does under a flick. (A wheel that had
@@ -5108,8 +5164,13 @@ impl App {
             return;
         }
         // (How far it carries: its speed for about a third of a second.)
-        let from = self.card.scroll_to.unwrap_or(self.card.scroll);
-        self.card.scroll_to = Some((from + v * 0.32).clamp(0.0, self.card.max_scroll));
+        let (at, most) = if self.card.scroll_pick {
+            (self.card.pick_scroll, self.card_pick_span())
+        } else {
+            (self.card.scroll, self.card.max_scroll)
+        };
+        let from = self.card.scroll_to.unwrap_or(at);
+        self.card.scroll_to = Some((from + v * 0.32).clamp(0.0, most));
         self.card.gliding = true;
         self.request_card_draw();
     }

@@ -120,6 +120,9 @@ pub(crate) struct BarView<'a> {
     pub caret: Option<(usize, f32)>,
     /// The first of its lines that is in view.
     pub first: usize,
+    /// …and how far that line is scrolled out at the top (px, less than a
+    /// line): what is written scrolls smoothly under the wheel.
+    pub first_off: f32,
     /// What is selected in it: for each line it touches, from where to
     /// where along that line (px).
     pub select: &'a [(usize, f32, f32)],
@@ -331,11 +334,12 @@ impl Bottom {
         pos: (f32, f32),
         lines: usize,
         first: usize,
+        off: f32,
     ) -> Option<(usize, f32)> {
         let (r, text) = (self.input?, self.text()?);
         let shown = lines.clamp(1, BOX_LINES);
         let top = r.y + (r.h - shown as f32 * TEXT_LINE) / 2.0;
-        let row = ((pos.1 - top) / TEXT_LINE)
+        let row = ((pos.1 - top + off) / TEXT_LINE)
             .floor()
             .clamp(0.0, shown as f32 - 1.0) as usize;
         Some((
@@ -943,7 +947,25 @@ pub(super) fn draw(
             boxg.labels
                 .push(glyph(which.glyph(), br, which.px(), color, boxg.clip));
         }
-        let top = r.y + (r.h - bar.draft.len().clamp(1, BOX_LINES) as f32 * TEXT_LINE) / 2.0;
+        let band_top = r.y + (r.h - bar.draft.len().clamp(1, BOX_LINES) as f32 * TEXT_LINE) / 2.0;
+        // (The band the lines are written in: what is scrolled part of the
+        // way out of it is cut at its edge.)
+        let band = Rect::new(
+            r.x,
+            band_top,
+            r.w,
+            bar.draft.len().clamp(1, BOX_LINES) as f32 * TEXT_LINE,
+        );
+        let band_clip = {
+            let c = boxg.clip;
+            let (y0, y1) = (band.y.max(c.y), (band.y + band.h).min(c.y + c.h));
+            Rect::new(c.x, y0, c.w, (y1 - y0).max(0.0))
+        };
+        let within = |rect: Rect| {
+            let (y0, y1) = (rect.y.max(band.y), (rect.y + rect.h).min(band.y + band.h));
+            (y1 > y0).then(|| Rect::new(rect.x, y0, rect.w, y1 - y0))
+        };
+        let top = band_top - bar.first_off;
         if let Some(secs) = bar.rec {
             boxg.labels.push(label(
                 &format!("●  {}:{:02}   recording", secs / 60, secs % 60),
@@ -959,16 +981,21 @@ pub(super) fn draw(
             let first = bar.first.min(bar.draft.len().saturating_sub(1));
             // What is selected, behind the words.
             for (line, from, to) in bar.select {
-                if *line < first || *line >= first + BOX_LINES {
+                // (One line more than fits is in view while it is scrolled
+                // part of a line.)
+                if *line < first || *line > first + BOX_LINES {
                     continue;
                 }
+                let Some(rect) = within(Rect::new(
+                    (text.x + from).round(),
+                    top + (line - first) as f32 * TEXT_LINE + 1.0,
+                    (to - from).max(3.0).round(),
+                    TEXT_LINE - 1.0,
+                )) else {
+                    continue;
+                };
                 boxg.rects.push(RectInst {
-                    rect: Rect::new(
-                        (text.x + from).round(),
-                        top + (line - first) as f32 * TEXT_LINE + 1.0,
-                        (to - from).max(3.0).round(),
-                        TEXT_LINE - 1.0,
-                    ),
+                    rect,
                     radius: 2.0,
                     color: accent(0.34),
                     glass: 0.0,
@@ -994,7 +1021,7 @@ pub(super) fn draw(
                     ));
                 }
             } else {
-                for (n, line) in bar.draft.iter().skip(first).take(BOX_LINES).enumerate() {
+                for (n, line) in bar.draft.iter().skip(first).take(BOX_LINES + 1).enumerate() {
                     boxg.labels.push(label(
                         line,
                         (text.x, top + n as f32 * TEXT_LINE),
@@ -1002,22 +1029,28 @@ pub(super) fn draw(
                         TEXT_PX + 0.5,
                         false,
                         ink(0.95),
-                        boxg.clip,
+                        band_clip,
                     ));
                 }
             }
             // The writing cursor, where it is in the text.
             // (Not while it is scrolled out of view.)
-            let seen = |line: usize| line >= first && line < first + BOX_LINES;
-            if let (true, Some((line, x))) = (typing, bar.caret.filter(|c| seen(c.0))) {
-                let row = (line - first) as f32;
-                boxg.rects.push(RectInst {
-                    rect: Rect::new(
+            let seen = |line: usize| line >= first && line <= first + BOX_LINES;
+            if let (true, Some((rect, _))) = (
+                typing,
+                bar.caret.filter(|c| seen(c.0)).and_then(|(line, x)| {
+                    let row = (line - first) as f32;
+                    within(Rect::new(
                         (text.x + x).round(),
                         top + row * TEXT_LINE + 2.0,
                         1.5,
                         TEXT_LINE - 3.0,
-                    ),
+                    ))
+                    .map(|r| (r, line))
+                }),
+            ) {
+                boxg.rects.push(RectInst {
+                    rect,
                     radius: 0.0,
                     color: accent(1.0),
                     glass: 0.0,
@@ -1145,7 +1178,7 @@ mod tests {
         assert_eq!(first_line(9, Some(0)), 0);
         assert_eq!(first_line(9, Some(6)), 7 - BOX_LINES);
         let text = b.text().unwrap();
-        let at = b.text_at((text.x + 30.0, text.y + text.h / 2.0), 1, 0);
+        let at = b.text_at((text.x + 30.0, text.y + text.h / 2.0), 1, 0, 0.0);
         assert_eq!(at, Some((0, 30.0)));
     }
 }
