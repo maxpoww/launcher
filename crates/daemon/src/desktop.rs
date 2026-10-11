@@ -2726,6 +2726,25 @@ impl App {
         self.desktop_camera_start(&on.path, n, Some(pic), flash);
     }
 
+    /// A camera that is not there, for the bar's pill to be looked at without
+    /// a phone (`debug-desktop "campill fake"`; `campill gone` takes it away).
+    pub(crate) fn camera_fake(&mut self, on: bool) {
+        const FAKE: &str = "/nowhere/a-phone";
+        self.desktop.camera_gen += 1;
+        if on {
+            let lens = |name: &str, zoom| Lens { name: name.to_owned(), id: "0".to_owned(), zoom, fps: Some(60) };
+            let mut lenses = vec![lens("Ultra wide", Some(0.5)), lens("Main", Some(1.0)), lens("Telephoto", Some(5.0))];
+            lenses.push(Lens { name: "Front".to_owned(), id: "1".to_owned(), zoom: None, fps: Some(60) });
+            let picture = camera_pictures(&lenses[1], camera_chip())[0];
+            self.desktop.lenses.insert(FAKE.to_owned(), lenses);
+            self.desktop.camera_on = Some(CameraOn { path: FAKE.to_owned(), lens: 1, picture, torch: false });
+        } else {
+            self.desktop.lenses.remove(FAKE);
+            self.desktop.camera_on = None;
+        }
+        self.camera_pill_sync();
+    }
+
     /// Stop the camera in use (the menu's row, by its phone).
     pub(crate) fn camera_stop(&mut self, path: &str) {
         if self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path) {

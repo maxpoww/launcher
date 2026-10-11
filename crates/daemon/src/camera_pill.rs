@@ -319,6 +319,8 @@ impl App {
             Some("lens") => self.camera_pill.forced = Some((true, Grown::Lens)),
             Some("close") => self.camera_pill.forced = Some((false, Grown::None)),
             Some("free") => self.camera_pill.forced = None,
+            Some("fake") => self.camera_fake(true),
+            Some("gone") => self.camera_fake(false),
             Some("flash") => {
                 if let Some(on) = self.camera_pill.torch {
                     self.camera_set(None, None, Some(!on));
@@ -334,7 +336,7 @@ impl App {
                     self.camera_set(Some(n), None, None);
                 }
             }
-            _ => return "campill open|picture|lens|close|free|flash|p <k>|l <k>".to_owned(),
+            _ => return "campill open|picture|lens|close|free|fake|gone|flash|p <k>|l <k>".to_owned(),
         }
         self.update_camera_hover();
         self.schedule_camera_pill_frame();
