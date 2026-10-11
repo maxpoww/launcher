@@ -199,7 +199,7 @@ struct Wheel {
 /// What a second of a drag was like (see `draw_card`).
 #[derive(Debug, Default, Clone, Copy)]
 struct DragPace {
-    since: Instant,
+    since: Option<Instant>,
     draws: u32,
     worst_draw: f32,
     all_draw: f32,
@@ -4241,13 +4241,17 @@ impl App {
         self.draw_card_frame();
         let took = began.elapsed().as_secs_f32() * 1000.0;
         let pace = self.card.drag_pace.get_or_insert(DragPace {
-            since: began,
+            since: Some(began),
             ..Default::default()
         });
         pace.draws += 1;
         pace.worst_draw = pace.worst_draw.max(took);
         pace.all_draw += took;
-        if began.duration_since(pace.since).as_secs_f32() >= 1.0 {
+        if began
+            .duration_since(pace.since.unwrap_or(began))
+            .as_secs_f32()
+            >= 1.0
+        {
             info!(
                 "card: drag pace — {} frames (drawing: {:.1} ms each, longest {:.1}), {} moves (longest wait {:.0} ms), {} items, over the card {}",
                 pace.draws,
@@ -4260,7 +4264,7 @@ impl App {
             );
             let last_move = self.card.drag_pace.as_ref().and_then(|p| p.last_move);
             self.card.drag_pace = Some(DragPace {
-                since: began,
+                since: Some(began),
                 last_move,
                 ..Default::default()
             });
