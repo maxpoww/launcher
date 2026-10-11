@@ -402,11 +402,11 @@ impl Tile {
         )
     }
 
-    /// Where a voice note's speed is ("x1"): at the left of its foot, under
-    /// its first time.
+    /// Where a voice note's speed is ("x1"): in its foot, to the right of
+    /// "Transcribe" (Max, 2026-10-11).
     pub(super) fn speed(&self) -> Rect {
         Rect::new(
-            self.rect.x + TILE_PAD_X - 4.0,
+            self.rect.x + self.rect.w / 2.0 + 32.0,
             self.rect.y + self.rect.h - NOTE_LINE - 8.0,
             44.0,
             NOTE_LINE + 6.0,
@@ -1647,7 +1647,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 glass: 0.0,
                 border: 0.0,
             });
-            // Its speed, at the left of its foot: a click goes to the next
+            // Its speed, to the right of "Transcribe": a click goes to the next
             // (in the accent when it is not the plain one).
             let speed = view.foot.as_ref().map_or("x1", |f| f.speed);
             let at = tile.speed();
