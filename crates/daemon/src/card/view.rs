@@ -2668,6 +2668,7 @@ mod tests {
                     hint_lit: false,
                     hint_red: false,
                     plain: false,
+                    kind_now: None,
                     picking: None,
                     emoji: &[],
                     pick_query: "",

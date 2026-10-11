@@ -623,4 +623,11 @@ The big daemon files are cohesive but long — go straight to the function:
   `waverunner-dev` at `~/.local/state/waverunner/translate` and named by `WAVERUNNER_TRANSLATE`.
   Pointer-free: `card translate <words>`, `card lang <n> <row>`. The whole mockup is in; what it
   has that this has not: Portuguese and Italian (no packaged model), a download on a click.
+  LAST (2026-10-11): a drag held over a button of the head turns the card to that page
+  (`Card::dnd_foot`), and a drop does what its page does (`card_push`: translated, looked up, kept in
+  the session whose row it was let go on — `Card::drop_session`; an item of the card's own lands on
+  another page as a copy, `Drag::item`); the pencil is on every item of one's own (a file opens in the
+  box as a part); THE EMOJI'S PAGE has its kinds along the top (the one in view marked:
+  `BarView::kind_now`, `Bottom::first_in_view`), the grid under them, and at the bottom a line of hint
+  where the search shows once something is typed. Not done: a drop on the clipboard's page.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

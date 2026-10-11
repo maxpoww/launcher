@@ -136,6 +136,9 @@ pub(crate) struct BarView<'a> {
     pub hint_red: bool,
     /// What is written is words alone (a title): the box has no +.
     pub plain: bool,
+    /// The kind of the emoji at the top of the picker's grid right now: its
+    /// button is marked (as one under the pointer is).
+    pub kind_now: Option<usize>,
     /// The emoji picker, when it is open: how many emoji it shows and
     /// how far its grid is scrolled; the emoji themselves (all, or those
     /// its search found); what is being searched.
@@ -355,26 +358,35 @@ impl Bottom {
 
     /// The picker's search row, and the grid under it.
     pub(crate) fn pick_seek(&self) -> Option<Rect> {
+        // (At the BOTTOM of the picker: a line of hint at rest, the search
+        // once something is typed — Max, 2026-10-10.)
         let tray = self.tray?;
         Some(Rect::new(
             tray.x + 6.0,
-            tray.y + 6.0,
+            tray.y + tray.h - PICK_SEEK,
             tray.w - 12.0,
             PICK_SEEK - 6.0,
         ))
     }
 
+    /// The place among the emoji shown of the first one in view, the grid
+    /// scrolled by `scroll`.
+    pub(crate) fn first_in_view(scroll: f32) -> usize {
+        (scroll / EMOJI_CELL).floor().max(0.0) as usize * EMOJI_COLS
+    }
+
     pub(crate) fn pick_grid(&self) -> Option<Rect> {
         let tray = self.tray?;
+        // (Under the kinds, which are along the top.)
         Some(Rect::new(
             tray.x + 6.0,
-            tray.y + PICK_SEEK + 4.0,
+            tray.y + PICK_KINDS + 8.0,
             tray.w - 12.0,
             self.rows * EMOJI_CELL,
         ))
     }
 
-    /// The kinds along the picker's bottom, each with its cell.
+    /// The kinds along the picker's TOP, each with its cell.
     pub(crate) fn kinds(&self) -> impl Iterator<Item = (usize, Rect)> + '_ {
         let tray = self.tray;
         let count = crate::emoji_table::GROUPS.len();
@@ -385,7 +397,7 @@ impl Bottom {
                 kind,
                 Rect::new(
                     tray.x + 6.0 + kind as f32 * cell,
-                    tray.y + tray.h - PICK_KINDS - 4.0,
+                    tray.y + 4.0,
                     cell,
                     PICK_KINDS,
                 ),
@@ -740,37 +752,50 @@ pub(super) fn draw(
     // The emoji picker, over the input box.
     if let (Some(tray), Some(seek), Some(cells)) = (b.tray, b.pick_seek(), b.pick_grid()) {
         boxed(grid, tray, RADIUS, well, rim, 1.0);
-        // Its search.
+        // Its search — only once something is typed; till then a line of
+        // hint in its place (while the card has the keys).
         let searching = bar.field == Some(Field::Pick);
-        boxed(
-            grid,
-            seek,
-            7.0,
-            ink(0.04),
-            if searching { accent(0.7) } else { rim },
-            1.0,
-        );
-        grid.labels.push(glyph(
-            GLYPH_SEARCH,
-            Rect::new(seek.x, seek.y, seek.h, seek.h),
-            10.0,
-            ink(0.5),
-            clip,
-        ));
-        let (words, color) = match (bar.pick_query.is_empty(), searching) {
-            (true, false) => ("Search emoji".to_owned(), ink(0.42)),
-            (_, true) => (format!("{}|", bar.pick_query), ink(0.95)),
-            (false, false) => (bar.pick_query.to_owned(), ink(0.95)),
-        };
-        grid.labels.push(label(
-            &words,
-            (seek.x + seek.h + 2.0, seek.y + 4.0),
-            seek.w - seek.h - 8.0,
-            11.5,
-            false,
-            color,
-            clip,
-        ));
+        if searching || !bar.pick_query.is_empty() {
+            boxed(
+                grid,
+                seek,
+                7.0,
+                ink(0.04),
+                if searching { accent(0.7) } else { rim },
+                1.0,
+            );
+            grid.labels.push(glyph(
+                GLYPH_SEARCH,
+                Rect::new(seek.x, seek.y, seek.h, seek.h),
+                10.0,
+                ink(0.5),
+                clip,
+            ));
+            let words = if searching {
+                format!("{}|", bar.pick_query)
+            } else {
+                bar.pick_query.to_owned()
+            };
+            grid.labels.push(label(
+                &words,
+                (seek.x + seek.h + 2.0, seek.y + 4.0),
+                seek.w - seek.h - 8.0,
+                11.5,
+                false,
+                ink(0.95),
+                clip,
+            ));
+        } else if bar.field.is_some() {
+            grid.labels.push(label(
+                "Select, or type to search",
+                (seek.x + seek.w / 2.0, seek.y + 5.0),
+                seek.w,
+                10.0,
+                true,
+                ink(0.5),
+                clip,
+            ));
+        }
         // The grid, cut to its own box (it scrolls).
         let window = Rect::new(
             cells.x,
@@ -789,12 +814,15 @@ pub(super) fn draw(
                 clip,
             ));
         }
-        // The kinds, along its bottom.
+        // The kinds, along its top: the one in view marked as the one
+        // under the pointer is.
         for (kind, cell) in b.kinds() {
             let Some(face) = bar.kinds.get(kind) else {
                 continue;
             };
-            if hover == Some(Hover::Kind(kind)) {
+            let lit = hover == Some(Hover::Kind(kind))
+                || (bar.kind_now == Some(kind) && bar.pick_query.is_empty());
+            if lit {
                 grid.rects.push(RectInst {
                     rect: Rect::new(cell.x + 2.0, cell.y + 2.0, cell.w - 4.0, cell.h - 4.0),
                     radius: 7.0,
@@ -814,16 +842,7 @@ pub(super) fn draw(
                 cache: true,
                 clip: Some(clip),
                 family: Some(crate::options::EMOJI_FONT),
-                color: Some([
-                    1.0,
-                    1.0,
-                    1.0,
-                    if hover == Some(Hover::Kind(kind)) {
-                        1.0
-                    } else {
-                        0.7
-                    },
-                ]),
+                color: Some([1.0, 1.0, 1.0, if lit { 1.0 } else { 0.7 }]),
             });
         }
         // The ones used lately come first, on a faint band of their own.
@@ -1106,7 +1125,7 @@ mod tests {
         assert_eq!(kinds.len(), crate::emoji_table::GROUPS.len());
         let grid = p.pick_grid().unwrap();
         for (kind, r) in &kinds {
-            assert!(r.y >= grid.y + grid.h && r.y + r.h <= tray.y + tray.h);
+            assert!(r.y >= tray.y && r.y + r.h <= grid.y);
             assert_eq!(p.hit(mid(*r), false), Some(Hover::Kind(*kind)));
         }
         assert_eq!(Bottom::pick_row(2 * EMOJI_COLS + 3), 2.0 * EMOJI_CELL);

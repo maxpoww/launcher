@@ -4584,6 +4584,12 @@ impl App {
                     hint_lit: flash.is_some(),
                     hint_red: held.is_some(),
                     plain: self.card.titling(),
+                    // (The kind of the first emoji in view, past the ones
+                    // used lately, which are of no kind.)
+                    kind_now: Bottom::first_in_view(self.card.pick_scroll)
+                        .checked_sub(self.card.recent.len())
+                        .and_then(|n| crate::emoji_table::EMOJI.get(n))
+                        .map(|d| d.group as usize),
                     picking: self.card.pick(),
                     emoji: &emoji,
                     pick_query: &self.card.pick_query,
