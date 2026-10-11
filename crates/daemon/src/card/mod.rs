@@ -93,8 +93,14 @@ const MIN_HEIGHT: f32 = 90.0;
 const DROP_OPENING: f32 = 44.0;
 /// How fast the items move aside for it (the ease's rate, per second).
 const SHIFT_RATE: f32 = 26.0;
-/// A press that travels this far takes the item (or the card) along.
-const DRAG_START: f32 = 6.0;
+/// A press that travels this far takes the item along (a short way: it is
+/// easy to grab), or the card.
+const DRAG_START: f32 = 3.0;
+const SLIDE_START: f32 = 6.0;
+/// A press on an item held this long and let go without carrying it was a
+/// grab that did not take, not a click: nothing is pasted (Max, 2026-10-11:
+/// *"i click a lot on the items when i'm trying to grab them"*).
+const CLICK_MS: u128 = 300;
 /// A click's paste waits this long for the clipboard to be the item's (and
 /// longer when the card's window has to be given the keyboard first).
 const PASTE_SETTLE: u64 = 70;
@@ -171,6 +177,7 @@ enum Press {
         id: u64,
         at: (f32, f32),
         serial: u32,
+        since: Instant,
     },
     /// On the card itself: it slides sideways with the pointer. `left` is
     /// where its left edge was, from its window's.
@@ -5014,7 +5021,12 @@ impl App {
                             left: r.x - s.x,
                             width: r.w,
                         }),
-                        Some(Hover::Item(id)) => Some(Press::Item { id, at, serial }),
+                        Some(Hover::Item(id)) => Some(Press::Item {
+                            id,
+                            at,
+                            serial,
+                            since: Instant::now(),
+                        }),
                         Some(button) => Some(Press::Tap(button)),
                         None => self
                             .card
@@ -5031,7 +5043,12 @@ impl App {
                 wl_pointer::ButtonState::Released => {
                     match self.card.press.take() {
                         // Pressed and let go without carrying it off: a click.
-                        Some(Press::Item { id, .. }) => self.card_click(id),
+                        // (Held a while first: a grab that did not take.)
+                        Some(Press::Item { id, since, .. }) => {
+                            if since.elapsed().as_millis() < CLICK_MS {
+                                self.card_click(id);
+                            }
+                        }
                         Some(Press::Tap(what)) => {
                             if self.card_still_on(what) {
                                 self.card_tap(what);
@@ -5342,7 +5359,7 @@ impl App {
                 return;
             }
             // (A session in memory is not carried anywhere: it is clicked.)
-            Some(Press::Item { id, at, serial })
+            Some(Press::Item { id, at, serial, .. })
                 if self.card.page != Page::Memory && (x - at.0).hypot(y - at.1) >= DRAG_START =>
             {
                 self.card_lift(id, serial);
@@ -5381,7 +5398,7 @@ impl App {
                 left,
                 moved,
             }) => {
-                let travelled = moved || (x - from_x).abs() >= DRAG_START;
+                let travelled = moved || (x - from_x).abs() >= SLIDE_START;
                 if travelled {
                     if let (Some(rect), Some(spot)) = (self.card.rect.as_mut(), self.card.spot) {
                         rect.x = (spot.x + clamp_left(left + x - from_x, spot.w, rect.w)).round();
