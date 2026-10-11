@@ -472,7 +472,7 @@ pub(crate) fn tile_height(kind: Kind, lines: usize, zoom: f32) -> f32 {
 
 /// A voice note's own rows: the title beside the play button, and the line
 /// with its two times ("00:00 ——|—— 01:13").
-const VOICE_HEAD: f32 = 40.0;
+const VOICE_HEAD: f32 = 35.0;
 /// What a voice note with no title of its own is called (its body starts
 /// so: "Voice note · 0:07").
 pub(crate) const VOICE_NAME: &str = "Voice note";
