@@ -378,6 +378,8 @@ pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); FEET] {
 const NAME_SPACE: f32 = 30.0;
 /// A voice note's play button.
 pub(super) const PLAY: f32 = 28.0;
+/// How big its mark is (Max, 2026-10-11: bigger — it was 11).
+const PLAY_PX: f32 = 16.0;
 /// A session's row on Memory's page: its name, and when its last thing was.
 pub(super) const ROW_H: f32 = 38.0;
 /// The line at the foot of an item (when it is from).
@@ -1625,7 +1627,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                         pos,
                         max_w: w,
                         font_px: px,
-                        line_px: 14.0,
+                        // (A line as tall as its letters need: the button's
+                        // mark is bigger than the words.)
+                        line_px: (px * 1.25).max(14.0),
                         centered,
                         dim: false,
                         cache: true,
@@ -1641,9 +1645,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 } else {
                     "\u{f04b}"
                 },
-                (x + 14.0, t.y + TILE_PAD_Y + 2.0),
+                (x + 14.0, t.y + TILE_PAD_Y - 1.0),
                 play.w,
-                11.0,
+                PLAY_PX,
                 true,
                 Some(crate::options::NERD),
                 paint.ink_at(0.92),
@@ -2665,10 +2669,10 @@ pub(crate) fn tile_picture(
         text(
             &mut canvas,
             "\u{f04b}",
-            s(11.0),
+            s(PLAY_PX),
             Some(crate::options::NERD),
             paint.ink_at(0.92),
-            (s(x + 9.0), s(y + 2.0)),
+            (s(x + 7.0), s(y - 1.0)),
         );
         let named = !item.body.starts_with(VOICE_NAME);
         text(
