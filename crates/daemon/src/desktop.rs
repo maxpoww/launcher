@@ -425,6 +425,11 @@ pub(crate) struct Desktop {
     /// each was there at the last look.
     pub syncing: HashSet<String>,
     pub phones_there: HashMap<String, bool>,
+    /// The phones that are on the Wi-Fi but can no longer be synced over it
+    /// (restarted: plugged in once, they can again) — each with the task
+    /// that says so on the bar; and the ones whose owner cancelled that.
+    pub sync_stuck: HashMap<String, crate::tasks::TaskHandle>,
+    pub sync_unasked: HashSet<String>,
     /// The phones to sync at the next look whatever the clock says (their
     /// settings were just applied).
     pub sync_now: HashSet<String>,
@@ -2516,6 +2521,17 @@ impl App {
 
     /// What is plugged in changed (`mounts.rs`): its icons follow.
     pub(crate) fn on_mounts(&mut self, list: Vec<crate::mounts::Mounted>) {
+        // A phone that could not be synced may be the one that was just
+        // plugged in: looked at now, and once more when it has settled on
+        // its cable — not at the next minute.
+        if !self.desktop.sync_stuck.is_empty() {
+            self.phone_sync_tick();
+            let soon = calloop::timer::Timer::from_duration(std::time::Duration::from_secs(6));
+            let _ = self.loop_handle.insert_source(soon, |_, _, app: &mut App| {
+                app.phone_sync_tick();
+                calloop::timer::TimeoutAction::Drop
+            });
+        }
         info!(
             "desktop: plugged in: {:?}",
             list.iter().map(|m| if m.closed { format!("{} (closed)", m.name) } else { m.name.clone() }).collect::<Vec<_>>()
@@ -5055,6 +5071,17 @@ impl App {
         // pointer do to the pill.)
         if let Some(rest) = what.strip_prefix("taskbox ") {
             return self.task_pill_debug(rest.trim());
+        }
+        // `syncstuck <name>` / `syncfixed <name>`: what the bar says of a
+        // phone that can no longer be synced over Wi-Fi, and of its mending
+        // (no phone needed).
+        if let Some(name) = what.strip_prefix("syncstuck ") {
+            self.phone_sync_stuck("debug", name.trim(), true, false, false);
+            return format!("{} cannot be synced over Wi-Fi", name.trim());
+        }
+        if let Some(name) = what.strip_prefix("syncfixed ") {
+            self.phone_sync_stuck("debug", name.trim(), false, true, true);
+            return format!("{} is fixed", name.trim());
         }
         // `campill …`: the bar's camera pill, without a pointer.
         if let Some(rest) = what.strip_prefix("campill ") {

@@ -479,7 +479,12 @@ struct Probe {
     target: Option<String>,
     /// Where it answers over Wi-Fi, if that was (re)allowed just now.
     addr: Option<String>,
+    /// It is on the Wi-Fi, due, and will not let us in: restarted.
+    shut: bool,
 }
+
+/// How long the bar says that a phone can be synced again.
+const FIXED_SHOWN: std::time::Duration = std::time::Duration::from_secs(8);
 
 impl App {
     /// Open the Configure box of the phone that is desktop item `i`.
@@ -866,8 +871,17 @@ impl App {
     /// Every `SYNC_TICK`: look for the phones that are synced over Wi-Fi,
     /// and sync the ones that are there and due.
     pub(crate) fn phone_sync_tick(&mut self) {
+        // A "cannot be synced" that its owner cancelled is not said again
+        // (until that phone has been made right, or the dock starts anew).
+        let cancelled: Vec<String> =
+            self.desktop.sync_stuck.iter().filter(|(_, task)| task.cancelled()).map(|(s, _)| s.clone()).collect();
+        for serial in cancelled {
+            self.desktop.sync_stuck.remove(&serial);
+            self.desktop.sync_unasked.insert(serial);
+        }
         for (serial, phone) in Phones::load().by_serial {
             if !phone.sync || self.desktop.syncing.contains(&serial) {
+                self.desktop.sync_stuck.remove(&serial);
                 continue;
             }
             let was_there = self.desktop.phones_there.get(&serial).copied().unwrap_or(false);
@@ -882,19 +896,24 @@ impl App {
                     // On its cable and not answering over Wi-Fi: it restarted
                     // (or was never allowed) — allowed again, for next time.
                     let addr = (on_cable && !on_wifi).then(|| crate::desktop_phone::wifi_allow(&probed)).flatten();
-                    if !(on_cable || on_wifi) {
-                        return (probed, phone, Probe { there: false, target: None, addr });
-                    }
                     let since = now_secs().saturating_sub(phone.last_sync.unwrap_or(0));
+                    if !(on_cable || on_wifi) {
+                        // Not reachable. Away — or right here on the Wi-Fi
+                        // with its door shut, when a sync is due.
+                        let shut = (now || since >= phone.every.secs())
+                            && phone.addr.as_deref().is_some_and(crate::desktop_phone::wifi_shut);
+                        return (probed, phone, Probe { there: false, target: None, addr, shut });
+                    }
                     let due = now || since >= phone.every.secs() || (!was_there && since >= SYNC_AGAIN);
                     let target = due
                         .then(|| crate::desktop_phone::reach(&probed, phone.addr.as_deref()))
                         .flatten()
                         .filter(|t| now || !phone.charging_only || crate::desktop_phone::charging(t));
-                    (probed, phone, Probe { there: true, target, addr })
+                    (probed, phone, Probe { there: true, target, addr, shut: false })
                 },
                 |app, (serial, phone, probe)| {
                     app.desktop.phones_there.insert(serial.clone(), probe.there);
+                    app.phone_sync_stuck(&serial, &phone.name, probe.shut, probe.there, probe.addr.is_some());
                     if let Some(addr) = probe.addr {
                         let mut phones = Phones::load();
                         if let Some(p) = phones.by_serial.get_mut(&serial) {
@@ -907,6 +926,41 @@ impl App {
                     }
                 },
             );
+        }
+    }
+
+    /// A phone that was restarted has forgotten that this computer may sync
+    /// it over Wi-Fi, and only its cable can tell it again (Max, 2026-10-10:
+    /// his Pixel, turned off and on, "does not sync any more — we need a
+    /// fallback"). While it is on the Wi-Fi with its door `shut`, the bar's
+    /// task pill says so — a task standing at nothing, with its Cancel as
+    /// always. Plugged in, it is `allowed` again by the look that finds it,
+    /// and the pill says that for a moment.
+    pub(crate) fn phone_sync_stuck(&mut self, serial: &str, name: &str, shut: bool, there: bool, allowed: bool) {
+        use crate::i18n::tr;
+        if allowed {
+            self.desktop.sync_unasked.remove(serial);
+            if self.desktop.sync_stuck.remove(serial).is_some() {
+                info!("desktop: {name} can be synced over Wi-Fi again");
+                let said = self.task_begin(&format!("{name} {}", tr("is fixed — you can unplug it, it will keep syncing over Wi-Fi")));
+                said.set(1, 1);
+                self.desktop_off_loop(
+                    move || {
+                        std::thread::sleep(FIXED_SHOWN);
+                        said
+                    },
+                    |_, said| drop(said),
+                );
+            }
+        } else if shut {
+            if !self.desktop.sync_stuck.contains_key(serial) && !self.desktop.sync_unasked.contains(serial) {
+                info!("desktop: {name} is on the Wi-Fi but cannot be synced over it (restarted)");
+                let task = self.task_begin(&format!("{name} {}", tr("can't sync over Wi-Fi — plug it in to fix it")));
+                self.desktop.sync_stuck.insert(serial.to_owned(), task);
+            }
+        } else if there {
+            // It answers after all (it was let in some other way).
+            self.desktop.sync_stuck.remove(serial);
         }
     }
 

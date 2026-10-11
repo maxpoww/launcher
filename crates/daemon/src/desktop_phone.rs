@@ -402,6 +402,19 @@ pub(crate) fn wifi_there(addr: &str) -> bool {
         .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_secs(1)).is_ok())
 }
 
+/// Whether the machine at `addr` is THERE and says no: a phone on the Wi-Fi
+/// whose door for us is shut — it was restarted and has forgotten that this
+/// computer may come in (a phone that is away does not answer at all).
+pub(crate) fn wifi_shut(addr: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    addr.to_socket_addrs().ok().and_then(|mut a| a.next()).is_some_and(|a| {
+        matches!(
+            std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_secs(1)),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
+        )
+    })
+}
+
 /// How to reach the phone now: by its cable if it is on it, else over Wi-Fi
 /// if it answers there. What `adb -s` is told.
 pub(crate) fn reach(serial: &str, addr: Option<&str>) -> Option<String> {
@@ -568,6 +581,19 @@ pub(crate) fn parse_facts(said: &str) -> Vec<(&'static str, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_shut_door_is_told_from_an_open_one() {
+        // A port nobody listens on, on a machine that is there: shut.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        assert!(!super::wifi_shut(&addr), "something answers there");
+        assert!(super::wifi_there(&addr));
+        drop(listener);
+        assert!(super::wifi_shut(&addr), "the machine is there and says no");
+        assert!(!super::wifi_there(&addr));
+        assert!(!super::wifi_shut("not an address"));
+    }
+
     use super::*;
 
     #[test]
