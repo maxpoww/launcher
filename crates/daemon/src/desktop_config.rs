@@ -1014,7 +1014,7 @@ impl App {
     /// Sync one phone now: what it has that is not here comes here (and,
     /// if its owner set that, leaves the phone). On the task pill; it speaks
     /// only when something came.
-    fn phone_sync(&mut self, serial: String, phone: crate::phones::Phone, target: String) {
+    pub(crate) fn phone_sync(&mut self, serial: String, phone: crate::phones::Phone, target: String) {
         if !self.desktop.syncing.insert(serial.clone()) {
             return;
         }
@@ -1039,6 +1039,7 @@ impl App {
             },
             |app, (serial, synced)| {
                 app.desktop.syncing.remove(&serial);
+                app.phone_pill_sync();
                 if synced {
                     let mut phones = Phones::load();
                     if let Some(p) = phones.by_serial.get_mut(&serial) {

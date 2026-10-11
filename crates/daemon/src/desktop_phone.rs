@@ -464,6 +464,16 @@ pub(crate) fn charging(target: &str) -> bool {
         .is_some_and(|said| said.lines().any(|l| l.contains("powered: true")))
 }
 
+/// How full its battery is, in hundredths (`None`: it would not say).
+pub(crate) fn battery(target: &str) -> Option<u8> {
+    battery_level(&adb(target, &["shell", "dumpsys battery"])?)
+}
+
+/// `  level: 66` among what `dumpsys battery` says.
+fn battery_level(said: &str) -> Option<u8> {
+    said.lines().find_map(|l| l.trim().strip_prefix("level:")?.trim().parse::<u8>().ok()).filter(|l| *l <= 100)
+}
+
 // ── Files dropped on its icon ────────────────────────────────────────────
 
 /// Copy `paths` (files, whole folders) to the phone's Download folder.
@@ -598,6 +608,14 @@ pub(crate) fn parse_facts(said: &str) -> Vec<(&'static str, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_battery_is_read_from_what_the_phone_says() {
+        let said = "Current Battery Service state:\n  AC powered: false\n  USB powered: true\n  status: 2\n  level: 66\n  scale: 100\n  temperature: 201\n";
+        assert_eq!(super::battery_level(said), Some(66));
+        assert_eq!(super::battery_level("  status: 2\n"), None);
+        assert_eq!(super::battery_level("  level: 250\n"), None);
+    }
+
     #[test]
     fn a_shut_door_is_told_from_an_open_one() {
         // A port nobody listens on, on a machine that is there: shut.

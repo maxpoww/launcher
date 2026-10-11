@@ -37,8 +37,12 @@ const LONGER: f32 = 4.0 / 3.0;
 struct Shown {
     /// The volume's path (what is ejected).
     path: String,
-    /// "Max's Pixel · Synced 2 h ago".
+    /// "Max's Pixel · Synced 2 h ago · 66%".
     says: String,
+    /// What `adb -s` is told for it (`None`: it has no adb to ask).
+    serial: Option<String>,
+    /// It is known here (in `phones.json`).
+    known: bool,
 }
 
 /// The pill's state.
@@ -60,6 +64,10 @@ pub(crate) struct PhonePill {
     /// pill stood open or shut without a pointer.
     fake: Option<Shown>,
     forced: Option<bool>,
+    /// Each phone's battery as it last said (by serial), and the one being
+    /// asked right now.
+    battery: std::collections::HashMap<String, u8>,
+    asking: Option<String>,
 }
 
 /// "5 min ago", "2 h ago", "3 days ago".
@@ -93,7 +101,41 @@ impl App {
                 None => "Not synced yet".to_owned(),
             },
         };
-        Some(Shown { path: v.path.to_string_lossy().into_owned(), says: format!("{name} · {state}") })
+        // Its battery, once it has said (Max, 2026-10-11: "the battery on
+        // the big pill").
+        let battery = serial.as_ref().and_then(|s| self.phone_pill.battery.get(s)).map(|b| format!(" · {b}%"));
+        Some(Shown {
+            path: v.path.to_string_lossy().into_owned(),
+            says: format!("{name} · {state}{}", battery.unwrap_or_default()),
+            known: known.is_some(),
+            serial,
+        })
+    }
+
+    /// Ask the plugged-in phone how full its battery is (off the loop); the
+    /// pill is written again when it answers.
+    fn phone_pill_ask_battery(&mut self) {
+        let Some(serial) = self.phone_pill_now().and_then(|s| s.serial) else {
+            return;
+        };
+        if self.phone_pill.fake.is_some() || self.phone_pill.asking.as_ref() == Some(&serial) {
+            return;
+        }
+        self.phone_pill.asking = Some(serial.clone());
+        self.desktop_off_loop(
+            move || {
+                let level = crate::desktop_phone::battery(&serial);
+                (serial, level)
+            },
+            |app, (serial, level)| {
+                app.phone_pill.asking = None;
+                if let Some(level) = level {
+                    if app.phone_pill.battery.insert(serial, level) != Some(level) {
+                        app.phone_pill_sync();
+                    }
+                }
+            },
+        );
     }
 
     /// A phone came or went, or what there is to say of it may have changed:
@@ -106,6 +148,10 @@ impl App {
                     self.phone_pill.says_w = r.measure_text(&now.says, font_px, TEXT_FONT);
                     self.phone_pill.measured = now.says.clone();
                 }
+            }
+            // A phone not asked yet (it has just been plugged in).
+            if now.serial.as_ref().is_some_and(|s| !self.phone_pill.battery.contains_key(s)) {
+                self.phone_pill_ask_battery();
             }
             self.phone_pill.shown = Some(now);
         }
@@ -122,7 +168,10 @@ impl App {
         let now = Instant::now();
         let dt = self.phone_pill.last.map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
         self.phone_pill.last = Some(now);
-        let there = f32::from(u8::from(self.phone_pill_now().is_some()));
+        // (Asked every frame of its motion: only whether one is plugged in,
+        // not all there is to say of it.)
+        let plugged = self.phone_pill.fake.is_some() || self.desktop.volumes.iter().any(|v| v.phone);
+        let there = f32::from(u8::from(plugged));
         let settle = animation::settle_t(self.phone_pill_long_w().max(1.0));
         let p = &self.phone_pill;
         let (t, a) = ease_toward(p.t, there, dt, animation::MORPH_RATE, settle);
@@ -184,9 +233,11 @@ impl App {
         let want = self.phone_pill.forced.unwrap_or(on);
         if want != self.phone_pill.want_open {
             self.phone_pill.want_open = want;
-            // (What it says is read as it opens: "Synced 2 h ago" ages.)
+            // (What it says is read as it opens: "Synced 2 h ago" ages, and
+            // so does its battery.)
             if want {
                 self.phone_pill_sync();
+                self.phone_pill_ask_battery();
             }
             self.schedule_phone_pill_frame();
         }
@@ -206,22 +257,49 @@ impl App {
         }
     }
 
-    /// A click on the pill: on the round one, the phone is ejected.
+    /// A click on the pill: on the round one, the phone is ejected; on the
+    /// long one, it is synced now (Max, 2026-10-11: "click on the big pill
+    /// triggers a sync") — a phone never set up here gets its Configure box
+    /// instead, there being nothing yet to sync it by.
     pub(crate) fn phone_pill_click(&mut self) {
         let (Some(ptr), Some(rect)) = (self.options_ptr, self.phone_pill_on_bar()) else {
             return;
         };
-        let round = Self::phone_pill_round(rect);
-        if ptr.0 < round.x {
+        if self.phone_pill.fake.is_some() {
             return;
         }
-        if self.phone_pill.fake.is_some() {
+        let round = Self::phone_pill_round(rect);
+        if ptr.0 < round.x {
+            self.phone_pill_sync_now((rect.x, rect.y + rect.h + 8.0));
             return;
         }
         if let Some(path) = self.phone_pill.shown.as_ref().map(|s| s.path.clone()) {
             tracing::info!("desktop: eject from the bar's phone pill");
             self.desktop_eject(&path);
         }
+    }
+
+    /// Sync the plugged-in phone now, by its cable, whatever its settings
+    /// say of when. `at`: where a Configure box would open.
+    fn phone_pill_sync_now(&mut self, at: (f32, f32)) {
+        let Some(shown) = self.phone_pill_now() else {
+            return;
+        };
+        if !shown.known {
+            if let Some(i) = self.desktop.items.iter().position(|it| it.path == shown.path) {
+                self.desktop_open_config(i, at);
+            }
+            return;
+        }
+        let Some(serial) = shown.serial else {
+            return;
+        };
+        let Some(phone) = crate::phones::Phones::load().by_serial.get(&serial).cloned() else {
+            return;
+        };
+        tracing::info!("desktop: {} synced now, from the bar's phone pill", phone.name);
+        self.phone_sync(serial.clone(), phone, serial);
+        self.phone_pill_sync();
     }
 
     /// The pill driven without a pointer (`debug-desktop "phonepill …"`):
@@ -231,8 +309,9 @@ impl App {
         let (verb, rest) = what.split_once(' ').unwrap_or((what, ""));
         match verb {
             "fake" => {
-                let says = if rest.trim().is_empty() { "Max's Pixel · Synced 2 h ago" } else { rest.trim() };
-                self.phone_pill.fake = Some(Shown { path: "/nowhere/a-phone".to_owned(), says: says.to_owned() });
+                let says = if rest.trim().is_empty() { "Max's Pixel · Synced 2 h ago · 66%" } else { rest.trim() };
+                self.phone_pill.fake =
+                    Some(Shown { path: "/nowhere/a-phone".to_owned(), says: says.to_owned(), serial: None, known: true });
             }
             "gone" => self.phone_pill.fake = None,
             "open" => self.phone_pill.forced = Some(true),
