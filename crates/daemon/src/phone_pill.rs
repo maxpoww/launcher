@@ -188,6 +188,11 @@ impl App {
         on
     }
 
+    /// Its long pill is out (it stands over what was there).
+    pub(crate) fn phone_pill_out(&self) -> bool {
+        self.phone_pill.open > 0.05
+    }
+
     /// The pointer left the bar: the long pill goes back in.
     pub(crate) fn phone_pill_close(&mut self) {
         if self.phone_pill.forced.is_none() && self.phone_pill.want_open {

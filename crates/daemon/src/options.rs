@@ -2239,6 +2239,12 @@ impl App {
         }
         let bell_left = bell_left - self.phone_pill_reserve();
         let window_right = if window_right.is_finite() { window_right } else { bell_left / 2.0 };
+        // (With no window's pill the task pill stands by the bell: the
+        // camera pill's ground ends where that one begins.)
+        let bell_left = pills
+            .iter()
+            .find(|p| p.id == PillId::Task && p.rect.x >= window_right)
+            .map_or(bell_left, |p| bell_left.min(p.rect.x));
         if let Some(rect) = self.camera_pill_rect(window_right, bell_left, y, ph) {
             pills.push(Pill { id: PillId::Camera, rect, text: String::new(), family: None, glyph_color: None });
         }
@@ -2342,6 +2348,19 @@ impl App {
             clear_under(&mut pills, self.notif_rect(), |id| {
                 matches!(id, PillId::Notif | PillId::NotifMute)
             });
+        }
+        // The camera pill's children and the phone pill's long one come out
+        // over whatever stands by the bell (the task pill, with no window's
+        // pill on the bar): the same rule.
+        if self.camera_pill_out() {
+            if let Some(rect) = pills.iter().find(|p| p.id == PillId::Camera).map(|p| p.rect) {
+                clear_under(&mut pills, rect, |id| id == PillId::Camera);
+            }
+        }
+        if self.phone_pill_out() {
+            if let Some(rect) = pills.iter().find(|p| p.id == PillId::Phone).map(|p| p.rect) {
+                clear_under(&mut pills, rect, |id| id == PillId::Phone);
+            }
         }
         pills
     }

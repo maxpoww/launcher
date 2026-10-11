@@ -273,6 +273,11 @@ impl App {
         on
     }
 
+    /// Its children are out (it stands over what was there).
+    pub(crate) fn camera_pill_out(&self) -> bool {
+        self.camera_pill.open > 0.05
+    }
+
     /// The pointer left the bar: the visit is over.
     pub(crate) fn camera_pill_close(&mut self) {
         if self.camera_pill.forced.is_some() {
