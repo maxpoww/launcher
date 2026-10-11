@@ -83,6 +83,10 @@ pub(crate) enum Page {
     /// Every emoji, the whole card of them: for when a few emoji are all
     /// that is wanted (they go straight into the window).
     Emoji,
+    /// VOICE TO TEXT (Max, 2026-10-10): the whole card for talking — what
+    /// is said is written into the window, and the last thing said stays
+    /// under the microphone until the next one, to be kept or pasted again.
+    Talk,
 }
 
 impl Page {
@@ -98,6 +102,7 @@ impl Page {
             Page::Clipboard => Some("Clipboard"),
             Page::Dictionary => Some("Dictionary"),
             Page::Emoji => Some("Emoji"),
+            Page::Talk => Some("Voice to text"),
         }
     }
 }
@@ -117,6 +122,26 @@ pub(crate) enum Foot {
     Clipboard,
     Dictionary,
     Emoji,
+    Talk,
+}
+
+/// How many buttons the head has.
+pub(crate) const FEET: usize = 6;
+/// The microphone (fa-microphone).
+const GLYPH_MIC: &str = "\u{f130}";
+/// The room the big microphone takes at the top of voice-to-text's page,
+/// and how big it is.
+const TALK_SPACE: f32 = 170.0;
+const TALK_MIC: f32 = 76.0;
+
+/// Where the big microphone of voice-to-text's page is, in its list.
+pub(crate) fn talk_mic(list: Rect) -> Rect {
+    Rect::new(
+        (list.x + (list.w - TALK_MIC) / 2.0).round(),
+        list.y + 26.0,
+        TALK_MIC,
+        TALK_MIC,
+    )
 }
 
 /// The button of the page that is up is an ARROW POINTING UP: a click on it
@@ -124,7 +149,8 @@ pub(crate) enum Foot {
 const GLYPH_UP: &str = "\u{f062}";
 
 impl Foot {
-    const ALL: [Foot; 5] = [
+    const ALL: [Foot; FEET] = [
+        Foot::Talk,
         Foot::Emoji,
         Foot::Pinned,
         Foot::Clipboard,
@@ -140,6 +166,7 @@ impl Foot {
             Foot::Clipboard => "\u{f0ea}",  // fa-clipboard
             Foot::Dictionary => "\u{f02d}", // fa-book
             Foot::Emoji => "\u{f118}",      // fa-smile-o
+            Foot::Talk => GLYPH_MIC,
         }
     }
 
@@ -155,6 +182,7 @@ impl Foot {
             Foot::Clipboard => Page::Clipboard,
             Foot::Dictionary => Page::Dictionary,
             Foot::Emoji => Page::Emoji,
+            Foot::Talk => Page::Talk,
         }
     }
 }
@@ -173,6 +201,8 @@ pub(crate) enum Hover {
     Undo,
     /// A long text's "Show all" / "Show less".
     More(u64),
+    /// The big microphone of voice-to-text's page.
+    Mic,
     /// An item's pencil: it is opened again to be changed.
     Edit(u64),
     Foot(Foot),
@@ -297,7 +327,7 @@ pub(crate) fn list_rect(rect: Rect, page: Option<Page>, bottom: f32) -> Rect {
 
 /// Where the head's buttons are: the two named ones share what the three
 /// round ones, at the right, leave.
-pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); 5] {
+pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); FEET] {
     let y = (rect.y + (FOOT_H - FOOT_BUTTON_H) / 2.0 + 2.0).round();
     let rounds = Foot::ALL.iter().filter(|f| f.round()).count() as f32;
     let names = Foot::ALL.len() as f32 - rounds;
@@ -1138,7 +1168,12 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         .foot
         .as_ref()
         .is_some_and(|f| f.page == Page::Session && f.bar.name.is_some());
-    let over = if named { NAME_SPACE } else { 0.0 };
+    // (Voice to text: the microphone has the top of the list.)
+    let over = match page {
+        Page::Talk => TALK_SPACE,
+        _ if named => NAME_SPACE,
+        _ => 0.0,
+    };
     let total = 2.0 * LIST_PAD
         + over
         + heights.iter().sum::<f32>()
@@ -1696,6 +1731,91 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 hot,
                 hot,
                 acc,
+            );
+        }
+    }
+    // VOICE TO TEXT: the big microphone at the top, what it is doing under
+    // it; the last thing said is the list's one item, under those.
+    if page == Page::Talk {
+        let mic = talk_mic(body);
+        let talk = view.foot.as_ref().and_then(|f| f.bar.talk);
+        let (listening, writing) = (
+            talk.is_some_and(|t| t.starts_with("Listening")),
+            talk.is_some_and(|t| t.starts_with("Writing")),
+        );
+        let hot = view.hover == Some(Hover::Mic);
+        list.rects.push(RectInst {
+            rect: mic,
+            radius: mic.w / 2.0,
+            color: if listening {
+                [DANGER[0], DANGER[1], DANGER[2], 0.9]
+            } else if hot {
+                paint.tone(ZEBRA_HOT)
+            } else {
+                paint.zebra(true)
+            },
+            glass: 0.0,
+            border: 0.0,
+        });
+        list.rects.push(RectInst {
+            rect: mic,
+            radius: mic.w / 2.0,
+            color: tile_rim,
+            glass: 0.0,
+            border: 1.0,
+        });
+        let mut put = |text: &str, y: f32, px: f32, family, color| {
+            list.labels.push(Label {
+                text: text.to_owned(),
+                pos: (mic.x + mic.w / 2.0, y),
+                max_w: rect.w - 2.0 * LIST_PAD,
+                font_px: px,
+                line_px: (px * 1.3).round(),
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: Some(clip),
+                family,
+                color: Some(color),
+            });
+        };
+        put(
+            GLYPH_MIC,
+            mic.y + 22.0,
+            26.0,
+            Some(crate::options::NERD),
+            if listening {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                [acc[0], acc[1], acc[2], 1.0]
+            },
+        );
+        put(
+            match (listening, writing) {
+                (true, _) => "Listening… press again to write it",
+                (_, true) => "Writing what you said…",
+                _ => "Press and talk",
+            },
+            mic.y + mic.h + 14.0,
+            13.0,
+            None,
+            paint.ink_at(0.95),
+        );
+        put(
+            "What you say is written in the window",
+            mic.y + mic.h + 36.0,
+            10.5,
+            None,
+            paint.ink_at(0.5),
+        );
+        // (Under the last thing said: how long it stays.)
+        if let Some(last) = tiles.last() {
+            put(
+                "Gone with the next one, unless you keep it",
+                last.rect.y + last.rect.h + 8.0,
+                10.0,
+                None,
+                paint.ink_at(0.45),
             );
         }
     }
@@ -2507,6 +2627,7 @@ mod tests {
         assert_eq!(
             buttons.map(|(f, _)| f),
             [
+                Foot::Talk,
                 Foot::Emoji,
                 Foot::Pinned,
                 Foot::Clipboard,
@@ -2516,11 +2637,12 @@ mod tests {
         );
         // The ones with an icon are round, from the left; Memory, by name,
         // has the rest of the row at the right.
-        for (_, r) in &buttons[..4] {
+        for (_, r) in &buttons[..FEET - 1] {
             assert_eq!((r.w, r.h), (FOOT_BUTTON_H, FOOT_BUTTON_H));
         }
-        assert!(buttons[4].1.w > 3.0 * FOOT_BUTTON_H);
-        assert!(buttons[4].1.x + buttons[4].1.w <= rect.x + rect.w - LIST_PAD + 1.0);
+        let memory = buttons[FEET - 1].1;
+        assert!(memory.w > 3.0 * FOOT_BUTTON_H);
+        assert!(memory.x + memory.w <= rect.x + rect.w - LIST_PAD + 1.0);
         let list = list_rect(rect, Some(Page::Session), low.h);
         assert_eq!(list.y, rect.y + FOOT_H);
         // A page with a name has it under the buttons: its list starts lower.

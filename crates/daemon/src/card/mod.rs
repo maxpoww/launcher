@@ -398,6 +398,10 @@ pub(crate) struct Card {
     /// The session being renamed in its row on Memory's page (`None`: the
     /// name being typed is the open session's own).
     renaming: Option<u64>,
+    /// Voice to text's page: the last thing said (its one item), kept here
+    /// while another page is up. It is gone with the next one, or when the
+    /// card is closed.
+    said_last: Option<Item>,
     /// The voice note being recorded (Space held) asks for its title the
     /// moment it is kept.
     name_next: bool,
@@ -899,6 +903,9 @@ impl Card {
         if pos.1 >= list.y + list.h {
             return None;
         }
+        if self.page == Page::Talk && talk_mic(list).contains(pos) {
+            return Some(Hover::Mic);
+        }
         if self.page == Page::Session {
             let name = match self.field {
                 Some(Field::Name) => Some(format!("{}|", self.naming)),
@@ -1122,6 +1129,7 @@ impl Card {
                 }
             }
             Page::Pinned => self.pinned = shown,
+            Page::Talk => self.said_last = shown.into_iter().next(),
             Page::Memory | Page::Clipboard | Page::Dictionary | Page::Emoji => {}
         }
     }
@@ -1140,6 +1148,7 @@ impl Card {
             Page::Pinned => std::mem::take(&mut self.pinned),
             Page::Memory => self.memory.iter().map(session_row).collect(),
             // (The clipboard's rows are the dock's to list: `card_show`.)
+            Page::Talk => self.said_last.take().into_iter().collect(),
             Page::Clipboard | Page::Dictionary | Page::Emoji => Vec::new(),
         };
         // (A session's row is wrapped afresh: it may have changed.)
@@ -2010,7 +2019,8 @@ impl App {
         }
         self.card.space = None;
         if std::mem::take(&mut self.card.held) {
-            self.card.name_next = true;
+            // (A voice note asks for its title; talk is just written.)
+            self.card.name_next = self.card.rec.as_ref().is_some_and(|r| !r.talk());
             self.card_record_stop(true);
             self.request_card_draw();
         }
@@ -2044,15 +2054,17 @@ impl App {
             // a search does not start with a space.
             if keysym == Keysym::space && !ctrl {
                 if self.card.space.is_none()
-                    && matches!(self.card.page, Page::Session | Page::Pinned)
+                    && matches!(self.card.page, Page::Session | Page::Pinned | Page::Talk)
                     && self.card.picking.is_none()
                 {
                     let since = Instant::now();
                     self.card.space = Some(since);
+                    // (On voice-to-text's page it is talk, written when let go.)
+                    let talk = self.card.page == Page::Talk;
                     self.after_ms(HOLD_MS, move |app| {
                         if app.card.space == Some(since) && app.card.rec.is_none() {
                             app.card.held = true;
-                            app.card_record_start(false);
+                            app.card_record_start(talk);
                             app.request_card_draw();
                         }
                     });
@@ -2683,6 +2695,8 @@ impl App {
             }
             Hover::Menu(row) => self.card_menu(row),
             Hover::Undo => self.card_undo(),
+            // The big microphone: talk; again, and it is written.
+            Hover::Mic => self.card_voice_button(true),
             // "Show all" / "Show less": the text is wrapped again, whole or cut.
             // (On a voice note it is "Transcribe" / "Hide text": what is
             // said in it is written out the first time, and kept.)
@@ -2971,6 +2985,26 @@ impl App {
                 warn!("card: cannot wait for a voice note being written out");
             }
         }
+    }
+
+    /// Voice to text's page: what was just said is WRITTEN INTO THE WINDOW
+    /// (pasted there, the keys handed to it first), and is the page's one
+    /// item from now — gone with the next thing said, unless its disk keeps
+    /// it somewhere.
+    pub(super) fn card_said(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            self.card.say = Some("Nothing was made out");
+            return;
+        }
+        let item = self.card_part(Kind::Text, text.to_owned(), None, false, 0.0);
+        self.card.lines.clear();
+        self.card.items = vec![item];
+        self.serve_transient_text(text);
+        self.card.tabbed = true;
+        self.card_drop_keys();
+        self.after_ms(PASTE_FOCUS + 60, |_| card_paste_key());
+        self.request_card_draw();
     }
 
     /// A row of the disk's menu (Max, 2026-10-10): PIN — a copy of the item
@@ -3903,6 +3937,7 @@ impl App {
             (_, _, Page::Clipboard) => "Click to paste · type to search",
             (_, _, Page::Pinned) => "Type to search · press Enter to create · hold Space to talk",
             (_, _, Page::Dictionary) => "Type a word",
+            (_, _, Page::Talk) => "Press the microphone, or hold Space to talk",
             _ => "",
         };
         let view = View {
@@ -4823,6 +4858,17 @@ impl App {
                 self.card_rename(rest);
                 self.card.lines.clear();
                 self.request_card_draw();
+                self.card_words()
+            }
+            // `talk`: voice-to-text's page · `said <words>`: as if that had
+            // just been said there (written into the window, kept as its last).
+            "talk" => {
+                self.card_show(Page::Talk);
+                format!("{:?}", self.card.page)
+            }
+            "said" => {
+                self.card_show(Page::Talk);
+                self.card_said(rest);
                 self.card_words()
             }
             "clipboard" => {

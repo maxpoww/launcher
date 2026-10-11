@@ -320,6 +320,9 @@ impl App {
                     Done::Words(text) if text.is_empty() => {
                         app.card.say = Some("Nothing was made out")
                     }
+                    // (On voice-to-text's page what was said goes into
+                    // the WINDOW, and stays on the page as its last thing.)
+                    Done::Words(text) if app.card.page == super::Page::Talk => app.card_said(&text),
                     Done::Words(text) => {
                         app.card_say_in(&text);
                     }
