@@ -2661,10 +2661,10 @@ impl App {
                     Keysym::Return | Keysym::KP_Enter,
                     Page::Pinned | Page::Dictionary | Page::Translate,
                 ) => self.card_write_new(""),
-                (Keysym::Return | Keysym::KP_Enter, Page::Memory) => {
-                    self.card_begin();
-                    self.card.field = Some(Field::Box);
-                }
+                // (A new session starts EMPTY — the frame that says "Drag
+                // here to keep", not a box to write in: Max, 2026-10-11.
+                // Enter there opens the box.)
+                (Keysym::Return | Keysym::KP_Enter, Page::Memory) => self.card_begin(),
                 _ => match letter {
                     // (An empty list: there is nothing to search — the hint
                     // says so for a moment and is back. At rest it still
@@ -3330,13 +3330,10 @@ impl App {
                 self.card_place_caret();
             }
             Hover::Btn(which) => self.card_box_button(which),
-            // New, in the input box's place: the new memory opens with the
-            // cursor already in its box (Max: *"so i click on it and i have
-            // my pointer on the input"*).
-            Hover::New => {
-                self.card_begin();
-                self.card_take_keys(Field::Box);
-            }
+            // New: the new session opens empty, on its frame (Max,
+            // 2026-10-11: *"it should start with the ----drag----, not
+            // with an input"*).
+            Hover::New => self.card_begin(),
             Hover::Name => self.card_take_keys(Field::Name),
             Hover::Play(id) => self.card_play(id),
             // A voice note's line: it plays from where it was clicked.
