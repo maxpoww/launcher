@@ -2878,7 +2878,7 @@ impl App {
     }
 
     /// A row of the menu was chosen.
-    fn desktop_menu_act(&mut self, action: Action, item: Option<usize>, at: (f32, f32)) {
+    pub(crate) fn desktop_menu_act(&mut self, action: Action, item: Option<usize>, at: (f32, f32)) {
         match action {
             Action::Open => {
                 // The whole selection opens (the clicked item is in it).

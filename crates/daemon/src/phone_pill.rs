@@ -22,6 +22,7 @@
 use std::time::Instant;
 
 use crate::animation::{self, ease_toward, lerp, lerp4};
+use crate::desktop_menu::{Action, Row};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{hover_grow, push_neumorph, PillId, FONT_PX, LINE_PX, OPTION_GAP, PILL_PAD_X, TEXT_FONT};
 use crate::App;
@@ -37,6 +38,11 @@ const SET_UP: &str = "Set up";
 const CHIP_PAD: f32 = 24.0;
 /// The least air either side of that button.
 const CHIP_AIR: f32 = 10.0;
+
+/// The air over a group of the box's rows (where the menu has a line).
+const GROUP_AIR: f32 = 6.0;
+/// The air under the box's last row.
+const BOX_FOOT: f32 = 6.0;
 
 /// Between the battery and its number.
 const BATTERY_GAP: f32 = 5.0;
@@ -105,6 +111,9 @@ pub(crate) struct PhonePill {
     /// asked right now.
     battery: std::collections::HashMap<String, u8>,
     asking: Option<String>,
+    /// Its box (all a phone's menu has): asked open, and how far open.
+    box_open: bool,
+    box_e: f32,
 }
 
 /// "5 min ago", "2 h ago", "3 days ago".
@@ -227,13 +236,19 @@ impl App {
         let settle = animation::settle_t(self.phone_pill_long_w().max(1.0));
         let p = &self.phone_pill;
         let (t, a) = ease_toward(p.t, there, dt, animation::MORPH_RATE, settle);
-        let want = f32::from(u8::from(p.want_open && there > 0.0));
+        let want = f32::from(u8::from((p.want_open || p.box_open) && there > 0.0));
         let (open, b) = ease_toward(p.open, want, dt, animation::MORPH_RATE, settle);
         self.phone_pill.t = t;
         self.phone_pill.open = open;
+        if there == 0.0 {
+            self.phone_pill.box_open = false;
+        }
+        let boxed = f32::from(u8::from(self.phone_pill.box_open));
+        let (box_e, c) = ease_toward(self.phone_pill.box_e, boxed, dt, animation::MORPH_RATE, animation::SETTLE_ALPHA);
+        self.phone_pill.box_e = box_e;
         self.sync_options_input();
         self.draw_options();
-        if a || b {
+        if a || b || c {
             self.schedule_phone_pill_frame();
         } else {
             self.phone_pill.last = None;
@@ -265,12 +280,13 @@ impl App {
         let battery_w = if p.level_w > 0.0 { p.glyph_w + BATTERY_GAP + p.level_w } else { 0.0 };
         let (left, right) = (long.x + PILL_PAD_X + p.says_w, long.x + long.w - PILL_PAD_X - battery_w);
         let h = LINE_PX * self.options_scale();
-        (right - left >= p.chip_w).then(|| Rect::new((left + right - p.chip_w) / 2.0, long.y + (long.h - h) / 2.0, p.chip_w, h))
+        let band = self.options_pill_h().min(long.h);
+        (right - left >= p.chip_w).then(|| Rect::new((left + right - p.chip_w) / 2.0, long.y + (band - h) / 2.0, p.chip_w, h))
     }
 
     /// The long pill within the whole, fully out.
     fn phone_pill_long(&self, rect: Rect) -> Rect {
-        let round = Self::phone_pill_round(rect);
+        let round = self.phone_pill_round(rect);
         Rect::new(rect.x, rect.y, (rect.w - round.w - OPTION_GAP * self.phone_pill.open).max(0.0), rect.h)
     }
 
@@ -301,12 +317,95 @@ impl App {
         }
         let right = bell_left - OPTION_GAP;
         let long = (OPTION_GAP + self.phone_pill_long_w()) * p.open;
-        Some(Rect::new(right - ph - long, y, ph + long, ph))
+        Some(Rect::new(right - ph - long, y, ph + long, ph + self.phone_box_h() * p.box_e))
     }
 
-    /// The round pill within the whole.
-    fn phone_pill_round(rect: Rect) -> Rect {
-        Rect::new(rect.x + rect.w - rect.h, rect.y, rect.h, rect.h)
+    /// The round pill within the whole (the whole is as tall as its box
+    /// makes it; the round pill is always one pill's height).
+    fn phone_pill_round(&self, rect: Rect) -> Rect {
+        let ph = self.options_pill_h().min(rect.h);
+        Rect::new(rect.x + rect.w - ph, rect.y, ph, ph)
+    }
+
+    /// What its box lists: the rows of the phone's own menu
+    /// (`desktop_menu::volume_rows` — one list for both), and the desktop
+    /// item they act on.
+    fn phone_box_rows(&self) -> (Vec<Row>, Option<usize>) {
+        let Some(shown) = self.phone_pill.shown.as_ref() else {
+            return (Vec::new(), None);
+        };
+        let Some(v) = self.desktop.volumes.iter().find(|v| v.path.to_string_lossy() == shown.path.as_str()) else {
+            return (Vec::new(), None);
+        };
+        let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == shown.path)
+            || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&shown.path));
+        let volume = crate::desktop_menu::Volume { phone: true, closed: v.closed, camera, tether: v.tether };
+        let item = self.desktop.items.iter().position(|it| it.path == shown.path);
+        (crate::desktop_menu::volume_rows(&volume), item)
+    }
+
+    /// The box's rows that act, each with its place under the long pill
+    /// (`long`: the long pill and its box, whole).
+    fn phone_box_lines(&self, long: Rect) -> Vec<(Rect, String, Action)> {
+        let ph = self.options_pill_h();
+        let mut y = long.y + ph;
+        let mut lines = Vec::new();
+        for row in self.phone_box_rows().0 {
+            match row {
+                Row::Sep => y += GROUP_AIR,
+                Row::Note(_) => {}
+                Row::Item { label, action, .. } => {
+                    lines.push((Rect::new(long.x, y, long.w, ph), crate::i18n::tr(label).to_owned(), action));
+                    y += ph;
+                }
+                Row::Target { label, action } => {
+                    lines.push((Rect::new(long.x, y, long.w, ph), label, action));
+                    y += ph;
+                }
+            }
+        }
+        lines
+    }
+
+    /// The box's height, fully open.
+    fn phone_box_h(&self) -> f32 {
+        let ph = self.options_pill_h();
+        let rows = self.phone_box_rows().0;
+        if rows.is_empty() {
+            return 0.0;
+        }
+        rows.iter().map(|r| match r {
+            Row::Sep => GROUP_AIR,
+            Row::Note(_) => 0.0,
+            _ => ph,
+        })
+        .sum::<f32>()
+            + BOX_FOOT
+    }
+
+    /// A scroll over the pill: down opens its box, up folds it (the task
+    /// pill's gesture and its sign).
+    pub(crate) fn phone_pill_axis(&mut self, value: f32) {
+        if value.abs() < crate::options::SCROLL_DEADZONE || self.phone_pill.fake.is_some() {
+            return;
+        }
+        let open = value < 0.0 && !self.phone_box_rows().0.is_empty();
+        if open != self.phone_pill.box_open {
+            self.phone_pill.box_open = open;
+            self.schedule_phone_pill_frame();
+            self.sync_options_input();
+            self.draw_options();
+        }
+    }
+
+    /// The box is open (the bar's pointer region reaches down over it).
+    pub(crate) fn phone_box_open(&self) -> bool {
+        self.phone_pill.box_open
+    }
+
+    /// How far down the pointer region must reach while the box is open.
+    pub(crate) fn phone_box_input_bottom(&self) -> f32 {
+        crate::options::PILL_MARGIN_Y + self.options_pill_h() + self.phone_box_h()
     }
 
     /// The pointer came onto the pill or went off it (called on every hover
@@ -334,6 +433,10 @@ impl App {
 
     /// The pointer left the bar: the long pill goes back in.
     pub(crate) fn phone_pill_close(&mut self) {
+        if self.phone_pill.box_open {
+            self.phone_pill.box_open = false;
+            self.schedule_phone_pill_frame();
+        }
         if self.phone_pill.forced.is_none() && self.phone_pill.want_open {
             self.phone_pill.want_open = false;
             self.schedule_phone_pill_frame();
@@ -351,9 +454,25 @@ impl App {
         if self.phone_pill.fake.is_some() {
             return;
         }
-        let round = Self::phone_pill_round(rect);
+        let round = self.phone_pill_round(rect);
+        // A row of the box: what that row of the phone's menu does, and the
+        // box folds (a box it opens — Configure, Properties — stands under
+        // the pill).
+        if ptr.1 > round.y + round.h {
+            let long = self.phone_pill_long(rect);
+            let hit = self.phone_box_lines(long).into_iter().find(|(r, _, _)| r.contains(ptr));
+            if let Some((_, label, action)) = hit {
+                let item = self.phone_box_rows().1;
+                tracing::info!("desktop: \"{label}\" from the bar's phone pill");
+                self.phone_pill.box_open = false;
+                self.schedule_phone_pill_frame();
+                self.desktop_menu_act(action, item, (long.x, round.y + round.h + 8.0));
+                self.phone_pill_sync();
+            }
+            return;
+        }
         if ptr.0 < round.x {
-            self.phone_pill_sync_now((rect.x, rect.y + rect.h + 8.0));
+            self.phone_pill_sync_now((rect.x, round.y + round.h + 8.0));
             return;
         }
         if let Some(path) = self.phone_pill.shown.as_ref().map(|s| s.path.clone()) {
@@ -409,9 +528,12 @@ impl App {
             }
             "gone" => self.phone_pill.fake = None,
             "open" => self.phone_pill.forced = Some(true),
+            // The box, as a scroll down and a scroll up do.
+            "box" => self.phone_pill.box_open = !self.phone_box_rows().0.is_empty(),
+            "fold" => self.phone_pill.box_open = false,
             "close" => self.phone_pill.forced = Some(false),
             "free" => self.phone_pill.forced = None,
-            _ => return "phonepill fake [words]|gone|open|close|free".to_owned(),
+            _ => return "phonepill fake [words]|gone|open|close|free|box|fold".to_owned(),
         }
         self.phone_pill_sync();
         self.update_phone_hover();
@@ -433,23 +555,72 @@ impl App {
         let a = ((p.t - 0.15) / 0.6).clamp(0.0, 1.0);
         let bright = self.options_bar_is_bright();
         let ink = self.options_text_color();
-        let round = Self::phone_pill_round(rect);
+        let round = self.phone_pill_round(rect);
         let ptr = self.options_ptr.filter(|_| self.options_hover == Some(PillId::Phone));
-        let on_round = ptr.is_some_and(|p| p.0 >= round.x);
+        let on_round = ptr.is_some_and(|p| p.0 >= round.x && p.1 <= round.y + round.h);
 
         // The long pill: from behind the round one, leftward.
         let out = a * ((p.open - 0.1) / 0.6).clamp(0.0, 1.0);
         let long = self.phone_pill_long(rect);
         if out > 0.004 && long.w > 2.0 {
-            push_neumorph(scene, long, long.h / 2.0, bright, out);
+            // The long pill, and under it as much of its box as is open:
+            // the task pill's morph (and the player's) — the corner runs
+            // from the stadium to the box's, the fill from the pill's wash
+            // to the panel's colour.
+            let ph = self.options_pill_h().min(long.h);
+            let e = p.box_e;
+            let solid = 1.0 - (1.0 - e).powi(3);
+            let radius = lerp(ph / 2.0, crate::clipboard::BOX_RADIUS, e);
+            push_neumorph(scene, long, radius, bright, out);
             let wash = self.options_rest_wash();
+            let (panel, box_ink) = self.clip_box_surface();
             scene.rects.push(RectInst {
                 rect: long,
-                radius: long.h / 2.0,
-                color: [wash[0], wash[1], wash[2], wash[3] * out],
+                radius,
+                color: lerp4(
+                    [wash[0], wash[1], wash[2], wash[3] * out],
+                    [panel[0], panel[1], panel[2], self.box_panel_alpha() * out],
+                    solid,
+                ),
                 glass: 0.0,
                 border: 0.0,
             });
+            let ink = lerp4(ink, box_ink, solid);
+            // The box's rows: the phone's menu, a line each, the one under
+            // the pointer on the hover wash. A row is drawn once the opening
+            // box has room for all of it.
+            if e > 0.01 {
+                let hover = self.options_hover_wash();
+                for (row, label, _) in self.phone_box_lines(long) {
+                    if row.y + row.h > long.y + long.h + 0.5 {
+                        break;
+                    }
+                    if ptr.is_some_and(|p| row.contains(p)) {
+                        scene.rects.push(RectInst {
+                            rect: Rect::new(row.x + 3.0, row.y, row.w - 6.0, row.h),
+                            radius: row.h / 2.0,
+                            color: [hover[0], hover[1], hover[2], hover[3] * solid * out],
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                    }
+                    scene.labels.push(Label {
+                        text: label,
+                        pos: (row.x + PILL_PAD_X, row.y + (row.h - LINE_PX * s) / 2.0),
+                        max_w: 4096.0,
+                        font_px: FONT_PX * s,
+                        line_px: LINE_PX * s,
+                        centered: false,
+                        dim: false,
+                        cache: true,
+                        family: TEXT_FONT,
+                        color: Some([ink[0], ink[1], ink[2], ink[3] * solid * out]),
+                        clip: Some(row),
+                    });
+                }
+            }
+            // (From here on, the band: the long pill itself.)
+            let long = Rect::new(long.x, long.y, long.w, ph);
             // The words at the pill's left end, the battery (a glyph of the
             // bar's icon font) and its number at its right end, the pill's
             // spare length between them (Max, 2026-10-11: "separate the

@@ -171,7 +171,7 @@ pub(crate) struct Volume {
 }
 
 /// The rows of a plugged-in volume's menu.
-fn volume_rows(v: &Volume) -> Vec<Row> {
+pub(crate) fn volume_rows(v: &Volume) -> Vec<Row> {
     let mut rows = vec![Row::Item { label: "Open", action: Action::Open, danger: false }];
     if !v.closed {
         rows.push(Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false });

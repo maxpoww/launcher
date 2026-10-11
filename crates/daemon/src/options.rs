@@ -5053,6 +5053,7 @@ impl App {
             || self.module_box_open
             || self.play_box_open
             || self.task_box_open()
+            || self.phone_box_open()
             || self.stats.open
         {
             // Extend the pointer-sensitive region down over whichever box is
@@ -5071,6 +5072,9 @@ impl App {
             }
             if self.task_box_open() {
                 bottom = bottom.max(self.task_box_input_bottom());
+            }
+            if self.phone_box_open() {
+                bottom = bottom.max(self.phone_box_input_bottom());
             }
             if self.module_box_open {
                 bottom = bottom.max(self.module_box_input_bottom());
@@ -5375,6 +5379,15 @@ impl App {
                     self.draw_options();
                 }
             }
+            // Scroll over the phone pill: its box — all a phone's menu has —
+            // open or folded (`phone_pill.rs`).
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } if !self.options_hidden && self.options_hover == Some(PillId::Phone) => {
+                self.phone_pill_axis(value as f32);
+            }
             // Scroll over the task pill: its box of the other tasks, open or
             // folded (`task_pill.rs`).
             wl_pointer::Event::Axis {
@@ -5493,6 +5506,7 @@ impl App {
                             | PillId::ClipboardBox
                             | PillId::CavaNow
                             | PillId::Task
+                            | PillId::Phone
                             | PillId::SettingsStats
                     ) {
                         Rect::new(pill.rect.x, 0.0, pill.rect.w, pill.rect.y + pill.rect.h)
