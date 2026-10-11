@@ -2176,7 +2176,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         };
         // (The writing is the lower part of the box; the parts over it.)
         let draft = writer.map(|w| Rect::new(w.x, w.y + w.h - draft_h, w.w, draft_h));
-        super::bar::draw(
+        let named = super::bar::draw(
             &mut bar,
             &mut well,
             draft,
@@ -2206,6 +2206,64 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 None,
                 None,
             );
+        }
+        // THE SESSION'S NAME floats over the list, and every label is drawn
+        // in one late pass, over every box: the items' words that pass
+        // under it are cut round it (Max, 2026-10-11: *"i see the content
+        // mixed with the title"*) — each such label drawn in the up to four
+        // parts of its clip that are clear of the name.
+        if let Some(m) = named {
+            let mut grids = vec![scene.grids.pop(), None];
+            if writer.is_some() {
+                grids[1] = Some(std::mem::take(&mut well));
+            }
+            for grid in grids.iter_mut().flatten() {
+                let within = grid.clip;
+                let mut cut = Vec::with_capacity(grid.labels.len());
+                for l in grid.labels.drain(..) {
+                    let c = l.clip.unwrap_or(within);
+                    let (x0, x1) = if l.centered {
+                        (l.pos.0 - l.max_w / 2.0, l.pos.0 + l.max_w / 2.0)
+                    } else {
+                        (l.pos.0, l.pos.0 + l.max_w)
+                    };
+                    let clear = l.pos.1 >= m.y + m.h
+                        || x1 <= m.x
+                        || x0 >= m.x + m.w
+                        || c.y >= m.y + m.h
+                        || c.y + c.h <= m.y;
+                    if clear {
+                        cut.push(l);
+                        continue;
+                    }
+                    let (top, bottom) = (c.y.max(m.y), (c.y + c.h).min(m.y + m.h));
+                    let parts = [
+                        Rect::new(c.x, c.y, c.w, (m.y - c.y).max(0.0)),
+                        Rect::new(c.x, m.y + m.h, c.w, (c.y + c.h - m.y - m.h).max(0.0)),
+                        Rect::new(c.x, top, (m.x - c.x).max(0.0), (bottom - top).max(0.0)),
+                        Rect::new(
+                            m.x + m.w,
+                            top,
+                            (c.x + c.w - m.x - m.w).max(0.0),
+                            (bottom - top).max(0.0),
+                        ),
+                    ];
+                    for part in parts.into_iter().filter(|p| p.w > 0.0 && p.h > 0.0) {
+                        cut.push(Label {
+                            clip: Some(part),
+                            ..l.clone()
+                        });
+                    }
+                }
+                grid.labels = cut;
+            }
+            let mut grids = grids.into_iter();
+            if let Some(list) = grids.next().flatten() {
+                scene.grids.push(list);
+            }
+            if let Some(w) = grids.next().flatten() {
+                well = w;
+            }
         }
         scene.grids.push(bar);
         if writer.is_some() {

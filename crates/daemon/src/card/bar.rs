@@ -576,7 +576,7 @@ fn boxed(
     });
 }
 
-/// Draw the bottom, and the name over the list.
+/// Draw the bottom, and the name over the list (whose box is given back).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
     grid: &mut GridContent,
@@ -597,7 +597,7 @@ pub(super) fn draw(
     paint: &Paint,
     bright: bool,
     hover: Option<Hover>,
-) {
+) -> Option<Rect> {
     let ink = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * a];
     let acc = paint.accent();
     let accent = |a: f32| [acc[0], acc[1], acc[2], a];
@@ -617,7 +617,9 @@ pub(super) fn draw(
         .plain_if(bar.plain)
         .with_input(writer);
 
-    // The name of the memory, floating at the top.
+    // The name of the memory, floating at the top. (Where it is goes back
+    // to the caller: the items' words that pass under it are cut there.)
+    let mut named = None;
     if let (Page::Session, Some(name)) = (page, bar.name) {
         let naming = bar.field == Some(Field::Name);
         let shown = if naming {
@@ -631,12 +633,14 @@ pub(super) fn draw(
             shown.to_owned()
         };
         let r = name_rect(list, &text);
+        named = Some(r);
         let hot = hover == Some(Hover::Name);
         boxed(
             grid,
             r,
             RADIUS,
-            plate,
+            // (Opaque: the items pass under it — Max, 2026-10-11.)
+            [plate[0], plate[1], plate[2], 1.0],
             if naming {
                 accent(1.0)
             } else if hot {
@@ -1080,6 +1084,7 @@ pub(super) fn draw(
             clip,
         ));
     }
+    named
 }
 
 #[cfg(test)]
