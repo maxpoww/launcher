@@ -7478,6 +7478,13 @@ impl DataDeviceHandler for App {
             .card_layer
             .as_ref()
             .is_some_and(|l| l.wl_surface() == surface);
+        // (Over the bar: nothing is taken there, but a drag held on the
+        // card's pill brings the card out to be dropped into.)
+        let on_bar = self
+            .options_layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface);
+        self.card_bar_drag(on_bar);
         if !on_desktop && !on_dock && !on_card {
             return;
         }
@@ -7496,6 +7503,7 @@ impl DataDeviceHandler for App {
     }
 
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {
+        self.card_bar_drag(false);
         if self.card_dnd_active() {
             self.card_dnd_leave();
         } else {
@@ -7511,6 +7519,9 @@ impl DataDeviceHandler for App {
         x: f64,
         y: f64,
     ) {
+        if self.card_bar_drag_at(x as f32, y as f32) {
+            return;
+        }
         if self.card_dnd_active() {
             self.card_dnd_motion(x as f32, y as f32);
         } else {

@@ -442,6 +442,9 @@ impl App {
             self.card.drop_own = false;
             self.card.drop_y = None;
             self.request_card_draw();
+            // (Out of the bar for this drag, and left without a drop: it
+            // folds, unless the drag comes back.)
+            self.card_banner_check();
         }
     }
 

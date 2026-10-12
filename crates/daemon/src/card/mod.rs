@@ -684,6 +684,9 @@ pub(crate) struct Card {
     /// and whether it was showing on its window before (it goes back there
     /// when this is over; else it goes away).
     banner: Option<Banner>,
+    /// A drag (anyone's) is over the BAR: held on the card's pill, it
+    /// brings the card out (`card_bar_drag_at`).
+    bar_drag: bool,
     /// The watch on a pointer that leaves without a word is running
     /// (`card_keys_watch`).
     keys_watch: bool,
@@ -4155,6 +4158,32 @@ impl App {
             self.card_summon(&addr);
         }
         info!("card: out under the bar for {addr}");
+    }
+
+    /// A drag came over the bar (`on`), or left it.
+    pub(crate) fn card_bar_drag(&mut self, on: bool) {
+        if self.card.bar_drag && !on {
+            // (Off the bar without the card having taken it: it folds.)
+            self.card_banner_check();
+        }
+        self.card.bar_drag = on;
+    }
+
+    /// A drag over the bar moved. ON THE CARD'S PILL the card comes out, to
+    /// be dropped into (Max, 2026-10-12: *"i want to drag an item on top of
+    /// the small button and the card to open so i can drop inside the
+    /// card"*). Whether the move was the bar's (not the desktop's).
+    pub(crate) fn card_bar_drag_at(&mut self, x: f32, _y: f32) -> bool {
+        if !self.card.bar_drag {
+            return false;
+        }
+        let ph = self.options_pill_h();
+        let from = self.options_left_start();
+        // (The round pill, and a little round it.)
+        if x >= from - 6.0 && x <= from + ph + 6.0 && !self.card_banner_open() {
+            self.card_banner(true);
+        }
+        true
     }
 
     /// The pointer left the pill, or the card: the card from the bar folds
