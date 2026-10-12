@@ -11,14 +11,16 @@
 //! word of something dictated is not lost to the wait that tells the two
 //! apart; a tap's third of a second of sound is thrown away.
 //!
-//! What is seen is THE CARD'S PILL on the bar (Max, the same day: *"the
-//! recording and loading animation have to be a part of the card pill, so
-//! make the card pill become this animation"*): its long pill comes out by
-//! itself and says "Listening" and the seconds while the key is down, then
-//! "Writing" with a fill going to and fro along it while the speech engine
-//! works, then goes back in — the words are in the window. A click on the
-//! pill meanwhile cancels. What goes wrong is said there too, for a moment.
-//! (`clipboard.rs::push_clip_pill` draws it, from [`Show`].) Sound and
+//! What is seen is THE CARD'S PILL on the bar, the small round one, which
+//! BECOMES it (Max, the same day: *"I want the small pill to become the
+//! listening, and I want to see the secs. When let go, I want the loading
+//! (the dots move) and a button that says Esc (Esc cancels)"*): it grows to
+//! the right — a microphone and the seconds while the key is down; three
+//! dots rising one after the other and "Esc" while the speech engine works
+//! — and is round again when the words are in the window. Escape (a
+//! compositor bind, there only while it is written out) or a click on the
+//! pill cancels. What goes wrong is said there too, for a moment.
+//! (`clipboard.rs::push_clip_glyph` draws it, from [`Show`].) Sound and
 //! engine are the card's own (`voice.rs`): recorded and written out on this
 //! machine.
 
@@ -55,16 +57,16 @@ pub(crate) enum Show {
     Said(&'static str, Instant),
 }
 
-/// How often the seconds are looked at, and the fill moved along.
+/// How often the seconds are looked at, and a frame of what moves.
 const TICK_MS: u64 = 200;
 const FRAME_MS: u64 = 16;
+/// How long the pill takes to grow to what it shows, and back.
+const MORPH_MS: f32 = 200.0;
 /// A recording ends by itself after this long: a key whose "up" never came
 /// (the session locked meanwhile) does not record for ever.
 const LONGEST_S: u64 = 180;
 /// How long something that went wrong stays said on the bar.
 const SAID_MS: u64 = 2600;
-/// How long the pill takes to go back in, at the most.
-const LEAVING_MS: u128 = 700;
 /// From the words being offered to the paste key: the selection is the
 /// dock's before the window asks for it.
 const PASTE_AFTER_MS: u64 = 80;
@@ -75,21 +77,53 @@ impl App {
         self.card.dictate_show.as_ref()
     }
 
-    /// A dictation has just ended and its pill is on its way back in: it
-    /// goes in empty, not saying the card's words for the blink that takes.
-    pub(crate) fn card_dictate_leaving(&self) -> bool {
-        self.card.dictate_left.is_some_and(|at| at.elapsed().as_millis() < LEAVING_MS)
+    /// How much wider than round the card's pill is NOW (px): easing from
+    /// what it was to what its dictation asks for.
+    pub(crate) fn card_dictate_extra(&self) -> f32 {
+        let want = self.clip_dictate_extra(self.card.dictate_show.as_ref());
+        let Some((from, at)) = self.card.dictate_from else {
+            return want;
+        };
+        let k = (at.elapsed().as_secs_f32() * 1000.0 / MORPH_MS).clamp(0.0, 1.0);
+        let k = k * k * (3.0 - 2.0 * k);
+        from + (want - from) * k
     }
 
-    /// The card's pill shows this now (`None`: its own words again, and it
-    /// goes back in unless the pointer is on it).
+    /// The card's pill shows this now (`None`: it is the card's round pill
+    /// again). Escape is taken for as long as something is written out.
     fn dictate_show(&mut self, show: Option<Show>) {
-        if show.is_none() && self.card.dictate_show.is_some() {
-            self.card.dictate_left = Some(Instant::now());
-        }
+        self.card.dictate_from = Some((self.card_dictate_extra(), Instant::now()));
+        let writing = matches!(show, Some(Show::Writing(..)));
         self.card.dictate_show = show;
-        self.clip_reveal_for_dictation();
+        if writing != self.card.dictate_esc {
+            self.card.dictate_esc = writing;
+            self.dictate_esc(writing);
+        }
+        self.sync_options_input();
         self.draw_options();
+        self.dictate_frames();
+    }
+
+    /// ESCAPE cancels while what was said is written out. The dock has no
+    /// keyboard then (the window keeps it, to be pasted into), so the key is
+    /// a compositor bind for exactly that long — and `golem_dictating` tells
+    /// the config, whose Super+Escape must not suspend the computer under a
+    /// hand that has not let go of Super yet (hyprland.lua).
+    fn dictate_esc(&self, on: bool) {
+        let ctl = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("waverunner-ctl")))
+            .filter(|ctl| ctl.exists());
+        let mut lua = format!("golem_dictating = {on} hl.unbind(\"ESCAPE\") ");
+        if let (true, Some(ctl)) = (on, &ctl) {
+            lua.push_str(&format!(
+                "hl.bind(\"ESCAPE\", hl.dsp.exec_cmd(\"{} card dictate cancel\"))",
+                ctl.display()
+            ));
+        }
+        if !crate::hypr::eval_ok(&lua) {
+            warn!("dictation: Escape could not be {}", if on { "taken" } else { "given back" });
+        }
     }
 
     /// The key went down.
@@ -139,12 +173,25 @@ impl App {
         });
     }
 
-    /// While it is written out: the fill goes along the pill.
-    fn dictate_frames(&mut self, since: Instant) {
-        self.after_ms(FRAME_MS, move |app| {
-            if matches!(app.card.dictate_show, Some(Show::Writing(at, _)) if at == since) {
-                app.draw_options();
-                app.dictate_frames(since);
+    /// Frames, for as long as something moves: the pill growing or going
+    /// back, the dots while it is written out. One loop at a time.
+    fn dictate_frames(&mut self) {
+        if std::mem::replace(&mut self.card.dictate_ticking, true) {
+            return;
+        }
+        self.after_ms(FRAME_MS, |app| {
+            app.card.dictate_ticking = false;
+            let morphing = app
+                .card
+                .dictate_from
+                .is_some_and(|(_, at)| at.elapsed().as_secs_f32() * 1000.0 < MORPH_MS);
+            if !morphing && app.card.dictate_from.take().is_some() {
+                // (Arrived: the pill's place under the pointer is its new one.)
+                app.sync_options_input();
+            }
+            app.draw_options();
+            if morphing || matches!(app.card.dictate_show, Some(Show::Writing(..))) {
+                app.dictate_frames();
             }
         });
     }
@@ -205,7 +252,6 @@ impl App {
         }
         let (since, stop) = (Instant::now(), Arc::new(AtomicBool::new(false)));
         self.dictate_show(Some(Show::Writing(since, stop.clone())));
-        self.dictate_frames(since);
         let engine = voice::engine();
         let (tx, rx) = calloop::channel::channel::<Result<String, &'static str>>();
         std::thread::spawn(move || {

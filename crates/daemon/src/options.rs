@@ -1862,6 +1862,9 @@ impl App {
         // Like everything else on this edge it simply leaves while the gear's
         // readout is over it — decided once, on the finished layout, in
         // `options_pills`.
+        // (What the card's pill has grown by for a dictation: what stands to
+        // its right moves over with it, as it does for the copy-link pill.)
+        let dictating = self.card_dictate_extra();
         {
             pills.push(Pill {
                 id: PillId::ClipboardBox,
@@ -1872,7 +1875,8 @@ impl App {
             });
             pills.push(Pill {
                 id: PillId::Clipboard,
-                rect: Rect::new(left_start, y, ph, ph),
+                // (Wider while it shows a dictation: `card/dictate.rs`.)
+                rect: Rect::new(left_start, y, ph + dictating, ph),
                 text: GLYPH_CARD.to_owned(),
                 family: Some(NERD),
                 glyph_color: None,
@@ -1882,7 +1886,7 @@ impl App {
             // its right when the focused app is a browser (has a copyable URL).
             let lt = self.clip_link_t();
             if lt > 0.01 {
-                let out_x = left_start + ph + crate::clipboard::LINK_GAP;
+                let out_x = left_start + ph + dictating + crate::clipboard::LINK_GAP;
                 pills.push(Pill {
                     id: PillId::ClipCopyLink,
                     rect: Rect::new(lerp(left_start, out_x, lt), y, ph, ph),
@@ -1915,6 +1919,7 @@ impl App {
             // appears.
             let cluster_start = left_start
                 + ph
+                + dictating
                 + OPTION_GAP
                 + self.clip_link_t().clamp(0.0, 1.0) * (ph + crate::clipboard::LINK_GAP);
             // (index, glyph, warning?) — a privacy/safety warning pill washes

@@ -650,8 +650,12 @@ pub(crate) struct Card {
     dictation: Option<dictate::Dictation>,
     /// …and what the bar's card pill shows of it.
     dictate_show: Option<dictate::Show>,
-    /// When the last one ended (the pill goes back in empty).
-    dictate_left: Option<Instant>,
+    /// The pill is growing to it, or going back: how much wider than round
+    /// it was (px) when that began, and when.
+    dictate_from: Option<(f32, Instant)>,
+    /// Its frames are running; Escape is taken (`dictate.rs`).
+    dictate_ticking: bool,
+    dictate_esc: bool,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -6013,7 +6017,8 @@ impl App {
             "dictate" => match rest {
                 "down" => self.dictate_down().to_owned(),
                 "up" => self.dictate_up(),
-                _ => "card dictate down|up".to_owned(),
+                "cancel" => self.dictate_cancel().to_string(),
+                _ => "card dictate down|up|cancel".to_owned(),
             },
             // `at clipboard|emoji|memory|voice`: the card on the focused window,
             // open AT that page — what a key does (Max, 2026-10-12: Super+.
