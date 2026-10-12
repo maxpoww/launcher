@@ -11,12 +11,16 @@
 //! word of something dictated is not lost to the wait that tells the two
 //! apart; a tap's third of a second of sound is thrown away.
 //!
-//! What is seen is the TASK pill (`tasks.rs`): "Listening" and the seconds
-//! while the key is down, "Writing" with its fill going to and fro while the
-//! speech engine works, then nothing — the words are in the window. Its
-//! Cancel ends either. What goes wrong is said on the same pill, for a
-//! moment. Sound and engine are the card's own (`voice.rs`): recorded and
-//! written out on this machine.
+//! What is seen is THE CARD'S PILL on the bar (Max, the same day: *"the
+//! recording and loading animation have to be a part of the card pill, so
+//! make the card pill become this animation"*): its long pill comes out by
+//! itself and says "Listening" and the seconds while the key is down, then
+//! "Writing" with a fill going to and fro along it while the speech engine
+//! works, then goes back in — the words are in the window. A click on the
+//! pill meanwhile cancels. What goes wrong is said there too, for a moment.
+//! (`clipboard.rs::push_clip_pill` draws it, from [`Show`].) Sound and
+//! engine are the card's own (`voice.rs`): recorded and written out on this
+//! machine.
 
 use std::path::PathBuf;
 use std::process::Child;
@@ -27,7 +31,6 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use super::{voice, HOLD_MS};
-use crate::tasks::{Counts, Report};
 use crate::App;
 
 /// The key is down.
@@ -36,36 +39,76 @@ pub(super) struct Dictation {
     rec: Result<(Child, PathBuf), &'static str>,
     /// Since when: also WHICH press this is, for the timers that outlive it.
     since: Instant,
-    /// Its task on the bar, once the key has been down long enough to be
-    /// dictation: the task's id, and the flag its Cancel raises.
-    task: Option<(u64, Arc<AtomicBool>)>,
+    /// It has been down long enough to be dictation (the pill says so).
+    held: bool,
 }
 
-/// How often the seconds are looked at.
+/// What the card's pill shows of a dictation.
+#[derive(Debug, Clone)]
+pub(crate) enum Show {
+    /// Recording, since then.
+    Listening(Instant),
+    /// What was said is being written out, since then; the flag is raised
+    /// if it is cancelled meanwhile.
+    Writing(Instant, Arc<AtomicBool>),
+    /// Something went wrong: said for a moment (since then).
+    Said(&'static str, Instant),
+}
+
+/// How often the seconds are looked at, and the fill moved along.
 const TICK_MS: u64 = 200;
+const FRAME_MS: u64 = 16;
 /// A recording ends by itself after this long: a key whose "up" never came
 /// (the session locked meanwhile) does not record for ever.
 const LONGEST_S: u64 = 180;
 /// How long something that went wrong stays said on the bar.
 const SAID_MS: u64 = 2600;
+/// How long the pill takes to go back in, at the most.
+const LEAVING_MS: u128 = 700;
 /// From the words being offered to the paste key: the selection is the
 /// dock's before the window asks for it.
 const PASTE_AFTER_MS: u64 = 80;
 
 impl App {
+    /// What the card's pill is to show of a dictation, if one is on.
+    pub(crate) fn card_dictate_show(&self) -> Option<&Show> {
+        self.card.dictate_show.as_ref()
+    }
+
+    /// A dictation has just ended and its pill is on its way back in: it
+    /// goes in empty, not saying the card's words for the blink that takes.
+    pub(crate) fn card_dictate_leaving(&self) -> bool {
+        self.card.dictate_left.is_some_and(|at| at.elapsed().as_millis() < LEAVING_MS)
+    }
+
+    /// The card's pill shows this now (`None`: its own words again, and it
+    /// goes back in unless the pointer is on it).
+    fn dictate_show(&mut self, show: Option<Show>) {
+        if show.is_none() && self.card.dictate_show.is_some() {
+            self.card.dictate_left = Some(Instant::now());
+        }
+        self.card.dictate_show = show;
+        self.clip_reveal_for_dictation();
+        self.draw_options();
+    }
+
     /// The key went down.
     pub(super) fn dictate_down(&mut self) -> &'static str {
-        // (Down already — a key that repeats — or the card is recording.)
-        if self.card.dictation.is_some() || self.card.rec.is_some() {
+        // (Down already — a key that repeats — or the card is recording, or
+        // the last thing said is still being written out.)
+        if self.card.dictation.is_some()
+            || self.card.rec.is_some()
+            || matches!(self.card.dictate_show, Some(Show::Writing(..)))
+        {
             return "busy";
         }
         let since = Instant::now();
-        self.card.dictation = Some(Dictation { rec: voice::recorder(true), since, task: None });
+        self.card.dictation = Some(Dictation { rec: voice::recorder(true), since, held: false });
         self.after_ms(HOLD_MS, move |app| app.dictate_held(since));
         "down"
     }
 
-    /// Still down after `HOLD_MS`: it is dictation, and the bar says so.
+    /// Still down after `HOLD_MS`: it is dictation, and the pill says so.
     fn dictate_held(&mut self, since: Instant) {
         let Some(d) = self.card.dictation.as_mut().filter(|d| d.since == since) else {
             return;
@@ -75,38 +118,54 @@ impl App {
             self.dictate_say(why);
             return;
         }
+        d.held = true;
         info!("dictation: listening");
-        let (id, stop) = self.tasks.begin("Listening");
-        self.tasks.report(Report::Counts { id, counts: Counts::Seconds }, Instant::now());
-        if let Some(d) = self.card.dictation.as_mut() {
-            d.task = Some((id, stop));
-        }
-        self.tasks_changed();
+        self.dictate_show(Some(Show::Listening(since)));
         self.dictate_tick(since);
     }
 
-    /// While it listens: the seconds on the pill, its Cancel, its limit.
+    /// While it listens: the seconds on the pill, and its limit.
     fn dictate_tick(&mut self, since: Instant) {
         self.after_ms(TICK_MS, move |app| {
-            let Some(d) = app.card.dictation.as_ref().filter(|d| d.since == since) else {
+            if !app.card.dictation.as_ref().is_some_and(|d| d.since == since && d.held) {
                 return;
-            };
-            let Some((id, stop)) = d.task.clone() else {
-                return;
-            };
-            let secs = since.elapsed().as_secs();
-            if stop.load(Ordering::Relaxed) {
-                info!("dictation: cancelled from the bar");
-                app.dictate_drop();
-            } else if secs >= LONGEST_S {
+            }
+            if since.elapsed().as_secs() >= LONGEST_S {
                 app.dictate_up();
             } else {
-                if app.tasks.report(Report::Progress { id, done: secs, total: 0 }, Instant::now()) {
-                    app.tasks_changed();
-                }
+                app.draw_options();
                 app.dictate_tick(since);
             }
         });
+    }
+
+    /// While it is written out: the fill goes along the pill.
+    fn dictate_frames(&mut self, since: Instant) {
+        self.after_ms(FRAME_MS, move |app| {
+            if matches!(app.card.dictate_show, Some(Show::Writing(at, _)) if at == since) {
+                app.draw_options();
+                app.dictate_frames(since);
+            }
+        });
+    }
+
+    /// A click on the card's pill while it shows a dictation: that is
+    /// cancelled — nothing is written. Whether there was one.
+    pub(crate) fn dictate_cancel(&mut self) -> bool {
+        match self.card.dictate_show.clone() {
+            Some(Show::Listening(_)) => {
+                info!("dictation: cancelled from the bar");
+                self.dictate_drop();
+            }
+            Some(Show::Writing(_, stop)) => {
+                info!("dictation: cancelled from the bar");
+                stop.store(true, Ordering::Relaxed);
+                self.dictate_show(None);
+            }
+            Some(Show::Said(..)) => self.dictate_show(None),
+            None => return false,
+        }
+        true
     }
 
     /// Throw away what is being recorded.
@@ -121,23 +180,21 @@ impl App {
                 let _ = std::fs::remove_file(path);
             });
         }
-        if let Some((id, _)) = d.task {
-            if self.tasks.cancel(id) {
-                self.tasks_changed();
-            }
+        if d.held {
+            self.dictate_show(None);
         }
     }
 
     /// The key came up. A tap: the card, at voice-to-text. Held: what was
     /// said is written out, then pasted into the window.
     pub(super) fn dictate_up(&mut self) -> String {
-        let Some(task) = self.card.dictation.as_ref().map(|d| d.task.clone()) else {
+        let Some(held) = self.card.dictation.as_ref().map(|d| d.held) else {
             return "not down".to_owned();
         };
-        let Some((id, stop)) = task else {
+        if !held {
             self.dictate_drop();
             return self.card_command("at voice");
-        };
+        }
         let Some(Dictation { rec: Ok((mut child, path)), .. }) = self.card.dictation.take() else {
             return "nothing recorded".to_owned();
         };
@@ -146,10 +203,9 @@ impl App {
         unsafe {
             libc::kill(child.id() as libc::pid_t, libc::SIGINT);
         }
-        let now = Instant::now();
-        self.tasks.report(Report::Label { id, label: "Writing".to_owned() }, now);
-        self.tasks.report(Report::Counts { id, counts: Counts::Busy }, now);
-        self.tasks_changed();
+        let (since, stop) = (Instant::now(), Arc::new(AtomicBool::new(false)));
+        self.dictate_show(Some(Show::Writing(since, stop.clone())));
+        self.dictate_frames(since);
         let engine = voice::engine();
         let (tx, rx) = calloop::channel::channel::<Result<String, &'static str>>();
         std::thread::spawn(move || {
@@ -168,18 +224,16 @@ impl App {
             let calloop::channel::Event::Msg(said) = event else {
                 return;
             };
-            // (Cancelled from the bar while it was written: its task is
-            // gone already, and nothing is pasted.)
+            // (Cancelled from the bar while it was written: the pill has
+            // gone back already, and nothing is pasted.)
             if stop.load(Ordering::Relaxed) {
                 return;
-            }
-            if app.tasks.cancel(id) {
-                app.tasks_changed();
             }
             match said {
                 Ok(text) if text.trim().is_empty() => app.dictate_say("Nothing was made out"),
                 Ok(text) => {
                     info!("dictation: {} characters written", text.chars().count());
+                    app.dictate_show(None);
                     app.serve_transient_text(text.trim());
                     app.after_ms(PASTE_AFTER_MS, |_| super::card_paste_key());
                 }
@@ -188,22 +242,27 @@ impl App {
         });
         if waiting.is_err() {
             warn!("dictation: cannot wait for the words");
-            if self.tasks.cancel(id) {
-                self.tasks_changed();
-            }
+            self.dictate_show(None);
         }
         "writing".to_owned()
     }
 
-    /// Say something on the bar for a moment (what went wrong).
+    /// Say something on the pill for a moment (what went wrong).
     fn dictate_say(&mut self, why: &'static str) {
         info!("dictation: {why}");
-        let (id, _) = self.tasks.begin(why);
-        self.tasks.report(Report::Counts { id, counts: Counts::Words }, Instant::now());
-        self.tasks_changed();
+        // (The pill is a line of some thirty letters: the card's sentences,
+        // which have a whole line under its box, are said shorter here.)
+        let why = match why {
+            w if w.starts_with("Nothing was heard") => "Nothing was heard",
+            w if w.starts_with("The microphone is muted") => "The microphone is muted",
+            w if w.contains("speech engine") => "No speech engine installed",
+            w => w,
+        };
+        let since = Instant::now();
+        self.dictate_show(Some(Show::Said(why, since)));
         self.after_ms(SAID_MS, move |app| {
-            if app.tasks.cancel(id) {
-                app.tasks_changed();
+            if matches!(app.card.dictate_show, Some(Show::Said(_, at)) if at == since) {
+                app.dictate_show(None);
             }
         });
     }

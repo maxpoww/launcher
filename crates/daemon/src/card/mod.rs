@@ -50,7 +50,7 @@ use crate::hypr::WindowSpot;
 use crate::App;
 
 mod bar;
-mod dictate;
+pub(crate) mod dictate;
 mod dnd;
 mod model;
 mod place;
@@ -648,6 +648,10 @@ pub(crate) struct Card {
     /// The dictation key is down (`dictate.rs`: talk written straight into
     /// the window, no card).
     dictation: Option<dictate::Dictation>,
+    /// …and what the bar's card pill shows of it.
+    dictate_show: Option<dictate::Show>,
+    /// When the last one ended (the pill goes back in empty).
+    dictate_left: Option<Instant>,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,

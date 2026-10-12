@@ -1987,7 +1987,68 @@ impl App {
         // (With the card out under it — the bar painted, the pill still a
         // pill — its words are the card's to show now, not the pill's.)
         let pa = if self.card_banner_open() { 0.0 } else { pa };
-        if pa > 0.01 {
+        // A DICTATION is what the pill shows while there is one: "Listening"
+        // and its seconds, "Writing" with a fill going to and fro along the
+        // pill (the player's track fill, a third of the pill long, slow at
+        // the ends), or what went wrong.
+        if let Some(show) = self.card_dictate_show().filter(|_| pa > 0.01) {
+            use crate::card::dictate::Show;
+            let s = self.options_scale();
+            let band = Rect::new(rect.x, rect.y, rect.w, ph.min(rect.h));
+            let (words, number) = match show {
+                Show::Listening(since) => ("Listening", format!("{}s", since.elapsed().as_secs())),
+                Show::Writing(since, _) => {
+                    let fw = (band.w / 3.0).max(band.h);
+                    let along = 0.5 - 0.5 * (since.elapsed().as_secs_f32() * 2.8).cos();
+                    scene.rects.push(RectInst {
+                        rect: Rect::new(band.x + (band.w - fw) * along, band.y, fw, band.h),
+                        radius: band.h / 2.0,
+                        color: [ink[0], ink[1], ink[2], 0.14 * pa],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                    ("Writing", String::new())
+                }
+                Show::Said(why, _) => (*why, String::new()),
+            };
+            let gty = band.y + (band.h - LINE_PX * s) / 2.0;
+            let color = Some([ink[0], ink[1], ink[2], ink[3] * pa]);
+            // (The seconds keep a slot at the right end, wide enough for
+            // three digits: the words do not move as they count.)
+            let slot = if number.is_empty() { 0.0 } else { FONT_PX * s * 2.6 };
+            let tx = band.x + PILL_PAD_X;
+            scene.labels.push(Label {
+                text: words.to_owned(),
+                pos: (tx, gty),
+                max_w: (band.x + band.w - PILL_PAD_X - slot - tx).max(0.0),
+                font_px: FONT_PX * s,
+                line_px: LINE_PX * s,
+                centered: false,
+                dim: false,
+                cache: true,
+                family: None,
+                color,
+                clip: Some(band),
+            });
+            if !number.is_empty() {
+                scene.labels.push(Label {
+                    text: number,
+                    pos: (band.x + band.w - PILL_PAD_X - slot / 2.0, gty),
+                    max_w: slot,
+                    font_px: FONT_PX * s,
+                    line_px: LINE_PX * s,
+                    centered: true,
+                    dim: false,
+                    cache: false,
+                    family: None,
+                    color,
+                    clip: Some(band),
+                });
+            }
+        } else if pa > 0.01
+            && !(self.card_dictate_leaving()
+                && !matches!(self.options_hover, Some(PillId::Clipboard | PillId::ClipboardBox)))
+        {
             // (The card's last thing — the pill is the card's: Max,
             // 2026-10-12. With the old box open it was the newest clip.)
             let words = self.card_pill_words();
@@ -4476,11 +4537,37 @@ impl App {
             && !self.card_banner_open()
             && !self.clip.dict_open
             && !self.clip.search_open
+            // (…and it is out by itself while it shows a dictation.)
+            && self.card_dictate_show().is_none()
         {
             // The dictionary panel and a typed search hold the box open
             // regardless of the pointer — the user has to leave the box to
             // reach the keyboard to type.
             self.schedule_clip_collapse(LEAVE_HOLD);
+        }
+    }
+
+    /// A dictation began, moved on or ended (`card/dictate.rs`): while there
+    /// is one to show the long pill is out, pointer or no pointer; after, it
+    /// goes back in as it does when the pointer leaves.
+    pub(crate) fn clip_reveal_for_dictation(&mut self) {
+        if self.card_dictate_show().is_some() {
+            self.clip.hold_deadline = None;
+            if !self.clip.peek_reveal {
+                self.clip.peek_reveal = true;
+                self.clip.last = None;
+                self.schedule_clip_frame();
+            }
+        } else {
+            self.update_clip_reveal();
+            // (No pointer on it, nothing else holding it out: it goes back
+            // now, not after the wait a pointer that left is given.)
+            if self.clip.hold_deadline.is_some() {
+                self.clip.hold_deadline = None;
+                self.clip.peek_reveal = false;
+                self.clip.last = None;
+                self.schedule_clip_frame();
+            }
         }
     }
 
@@ -4596,6 +4683,7 @@ impl App {
                     if !app.clip.dict_open
                         && !app.clip.search_open
                         && !app.card_banner_open()
+                        && app.card_dictate_show().is_none()
                         && !matches!(
                             app.options_hover,
                             Some(PillId::Clipboard | PillId::ClipboardBox)

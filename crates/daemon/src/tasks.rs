@@ -45,27 +45,8 @@ pub(crate) enum Report {
     // (No worker says this yet: it is there for the ones wired in later.)
     #[allow(dead_code)]
     Label { id: u64, label: String },
-    /// What its number counts from now on.
-    Counts { id: u64, counts: Counts },
     /// It is over.
     End { id: u64 },
-}
-
-/// What a task's number says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Counts {
-    /// How far along it is: "42%", and the pill fills.
-    #[default]
-    Percent,
-    /// How long it has gone on: `done` seconds, "4s" — nothing fills, there
-    /// is no end to be near (something being recorded).
-    Seconds,
-    /// Nothing: it is being worked on and cannot say how far it is — the
-    /// pill's fill goes to and fro (what was said being written out).
-    Busy,
-    /// Nothing: its words are all there is to it (something that went wrong,
-    /// said for a moment).
-    Words,
 }
 
 /// One task as the bar shows it.
@@ -79,17 +60,13 @@ pub(crate) struct Task {
     pub total: u64,
     /// When it ended; it lingers for `LINGER` after.
     pub ended: Option<Instant>,
-    /// What its number says.
-    pub counts: Counts,
 }
 
 impl Task {
     /// How far along, 0…1 (a finished one is whole; one that does not yet
     /// know its size is at the start).
     pub fn fraction(&self) -> f32 {
-        if self.counts != Counts::Percent {
-            0.0
-        } else if self.ended.is_some() {
+        if self.ended.is_some() {
             1.0
         } else if self.total == 0 {
             0.0
@@ -103,15 +80,6 @@ impl Task {
         // Not rounded up: 100 is said when it is over, not just before.
         let p = (self.fraction() * 100.0).floor() as u32;
         if self.ended.is_some() { 100 } else { p.min(99) }
-    }
-
-    /// Its number as the pill writes it ("42%", "4s", or none).
-    pub fn number(&self) -> String {
-        match self.counts {
-            Counts::Percent => format!("{}%", self.percent()),
-            Counts::Seconds => format!("{}s", self.done),
-            Counts::Busy | Counts::Words => String::new(),
-        }
     }
 }
 
@@ -129,7 +97,7 @@ impl Tasks {
     /// cancelled.
     pub fn begin(&mut self, label: &str) -> (u64, Arc<AtomicBool>) {
         self.next += 1;
-        self.list.push(Task { id: self.next, label: label.to_owned(), done: 0, total: 0, ended: None, counts: Counts::Percent });
+        self.list.push(Task { id: self.next, label: label.to_owned(), done: 0, total: 0, ended: None });
         let stop = Arc::new(AtomicBool::new(false));
         self.stops.insert(self.next, stop.clone());
         (self.next, stop)
@@ -161,11 +129,6 @@ impl Tasks {
             Report::Label { id, label } => {
                 if let Some(t) = self.list.iter_mut().find(|t| t.id == id) {
                     t.label = label;
-                }
-            }
-            Report::Counts { id, counts } => {
-                if let Some(t) = self.list.iter_mut().find(|t| t.id == id) {
-                    t.counts = counts;
                 }
             }
             Report::End { id } => {
@@ -321,28 +284,6 @@ impl crate::App {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Something recorded counts its seconds and fills nothing; written
-    /// out, it has no number at all — and neither is ever "at 100%".
-    #[test]
-    fn a_task_can_count_seconds_or_nothing() {
-        let mut tasks = Tasks::default();
-        let t0 = Instant::now();
-        let (id, _) = tasks.begin("Listening");
-        assert!(tasks.report(Report::Counts { id, counts: Counts::Seconds }, t0));
-        assert!(tasks.report(Report::Progress { id, done: 4, total: 0 }, t0));
-        let shown = tasks.shown().unwrap();
-        assert_eq!((shown.number().as_str(), shown.fraction()), ("4s", 0.0));
-        // (The same second again changes nothing the pill shows.)
-        assert!(!tasks.report(Report::Progress { id, done: 4, total: 0 }, t0));
-        tasks.report(Report::Label { id, label: "Writing".to_owned() }, t0);
-        assert!(tasks.report(Report::Counts { id, counts: Counts::Busy }, t0));
-        let shown = tasks.shown().unwrap();
-        assert_eq!((shown.label.as_str(), shown.number().as_str(), shown.fraction()), ("Writing", "", 0.0));
-        // Done: it goes at once, it does not linger full.
-        assert!(tasks.cancel(id));
-        assert!(tasks.is_empty());
-    }
 
     #[test]
     fn a_task_is_shown_from_its_start_to_a_moment_after_its_end() {

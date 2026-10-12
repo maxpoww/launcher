@@ -6702,7 +6702,12 @@ impl App {
             // later stage).
             // (THE CARD'S PILL since 2026-10-12: a click turns the card on or
             // off for the focused window. It pasted the newest clip.)
-            Some(PillId::Clipboard | PillId::ClipboardBox) => self.card_pill_click(),
+            // (While it shows a dictation a click cancels that.)
+            Some(PillId::Clipboard | PillId::ClipboardBox) => {
+                if !self.dictate_cancel() {
+                    self.card_pill_click();
+                }
+            }
             // Copy the focused browser's current page URL to the clipboard.
             Some(PillId::ClipCopyLink) => self.copy_active_link(),
             // A dynamic OPTION control from the Mind — run its action.
