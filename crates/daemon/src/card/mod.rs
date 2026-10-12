@@ -4277,6 +4277,14 @@ impl App {
             self.draw_options();
             return;
         }
+        // (No window has the focus: there is none to put it on — it comes
+        // out under the bar, the desktop's. Max, 2026-10-12: "clicking the
+        // pill should open it on the bar when there is no window focused".)
+        if self.card_focused().filter(|a| valid_addr(a)).is_none() {
+            self.card_banner(true);
+            info!("card: the bar's pill — out under the bar, no window");
+            return;
+        }
         let said = self.card_toggle(None);
         info!("card: the bar's pill — {said}");
     }
