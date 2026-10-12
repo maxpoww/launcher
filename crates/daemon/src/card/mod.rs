@@ -5999,6 +5999,32 @@ impl App {
         let rest = rest.trim();
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
+            // `at clipboard|emoji|memory`: the card on the focused window,
+            // open AT that page — what a key does (Max, 2026-10-12: Super+.
+            // the clipboard, Super+, the emoji, Super+/ memory). The same
+            // key again, on that page, puts the card away.
+            "at" => {
+                let page = match rest {
+                    "clipboard" => Page::Clipboard,
+                    "emoji" | "emojis" => Page::Emoji,
+                    "memory" => Page::Memory,
+                    _ => return "card at clipboard|emoji|memory".to_owned(),
+                };
+                let Some(addr) = self.card_focused() else {
+                    return "no window is focused".to_owned();
+                };
+                let up = self.card.armed(&addr) && self.card.host.as_deref() == Some(addr.as_str());
+                if up && self.card.page == page {
+                    return self.card_toggle(Some(&addr));
+                }
+                if !self.card.armed(&addr) {
+                    self.card_toggle(Some(&addr));
+                } else if !up {
+                    self.card_summon(&addr);
+                }
+                self.card_show(page);
+                format!("at {rest} on {addr}")
+            }
             // The input box, the search and the name, without a keyboard:
             // `write <text>` · `keep` · `send` · `find <words>` · `rename <name>`
             // · `clipboard` (its page).
