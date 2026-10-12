@@ -179,9 +179,12 @@ pub(crate) fn card_rect(spot: &WindowSpot, left: f32, scale: f32, width: f32) ->
     let snap = |v: f32| (v * scale).round() / scale;
     Rect::new(
         snap(spot.x + left),
-        snap(spot.y + INSET),
+        // (Its top edge TOUCHES the bottom of the window's title bar — the
+        // top of the window's own box: Max, 2026-10-12. Its foot keeps
+        // its air from the window's.)
+        snap(spot.y),
         snap(width),
-        snap(spot.h - 2.0 * INSET),
+        snap(spot.h - INSET),
     )
 }
 
@@ -237,7 +240,9 @@ mod tests {
         let r = card_rect(&s, Place::REST.left(s.w, WIDTH), 1.0, WIDTH);
         assert_eq!(
             (r.x, r.y, r.w, r.h),
-            (100.0 + 900.0 - 10.0 - WIDTH, 60.0, WIDTH, 580.0)
+            // (Its top at the window's own — under the title bar — its foot
+            // 10 px short of the window's.)
+            (100.0 + 900.0 - 10.0 - WIDTH, 50.0, WIDTH, 590.0)
         );
         // However far it is asked to go, no further than a slide may.
         assert_eq!(card_rect(&s, -9999.0, 1.0, WIDTH).x, 100.0 - WIDTH - 12.0);
