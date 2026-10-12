@@ -838,7 +838,8 @@ const CTRL_MINIMIZE: usize = 3;
 /// the mode toggles, back before the first of them.
 const CTRL_PIN: usize = 4;
 /// How much further than a control's gap the pin stands from the last mode
-/// toggle while it is OFF.
+/// toggle of the revealed row. (A pinned window's pin, resting beside the
+/// state pill with the toggles hidden, keeps none of it.)
 const PIN_APART: f32 = 6.0;
 
 /// Animation slot for a mode-toggle pill (`None` for window/clock/close —
@@ -2277,22 +2278,27 @@ impl App {
                     //
                     // ON, it rests on the bar (`pin_rests`) — beside the state
                     // pill, not out at the end with a hole where the hidden
-                    // toggles go — and at a control's ordinary gap: the space
-                    // apart is the off pin's alone (Max, same day: *"get rid
-                    // of the space between the pin and the others when the
-                    // pin is on"*). The toggles PUSH it: it stands exactly as
+                    // toggles go — and there at a control's ordinary gap (Max,
+                    // same day: *"get rid of the space between the pin and
+                    // the others when the pin is on"*). The toggles PUSH it: it stands exactly as
                     // far out as they have emerged, so it moves with them in
                     // both directions instead of on a clock of its own (*"the
                     // other buttons hides faster thah the pin moves to its
                     // resting spot"*, of the first cut, which rode its own
                     // slot of the stagger).
                     if self.options_mode_shown == hypr::WindowMode::Floating {
-                        let x = if !self.options_pinned {
-                            cx + PIN_APART
-                        } else if self.options_sticky.is_none() {
-                            tucked_x + emerged
+                        // The space apart belongs to the REVEALED row, on or
+                        // off — so the click that pins moves nothing — and
+                        // closes as the toggles hide, while the pin travels
+                        // to its resting spot (Max: *"click keep the space,
+                        // the space goes away when the buttons hide and the
+                        // pin have to moves to its on resting spot"*).
+                        let room = cx - tucked_x;
+                        let x = if self.options_pinned && self.options_sticky.is_none() {
+                            let out = if room > 0.0 { (emerged / room).clamp(0.0, 1.0) } else { 1.0 };
+                            tucked_x + emerged + PIN_APART * out
                         } else {
-                            cx
+                            cx + PIN_APART
                         };
                         circle(&mut pills, x, PillId::Pin, GLYPH_PIN, None);
                     }
