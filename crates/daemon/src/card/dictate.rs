@@ -12,17 +12,16 @@
 //! apart; a tap's third of a second of sound is thrown away.
 //!
 //! What is seen is THE CARD'S PILL on the bar, the small round one, which
-//! BECOMES it (Max, the same day: *"I want the small pill to become the
-//! listening, and I want to see the secs. When let go, I want the loading
-//! (the dots move) and a button that says Esc (Esc cancels)"*): it grows to
-//! the right — a microphone and the seconds while the key is down; three
-//! dots rising one after the other and "Esc" while the speech engine works
-//! — and is round again when the words are in the window. Escape (a
-//! compositor bind, there only while it is written out) or a click on the
-//! pill cancels. What goes wrong is said there too, for a moment.
-//! (`clipboard.rs::push_clip_glyph` draws it, from [`Show`].) Sound and
-//! engine are the card's own (`voice.rs`): recorded and written out on this
-//! machine.
+//! BECOMES it (Max, the same day, in three looks; the last: *"we don't need
+//! the seconds, leave only the mic, and when I let go I want one of those
+//! semi rings spinning around the pill"*): its symbol is a microphone while
+//! the key is down, and half a ring turns round its rim while the speech
+//! engine works; then it is the card's pill again and the words are in the
+//! window. Escape (a compositor bind, there only while it is written out)
+//! or a click on the pill cancels. What goes wrong is said there, the pill
+//! grown for the words, for a moment. (`clipboard.rs::push_clip_glyph` draws
+//! it, from [`Show`].) Sound and engine are the card's own (`voice.rs`):
+//! recorded and written out on this machine.
 
 use std::path::PathBuf;
 use std::process::Child;
@@ -48,8 +47,8 @@ pub(super) struct Dictation {
 /// What the card's pill shows of a dictation.
 #[derive(Debug, Clone)]
 pub(crate) enum Show {
-    /// Recording, since then.
-    Listening(Instant),
+    /// Recording.
+    Listening,
     /// What was said is being written out, since then; the flag is raised
     /// if it is cancelled meanwhile.
     Writing(Instant, Arc<AtomicBool>),
@@ -154,7 +153,7 @@ impl App {
         }
         d.held = true;
         info!("dictation: listening");
-        self.dictate_show(Some(Show::Listening(since)));
+        self.dictate_show(Some(Show::Listening));
         self.dictate_tick(since);
     }
 
@@ -200,7 +199,7 @@ impl App {
     /// cancelled — nothing is written. Whether there was one.
     pub(crate) fn dictate_cancel(&mut self) -> bool {
         match self.card.dictate_show.clone() {
-            Some(Show::Listening(_)) => {
+            Some(Show::Listening) => {
                 info!("dictation: cancelled from the bar");
                 self.dictate_drop();
             }

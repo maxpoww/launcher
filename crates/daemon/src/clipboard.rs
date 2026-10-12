@@ -1404,6 +1404,13 @@ pub(crate) fn contains_ci(hay: &str, needle: &str) -> bool {
     false
 }
 
+/// The card's pill while it shows a dictation: the microphone, and the ring
+/// that turns round the pill while what was said is written out — how many
+/// turns a second, and how much of the circle it is (radians).
+const GLYPH_MIC: &str = "\u{f036c}"; // md-microphone
+const RING_TURNS: f32 = 1.1;
+const RING_ARC: f32 = std::f32::consts::PI * 1.1;
+
 impl App {
     /// A clipboard change arrived from the worker: fold it into the history
     /// (newest first, de-duplicated) and persist.
@@ -4418,51 +4425,39 @@ impl App {
         // pill at rest: the pill grows to the right of it for a dictation.)
         let cx = rect.x + rect.h / 2.0;
         let ty = rect.y + (rect.h - LINE_PX * s) / 2.0;
-        // A DICTATION (`card/dictate.rs`): the pill itself is what shows it.
-        // LISTENING: a microphone where its symbol was, and the seconds.
-        // WRITING: three dots that rise one after the other, and "Esc" —
-        // what cancels it. Gone wrong: the words for it.
+        // A DICTATION (`card/dictate.rs`): the pill itself is what shows it,
+        // round as it is. LISTENING: a microphone where its symbol was.
+        // WRITING: the microphone still, and half a ring turning round the
+        // pill's rim — its head solid, fading away behind it. Gone wrong:
+        // the pill grows for the words. (It showed the seconds, and "Esc"
+        // beside three dots; Max, 2026-10-12: *"we don't need the seconds,
+        // leave only the mic, and when I let go I want one of those semi
+        // rings spinning around the pill"*.)
         use crate::card::dictate::Show;
         let color = Some(ink);
         let glyph = match self.card_dictate_show() {
-            Some(Show::Listening(since)) => {
-                let slot = (rect.x + rect.w - self.clip_dictate_edge() - (rect.x + rect.h)).max(0.0);
-                scene.labels.push(Label {
-                    text: format!("{}s", since.elapsed().as_secs()),
-                    pos: (rect.x + rect.h + slot / 2.0, ty),
-                    max_w: slot + 4.0,
-                    font_px: FONT_PX * s,
-                    line_px: LINE_PX * s,
-                    centered: true,
-                    dim: false,
-                    cache: false,
-                    family: None,
-                    color,
-                    clip: Some(rect),
-                });
-                Some("\u{f036c}") // md-microphone
-            }
+            Some(Show::Listening) => Some(GLYPH_MIC),
             Some(Show::Writing(since, _)) => {
-                let t = since.elapsed().as_secs_f32();
-                let (r, step) = (2.4 * s, 8.0 * s);
-                for i in 0..3 {
-                    // (One after the other, each up and down again, then a
-                    // rest: a wave that runs along the three.)
-                    let phase = (t * 1.6 - i as f32 * 0.16).rem_euclid(1.0);
-                    let up = if phase < 0.5 { (phase * 2.0 * std::f32::consts::PI).sin() } else { 0.0 };
-                    let x = cx + (i as f32 - 1.0) * step;
-                    let y = rect.y + rect.h / 2.0 - up * 4.5 * s;
+                // (The renderer draws rounded boxes, not arcs: the ring is
+                // dots set closer than they are wide.)
+                let thick = 2.6 * s;
+                let r = rect.h / 2.0 - thick / 2.0 - 0.5;
+                let (mx, my) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+                let head = since.elapsed().as_secs_f32() * RING_TURNS * std::f32::consts::TAU;
+                let n = ((RING_ARC * r) / (thick * 0.4)).ceil().max(8.0) as usize;
+                for i in 0..n {
+                    let back = i as f32 / (n - 1) as f32;
+                    let a = head - back * RING_ARC;
+                    let (x, y) = (mx + r * a.cos(), my + r * a.sin());
                     scene.rects.push(RectInst {
-                        rect: Rect::new(x - r, y - r, 2.0 * r, 2.0 * r),
-                        radius: r,
-                        color: [ink[0], ink[1], ink[2], ink[3] * (0.55 + 0.45 * up)],
+                        rect: Rect::new(x - thick / 2.0, y - thick / 2.0, thick, thick),
+                        radius: thick / 2.0,
+                        color: [ink[0], ink[1], ink[2], ink[3] * (1.0 - back).powf(1.5) * 0.9],
                         glass: 0.0,
                         border: 0.0,
                     });
                 }
-                let chip = self.clip_dictate_chip(rect);
-                self.push_task_chip(scene, chip, "Esc", ink, 1.0, hovered);
-                None
+                Some(GLYPH_MIC)
             }
             Some(Show::Said(why, _)) => {
                 scene.labels.push(Label {
@@ -4502,37 +4497,14 @@ impl App {
         }
     }
 
-    /// The air at the right end of the card's pill while it shows a
-    /// dictation.
-    fn clip_dictate_edge(&self) -> f32 {
-        PILL_PAD_X * self.options_scale() * 0.8
-    }
-
-    /// Where "Esc" stands in the card's pill while what was said is
-    /// written out: in its right cap, as the bell's chip is in its.
-    fn clip_dictate_chip(&self, pill: Rect) -> Rect {
-        let s = self.options_scale();
-        let h = LINE_PX * s;
-        let w = self.clip_dictate_chip_w();
-        let edge = (pill.h - h) / 2.0;
-        Rect::new(pill.x + pill.w - edge - w, pill.y + edge, w, h)
-    }
-
-    fn clip_dictate_chip_w(&self) -> f32 {
-        FONT_PX * self.options_scale() * 0.6 * 3.0 + 14.0
-    }
-
     /// How much WIDER than a round pill the card's pill is to be for what
     /// it shows of a dictation, once it has grown to it (px).
     pub(crate) fn clip_dictate_extra(&self, show: Option<&crate::card::dictate::Show>) -> f32 {
         use crate::card::dictate::Show;
         let s = self.options_scale();
-        let ph = self.options_pill_h();
         match show {
-            None => 0.0,
-            // (Three digits of seconds, and their "s".)
-            Some(Show::Listening(_)) => FONT_PX * s * 2.3 + self.clip_dictate_edge(),
-            Some(Show::Writing(..)) => 4.0 * s + self.clip_dictate_chip_w() + (ph - LINE_PX * s) / 2.0,
+            // (Listening and writing it is as round as ever.)
+            None | Some(Show::Listening | Show::Writing(..)) => 0.0,
             Some(Show::Said(why, _)) => why.chars().count() as f32 * FONT_PX * s * 0.56 + PILL_PAD_X * s,
         }
     }

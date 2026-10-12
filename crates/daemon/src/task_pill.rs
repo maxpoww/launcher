@@ -453,7 +453,7 @@ impl App {
     }
 
     /// One amber chip, the bell's.
-    pub(crate) fn push_task_chip(&self, scene: &mut Scene, chip: Rect, text: &str, ink: [f32; 4], alpha: f32, lit: bool) {
+    fn push_task_chip(&self, scene: &mut Scene, chip: Rect, text: &str, ink: [f32; 4], alpha: f32, lit: bool) {
         if alpha <= 0.004 {
             return;
         }
