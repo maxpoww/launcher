@@ -189,11 +189,11 @@ impl Foot {
     fn icon(self) -> Option<Icon> {
         let (w, h, off) = match self {
             Foot::Memory => return None,
-            Foot::Talk => (0.330, 0.480, (0.0, 0.0)),
-            Foot::Emoji => (0.600, 0.600, (0.0, 0.0)),
+            Foot::Talk => (0.330, 0.480, (0.0, 0.25)),
+            Foot::Emoji => (0.600, 0.600, (0.0, 0.15)),
             // (Its outline sits in the middle, but its weight — the head
             // of the pin — is 1.6 px above it: a pixel down.)
-            Foot::Pinned => (0.6025, 0.800, (0.0, -0.3)),
+            Foot::Pinned => (0.6025, 0.800, (0.0, -0.1)),
             Foot::Clipboard => (0.600, 0.670, (0.0, 0.1)),
             Foot::Translate => (0.600, 0.545, (0.0, 0.2)),
             Foot::Dictionary => (0.600, 0.6875, (0.0, 0.1)),
@@ -385,7 +385,7 @@ struct Icon {
 }
 
 /// The side of the square an icon's drawing has the area of.
-const FOOT_ICON: f32 = 12.5;
+const FOOT_ICON: f32 = 12.0;
 
 impl Icon {
     fn px(self) -> f32 {
