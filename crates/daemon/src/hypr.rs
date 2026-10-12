@@ -1596,6 +1596,25 @@ pub fn cursor_pos() -> Option<(f64, f64)> {
     Some((json["x"].as_f64()?, json["y"].as_f64()?))
 }
 
+/// Where the pointer is ON ITS MONITOR (logical, from that monitor's top
+/// left corner) — the space a layer surface's own positions are in.
+pub fn cursor_on_monitor() -> Option<(f32, f32)> {
+    let (x, y) = cursor_pos()?;
+    let monitors = reply_json("j/monitors")?;
+    let origin = monitors
+        .as_array()?
+        .iter()
+        .filter_map(|m| {
+            let (mx, my) = (m["x"].as_f64()?, m["y"].as_f64()?);
+            let scale = m["scale"].as_f64().filter(|s| *s > 0.0).unwrap_or(1.0);
+            let (w, h) = (m["width"].as_f64()? / scale, m["height"].as_f64()? / scale);
+            (x >= mx && x < mx + w && y >= my && y < my + h).then_some((mx, my))
+        })
+        .next()
+        .unwrap_or((0.0, 0.0));
+    Some(((x - origin.0) as f32, (y - origin.1) as f32))
+}
+
 /// Put the pointer at a global logical position.
 pub fn move_cursor(x: f64, y: f64) {
     dispatch(&format!("hl.dsp.cursor.move({{ x = {}, y = {} }})", x.round(), y.round()));

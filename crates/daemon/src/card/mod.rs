@@ -649,6 +649,9 @@ pub(crate) struct Card {
     playing: Option<voice::Playing>,
     /// The voice note that is paused, and how many seconds in it stopped.
     paused: Option<(u64, f32)>,
+    /// The watch on a pointer that leaves without a word is running
+    /// (`card_keys_watch`).
+    keys_watch: bool,
     /// The item clicked once, and when: a second click on it soon after
     /// pastes it (`card_click`).
     clicked: Option<(u64, Instant)>,
@@ -2525,10 +2528,45 @@ impl App {
                 let _ = self.conn.flush();
             }
             self.cancel_keyboard_handback(crate::KbSurface::Card);
-            debug!("card: has the keyboard ({field:?})");
+            info!("card: has the keyboard ({field:?})");
         }
+        self.card_keys_watch();
         self.sync_card_input();
         self.request_card_draw();
+    }
+
+    /// THE KEYS THAT FOLLOWED THE POINTER ONTO THE CARD go back when it
+    /// leaves — and the compositor does not always say that it left (Max,
+    /// 2026-10-12, once the card's top touched the title bar: *"the card
+    /// won't give back the kb focus now"* — a pointer that goes from the
+    /// card onto a title bar is on no surface, and nothing is sent). So
+    /// while the card has them for that reason alone, it asks a few times
+    /// a second where the pointer really is.
+    fn card_keys_watch(&mut self) {
+        if self.card.field != Some(Field::Card)
+            || std::mem::replace(&mut self.card.keys_watch, true)
+        {
+            return;
+        }
+        self.after_ms(250, |app| {
+            app.card.keys_watch = false;
+            if app.card.field != Some(Field::Card) {
+                return;
+            }
+            let off = crate::hypr::cursor_on_monitor()
+                .zip(app.card.rect)
+                .is_some_and(|((x, y), r)| {
+                    x < r.x - 1.0 || x > r.x + r.w + 1.0 || y < r.y - 1.0 || y > r.y + r.h + 1.0
+                });
+            if off {
+                info!("card: the pointer is off the card and nothing said so: the keys go back");
+                app.card.ptr = None;
+                app.card_keys(false);
+                app.card_drop_keys();
+            } else {
+                app.card_keys_watch();
+            }
+        });
     }
 
     /// The keyboard has arrived on the card.
@@ -2567,7 +2605,7 @@ impl App {
         if self.card.field.take().is_none() {
             return;
         }
-        debug!("card: gives the keyboard back");
+        info!("card: gives the keyboard back");
         self.begin_keyboard_handback(crate::KbSurface::Card, self.card.host.clone());
         if let Some(layer) = self.card_layer.as_ref() {
             crate::surface::set_interactive(layer, false);
@@ -2610,6 +2648,7 @@ impl App {
             .is_some_and(|(at, r)| r.contains(at));
         if on && !self.card.tabbed && self.card.field.is_some() {
             self.card.field = Some(Field::Card);
+            self.card_keys_watch();
             self.sync_card_input();
             self.request_card_draw();
         } else {
@@ -5021,6 +5060,8 @@ impl App {
                 self.card.lang = None;
                 if self.card.field == Some(Field::Card) {
                     self.card_drop_keys();
+                } else if let Some(field) = self.card.field {
+                    info!("card: the pointer left; the keys stay ({field:?})");
                 }
                 match self.card.press.take() {
                     Some(Press::Slide { moved: true, .. }) => self.card_settle(),
