@@ -27,14 +27,22 @@ impl Rect {
     }
 }
 
-/// THE WINDOWS' CORNER, as a [`RectInst::radius`]: 14 px at the curve Golem's
-/// windows are rounded with (hyprland.lua: `rounding = 14`,
-/// `rounding_power = 3` — chosen by eye on the live screen, Max 2026-10-12:
-/// *"me gusta la curva… usa esa curva en la tarjeta"*; a circle of 12 read as
-/// "too square", power 4 showed "una ligera punta"). NEGATIVE on purpose: the
-/// sign is what tells `rounded_rect.wgsl` to draw that curve and not a
-/// circle's quarter. Change the three together.
-pub(crate) const WINDOW_CORNER: f32 = -14.0;
+/// THE WINDOWS' CORNER, as a [`RectInst::radius`]: the curve Golem's windows
+/// are rounded with (hyprland.lua: `rounding = 14`, `rounding_power = 3` —
+/// chosen by eye on the live screen, Max 2026-10-12: *"me gusta la curva…
+/// usa esa curva en la tarjeta"*; a circle of 12 read as "too square", power
+/// 4 showed "una ligera punta").
+///
+/// 21, NOT 14: Hyprland draws a window's corner at `rounding × power / 2`
+/// ("make perceived roundness consistent", `CWindow::rounding`), so 14 at
+/// power 3 is a superellipse of 21. Measured on a real window, pixel row by
+/// pixel row; at 14 the card's corner was visibly tighter than its window's
+/// (Max: *"no parece la misma curva… las esquinas se ven diferentes"*).
+///
+/// NEGATIVE on purpose: the sign is what tells `rounded_rect.wgsl` to draw
+/// that curve (its `WINDOW_POWER`) and not a circle's quarter. Change the
+/// config, this and the shader together.
+pub(crate) const WINDOW_CORNER: f32 = -(14.0 * 3.0 / 2.0);
 
 /// One rounded rectangle to fill (card background, hover highlight).
 #[derive(Debug, Clone, Copy)]
