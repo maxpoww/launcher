@@ -331,6 +331,10 @@ const GLYPH_EDIT: &str = "\u{f040}";
 
 /// The foot's height, and its buttons' own.
 pub(super) const FOOT_H: f32 = 46.0;
+/// How big the icons of the head's round buttons are, and the line they
+/// stand in.
+const FOOT_ICON_PX: f32 = 17.0;
+const FOOT_ICON_LINE: f32 = 22.0;
 const FOOT_BUTTON_H: f32 = 28.0;
 /// The pin glyph (fa-thumb-tack, in the Nerd font).
 const GLYPH_PIN: &str = "\u{f08d}";
@@ -2268,13 +2272,16 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             let icon = which.round() || up;
             bar.labels.push(Label {
                 text: if up { GLYPH_UP } else { which.word() }.to_owned(),
+                // (An icon is drawn bigger than the words are: Max,
+                // 2026-10-12, *"make the icons on the buttons bigger"*.)
                 pos: (
                     r.x + r.w / 2.0,
-                    r.y + (r.h - TEXT_LINE) / 2.0 + if icon { 1.0 } else { 0.0 },
+                    r.y + (r.h - if icon { FOOT_ICON_LINE } else { TEXT_LINE }) / 2.0
+                        + if icon { 1.0 } else { 0.0 },
                 ),
                 max_w: r.w,
-                font_px: TEXT_PX,
-                line_px: TEXT_LINE,
+                font_px: if icon { FOOT_ICON_PX } else { TEXT_PX },
+                line_px: if icon { FOOT_ICON_LINE } else { TEXT_LINE },
                 centered: true,
                 dim: false,
                 cache: true,
