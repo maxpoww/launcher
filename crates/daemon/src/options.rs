@@ -5078,6 +5078,18 @@ impl App {
         } else {
             self.options_bar_h().ceil() as i32
         };
+        // (The card stands in a stretch of the row — the long pill has
+        // become it: the pointer there is the card's, a surface under this
+        // one, so this one lets it through.)
+        if let Some((from, to)) = self.card_banner_in_bar().filter(|_| !self.options_hidden) {
+            let (from, to) = (from.floor() as i32, (to.ceil() as i32).min(w as i32));
+            surface::set_input_rects(
+                &self.compositor,
+                layer,
+                &[(0, 0, from.max(0), h), (to, 0, (w as i32 - to).max(0), h)],
+            );
+            return;
+        }
         surface::set_input_rects(&self.compositor, layer, &[(0, 0, w as i32, h)]);
     }
 

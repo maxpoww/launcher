@@ -1942,13 +1942,13 @@ impl App {
             return;
         }
         let radius = lerp(ph / 2.0, BOX_RADIUS, e);
-        // (THE CARD IS OUT UNDER IT: the card's own ground has risen behind
-        // the pill — pill and card are one shape — so the pill draws none
-        // of its own, only its words, in the card's ink.)
-        let carried = self.card_banner_carries_pill() && e < 0.001;
-        if !carried {
-            push_neumorph(scene, rect, radius, bright, 1.0);
+        // (THE LONG PILL HAS BECOME THE CARD: the card stands in its place,
+        // in the bar's row, and nothing of the pill is drawn — Max,
+        // 2026-10-12.)
+        if self.card_banner_in_bar().is_some() && e < 0.001 {
+            return;
         }
+        push_neumorph(scene, rect, radius, bright, 1.0);
 
         // Box fill: the pill's apparent colour (its backdrop with the wash
         // composited on) so the opaque open box reads as the pill grown. Same
@@ -1958,17 +1958,8 @@ impl App {
         // The box is the pill grown: fill + ink both follow the bar's regime
         // (see `options_box_surface`), so the two never disagree.
         let (fill, box_ink) = self.clip_box_surface();
-        let text_color = if carried {
-            self.card_paint_ink()
-        } else {
-            text_color
-        };
         scene.rects.push(RectInst {
-            rect: if carried {
-                Rect::new(rect.x, rect.y, 0.0, 0.0)
-            } else {
-                rect
-            },
+            rect,
             radius,
             // Ramped by the EXPAND only, never the peek: a peeking pill keeps
             // the plain resting wash so it looks like every other pill on the
@@ -1993,6 +1984,9 @@ impl App {
         // Collapsed preview of the newest clip, fading out as the box solidifies
         // (complementary to the list fading in, so they cross-fade cleanly).
         let pa = ((peek - 0.35) / 0.5).clamp(0.0, 1.0) * (1.0 - solid);
+        // (With the card out under it — the bar painted, the pill still a
+        // pill — its words are the card's to show now, not the pill's.)
+        let pa = if self.card_banner_open() { 0.0 } else { pa };
         if pa > 0.01 {
             // (The card's last thing — the pill is the card's: Max,
             // 2026-10-12. With the old box open it was the newest clip.)

@@ -215,11 +215,14 @@ struct Wheel {
 struct Banner {
     x: f32,
     y: f32,
-    /// As wide as the long pill it comes out of.
-    w: f32,
-    /// How far its ground rises behind that pill (0: the bar is painted
-    /// there — a maximized window's — and the pill stays a pill).
-    rise: f32,
+    /// It stands IN THE BAR'S ROW, where the long pill was — its top at
+    /// the pill's top (Max, 2026-10-12: *"i want the long pill to become
+    /// the card"*, then *"the scroll does not hide the old content of the
+    /// long pill"*): the bar draws no long pill then and gives that stretch
+    /// of its row to the card (`sync_options_input`). Not so when the bar
+    /// is painted (a maximized window's): it would cover the card's top —
+    /// there the card hangs from the bar's foot.
+    in_bar: bool,
     was_on: bool,
     /// It is rolling up to go away: it keeps its place under the bar till
     /// it is gone.
@@ -807,10 +810,6 @@ impl Card {
 
     /// How wide the card is on the window it is on.
     fn width(&self) -> f32 {
-        // (Under the bar: the long pill's.)
-        if let Some(b) = self.banner {
-            return b.w;
-        }
         self.win()
             .width
             .map_or(WIDTH, |w| w.clamp(WIDTH_MIN, WIDTH_MAX))
@@ -4076,16 +4075,11 @@ impl App {
         }
     }
 
-    /// Whether the bar's long pill has no ground of its own right now: the
-    /// card's, risen behind it, is its ground (`Banner::rise`).
-    pub(crate) fn card_banner_carries_pill(&self) -> bool {
-        self.card.banner.is_some_and(|b| b.rise > 0.0) && self.card.shown > 0.0
-    }
-
-    /// The card's ink (what the long pill writes in while it rides the
-    /// card's ground).
-    pub(crate) fn card_paint_ink(&self) -> [f32; 4] {
-        self.card_paint().ink
+    /// The stretch of the bar's row the card stands in right now (from,
+    /// to): the bar draws no long pill there and takes no pointer there.
+    pub(crate) fn card_banner_in_bar(&self) -> Option<(f32, f32)> {
+        let b = self.card.banner.filter(|b| b.in_bar)?;
+        Some((b.x, b.x + self.card.width()))
     }
 
     /// Whether the card hangs under the bar right now.
@@ -4123,6 +4117,7 @@ impl App {
                 self.card.banner = None;
                 self.card.lines.clear();
                 self.sync_card();
+                self.sync_options_input();
             } else {
                 self.card.banner = Some(Banner { closing: true, ..b });
                 self.card_dismiss();
@@ -4135,27 +4130,23 @@ impl App {
         let Some(addr) = self.card_focused().filter(|a| valid_addr(a)) else {
             return;
         };
-        // THE LONG PILL BECOMES THE CARD: the card hangs from the bar's foot
-        // exactly under the long pill, as wide, and its ground rises behind
-        // the pill — one shape, unrolling down out of it.
+        // THE LONG PILL BECOMES THE CARD: the card stands where the long
+        // pill was — its top left corner the pill's — at the size it has on
+        // a window, and unrolls down from there.
         let pill = self.clip_long_rect();
-        let foot = self.options_bar_h();
+        let in_bar = self.options_bar_matched.is_none();
         let was_on = self.card.host.as_deref() == Some(addr.as_str()) && self.card_present();
         self.card.banner = Some(Banner {
             x: pill.x,
-            y: foot,
-            w: pill.w,
-            rise: if self.options_bar_matched.is_some() {
-                0.0
-            } else {
-                (foot - pill.y).max(0.0)
-            },
+            y: if in_bar { pill.y } else { self.options_bar_h() },
+            in_bar,
             was_on,
             closing: false,
         });
         self.card.at = None;
         self.card.press = None;
         self.card.lines.clear();
+        self.sync_options_input();
         self.draw_options();
         if was_on {
             self.sync_card();
@@ -4205,6 +4196,7 @@ impl App {
             self.card.banner = None;
             self.card.lines.clear();
             self.sync_card();
+            self.sync_options_input();
             self.update_clip_reveal();
             self.draw_options();
             return;
@@ -4352,6 +4344,7 @@ impl App {
         self.card.tiles.clear();
         self.sync_card_input();
         if hung {
+            self.sync_options_input();
             self.update_clip_reveal();
             self.draw_options();
         }
@@ -5127,7 +5120,7 @@ impl App {
             dnd_over: self.card.dnd_over,
             hidden,
             opening: opening.map_or(0.0, |o| o.1),
-            rise: self.card.banner.map_or(0.0, |b| b.rise),
+            rise: 0.0,
             shifts: &self.card.shifts,
             slots: &self.card.slots,
             paint,
