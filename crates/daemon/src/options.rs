@@ -469,6 +469,10 @@ const LAYOUT_SETTLE: Duration = Duration::from_millis(60);
 pub(crate) struct CtrlAnim {
     /// Whether the cluster should be revealed (pointer on the window/cluster).
     reveal: bool,
+    /// Whether the MINIMIZE should be out: it answers to the close alone
+    /// (pointer on the close, or on the minimize once it is out), not to the
+    /// cluster — see `PillId::Minimize`.
+    min_reveal: bool,
     /// When `reveal` last flipped — drives the stagger in both directions.
     changed_at: Option<std::time::Instant>,
     /// Slide progress 0 (tucked behind the parent) → 1 (resting); opacity is
@@ -831,8 +835,9 @@ impl Default for TitleMeta {
     }
 }
 
-/// The minimize's slot in the reveal chain. It is alone on its side of the
-/// window name, so it takes no turn in the stagger: first out, first back.
+/// The minimize's slot among the reveal progresses. It is not part of the
+/// chain: it answers to the close's hover (`CtrlAnim::min_reveal`) and takes
+/// no turn in the stagger.
 const CTRL_MINIMIZE: usize = 3;
 /// The pin's slot. The outermost control on the right: out after the last of
 /// the mode toggles, back before the first of them.
@@ -849,8 +854,8 @@ fn ctrl_index(id: PillId) -> Option<usize> {
         PillId::Pseudo => Some(0),
         PillId::Float => Some(1),
         PillId::Fullscreen => Some(2),
-        // The minimize: tucked behind the close on the OTHER side of the
-        // window name, emerging leftward (see `CTRL_MINIMIZE`).
+        // The minimize: tucked behind the close, emerging to its right on a
+        // reveal of its own (see `CTRL_MINIMIZE`).
         PillId::Minimize => Some(CTRL_MINIMIZE),
         // The pin while it is OFF (on, it rests — see `pin_rests`).
         PillId::Pin => Some(CTRL_PIN),
@@ -982,11 +987,16 @@ pub(crate) enum PillId {
     /// minimize options to the left of the current task"*, then: *"it is
     /// better if the X buttons moves to the left and the minimize is "hidden"
     /// on it, so x to the left, hover reveal monimize to the left (hover
-    /// current task reveals all)"*). So the close rests LEFT of the window
-    /// name and the minimize is tucked behind it, sliding out to ITS left on
-    /// the same reveal that brings the mode controls out on the right. The
-    /// same act as the title bar's orange disc, for the windows that wear no
-    /// title bar.
+    /// current task reveals all)"*), and after two other tries: *"make the
+    /// mimize reveal only when i hover the X, and to the right of the x"*.
+    /// So the close rests LEFT of the window name and the minimize is tucked
+    /// behind it, sliding out to its RIGHT when the hand is on the close —
+    /// and on nothing else: the window name's hover brings out the mode
+    /// controls, not this. There is no room right of the close (the name
+    /// stands against it), so the name and everything right of it step
+    /// aside by one pill while the minimize is out (`min_room`); the close
+    /// stays under the hand. The same act as the title bar's orange disc,
+    /// for the windows that wear no title bar.
     Minimize,
     /// Pin the focused window — above every other window and on whichever
     /// workspace is showing, the compositor's own pin and the same act as the
@@ -2112,7 +2122,10 @@ impl App {
             // two titles instead of jumping (see [`TitleMeta`]).
             let ww = (self.options_title_content_w() + 2.0 * PILL_PAD_X).max(ph);
             let d = ph; // control-circle diameter
-            let wx = ((w - ww) / 2.0).max(EDGE_PAD);
+            // …and steps aside to the right while the minimize is out between
+            // it and the close (`min_room`); the close keeps the resting spot.
+            let wx_rest = ((w - ww) / 2.0).max(EDGE_PAD);
+            let wx = wx_rest + self.min_room();
             // The module's nested children: sunset's [turn on], and the settings
             // gear every module carries. Listed BEFORE the window pill so the
             // overlap hover resolves to them, and kept through the back-morph
@@ -2176,21 +2189,15 @@ impl App {
             // them to act on anyway.)
             if !self.module_on_pill() {
                 // Close, LEFT of the window name — a resting pill, no reveal.
-                let close_x = wx - GROUP_GAP - d;
+                let close_x = wx_rest - GROUP_GAP - d;
                 // The minimize, hidden behind the close and revealed to its
-                // left. Only while there is a window of the desktop to send
-                // to the dock: not over the overview's map (the pill names
-                // what you point at there), and not for a title that has
-                // outlived its window. Listed BEFORE the close so the close's
-                // own spot always hits the close.
-                if self.overview_hover.is_none()
-                    && !self.overview_active
-                    && self.options_active_addr.is_some()
-                {
-                    let min_x = close_x - CTRL_GAP - d;
-                    if min_x >= EDGE_PAD {
-                        circle(&mut pills, min_x, PillId::Minimize, GLYPH_MINIMIZE, None);
-                    }
+                // RIGHT, in the room the window name leaves (see
+                // `PillId::Minimize`). Only while there is a window of the
+                // desktop to send to the dock: not over the overview's map
+                // (the pill names what you point at there), and not for a
+                // title that has outlived its window.
+                if self.minimize_offered() {
+                    circle(&mut pills, close_x + d + CTRL_GAP, PillId::Minimize, GLYPH_MINIMIZE, None);
                 }
                 circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
                 // The state word and the mode controls keep the right side,
@@ -3988,17 +3995,20 @@ impl App {
                         continue; // fully hidden — don't draw
                     }
                     let d = pill.rect.w;
-                    // The minimize is the one control on the LEFT: it comes
-                    // out from behind the close toward the bar's left end,
-                    // clipped to the left of the close's left edge.
+                    // The minimize is the close's own child: it comes out
+                    // from behind the close to its RIGHT, clipped to the
+                    // right of the close's right edge, into the room the
+                    // window name is leaving at the same rate (`min_room`
+                    // rides this same progress, so the name's edge stays one
+                    // gap ahead of it all the way).
                     if pill.id == PillId::Minimize {
                         let edge = pills
                             .iter()
                             .find(|p| p.id == PillId::Close)
-                            .map_or(pill.rect.x + d, |p| p.rect.x);
-                        let x = lerp(edge, pill.rect.x, t);
+                            .map_or(pill.rect.x, |p| p.rect.x + p.rect.w);
+                        let x = lerp(edge - d, pill.rect.x, t);
                         let rect = Rect::new(x, pill.rect.y, d, pill.rect.h);
-                        let clip = Rect::new(0.0, 0.0, edge.max(0.0), bar_h);
+                        let clip = Rect::new(edge, 0.0, (full_w - edge).max(0.0), bar_h);
                         (rect, a, Some(clip), a * t)
                     } else {
                     // `origin` = tucked-x behind the parent; `edge` = the
@@ -5705,6 +5715,44 @@ impl App {
         }
     }
 
+    /// Whether the bar offers a minimize at all: only for a window of the
+    /// plain desktop — not over the overview's map, not on the stage, not
+    /// while a module holds the pill, not for a title that has outlived its
+    /// window.
+    fn minimize_offered(&self) -> bool {
+        self.overview_hover.is_none()
+            && !self.overview_active
+            && !self.stage.is_on()
+            && !self.module_on_pill()
+            && self.options_active_addr.is_some()
+    }
+
+    /// How far the window name (and all that stands right of it) has stepped
+    /// aside for the minimize: one pill and its gap, times the minimize's own
+    /// progress out from behind the close.
+    fn min_room(&self) -> f32 {
+        self.options_ctrl.t[CTRL_MINIMIZE] * (self.options_pill_h() + CTRL_GAP)
+    }
+
+    /// Whether the pointer is on the close or the minimize's spot beside it
+    /// (the gap between them included) — what keeps the minimize out.
+    fn options_ptr_on_close_pair(&self) -> bool {
+        let Some((x, y)) = self.options_ptr else {
+            return false;
+        };
+        if y < 0.0 || y > self.options_bar_h() {
+            return false;
+        }
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for p in &self.options_pills() {
+            if matches!(p.id, PillId::Close | PillId::Minimize) {
+                lo = lo.min(p.rect.x);
+                hi = hi.max(p.rect.x + p.rect.w);
+            }
+        }
+        x >= lo && x <= hi
+    }
+
     /// The pin pill of a PINNED window: it stands at rest on the bar instead
     /// of riding the reveal chain (see `PillId::Pin`).
     fn pin_rests(&self, id: PillId) -> bool {
@@ -5990,9 +6038,11 @@ impl App {
         let want = if self.options_ctrl.reveal {
             self.options_ptr_in_cluster()
         } else {
+            // (Not the close: its hover brings out its own child, the
+            // minimize, and nothing else — below.)
             matches!(
                 self.options_hover,
-                Some(PillId::Window) | Some(PillId::Close) | Some(PillId::WindowState)
+                Some(PillId::Window) | Some(PillId::WindowState)
             )
         };
         if want != self.options_ctrl.reveal {
@@ -6000,6 +6050,19 @@ impl App {
             // Progress is NOT reset: a flip mid-flight continues from where
             // each button is, so quick hover in/out reverses smoothly.
             self.options_ctrl.changed_at = Some(Instant::now());
+            self.options_ctrl.last = None;
+            self.schedule_options_ctrl_frame();
+        }
+        // The minimize: out while the hand is on the close, kept out while it
+        // is anywhere on the pair.
+        let want_min = self.minimize_offered()
+            && if self.options_ctrl.min_reveal {
+                self.options_ptr_on_close_pair()
+            } else {
+                self.options_hover == Some(PillId::Close)
+            };
+        if want_min != self.options_ctrl.min_reveal {
+            self.options_ctrl.min_reveal = want_min;
             self.options_ctrl.last = None;
             self.schedule_options_ctrl_frame();
         }
@@ -6045,7 +6108,12 @@ impl App {
                 active = true; // its turn is coming — keep ticking
                 continue;
             }
-            let target = if reveal { 1.0 } else { 0.0 };
+            let out = if i == CTRL_MINIMIZE {
+                self.options_ctrl.min_reveal
+            } else {
+                reveal
+            };
+            let target = if out { 1.0 } else { 0.0 };
             // The progress carries a slide of one pill plus the gap it emerges
             // across (`origin` → rest in `draw_options`), so that is the span
             // its settle is measured in (`OptionUXRules.md` §3).
@@ -6503,7 +6571,8 @@ impl App {
         let box_h = bh.max(module_h);
         let w = lerp(module_w, panel_w, e);
         let h = lerp(module_h, box_h, e);
-        Rect::new(cx - w / 2.0, y + MODULE_DROP_Y * mt, w, h)
+        // (Stepped aside while the minimize is out beside the close.)
+        Rect::new(cx - w / 2.0 + self.min_room(), y + MODULE_DROP_Y * mt, w, h)
     }
 
     /// The module's ink: the BAR's own adaptive ink (`options_text_color`).
