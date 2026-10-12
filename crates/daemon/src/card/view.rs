@@ -193,9 +193,9 @@ impl Foot {
             Foot::Emoji => (0.600, 0.600, (0.0, 0.15)),
             // (Its outline sits in the middle, but its weight — the head
             // of the pin — is 1.6 px above it: a pixel down.)
-            Foot::Pinned => (0.6025, 0.800, (0.0, -0.1)),
+            Foot::Pinned => (0.6025, 0.800, (0.3, -0.4)),
             Foot::Clipboard => (0.600, 0.670, (0.0, 0.1)),
-            Foot::Translate => (0.600, 0.545, (0.0, 0.2)),
+            Foot::Translate => (0.600, 0.545, (0.0, 0.35)),
             Foot::Dictionary => (0.600, 0.6875, (0.0, 0.1)),
         };
         Some(Icon {
@@ -385,7 +385,7 @@ struct Icon {
 }
 
 /// The side of the square an icon's drawing has the area of.
-const FOOT_ICON: f32 = 12.0;
+const FOOT_ICON: f32 = 11.5;
 
 impl Icon {
     fn px(self) -> f32 {
@@ -407,7 +407,7 @@ const ICON_UP: Icon = Icon {
     w: 0.515,
     h: 0.600,
     // (An arrow's weight is its head: above the middle of its outline.)
-    off: (0.0, -0.6),
+    off: (0.0, -0.2),
 };
 const FOOT_BUTTON_H: f32 = 28.0;
 /// The pin glyph (fa-thumb-tack, in the Nerd font).
