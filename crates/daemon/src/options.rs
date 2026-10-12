@@ -290,6 +290,7 @@ impl Module {
 
 // Nerd Font glyphs (Font Awesome range, present in JetBrainsMono NF).
 pub(crate) const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
+const GLYPH_MINIMIZE: &str = "\u{f2d1}"; // fa-window-minimize
 const GLYPH_SQUARE: &str = "\u{f096}"; // fa-square-o (pseudotile)
 const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
@@ -564,6 +565,7 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         | PillId::SunsetTurnOn
         | PillId::ModuleSettings
         | PillId::Close
+        | PillId::Minimize
         | PillId::WindowState
         | PillId::Pseudo
         | PillId::Float
@@ -851,7 +853,7 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Pseudo => 3,
         // A resting pill like the close, and like it a parent: the tucked mode
         // toggles emerge from behind it, so it has to draw over them.
-        PillId::Close | PillId::WindowState => 4,
+        PillId::Close | PillId::Minimize | PillId::WindowState => 4,
         PillId::Window => 5,
         // Nested inside the window pill, so they must draw over it.
         PillId::SunsetTurnOn => 6,
@@ -954,6 +956,11 @@ pub(crate) enum PillId {
     /// right end, right of [turn on].
     ModuleSettings,
     Close,
+    /// Minimize the focused window to the dock — a resting circle LEFT of the
+    /// current-task pill, the close's mirror (Max, 2026-10-12: *"i want a
+    /// minimize options to the left of the current task"*). The same act as
+    /// the title bar's orange disc, for the windows that wear no title bar.
+    Minimize,
     /// What the focused window IS — floating, pseudo, fullscreen — as that
     /// mode's own glyph, right of the close. Nothing at all when the window is
     /// plainly tiled: the layout is the resting state of the desktop and needs
@@ -1374,6 +1381,9 @@ fn presence(id: PillId) -> Presence {
         // Window-mode controls act on the FOCUSED window — meaningless while
         // you're above the desktop choosing one.
         PillId::Pseudo | PillId::Float | PillId::Fullscreen => DESKTOP_ONLY,
+        // Minimize acts on the focused window too. (Not on the stage: a staged
+        // task leaves the stage by its own controls.)
+        PillId::Minimize => DESKTOP_ONLY,
         // The state pill says what the window IS. On the stage that is NOT the
         // mode's own maximize — every task there is maximized, so marking it
         // would be a sign that is true always and therefore says nothing — but
@@ -1443,6 +1453,7 @@ fn glyph_for_pill(id: PillId) -> &'static str {
         PillId::Pseudo => GLYPH_SQUARE,
         PillId::Float => GLYPH_FLOAT,
         PillId::Close => GLYPH_CLOSE,
+        PillId::Minimize => GLYPH_MINIMIZE,
         _ => GLYPH_OPTION,
     }
 }
@@ -2119,6 +2130,20 @@ impl App {
             // return with the title. (On an empty workspace there is nothing for
             // them to act on anyway.)
             if !self.module_on_pill() {
+                // Minimize, left of the window name — the close's mirror, a
+                // resting pill like it. Only while there is a window of the
+                // desktop to send to the dock: not over the overview's map
+                // (the pill names what you point at there), and not for a
+                // title that has outlived its window.
+                if self.overview_hover.is_none()
+                    && !self.overview_active
+                    && self.options_active_addr.is_some()
+                {
+                    let min_x = wx - GROUP_GAP - d;
+                    if min_x >= EDGE_PAD {
+                        circle(&mut pills, min_x, PillId::Minimize, GLYPH_MINIMIZE, None);
+                    }
+                }
                 // Close, right of the window name — a resting pill, no reveal.
                 let close_x = wx + ww + GROUP_GAP;
                 circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
@@ -5589,8 +5614,10 @@ impl App {
         }
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for p in &self.options_pills() {
-            if matches!(p.id, PillId::Window | PillId::Close | PillId::WindowState)
-                || ctrl_index(p.id).is_some()
+            if matches!(
+                p.id,
+                PillId::Window | PillId::Close | PillId::Minimize | PillId::WindowState
+            ) || ctrl_index(p.id).is_some()
             {
                 lo = lo.min(p.rect.x);
                 hi = hi.max(p.rect.x + p.rect.w);
@@ -6451,6 +6478,13 @@ impl App {
             Some(PillId::Close) => {
                 if let Some(addr) = self.options_active_addr.clone() {
                     hypr::close_window(&addr);
+                }
+            }
+            // To the dock, by the plugin's own minimize (the capture, the
+            // flight and the park are its; it tells us when the card lands).
+            Some(PillId::Minimize) => {
+                if let Some(addr) = self.options_active_addr.clone() {
+                    hypr::eval(&format!("hl.plugin.waveview.minimize(\"{addr}\")"));
                 }
             }
             // The sunset prompt's nested button: warm the screen, morph back.
@@ -7409,6 +7443,7 @@ mod tests {
         for id in [
             PillId::Window,
             PillId::Close,
+            PillId::Minimize,
             PillId::Pseudo,
             PillId::Fullscreen,
         ] {
