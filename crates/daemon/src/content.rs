@@ -27,10 +27,21 @@ impl Rect {
     }
 }
 
+/// THE WINDOWS' CORNER, as a [`RectInst::radius`]: 14 px at the curve Golem's
+/// windows are rounded with (hyprland.lua: `rounding = 14`,
+/// `rounding_power = 3` — chosen by eye on the live screen, Max 2026-10-12:
+/// *"me gusta la curva… usa esa curva en la tarjeta"*; a circle of 12 read as
+/// "too square", power 4 showed "una ligera punta"). NEGATIVE on purpose: the
+/// sign is what tells `rounded_rect.wgsl` to draw that curve and not a
+/// circle's quarter. Change the three together.
+pub(crate) const WINDOW_CORNER: f32 = -14.0;
+
 /// One rounded rectangle to fill (card background, hover highlight).
 #[derive(Debug, Clone, Copy)]
 pub struct RectInst {
     pub rect: Rect,
+    /// The corner: a circle's quarter of this radius — or, NEGATIVE, the
+    /// windows' own curve of that size ([`WINDOW_CORNER`]).
     pub radius: f32,
     pub color: [f32; 4],
     /// Glass-material strength: `0.0` → plain solid fill; `1.0` → full

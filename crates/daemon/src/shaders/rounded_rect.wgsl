@@ -62,15 +62,25 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     return out;
 }
 
+const WINDOW_POWER: f32 = 3.0;
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let center = (in.rect_min + in.rect_max) * 0.5;
     let half   = (in.rect_max - in.rect_min) * 0.5;
     let p      = in.px - center;
 
-    let r = min(in.radius, min(half.x, half.y));
+    // A NEGATIVE radius asks for THE WINDOWS' CORNER and not a circle's
+    // quarter: the superellipse the compositor rounds a window with
+    // (Hyprland's `rounding.glsl`: |x|^p + |y|^p = r^p), at the power Golem
+    // sets — `decoration.rounding_power` in hyprland.lua; `WINDOW_POWER`
+    // here must say the same. See `content::WINDOW_CORNER`.
+    let r = min(abs(in.radius), min(half.x, half.y));
     let q = abs(p) - half + vec2<f32>(r);
-    let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    var d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    if in.radius < 0.0 && q.x > 0.0 && q.y > 0.0 {
+        d = pow(pow(q.x, WINDOW_POWER) + pow(q.y, WINDOW_POWER), 1.0 / WINDOW_POWER) - r;
+    }
 
     // A stroke keeps only a band of `border` px just INSIDE the edge: fold
     // the signed distance about the band's midline, so the outline follows
