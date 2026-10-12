@@ -210,6 +210,21 @@ struct Wheel {
     along: f32,
 }
 
+/// The card hung under the bar (see `Card::banner`).
+#[derive(Debug, Clone, Copy)]
+struct Banner {
+    x: f32,
+    y: f32,
+    was_on: bool,
+    /// It is rolling up to go away: it keeps its place under the bar till
+    /// it is gone.
+    closing: bool,
+}
+
+/// How tall the card from the bar is at most, and the air under the bar.
+const BANNER_H: f32 = 640.0;
+const BANNER_GAP: f32 = 6.0;
+
 /// What a second of a drag was like (see `draw_card`).
 #[derive(Debug, Default, Clone, Copy)]
 struct DragPace {
@@ -654,6 +669,14 @@ pub(crate) struct Card {
     playing: Option<voice::Playing>,
     /// The voice note that is paused, and how many seconds in it stopped.
     paused: Option<(u64, f32)>,
+    /// THE CARD FROM THE BAR (Max, 2026-10-12: *"one circle that i can
+    /// hover and scroll down to open the card from the banner, as the card
+    /// we have now. same"*): while this is set the card does not stand on
+    /// its window but hangs under the bar's card pill — the same card, its
+    /// window's session and pages. `Some`: where its top left corner is,
+    /// and whether it was showing on its window before (it goes back there
+    /// when this is over; else it goes away).
+    banner: Option<Banner>,
     /// The watch on a pointer that leaves without a word is running
     /// (`card_keys_watch`).
     keys_watch: bool,
@@ -788,6 +811,10 @@ impl Card {
     /// The card's left edge from its window's, where it rests on a window
     /// `window_w` wide.
     fn left(&self, window_w: f32) -> f32 {
+        // (Under the bar it hangs from its corner: no place of its own.)
+        if self.banner.is_some() {
+            return 0.0;
+        }
         self.win()
             .place
             .unwrap_or(Place::REST)
@@ -797,6 +824,10 @@ impl Card {
     /// Put the card with its left edge `left` from its window's (kept by
     /// the side it is nearer to).
     fn put(&mut self, left: f32, window_w: f32) {
+        // (Slid under the bar, nothing is kept: that is not its window.)
+        if self.banner.is_some() {
+            return;
+        }
         let width = self.width();
         if let Some(host) = self.host.clone() {
             self.wins.entry(host).or_default().place = Some(Place::of(left, window_w, width));
@@ -4037,6 +4068,144 @@ impl App {
         }
     }
 
+    /// Whether the card hangs under the bar right now.
+    pub(crate) fn card_banner_open(&self) -> bool {
+        self.card.banner.is_some_and(|b| !b.closing)
+    }
+
+    /// Where the card hangs under the bar, as the window it would stand on.
+    fn card_banner_spot(&self) -> Option<crate::hypr::WindowSpot> {
+        let b = self.card.banner?;
+        let room = (self.card_size.1 as f32 - b.y - 48.0).max(MIN_HEIGHT);
+        Some(crate::hypr::WindowSpot {
+            x: b.x,
+            y: b.y,
+            w: self.card.width(),
+            // (`card_rect` leaves a title bar's height under it.)
+            h: room.min(BANNER_H) + 25.0,
+            visible: true,
+        })
+    }
+
+    /// THE BAR'S CARD PILL, scrolled down on: the card of the focused window
+    /// comes out under the pill (`open`), or goes back where it was — onto
+    /// its window if it was showing there, away if it was not. Nothing is
+    /// turned on or off by this: that is the pill's click.
+    pub(crate) fn card_banner(&mut self, open: bool) {
+        if open == self.card_banner_open() {
+            return;
+        }
+        if !open {
+            let Some(b) = self.card.banner else {
+                return;
+            };
+            if b.was_on {
+                self.card.banner = None;
+                self.sync_card();
+            } else {
+                self.card.banner = Some(Banner { closing: true, ..b });
+                self.card_dismiss();
+            }
+            return;
+        }
+        let Some(addr) = self.card_focused().filter(|a| valid_addr(a)) else {
+            return;
+        };
+        let pill = self.clip_rect();
+        let was_on = self.card.host.as_deref() == Some(addr.as_str()) && self.card_present();
+        self.card.banner = Some(Banner {
+            x: pill.x,
+            y: 2.0 * pill.y + self.options_pill_h() + BANNER_GAP,
+            was_on,
+            closing: false,
+        });
+        self.card.at = None;
+        self.card.press = None;
+        if was_on {
+            self.sync_card();
+        } else {
+            self.card.leaving = false;
+            self.card_summon(&addr);
+        }
+        info!("card: out under the bar for {addr}");
+    }
+
+    /// The pointer left the pill, or the card: the card from the bar folds
+    /// a moment later unless the pointer is on one of them again, or
+    /// something is being written or carried there.
+    pub(crate) fn card_banner_check(&mut self) {
+        if !self.card_banner_open() {
+            return;
+        }
+        self.after_ms(380, |app| {
+            let on_pill = matches!(
+                app.options_hover,
+                Some(crate::options::PillId::Clipboard | crate::options::PillId::ClipboardBox)
+            );
+            let busy = app.card.ptr.is_some()
+                || app.card.dnd_over
+                || app.card.menu.is_some()
+                || app.card.plus
+                || app.card.field.is_some_and(|f| f != Field::Card);
+            if app.card_banner_open() && !on_pill && !busy {
+                app.card_banner(false);
+            }
+        });
+    }
+
+    /// THE BAR'S CARD PILL, clicked: the card on or off for the focused
+    /// window (Max: *"super useful for windows with no titlebar"*). With the
+    /// card out under the bar, a click puts it ON its window and there.
+    pub(crate) fn card_pill_click(&mut self) {
+        if let Some(b) = self.card.banner.filter(|b| !b.closing) {
+            if let Some(addr) = self.card.host.clone() {
+                if !self.card.armed(&addr) {
+                    let on = self.card.toggle(&addr);
+                    self.card_tell_bar(&addr, on);
+                    self.card_save_session();
+                }
+            }
+            let _ = b;
+            self.card.banner = None;
+            self.sync_card();
+            return;
+        }
+        let said = self.card_toggle(None);
+        info!("card: the bar's pill — {said}");
+    }
+
+    /// What the bar's long card pill says: the last thing kept in the
+    /// focused window's session, or what the pill is for.
+    pub(crate) fn card_pill_words(&self) -> String {
+        let addr = self.card.active.as_deref().or(self.card.host.as_deref());
+        let session = addr
+            .and_then(|a| self.card.wins.get(a))
+            .and_then(|w| w.session);
+        let showing = self.card.page == Page::Session && self.card.open == session;
+        let last = if showing && session.is_some() {
+            self.card.items.last()
+        } else {
+            self.card
+                .memory
+                .iter()
+                .find(|p| Some(p.id) == session)
+                .and_then(|p| p.items.last())
+        };
+        match last {
+            Some(it) if it.kind == Kind::Voice => "Voice note".to_owned(),
+            Some(it) => it
+                .body
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(90)
+                .collect(),
+            None => "Nothing kept yet · scroll down for the card".to_owned(),
+        }
+    }
+
     /// The master switch: the card on for every window, or off for all.
     pub(crate) fn card_toggle_all(&mut self) -> String {
         let on = self.card.toggle_all();
@@ -4059,6 +4228,10 @@ impl App {
         let Some(addr) = addr else {
             return;
         };
+        // (The card from the bar was another window's: it is over.)
+        if self.card.banner.is_some() && self.card.host.as_deref() != Some(addr) {
+            self.card.banner = None;
+        }
         self.card.active = Some(addr.to_owned());
         if self.card.follows(addr) {
             // (A window opened since the master switch has not heard yet.)
@@ -4119,6 +4292,7 @@ impl App {
     /// The card has no window any more: nothing is drawn, nothing takes the
     /// pointer, and the renderer is shrunk until it is wanted again.
     fn card_let_go(&mut self) {
+        self.card.banner = None;
         self.card_keys(false);
         self.card_drop_keys();
         self.card_voice_quiet();
@@ -4162,6 +4336,8 @@ impl App {
                 self.card_let_go();
             }
             Some(spot) => {
+                // (Hung under the bar, "its window" is the place there.)
+                let spot = self.card_banner_spot().unwrap_or(spot);
                 self.card.spot = Some(spot);
                 // A card in the hand keeps to the pointer, not to memory.
                 if !matches!(
@@ -5043,6 +5219,7 @@ impl App {
                 // ours starts: the pointer is its from then on.)
                 self.pointer_surface = crate::options::PointerSurface::Dock;
                 self.card.ptr = None;
+                self.card_banner_check();
                 self.card_keys(false);
                 // The keys go with the pointer — unless something is being
                 // written: that keeps them until it is done.
@@ -6031,6 +6208,23 @@ impl App {
                 String::new()
             }
             "carry" => self.card_carry(rest),
+            // `banner open|close|click|words`: the bar's card pill, without
+            // a pointer.
+            "banner" => match rest {
+                "open" => {
+                    self.card_banner(true);
+                    format!("{:?}", self.card.banner)
+                }
+                "close" => {
+                    self.card_banner(false);
+                    format!("{:?}", self.card.banner)
+                }
+                "click" => {
+                    self.card_pill_click();
+                    String::new()
+                }
+                _ => self.card_pill_words(),
+            },
             // `icons <factor> <dx> <dy>` · `icons` (as they are): see
             // `view::ICON_TRY`.
             "icons" => {

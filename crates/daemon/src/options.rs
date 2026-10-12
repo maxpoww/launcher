@@ -295,7 +295,9 @@ const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
 pub(crate) const GLYPH_BELL: &str = "\u{f0f3}"; // fa-bell (notification OPTION)
 pub(crate) const GLYPH_BELL_SLASH: &str = "\u{f1f6}"; // fa-bell-slash (mute pill)
-pub(crate) const GLYPH_CLIPBOARD: &str = "\u{f0ea}"; // fa-clipboard (clipboard OPTION)
+/// The card's pill (it took the clipboard pill's place, 2026-10-12): a
+/// window with its side panel — the symbol of the title bar's card button.
+pub(crate) const GLYPH_CARD: &str = "\u{ebf4}"; // cod-layout-sidebar-right
 pub(crate) const GLYPH_COPY: &str = "\u{f0c5}"; // fa-copy (detail-view copy)
 pub(crate) const GLYPH_COPY_LINK: &str = "\u{f0c1}"; // fa-link (copy the page URL)
 
@@ -1820,7 +1822,7 @@ impl App {
             pills.push(Pill {
                 id: PillId::Clipboard,
                 rect: Rect::new(left_start, y, ph, ph),
-                text: GLYPH_CLIPBOARD.to_owned(),
+                text: GLYPH_CARD.to_owned(),
                 family: Some(NERD),
                 glyph_color: None,
             });
@@ -5183,6 +5185,7 @@ impl App {
                     self.update_clock_meta(); // start the date's hold-then-collapse
                     self.update_notif_reveal(); // collapse the bell's peek/history
                     self.update_clip_reveal(); // collapse the clipboard's peek
+                    self.card_banner_check(); // and the card hung under its pill
                     self.update_stats_reveal(); // and the gear's stats child
                                                // The playing box ends with the visit, like every other box
                                                // on this bar — it stays for as long as the hand is on the
@@ -6498,7 +6501,9 @@ impl App {
             // focused window. Both ids resolve here because the box overlaps the
             // small pill at rest (a scrollable history box will split these in a
             // later stage).
-            Some(PillId::Clipboard | PillId::ClipboardBox) => self.clip_paste(),
+            // (THE CARD'S PILL since 2026-10-12: a click turns the card on or
+            // off for the focused window. It pasted the newest clip.)
+            Some(PillId::Clipboard | PillId::ClipboardBox) => self.card_pill_click(),
             // Copy the focused browser's current page URL to the clipboard.
             Some(PillId::ClipCopyLink) => self.copy_active_link(),
             // A dynamic OPTION control from the Mind — run its action.

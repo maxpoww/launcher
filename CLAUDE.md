@@ -638,7 +638,15 @@ The big daemon files are cohesive but long — go straight to the function:
   (`Card::draft_off`, `BarView.first_off`). A VOICE NOTE (2026-10-11): its title is written IN the note (dimmed "Type a title",
   no box); its button is play/PAUSE (`Card::paused`), a click on its line plays from there when playing
   and pauses there when not; "x1" at its foot goes round `voice::SPEEDS` (x1, x1.5, x0.75 — for every
-  note; `voice::stretch` = WSOLA, the pitch kept; `Playing::at()` is the place in the note). The whole mockup is in; what it
+  note; `voice::stretch` = WSOLA, the pitch kept; `Playing::at()` is the place in the note). THE CARD'S PILL ON THE BAR (2026-10-12, a first cut "to see
+  how it feels"): the clipboard pill's place and machinery (`PillId::Clipboard`/`ClipboardBox`, `clip.peek_t`)
+  with the card's symbol (`GLYPH_CARD`); a CLICK turns the card on/off for the focused window
+  (`card_pill_click`), HOVER shows the long pill with the session's last thing (`card_pill_words`), a SCROLL
+  DOWN hangs the card itself under the bar (`Card::banner`, `card_banner`, a fake window spot in `sync_card`)
+  and a scroll up or leaving both folds it (`card_banner_check`). The old clipboard box is still in the
+  code (its shortcut opens it); `clip_paste` is unused. Test verbs: `card banner open|close|click|words`.
+  Icons of the head: each at its own measured size and nudge (`Icon`, `card icons <f> <dx> <dy>`,
+  tools/card-icons/measure.py). The whole mockup is in; what it
   has that this has not: Portuguese and Italian (no packaged model), a download on a click.
   LAST (2026-10-11): a drag held over a button of the head turns the card to that page
   (`Card::dnd_foot`), and a drop does what its page does (`card_push`: translated, looked up, kept in

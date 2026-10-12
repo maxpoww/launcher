@@ -41,7 +41,7 @@ use crate::animation::{
 };
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene};
 use crate::options::{
-    hover_grow, push_neumorph, PillId, BOND_GAP, EMOJI_FONT, FONT_PX, GLYPH_CLIPBOARD, GLYPH_COPY,
+    hover_grow, push_neumorph, PillId, BOND_GAP, EMOJI_FONT, FONT_PX, GLYPH_COPY,
     LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
@@ -1520,6 +1520,9 @@ impl App {
     /// Click on the small pill: paste the current clip where the user is
     /// working. The newest history entry is always exactly the live clipboard
     /// (we capture every change), so this just injects the paste — no re-copy.
+    // (Not called since the pill became the card's — 2026-10-12: kept till
+    // Max has settled what the pill does.)
+    #[allow(dead_code)]
     pub(crate) fn clip_paste(&mut self) {
         if self.clip.history.is_empty() {
             return;
@@ -1964,7 +1967,10 @@ impl App {
         // (complementary to the list fading in, so they cross-fade cleanly).
         let pa = ((peek - 0.35) / 0.5).clamp(0.0, 1.0) * (1.0 - solid);
         if pa > 0.01 {
-            if let Some(latest) = self.clip.history.first() {
+            // (The card's last thing — the pill is the card's: Max,
+            // 2026-10-12. With the old box open it was the newest clip.)
+            let words = self.card_pill_words();
+            if !words.is_empty() {
                 // The preview line nests in the pill band, so it takes the
                 // pills' bar-scaled text size.
                 let s = self.options_scale();
@@ -1972,7 +1978,7 @@ impl App {
                 let gty = rect.y + (ph - LINE_PX * s) / 2.0;
                 let max_w = (rect.x + rect.w - PILL_PAD_X - tx).max(0.0);
                 scene.labels.push(Label {
-                    text: latest.preview.clone(),
+                    text: words,
                     pos: (tx, gty),
                     max_w,
                     font_px: FONT_PX * s,
@@ -2718,6 +2724,17 @@ impl App {
     /// A wheel event over the clipboard OPTION (raw axis value): opens the box
     /// from the collapsed preview, then scrolls the list. Mirrors `notif_axis`.
     pub(crate) fn clip_axis(&mut self, value: f32) {
+        // THE PILL IS THE CARD'S NOW (Max, 2026-10-12): a scroll down on it
+        // brings the card out under the bar, a scroll up folds it — the
+        // gesture the task and the phone pills have. (The old box, opened
+        // some other way, still scrolls as it did.)
+        if !self.clip.expanded {
+            if value.abs() < crate::options::SCROLL_DEADZONE {
+                return;
+            }
+            self.card_banner(value < 0.0);
+            return;
+        }
         let delta = if self.config.input.natural_scroll {
             value
         } else {
@@ -4379,7 +4396,7 @@ impl App {
         let cx = rect.x + rect.w / 2.0;
         let ty = rect.y + (rect.h - LINE_PX * s) / 2.0;
         scene.labels.push(Label {
-            text: GLYPH_CLIPBOARD.to_owned(),
+            text: crate::options::GLYPH_CARD.to_owned(),
             pos: (cx, ty),
             max_w: rect.w + 4.0,
             font_px: FONT_PX * s,
@@ -4425,7 +4442,9 @@ impl App {
         );
         if on {
             self.clip.hold_deadline = None;
-            if !self.clip.peek_reveal && !self.clip.history.is_empty() {
+            // (The long pill says the card's last thing, or what the pill
+            // is for: it comes out with nothing copied too.)
+            if !self.clip.peek_reveal {
                 self.clip.peek_reveal = true;
                 self.clip.last = None;
                 self.schedule_clip_frame();
