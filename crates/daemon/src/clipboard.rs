@@ -4481,6 +4481,14 @@ impl App {
             None => Some(crate::options::GLYPH_CARD),
         };
         if let Some(glyph) = glyph {
+            // (The microphone is amber, the bar's colour for what is live:
+            // Max, 2026-10-12, "make the mic amber".)
+            let color = if glyph == GLYPH_MIC {
+                let amber = crate::notif::AMBER;
+                Some([amber[0], amber[1], amber[2], ink[3]])
+            } else {
+                color
+            };
             scene.labels.push(Label {
                 text: glyph.to_owned(),
                 pos: (cx, ty),
