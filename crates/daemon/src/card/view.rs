@@ -171,9 +171,11 @@ impl Foot {
         match self {
             Foot::Memory => "Memory",
             Foot::Pinned => GLYPH_PIN,
-            Foot::Clipboard => "\u{f0ea}",  // fa-clipboard
+            // (Max, 2026-10-12: the two sheets of fa-clipboard and the
+            // boxed "A" of fa-language were not liked.)
+            Foot::Clipboard => "\u{f014d}", // md-clipboard-text: a clipboard with its lines
             Foot::Dictionary => "\u{f02d}", // fa-book
-            Foot::Translate => "\u{f1ab}",  // fa-language
+            Foot::Translate => "\u{f05ca}", // md-translate: 文 and A
             Foot::Emoji => "\u{f118}",      // fa-smile-o
             Foot::Talk => GLYPH_MIC,
         }
