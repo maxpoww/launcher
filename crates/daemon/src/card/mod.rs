@@ -4331,7 +4331,9 @@ impl App {
     /// The card has no window any more: nothing is drawn, nothing takes the
     /// pointer, and the renderer is shrunk until it is wanted again.
     fn card_let_go(&mut self) {
-        self.card.banner = None;
+        // (The long pill it hung from has its own ground again: the bar is
+        // drawn afresh once the card is gone.)
+        let hung = self.card.banner.take().is_some();
         self.card_keys(false);
         self.card_drop_keys();
         self.card_voice_quiet();
@@ -4349,6 +4351,10 @@ impl App {
         self.card.swipe = None;
         self.card.tiles.clear();
         self.sync_card_input();
+        if hung {
+            self.update_clip_reveal();
+            self.draw_options();
+        }
     }
 
     /// A window closed: everything the card kept for it goes — whether it
