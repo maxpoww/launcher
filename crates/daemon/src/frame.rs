@@ -1628,15 +1628,29 @@ impl App {
         // surface arrives and leaves on the same tempo its pills move at,
         // instead of being the one thing up here that snaps.
         color[3] *= self.options_show.t;
+        let strip = |x: f32, y: f32, w: f32, h: f32| content::RectInst {
+            rect: content::Rect::new(x, y, w, h),
+            radius: 0.0,
+            color,
+            glass: if matched { -1.0 } else { 0.0 },
+            border: 0.0,
+        };
+        // THE CARD hung from its pill stands IN this row, on a surface under
+        // this one: the strip is not drawn where the card is, or the card
+        // was seen through it (Max, 2026-10-12: "todavía veo la capa del
+        // banner, que es casi transparente… atrás de la tarjeta"). Left of
+        // the card, right of it, and the sliver over its top edge.
+        let rects = match self.card_banner_in_bar_at() {
+            Some((from, to, top)) => vec![
+                strip(-2.0, -2.0, from + 2.0, bottom + 2.0),
+                strip(to, -2.0, (w + 2.0 - to).max(0.0), bottom + 2.0),
+                strip(from, -2.0, to - from, top + 2.0),
+            ],
+            None => vec![strip(-2.0, -2.0, w + 4.0, bottom + 2.0)],
+        };
         let mut scene = content::Scene {
             alpha: 1.0,
-            rects: vec![content::RectInst {
-                rect: content::Rect::new(-2.0, -2.0, w + 4.0, bottom + 2.0),
-                radius: 0.0,
-                color,
-                glass: if matched { -1.0 } else { 0.0 },
-                border: 0.0,
-            }],
+            rects,
             ..Default::default()
         };
         // The context-aware pill modules ride on top of the base fill.

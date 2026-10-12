@@ -4128,6 +4128,12 @@ impl App {
         Some((b.x, b.x + self.card.width()))
     }
 
+    /// …the same stretch, and how far down the row the card's top is.
+    pub(crate) fn card_banner_in_bar_at(&self) -> Option<(f32, f32, f32)> {
+        let b = self.card.banner.filter(|b| b.in_bar)?;
+        Some((b.x, b.x + self.card.width(), b.y))
+    }
+
     /// Whether the card hangs under the bar right now.
     pub(crate) fn card_banner_open(&self) -> bool {
         self.card.banner.is_some_and(|b| !b.closing)
