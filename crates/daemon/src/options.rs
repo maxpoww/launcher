@@ -6066,6 +6066,26 @@ impl App {
                 self.options_hover == Some(PillId::Close)
             };
         if want_min != self.options_ctrl.min_reveal {
+            // THE CLOSE HOLDS STILL while its minimize comes out. If a click
+            // on another pill of the group still holds the Leader — pin a
+            // window, then go across to the close — the group would go on
+            // laying itself out from THAT pill, and with the row making room
+            // for the minimize the close itself slid away, everything turning
+            // about the pin (Max, 2026-10-12: *"all the buttons got pulled
+            // from the pin button… if I go to the X the X should stay what it
+            // is and all the other buttons should move to the X"*). So the
+            // leadership is handed to the close, where it stands right now —
+            // a place on the bar, not the pointer, so §1's own lesson holds:
+            // nothing is chased. With no leader held there is nothing to
+            // hand over: the resting layout already keeps the close still.
+            if want_min
+                && self
+                    .options_leader
+                    .as_ref()
+                    .is_some_and(|l| !matches!(l.id, PillId::Close | PillId::Minimize))
+            {
+                self.capture_leader();
+            }
             self.options_ctrl.min_reveal = want_min;
             self.options_ctrl.last = None;
             self.schedule_options_ctrl_frame();
