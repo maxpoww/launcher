@@ -215,15 +215,19 @@ struct Wheel {
 struct Banner {
     x: f32,
     y: f32,
+    /// As wide as the long pill it comes out of.
+    w: f32,
+    /// How far its ground rises behind that pill (0: the bar is painted
+    /// there — a maximized window's — and the pill stays a pill).
+    rise: f32,
     was_on: bool,
     /// It is rolling up to go away: it keeps its place under the bar till
     /// it is gone.
     closing: bool,
 }
 
-/// How tall the card from the bar is at most, and the air under the bar.
+/// How tall the card from the bar is at most.
 const BANNER_H: f32 = 640.0;
-const BANNER_GAP: f32 = 6.0;
 
 /// What a second of a drag was like (see `draw_card`).
 #[derive(Debug, Default, Clone, Copy)]
@@ -803,6 +807,10 @@ impl Card {
 
     /// How wide the card is on the window it is on.
     fn width(&self) -> f32 {
+        // (Under the bar: the long pill's.)
+        if let Some(b) = self.banner {
+            return b.w;
+        }
         self.win()
             .width
             .map_or(WIDTH, |w| w.clamp(WIDTH_MIN, WIDTH_MAX))
@@ -4068,6 +4076,18 @@ impl App {
         }
     }
 
+    /// Whether the bar's long pill has no ground of its own right now: the
+    /// card's, risen behind it, is its ground (`Banner::rise`).
+    pub(crate) fn card_banner_carries_pill(&self) -> bool {
+        self.card.banner.is_some_and(|b| b.rise > 0.0) && self.card.shown > 0.0
+    }
+
+    /// The card's ink (what the long pill writes in while it rides the
+    /// card's ground).
+    pub(crate) fn card_paint_ink(&self) -> [f32; 4] {
+        self.card_paint().ink
+    }
+
     /// Whether the card hangs under the bar right now.
     pub(crate) fn card_banner_open(&self) -> bool {
         self.card.banner.is_some_and(|b| !b.closing)
@@ -4101,26 +4121,42 @@ impl App {
             };
             if b.was_on {
                 self.card.banner = None;
+                self.card.lines.clear();
                 self.sync_card();
             } else {
                 self.card.banner = Some(Banner { closing: true, ..b });
                 self.card_dismiss();
             }
+            // (The long pill is a pill again, and folds when it is left.)
+            self.update_clip_reveal();
+            self.draw_options();
             return;
         }
         let Some(addr) = self.card_focused().filter(|a| valid_addr(a)) else {
             return;
         };
-        let pill = self.clip_rect();
+        // THE LONG PILL BECOMES THE CARD: the card hangs from the bar's foot
+        // exactly under the long pill, as wide, and its ground rises behind
+        // the pill — one shape, unrolling down out of it.
+        let pill = self.clip_long_rect();
+        let foot = self.options_bar_h();
         let was_on = self.card.host.as_deref() == Some(addr.as_str()) && self.card_present();
         self.card.banner = Some(Banner {
             x: pill.x,
-            y: 2.0 * pill.y + self.options_pill_h() + BANNER_GAP,
+            y: foot,
+            w: pill.w,
+            rise: if self.options_bar_matched.is_some() {
+                0.0
+            } else {
+                (foot - pill.y).max(0.0)
+            },
             was_on,
             closing: false,
         });
         self.card.at = None;
         self.card.press = None;
+        self.card.lines.clear();
+        self.draw_options();
         if was_on {
             self.sync_card();
         } else {
@@ -4167,7 +4203,10 @@ impl App {
             }
             let _ = b;
             self.card.banner = None;
+            self.card.lines.clear();
             self.sync_card();
+            self.update_clip_reveal();
+            self.draw_options();
             return;
         }
         let said = self.card_toggle(None);
@@ -5082,6 +5121,7 @@ impl App {
             dnd_over: self.card.dnd_over,
             hidden,
             opening: opening.map_or(0.0, |o| o.1),
+            rise: self.card.banner.map_or(0.0, |b| b.rise),
             shifts: &self.card.shifts,
             slots: &self.card.slots,
             paint,

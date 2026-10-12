@@ -1239,6 +1239,12 @@ pub(crate) struct View<'a> {
     /// — also when that place is AFTER THE LAST ITEM, where no item moves
     /// aside to show it.
     pub opening: f32,
+    /// How far the card's GROUND (its panel, its shadow) rises above the
+    /// card itself: hung under the bar, it goes up behind the long pill it
+    /// came out of, so the pill and the card are one shape (Max,
+    /// 2026-10-12: *"i want the long pill to become the card, as
+    /// notification and clipboard do"*). 0 on a window.
+    pub rise: f32,
     /// How far each item is moved down right now, by id, to open a place
     /// for what is being dragged in (eased by the caller).
     pub shifts: &'a HashMap<u64, f32>,
@@ -1326,8 +1332,12 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
 
     let window = Rect::new(rect.x, rect.y, rect.w, (rect.h * shown).round());
 
+    // (Its ground: the card and what rises above it — see `View::rise`.)
+    let rise = view.rise.max(0.0);
+    let ground = Rect::new(rect.x, rect.y - rise, rect.w, window.h + rise);
+    let whole = Rect::new(rect.x, rect.y - rise, rect.w, rect.h + rise);
     scene.shadows.push(ShadowInst {
-        rect: window,
+        rect: ground,
         radius: RADIUS,
         blur: 26.0,
         color: [0.0, 0.0, 0.0, shown],
@@ -1335,11 +1345,11 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     });
 
     let mut panel = GridContent {
-        clip: window,
+        clip: ground,
         ..Default::default()
     };
     panel.rects.push(RectInst {
-        rect,
+        rect: whole,
         radius: RADIUS,
         // The card's own ground lets what is behind it through (Max,
         // 2026-10-09: *"make the 'air' of the card more transparent"*);
@@ -1362,7 +1372,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         [1.0, 1.0, 1.0, 0.09]
     };
     panel.rects.push(RectInst {
-        rect,
+        rect: whole,
         radius: RADIUS,
         color: rim,
         glass: 0.0,
@@ -2917,6 +2927,7 @@ mod tests {
             dnd_over: false,
             hidden: None,
             opening: 0.0,
+            rise: 0.0,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -2963,6 +2974,7 @@ mod tests {
             dnd_over: true,
             hidden: None,
             opening: 0.0,
+            rise: 0.0,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -2995,6 +3007,7 @@ mod tests {
                 dnd_over: true,
                 hidden,
                 opening: 0.0,
+                rise: 0.0,
                 shifts,
                 slots: &slots,
                 paint: PAINT,
@@ -3128,6 +3141,7 @@ mod tests {
             dnd_over: false,
             hidden: None,
             opening: 0.0,
+            rise: 0.0,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -3209,6 +3223,7 @@ mod tests {
                 dnd_over: false,
                 hidden: None,
                 opening: 0.0,
+                rise: 0.0,
                 shifts: &shifts,
                 slots: &slots,
                 paint: PAINT,

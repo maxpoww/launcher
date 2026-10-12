@@ -1638,6 +1638,18 @@ impl App {
     /// it sits exactly under the small pill; as `peek_t` rises its left edge
     /// slides *right* (clearing the small pill plus a bond gap) and it grows to
     /// the preview width — the left-side mirror of the bell, opening rightward.
+    /// The long pill at its full length, whatever it is doing now: where
+    /// the card hangs from (`card_banner`).
+    pub(crate) fn clip_long_rect(&self) -> Rect {
+        let ph = self.options_pill_h();
+        Rect::new(
+            self.options_left_start() + ph + BOND_GAP,
+            self.clip_rect().y,
+            PEEK_W * self.options_scale(),
+            ph,
+        )
+    }
+
     pub(crate) fn clip_geom(&self, left0: f32, y: f32, ph: f32) -> Rect {
         let left = left0 + (ph + BOND_GAP) * self.clip.peek_t;
         let w = lerp(ph, PEEK_W * self.options_scale(), self.clip.peek_t).max(ph);
@@ -1930,7 +1942,13 @@ impl App {
             return;
         }
         let radius = lerp(ph / 2.0, BOX_RADIUS, e);
-        push_neumorph(scene, rect, radius, bright, 1.0);
+        // (THE CARD IS OUT UNDER IT: the card's own ground has risen behind
+        // the pill — pill and card are one shape — so the pill draws none
+        // of its own, only its words, in the card's ink.)
+        let carried = self.card_banner_carries_pill() && e < 0.001;
+        if !carried {
+            push_neumorph(scene, rect, radius, bright, 1.0);
+        }
 
         // Box fill: the pill's apparent colour (its backdrop with the wash
         // composited on) so the opaque open box reads as the pill grown. Same
@@ -1940,8 +1958,17 @@ impl App {
         // The box is the pill grown: fill + ink both follow the bar's regime
         // (see `options_box_surface`), so the two never disagree.
         let (fill, box_ink) = self.clip_box_surface();
+        let text_color = if carried {
+            self.card_paint_ink()
+        } else {
+            text_color
+        };
         scene.rects.push(RectInst {
-            rect,
+            rect: if carried {
+                Rect::new(rect.x, rect.y, 0.0, 0.0)
+            } else {
+                rect
+            },
             radius,
             // Ramped by the EXPAND only, never the peek: a peeking pill keeps
             // the plain resting wash so it looks like every other pill on the
@@ -4451,6 +4478,8 @@ impl App {
             }
         } else if self.clip.peek_reveal
             && self.clip.hold_deadline.is_none()
+            // (The card hangs from the long pill: it stays out with it.)
+            && !self.card_banner_open()
             && !self.clip.dict_open
             && !self.clip.search_open
         {
@@ -4572,6 +4601,7 @@ impl App {
                     // the pointer that was keeping it alive.
                     if !app.clip.dict_open
                         && !app.clip.search_open
+                        && !app.card_banner_open()
                         && !matches!(
                             app.options_hover,
                             Some(PillId::Clipboard | PillId::ClipboardBox)
