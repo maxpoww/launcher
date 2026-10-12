@@ -77,8 +77,12 @@ const TEXT_GAP: f32 = 8.0;
 /// actual time string and of hover — so the measured row height and the drawn text
 /// can't disagree on where lines break.
 const TIME_COL_W: f32 = 52.0;
-/// The box's corner radius once fully open (the collapsed pill is a stadium).
-pub(crate) const BOX_RADIUS: f32 = 10.0;
+/// The box's corner radius once fully open: the PILL's own corner (half of a
+/// pill's 23), so the pill grows into its box without its corner changing —
+/// and the one curve of the bar, its boxes, the card and the windows (Max,
+/// 2026-10-12: "unificar todo… respetar las curvas que tienen las píldoras").
+/// It was 10.
+pub(crate) const BOX_RADIUS: f32 = 11.5;
 // Zebra striping and resting list-ink dim are shared with the notification
 // box — see `options::App::zebra_stripe`/`dim_ink`.
 const DELETE_SZ: f32 = 18.0;

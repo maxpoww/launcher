@@ -8,6 +8,13 @@ use super::model::{Item, Kind, MAX_LINES};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst, NO_PLATE};
 
 pub(super) const RADIUS: f32 = 10.0;
+/// THE CARD'S OWN FRAME has the corner every pill on the bar has — a
+/// quarter circle of half a pill's height (the bar is 28 high, its pills 23:
+/// 11.5) — as the bar's boxes and the windows do (`clipboard::BOX_RADIUS`;
+/// hyprland.lua, rounding 12 at rounding_power 2). Max, 2026-10-12: *"the
+/// same curve: if I lay a window over a pill the curve has to be exactly the
+/// same, and the same with the card"*. What is INSIDE the card keeps `RADIUS`.
+pub(super) const FRAME_RADIUS: f32 = crate::clipboard::BOX_RADIUS;
 /// How solid the card's ground is (1 = opaque).
 pub(super) const AIR: f32 = 0.72;
 
@@ -1345,11 +1352,11 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     let ground = Rect::new(rect.x, rect.y - rise, rect.w, window.h + rise);
     let whole = Rect::new(rect.x, rect.y - rise, rect.w, rect.h + rise);
     if let Some((_, bar_bright)) = view.boxed {
-        crate::options::push_neumorph(&mut scene, ground, RADIUS, bar_bright, shown);
+        crate::options::push_neumorph(&mut scene, ground, FRAME_RADIUS, bar_bright, shown);
     } else {
         scene.shadows.push(ShadowInst {
             rect: ground,
-            radius: RADIUS,
+            radius: FRAME_RADIUS,
             blur: 26.0,
             color: [0.0, 0.0, 0.0, shown],
             edges: [0.18, 0.42, 0.34, 0.34],
@@ -1362,7 +1369,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     };
     panel.rects.push(RectInst {
         rect: whole,
-        radius: RADIUS,
+        radius: FRAME_RADIUS,
         // The card's own ground lets what is behind it through (Max,
         // 2026-10-09: *"make the 'air' of the card more transparent"*);
         // the compositor frosts it (`declare_layer_rule`). The items on it
@@ -1387,7 +1394,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     };
     panel.rects.push(RectInst {
         rect: whole,
-        radius: RADIUS,
+        radius: FRAME_RADIUS,
         color: rim,
         glass: 0.0,
         border: if view.dnd_over { 1.5 } else { 1.0 },
@@ -3255,7 +3262,7 @@ mod tests {
         zoom_scene(&mut big, (rect.x, rect.y), 2.0);
         // Its frame is the same box, the same corners.
         assert_eq!(big.grids[0].rects[0].rect, plain.grids[0].rects[0].rect);
-        assert_eq!(big.grids[0].rects[0].radius, RADIUS);
+        assert_eq!(big.grids[0].rects[0].radius, FRAME_RADIUS);
         // Its first item starts twice as far from the corner, twice as tall,
         // its words twice as big.
         let (a, b) = (plain.grids[1].rects[0].rect, big.grids[1].rects[0].rect);
