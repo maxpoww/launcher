@@ -50,6 +50,7 @@ use crate::hypr::WindowSpot;
 use crate::App;
 
 mod bar;
+mod dictate;
 mod dnd;
 mod model;
 mod place;
@@ -644,6 +645,9 @@ pub(crate) struct Card {
     /// it is a voice note, recorded until it is let go (`held`).
     space: Option<Instant>,
     held: bool,
+    /// The dictation key is down (`dictate.rs`: talk written straight into
+    /// the window, no card).
+    dictation: Option<dictate::Dictation>,
     /// What is written in the input box, and that wrapped to the box.
     draft: String,
     draft_lines: Vec<String>,
@@ -5999,7 +6003,15 @@ impl App {
         let rest = rest.trim();
         match verb {
             "" | "toggle" => self.card_toggle((!rest.is_empty()).then_some(rest)),
-            // `at clipboard|emoji|memory`: the card on the focused window,
+            // `dictate down|up`: the key that is voice-to-text's — a tap
+            // brings the card up at that page, held it is dictation with no
+            // card at all (`dictate.rs`).
+            "dictate" => match rest {
+                "down" => self.dictate_down().to_owned(),
+                "up" => self.dictate_up(),
+                _ => "card dictate down|up".to_owned(),
+            },
+            // `at clipboard|emoji|memory|voice`: the card on the focused window,
             // open AT that page — what a key does (Max, 2026-10-12: Super+.
             // the clipboard, Super+, the emoji, Super+/ memory). The same
             // key again, on that page, puts the card away.
@@ -6008,7 +6020,8 @@ impl App {
                     "clipboard" => Page::Clipboard,
                     "emoji" | "emojis" => Page::Emoji,
                     "memory" => Page::Memory,
-                    _ => return "card at clipboard|emoji|memory".to_owned(),
+                    "voice" => Page::Talk,
+                    _ => return "card at clipboard|emoji|memory|voice".to_owned(),
                 };
                 let Some(addr) = self.card_focused() else {
                     return "no window is focused".to_owned();

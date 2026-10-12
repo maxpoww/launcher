@@ -279,6 +279,40 @@ pub(super) fn engine() -> Option<(PathBuf, PathBuf)> {
     Some((cli, model))
 }
 
+/// Start recording the microphone to a new file under the card's folder
+/// (`talk`: to be written out, which needs the speech engine) — or why not.
+pub(super) fn recorder(talk: bool) -> Result<(Child, PathBuf), &'static str> {
+    if talk && engine().is_none() {
+        return Err("Talk-to-text needs the speech engine (whisper), which is not installed");
+    }
+    if mic_muted() {
+        return Err("The microphone is muted. Unmute it and press again");
+    }
+    let recorder = tool("WAVERUNNER_PW_RECORD", "pw-record").ok_or("No recorder found (pw-record)")?;
+    let dir = crate::persist::data_path(PICTURES_DIR);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("card: no folder for a recording ({e})");
+        return Err("The recorder did not start");
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let path = dir.join(format!("voice-{stamp}.wav"));
+    // (16 kHz mono is what speech needs, and what the engine reads.)
+    Command::new(recorder)
+        .args(["--rate", "16000", "--channels", "1", "--format", "s16"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|child| (child, path))
+        .map_err(|e| {
+            warn!("card: the recorder did not start ({e})");
+            "The recorder did not start"
+        })
+}
+
 /// Whether the microphone the system records from is muted (`wpctl`; not
 /// known = not muted: the recording itself is checked afterwards).
 fn mic_muted() -> bool {
@@ -294,7 +328,7 @@ fn mic_muted() -> bool {
 }
 
 /// A recording whose loudest sample is under this is silence.
-const QUIET: i32 = 120;
+pub(super) const QUIET: i32 = 120;
 
 /// The loudest sample in the 16-bit recording at `wav` (0: none, or
 /// unreadable).
@@ -363,41 +397,8 @@ impl App {
     }
 
     pub(super) fn card_record_start(&mut self, talk: bool) {
-        if talk && engine().is_none() {
-            self.card.say =
-                Some("Talk-to-text needs the speech engine (whisper), which is not installed");
-            self.request_card_draw();
-            return;
-        }
-        if mic_muted() {
-            self.card.say = Some("The microphone is muted. Unmute it and press again");
-            self.request_card_draw();
-            return;
-        }
-        let Some(recorder) = tool("WAVERUNNER_PW_RECORD", "pw-record") else {
-            self.card.say = Some("No recorder found (pw-record)");
-            self.request_card_draw();
-            return;
-        };
-        let dir = crate::persist::data_path(PICTURES_DIR);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            warn!("card: no folder for a recording ({e})");
-            return;
-        }
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis());
-        let path = dir.join(format!("voice-{stamp}.wav"));
-        // (16 kHz mono is what speech needs, and what the engine reads.)
-        let child = Command::new(recorder)
-            .args(["--rate", "16000", "--channels", "1", "--format", "s16"])
-            .arg(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        match child {
-            Ok(child) => {
+        match recorder(talk) {
+            Ok((child, path)) => {
                 info!(
                     "card: recording {}",
                     if talk { "to write it" } else { "a voice note" }
@@ -411,10 +412,7 @@ impl App {
                 });
                 self.card_voice_tick();
             }
-            Err(e) => {
-                warn!("card: the recorder did not start ({e})");
-                self.card.say = Some("The recorder did not start");
-            }
+            Err(why) => self.card.say = Some(why),
         }
         self.request_card_draw();
     }

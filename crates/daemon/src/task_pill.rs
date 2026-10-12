@@ -39,7 +39,7 @@ use std::time::Instant;
 use crate::animation::{self, ease_toward, lerp, lerp4};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{push_neumorph, PillId, FONT_PX, LINE_PX, OPTION_GAP, PILL_PAD_X, TEXT_FONT};
-use crate::tasks::Task;
+use crate::tasks::{Counts, Task};
 use crate::App;
 
 /// The pill at its widest, in pill-heights. Wider than the player's pill is
@@ -65,6 +65,9 @@ const SMALL_PAD: f32 = 7.0;
 const SMALL_GAP: f32 = 5.0;
 /// What the number's slot is measured from.
 const WIDEST: &str = "100%";
+/// How fast a busy task's fill goes to and fro (radians a second: one way
+/// along the pill in a little over a second).
+const BUSY_RATE: f32 = 2.8;
 const CANCEL: &str = "Cancel";
 
 /// The pill's state.
@@ -78,6 +81,9 @@ pub(crate) struct TaskPill {
     t: f32,
     /// The fill, easing after the task's own fraction.
     fill: f32,
+    /// A task that cannot say how far it is (`Counts::Busy`): how long its
+    /// fill has gone to and fro, in seconds.
+    busy: f32,
     last: Option<Instant>,
     frame_pending: bool,
     /// Measured widths: the words, the number's slot, the word on the cancel
@@ -147,7 +153,7 @@ impl App {
     /// Measure what the pill writes, where it changed.
     fn task_pill_measure(&mut self) {
         let label = self.task_pill_label();
-        let number = self.task_pill.shown.as_ref().map(|t| format!("{}%", t.percent())).unwrap_or_default();
+        let number = self.task_pill.shown.as_ref().map(Task::number).unwrap_or_default();
         let font_px = FONT_PX * self.options_scale();
         let Some(r) = self.options_renderer.as_mut() else {
             return;
@@ -197,6 +203,8 @@ impl App {
         let want = self.task_pill.shown.as_ref().map_or(0.0, Task::fraction);
         let (fill, filling) = ease_toward(self.task_pill.fill, want, dt, animation::MORPH_RATE, settle);
         self.task_pill.fill = fill;
+        let busy = out > 0.0 && self.task_pill.shown.as_ref().is_some_and(|t| t.counts == Counts::Busy);
+        self.task_pill.busy = if busy { self.task_pill.busy + dt } else { 0.0 };
         let small = f32::from(u8::from(self.task_pill_small()));
         let (small, shrinking) = ease_toward(self.task_pill.small, small, dt, animation::MORPH_RATE, settle);
         self.task_pill.small = small;
@@ -212,7 +220,7 @@ impl App {
         }
         self.draw_options();
         // (While the box is open its rows fill as their tasks go.)
-        if coming || filling || boxing || shrinking || (self.task_pill.box_open && !self.tasks.is_empty()) {
+        if coming || filling || boxing || shrinking || busy || (self.task_pill.box_open && !self.tasks.is_empty()) {
             self.schedule_task_pill_frame();
         } else {
             self.task_pill.last = None;
@@ -410,7 +418,8 @@ impl App {
         let slot = self.task_pill.pct_w;
         let e = self.task_pill.box_e;
         let more = self.task_more().map(|(text, w)| (Rect::new(right - edge - w, chip_y, w, chip_h), text));
-        let over = self.task_pill.shown.as_ref().is_none_or(|t| t.ended.is_some());
+        // (Nothing to cancel either in words that are only said.)
+        let over = self.task_pill.shown.as_ref().is_none_or(|t| t.ended.is_some() || t.counts == Counts::Words);
         // As the box opens and `+N` goes, what stood left of it slides to the
         // edge, into line with the rows under it.
         let beside = |w: f32, at_edge: f32| match &more {
@@ -532,6 +541,20 @@ impl App {
                 border: 0.0,
             });
         }
+        // One that cannot say how far it is: a third of the pill, the same
+        // fill, going to and fro along it (slow at the ends, as a thing that
+        // turns round is).
+        if task.counts == Counts::Busy && whole > 0.01 {
+            let fw = (band.w / 3.0).max(band.h);
+            let along = 0.5 - 0.5 * (self.task_pill.busy * BUSY_RATE).cos();
+            scene.rects.push(RectInst {
+                rect: Rect::new(band.x + (band.w - fw) * along, band.y, fw, band.h),
+                radius: band.h / 2.0,
+                color: [ink[0], ink[1], ink[2], 0.14 * a * whole],
+                glass: 0.0,
+                border: 0.0,
+            });
+        }
         self.push_task_rows(scene, rect, solid, ink);
 
         let parts = self.task_band(band);
@@ -569,7 +592,7 @@ impl App {
         let num_w = self.task_pill.num_w.max(1.0);
         let x = lerp(band.x + SMALL_PAD, slot_x + (slot - num_w) / 2.0, whole);
         scene.labels.push(Label {
-            text: format!("{}%", task.percent()),
+            text: task.number(),
             pos: (x, ty),
             max_w: num_w + 4.0,
             font_px,
@@ -629,7 +652,7 @@ impl App {
                 color,
             });
             scene.labels.push(Label {
-                text: format!("{}%", task.percent()),
+                text: task.number(),
                 pos: (slot_x + slot / 2.0, ty),
                 max_w: slot.max(1.0),
                 font_px,
