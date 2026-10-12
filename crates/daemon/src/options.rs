@@ -840,8 +840,8 @@ fn ctrl_index(id: PillId) -> Option<usize> {
         PillId::Pseudo => Some(0),
         PillId::Float => Some(1),
         PillId::Fullscreen => Some(2),
-        // The minimize: tucked behind the window name's LEFT end, emerging
-        // leftward (see `CTRL_MINIMIZE`).
+        // The minimize: tucked behind the close on the OTHER side of the
+        // window name, emerging leftward (see `CTRL_MINIMIZE`).
         PillId::Minimize => Some(CTRL_MINIMIZE),
         _ => None,
     }
@@ -860,7 +860,7 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Pseudo => 3,
         // A resting pill like the close, and like it a parent: the tucked mode
         // toggles emerge from behind it, so it has to draw over them.
-        // Under the window name it hides behind.
+        // Under the close it hides behind.
         PillId::Minimize => 3,
         PillId::Close | PillId::WindowState => 4,
         PillId::Window => 5,
@@ -969,13 +969,11 @@ pub(crate) enum PillId {
     /// minimize options to the left of the current task"*, then: *"it is
     /// better if the X buttons moves to the left and the minimize is "hidden"
     /// on it, so x to the left, hover reveal monimize to the left (hover
-    /// current task reveals all)"*) — built, and: *"i dont like it… keep the
-    /// X where [it was] and the minimiza also where it was but hide the
-    /// minimize, reveal it on current tast hover"*. So the close rests RIGHT
-    /// of the window name as it always did, and the minimize is tucked behind
-    /// the name's LEFT end, sliding out to the left on the same reveal that
-    /// brings the mode controls out on the right. The same act as the title
-    /// bar's orange disc, for the windows that wear no title bar.
+    /// current task reveals all)"*). So the close rests LEFT of the window
+    /// name and the minimize is tucked behind it, sliding out to ITS left on
+    /// the same reveal that brings the mode controls out on the right. The
+    /// same act as the title bar's orange disc, for the windows that wear no
+    /// title bar.
     Minimize,
     /// What the focused window IS — floating, pseudo, fullscreen — as that
     /// mode's own glyph, right of the close. Nothing at all when the window is
@@ -2146,24 +2144,27 @@ impl App {
             // return with the title. (On an empty workspace there is nothing for
             // them to act on anyway.)
             if !self.module_on_pill() {
-                // The minimize, LEFT of the window name: hidden behind the
-                // name at rest, out on the reveal (see `CTRL_MINIMIZE`). Only
-                // while there is a window of the desktop to send to the dock:
-                // not over the overview's map (the pill names what you point
-                // at there), and not for a title that has outlived its window.
+                // Close, LEFT of the window name — a resting pill, no reveal.
+                let close_x = wx - GROUP_GAP - d;
+                // The minimize, hidden behind the close and revealed to its
+                // left. Only while there is a window of the desktop to send
+                // to the dock: not over the overview's map (the pill names
+                // what you point at there), and not for a title that has
+                // outlived its window. Listed BEFORE the close so the close's
+                // own spot always hits the close.
                 if self.overview_hover.is_none()
                     && !self.overview_active
                     && self.options_active_addr.is_some()
                 {
-                    let min_x = wx - GROUP_GAP - d;
+                    let min_x = close_x - CTRL_GAP - d;
                     if min_x >= EDGE_PAD {
                         circle(&mut pills, min_x, PillId::Minimize, GLYPH_MINIMIZE, None);
                     }
                 }
-                // Close, right of the window name — a resting pill, no reveal.
-                let close_x = wx + ww + GROUP_GAP;
                 circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
-                let mut cx = close_x + d + GROUP_GAP;
+                // The state word and the mode controls keep the right side,
+                // starting where the close used to rest.
+                let mut cx = wx + ww + GROUP_GAP;
                 if self.stage.is_on() {
                     // ON THE STAGE the cluster is just [X] and [fullscreen]
                     // (Max, 2026-09-16). Float and pseudo have no meaning on a
@@ -3908,12 +3909,12 @@ impl App {
                     }
                     let d = pill.rect.w;
                     // The minimize is the one control on the LEFT: it comes
-                    // out from behind the window name toward the bar's left
-                    // end, clipped to the left of the name's left edge.
+                    // out from behind the close toward the bar's left end,
+                    // clipped to the left of the close's left edge.
                     if pill.id == PillId::Minimize {
                         let edge = pills
                             .iter()
-                            .find(|p| p.id == PillId::Window)
+                            .find(|p| p.id == PillId::Close)
                             .map_or(pill.rect.x + d, |p| p.rect.x);
                         let x = lerp(edge, pill.rect.x, t);
                         let rect = Rect::new(x, pill.rect.y, d, pill.rect.h);
@@ -3923,20 +3924,20 @@ impl App {
                     // `origin` = tucked-x behind the parent; `edge` = the
                     // vertical line the glyph emerges past. Mode toggles
                     // emerge rightward, each from behind the previous pill's
-                    // right edge, starting at the close (which never gets
-                    // here — it has no ctrl slot).
+                    // right edge, starting at the window name itself (the
+                    // close rested there until it moved to the left).
                     // Read from the LAYOUT rather than from a fixed chain of
                     // ids: the row's membership changes now (the mode the
                     // window is in is shown as a word instead of a toggle), so
                     // "behind the previous pill" has to mean whichever pill is
-                    // actually to the left — the close, the state word, or
-                    // another toggle.
+                    // actually to the left — the window name, the state word,
+                    // or another toggle.
                     let prev_right = pills
                         .iter()
                         .filter(|p| {
                             matches!(
                                 p.id,
-                                PillId::Close
+                                PillId::Window
                                     | PillId::WindowState
                                     | PillId::Pseudo
                                     | PillId::Float
