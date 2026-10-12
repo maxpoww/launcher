@@ -4518,7 +4518,7 @@ impl App {
     }
 
     /// Start a fresh-clip beat on the small pill and drive the frame loop.
-    fn trigger_clip_beat(&mut self) {
+    pub(crate) fn trigger_clip_beat(&mut self) {
         self.clip.blink_until = Some(Instant::now() + BEAT_DURATION);
         self.clip.last = None;
         self.schedule_clip_frame();

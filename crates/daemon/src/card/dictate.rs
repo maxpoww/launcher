@@ -154,6 +154,10 @@ impl App {
         d.held = true;
         info!("dictation: listening");
         self.dictate_show(Some(Show::Listening));
+        // (It starts with the pill's own bright beat, the one a muted
+        // notification lands on the bell with: Max, 2026-10-12, "a bright
+        // beating when the recording starts, like a spark".)
+        self.trigger_clip_beat();
         self.dictate_tick(since);
     }
 
