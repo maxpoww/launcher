@@ -1413,6 +1413,9 @@ const RING_TURNS: f32 = 1.1;
 /// far as this much of the starting beat's swell.
 const BREATH_PERIOD: f32 = 1.8;
 const BREATH_DEPTH: f32 = 0.6;
+/// Between which two points of a swell (0 at rest, 1 the starting beat's
+/// top) the microphone turns to its other colour.
+const MIC_TURN: (f32, f32) = (0.2, 0.36);
 const RING_ARC: f32 = std::f32::consts::PI * 1.1;
 
 impl App {
@@ -4496,13 +4499,20 @@ impl App {
             None => Some(crate::options::GLYPH_CARD),
         };
         if let Some(glyph) = glyph {
-            // (The microphone is the title bars' GREEN, #21D758 — waveview's
-            // traffic lights. Max, 2026-10-12: amber first, then "make the
-            // mic green (same green we use on the traffic light)". A LABEL's
-            // colour is given as it is seen, like the bell's amber: put
-            // through the boxes' linear space it came out #06A618, darker.)
+            // (The microphone is the bar's ink — white on a dark bar — and
+            // turns to its opposite as the pill swells bright under it, and
+            // back: black on the bright of each breath. It was amber, then
+            // the traffic lights' green; Max, 2026-10-12: "make the mic
+            // black and white (changes with the breathing)".)
             let color = if glyph == GLYPH_MIC {
-                Some([33.0 / 255.0, 215.0 / 255.0, 88.0 / 255.0, ink[3]])
+                let dark = ink[0] + ink[1] + ink[2] < 1.5;
+                let other = if dark { 1.0 } else { 0.0 };
+                // (Quickly, about the middle of the swell: turning all the
+                // way along it, it was the pill's own grey for half of every
+                // breath and could not be seen.)
+                let k = ((beat - MIC_TURN.0) / (MIC_TURN.1 - MIC_TURN.0)).clamp(0.0, 1.0);
+                let k = k * k * (3.0 - 2.0 * k);
+                Some([lerp(ink[0], other, k), lerp(ink[1], other, k), lerp(ink[2], other, k), ink[3]])
             } else {
                 color
             };
