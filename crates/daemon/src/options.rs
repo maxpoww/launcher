@@ -291,6 +291,7 @@ impl Module {
 // Nerd Font glyphs (Font Awesome range, present in JetBrainsMono NF).
 pub(crate) const GLYPH_CLOSE: &str = "\u{f00d}"; // fa-times
 const GLYPH_MINIMIZE: &str = "\u{f2d1}"; // fa-window-minimize
+const GLYPH_PIN: &str = "\u{f08d}"; // fa-thumb-tack
 const GLYPH_SQUARE: &str = "\u{f096}"; // fa-square-o (pseudotile)
 const GLYPH_FULL: &str = "\u{f065}"; // fa-expand (fullscreen)
 const GLYPH_FLOAT: &str = "\u{f2d2}"; // fa-window-restore (floating)
@@ -442,7 +443,7 @@ fn action_command_line(action: &options_engine::AffordanceAction) -> Option<Stri
 // the moment (`OptionUXRules.md` §3).
 const CTRL_STAGGER: f32 = 0.06; // s between stagger stages
 /// How many toggles ride the reveal chain.
-const CTRL_N: usize = 4;
+const CTRL_N: usize = 5;
 /// How long to let a window settle into its tile before measuring it — the
 /// second beat of a fullscreen/float → pseudo transition. Comfortably past the
 /// compositor's move animation, since a size read mid-flight is worse than a
@@ -566,6 +567,7 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         | PillId::ModuleSettings
         | PillId::Close
         | PillId::Minimize
+        | PillId::Pin
         | PillId::WindowState
         | PillId::Pseudo
         | PillId::Float
@@ -832,6 +834,9 @@ impl Default for TitleMeta {
 /// The minimize's slot in the reveal chain. It is alone on its side of the
 /// window name, so it takes no turn in the stagger: first out, first back.
 const CTRL_MINIMIZE: usize = 3;
+/// The pin's slot. The innermost control on the right: out with the first of
+/// the mode toggles, back after the last of them.
+const CTRL_PIN: usize = 4;
 
 /// Animation slot for a mode-toggle pill (`None` for window/clock/close —
 /// close is a resting pill, always visible beside the window name).
@@ -843,6 +848,8 @@ fn ctrl_index(id: PillId) -> Option<usize> {
         // The minimize: tucked behind the close on the OTHER side of the
         // window name, emerging leftward (see `CTRL_MINIMIZE`).
         PillId::Minimize => Some(CTRL_MINIMIZE),
+        // The pin while it is OFF (on, it rests — see `pin_rests`).
+        PillId::Pin => Some(CTRL_PIN),
         _ => None,
     }
 }
@@ -862,32 +869,35 @@ fn draw_z(id: PillId) -> u8 {
         // toggles emerge from behind it, so it has to draw over them.
         // Under the close it hides behind.
         PillId::Minimize => 3,
-        PillId::Close | PillId::WindowState => 4,
-        PillId::Window => 5,
+        // Above the mode toggles that emerge from behind it, under the state
+        // pill it emerges from behind itself.
+        PillId::Pin => 4,
+        PillId::Close | PillId::WindowState => 5,
+        PillId::Window => 6,
         // Nested inside the window pill, so they must draw over it.
-        PillId::SunsetTurnOn => 6,
-        PillId::ModuleSettings => 6,
-        PillId::Clock => 6,
+        PillId::SunsetTurnOn => 7,
+        PillId::ModuleSettings => 7,
+        PillId::Clock => 7,
         // The preview/box (Notif) draws first; the fixed bell (NotifMute) draws
         // on top of it, capping its right end as it grows out from behind.
-        PillId::Notif => 7,
-        PillId::NotifMute => 8,
+        PillId::Notif => 8,
+        PillId::NotifMute => 9,
         // Under the bell's preview, which grows over it.
-        PillId::Task => 6,
-        PillId::Phone => 6,
+        PillId::Task => 7,
+        PillId::Phone => 7,
         // Mirror of the bell on the left edge: the box + copy-link pill draw
         // first (emerging from behind), then the small fixed glyph pill on top.
-        PillId::ClipboardBox => 9,
-        PillId::ClipCopyLink => 9,
-        PillId::Clipboard => 10,
+        PillId::ClipboardBox => 10,
+        PillId::ClipCopyLink => 10,
+        PillId::Clipboard => 11,
         // The readout slides out from BEHIND the gear and over the clipboard
         // cluster while it is out, so it draws above that cluster and below the
         // gear itself — the same stacking the clipboard box uses under its own
         // glyph pill, one edge of the bar mirroring the other.
-        PillId::SettingsStats => 11,
+        PillId::SettingsStats => 12,
         // The gear is never covered: it is the one pill that must always be
         // findable, and its child emerges from under it.
-        PillId::Settings => 12,
+        PillId::Settings => 13,
         // Dynamic OPTION controls sit in the free left-centre band, overlapping
         // nothing — drawn first (lowest z).
         PillId::Option(_) | PillId::StageMode => 0,
@@ -975,6 +985,16 @@ pub(crate) enum PillId {
     /// same act as the title bar's orange disc, for the windows that wear no
     /// title bar.
     Minimize,
+    /// Pin the focused window — above every other window and on whichever
+    /// workspace is showing, the compositor's own pin and the same act as the
+    /// title bar's pushpin (Max, 2026-10-12: *"add the pin button to the
+    /// right of the window status hidden to the right of the current task,
+    /// and make it sticky when is on"*). Offered for a FLOATING window only
+    /// (nothing else can be pinned). Off, it is the first control of the
+    /// reveal chain on the right, straight after the state pill; ON, it
+    /// stands at rest in that same spot, as the state pill does — the bar
+    /// marking what the window is.
+    Pin,
     /// What the focused window IS — floating, pseudo, fullscreen — as that
     /// mode's own glyph, right of the close. Nothing at all when the window is
     /// plainly tiled: the layout is the resting state of the desktop and needs
@@ -1398,6 +1418,8 @@ fn presence(id: PillId) -> Presence {
         // Minimize acts on the focused window too. (Not on the stage: a staged
         // task leaves the stage by its own controls.)
         PillId::Minimize => DESKTOP_ONLY,
+        // The pin too, and only a floating window of the desktop has one.
+        PillId::Pin => DESKTOP_ONLY,
         // The state pill says what the window IS. On the stage that is NOT the
         // mode's own maximize — every task there is maximized, so marking it
         // would be a sign that is true always and therefore says nothing — but
@@ -1468,6 +1490,7 @@ fn glyph_for_pill(id: PillId) -> &'static str {
         PillId::Float => GLYPH_FLOAT,
         PillId::Close => GLYPH_CLOSE,
         PillId::Minimize => GLYPH_MINIMIZE,
+        PillId::Pin => GLYPH_PIN,
         _ => GLYPH_OPTION,
     }
 }
@@ -2208,6 +2231,13 @@ impl App {
                             glyph_for_pill(active),
                             None,
                         );
+                        cx += d + CTRL_GAP;
+                    }
+                    // The pin, straight after the state pill and only for a
+                    // floating window (see `PillId::Pin`). One spot whether it
+                    // is on or off, so turning it on moves nothing.
+                    if self.options_mode_shown == hypr::WindowMode::Floating {
+                        circle(&mut pills, cx, PillId::Pin, GLYPH_PIN, None);
                         cx += d + CTRL_GAP;
                     }
                     // The window modes, ordered by how far each takes the window
@@ -3898,7 +3928,7 @@ impl App {
             // draws at full presence instead of tucking back behind a parent
             // that is no longer there.
             let (rect, a, clip, shadow_a) = match ctrl_index(pill.id) {
-                Some(i) if self.options_sticky.is_none() => {
+                Some(i) if self.options_sticky.is_none() && !self.pin_rests(pill.id) => {
                     let t = self.options_ctrl.t[i];
                     // Opacity rides the slide (the same mapping as the
                     // copy-link pill), so show and hide are one symmetric
@@ -3939,6 +3969,7 @@ impl App {
                                 p.id,
                                 PillId::Window
                                     | PillId::WindowState
+                                    | PillId::Pin
                                     | PillId::Pseudo
                                     | PillId::Float
                                     | PillId::Fullscreen
@@ -4402,6 +4433,7 @@ impl App {
             self.draw_options();
         }
         self.set_options_fullscreen(fullscreen);
+        self.refresh_window_pin();
     }
 
     /// One tick of the live-resize watcher: sample the focused window's
@@ -5611,9 +5643,30 @@ impl App {
         if id == PillId::ClipCopyLink {
             return self.clip_link_t() > 0.5;
         }
+        if self.pin_rests(id) {
+            return true;
+        }
         match ctrl_index(id) {
             Some(i) => self.options_ctrl.t[i] > 0.5,
             None => true, // window / clock / close always
+        }
+    }
+
+    /// The pin pill of a PINNED window: it stands at rest on the bar instead
+    /// of riding the reveal chain (see `PillId::Pin`).
+    fn pin_rests(&self, id: PillId) -> bool {
+        id == PillId::Pin && self.options_pinned
+    }
+
+    /// Read whether the focused window is pinned, and redraw if that changed.
+    /// Called on every compositor event the bar answers to (`pin` is one of
+    /// them) — the title bar's pushpin and a keybind pin it just as well.
+    pub(crate) fn refresh_window_pin(&mut self) {
+        let pinned = hypr::active_window_pinned();
+        if pinned != self.options_pinned {
+            self.options_pinned = pinned;
+            self.sync_options_input();
+            self.draw_options();
         }
     }
 
@@ -5924,6 +5977,8 @@ impl App {
             // where it is until then.
             let order = if i == CTRL_MINIMIZE {
                 0
+            } else if i == CTRL_PIN {
+                if reveal { 0 } else { CTRL_MINIMIZE }
             } else if reveal {
                 i
             } else {
@@ -6531,6 +6586,16 @@ impl App {
             }
             // To the dock, by the plugin's own minimize (the capture, the
             // flight and the park are its; it tells us when the card lands).
+            // The compositor's own pin, on the focused window; the bar reads
+            // the answer back rather than assuming it.
+            Some(PillId::Pin) => {
+                if let Some(addr) = self.options_active_addr.clone() {
+                    hypr::dispatch(&format!(
+                        "hl.dsp.window.pin({{ window = \"address:{addr}\" }})"
+                    ));
+                    self.refresh_window_pin();
+                }
+            }
             Some(PillId::Minimize) => {
                 if let Some(addr) = self.options_active_addr.clone() {
                     hypr::eval(&format!("hl.plugin.waveview.minimize(\"{addr}\")"));
@@ -7493,6 +7558,7 @@ mod tests {
             PillId::Window,
             PillId::Close,
             PillId::Minimize,
+            PillId::Pin,
             PillId::Pseudo,
             PillId::Fullscreen,
         ] {

@@ -400,6 +400,15 @@ pub fn active_window_mode() -> Option<(String, WindowMode)> {
     Some((addr, mode_of(&json)))
 }
 
+/// Whether the focused window is pinned (above every other window, on every
+/// workspace) — for the OPTIONS pin pill. `false` when nothing is focused.
+pub fn active_window_pinned() -> bool {
+    request("j/activewindow")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .is_some_and(|json| json["pinned"].as_bool().unwrap_or(false))
+}
+
 /// The focused window's **internal** fullscreen level: `0` none, `1` maximized,
 /// `2` true fullscreen. [`mode_of`] collapses 1 and 2 into one `Fullscreen`, but
 /// the stage's [fullscreen] control has to tell its own maximize (1) from a real

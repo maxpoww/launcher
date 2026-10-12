@@ -626,6 +626,7 @@ fn main() -> anyhow::Result<()> {
         options_resize_live: None,
         options_mode: hypr::WindowMode::Tiled,
         options_mode_addr: None,
+        options_pinned: false,
         options_mode_shown: hypr::WindowMode::Tiled,
         pseudo_sweep_pending: false,
         overview_hover: None,
@@ -1456,6 +1457,9 @@ pub struct App {
     /// read is what tells a window CHANGING shape from focus landing on a
     /// different one — see `refresh_window_mode`.
     options_mode_addr: Option<String>,
+    /// Whether the focused window is pinned — the pin pill rests on the bar
+    /// while it is (`options::PillId::Pin`).
+    options_pinned: bool,
     /// Whether a solitary-pseudo sweep is already waiting on its timer, so a
     /// burst of window events costs one sweep — see `schedule_solitary_pseudo`.
     pseudo_sweep_pending: bool,
