@@ -187,21 +187,29 @@ impl Foot {
 
     /// Its icon (the round ones have one), with its measures.
     fn icon(self) -> Option<Icon> {
-        let (w, h, off) = match self {
+        // (w, h: measured from the font. fit, off: SEARCHED on the rig,
+        // 2026-10-12 — 9 sizes x 9 nudges, captured at screen scales 1.25
+        // and 1.6, the one kept for each icon being the one whose drawing
+        // is nearest the middle of its button at BOTH. After it the worst
+        // of them is 0.30 of a design pixel off, where the face was 0.43 of
+        // a screen pixel to the right at 1.25 — and a ring in a ring shows
+        // that: Max, *"the emoji one does look out of center"*.)
+        let (w, h, fit, off) = match self {
             Foot::Memory => return None,
-            Foot::Talk => (0.330, 0.480, (0.0, 0.25)),
-            Foot::Emoji => (0.600, 0.600, (0.0, 0.15)),
-            // (Its outline sits in the middle, but its weight — the head
-            // of the pin — is 1.6 px above it: a pixel down.)
-            Foot::Pinned => (0.6025, 0.800, (0.3, -0.4)),
-            Foot::Clipboard => (0.600, 0.670, (0.0, 0.1)),
-            Foot::Translate => (0.600, 0.545, (0.0, 0.35)),
-            Foot::Dictionary => (0.600, 0.6875, (0.0, 0.1)),
+            Foot::Talk => (0.330, 0.480, 0.975, (0.0, 0.4)),
+            Foot::Emoji => (0.600, 0.600, 0.95, (0.0, 0.0)),
+            // (Half way between the middle of its outline and that of its
+            // weight — the pin's head is well above its outline's middle.)
+            Foot::Pinned => (0.6025, 0.800, 0.9875, (0.0, -0.4)),
+            Foot::Clipboard => (0.600, 0.670, 1.0, (0.0, 0.0)),
+            Foot::Translate => (0.600, 0.545, 1.0125, (0.0, 0.0)),
+            Foot::Dictionary => (0.600, 0.6875, 1.0, (0.0, 0.0)),
         };
         Some(Icon {
             glyph: self.word(),
             w,
             h,
+            fit,
             off,
         })
     }
@@ -370,6 +378,10 @@ struct Icon {
     glyph: &'static str,
     w: f32,
     h: f32,
+    /// A hair more or less than the size its area asks for (within a few
+    /// hundredths): the size at which its drawing lands on the pixels with
+    /// its middle in the middle (searched on the rig — see `ICON_TRY`).
+    fit: f32,
     /// What it is off the middle by, in design pixels (right, down), taken
     /// back out. MEASURED on the nested rig (2026-10-12: captures at screen
     /// scales 1, 1.25 and 1.6, the middle of each drawing's outline and of
@@ -387,9 +399,22 @@ struct Icon {
 /// The side of the square an icon's drawing has the area of.
 const FOOT_ICON: f32 = 11.5;
 
+/// `card icons <factor> <dx> <dy>` (a test's): every icon at `factor` times
+/// its size and nudged by that, its own nudge set aside — to find, on
+/// captures, the size and place at which each lands best on the pixels.
+pub(super) static ICON_TRY: std::sync::Mutex<Option<(f32, f32, f32)>> = std::sync::Mutex::new(None);
+
 impl Icon {
+    fn tried() -> Option<(f32, f32, f32)> {
+        ICON_TRY.lock().ok().and_then(|t| *t)
+    }
+
     fn px(self) -> f32 {
-        FOOT_ICON / (self.w * self.h).sqrt()
+        let own = FOOT_ICON / (self.w * self.h).sqrt();
+        match Self::tried() {
+            Some((factor, ..)) => own * factor,
+            None => own * self.fit,
+        }
     }
 
     /// The line it stands in: the font's own (1.3225 of its size).
@@ -398,7 +423,10 @@ impl Icon {
     }
 
     fn nudge(self) -> (f32, f32) {
-        (-self.off.0, -self.off.1)
+        match Self::tried() {
+            Some((_, dx, dy)) => (dx, dy),
+            None => (-self.off.0, -self.off.1),
+        }
     }
 }
 
@@ -406,8 +434,9 @@ const ICON_UP: Icon = Icon {
     glyph: GLYPH_UP,
     w: 0.515,
     h: 0.600,
+    fit: 1.0,
     // (An arrow's weight is its head: above the middle of its outline.)
-    off: (0.0, -0.2),
+    off: (0.0, -0.4),
 };
 const FOOT_BUTTON_H: f32 = 28.0;
 /// The pin glyph (fa-thumb-tack, in the Nerd font).

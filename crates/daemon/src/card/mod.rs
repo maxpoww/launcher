@@ -6031,6 +6031,22 @@ impl App {
                 String::new()
             }
             "carry" => self.card_carry(rest),
+            // `icons <factor> <dx> <dy>` · `icons` (as they are): see
+            // `view::ICON_TRY`.
+            "icons" => {
+                let n: Vec<f32> = rest
+                    .split_whitespace()
+                    .filter_map(|x| x.parse().ok())
+                    .collect();
+                if let Ok(mut t) = view::ICON_TRY.lock() {
+                    *t = match n[..] {
+                        [factor, dx, dy] => Some((factor, dx, dy)),
+                        _ => None,
+                    };
+                }
+                self.request_card_draw();
+                String::new()
+            }
             "lifted" => {
                 self.card_window_lifted(rest);
                 String::new()
