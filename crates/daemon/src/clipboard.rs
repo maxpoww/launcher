@@ -4481,11 +4481,13 @@ impl App {
             None => Some(crate::options::GLYPH_CARD),
         };
         if let Some(glyph) = glyph {
-            // (The microphone is amber, the bar's colour for what is live:
-            // Max, 2026-10-12, "make the mic amber".)
+            // (The microphone is the title bars' GREEN, #21D758 — waveview's
+            // traffic lights. Max, 2026-10-12: amber first, then "make the
+            // mic green (same green we use on the traffic light)". A LABEL's
+            // colour is given as it is seen, like the bell's amber: put
+            // through the boxes' linear space it came out #06A618, darker.)
             let color = if glyph == GLYPH_MIC {
-                let amber = crate::notif::AMBER;
-                Some([amber[0], amber[1], amber[2], ink[3]])
+                Some([33.0 / 255.0, 215.0 / 255.0, 88.0 / 255.0, ink[3]])
             } else {
                 color
             };
