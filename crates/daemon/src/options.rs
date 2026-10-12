@@ -834,9 +834,12 @@ impl Default for TitleMeta {
 /// The minimize's slot in the reveal chain. It is alone on its side of the
 /// window name, so it takes no turn in the stagger: first out, first back.
 const CTRL_MINIMIZE: usize = 3;
-/// The pin's slot. The innermost control on the right: out with the first of
-/// the mode toggles, back after the last of them.
+/// The pin's slot. The outermost control on the right: out after the last of
+/// the mode toggles, back before the first of them.
 const CTRL_PIN: usize = 4;
+/// How much further than a control's gap the pin stands from the last mode
+/// toggle.
+const PIN_APART: f32 = 6.0;
 
 /// Animation slot for a mode-toggle pill (`None` for window/clock/close —
 /// close is a resting pill, always visible beside the window name).
@@ -869,9 +872,8 @@ fn draw_z(id: PillId) -> u8 {
         // toggles emerge from behind it, so it has to draw over them.
         // Under the close it hides behind.
         PillId::Minimize => 3,
-        // Above the mode toggles that emerge from behind it, under the state
-        // pill it emerges from behind itself.
-        PillId::Pin => 4,
+        // Under the last mode toggle, which it emerges from behind.
+        PillId::Pin => 0,
         PillId::Close | PillId::WindowState => 5,
         PillId::Window => 6,
         // Nested inside the window pill, so they must draw over it.
@@ -990,10 +992,10 @@ pub(crate) enum PillId {
     /// title bar's pushpin (Max, 2026-10-12: *"add the pin button to the
     /// right of the window status hidden to the right of the current task,
     /// and make it sticky when is on"*). Offered for a FLOATING window only
-    /// (nothing else can be pinned). Off, it is the first control of the
-    /// reveal chain on the right, straight after the state pill; ON, it
-    /// stands at rest in that same spot, as the state pill does — the bar
-    /// marking what the window is.
+    /// (nothing else can be pinned). Off, it is the LAST control of the
+    /// reveal chain on the right, a little apart from the mode toggles; ON,
+    /// it stands at rest in that same spot — the bar marking what the window
+    /// is, as the state pill does.
     Pin,
     /// What the focused window IS — floating, pseudo, fullscreen — as that
     /// mode's own glyph, right of the close. Nothing at all when the window is
@@ -2233,19 +2235,15 @@ impl App {
                         );
                         cx += d + CTRL_GAP;
                     }
-                    // The pin, straight after the state pill and only for a
-                    // floating window (see `PillId::Pin`). One spot whether it
-                    // is on or off, so turning it on moves nothing.
-                    if self.options_mode_shown == hypr::WindowMode::Floating {
-                        circle(&mut pills, cx, PillId::Pin, GLYPH_PIN, None);
-                        cx += d + CTRL_GAP;
-                    }
                     // The window modes, ordered by how far each takes the window
                     // from the layout: pseudo (still tiled, just smaller), float
                     // (out of the layout), fullscreen (over everything). The one
                     // the window is already in is left out — the word above IS
                     // its control, and offering the same mode twice in one row
                     // would be two ways to press the same thing.
+                    // Where the row stands with every toggle tucked away: the
+                    // pin of a pinned window rests here (below).
+                    let tucked_x = cx;
                     for (id, glyph) in [
                         (PillId::Pseudo, GLYPH_SQUARE),
                         (PillId::Float, GLYPH_FLOAT),
@@ -2256,6 +2254,28 @@ impl App {
                         }
                         circle(&mut pills, cx, id, glyph, None);
                         cx += d + CTRL_GAP;
+                    }
+                    // The pin, LAST and a little apart (Max, 2026-10-12: *"the
+                    // pin button should be at the end and with a little space
+                    // between it and the others"* — it first stood straight
+                    // after the state pill): it is not one of the window's
+                    // modes. Only for a floating window (see `PillId::Pin`).
+                    //
+                    // ON, it rests on the bar (`pin_rests`) — and beside the
+                    // state pill, not out at the end with a hole where the
+                    // hidden toggles go: the reveal carries it out to the end
+                    // ahead of them and brings it back after them, riding its
+                    // own slot of the chain. With the row revealed it is in
+                    // the one spot whether on or off, so pressing it moves
+                    // nothing.
+                    if self.options_mode_shown == hypr::WindowMode::Floating {
+                        let out = cx + PIN_APART;
+                        let x = if self.options_pinned && self.options_sticky.is_none() {
+                            lerp(tucked_x + PIN_APART, out, self.options_ctrl.t[CTRL_PIN])
+                        } else {
+                            out
+                        };
+                        circle(&mut pills, x, PillId::Pin, GLYPH_PIN, None);
                     }
                 }
             }
@@ -3974,6 +3994,9 @@ impl App {
                                     | PillId::Float
                                     | PillId::Fullscreen
                             ) && p.rect.x < pill.rect.x
+                                // (a pinned window's pin is on its way out
+                                // ahead of the toggles, not a parent of theirs)
+                                && !self.pin_rests(p.id)
                         })
                         .map(|p| p.rect.x + p.rect.w)
                         .fold(f32::MIN, f32::max);
@@ -5978,7 +6001,10 @@ impl App {
             let order = if i == CTRL_MINIMIZE {
                 0
             } else if i == CTRL_PIN {
-                if reveal { 0 } else { CTRL_MINIMIZE }
+                // Emerging from behind the last toggle it waits for it; as
+                // the resting pill of a pinned window it is what the toggles
+                // push outward, so it leads the way out and is last back.
+                if reveal != self.options_pinned { CTRL_MINIMIZE } else { 0 }
             } else if reveal {
                 i
             } else {
