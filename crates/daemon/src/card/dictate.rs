@@ -127,6 +127,22 @@ impl App {
 
     /// The key went down.
     pub(super) fn dictate_down(&mut self) -> &'static str {
+        // THE CARD IS UP HERE: the key is the card's. It turns to
+        // voice-to-text's page and listens at once, as Space held on that
+        // page does; let go, what was said is written by the card (Max,
+        // 2026-10-12: "all of the keybinds should go to the card because
+        // it's open").
+        if self.card_up_here() && self.card.dictation.is_none() && self.card.talk_key.is_none() {
+            let was_talk = self.card.page == super::Page::Talk;
+            if !was_talk {
+                self.card_show(super::Page::Talk);
+            }
+            if self.card.rec.is_none() {
+                self.card_record_start(true);
+            }
+            self.card.talk_key = Some((Instant::now(), was_talk));
+            return "down (the card)";
+        }
         // (Down already — a key that repeats — or the card is recording, or
         // the last thing said is still being written out.)
         if self.card.dictation.is_some()
@@ -239,6 +255,16 @@ impl App {
     /// The key came up. A tap: the card, at voice-to-text. Held: what was
     /// said is written out, then pasted into the window.
     pub(super) fn dictate_up(&mut self) -> String {
+        if let Some((since, was_talk)) = self.card.talk_key.take() {
+            if since.elapsed().as_millis() as u64 >= HOLD_MS {
+                self.card_record_stop(true);
+                return "writing (the card)".to_owned();
+            }
+            // (A tap: nothing was said. On voice-to-text's page already, it
+            // is the same key again — the card goes away.)
+            self.card_record_stop(false);
+            return if was_talk { self.card_command("at voice") } else { "at voice".to_owned() };
+        }
         let Some(held) = self.card.dictation.as_ref().map(|d| d.held) else {
             return "not down".to_owned();
         };

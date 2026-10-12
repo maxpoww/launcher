@@ -648,6 +648,10 @@ pub(crate) struct Card {
     /// The dictation key is down (`dictate.rs`: talk written straight into
     /// the window, no card).
     dictation: Option<dictate::Dictation>,
+    /// …or it went down with the card up here, and is the CARD's talk
+    /// key: since when, and whether the card was on voice-to-text's page
+    /// already (a tap then puts the card away).
+    talk_key: Option<(Instant, bool)>,
     /// …and what the bar's card pill shows of it.
     dictate_show: Option<dictate::Show>,
     /// The pill is growing to it, or going back: how much wider than round
@@ -765,6 +769,13 @@ fn card_paste_key() {
 /// Whether `addr` is a window's address as the compositor writes it
 /// (`0x` and hex). Addresses arrive over the dock's socket and go into
 /// commands the compositor evaluates: anything else is refused.
+/// THE DESKTOP, as a card's "window": a workspace with no window on it has
+/// nothing for the card to stand on, so it hangs under the bar's pill
+/// (the banner) and this is the address it is kept under — no window ever
+/// has it (Max, 2026-10-12: *"if I'm on an empty workspace and I press
+/// Super+. I want the card to open from the banner"*).
+const DESK: &str = "0x0";
+
 pub(crate) fn valid_addr(addr: &str) -> bool {
     addr.strip_prefix("0x")
         .is_some_and(|h| !h.is_empty() && h.len() <= 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -4064,6 +4075,26 @@ impl App {
         self.options_active_addr
             .clone()
             .or_else(crate::hypr::active_window)
+            .filter(|a| !a.is_empty() && a != DESK)
+    }
+
+    /// Where the card's "window" is: a real one's place — or, for the
+    /// desktop's card, its place under the bar while it hangs there.
+    fn card_host_spot(&self, host: &str) -> Option<crate::hypr::WindowSpot> {
+        if host == DESK {
+            self.card_banner_spot()
+        } else {
+            crate::hypr::window_spot(host)
+        }
+    }
+
+    /// Whether the card is UP where the owner is: showing on the focused
+    /// window (standing on it, or hung under the bar for it) — or, on a
+    /// workspace with no window, hung under the bar for the desktop. Then
+    /// the card's keys are for THAT card: they do not call another.
+    pub(super) fn card_up_here(&self) -> bool {
+        let here = self.card_focused().filter(|a| valid_addr(a));
+        self.card_present() && self.card.host.as_deref() == Some(here.as_deref().unwrap_or(DESK))
     }
 
     /// The button on a window's title bar: the card on for that window (and
@@ -4142,9 +4173,8 @@ impl App {
             self.draw_options();
             return;
         }
-        let Some(addr) = self.card_focused().filter(|a| valid_addr(a)) else {
-            return;
-        };
+        // (No window here: it is the desktop's card that comes out.)
+        let addr = self.card_focused().filter(|a| valid_addr(a)).unwrap_or_else(|| DESK.to_owned());
         // THE LONG PILL BECOMES THE CARD: the card stands where the long
         // pill was — its top left corner the pill's — at the size it has on
         // a window, and unrolls down from there.
@@ -4225,6 +4255,11 @@ impl App {
     /// window (Max: *"super useful for windows with no titlebar"*). With the
     /// card out under the bar, a click puts it ON its window and there.
     pub(crate) fn card_pill_click(&mut self) {
+        // (The desktop's card has no window to be put on: it goes back.)
+        if self.card_banner_open() && self.card.host.as_deref() == Some(DESK) {
+            self.card_banner(false);
+            return;
+        }
         if let Some(b) = self.card.banner.filter(|b| !b.closing) {
             if let Some(addr) = self.card.host.clone() {
                 if !self.card.armed(&addr) {
@@ -4300,6 +4335,10 @@ impl App {
         let Some(addr) = addr else {
             return;
         };
+        // (The desktop's card: a window has the focus now, it is over.)
+        if self.card.host.as_deref() == Some(DESK) {
+            self.card_let_go();
+        }
         // (The card from the bar was another window's: it is over.)
         if self.card.banner.is_some() && self.card.host.as_deref() != Some(addr) {
             self.card.banner = None;
@@ -4408,7 +4447,7 @@ impl App {
         let Some(host) = self.card.host.clone() else {
             return;
         };
-        match crate::hypr::window_spot(&host) {
+        match self.card_host_spot(&host) {
             None => {
                 debug!("card: its window {host} is gone");
                 self.card_window_closed(&host);
@@ -4482,7 +4521,7 @@ impl App {
                 let Some(host) = app.card.host.clone() else {
                     return calloop::timer::TimeoutAction::Drop;
                 };
-                let now = crate::hypr::window_spot(&host);
+                let now = app.card_host_spot(&host).map(|s| app.card_banner_spot().unwrap_or(s));
                 // A window "in hand" that has not moved for a long while:
                 // its being put down was never heard (the plugin went away
                 // mid-drag). The card comes back rather than staying lost.
@@ -6032,20 +6071,33 @@ impl App {
                     "voice" => Page::Talk,
                     _ => return "card at clipboard|emoji|memory|voice".to_owned(),
                 };
-                let Some(addr) = self.card_focused() else {
-                    return "no window is focused".to_owned();
-                };
-                let up = self.card.armed(&addr) && self.card.host.as_deref() == Some(addr.as_str());
-                if up && self.card.page == page {
-                    return self.card_toggle(Some(&addr));
+                // (THE CARD THAT IS UP HERE is the one the key is for: it
+                // turns to that page where it is — on its window or under
+                // the bar — and the same key again puts it away. Max,
+                // 2026-10-12: "the card should know when it's open… all of
+                // the keybinds should go to the card because it's open".)
+                let addr = self.card_focused().filter(|a| valid_addr(a));
+                if self.card_up_here() {
+                    if self.card.page != page {
+                        self.card_show(page);
+                        return format!("at {rest}");
+                    }
+                    if self.card_banner_open() {
+                        self.card_banner(false);
+                        return "away".to_owned();
+                    }
+                    return self.card_toggle(addr.as_deref());
                 }
-                if !self.card.armed(&addr) {
-                    self.card_toggle(Some(&addr));
-                } else if !up {
-                    self.card_summon(&addr);
+                match &addr {
+                    Some(addr) if !self.card.armed(addr) => {
+                        self.card_toggle(Some(addr));
+                    }
+                    Some(addr) => self.card_summon(addr),
+                    // (A workspace with no window: from the bar's pill.)
+                    None => self.card_banner(true),
                 }
                 self.card_show(page);
-                format!("at {rest} on {addr}")
+                format!("at {rest} on {}", addr.as_deref().unwrap_or("the desktop"))
             }
             // The input box, the search and the name, without a keyboard:
             // `write <text>` · `keep` · `send` · `find <words>` · `rename <name>`
