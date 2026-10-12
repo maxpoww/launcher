@@ -25,6 +25,8 @@ pub(super) const WIDTH_MAX: f32 = 640.0;
 pub(super) const GRIP: f32 = 7.0;
 
 pub(super) const INSET: f32 = 10.0;
+/// How tall a window's title bar is (waveview's `GOLEM_BAR_HEIGHT`).
+const TITLE_BAR: f32 = 25.0;
 
 /// How far past either side of its window the card may be slid.
 pub(super) const OVERHANG: f32 = 12.0;
@@ -180,11 +182,12 @@ pub(crate) fn card_rect(spot: &WindowSpot, left: f32, scale: f32, width: f32) ->
     Rect::new(
         snap(spot.x + left),
         // (Its top edge TOUCHES the bottom of the window's title bar — the
-        // top of the window's own box: Max, 2026-10-12. Its foot keeps
-        // its air from the window's.)
+        // top of the window's own box: Max, 2026-10-12. And it is CENTRED
+        // in the window, title bar and all: as far from the window's foot
+        // as its top is from the window's top — the title bar's height.)
         snap(spot.y),
         snap(width),
-        snap(spot.h - INSET),
+        snap(spot.h - TITLE_BAR),
     )
 }
 
@@ -241,8 +244,8 @@ mod tests {
         assert_eq!(
             (r.x, r.y, r.w, r.h),
             // (Its top at the window's own — under the title bar — its foot
-            // 10 px short of the window's.)
-            (100.0 + 900.0 - 10.0 - WIDTH, 50.0, WIDTH, 590.0)
+            // a title bar's height short of the window's.)
+            (100.0 + 900.0 - 10.0 - WIDTH, 50.0, WIDTH, 575.0)
         );
         // However far it is asked to go, no further than a slide may.
         assert_eq!(card_rect(&s, -9999.0, 1.0, WIDTH).x, 100.0 - WIDTH - 12.0);
