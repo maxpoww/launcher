@@ -5811,10 +5811,14 @@ impl App {
         }
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for p in &self.options_pills() {
-            if matches!(
-                p.id,
-                PillId::Window | PillId::Close | PillId::Minimize | PillId::WindowState
-            ) || ctrl_index(p.id).is_some()
+            // From the window name rightward. The close and its minimize are
+            // a pair of their own, on the other side: going to them LEAVES
+            // this cluster, so the controls out here go back as the minimize
+            // comes out (Max, 2026-10-12: *"when i go to the x i want the
+            // other ones to the right to hide at the same time that the
+            // minimize will reveal"* — the buttons not in use go away).
+            if matches!(p.id, PillId::Window | PillId::WindowState)
+                || (ctrl_index(p.id).is_some() && p.id != PillId::Minimize)
             {
                 lo = lo.min(p.rect.x);
                 hi = hi.max(p.rect.x + p.rect.w);
