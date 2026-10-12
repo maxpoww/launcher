@@ -838,7 +838,7 @@ const CTRL_MINIMIZE: usize = 3;
 /// the mode toggles, back before the first of them.
 const CTRL_PIN: usize = 4;
 /// How much further than a control's gap the pin stands from the last mode
-/// toggle.
+/// toggle while it is OFF.
 const PIN_APART: f32 = 6.0;
 
 /// Animation slot for a mode-toggle pill (`None` for window/clock/close —
@@ -2244,6 +2244,10 @@ impl App {
                     // Where the row stands with every toggle tucked away: the
                     // pin of a pinned window rests here (below).
                     let tucked_x = cx;
+                    // …and how far the toggles have come out of hiding, in
+                    // px of row: each one's own progress times the room it
+                    // takes.
+                    let mut emerged = 0.0;
                     for (id, glyph) in [
                         (PillId::Pseudo, GLYPH_SQUARE),
                         (PillId::Float, GLYPH_FLOAT),
@@ -2254,6 +2258,15 @@ impl App {
                         }
                         circle(&mut pills, cx, id, glyph, None);
                         cx += d + CTRL_GAP;
+                        if let Some(i) = ctrl_index(id) {
+                            // Counted from where the toggle becomes VISIBLE
+                            // (its opacity rides the slide and is nil below
+                            // 0.15 — see the draw): the long invisible tail
+                            // of its settle would otherwise keep the pin
+                            // travelling after the toggle had gone.
+                            let seen = ((self.options_ctrl.t[i] - 0.15) / 0.85).clamp(0.0, 1.0);
+                            emerged += seen * (d + CTRL_GAP);
+                        }
                     }
                     // The pin, LAST and a little apart (Max, 2026-10-12: *"the
                     // pin button should be at the end and with a little space
@@ -2261,19 +2274,25 @@ impl App {
                     // after the state pill): it is not one of the window's
                     // modes. Only for a floating window (see `PillId::Pin`).
                     //
-                    // ON, it rests on the bar (`pin_rests`) — and beside the
-                    // state pill, not out at the end with a hole where the
-                    // hidden toggles go: the reveal carries it out to the end
-                    // ahead of them and brings it back after them, riding its
-                    // own slot of the chain. With the row revealed it is in
-                    // the one spot whether on or off, so pressing it moves
-                    // nothing.
+                    //
+                    // ON, it rests on the bar (`pin_rests`) — beside the state
+                    // pill, not out at the end with a hole where the hidden
+                    // toggles go — and at a control's ordinary gap: the space
+                    // apart is the off pin's alone (Max, same day: *"get rid
+                    // of the space between the pin and the others when the
+                    // pin is on"*). The toggles PUSH it: it stands exactly as
+                    // far out as they have emerged, so it moves with them in
+                    // both directions instead of on a clock of its own (*"the
+                    // other buttons hides faster thah the pin moves to its
+                    // resting spot"*, of the first cut, which rode its own
+                    // slot of the stagger).
                     if self.options_mode_shown == hypr::WindowMode::Floating {
-                        let out = cx + PIN_APART;
-                        let x = if self.options_pinned && self.options_sticky.is_none() {
-                            lerp(tucked_x + PIN_APART, out, self.options_ctrl.t[CTRL_PIN])
+                        let x = if !self.options_pinned {
+                            cx + PIN_APART
+                        } else if self.options_sticky.is_none() {
+                            tucked_x + emerged
                         } else {
-                            out
+                            cx
                         };
                         circle(&mut pills, x, PillId::Pin, GLYPH_PIN, None);
                     }
@@ -6001,10 +6020,10 @@ impl App {
             let order = if i == CTRL_MINIMIZE {
                 0
             } else if i == CTRL_PIN {
-                // Emerging from behind the last toggle it waits for it; as
-                // the resting pill of a pinned window it is what the toggles
-                // push outward, so it leads the way out and is last back.
-                if reveal != self.options_pinned { CTRL_MINIMIZE } else { 0 }
+                // Emerging from behind the last toggle, it waits for it. (A
+                // pinned window's pin is placed by the toggles themselves —
+                // where the row is laid out — and does not read this slot.)
+                if reveal { CTRL_MINIMIZE } else { 0 }
             } else if reveal {
                 i
             } else {
