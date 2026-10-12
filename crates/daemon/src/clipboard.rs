@@ -1409,6 +1409,10 @@ pub(crate) fn contains_ci(hay: &str, needle: &str) -> bool {
 /// turns a second, and how much of the circle it is (radians).
 const GLYPH_MIC: &str = "\u{f036c}"; // md-microphone
 const RING_TURNS: f32 = 1.1;
+/// …and its breathing while it listens: one breath in this many seconds, as
+/// far as this much of the starting beat's swell.
+const BREATH_PERIOD: f32 = 1.8;
+const BREATH_DEPTH: f32 = 0.6;
 const RING_ARC: f32 = std::f32::consts::PI * 1.1;
 
 impl App {
@@ -4388,6 +4392,17 @@ impl App {
     pub(crate) fn push_clip_glyph(&self, scene: &mut Scene, rect: Rect) {
         let hovered = self.options_hover == Some(PillId::Clipboard);
         let beat = self.clip_blink().unwrap_or(0.0);
+        // While it LISTENS it breathes: the same swell as the beat it began
+        // with, slower and not as far, for as long as the key is down (Max,
+        // 2026-10-12: "the beating, make it breathe during the recording").
+        let breath = match self.card_dictate_show() {
+            Some(crate::card::dictate::Show::Listening(since)) => {
+                let along = since.elapsed().as_secs_f32() / BREATH_PERIOD;
+                BREATH_DEPTH * (0.5 - 0.5 * (along * std::f32::consts::TAU).cos())
+            }
+            _ => 0.0,
+        };
+        let beat = beat.max(breath);
         let lift = if hovered { 1.0 } else { beat };
         let grown = hover_grow(rect);
         let rect = Rect::new(
@@ -4436,7 +4451,7 @@ impl App {
         use crate::card::dictate::Show;
         let color = Some(ink);
         let glyph = match self.card_dictate_show() {
-            Some(Show::Listening) => Some(GLYPH_MIC),
+            Some(Show::Listening(_)) => Some(GLYPH_MIC),
             Some(Show::Writing(since, _)) => {
                 // (The renderer draws rounded boxes, not arcs: the ring is
                 // dots set closer than they are wide.)
@@ -4514,7 +4529,7 @@ impl App {
         let s = self.options_scale();
         match show {
             // (Listening and writing it is as round as ever.)
-            None | Some(Show::Listening | Show::Writing(..)) => 0.0,
+            None | Some(Show::Listening(_) | Show::Writing(..)) => 0.0,
             Some(Show::Said(why, _)) => why.chars().count() as f32 * FONT_PX * s * 0.56 + PILL_PAD_X * s,
         }
     }

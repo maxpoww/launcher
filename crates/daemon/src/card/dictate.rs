@@ -47,8 +47,8 @@ pub(super) struct Dictation {
 /// What the card's pill shows of a dictation.
 #[derive(Debug, Clone)]
 pub(crate) enum Show {
-    /// Recording.
-    Listening,
+    /// Recording, since then.
+    Listening(Instant),
     /// What was said is being written out, since then; the flag is raised
     /// if it is cancelled meanwhile.
     Writing(Instant, Arc<AtomicBool>),
@@ -153,7 +153,7 @@ impl App {
         }
         d.held = true;
         info!("dictation: listening");
-        self.dictate_show(Some(Show::Listening));
+        self.dictate_show(Some(Show::Listening(since)));
         // (It starts with the pill's own bright beat, the one a muted
         // notification lands on the bell with: Max, 2026-10-12, "a bright
         // beating when the recording starts, like a spark".)
@@ -193,7 +193,8 @@ impl App {
                 app.sync_options_input();
             }
             app.draw_options();
-            if morphing || matches!(app.card.dictate_show, Some(Show::Writing(..))) {
+            // (Listening it breathes, written out its ring turns.)
+            if morphing || matches!(app.card.dictate_show, Some(Show::Listening(_) | Show::Writing(..))) {
                 app.dictate_frames();
             }
         });
@@ -203,7 +204,7 @@ impl App {
     /// cancelled — nothing is written. Whether there was one.
     pub(crate) fn dictate_cancel(&mut self) -> bool {
         match self.card.dictate_show.clone() {
-            Some(Show::Listening) => {
+            Some(Show::Listening(_)) => {
                 info!("dictation: cancelled from the bar");
                 self.dictate_drop();
             }
