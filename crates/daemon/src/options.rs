@@ -2183,16 +2183,29 @@ impl App {
                 // what you point at there), and not for a title that has
                 // outlived its window. Listed BEFORE the close so the close's
                 // own spot always hits the close.
-                if self.overview_hover.is_none()
-                    && !self.overview_active
-                    && self.options_active_addr.is_some()
-                {
+                //
+                // THE TWO TRADE PLACES ON THE REVEAL (Max, 2026-10-12: *"the X
+                // becomes minimize on hover and the one revealing becomes the
+                // X"*): at rest the near pill is the X, as a sign; once the
+                // hand is on the group that pill IS the minimize — glyph and
+                // act — and the pill that slides out beyond it is the X. The
+                // harmless act is the one in reach; closing takes the extra
+                // travel. The ids stay with the SPOTS (`Close` = the resting
+                // spot, `Minimize` = the revealed one) because the reveal
+                // chain animates by id; `close_spot_minimizes` says which act
+                // the resting spot carries.
+                if self.minimize_offered() {
                     let min_x = close_x - CTRL_GAP - d;
                     if min_x >= EDGE_PAD {
-                        circle(&mut pills, min_x, PillId::Minimize, GLYPH_MINIMIZE, None);
+                        circle(&mut pills, min_x, PillId::Minimize, GLYPH_CLOSE, None);
                     }
                 }
-                circle(&mut pills, close_x, PillId::Close, GLYPH_CLOSE, None);
+                let near = if self.close_spot_minimizes() {
+                    GLYPH_MINIMIZE
+                } else {
+                    GLYPH_CLOSE
+                };
+                circle(&mut pills, close_x, PillId::Close, near, None);
                 // The state word and the mode controls keep the right side,
                 // starting where the close used to rest.
                 let mut cx = wx + ww + GROUP_GAP;
@@ -5705,6 +5718,33 @@ impl App {
         }
     }
 
+    /// Whether the bar offers a minimize at all: only for a window of the
+    /// plain desktop — not over the overview's map (the pill names what you
+    /// point at there), not on the stage, not for a title that has outlived
+    /// its window.
+    fn minimize_offered(&self) -> bool {
+        self.overview_hover.is_none()
+            && !self.overview_active
+            && !self.stage.is_on()
+            && self.options_active_addr.is_some()
+    }
+
+    /// Whether the close's resting spot is the MINIMIZE right now: while the
+    /// group is revealed and a minimize is offered. (Read by the layout for
+    /// the glyph and by the click for the act, so what it shows is what it
+    /// does.)
+    fn close_spot_minimizes(&self) -> bool {
+        self.options_ctrl.reveal && self.options_sticky.is_none() && self.minimize_offered()
+    }
+
+    /// To the dock, by the plugin's own minimize (the capture, the flight
+    /// and the park are its; it tells us when the card lands).
+    fn minimize_active_window(&mut self) {
+        if let Some(addr) = self.options_active_addr.clone() {
+            hypr::eval(&format!("hl.plugin.waveview.minimize(\"{addr}\")"));
+        }
+    }
+
     /// The pin pill of a PINNED window: it stands at rest on the bar instead
     /// of riding the reveal chain (see `PillId::Pin`).
     fn pin_rests(&self, id: PillId) -> bool {
@@ -6635,13 +6675,14 @@ impl App {
             // not the window under it — the bar is the overview's only
             // on-screen exit affordance (Esc/Super+R being the others).
             Some(PillId::Close) if self.overview_active => hypr::close_overview(),
+            // The resting spot: the minimize while the group is revealed
+            // (see the layout), the close otherwise.
+            Some(PillId::Close) if self.close_spot_minimizes() => self.minimize_active_window(),
             Some(PillId::Close) => {
                 if let Some(addr) = self.options_active_addr.clone() {
                     hypr::close_window(&addr);
                 }
             }
-            // To the dock, by the plugin's own minimize (the capture, the
-            // flight and the park are its; it tells us when the card lands).
             // The compositor's own pin, on the focused window; the bar reads
             // the answer back rather than assuming it.
             Some(PillId::Pin) => {
@@ -6652,9 +6693,10 @@ impl App {
                     self.refresh_window_pin();
                 }
             }
+            // The revealed spot: the close (the two trade places).
             Some(PillId::Minimize) => {
                 if let Some(addr) = self.options_active_addr.clone() {
-                    hypr::eval(&format!("hl.plugin.waveview.minimize(\"{addr}\")"));
+                    hypr::close_window(&addr);
                 }
             }
             // The sunset prompt's nested button: warm the screen, morph back.
