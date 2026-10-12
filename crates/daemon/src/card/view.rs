@@ -1245,6 +1245,14 @@ pub(crate) struct View<'a> {
     /// 2026-10-12: *"i want the long pill to become the card, as
     /// notification and clipboard do"*). 0 on a window.
     pub rise: f32,
+    /// HUNG UNDER THE BAR it is one of the bar's boxes, not a thing of its
+    /// own: this is the fill those have (the notifications', the phone's),
+    /// and it is edged as they are — their faint even glow, no drop shadow,
+    /// no rim (Max, 2026-10-12: *"notificaciones está bien integrado, se ve
+    /// como algo nativo de la barra; la tarjeta se ve como algo aparte"*).
+    /// `None` on a window: the card's own frame.
+    /// (The fill, and whether the bar it hangs from is a bright one.)
+    pub boxed: Option<([f32; 4], bool)>,
     /// How far each item is moved down right now, by id, to open a place
     /// for what is being dragged in (eased by the caller).
     pub shifts: &'a HashMap<u64, f32>,
@@ -1279,7 +1287,7 @@ pub(crate) fn zoom_scene(scene: &mut Scene, origin: (f32, f32), zoom: f32) {
         rect.w *= zoom;
         rect.h *= zoom;
     };
-    for shadow in &mut scene.shadows {
+    for shadow in scene.shadows.iter_mut().chain(scene.overlay_shadows.iter_mut()) {
         r(&mut shadow.rect);
     }
     for (n, grid) in scene.grids.iter_mut().enumerate() {
@@ -1336,13 +1344,17 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     let rise = view.rise.max(0.0);
     let ground = Rect::new(rect.x, rect.y - rise, rect.w, window.h + rise);
     let whole = Rect::new(rect.x, rect.y - rise, rect.w, rect.h + rise);
-    scene.shadows.push(ShadowInst {
-        rect: ground,
-        radius: RADIUS,
-        blur: 26.0,
-        color: [0.0, 0.0, 0.0, shown],
-        edges: [0.18, 0.42, 0.34, 0.34],
-    });
+    if let Some((_, bar_bright)) = view.boxed {
+        crate::options::push_neumorph(&mut scene, ground, RADIUS, bar_bright, shown);
+    } else {
+        scene.shadows.push(ShadowInst {
+            rect: ground,
+            radius: RADIUS,
+            blur: 26.0,
+            color: [0.0, 0.0, 0.0, shown],
+            edges: [0.18, 0.42, 0.34, 0.34],
+        });
+    }
 
     let mut panel = GridContent {
         clip: ground,
@@ -1355,17 +1367,19 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         // 2026-10-09: *"make the 'air' of the card more transparent"*);
         // the compositor frosts it (`declare_layer_rule`). The items on it
         // keep their own darker boxes, so they stay as readable as before.
-        color: [
+        color: view.boxed.map(|(fill, _)| fill).unwrap_or([
             paint.fill[0],
             paint.fill[1],
             paint.fill[2],
             paint.fill[3] * AIR,
-        ],
+        ]),
         glass: 0.0,
         border: 0.0,
     });
     let rim = if view.dnd_over {
         [acc[0], acc[1], acc[2], 0.7]
+    } else if view.boxed.is_some() {
+        [0.0; 4]
     } else if bright {
         [0.0, 0.0, 0.0, 0.12]
     } else {
@@ -2928,6 +2942,7 @@ mod tests {
             hidden: None,
             opening: 0.0,
             rise: 0.0,
+            boxed: None,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -2975,6 +2990,7 @@ mod tests {
             hidden: None,
             opening: 0.0,
             rise: 0.0,
+            boxed: None,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -3008,6 +3024,7 @@ mod tests {
                 hidden,
                 opening: 0.0,
                 rise: 0.0,
+                boxed: None,
                 shifts,
                 slots: &slots,
                 paint: PAINT,
@@ -3142,6 +3159,7 @@ mod tests {
             hidden: None,
             opening: 0.0,
             rise: 0.0,
+            boxed: None,
             shifts: &shifts,
             slots: &slots,
             paint: PAINT,
@@ -3224,6 +3242,7 @@ mod tests {
                 hidden: None,
                 opening: 0.0,
                 rise: 0.0,
+                boxed: None,
                 shifts: &shifts,
                 slots: &slots,
                 paint: PAINT,

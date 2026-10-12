@@ -4794,6 +4794,11 @@ impl App {
         // 'hole' on the animation when the card cross the middle of the
         // window"*). Its window does not move while it slides.
         let paint = self.card_paint();
+        // (Hung under the bar: the bar's boxes' own fill.)
+        let boxed = self.card.banner.is_some().then(|| {
+            let (fill, _) = self.clip_box_surface();
+            ([fill[0], fill[1], fill[2], self.box_panel_alpha()], self.options_bar_is_bright())
+        });
         let Some(renderer) = self.card_renderer.as_mut() else {
             return;
         };
@@ -5111,6 +5116,7 @@ impl App {
         let view = View {
             rect,
             shown,
+            boxed,
             items: listed,
             lines: &self.card.lines,
             scroll: if self.card.to_bottom {
