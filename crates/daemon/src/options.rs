@@ -2453,6 +2453,18 @@ impl App {
                 )
             });
         }
+        // THE CARD hung from its pill stands IN the bar's row, on a surface
+        // under this one: whatever of the bar stood in that stretch was
+        // drawn over the card, two things in one place (Max, 2026-10-12: "I
+        // can see the banner layer combined with the card layer… I want the
+        // card on top of the banner. We don't want the banner there. Like
+        // the notifications"). So the bar leaves that stretch, as it does
+        // under the notifications' box.
+        if let Some((from, to)) = self.card_banner_in_bar() {
+            clear_under(&mut pills, Rect::new(from, 0.0, to - from, 1.0), |id| {
+                matches!(id, PillId::Settings | PillId::Clipboard | PillId::ClipboardBox)
+            });
+        }
         if self.notif_covering() {
             clear_under(&mut pills, self.notif_rect(), |id| {
                 matches!(id, PillId::Notif | PillId::NotifMute)
