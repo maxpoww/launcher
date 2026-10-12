@@ -1239,6 +1239,8 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 app.remember_window_closed(&addr);
                                 // The card forgets what it kept for the window.
                                 app.card_window_closed(&addr);
+                                // …and the pill forgets where it was centred from.
+                                app.nub_window_closed(&addr);
                                 // Addresses are window pointers and Hyprland
                                 // reuses them, so a thumbnail left filed under a
                                 // dead window's address would eventually be

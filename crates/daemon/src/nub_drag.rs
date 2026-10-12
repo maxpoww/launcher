@@ -149,7 +149,19 @@ impl App {
             if nd.ux0.is_finite() && nd.ux1.is_finite() {
                 let x = (nd.ux0 + (nd.ux1 - nd.ux0 - nd.win_w as f64) / 2.0).round() as i32;
                 let y = (nd.uy0 + (nd.uy1 - nd.uy0 - nd.win_h as f64) / 2.0).round() as i32;
-                move_window(&nd.addr, x, y);
+                // …and BACK on the next click (Max, 2026-10-12: the place it
+                // was centred FROM is remembered, a second right-click on
+                // the pill returns it there, and the place stays remembered
+                // until the window closes — see `click_move`).
+                let home = self.nub_home.get(&nd.addr).copied();
+                let (to, keep) = click_move((nd.start_x, nd.start_y), (x, y), home);
+                match keep {
+                    Some(h) => self.nub_home.insert(nd.addr.clone(), h),
+                    None => self.nub_home.remove(&nd.addr),
+                };
+                if let Some((tx, ty)) = to {
+                    move_window(&nd.addr, tx, ty);
+                }
             }
         } else {
             let (x, y) = nd.target();
@@ -160,6 +172,43 @@ impl App {
         let _ = self.conn.flush();
         debug!("nub drag: dropped {} (travelled {travelled:.0})", nd.addr);
         self.card_window_placed(&nd.addr);
+    }
+}
+
+/// A window's position (its top-left corner, in layout coordinates).
+type Place = (i32, i32);
+
+/// How near the centre a window has to stand to count as centred: a window
+/// can settle a pixel or two off where it was sent (odd sizes, the app's own
+/// size steps), and that must still read as "it is in the centre".
+const CENTRED_WITHIN: i32 = 3;
+
+/// What a right-click on the pill does to a window standing at `at`, given the
+/// `centre` it would be centred at and the place remembered for it (`home`):
+/// where to move it (if anywhere), and the place to remember afterwards.
+///
+/// * Not in the centre → it goes to the centre, and where it stood is the
+///   place remembered (a window moved by hand since the last time has a new
+///   one).
+/// * In the centre, with a place remembered → it goes back there, and the
+///   place STAYS remembered: the next click centres it again and the one
+///   after returns it, as often as wanted, until the window closes.
+/// * In the centre with nothing remembered → nothing to do.
+fn click_move(at: Place, centre: Place, home: Option<Place>) -> (Option<Place>, Option<Place>) {
+    let centred =
+        (at.0 - centre.0).abs() <= CENTRED_WITHIN && (at.1 - centre.1).abs() <= CENTRED_WITHIN;
+    match (centred, home) {
+        (false, _) => (Some(centre), Some(at)),
+        (true, Some(h)) => (Some(h), Some(h)),
+        (true, None) => (None, None),
+    }
+}
+
+impl App {
+    /// A window closed: the place its centring remembered goes with it
+    /// (addresses are reused, so it must not wait for another window).
+    pub(crate) fn nub_window_closed(&mut self, addr: &str) {
+        self.nub_home.remove(addr);
     }
 }
 
@@ -399,4 +448,32 @@ fn resize_about_centre(addr: &str, w: i32, h: i32, cx: f64, cy: f64) {
            hl.dispatch(hl.dsp.window.move({{ x = math.floor({cx} - sw / 2 + 0.5), y = math.floor({cy} - sh / 2 + 0.5), window = a }})) \
            return hl.dsp.no_op() end)()"
     ));
+}
+
+#[cfg(test)]
+mod click_tests {
+    use super::click_move;
+
+    #[test]
+    fn a_click_centres_then_returns_and_keeps_the_place() {
+        let (centre, there) = ((500, 300), (40, 60));
+        // First click: to the centre, remembering where it stood.
+        assert_eq!(click_move(there, centre, None), (Some(centre), Some(there)));
+        // Second click (it settled a pixel off the centre): back, place kept.
+        assert_eq!(click_move((501, 299), centre, Some(there)), (Some(there), Some(there)));
+        // Third: centred again from the same place; fourth: back again.
+        assert_eq!(click_move(there, centre, Some(there)), (Some(centre), Some(there)));
+        assert_eq!(click_move(centre, centre, Some(there)), (Some(there), Some(there)));
+    }
+
+    #[test]
+    fn a_window_moved_by_hand_has_a_new_place_to_return_to() {
+        let (centre, old, new) = ((500, 300), (40, 60), (900, 120));
+        assert_eq!(click_move(new, centre, Some(old)), (Some(centre), Some(new)));
+    }
+
+    #[test]
+    fn a_centred_window_with_no_place_remembered_stays() {
+        assert_eq!(click_move((500, 300), (500, 300), None), (None, None));
+    }
 }

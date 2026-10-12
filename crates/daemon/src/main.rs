@@ -615,6 +615,7 @@ fn main() -> anyhow::Result<()> {
         swipe_gesture: None,
         pinch_gesture: None,
         nub_drag: None,
+        nub_home: std::collections::HashMap::new(),
         scroll_drag: None,
         pinch_drag: None,
         pointer_surface: options::PointerSurface::Dock,
@@ -1422,6 +1423,10 @@ pub struct App {
     /// An in-flight nub drag: the cursor is locked and touchpad motion is moving
     /// the focused window. `None` when not dragging. (Hardware-mouse path.)
     nub_drag: Option<nub_drag::NubDrag>,
+    /// Where each window stood before a right-click on the pill centred it
+    /// (address → position): the next right-click returns it there. Kept
+    /// until the window closes (see nub_drag.rs, `click_move`).
+    nub_home: std::collections::HashMap<String, (i32, i32)>,
     /// An in-flight scroll drag: two-finger scroll over the current-task pill is
     /// moving the focused window (the touchpad path). `None` when not dragging.
     scroll_drag: Option<nub_drag::ScrollDrag>,
