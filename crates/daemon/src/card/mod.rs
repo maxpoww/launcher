@@ -101,8 +101,13 @@ const SLIDE_START: f32 = 6.0;
 /// grab that did not take, not a click: nothing is pasted (Max, 2026-10-11:
 /// *"i click a lot on the items when i'm trying to grab them"*).
 const CLICK_MS: u128 = 300;
-/// Two clicks on an item this close together are a double click.
-const TWICE_MS: u128 = 450;
+/// A click on an item acts this long after it — if the pointer has not
+/// gone this far from it meanwhile (`card_clicked`).
+const CLICK_WAIT_MS: u64 = 180;
+const CLICK_AWAY: f32 = 8.0;
+/// A press on an item held this long takes it in hand where it is, with no
+/// travel at all: to grab is to press and hold a moment.
+const HOLD_MS_GRAB: u64 = 160;
 /// A click's paste waits this long for the clipboard to be the item's (and
 /// longer when the card's window has to be given the keyboard first).
 const PASTE_SETTLE: u64 = 70;
@@ -654,7 +659,7 @@ pub(crate) struct Card {
     keys_watch: bool,
     /// The item clicked once, and when: a second click on it soon after
     /// pastes it (`card_click`).
-    clicked: Option<(u64, Instant)>,
+    clicked: Option<(u64, Instant, (f32, f32))>,
     /// How the drag in hand is going, this second (`draw_card`).
     drag_pace: Option<DragPace>,
     /// The timer that redraws the card while something records or plays
@@ -3616,55 +3621,18 @@ impl App {
     /// again. Anything else (a plain item, a piece of an open one) is pasted
     /// into the window.
     fn card_click(&mut self, id: u64) {
-        // EVERYTHING in the list answers to TWO clicks, one after the other
-        // (Max, 2026-10-11: *"i click on an item trying to drag it and it
-        // pastes it… i like to drag more than click"*, then *"we need double
-        // click everywhere now"*): a grab that misses is one click, and one
-        // click does nothing but say what two would do.
-        let row = id == PINNED_ROW || self.card.is_row(id);
         let composed = self
             .card
             .items
             .iter()
             .any(|it| it.id == id && !it.parts.is_empty());
-        let voice = self.card.item(id).is_some_and(|it| it.kind == Kind::Voice);
         // (On voice to text's page what was said is COPIED: it is in the
-        // window already — Max: *"i want to copy it if i need it"*.)
-        let copies = self.card.page == Page::Talk && !row && !composed && !voice;
-        let now = Instant::now();
-        let twice =
-            self.card.clicked.take().is_some_and(|(was, at)| {
-                was == id && now.duration_since(at).as_millis() < TWICE_MS
-            });
-        if !twice {
-            self.card.clicked = Some((id, now));
-            // (Said in the hint's line, for as long as the second click
-            // would still count — without touching what can be undone.)
-            let words = if row || composed {
-                "Double-click opens it"
-            } else if voice {
-                "Double-click plays it"
-            } else if copies {
-                "Double-click copies it"
-            } else {
-                "Double-click pastes it"
-            };
-            if self.card.undo.is_none() {
-                self.card.flash = Some((words.to_owned(), now));
-                self.after_ms(900, move |app| {
-                    if app.card.flash.as_ref().is_some_and(|f| f.1 == now) {
-                        app.card.flash = None;
-                        app.request_card_draw();
-                    }
-                });
-            }
-            self.request_card_draw();
-            return;
-        }
-        if self.card.undo.is_none() {
-            self.card.flash = None;
-        }
-        if copies {
+        // window already — Max, 2026-10-11: *"i want to copy it if i need
+        // it"*.)
+        let said = self.card.page == Page::Talk
+            && !composed
+            && self.card.item(id).is_some_and(|it| it.kind != Kind::Voice);
+        if said {
             if let Some(body) = self.card.item(id).map(|it| it.body.clone()) {
                 self.copy_text(&body);
                 self.card_flash("Copied");
@@ -3676,6 +3644,32 @@ impl App {
             self.card_write_out(id);
         }
         self.request_card_draw();
+    }
+
+    /// AN ITEM WAS CLICKED — pressed and let go at once, where it was. ONE
+    /// click acts (Max, 2026-10-12: *"i don't like the double click… i want
+    /// to manage with single click, and somehow make the grab a little
+    /// easier"*), but not before a moment has passed with the pointer still
+    /// there: a click the pointer then runs away from was a grab that
+    /// missed (the log of 2026-10-11: quick clean clicks between his
+    /// drags), and does nothing. A session's row, which cannot be carried,
+    /// answers at once.
+    fn card_clicked(&mut self, id: u64) {
+        let Some(at) = self.card.ptr else {
+            return;
+        };
+        if self.card.page == Page::Memory {
+            self.card_click(id);
+            return;
+        }
+        let now = Instant::now();
+        self.card.clicked = Some((id, now, at));
+        self.after_ms(CLICK_WAIT_MS, move |app| {
+            if app.card.clicked.is_some_and(|c| c.0 == id && c.1 == now) {
+                app.card.clicked = None;
+                app.card_click(id);
+            }
+        });
     }
 
     /// Write out what the voice notes of item `id` say (those not written
@@ -4798,8 +4792,8 @@ impl App {
             (_, _, Page::Session) if self.card.open.is_some() => {
                 "Type to search · press Enter to create · hold Space to talk"
             }
-            (_, _, Page::Memory) => "Double-click to open · Enter to create · type to search",
-            (_, _, Page::Clipboard) => "Double-click to paste · type to search",
+            (_, _, Page::Memory) => "Enter to create · type to search",
+            (_, _, Page::Clipboard) => "Click to paste · type to search",
             (_, _, Page::Pinned) => "Type to search · press Enter to create · hold Space to talk",
             (_, _, Page::Dictionary) => "Type to search · press Enter to look a word up",
             (_, _, Page::Translate) => "Type to search · press Enter to translate",
@@ -5134,6 +5128,8 @@ impl App {
                         return;
                     }
                     let edge = self.card.grip(at).zip(self.card.rect).zip(self.card.spot);
+                    // (A press cancels a click that was waiting to act.)
+                    self.card.clicked = None;
                     self.card.press = match self.card.hit(at) {
                         // A side edge first: it is the card's, whatever
                         // lies just inside it.
@@ -5160,6 +5156,26 @@ impl App {
                                 moved: false,
                             }),
                     };
+                    // PRESS AND HOLD takes an item in hand where it is, with
+                    // no travel needed (Max, 2026-10-12: *"make the grab a
+                    // little easier"*): a click is quick, a grab is not.
+                    if let Some(Press::Item { id, since, .. }) = self.card.press {
+                        if self.card.page != Page::Memory {
+                            self.after_ms(HOLD_MS_GRAB, move |app| {
+                                if let Some(Press::Item {
+                                    id: held,
+                                    since: from,
+                                    serial,
+                                    ..
+                                }) = app.card.press
+                                {
+                                    if held == id && from == since {
+                                        app.card_lift(id, serial);
+                                    }
+                                }
+                            });
+                        }
+                    }
                     self.card_cursor();
                 }
                 wl_pointer::ButtonState::Released => {
@@ -5168,7 +5184,7 @@ impl App {
                         // (Held a while first: a grab that did not take.)
                         Some(Press::Item { id, since, .. }) => {
                             if since.elapsed().as_millis() < CLICK_MS {
-                                self.card_click(id);
+                                self.card_clicked(id);
                             }
                         }
                         Some(Press::Tap(what)) => {
@@ -5473,6 +5489,14 @@ impl App {
     fn card_motion(&mut self, x: f32, y: f32) {
         let before = self.card.ptr.and_then(|p| self.card.hit(p));
         self.card.ptr = Some((x, y));
+        // (A click the pointer runs away from was a grab that missed.)
+        if self
+            .card
+            .clicked
+            .is_some_and(|(_, _, at)| (x - at.0).hypot(y - at.1) >= CLICK_AWAY)
+        {
+            self.card.clicked = None;
+        }
         match self.card.press {
             // Travel in the input box's words selects them, from where the
             // press was to where the pointer is.
