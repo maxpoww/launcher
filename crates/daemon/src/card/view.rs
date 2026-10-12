@@ -185,6 +185,27 @@ impl Foot {
         !matches!(self, Foot::Memory)
     }
 
+    /// Its icon (the round ones have one), with its measures.
+    fn icon(self) -> Option<Icon> {
+        let (w, h, off) = match self {
+            Foot::Memory => return None,
+            Foot::Talk => (0.330, 0.480, (0.0, 0.0)),
+            Foot::Emoji => (0.600, 0.600, (0.0, 0.0)),
+            // (Its outline sits in the middle, but its weight — the head
+            // of the pin — is 1.6 px above it: a pixel down.)
+            Foot::Pinned => (0.6025, 0.800, (0.0, -0.3)),
+            Foot::Clipboard => (0.600, 0.670, (0.0, 0.1)),
+            Foot::Translate => (0.600, 0.545, (0.0, 0.2)),
+            Foot::Dictionary => (0.600, 0.6875, (0.0, 0.1)),
+        };
+        Some(Icon {
+            glyph: self.word(),
+            w,
+            h,
+            off,
+        })
+    }
+
     /// The page this button shows.
     pub(super) fn page(self) -> Page {
         match self {
@@ -333,10 +354,61 @@ const GLYPH_EDIT: &str = "\u{f040}";
 
 /// The foot's height, and its buttons' own.
 pub(super) const FOOT_H: f32 = 46.0;
-/// How big the icons of the head's round buttons are, and the line they
-/// stand in.
-const FOOT_ICON_PX: f32 = 17.0;
-const FOOT_ICON_LINE: f32 = 22.0;
+/// AN ICON OF THE HEAD, MEASURED (Max, 2026-10-12: *"those three look
+/// smaller than the other ones… they don't look very centered, any of them…
+/// measure it"*). The icon font draws every icon in a letter's cell, 0.6 of
+/// the font's size wide: a tall one (the pin) comes out a third bigger than
+/// a square one (the face), and a narrow one (the microphone) half its
+/// size. So each is drawn at ITS OWN font size — the one at which its
+/// drawing covers the same area as the others' (`FOOT_ICON` is the side of
+/// the square of that area) — and nudged by what was measured on the
+/// screen, so the middle of its drawing is the middle of its button.
+/// `w`/`h`: its drawing's size, of the font's size (measured from the font
+/// file, JetBrainsMono Nerd Font Mono 3.4.0, at 400 px).
+#[derive(Clone, Copy)]
+struct Icon {
+    glyph: &'static str,
+    w: f32,
+    h: f32,
+    /// What it is off the middle by, in design pixels (right, down), taken
+    /// back out. MEASURED on the nested rig (2026-10-12: captures at screen
+    /// scales 1, 1.25 and 1.6, the middle of each drawing's outline and of
+    /// its weight against the middle of its button). As the font has them
+    /// every outline is within a screen pixel of the middle — a letter is
+    /// put on whole pixels, and which way that rounds changes with the
+    /// scale — so these are small: a fraction that tips the rounding the
+    /// right way at 1.25 and 1.6 for three that sat a pixel low, and a
+    /// little more for the two whose WEIGHT is well above the middle of
+    /// their outline (the pin's head, the arrow's). After them: every
+    /// outline within 0.6 screen px at 1.25, within 1.0 at 1.6.
+    off: (f32, f32),
+}
+
+/// The side of the square an icon's drawing has the area of.
+const FOOT_ICON: f32 = 12.5;
+
+impl Icon {
+    fn px(self) -> f32 {
+        FOOT_ICON / (self.w * self.h).sqrt()
+    }
+
+    /// The line it stands in: the font's own (1.3225 of its size).
+    fn line(self) -> f32 {
+        (self.px() * 1.3225).round()
+    }
+
+    fn nudge(self) -> (f32, f32) {
+        (-self.off.0, -self.off.1)
+    }
+}
+
+const ICON_UP: Icon = Icon {
+    glyph: GLYPH_UP,
+    w: 0.515,
+    h: 0.600,
+    // (An arrow's weight is its head: above the middle of its outline.)
+    off: (0.0, -0.6),
+};
 const FOOT_BUTTON_H: f32 = 28.0;
 /// The pin glyph (fa-thumb-tack, in the Nerd font).
 const GLYPH_PIN: &str = "\u{f08d}";
@@ -2271,24 +2343,25 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 border: 1.0,
             });
             // (The one that is up: an arrow pointing up — back to the session.)
-            let icon = which.round() || up;
+            let icon = if up { Some(ICON_UP) } else { which.icon() };
+            // (An icon: at the size that makes its drawing as big as the
+            // others', and where that drawing — not its letter's cell — is
+            // in the middle of the button. See `Icon`.)
+            let (px, line) = icon.map_or((TEXT_PX, TEXT_LINE), |i| (i.px(), i.line()));
+            let (dx, dy) = icon.map_or((0.0, 0.0), |i| i.nudge());
             bar.labels.push(Label {
-                text: if up { GLYPH_UP } else { which.word() }.to_owned(),
-                // (An icon is drawn bigger than the words are: Max,
-                // 2026-10-12, *"make the icons on the buttons bigger"*.)
-                pos: (
-                    r.x + r.w / 2.0,
-                    r.y + (r.h - if icon { FOOT_ICON_LINE } else { TEXT_LINE }) / 2.0
-                        + if icon { 1.0 } else { 0.0 },
-                ),
-                max_w: r.w,
-                font_px: if icon { FOOT_ICON_PX } else { TEXT_PX },
-                line_px: if icon { FOOT_ICON_LINE } else { TEXT_LINE },
+                text: icon.map_or(which.word(), |i| i.glyph).to_owned(),
+                pos: (r.x + r.w / 2.0 + dx, r.y + (r.h - line) / 2.0 + dy),
+                // (Room for the biggest letter: the microphone is narrow, so
+                // its letter is big.)
+                max_w: r.w + 16.0,
+                font_px: px,
+                line_px: line,
                 centered: true,
                 dim: false,
                 cache: true,
                 clip: Some(window),
-                family: icon.then_some(crate::options::NERD),
+                family: icon.map(|_| crate::options::NERD),
                 color: Some(if up {
                     [acc[0], acc[1], acc[2], 1.0]
                 } else {
