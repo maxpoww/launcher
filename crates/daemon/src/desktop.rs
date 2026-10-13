@@ -698,25 +698,6 @@ pub(crate) fn icon_request(key: &str) -> Option<crate::notif_icons::Request> {
     }
 }
 
-/// Open `folder` in the file manager. Off the loop; `xdg-open` is the way
-/// out with no file manager that answers.
-pub(crate) fn show_in_file_manager(folder: PathBuf) {
-    std::thread::spawn(move || {
-        let shown = std::process::Command::new("busctl")
-            .args(["--user", "call", "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1"])
-            .args(["org.freedesktop.FileManager1", "ShowFolders", "ass", "1"])
-            .arg(file_uri(&folder.to_string_lossy()))
-            .arg("")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !shown {
-            let _ = std::process::Command::new("xdg-open").arg(&folder).status();
-        }
-    });
-}
-
 /// How long a drag is held on an app's tile in the dock before that app
 /// comes forward (the compositor's own hold over a window is 650 ms:
 /// `hyprland-dnd-hold-raise.patch`).
@@ -5069,6 +5050,14 @@ impl App {
                 crate::i18n::tr("is a shortcut from elsewhere. If you trust it: right-click → Allow to run.")
             );
             std::thread::spawn(move || crate::desktop_send_notify(&body));
+            return;
+        }
+        // A folder, a stick, a phone: in a window of Golem's own file
+        // manager (`filer.rs` — the system's since 2026-10-13).
+        if matches!(item.kind, Kind::Folder | Kind::Volume) {
+            let dir = PathBuf::from(&item.path);
+            info!("desktop: open {} in Files", item.name);
+            self.filer_open(dir);
             return;
         }
         let (exec, terminal) = match &item.exec {

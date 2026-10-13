@@ -250,10 +250,16 @@ const SCROLL_THUMB: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
 
 /// The app's own launcher, written where the dock's index finds it: a tile
 /// in the grid that opens a window on Home (`waverunner-ctl files`, the ctl
-/// that sits beside this daemon), and the class by which the dock knows
-/// the windows for it. It claims no file type: opening folders from other
-/// apps stays the system file manager's until this one takes that over.
-/// Written only when it changes, as the webapps' launchers are.
+/// that sits beside this daemon; with a folder after it, on that folder),
+/// and the class by which the dock knows the windows for it. Written only
+/// when it changes, as the webapps' launchers are.
+///
+/// IT IS THE SYSTEM'S FILE MANAGER (Max, 2026-10-13: "hacé Golem Files
+/// default"): the entry says it opens folders (`MimeType=inode/directory`),
+/// and — ONCE, so a later choice of the owner's in the control panel stands
+/// — it is made the default for them (`xdg-mime default`, the way the
+/// control panel's own default apps are set). Golem's `home.nix` names it
+/// first for new installs.
 pub(crate) fn materialize_entry() {
     let dir = crate::webapps::applications_dir();
     if std::fs::create_dir_all(&dir).is_err() {
@@ -267,16 +273,33 @@ pub(crate) fn materialize_entry() {
     let contents = format!(
         "[Desktop Entry]\nType=Application\nName=Golem Files\nName[es]=Archivos de Golem\n\
          Comment=Your folders, in a window\nComment[es]=Tus carpetas, en una ventana\n\
-         Exec={ctl} files\nIcon=system-file-manager\nStartupWMClass={APP_ID}\n\
-         Categories=System;FileManager;\nTerminal=false\n"
+         Exec={ctl} files %f\nIcon=system-file-manager\nStartupWMClass={APP_ID}\n\
+         MimeType=inode/directory;\nCategories=System;FileManager;\nTerminal=false\n"
     );
     let path = dir.join(format!("{APP_ID}.desktop"));
-    if std::fs::read_to_string(&path).is_ok_and(|c| c == contents) {
+    if !std::fs::read_to_string(&path).is_ok_and(|c| c == contents) {
+        if let Err(e) = std::fs::write(&path, contents) {
+            warn!("files: cannot write {}: {e}", path.display());
+            return;
+        }
+    }
+    // The default for folders, once.
+    let marker = crate::persist::data_path("files-default-set");
+    if marker.exists() {
         return;
     }
-    if let Err(e) = std::fs::write(&path, contents) {
-        warn!("files: cannot write {}: {e}", path.display());
-    }
+    std::thread::spawn(move || {
+        let set = std::process::Command::new("xdg-mime")
+            .args(["default", &format!("{APP_ID}.desktop"), "inode/directory"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if set {
+            info!("files: Golem Files is the system's file manager from now on");
+            crate::persist::write_text("files-default", &marker, "1\n");
+        } else {
+            warn!("files: could not be made the default for folders (xdg-mime)");
+        }
+    });
 }
 
 /// One of the places down the side.

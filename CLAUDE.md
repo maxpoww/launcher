@@ -777,7 +777,11 @@ The big daemon files are cohesive but long — go straight to the function:
   turns to "Click again to delete", `Win::armed`; a thing is never put back over one that took
   its place); nothing is made, named or pasted there. A drag can be let go ON A PLACE
   (`Win::drop_place`), and into the bin — its place or its window — means thrown away
-  (`filer_bring`). THE TILE: `materialize_entry` writes `golem-files.desktop` ("Golem Files",
+  (`filer_bring`). IT IS THE SYSTEM'S FILE MANAGER (Max, 2026-10-13): the entry claims `inode/directory` and is made
+  the default for it ONCE (`xdg-mime default`, marker `files-default-set`; Golem's `home.nix` names
+  it first), and the shell's own folders open in it directly — the desktop's (`desktop_activate`),
+  a notification's "view" (`notif_open`). Not taken over: `org.freedesktop.FileManager1` (a
+  browser's "show in folder" still asks Nautilus). THE TILE: `materialize_entry` writes `golem-files.desktop` ("Golem Files",
   `Exec=<the ctl beside the daemon> files`, `StartupWMClass=golem-files`) at start; it claims no
   file type. MAKE ROOM (Max,
   2026-10-13: "que hagan espacio como en el grid de aplicaciones… usa el mismo código"): while a

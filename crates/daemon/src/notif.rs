@@ -2396,7 +2396,7 @@ impl App {
             .map(std::path::PathBuf::from);
         if let Some(folder) = folder {
             tracing::info!("notif: opening {}", folder.display());
-            crate::desktop::show_in_file_manager(folder);
+            self.filer_open(folder);
             self.notif_dismiss(idx);
             return;
         }
