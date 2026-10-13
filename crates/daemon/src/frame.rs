@@ -1371,6 +1371,7 @@ impl App {
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
                 search_expand: self.search.expand,
                 placeholders: &self.placeholders,
+                kinds: &self.kinds,
                 layers: &self.icon_layers,
                 dock_order: &self.dock_order,
                 dock_running: &dock_running,

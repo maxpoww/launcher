@@ -1485,6 +1485,9 @@ pub struct FrameInput<'a> {
     /// Which entries are using placeholder tiles (no resolved icon file).
     /// Aligned with the `entries` slice passed to `scene()`.
     pub placeholders: &'a [bool],
+    /// What each entry is, aligned with `entries` (empty: all apps). Only
+    /// an app's icon wears a plate.
+    pub kinds: &'a [crate::apps::EntryKind],
     /// Texture layer per entry. Normally the entry's own index; dynamic
     /// file-search results borrow a generic asset icon's layer. Empty
     /// slice = identity (entry index is the layer).
@@ -1734,6 +1737,7 @@ pub fn scene(
         selected,
         search_expand,
         placeholders,
+        kinds,
         layers,
         dock_order,
         dock_running,
@@ -1777,11 +1781,16 @@ pub fn scene(
         dock_highlight,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
-    // Plate for an app entry's icon: the live adaptive colour — except the
-    // `asset-*` file-type carriers, which render unplated (matching the
-    // rasterizer, which never plated them either).
+    // Plate for an app entry's icon: the live adaptive colour. Only an
+    // app's (Max, 2026-10-13: "on the dock only icons get the plate, not
+    // folders or thumbnails"): a folder, a file's thumbnail and the
+    // `asset-*` file-type carriers stand bare wherever they are — pinned to
+    // the dock, in a folder's stack over it, in the Files row (matching
+    // the rasterizer, which never plated them either).
     let plate_of = |i: usize| {
-        if entries.get(i).is_some_and(|e| e.id.starts_with("asset-")) {
+        let bare = matches!(kinds.get(i), Some(crate::apps::EntryKind::File | crate::apps::EntryKind::Asset))
+            || entries.get(i).is_some_and(|e| e.id.starts_with("asset-"));
+        if bare {
             NO_PLATE
         } else {
             plate
