@@ -800,7 +800,20 @@ The big daemon files are cohesive but long — go straight to the function:
   as a notification (`filer_say_failed`). A drag held near the field's top or bottom SCROLLS the
   folder (`EDGE_ZONE`, `filer_edge_tick`). ARCHIVES: "Extract here" on one, "Compress" on any
   selection = File Roller (`file-roller --extract-here` / `--add`, `Action::Extract|Compress`,
-  `is_archive`). `menu_rows` takes an `Asked`. NOT BUILT: a drag's spring-open, list view, search,
+  `is_archive`). `menu_rows` takes an `Asked`. THE LIST (`settings.files_list`, one
+  choice for every window; the head's right button or Ctrl+1 / Ctrl+2, `filer_set_list`): a
+  `Layout` of ONE column whose cell is a row (`Layout::of(…, list)`, `LIST_ROW`), so the pointer,
+  the keys, the band, drags and make-room know rows with no code of their own (`slot_at` gives
+  how far DOWN a row); only the drawing differs (`icon_in`, `columns`: name · size · date, the
+  last two only where there is room; `Win::meta`, read with the listing). Its strip names the
+  columns; a click orders by one (`Spot::Col`, `Win::sort`, `sorted`: size/date in THIS window,
+  folders first; Name = the folder's own order) — while ordered by size or date no room is made
+  for a drag. SEARCH (the magnifier, or Ctrl+F): a field at the head's right, the folder showing
+  only what holds the words (`Win::find`, `Win::all`, `found`, `filer_find`; Escape puts it
+  away, Enter opens the first found, the walking keys go on to what is found); not into
+  sub-folders. The head's icons are the bar's font (`options::NERD`). Rig: `files view
+  list|icons`, `sort name|size|date [up]`, `find <words>|-`. NOT BUILT: a drag's spring-open,
+  search into sub-folders,
   `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll

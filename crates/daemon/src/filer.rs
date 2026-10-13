@@ -102,6 +102,82 @@ const TYPE_PAUSE: Duration = Duration::from_millis(900);
 /// A wheel's notch (15 units from the compositor) in pixels of scroll.
 const WHEEL_STEP: f32 = 4.0;
 
+/// THE LIST: a row a thing, under a strip naming its columns.
+const LIST_ROW: f32 = 30.0;
+const LIST_HEAD: f32 = 26.0;
+const LIST_ICON: f32 = 20.0;
+/// Where a row's name begins, and its columns' widths (each left out of a
+/// window too narrow for it).
+const LIST_NAME_X: f32 = 38.0;
+const LIST_SIZE_W: f32 = 84.0;
+const LIST_DATE_W: f32 = 150.0;
+
+/// The search field at the head's right end.
+const FIND_W: f32 = 210.0;
+
+/// The things of a folder whose names hold `find` (whatever the case);
+/// all of them for no search.
+pub(crate) fn found(all: &[Item], find: Option<&str>) -> Vec<Item> {
+    match find.map(str::to_lowercase).filter(|f| !f.is_empty()) {
+        Some(find) => all.iter().filter(|it| it.name.to_lowercase().contains(&find)).cloned().collect(),
+        None => all.to_vec(),
+    }
+}
+
+/// What a folder's things are ordered by in a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SortKey {
+    /// The folder's own order: by name, or as arranged by hand.
+    #[default]
+    Name,
+    Size,
+    Modified,
+}
+
+/// What the list says of a thing beside its name.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Meta {
+    pub size: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// What the disk says of each of `items` (asked off the loop, with the
+/// listing).
+fn meta_of(items: &[Item]) -> HashMap<String, Meta> {
+    items
+        .iter()
+        .filter_map(|it| {
+            let m = std::fs::metadata(&it.path).ok()?;
+            Some((
+                it.path.clone(),
+                Meta {
+                    size: m.len(),
+                    modified: m.modified().ok(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// `items` by size or date (folders first, as ever), biggest or newest
+/// first when `desc`. By name they stay as they are: the folder's own order.
+pub(crate) fn sorted(mut items: Vec<Item>, meta: &HashMap<String, Meta>, key: SortKey, desc: bool) -> Vec<Item> {
+    if key == SortKey::Name {
+        return items;
+    }
+    let of = |it: &Item| meta.get(&it.path).copied().unwrap_or_default();
+    items.sort_by(|a, b| {
+        let by = match key {
+            SortKey::Size => of(a).size.cmp(&of(b).size),
+            _ => of(a).modified.cmp(&of(b).modified),
+        };
+        (b.kind == Kind::Folder)
+            .cmp(&(a.kind == Kind::Folder))
+            .then(if desc { by.reverse() } else { by })
+    });
+    items
+}
+
 /// A drag held this near the field's top or bottom scrolls the folder, at
 /// most this many pixels a tick (faster the nearer the edge).
 const EDGE_ZONE: f32 = 44.0;
@@ -174,6 +250,12 @@ enum Spot {
     Crumb(usize),
     Back,
     Forward,
+    /// The button that turns the folder between icons and a list.
+    View,
+    /// The magnifier: it opens the search.
+    Find,
+    /// A column's name in the list's strip (0 name, 1 size, 2 date).
+    Col(usize),
 }
 
 /// Where a window's parts are: its places' column, the icons' field and
@@ -187,17 +269,36 @@ pub(crate) struct Layout {
     pub pitch: f32,
     pub cw: f32,
     pub ch: f32,
+    /// A list: one column of rows, under a strip naming the columns.
+    pub list: bool,
 }
 
 impl Layout {
     #[cfg(test)]
     pub fn new((w, h): (u32, u32), icon_scale: f32) -> Self {
-        Self::of((w as f32, h as f32), icon_scale)
+        Self::of((w as f32, h as f32), icon_scale, false)
     }
 
     /// The same for a size that is not whole (a zoomed window's — `Win::virt`).
-    pub fn of((w, h): (f32, f32), icon_scale: f32) -> Self {
+    pub fn of((w, h): (f32, f32), icon_scale: f32, list: bool) -> Self {
         let side_w = if w >= SIDE_FROM { SIDE_W } else { 0.0 };
+        if list {
+            // One column as wide as the field: a row is a cell, so all that
+            // knows cells (the pointer, the keys, a band, a drag's room)
+            // knows rows.
+            let top = HEAD_H + LIST_HEAD;
+            let body = Rect::new(side_w, top, (w - side_w).max(1.0), (h - top).max(1.0));
+            let room = (body.w - 2.0 * PAD).max(1.0);
+            return Self {
+                side_w,
+                body,
+                cols: 1,
+                pitch: room,
+                cw: room,
+                ch: LIST_ROW,
+                list,
+            };
+        }
         let body = Rect::new(side_w, HEAD_H, (w - side_w).max(1.0), (h - HEAD_H).max(1.0));
         let (cw, ch) = (GRID_CELL_W * icon_scale, CELL_H * icon_scale);
         let room = (body.w - 2.0 * PAD).max(cw);
@@ -209,7 +310,26 @@ impl Layout {
             pitch: room / cols as f32,
             cw,
             ch,
+            list,
         }
+    }
+
+    /// A thing's picture in its cell: the grid's icon, centred under the
+    /// cell's top; a row's small one, at its left.
+    pub fn icon_in(&self, cell: &Rect, icon_scale: f32) -> Rect {
+        if self.list {
+            return Rect::new(cell.x + 9.0, cell.y + (cell.h - LIST_ICON) / 2.0, LIST_ICON, LIST_ICON);
+        }
+        let size = GRID_ICON * icon_scale;
+        Rect::new(cell.x + (cell.w - size) / 2.0, cell.y + GRID_ICON_TOP * icon_scale, size, size)
+    }
+
+    /// The list's columns in a row `cell`: where the size ends (right
+    /// aligned) and where the date begins, each only where there is room.
+    pub fn columns(&self, cell: &Rect) -> (Option<f32>, Option<f32>) {
+        let date = (cell.w > 470.0).then_some(cell.x + cell.w - LIST_DATE_W);
+        let size = (cell.w > 300.0).then(|| date.unwrap_or(cell.x + cell.w) - 14.0);
+        (size, date)
     }
 
     /// Item `i`'s cell, before any scroll.
@@ -265,8 +385,9 @@ impl Layout {
     /// across it the pointer is, the field scrolled by `scroll`.
     pub fn slot_at(&self, pos: (f32, f32), scroll: f32) -> (usize, f32) {
         let x = ((pos.0 - self.body.x - PAD) / self.pitch).clamp(0.0, self.cols as f32 - 0.001);
-        let row = ((pos.1 - self.body.y - PAD + scroll) / self.ch).max(0.0) as usize;
-        (row * self.cols + x as usize, x.fract())
+        let y = ((pos.1 - self.body.y - PAD + scroll) / self.ch).max(0.0);
+        // (Things follow one another across a row of icons, down a list.)
+        (y as usize * self.cols + x as usize, if self.list { y.fract() } else { x.fract() })
     }
 
     /// The items with any part on screen at `scroll`.
@@ -603,6 +724,10 @@ struct Hits {
     forward: Rect,
     crumbs: Vec<(Rect, PathBuf)>,
     places: Vec<Rect>,
+    view: Rect,
+    find: Rect,
+    /// The list's column names.
+    cols: Vec<Rect>,
 }
 
 /// One window.
@@ -617,6 +742,17 @@ struct Win {
     /// The owner's zoom of the file windows (`App::files_zoom`), kept here
     /// for the layout.
     zoom: f32,
+    /// Shown as a list (`settings.files_list`, one choice for every window).
+    list: bool,
+    /// What the things are ordered by here, biggest or newest first when
+    /// the flag is set; and what the disk says of each.
+    sort: (SortKey, bool),
+    meta: HashMap<String, Meta>,
+    /// A search of this folder: what is typed (the field is out while this
+    /// is `Some`), and everything the folder holds — `items` is then only
+    /// what was found.
+    find: Option<String>,
+    all: Vec<Item>,
     frame_pending: bool,
     dirty: bool,
     last_frame: Option<Instant>,
@@ -726,7 +862,7 @@ impl Win {
     }
 
     fn layout(&self, icon_scale: f32) -> Layout {
-        Layout::of(self.virt(), icon_scale)
+        Layout::of(self.virt(), icon_scale, self.list)
     }
 
     /// The size everything is laid out in: the window's, as many times
@@ -756,6 +892,15 @@ impl Win {
         }
         if let Some(i) = self.hits.places.iter().position(|r| r.contains(pos)) {
             return Spot::Place(i);
+        }
+        if self.hits.view.contains(pos) {
+            return Spot::View;
+        }
+        if self.hits.find.contains(pos) {
+            return Spot::Find;
+        }
+        if let Some(i) = self.hits.cols.iter().position(|r| r.contains(pos)) {
+            return Spot::Col(i);
         }
         layout
             .index_at(pos, self.scroll, self.items.len())
@@ -1176,6 +1321,11 @@ impl App {
             id,
             size: (0, 0),
             zoom: self.files_zoom(),
+            list: self.settings.files_list,
+            sort: (SortKey::Name, false),
+            meta: HashMap::new(),
+            find: None,
+            all: Vec::new(),
             frame_pending: false,
             dirty: false,
             last_frame: None,
@@ -1338,6 +1488,8 @@ impl App {
         win.gap = None;
         win.edge = 0.0;
         win.slide.clear();
+        win.find = None;
+        win.all.clear();
         win.selected.clear();
         win.cursor = None;
         win.click = None;
@@ -1401,13 +1553,32 @@ impl App {
         let (generation, dir, hidden) = (win.generation, win.dir.clone(), win.hidden);
         self.desktop_off_loop(
             // (The bin is read through its own records: names, newest first.)
-            move || if dir == bin_root() { Ok(list_bin()) } else { list(&dir, hidden) },
+            move || {
+                let items = if dir == bin_root() { list_bin() } else { list(&dir, hidden)? };
+                let meta = meta_of(&items);
+                Ok((items, meta))
+            },
             move |app, listed| app.filer_listed(id, generation, listed),
         );
     }
 
-    fn filer_listed(&mut self, id: u32, generation: u64, listed: Result<Vec<Item>, std::io::Error>) {
+    fn filer_listed(
+        &mut self,
+        id: u32,
+        generation: u64,
+        listed: Result<(Vec<Item>, HashMap<String, Meta>), std::io::Error>,
+    ) {
         let icon_scale = self.icon_scale();
+        let (listed, meta) = match listed {
+            Ok((items, meta)) => (Ok(items), meta),
+            Err(e) => (Err(e), HashMap::new()),
+        };
+        // (By size or by date, in this window, over whatever order the
+        // folder has.)
+        let sort = self.filer.win(id).map_or((SortKey::Name, false), |w| w.sort);
+        if let Some(win) = self.filer.win_mut(id).filter(|w| w.generation == generation) {
+            win.meta = meta.clone();
+        }
         // A folder arranged by hand is shown as it was left.
         let order = self
             .filer
@@ -1418,6 +1589,7 @@ impl App {
             Some(order) => arranged(items, order),
             None => items,
         });
+        let listed = listed.map(|items| sorted(items, &meta, sort.0, sort.1));
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -1428,7 +1600,8 @@ impl App {
         let cursor_path = win.cursor.and_then(|i| win.items.get(i)).map(|it| it.path.clone());
         match listed {
             Ok(items) => {
-                win.items = items;
+                win.items = found(&items, win.find.as_deref());
+                win.all = items;
                 win.failed = false;
             }
             Err(e) => {
@@ -2019,6 +2192,53 @@ impl App {
         self.filer_relayout(id);
     }
 
+    /// Search window `id`'s folder for `find` (`Some("")`: the field out and
+    /// empty; `None`: put away, everything shown again).
+    fn filer_find(&mut self, id: u32, find: Option<String>) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        win.find = find;
+        win.items = found(&win.all, win.find.as_deref());
+        // What is shown changed under everything that held a place in it.
+        let present: HashSet<&str> = win.items.iter().map(|it| it.path.as_str()).collect();
+        win.selected.retain(|p| present.contains(p.as_str()));
+        win.cursor = None;
+        win.names.1.clear();
+        win.slide.clear();
+        win.menu = None;
+        win.menu_path = None;
+        win.props = None;
+        win.rename = None;
+        win.press = None;
+        win.band = None;
+        win.scroll = 0.0;
+        win.scroll_to = 0.0;
+        self.filer_hover(id);
+        self.filer_request_draw(id);
+    }
+
+    /// Icons, or a list: the owner's standing choice for every window.
+    pub(crate) fn filer_set_list(&mut self, list: bool) {
+        if self.settings.files_list != list {
+            self.settings.files_list = list;
+            self.settings.save();
+            info!("files: shown as {}", if list { "a list" } else { "icons" });
+        }
+        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        for id in ids {
+            if let Some(win) = self.filer.win_mut(id) {
+                win.list = list;
+                win.menu = None;
+                win.menu_path = None;
+                win.props = None;
+                win.slide.clear();
+            }
+            self.filer_relayout(id);
+            self.filer_hover(id);
+        }
+    }
+
     /// The owner's zoom of the file windows changed: every window is laid
     /// out and drawn anew at it.
     pub(crate) fn filer_zoomed(&mut self) {
@@ -2277,6 +2497,96 @@ impl App {
                 ..label(glyph, (r.x + r.w / 2.0, mid - 12.0), r.w, true, !live)
             });
         }
+        // Icons or a list: the button shows the one it turns to.
+        hits.view = Rect::new(w - PAD - 28.0, mid - 14.0, 28.0, 28.0);
+        if win.hover == Spot::View {
+            scene.rects.push(rect(hits.view, 14.0, WASH_HOVER));
+        }
+        scene.labels.push(Label {
+            font_px: 14.0,
+            line_px: 18.0,
+            family: Some(crate::options::NERD),
+            ..label(
+                // (The bar's icon font: a grid of squares, a list of lines.)
+                if win.list { "\u{f00a}" } else { "\u{f03a}" },
+                (hits.view.x + hits.view.w / 2.0, mid - 9.0),
+                hits.view.w,
+                true,
+                false,
+            )
+        });
+        // The magnifier, and — once it is clicked or Ctrl+F pressed — the
+        // field what is typed goes in: the folder shows what it finds.
+        hits.find = Rect::new(hits.view.x - 32.0, mid - 14.0, 28.0, 28.0);
+        if win.hover == Spot::Find || win.find.is_some() {
+            scene.rects.push(rect(hits.find, 14.0, WASH_HOVER));
+        }
+        scene.labels.push(Label {
+            font_px: 14.0,
+            line_px: 18.0,
+            family: Some(crate::options::NERD),
+            ..label("\u{f002}", (hits.find.x + hits.find.w / 2.0, mid - 9.0), hits.find.w, true, false)
+        });
+        if let Some(find) = win.find.as_ref() {
+            let field = Rect::new(hits.find.x - 8.0 - FIND_W, mid - 13.0, FIND_W, 26.0);
+            scene.rects.push(rect(field, 13.0, [0.0, 0.0, 0.0, 0.35]));
+            scene.rects.push(RectInst {
+                border: 1.0,
+                ..rect(field, 13.0, [1.0, 1.0, 1.0, 0.16])
+            });
+            let (x, y) = (field.x + 12.0, mid - TEXT_LINE / 2.0);
+            let tw = win
+                .renderer
+                .as_mut()
+                .map_or(0.0, |r| r.measure_text(find, TEXT_PX, None))
+                .min(FIND_W - 26.0);
+            if find.is_empty() {
+                scene.labels.push(label(tr("Search"), (x, y), FIND_W - 24.0, false, true));
+            } else {
+                scene.labels.push(Label {
+                    cache: false,
+                    clip: Some(field),
+                    ..label(find, (x, y), FIND_W - 24.0, false, false)
+                });
+            }
+            scene.rects.push(rect(Rect::new(x + tw + 1.0, y + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
+        }
+        // The list's strip: what each column is, the one the things are
+        // ordered by said with its arrow; a click orders by it.
+        if layout.list {
+            let row = Rect::new(layout.body.x + PAD, HEAD_H, layout.pitch, LIST_HEAD);
+            let (size_end, date_x) = layout.columns(&row);
+            let y = HEAD_H + (LIST_HEAD - TEXT_LINE) / 2.0;
+            let name_of = |key: SortKey, words: &'static str| -> String {
+                match win.sort {
+                    (k, desc) if k == key && key != SortKey::Name => format!("{words} {}", if desc { "↓" } else { "↑" }),
+                    _ => words.to_owned(),
+                }
+            };
+            let name_end = size_end.map_or(row.x + row.w, |x| x - LIST_SIZE_W);
+            let mut cols = vec![(SortKey::Name, row.x + LIST_NAME_X, name_end, name_of(SortKey::Name, tr("Name")))];
+            if let Some(end) = size_end {
+                cols.push((SortKey::Size, end - LIST_SIZE_W, end, name_of(SortKey::Size, tr("Size"))));
+            }
+            if let Some(x) = date_x {
+                cols.push((SortKey::Modified, x, row.x + row.w, name_of(SortKey::Modified, tr("Modified"))));
+            }
+            for (n, (key, x0, x1, words)) in cols.into_iter().enumerate() {
+                let hit = Rect::new(x0 - 6.0, HEAD_H + 2.0, x1 - x0 + 6.0, LIST_HEAD - 4.0);
+                if win.hover == Spot::Col(n) {
+                    scene.rects.push(rect(hit, 7.0, WASH_HOVER));
+                }
+                // (Size is read from its right end, as its numbers are.)
+                let tw = if key == SortKey::Size {
+                    win.renderer.as_mut().map_or(0.0, |r| r.measure_text(&words, TEXT_PX, None))
+                } else {
+                    0.0
+                };
+                let x = if key == SortKey::Size { x1 - tw } else { x0 };
+                scene.labels.push(label(&words, (x, y), x1 - x0 + 4.0, false, win.sort.0 != key));
+                hits.cols.push(hit);
+            }
+        }
         let steps = crumbs(&win.dir, &win.places);
         if let Some(renderer) = win.renderer.as_mut() {
             let widths: Vec<f32> = steps
@@ -2284,7 +2594,10 @@ impl App {
                 .map(|(name, _)| renderer.measure_text(name, TEXT_PX, None))
                 .collect();
             const STEP_GAP: f32 = 22.0;
-            let (left, room) = (PAD + 76.0, w - PAD - 76.0 - PAD);
+            // (The view's button, the magnifier and the search field stand
+            // at the head's right end.)
+            let taken = 68.0 + if win.find.is_some() { FIND_W + 8.0 } else { 0.0 };
+            let (left, room) = (PAD + 76.0, (w - PAD - 76.0 - PAD - taken).max(40.0));
             // The steps that fit, counted from the folder shown: the first
             // ones give way when the window is narrow.
             let mut from = steps.len().saturating_sub(1);
@@ -2417,8 +2730,7 @@ impl App {
                     WASH_SELECTED,
                 ));
             }
-            let size = GRID_ICON * icon_scale;
-            let icon = Rect::new(cell.x + (cell.w - size) / 2.0, cell.y + GRID_ICON_TOP * icon_scale, size, size);
+            let icon = layout.icon_in(&cell, icon_scale);
             if let Some(layer) = win.layer_of(&item.icon) {
                 grid.icons.push(IconInst {
                     rect: icon,
@@ -2427,6 +2739,57 @@ impl App {
                     ring: -1.0,
                     plate: if item.kind == Kind::Launcher { PLATE_STATIC } else { NO_PLATE },
                 });
+            }
+            if layout.list {
+                // A row: the name, its size (a file's) and when it was last
+                // changed, each in its column.
+                let top = cell.y + (cell.h - TEXT_LINE) / 2.0;
+                let (size_end, date_x) = layout.columns(&cell);
+                let name_x = cell.x + LIST_NAME_X;
+                let name_w = size_end.map_or(cell.x + cell.w, |x| x - LIST_SIZE_W) - name_x - 10.0;
+                if covered(cell) {
+                    continue;
+                }
+                let meta = win.meta.get(&item.path).copied().unwrap_or_default();
+                if let Some(rename) = win.rename.as_ref().filter(|r| r.path == item.path) {
+                    let tw = win
+                        .renderer
+                        .as_mut()
+                        .map_or(0.0, |r| r.measure_text(&rename.text, TEXT_PX, None));
+                    let inner = tw.max(24.0);
+                    let field = Rect::new(name_x - 7.0, top - 2.0, inner + 14.0, TEXT_LINE + 4.0);
+                    grid.rects.push(rect(field, 7.0, [0.0, 0.0, 0.0, 0.6]));
+                    grid.rects.push(RectInst {
+                        border: 1.0,
+                        ..rect(field, 7.0, [1.0, 1.0, 1.0, 0.18])
+                    });
+                    if rename.all && tw > 0.0 {
+                        grid.rects.push(rect(Rect::new(name_x, top + 1.0, tw, TEXT_LINE - 2.0), 2.0, [1.0, 1.0, 1.0, 0.22]));
+                    }
+                    grid.rects.push(rect(Rect::new(name_x + tw + 1.0, top + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
+                    grid.labels.push(Label {
+                        cache: false,
+                        ..label(&rename.text, (name_x, top), inner + 2.0, false, false)
+                    });
+                } else if let Some(renderer) = win.renderer.as_mut() {
+                    let name = crate::desktop::fit_label(&item.name, name_w, &mut |t| {
+                        renderer.measure_text(t, TEXT_PX, None)
+                    });
+                    grid.labels.push(label(&name, (name_x, top), name_w + 2.0, false, false));
+                }
+                if let Some(end) = size_end {
+                    let words = if item.kind == Kind::File || item.kind == Kind::Launcher {
+                        crate::desktop_props::size_text(meta.size)
+                    } else {
+                        "—".to_owned()
+                    };
+                    let tw = win.renderer.as_mut().map_or(0.0, |r| r.measure_text(&words, TEXT_PX, None));
+                    grid.labels.push(label(&words, (end - tw, top), tw + 4.0, false, true));
+                }
+                if let (Some(x), Some(when)) = (date_x, crate::desktop_props::date_text(meta.modified)) {
+                    grid.labels.push(label(&when, (x, top), LIST_DATE_W, false, true));
+                }
+                continue;
             }
             if win.names.1[i].is_none() {
                 if let Some(renderer) = win.renderer.as_mut() {
@@ -2498,6 +2861,8 @@ impl App {
         if win.items.is_empty() && !win.loading {
             let words = if win.failed {
                 tr("This folder can't be opened")
+            } else if win.find.as_ref().is_some_and(|f| !f.is_empty()) {
+                tr("Nothing found")
             } else if win.in_bin() == InBin::Top {
                 tr("The bin is empty")
             } else {
@@ -2600,7 +2965,7 @@ impl App {
             Spot::Back => !win.back.is_empty(),
             Spot::Forward => !win.forward.is_empty(),
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
-            Spot::Place(_) => true,
+            Spot::Place(_) | Spot::View | Spot::Find | Spot::Col(_) => true,
         };
         let shape = if goes { Shape::Pointer } else { Shape::Default };
         if self.cursor_now != Some(shape) {
@@ -2929,9 +3294,14 @@ impl App {
         let layout = win.layout(icon_scale);
         let mut cell = layout.cell(i);
         cell.y -= win.scroll;
-        let size = GRID_ICON * icon_scale;
-        let corner = (cell.x + (cell.w - size) / 2.0, cell.y + GRID_ICON_TOP * icon_scale);
-        let grip = ((at.0 - corner.0) * win.zoom, (at.1 - corner.1) * win.zoom);
+        let icon = layout.icon_in(&cell, icon_scale);
+        // (A row's small picture travels full size, held by its middle.)
+        let grip = if layout.list {
+            let half = GRID_ICON * icon_scale * win.zoom / 2.0;
+            (half, half)
+        } else {
+            ((at.0 - icon.x) * win.zoom, (at.1 - icon.y) * win.zoom)
+        };
         let image = win
             .chains
             .get(&item.icon)
@@ -3057,7 +3427,13 @@ impl App {
             .filter(|&i| !carried.contains(&win.items[i].path))
             .collect();
         let (n, m) = (carried.len().max(1), rest.len());
-        let in_field = place.is_none() && layout.body.contains(at) && win.in_bin() == InBin::No;
+        // (Room is made only where a place can be kept: in the folder's own
+        // order, not while it is shown by size or by date.)
+        let in_field = place.is_none()
+            && layout.body.contains(at)
+            && win.in_bin() == InBin::No
+            && win.sort.0 == SortKey::Name
+            && win.find.as_ref().is_none_or(|f| f.is_empty());
         let (d, fx) = layout.slot_at(at, win.scroll);
         let gap_now = win.gap.unwrap_or(m);
         let under = if d < gap_now {
@@ -3315,6 +3691,7 @@ impl App {
             return;
         };
         let at = win.ptr.unwrap_or_default();
+        let layout_top = if win.list { HEAD_H + LIST_HEAD } else { HEAD_H };
         match win.hover {
             Spot::Back => self.filer_back(id),
             Spot::Forward => self.filer_forward(id),
@@ -3362,10 +3739,28 @@ impl App {
                 });
                 self.filer_request_draw(id);
             }
+            Spot::View => {
+                let list = !win.list;
+                self.filer_set_list(list);
+            }
+            Spot::Find => {
+                let open = win.find.is_none();
+                self.filer_find(id, open.then(String::new));
+            }
+            Spot::Col(n) => {
+                let key = [SortKey::Name, SortKey::Size, SortKey::Modified][n.min(2)];
+                // The same column again turns it round; a new one starts
+                // with the biggest, the newest.
+                win.sort = match win.sort {
+                    (k, desc) if k == key && key != SortKey::Name => (key, !desc),
+                    _ => (key, key != SortKey::Name),
+                };
+                self.filer_list(id);
+            }
             Spot::Nothing => {
                 win.click = None;
                 // Bare ground in the field: a band may start here.
-                if at.1 > HEAD_H && at.0 > win.hits.places.first().map_or(0.0, |r| r.x + r.w) {
+                if at.1 > layout_top && at.0 > win.hits.places.first().map_or(0.0, |r| r.x + r.w) {
                     win.press = Some(Press {
                         path: None,
                         at,
@@ -3419,6 +3814,30 @@ impl App {
             }
             return;
         }
+        // A search that is open takes what is typed; the keys that walk
+        // and open go on to the things found.
+        if let Some(find) = win.find.clone() {
+            let typed = utf8.filter(|t| !ctrl && !alt && !t.is_empty() && !t.chars().any(char::is_control));
+            match keysym {
+                Keysym::Escape => return self.filer_find(id, None),
+                Keysym::BackSpace => {
+                    let mut find = find;
+                    // (On an empty field it puts the field away.)
+                    let left = find.pop().map(|_| find);
+                    return self.filer_find(id, left);
+                }
+                Keysym::Return | Keysym::KP_Enter if win.cursor.is_none() && !win.items.is_empty() => {
+                    // Enter with nothing walked to: the first thing found.
+                    self.filer_walk_to(id, 0);
+                    return self.filer_activate(id, 0);
+                }
+                _ => {
+                    if let Some(text) = typed {
+                        return self.filer_find(id, Some(format!("{find}{text}")));
+                    }
+                }
+            }
+        }
         let (n, cols) = (win.items.len(), win.layout(icon_scale).cols);
         let page = win.layout(icon_scale).body.h * 0.9;
         let at = win.cursor;
@@ -3466,6 +3885,12 @@ impl App {
                 }
             }
             Keysym::F5 => self.filer_list(id),
+            Keysym::f | Keysym::F if ctrl => {
+                let open = win.find.is_none();
+                self.filer_find(id, open.then(String::new));
+            }
+            Keysym::_1 if ctrl => self.filer_set_list(false),
+            Keysym::_2 if ctrl => self.filer_set_list(true),
             Keysym::plus | Keysym::equal | Keysym::KP_Add if ctrl => {
                 self.zoom("files", "in");
             }
@@ -3653,6 +4078,21 @@ impl App {
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
             "zoom" => return self.zoom("files", rest),
+            "view" => self.filer_set_list(rest == "list"),
+            "find" => self.filer_find(id, (rest != "-").then(|| rest.to_owned())),
+            "sort" => {
+                // `sort name|size|date [up]`
+                let mut words = rest.split_whitespace();
+                let key = match words.next() {
+                    Some("size") => SortKey::Size,
+                    Some("date") => SortKey::Modified,
+                    _ => SortKey::Name,
+                };
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.sort = (key, key != SortKey::Name && words.next() != Some("up"));
+                }
+                self.filer_list(id);
+            }
             "band" => {
                 // `band <x0> <y0> <x1> <y1>`: as a press and a travel.
                 let n: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
@@ -4026,6 +4466,51 @@ mod tests {
         let (d, fx) = l.slot_at((b.x + b.w / 2.0, b.y + 10.0), 0.0);
         assert_eq!(d, 3);
         assert!(fx > 0.3 && fx < 0.7);
+    }
+
+    #[test]
+    fn a_list_is_one_column_of_rows_under_its_strip() {
+        let l = Layout::of((920.0, 600.0), 1.0, true);
+        assert_eq!((l.cols, l.ch), (1, LIST_ROW));
+        assert_eq!(l.body.y, HEAD_H + LIST_HEAD);
+        let (a, b) = (l.cell(0), l.cell(1));
+        assert!((b.y - a.y - LIST_ROW).abs() < 0.01 && (a.w - (l.body.w - 2.0 * PAD)).abs() < 0.01);
+        // The row under a point, and how far DOWN it the pointer is.
+        assert_eq!(l.index_at((a.x + 200.0, b.y + 4.0), 0.0, 5), Some(1));
+        let (d, f) = l.slot_at((a.x + 200.0, b.y + 24.0), 0.0);
+        assert_eq!(d, 1);
+        assert!(f > 0.7);
+        // Both columns in a wide window, none in a narrow one.
+        assert!(matches!(l.columns(&a), (Some(_), Some(_))));
+        let narrow = Layout::of((320.0, 400.0), 1.0, true);
+        assert_eq!(narrow.columns(&narrow.cell(0)).1, None);
+    }
+
+    #[test]
+    fn by_size_or_date_folders_stay_first_and_by_name_nothing_moves() {
+        let mut folder = item("zdir");
+        folder.kind = Kind::Folder;
+        let items = vec![item("small"), folder, item("big")];
+        let meta: HashMap<String, Meta> = [("/x/small", 10u64), ("/x/zdir", 4096), ("/x/big", 900)]
+            .into_iter()
+            .map(|(p, size)| (p.to_owned(), Meta { size, modified: None }))
+            .collect();
+        let names = |key, desc| -> Vec<String> {
+            sorted(items.clone(), &meta, key, desc).into_iter().map(|it| it.name).collect()
+        };
+        assert_eq!(names(SortKey::Size, true), ["zdir", "big", "small"]);
+        assert_eq!(names(SortKey::Size, false), ["zdir", "small", "big"]);
+        assert_eq!(names(SortKey::Name, true), ["small", "zdir", "big"]);
+    }
+
+    #[test]
+    fn a_search_keeps_what_holds_the_words_whatever_the_case() {
+        let all = [item("Informe.pdf"), item("notas.txt"), item("INFORME viejo.odt")];
+        let names = |find| -> Vec<String> { found(&all, find).into_iter().map(|it| it.name).collect() };
+        assert_eq!(names(Some("inf")), ["Informe.pdf", "INFORME viejo.odt"]);
+        assert_eq!(names(Some("")).len(), 3);
+        assert_eq!(names(None).len(), 3);
+        assert!(names(Some("zzz")).is_empty());
     }
 
     #[test]

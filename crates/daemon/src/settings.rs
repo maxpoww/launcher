@@ -56,6 +56,9 @@ pub(crate) struct Settings {
     pub(crate) fast_zoom: f32,
     /// The same for the file manager's windows: everything in them.
     pub(crate) files_zoom: f32,
+    /// The file manager's windows show a folder as a LIST (name, size,
+    /// date) and not as icons.
+    pub(crate) files_list: bool,
 }
 
 impl Settings {
