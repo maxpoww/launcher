@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use crate::content::{GridContent, Label, Rect, RectInst, Scene, FONT_BOLD};
 use crate::desktop::{Item, Kind};
 use crate::desktop_menu::{Menu, MenuPaint};
+use crate::i18n::tr;
 
 /// The panel's width, its padding, and the lines' metrics.
 pub(crate) const WIDTH: f32 = 336.0;
@@ -87,14 +88,14 @@ pub(crate) fn date_text(time: Option<SystemTime>) -> Option<String> {
 /// What kind of thing a file is, in a word or two, by its name.
 fn file_kind(name: &str) -> String {
     let what = match crate::files::file_asset_name(name) {
-        "asset-audio" => "Audio",
-        "asset-video" => "Video",
-        "asset-image" => "Image",
-        "asset-pdf" => "Document",
-        "asset-archive" => "Archive",
-        "asset-doc" => "Document",
-        "asset-code" => "Code",
-        _ => "File",
+        "asset-audio" => tr("Audio"),
+        "asset-video" => tr("Video"),
+        "asset-image" => tr("Image"),
+        "asset-pdf" => tr("Document"),
+        "asset-archive" => tr("Archive"),
+        "asset-doc" => tr("Document"),
+        "asset-code" => tr("Code"),
+        _ => tr("File"),
     };
     match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() <= 8 => {
@@ -138,11 +139,11 @@ pub(crate) fn contains_text(folders: usize, files: usize, hidden: usize) -> Stri
         parts.push(n(files, "file", "files"));
     }
     if parts.is_empty() {
-        return "Nothing".to_owned();
+        return tr("Nothing").to_owned();
     }
     let mut out = parts.join(", ");
     if hidden > 0 {
-        out.push_str(&format!(" ({hidden} hidden)"));
+        out.push_str(&crate::i18n::fill(tr(" ({hidden} hidden)"), &[("hidden", &hidden)]));
     }
     out
 }
@@ -172,7 +173,7 @@ fn owner_text(uid: u32) -> String {
     // into static storage (or null), read at once on this one thread.
     unsafe {
         if uid == libc::getuid() {
-            return "You".to_owned();
+            return tr("You").to_owned();
         }
         let pw = libc::getpwuid(uid);
         if !pw.is_null() && !(*pw).pw_name.is_null() {
@@ -191,7 +192,7 @@ pub(crate) fn rows_for(item: &Item, home: &Path) -> Vec<(&'static str, String)> 
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     match item.kind {
         Kind::Folder | Kind::Volume => {
-            rows.push(("Kind", if item.kind == Kind::Volume { "Drive" } else { "Folder" }.to_owned()));
+            rows.push((tr("Kind"), if item.kind == Kind::Volume { tr("Drive") } else { tr("Folder") }.to_owned()));
             let (mut folders, mut files, mut hidden) = (0usize, 0usize, 0usize);
             for e in std::fs::read_dir(path).into_iter().flatten().flatten() {
                 if e.file_name().to_string_lossy().starts_with('.') {
@@ -203,45 +204,45 @@ pub(crate) fn rows_for(item: &Item, home: &Path) -> Vec<(&'static str, String)> 
                     files += 1;
                 }
             }
-            rows.push(("Contains", contains_text(folders, files, hidden)));
-            rows.push(("Size", CALCULATING.to_owned()));
+            rows.push((tr("Contains"), contains_text(folders, files, hidden)));
+            rows.push((tr("Size"), tr(CALCULATING).to_owned()));
         }
         Kind::Launcher => {
-            rows.push(("Kind", "Application".to_owned()));
+            rows.push((tr("Kind"), tr("Application").to_owned()));
             if let Some((exec, _)) = &item.exec {
-                rows.push(("Runs", exec.clone()));
+                rows.push((tr("Runs"), exec.clone()));
             }
         }
         Kind::File => {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            rows.push(("Kind", file_kind(&name)));
+            rows.push((tr("Kind"), file_kind(&name)));
             if let Some(m) = &meta {
-                rows.push(("Size", size_text(m.len())));
+                rows.push((tr("Size"), size_text(m.len())));
             }
             if crate::files::file_asset_name(&name) == "asset-image" {
                 if let Ok((w, h)) = image::image_dimensions(path) {
-                    rows.push(("Dimensions", format!("{w} × {h}")));
+                    rows.push((tr("Dimensions"), format!("{w} × {h}")));
                 }
             }
         }
     }
     if let Some(to) = link {
-        rows.push(("Link to", tilde(&to, home)));
+        rows.push((tr("Link to"), tilde(&to, home)));
     }
     if let Some(parent) = path.parent() {
-        rows.push(("Where", tilde(parent, home)));
+        rows.push((tr("Where"), tilde(parent, home)));
     }
     if let Some(m) = &meta {
-        rows.push(("Owner", owner_text(m.uid())));
+        rows.push((tr("Owner"), owner_text(m.uid())));
         rows.push((
-            "Access",
-            if writable(path) { "Read and write" } else { "Read only" }.to_owned(),
+            tr("Access"),
+            if writable(path) { tr("Read and write") } else { tr("Read only") }.to_owned(),
         ));
     }
     for (key, time) in [
-        ("Modified", meta.as_ref().and_then(|m| m.modified().ok())),
-        ("Created", meta.as_ref().and_then(|m| m.created().ok())),
-        ("Opened", meta.as_ref().and_then(|m| m.accessed().ok())),
+        (tr("Modified"), meta.as_ref().and_then(|m| m.modified().ok())),
+        (tr("Created"), meta.as_ref().and_then(|m| m.created().ok())),
+        (tr("Opened"), meta.as_ref().and_then(|m| m.accessed().ok())),
     ] {
         if let Some(d) = date_text(time) {
             rows.push((key, d));
@@ -332,10 +333,10 @@ impl Props {
     pub fn set_size(&mut self, bytes: u64, files: u64) {
         if let Some(row) = self.rows.iter_mut().find(|(k, _)| *k == "Size") {
             row.1 = if files == 0 {
-                "Empty".to_owned()
+                tr("Empty").to_owned()
             } else {
-                let n = if files == 1 { "1 file".to_owned() } else { format!("{files} files") };
-                format!("{}, {n} in all", size_text(bytes))
+                let n = if files == 1 { tr("1 file").to_owned() } else { crate::i18n::fill(tr("{files} files"), &[("files", &files)]) };
+                crate::i18n::fill(tr("{0}, {n} in all"), &[("0", &(size_text(bytes))), ("n", &n)])
             };
         }
     }
@@ -385,7 +386,7 @@ impl Props {
         };
         if let Some(back) = self.back_rect() {
             grid.labels.push(label(
-                "‹  Back",
+                tr("‹  Back"),
                 (back.x + 8.0, back.y + (BACK_H - LINE_PX) / 2.0),
                 back.w - 12.0,
                 FONT_PX,

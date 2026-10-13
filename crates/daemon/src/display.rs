@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{hypr, App};
+use crate::i18n::tr;
 
 /// How long a tried resolution stays up before it goes back by itself.
 const KEEP_SECS: u64 = 15;
@@ -134,7 +135,7 @@ impl Monitor {
     pub(crate) fn title(&self) -> String {
         let built_in = ["eDP", "LVDS", "DSI"].iter().any(|p| self.name.starts_with(p));
         if built_in {
-            "Built-in screen".to_owned()
+            tr("Built-in screen").to_owned()
         } else if self.model.is_empty() {
             self.name.clone()
         } else {

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tracing::{debug, info, warn};
+use crate::i18n::tr;
 
 /// A place a selection can be sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +209,7 @@ pub(crate) fn inside(dir: &Path, src: &Path) -> bool {
 /// (a link back to an ancestor, Wine's `z:` → `/`) is refused.
 pub(crate) fn copy_all(src: &Path, dest: &Path) -> std::io::Result<()> {
     if dest.parent().is_some_and(|d| inside(d, src)) {
-        return Err(std::io::Error::other("a folder cannot be copied into itself"));
+        return Err(std::io::Error::other(tr("a folder cannot be copied into itself")));
     }
     copy_into(src, dest, &mut Vec::new())
 }
@@ -217,10 +218,7 @@ fn copy_into(src: &Path, dest: &Path, entered: &mut Vec<PathBuf>) -> std::io::Re
     if std::fs::metadata(src)?.is_dir() {
         let real = std::fs::canonicalize(src)?;
         if entered.contains(&real) {
-            return Err(std::io::Error::other(format!(
-                "{} links back into what is being copied",
-                src.display()
-            )));
+            return Err(std::io::Error::other(crate::i18n::fill(tr("{0} links back into what is being copied"), &[("0", &src.display())])));
         }
         entered.push(real);
         std::fs::create_dir_all(dest)?;
@@ -370,9 +368,9 @@ pub(crate) fn send(paths: &[PathBuf], target: &Target) -> String {
 fn outcome(done: usize, failed: usize, verb: &str, name: &str) -> String {
     let files = |n: usize| format!("{n} {}", if n == 1 { "file" } else { "files" });
     match (done, failed) {
-        (0, f) => format!("{} could not be {verb} {name}", files(f)),
+        (0, f) => crate::i18n::fill(tr("{0} could not be {verb} {name}"), &[("0", &(files(f))), ("verb", &verb), ("name", &name)]),
         (d, 0) => format!("{} {verb} {name}", files(d)),
-        (d, f) => format!("{} {verb} {name} · {f} could not be", files(d)),
+        (d, f) => crate::i18n::fill(tr("{0} {verb} {name} · {f} could not be"), &[("0", &(files(d))), ("verb", &verb), ("name", &name), ("f", &f)]),
     }
 }
 

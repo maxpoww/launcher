@@ -7,6 +7,7 @@
 use super::view::{head_h, Hover, Page, Paint, DANGER, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX};
 use crate::content::{GridContent, Label, Rect, RectInst};
 use crate::options::NERD;
+use crate::i18n::tr;
 
 /// What the typing goes into, while the card has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,9 +65,9 @@ impl BoxBtn {
 
     pub(super) fn hint(self) -> &'static str {
         match self {
-            BoxBtn::Clip => "Add a picture, a file, a voice note…",
-            BoxBtn::Talk => "Talk and it is written here",
-            BoxBtn::Mic => "Record a voice note",
+            BoxBtn::Clip => tr("Add a picture, a file, a voice note…"),
+            BoxBtn::Talk => tr("Talk and it is written here"),
+            BoxBtn::Mic => tr("Record a voice note"),
         }
     }
 }
@@ -705,7 +706,7 @@ pub(super) fn draw(
             ));
             // (How many were found — where the search narrows a list.)
             if !bar.query.is_empty() && bar.found != usize::MAX {
-                let found = format!("{} found", bar.found);
+                let found = crate::i18n::fill(tr("{0} found"), &[("0", &bar.found)]);
                 grid.labels.push(label(
                     &found,
                     (
@@ -747,7 +748,7 @@ pub(super) fn draw(
             1.0,
         );
         grid.labels.push(label(
-            "+   New",
+            tr("+   New"),
             (r.x + r.w / 2.0, r.y + (r.h - 18.0) / 2.0),
             r.w,
             13.0,
@@ -798,7 +799,7 @@ pub(super) fn draw(
             ));
         } else if bar.field.is_some() {
             grid.labels.push(label(
-                "Select, or type to search",
+                tr("Select, or type to search"),
                 (seek.x + seek.w / 2.0, seek.y + 5.0),
                 seek.w,
                 10.0,
@@ -816,7 +817,7 @@ pub(super) fn draw(
         );
         if bar.emoji.is_empty() {
             grid.labels.push(label(
-                "No emoji by that name",
+                tr("No emoji by that name"),
                 (cells.x + cells.w / 2.0, cells.y + 30.0),
                 cells.w,
                 11.5,
@@ -975,7 +976,7 @@ pub(super) fn draw(
         let top = band_top - bar.first_off;
         if let Some(secs) = bar.rec {
             boxg.labels.push(label(
-                &format!("●  {}:{:02}   recording", secs / 60, secs % 60),
+                &crate::i18n::fill(tr("●  {0}:{1}   recording"), &[("0", &(secs / 60)), ("1", &format!("{:02}", secs % 60))]),
                 (r.x + 16.0, top),
                 r.w - BTN - 30.0,
                 TEXT_PX + 0.5,
@@ -1014,7 +1015,7 @@ pub(super) fn draw(
                 let words = match bar.talk {
                     Some(say) => Some((say, accent(0.9))),
                     None if typing => None,
-                    None => Some(("Type and press Enter", ink(0.42))),
+                    None => Some((tr("Type and press Enter"), ink(0.42))),
                 };
                 if let Some((words, color)) = words {
                     boxg.labels.push(label(

@@ -27,6 +27,7 @@ use crate::desktop_menu::{Action, Row};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{hover_grow, push_neumorph, PillId, FONT_PX, LINE_PX, OPTION_GAP, PILL_PAD_X, TEXT_FONT};
 use crate::App;
+use crate::i18n::tr;
 
 /// fa-mobile.
 const GLYPH_PHONE: &str = "\u{f10b}";
@@ -147,8 +148,9 @@ fn line(label: &str, value: &str, act: Act) -> Line {
 /// under the other, was "all close together, hard to understand and
 /// follow").
 fn guide(title: &str, under: &str, steps: &[(&str, &str)], last: &[&str]) -> Vec<Line> {
-    let say = |label: &str| line(label, "", Act::Nothing);
-    let mut lines = vec![line("‹  Back", "", Act::Turn(Page::Menu))];
+    // (Steps come as constant tables: translated here, as they become lines.)
+    let say = |label: &str| line(crate::i18n::tr_dyn(label), "", Act::Nothing);
+    let mut lines = vec![line(tr("‹  Back"), "", Act::Turn(Page::Menu))];
     lines.push(Line { air: true, ..say(title) });
     lines.push(Line { dim: true, ..say(under) });
     for (n, (text, seen)) in steps.iter().enumerate() {
@@ -201,8 +203,8 @@ fn debugging_lines(asked: bool) -> Vec<Line> {
 /// know how to paste a folder or a file on this device").
 fn files_lines() -> Vec<Line> {
     guide(
-        "See the phone's files",
-        "It is plugged in, but it is not showing them yet.",
+        tr("See the phone's files"),
+        tr("It is plugged in, but it is not showing them yet."),
         &[
             ("Unlock the phone's screen", ""),
             ("Pull down its notifications", "Tap the one about USB: \"Charging this device\""),
@@ -355,9 +357,9 @@ pub(crate) struct PhonePill {
 fn ago(secs: u64) -> String {
     match secs {
         0..=89 => "just now".to_owned(),
-        90..=5399 => format!("{} min ago", (secs + 30) / 60),
-        5400..=129_599 => format!("{} h ago", (secs + 1800) / 3600),
-        _ => format!("{} days ago", (secs + 43_200) / 86_400),
+        90..=5399 => crate::i18n::fill(tr("{0} min ago"), &[("0", &((secs + 30) / 60))]),
+        5400..=129_599 => crate::i18n::fill(tr("{0} h ago"), &[("0", &((secs + 1800) / 3600))]),
+        _ => crate::i18n::fill(tr("{0} days ago"), &[("0", &((secs + 43_200) / 86_400))]),
     }
 }
 
@@ -381,17 +383,17 @@ impl App {
         };
         let no_files = self.phone_pill.no_files.contains(&path);
         let state = match &known {
-            _ if camera => "Using as a camera".to_owned(),
-            _ if v.closed => "Locked".to_owned(),
-            _ if no_files => "Not showing its files".to_owned(),
-            _ if debugging == Debugging::Off => "USB debugging off".to_owned(),
-            _ if debugging == Debugging::NotAllowed => "Not allowed on the phone".to_owned(),
-            _ if syncing => "Syncing…".to_owned(),
-            None => "Not set up".to_owned(),
-            Some(p) if !p.sync => "Sync off".to_owned(),
+            _ if camera => tr("Using as a camera").to_owned(),
+            _ if v.closed => tr("Locked").to_owned(),
+            _ if no_files => tr("Not showing its files").to_owned(),
+            _ if debugging == Debugging::Off => tr("USB debugging off").to_owned(),
+            _ if debugging == Debugging::NotAllowed => tr("Not allowed on the phone").to_owned(),
+            _ if syncing => tr("Syncing…").to_owned(),
+            None => tr("Not set up").to_owned(),
+            Some(p) if !p.sync => tr("Sync off").to_owned(),
             Some(p) => match p.last_sync {
-                Some(at) => format!("Synced {}", ago(crate::desktop_config::now_secs().saturating_sub(at))),
-                None => "Not synced yet".to_owned(),
+                Some(at) => crate::i18n::fill(tr("Synced {0}"), &[("0", &(ago(crate::desktop_config::now_secs().saturating_sub(at))))]),
+                None => tr("Not synced yet").to_owned(),
             },
         };
         // Its battery, once it has said (Max, 2026-10-11: "the battery on
@@ -476,7 +478,7 @@ impl App {
                         ),
                         None => (0.0, 0.0),
                     };
-                    self.phone_pill.chip_w = now.button.map_or(0.0, |word| r.measure_text(word, font_px, TEXT_FONT) + CHIP_PAD);
+                    self.phone_pill.chip_w = now.button.map_or(0.0, |word| r.measure_text(tr(word), font_px, TEXT_FONT) + CHIP_PAD);
                     self.phone_pill.measured = key;
                 }
             }
@@ -752,7 +754,7 @@ impl App {
                     return lines;
                 };
                 if self.camera_has_torch() {
-                    lines.push(group(line("Flash", if on.torch { "On" } else { "Off" }, Act::Flash)));
+                    lines.push(group(line("Flash", if on.torch { "On" } else { tr("Off") }, Act::Flash)));
                 }
                 for (n, name) in lenses.iter().enumerate() {
                     let l = line(name, yes(n == on.lens), Act::Lens(n));
@@ -1475,7 +1477,7 @@ impl App {
                     border: 0.0,
                 });
                 scene.labels.push(Label {
-                    text: word.to_owned(),
+                    text: tr(word).to_owned(),
                     pos: (chip.x + chip.w / 2.0, ty),
                     max_w: 4096.0,
                     font_px: FONT_PX * s,

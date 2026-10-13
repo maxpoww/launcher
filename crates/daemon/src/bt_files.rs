@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, Proxy};
+use crate::i18n::tr;
 
 const OBEX: &str = "org.bluez.obex";
 const OBEX_ROOT: &str = "/org/bluez/obex";
@@ -114,8 +115,8 @@ fn run_worker(events: &Sender<FileEvent>, mut commands: mpsc::UnboundedReceiver<
                             if on {
                                 notify(
                                     &conn,
-                                    "Cannot receive files",
-                                    "Another program on this computer already takes Bluetooth files",
+                                    tr("Cannot receive files"),
+                                    tr("Another program on this computer already takes Bluetooth files"),
                                 )
                                 .await;
                                 let _ = events.send(FileEvent::ReceiveFailed);
@@ -166,7 +167,7 @@ async fn pick_file(conn: &Connection, token: u32) -> zbus::Result<Option<PathBuf
     let options: HashMap<&str, Value<'_>> =
         HashMap::from([("handle_token", Value::from(handle.as_str()))]);
     chooser
-        .call::<_, _, OwnedObjectPath>("OpenFile", &("", "Send a file", options))
+        .call::<_, _, OwnedObjectPath>("OpenFile", &("", tr("Send a file"), options))
         .await?;
     let Some(msg) = answers.next().await else {
         return Ok(None);
@@ -216,7 +217,7 @@ async fn send_file(
         Ok(None) => return,
         Err(e) => {
             warn!("bt files: file picker: {e}");
-            notify(conn, "Could not open the file picker", "").await;
+            notify(conn, tr("Could not open the file picker"), "").await;
             return;
         }
     };
@@ -230,19 +231,19 @@ async fn send_file(
             text,
         });
     };
-    progress(format!("Sending {file}…"));
+    progress(crate::i18n::fill(tr("Sending {file}…"), &[("file", &file)]));
     match push(conn, address, &path, |pct| {
-        progress(format!("Sending {file}… {pct}%"))
+        progress(crate::i18n::fill(tr("Sending {file}… {pct}%"), &[("file", &file), ("pct", &pct)]))
     })
     .await
     {
-        Ok(()) => notify(conn, &format!("Sent {file}"), &format!("To {name}")).await,
+        Ok(()) => notify(conn, &crate::i18n::fill(tr("Sent {file}"), &[("file", &file)]), &crate::i18n::fill(tr("To {name}"), &[("name", &name)])).await,
         Err(e) => {
             warn!("bt files: sending {file} to {address}: {e}");
             notify(
                 conn,
-                &format!("Could not send {file}"),
-                &format!("{name} did not take it"),
+                &crate::i18n::fill(tr("Could not send {file}"), &[("file", &file)]),
+                &crate::i18n::fill(tr("{name} did not take it"), &[("name", &name)]),
             )
             .await;
         }
@@ -256,7 +257,7 @@ async fn push(
     progress: impl Fn(u64),
 ) -> zbus::Result<()> {
     let client = Proxy::new(conn, OBEX, OBEX_ROOT, "org.bluez.obex.Client1").await?;
-    let args: HashMap<&str, Value<'_>> = HashMap::from([("Target", Value::from("opp"))]);
+    let args: HashMap<&str, Value<'_>> = HashMap::from([(tr("Target"), Value::from("opp"))]);
     let session: OwnedObjectPath = client.call("CreateSession", &(address, args)).await?;
     let result = async {
         let opp = Proxy::new(conn, OBEX, session.clone(), "org.bluez.obex.ObjectPush1").await?;
@@ -280,19 +281,19 @@ async fn wait_transfer(t: &Proxy<'_>, progress: impl Fn(u64)) -> zbus::Result<()
         let status: String = t.get_property("Status").await?;
         match status.as_str() {
             "complete" => return Ok(()),
-            "error" => return Err(zbus::Error::Failure("the transfer failed".into())),
+            "error" => return Err(zbus::Error::Failure(tr("the transfer failed").into())),
             _ => {}
         }
         if let (Ok(done), Ok(size)) = (
-            t.get_property::<u64>("Transferred").await,
-            t.get_property::<u64>("Size").await,
+            t.get_property::<u64>(tr("Transferred")).await,
+            t.get_property::<u64>(tr("Size")).await,
         ) {
             if let Some(pct) = (done * 100).checked_div(size) {
                 progress(pct);
             }
         }
         if started.elapsed() > TRANSFER_CAP {
-            return Err(zbus::Error::Failure("the transfer timed out".into()));
+            return Err(zbus::Error::Failure(tr("the transfer timed out").into()));
         }
         tokio::time::sleep(TICK).await;
     }
@@ -314,9 +315,9 @@ async fn notify(conn: &Connection, summary: &str, body: &str) {
     let actions: Vec<&str> = Vec::new();
     if let Err(e) = p
         .call::<_, _, u32>(
-            "Notify",
+            tr("Notify"),
             &(
-                "Bluetooth",
+                tr("Bluetooth"),
                 0u32,
                 "bluetooth",
                 summary,
@@ -358,14 +359,14 @@ impl ObexAgent {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .filter(|n| !n.is_empty() && n != "." && n != "..")
-            .ok_or_else(|| refuse("no file name"))?;
+            .ok_or_else(|| refuse(tr("no file name")))?;
         let session: OwnedObjectPath = t
             .get_property("Session")
             .await
             .map_err(|e| refuse(&e.to_string()))?;
         let from = match Proxy::new(conn, OBEX, session, "org.bluez.obex.Session1").await {
             Ok(s) => s
-                .get_property::<String>("Destination")
+                .get_property::<String>(tr("Destination"))
                 .await
                 .unwrap_or_default(),
             Err(_) => String::new(),
@@ -427,12 +428,12 @@ async fn received(conn: &Connection, transfer: &str, name: &str) {
     let ok = loop {
         if stored.is_none() {
             stored = t
-                .get_property::<String>("Filename")
+                .get_property::<String>(tr("Filename"))
                 .await
                 .ok()
                 .filter(|s| !s.is_empty());
         }
-        match t.get_property::<String>("Status").await.as_deref() {
+        match t.get_property::<String>(tr("Status")).await.as_deref() {
             Ok("complete") => break true,
             Ok("error") => break false,
             // The object is gone: obexd removes it when the transfer ends.
@@ -447,8 +448,8 @@ async fn received(conn: &Connection, transfer: &str, name: &str) {
     if !ok {
         notify(
             conn,
-            &format!("Could not receive {name}"),
-            "The transfer stopped",
+            &crate::i18n::fill(tr("Could not receive {name}"), &[("name", &name)]),
+            tr("The transfer stopped"),
         )
         .await;
         return;
@@ -463,13 +464,13 @@ async fn received(conn: &Connection, transfer: &str, name: &str) {
     match moved {
         Ok(()) => {
             let _ = std::fs::remove_file(&src);
-            notify(conn, &format!("Received {name}"), "It is in Downloads").await;
+            notify(conn, &crate::i18n::fill(tr("Received {name}"), &[("name", &name)]), tr("It is in Downloads")).await;
         }
         Err(e) => {
             warn!("bt files: moving {} to Downloads: {e}", src.display());
             notify(
                 conn,
-                &format!("Received {name}"),
+                &crate::i18n::fill(tr("Received {name}"), &[("name", &name)]),
                 &format!("It is in {}", src.display()),
             )
             .await;

@@ -263,14 +263,14 @@ impl Config {
 
         // ── Its folder here ──
         rule(&mut b, &mut y);
-        b.labels.push(text("Its folder on this computer", (x, y), w, HEAD_PX, LINE_PX, true, at(1.0)));
+        b.labels.push(text(tr("Its folder on this computer"), (x, y), w, HEAD_PX, LINE_PX, true, at(1.0)));
         y += LINE_PX + 4.0;
-        for line in wrapped("Everything from this phone is kept in one folder, so it is always in the same place.") {
+        for line in wrapped(tr("Everything from this phone is kept in one folder, so it is always in the same place.")) {
             b.labels.push(text(&line, (x, y), w, FONT_PX, SAY_LINE, false, at(DIM)));
             y += SAY_LINE;
         }
         y += 8.0;
-        b.labels.push(text("Name", (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
+        b.labels.push(text(tr("Name"), (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
         // The name, typed by its owner: a field.
         let field = Rect::new(x + VALUE_X, y - 4.0, w - VALUE_X, 25.0);
         let field_wash = if self.editing { 2.2 } else if lit(Hit::Name) { 1.7 } else { 1.0 };
@@ -284,16 +284,16 @@ impl Config {
         b.labels.push(text(&typed, (field.x + 10.0, y), field.w - 20.0, FONT_PX, LINE_PX, false, at(0.95)));
         b.hits.push((Hit::Name, field));
         y += ROW_H;
-        b.labels.push(text("Folder", (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
+        b.labels.push(text(tr("Folder"), (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
         b.labels.push(text(&self.folder_text(), (x + VALUE_X + 10.0, y), w - VALUE_X - 10.0, FONT_PX, LINE_PX, false, at(0.92)));
         y += LINE_PX;
 
         // ── Sync over Wi-Fi ──
         rule(&mut b, &mut y);
-        b.labels.push(text("Sync over Wi-Fi", (x, y), w - 50.0, HEAD_PX, LINE_PX, true, at(1.0)));
+        b.labels.push(text(tr("Sync over Wi-Fi"), (x, y), w - 50.0, HEAD_PX, LINE_PX, true, at(1.0)));
         switch(&mut b, y, self.phone.sync, Hit::Sync, true);
         y += LINE_PX + 4.0;
-        for line in wrapped("When the phone is on the same Wi-Fi as this computer, new files on it are copied to its folder here, without the cable. It has to be plugged in once to allow it, and again after the phone restarts.") {
+        for line in wrapped(tr("When the phone is on the same Wi-Fi as this computer, new files on it are copied to its folder here, without the cable. It has to be plugged in once to allow it, and again after the phone restarts.")) {
             b.labels.push(text(&line, (x, y), w, FONT_PX, SAY_LINE, false, at(DIM)));
             y += SAY_LINE;
         }
@@ -318,19 +318,19 @@ impl Config {
         y += KINDS.len().div_ceil(2) as f32 * ROW_H + 4.0;
         let live = self.phone.sync;
         let fade = if live { 1.0 } else { 0.4 };
-        b.labels.push(text("How often", (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM * fade)));
+        b.labels.push(text(tr("How often"), (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM * fade)));
         choice(&mut b, y, self.phone.every.label(), Hit::Every, live);
         y += ROW_H + 2.0;
-        b.labels.push(text("Only while charging", (x, y), w - 50.0, FONT_PX, LINE_PX, false, at(DIM * fade)));
+        b.labels.push(text(tr("Only while charging"), (x, y), w - 50.0, FONT_PX, LINE_PX, false, at(DIM * fade)));
         switch(&mut b, y, self.phone.charging_only, Hit::Charging, live);
         y += ROW_H;
         let state = match (self.phone.sync, &self.phone.addr, self.phone.last_sync) {
-            (false, ..) => "Off.".to_owned(),
-            (true, None, _) => "Not allowed over Wi-Fi yet: Apply does it, with the phone plugged in.".to_owned(),
-            (true, Some(addr), None) => format!("Allowed at {addr}. Not synced yet."),
+            (false, ..) => tr("Off.").to_owned(),
+            (true, None, _) => tr("Not allowed over Wi-Fi yet: Apply does it, with the phone plugged in.").to_owned(),
+            (true, Some(addr), None) => crate::i18n::fill(tr("Allowed at {addr}. Not synced yet."), &[("addr", &addr)]),
             (true, Some(_), Some(at)) => {
                 let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(at);
-                format!("Last sync: {}.", crate::desktop_props::date_text(Some(when)).unwrap_or_default())
+                crate::i18n::fill(tr("Last sync: {0}."), &[("0", &(crate::desktop_props::date_text(Some(when)).unwrap_or_default()))])
             }
         };
         b.labels.push(text(&state, (x, y), w, FONT_PX, LINE_PX, false, at(DIM)));
@@ -338,36 +338,32 @@ impl Config {
 
         // ── Clean the phone ──
         rule(&mut b, &mut y);
-        b.labels.push(text("Clean the phone", (x, y), w - 130.0, HEAD_PX, LINE_PX, true, at(1.0)));
+        b.labels.push(text(tr("Clean the phone"), (x, y), w - 130.0, HEAD_PX, LINE_PX, true, at(1.0)));
         if !self.confirm {
-            chip(&mut b, Rect::new(right - 112.0, y - 3.0, 112.0, 23.0), "Clean now…", Hit::Clean, true);
+            chip(&mut b, Rect::new(right - 112.0, y - 3.0, 112.0, 23.0), tr("Clean now…"), Hit::Clean, true);
         }
         y += LINE_PX + 4.0;
-        for line in wrapped("Moves your files off the phone into its folder here and frees the space on the phone: what is ticked above. Apps, their data and the system are never touched.") {
+        for line in wrapped(tr("Moves your files off the phone into its folder here and frees the space on the phone: what is ticked above. Apps, their data and the system are never touched.")) {
             b.labels.push(text(&line, (x, y), w, FONT_PX, SAY_LINE, false, at(DIM)));
             y += SAY_LINE;
         }
         y += 8.0;
-        b.labels.push(text("Would free", (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
+        b.labels.push(text(tr("Would free"), (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
         let free = match self.would_free() {
-            Some(bytes) => format!("About {} on the phone", crate::desktop_props::size_text(bytes)),
-            None => "Asking the phone…".to_owned(),
+            Some(bytes) => crate::i18n::fill(tr("About {0} on the phone"), &[("0", &(crate::desktop_props::size_text(bytes)))]),
+            None => tr("Asking the phone…").to_owned(),
         };
         b.labels.push(text(&free, (x + VALUE_X + 10.0, y), w - VALUE_X - 10.0, FONT_PX, LINE_PX, false, at(0.92)));
         y += ROW_H;
-        b.labels.push(text("After a sync", (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
-        let after = if self.phone.remove_after_sync { "Remove what was copied (keep it clean)" } else { "Leave the files on the phone" };
+        b.labels.push(text(tr("After a sync"), (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
+        let after = if self.phone.remove_after_sync { tr("Remove what was copied (keep it clean)") } else { tr("Leave the files on the phone") };
         choice(&mut b, y, after, Hit::After, true);
         y += ROW_H;
         if self.confirm {
             // Asked once more: it deletes from the phone.
             y += 4.0;
             let top = y;
-            let said = format!(
-                "This moves {} off the phone into {}. Each file is deleted from the phone only after its copy here has been checked.",
-                self.would_free().map_or_else(|| "your files".to_owned(), |b| format!("about {}", crate::desktop_props::size_text(b))),
-                self.folder_text()
-            );
+            let said = crate::i18n::fill(tr("This moves {0} off the phone into {1}. Each file is deleted from the phone only after its copy here has been checked."), &[("0", &(self.would_free().map_or_else(|| "your files".to_owned(), |b| format!("about {}", crate::desktop_props::size_text(b))))), ("1", &self.folder_text())]);
             let lines = wrapped(&said);
             let block_h = 10.0 + lines.len() as f32 * SAY_LINE + 8.0 + 23.0 + 10.0;
             b.rects.push(RectInst { rect: Rect::new(x - 6.0, top, w + 12.0, block_h), radius: 8.0, color: tint(DANGER, 0.10), glass: 0.0, border: 0.0 });
@@ -377,8 +373,8 @@ impl Config {
                 y += SAY_LINE;
             }
             y += 8.0;
-            chip(&mut b, Rect::new(x + 4.0, y, 190.0, 23.0), "Move them off the phone", Hit::Really, true);
-            chip(&mut b, Rect::new(x + 204.0, y, 84.0, 23.0), "Not now", Hit::NotNow, false);
+            chip(&mut b, Rect::new(x + 4.0, y, 190.0, 23.0), tr("Move them off the phone"), Hit::Really, true);
+            chip(&mut b, Rect::new(x + 204.0, y, 84.0, 23.0), tr("Not now"), Hit::NotNow, false);
             y += 23.0 + 10.0;
         }
 
@@ -386,10 +382,10 @@ impl Config {
         rule(&mut b, &mut y);
         let (apply, cancel) = (Rect::new(right - 92.0, y, 92.0, 27.0), Rect::new(right - 92.0 - 10.0 - 92.0, y, 92.0, 27.0));
         b.rects.push(RectInst { rect: cancel, radius: 13.5, color: [wash[0], wash[1], wash[2], wash[3] * if lit(Hit::Cancel) { 1.8 } else { 1.0 }], glass: 0.0, border: 0.0 });
-        b.labels.push(centred("Cancel", cancel, at(0.95)));
+        b.labels.push(centred(tr("Cancel"), cancel, at(0.95)));
         b.hits.push((Hit::Cancel, cancel));
         b.rects.push(RectInst { rect: apply, radius: 13.5, color: tint(ACCENT, if lit(Hit::Apply) { 0.55 } else { 0.32 }), glass: 0.0, border: 0.0 });
-        b.labels.push(centred("Apply", apply, at(1.0)));
+        b.labels.push(centred(tr("Apply"), apply, at(1.0)));
         b.hits.push((Hit::Apply, apply));
         y += 27.0 + PAD;
         b.height = y - self.rect.y;
@@ -486,6 +482,7 @@ use tracing::{info, warn};
 
 use crate::phones::Phones;
 use crate::App;
+use crate::i18n::tr;
 
 /// Seconds since the epoch, now.
 pub(crate) fn now_secs() -> u64 {

@@ -1463,6 +1463,14 @@ pub(crate) fn reassert() {
         if s.language.is_some() || s.time_zone.is_some() {
             assert_session_env(&s);
         }
+        // The session puts ITS picture up as it starts (Golem's hyprland.lua);
+        // the owner's goes over it once that has settled.
+        if let (Some(picture), Some(tool)) = (&s.wallpaper, wallpaper_tool()) {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if std::path::Path::new(picture).is_file() {
+                run(tool, &["img", picture, "--transition-type", "none"]);
+            }
+        }
     });
     if let Err(e) = spawned {
         warn!("controls: could not put the saved settings back: {e}");

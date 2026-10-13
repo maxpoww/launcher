@@ -20,6 +20,7 @@ use crate::animation::{ease_toward, settle_t, MORPH_RATE, SETTLE_PX};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{push_neumorph, Module, FONT_PX, LINE_PX, MODULE_GROW_H};
 use crate::App;
+use crate::i18n::tr;
 
 /// The screen-temperature presets the panel offers (Kelvin). 6500 is
 /// hyprsunset's neutral identity (protection off); lower is warmer. Picking one
@@ -190,7 +191,7 @@ impl App {
         // "Screen temperature" caption above the preset row.
         let dim = [ink[0], ink[1], ink[2], ink[3] * 0.6 * a];
         scene.labels.push(Label {
-            text: "Screen temperature".to_owned(),
+            text: tr("Screen temperature").to_owned(),
             pos: (rect.x + pad, rect.y + band_h + 11.0 * s),
             max_w: rect.w - 2.0 * pad,
             font_px: 13.0 * s,
@@ -251,7 +252,7 @@ impl App {
         // "Automatically at sunset" toggle row: a label + a pill switch.
         let ar = self.sunset_auto_rect(rect);
         scene.labels.push(Label {
-            text: "Automatically at sunset".to_owned(),
+            text: tr("Automatically at sunset").to_owned(),
             pos: (ar.x, ar.y + (ar.h - line) / 2.0),
             max_w: ar.w - 60.0 * s,
             font_px: 14.0 * s,

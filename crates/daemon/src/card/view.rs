@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use super::bar::{BarView, BoxBtn, Field};
 use super::model::{Item, Kind, MAX_LINES};
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst, NO_PLATE};
+use crate::i18n::tr;
 
 pub(super) const RADIUS: f32 = 10.0;
 /// THE CARD'S OWN FRAME: on a window, the window's own corner — the same
@@ -113,13 +114,13 @@ impl Page {
     pub(crate) fn title(self) -> Option<&'static str> {
         match self {
             Page::Session => None,
-            Page::Memory => Some("Sessions"),
-            Page::Pinned => Some("Pinned"),
-            Page::Clipboard => Some("Clipboard"),
-            Page::Dictionary => Some("Dictionary"),
-            Page::Translate => Some("Translator"),
-            Page::Emoji => Some("Emoji"),
-            Page::Talk => Some("Voice to text"),
+            Page::Memory => Some(tr("Sessions")),
+            Page::Pinned => Some(tr("Pinned")),
+            Page::Clipboard => Some(tr("Clipboard")),
+            Page::Dictionary => Some(tr("Dictionary")),
+            Page::Translate => Some(tr("Translator")),
+            Page::Emoji => Some(tr("Emoji")),
+            Page::Talk => Some(tr("Voice to text")),
         }
     }
 }
@@ -180,7 +181,7 @@ impl Foot {
     /// Its icon (the round ones) or its word (Memory).
     fn word(self) -> &'static str {
         match self {
-            Foot::Memory => "Memory",
+            Foot::Memory => tr("Memory"),
             Foot::Pinned => GLYPH_PIN,
             // (Max, 2026-10-12: the two sheets of fa-clipboard and the
             // boxed "A" of fa-language were not liked.)
@@ -1645,7 +1646,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     [acc[0], acc[1], acc[2], 1.0],
                 ),
                 (_, true) => put(
-                    "Forget this session? Click × again",
+                    tr("Forget this session? Click × again"),
                     (tx, mid),
                     tw + when_w,
                     12.5,
@@ -1806,7 +1807,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 .map(|b| b.draft.first().map(String::as_str).unwrap_or(""));
             put(
                 match written {
-                    Some("") => "Type a title",
+                    Some("") => tr("Type a title"),
                     Some(words) => words,
                     None if named => item.body.as_str(),
                     None => VOICE_NAME,
@@ -1930,9 +1931,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             let busy = item.said.as_deref() == Some(WRITING_OUT);
             put(
                 match (busy, wide) {
-                    (true, _) => "Transcribing…",
-                    (_, true) => "Hide text",
-                    _ => "Transcribe",
+                    (true, _) => tr("Transcribing…"),
+                    (_, true) => tr("Hide text"),
+                    _ => tr("Transcribe"),
                 },
                 (more.x + more.w / 2.0, more.y + 3.0),
                 more.w,
@@ -2019,7 +2020,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 let r = tile.more();
                 let hot = view.hover == Some(Hover::More(item.id));
                 list.labels.push(Label {
-                    text: if wide { "Show less" } else { "Show all" }.to_owned(),
+                    text: if wide { tr("Show less") } else { tr("Show all") }.to_owned(),
                     pos: (r.x + r.w / 2.0, r.y + 3.0),
                     max_w: r.w,
                     font_px: NOTE_PX + 1.0,
@@ -2228,9 +2229,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         );
         put(
             match (listening, writing) {
-                (true, _) => "Listening… press again to write it",
-                (_, true) => "Writing what you said…",
-                _ => "Press and talk",
+                (true, _) => tr("Listening… press again to write it"),
+                (_, true) => tr("Writing what you said…"),
+                _ => tr("Press and talk"),
             },
             mic.y + mic.h + 14.0,
             13.0,
@@ -2238,7 +2239,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             paint.ink_at(0.95),
         );
         put(
-            "What you say is written in the window",
+            tr("What you say is written in the window"),
             mic.y + mic.h + 36.0,
             10.5,
             None,
@@ -2247,7 +2248,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         // (Under the last thing said: how long it stays.)
         if let Some(last) = tiles.last() {
             put(
-                "Gone with the next one, unless you keep it",
+                tr("Gone with the next one, unless you keep it"),
                 last.rect.y + last.rect.h + 8.0,
                 10.0,
                 None,
@@ -2261,11 +2262,11 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     // the card, and the text a little bigger"*). It wears the accent while
     // something is held over the card.
     let words = match page {
-        Page::Session => Some("Drag here to keep"),
-        Page::Pinned => Some("Drag here to pin"),
-        Page::Translate => Some("Drag here to translate"),
-        Page::Clipboard => Some("Drag here to copy"),
-        Page::Dictionary => Some("Drag here to look up"),
+        Page::Session => Some(tr("Drag here to keep")),
+        Page::Pinned => Some(tr("Drag here to pin")),
+        Page::Translate => Some(tr("Drag here to translate")),
+        Page::Clipboard => Some(tr("Drag here to copy")),
+        Page::Dictionary => Some(tr("Drag here to look up")),
         _ => None,
     };
     if let (true, None, Some(words)) = (shown_items.is_empty(), writing, words) {
@@ -2573,7 +2574,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     });
                 }
                 over.labels.push(Label {
-                    text: (*row).to_owned(),
+                    // (The rows are the menu's own words, and what a pick
+                    // is told apart by: translated only as they are drawn.)
+                    text: crate::i18n::tr(row).to_owned(),
                     pos: (r.x + 9.0, r.y + (r.h - TEXT_LINE) / 2.0),
                     max_w: r.w - 12.0,
                     font_px: TEXT_PX + 0.5,
@@ -2861,9 +2864,9 @@ pub(crate) fn tile_picture(
             None,
         );
         let word = if lines.is_empty() {
-            "Transcribe"
+            tr("Transcribe")
         } else {
-            "Hide text"
+            tr("Hide text")
         };
         text(
             &mut canvas,

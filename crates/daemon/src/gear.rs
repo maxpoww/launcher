@@ -24,6 +24,7 @@ use crate::options::{
     LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
+use crate::i18n::tr;
 
 // --- geometry, in logical px at scale 1 (the notification card's numbers) ---
 const ROW_PAD_X: f32 = 14.0;
@@ -427,10 +428,10 @@ fn wifi_glyph(signal: u8) -> &'static str {
 
 fn signal_word(signal: u8) -> &'static str {
     match signal {
-        75..=u8::MAX => "Excellent",
-        50..=74 => "Good",
-        25..=49 => "Fair",
-        _ => "Weak",
+        75..=u8::MAX => tr("Excellent"),
+        50..=74 => tr("Good"),
+        25..=49 => tr("Fair"),
+        _ => tr("Weak"),
     }
 }
 
@@ -438,14 +439,14 @@ fn signal_word(signal: u8) -> &'static str {
 /// name.
 fn bt_kind(icon: &str) -> (&'static str, &'static str) {
     match icon {
-        "audio-headphones" | "audio-headset" => (G_HEADPHONES, "Headphones"),
-        "audio-card" | "audio-speakers" => (G_SPEAKER, "Speaker"),
-        "input-mouse" | "input-tablet" => (G_MOUSE, "Mouse"),
-        "input-keyboard" => (G_KEYBOARD, "Keyboard"),
+        "audio-headphones" | "audio-headset" => (G_HEADPHONES, tr("Headphones")),
+        "audio-card" | "audio-speakers" => (G_SPEAKER, tr("Speaker")),
+        "input-mouse" | "input-tablet" => (G_MOUSE, tr("Mouse")),
+        "input-keyboard" => (G_KEYBOARD, tr("Keyboard")),
         "phone" => (G_PHONE, "Phone"),
-        "input-gaming" => (G_GAMEPAD, "Game controller"),
-        "computer" => (G_LAPTOP, "Computer"),
-        _ => (G_BT, "Device"),
+        "input-gaming" => (G_GAMEPAD, tr("Game controller")),
+        "computer" => (G_LAPTOP, tr("Computer")),
+        _ => (G_BT, tr("Device")),
     }
 }
 
@@ -928,13 +929,13 @@ impl App {
                 self.gear.hs_busy = false;
                 self.gear.share_err = Some(if wifi {
                     (
-                        "The Wi-Fi hotspot did not start",
-                        "Use Bluetooth sharing instead",
+                        tr("The Wi-Fi hotspot did not start"),
+                        tr("Use Bluetooth sharing instead"),
                     )
                 } else {
                     (
-                        "Sharing over Bluetooth did not start",
-                        "Check that Bluetooth is on",
+                        tr("Sharing over Bluetooth did not start"),
+                        tr("Check that Bluetooth is on"),
                     )
                 });
             }
@@ -1063,13 +1064,13 @@ impl App {
                     hit: Hit::Airplane,
                     more: None,
                     tile: None,
-                    title: "Airplane mode".into(),
-                    sub: "Wi-Fi and Bluetooth are off".into(),
+                    title: tr("Airplane mode").into(),
+                    sub: tr("Wi-Fi and Bluetooth are off").into(),
                     tone: Tone::Normal,
                     trail: Trail::Switch(true),
                     sel: false,
                 },
-                Item::Empty(format!("Turn it off to see {what}")),
+                Item::Empty(crate::i18n::fill(tr("Turn it off to see {what}"), &[("what", &what)])),
             ],
             compact: true,
             ..View::default()
@@ -1104,26 +1105,26 @@ impl App {
         };
         if !snap.reachable {
             return compact(
-                "Not available",
+                tr("Not available"),
                 false,
-                "The network service is not answering",
+                tr("The network service is not answering"),
             );
         }
         if snap.wifi_dev.is_none() {
-            return compact("Not available", false, "This computer has no Wi-Fi");
+            return compact(tr("Not available"), false, tr("This computer has no Wi-Fi"));
         }
         if !snap.wifi_on {
-            return compact("Off", false, "Wi-Fi is off");
+            return compact(tr("Off"), false, tr("Wi-Fi is off"));
         }
         let active = snap.aps.iter().find(|a| a.active);
         let sub = if g.net_busy.is_some() {
-            "Connecting…".to_owned()
+            tr("Connecting…").to_owned()
         } else if let Some(a) = active {
-            format!("Connected to {}", a.ssid)
+            crate::i18n::fill(tr("Connected to {0}"), &[("0", &a.ssid)])
         } else if snap.hotspot_on {
-            "Paused while the hotspot is on".to_owned()
+            tr("Paused while the hotspot is on").to_owned()
         } else {
-            "Not connected".to_owned()
+            tr("Not connected").to_owned()
         };
         let mut items = vec![power(&sub, true)];
         let query = self.search_query();
@@ -1132,11 +1133,11 @@ impl App {
                 hit: Hit::None,
                 more: None,
                 tile: Some(G_ETH),
-                title: "Wired".into(),
+                title: tr("Wired").into(),
                 sub: if speed.is_empty() {
-                    "Connected".into()
+                    tr("Connected").into()
                 } else {
-                    format!("Connected · {speed}")
+                    crate::i18n::fill(tr("Connected · {speed}"), &[("speed", &speed)])
                 },
                 tone: Tone::Normal,
                 trail: Trail::Glyph(G_CHECK),
@@ -1151,25 +1152,25 @@ impl App {
         {
             shown += 1;
             let (sub, tone) = if g.net_busy.as_deref() == Some(ap.ssid.as_str()) {
-                ("Connecting…".to_owned(), Tone::Busy)
+                (tr("Connecting…").to_owned(), Tone::Busy)
             } else if g.net_err.as_deref() == Some(ap.ssid.as_str()) && !ap.active {
                 (
                     if g.net_err_password {
-                        "Wrong password. Try again"
+                        tr("Wrong password. Try again")
                     } else {
-                        "Could not connect. Try again"
+                        tr("Could not connect. Try again")
                     }
                     .to_owned(),
                     Tone::Warn,
                 )
             } else if ap.active && snap.portal {
                 (
-                    "Sign-in needed. Click to open the page".to_owned(),
+                    tr("Sign-in needed. Click to open the page").to_owned(),
                     Tone::Warn,
                 )
             } else if ap.active {
                 (
-                    ["Connected", ap.band(), ap.rate.as_str()]
+                    [tr("Connected"), ap.band(), ap.rate.as_str()]
                         .iter()
                         .filter(|p| !p.is_empty())
                         .copied()
@@ -1178,11 +1179,11 @@ impl App {
                     Tone::Normal,
                 )
             } else if ap.saved.is_some() {
-                ("Saved".to_owned(), Tone::Normal)
+                (tr("Saved").to_owned(), Tone::Normal)
             } else if ap.secured() {
-                ("Secured".to_owned(), Tone::Normal)
+                (tr("Secured").to_owned(), Tone::Normal)
             } else {
-                ("Open".to_owned(), Tone::Normal)
+                (tr("Open").to_owned(), Tone::Normal)
             };
             items.push(Item::Row {
                 hit: Hit::Net(ap.ssid.clone()),
@@ -1203,7 +1204,7 @@ impl App {
         }
         if g.net_scanning {
             items.push(Item::Heading {
-                text: "Searching…".into(),
+                text: tr("Searching…").into(),
                 busy: true,
             });
         }
@@ -1211,12 +1212,12 @@ impl App {
             items.push(Item::Empty(
                 if query.is_empty() {
                     if snap.hotspot_on {
-                        "The hotspot is using the Wi-Fi radio"
+                        tr("The hotspot is using the Wi-Fi radio")
                     } else {
-                        "No networks in range"
+                        tr("No networks in range")
                     }
                 } else {
-                    "No networks match"
+                    tr("No networks match")
                 }
                 .into(),
             ));
@@ -1248,7 +1249,7 @@ impl App {
                 items: vec![Item::Card {
                     glyph: G_WIFI[0],
                     title: ssid.to_owned(),
-                    sub: "Out of range".into(),
+                    sub: tr("Out of range").into(),
                     extra: Extra::None,
                     rename: None,
                 }],
@@ -1278,16 +1279,16 @@ impl App {
             strip.push(btn(Hit::NetForget, G_TRASH));
         }
         let state = if g.net_busy.as_deref() == Some(ssid) {
-            "Connecting…"
+            tr("Connecting…")
         } else if ap.active {
-            "Connected"
+            tr("Connected")
         } else if saved {
-            "Saved, not connected"
+            tr("Saved, not connected")
         } else {
-            "Not connected"
+            tr("Not connected")
         };
         let extra = match (&g.qr, g.share) {
-            (Some(m), true) => Extra::Qr(m.clone(), "Scan with a phone camera to join".into()),
+            (Some(m), true) => Extra::Qr(m.clone(), tr("Scan with a phone camera to join").into()),
             _ => Extra::None,
         };
         let mut items = vec![Item::Card {
@@ -1305,7 +1306,7 @@ impl App {
         if g.share {
             let pw = detail.and_then(|d| d.password.clone()).unwrap_or_default();
             items.push(kv(
-                "Password",
+                tr("Password"),
                 if g.show_pw {
                     pw
                 } else {
@@ -1313,53 +1314,53 @@ impl App {
                 },
             ));
         }
-        items.push(kv("Signal", signal_word(ap.signal).into()));
+        items.push(kv(tr("Signal"), signal_word(ap.signal).into()));
         items.push(kv(
-            "Security",
+            tr("Security"),
             if ap.secured() {
                 ap.security.clone()
             } else {
-                "None (open)".into()
+                tr("None (open)").into()
             },
         ));
         if ap.freq_mhz > 0 {
-            items.push(kv("Band", format!("{} · channel {}", ap.band(), ap.chan)));
+            items.push(kv(tr("Band"), crate::i18n::fill(tr("{0} · channel {1}"), &[("0", &ap.band()), ("1", &ap.chan)])));
         }
         if ap.active && !ap.rate.is_empty() {
-            items.push(kv("Speed", ap.rate.clone()));
+            items.push(kv(tr("Speed"), ap.rate.clone()));
         }
         let manual = detail.is_some_and(|d| d.manual);
         if saved {
             items.push(Item::Toggle {
                 hit: Hit::NetAuto,
-                label: "Connect automatically".into(),
+                label: tr("Connect automatically").into(),
                 hint: String::new(),
                 on: ap.autoconnect,
             });
             items.push(Item::Toggle {
                 hit: Hit::NetMetered,
-                label: "Metered".into(),
-                hint: "Golem holds big downloads on this network".into(),
+                label: tr("Metered").into(),
+                hint: tr("Golem holds big downloads on this network").into(),
                 on: detail.is_some_and(|d| d.metered),
             });
             items.push(Item::Toggle {
                 hit: Hit::NetPrivate,
-                label: "Private address".into(),
-                hint: "Hides this computer from tracking on public networks".into(),
+                label: tr("Private address").into(),
+                hint: tr("Hides this computer from tracking on public networks").into(),
                 on: detail.is_some_and(|d| d.private_mac),
             });
             items.push(Item::Choice {
-                key: "Address".into(),
+                key: tr("Address").into(),
                 opts: vec![
-                    (Hit::NetIp(false), "Automatic".into(), !manual),
-                    (Hit::NetIp(true), "Manual".into(), manual),
+                    (Hit::NetIp(false), tr("Automatic").into(), !manual),
+                    (Hit::NetIp(true), tr("Manual").into(), manual),
                 ],
             });
         }
         if let Some(d) = detail.filter(|_| ap.active || manual) {
             for (key, label, value) in [
-                (EditKey::Ip, "IP address", &d.ip),
-                (EditKey::Gateway, "Router", &d.gateway),
+                (EditKey::Ip, tr("IP address"), &d.ip),
+                (EditKey::Gateway, tr("Router"), &d.gateway),
                 (EditKey::Dns, "DNS", &d.dns),
             ] {
                 if value.is_empty() && !manual {
@@ -1374,7 +1375,7 @@ impl App {
                 });
             }
             if !d.mac.is_empty() {
-                items.push(kv("This computer", d.mac.clone()));
+                items.push(kv(tr("This computer"), d.mac.clone()));
             }
         }
         View {
@@ -1395,15 +1396,15 @@ impl App {
         let pass = &self.settings.hotspot_pass;
         let mut items = vec![Item::Card {
             glyph: G_HOTSPOT,
-            title: "Share internet".into(),
+            title: tr("Share internet").into(),
             sub: match (wifi_on, bt_on) {
-                (true, true) => format!("Wi-Fi “{name}” and Bluetooth"),
-                (true, false) => format!("Wi-Fi hotspot “{name}” is on"),
-                (false, true) => "Sharing over Bluetooth".into(),
-                (false, false) => "Lets other devices online".into(),
+                (true, true) => crate::i18n::fill(tr("Wi-Fi “{name}” and Bluetooth"), &[("name", &name)]),
+                (true, false) => crate::i18n::fill(tr("Wi-Fi hotspot “{name}” is on"), &[("name", &name)]),
+                (false, true) => tr("Sharing over Bluetooth").into(),
+                (false, false) => tr("Lets other devices online").into(),
             },
             extra: match (&g.qr, wifi_on) {
-                (Some(m), true) => Extra::Qr(m.clone(), "Scan with a phone camera to join".into()),
+                (Some(m), true) => Extra::Qr(m.clone(), tr("Scan with a phone camera to join").into()),
                 _ => Extra::None,
             },
             rename: None,
@@ -1422,31 +1423,31 @@ impl App {
         }
         let busy = |hint: &str| {
             if g.hs_busy {
-                "Working…".to_owned()
+                tr("Working…").to_owned()
             } else {
                 hint.to_owned()
             }
         };
         items.push(Item::Toggle {
             hit: Hit::HsPower,
-            label: "Wi-Fi hotspot".into(),
+            label: tr("Wi-Fi hotspot").into(),
             hint: busy(if g.net_snap.wifi_dev.is_none() {
-                "This computer has no Wi-Fi"
+                tr("This computer has no Wi-Fi")
             } else if g.net_snap.wired.is_some() {
-                "Shares the wired connection"
+                tr("Shares the wired connection")
             } else {
-                "Needs a cable to share from"
+                tr("Needs a cable to share from")
             }),
             on: wifi_on,
         });
         items.push(Item::Kv {
             hit: Some(Hit::HsName),
-            key: "Name".into(),
+            key: tr("Name").into(),
             value: name,
         });
         items.push(Item::Kv {
             hit: Some(Hit::HsPass),
-            key: "Password".into(),
+            key: tr("Password").into(),
             value: if g.show_pw {
                 pass.clone()
             } else {
@@ -1454,16 +1455,16 @@ impl App {
             },
         });
         items.push(Item::Choice {
-            key: "Band".into(),
+            key: tr("Band").into(),
             opts: vec![
                 (
                     Hit::HsBand(false),
-                    "2.4 GHz".into(),
+                    tr("2.4 GHz").into(),
                     !self.settings.hotspot_5ghz,
                 ),
                 (
                     Hit::HsBand(true),
-                    "5 GHz".into(),
+                    tr("5 GHz").into(),
                     self.settings.hotspot_5ghz,
                 ),
             ],
@@ -1471,21 +1472,21 @@ impl App {
         let bt = &g.bt_snap;
         items.push(Item::Toggle {
             hit: Hit::BtShare,
-            label: "Over Bluetooth".into(),
+            label: tr("Over Bluetooth").into(),
             hint: busy(if !bt.present {
-                "This computer has no Bluetooth"
+                tr("This computer has no Bluetooth")
             } else if !bt.powered {
-                "Turn Bluetooth on first"
+                tr("Turn Bluetooth on first")
             } else if bt_on {
-                "Paired devices can connect now"
+                tr("Paired devices can connect now")
             } else {
-                "Paired devices use this internet"
+                tr("Paired devices use this internet")
             }),
             on: bt_on,
         });
         if bt_on {
             items.push(Item::Heading {
-                text: format!("On the phone: Bluetooth, “{}”, Internet access", bt.alias),
+                text: crate::i18n::fill(tr("On the phone: Bluetooth, “{0}”, Internet access"), &[("0", &bt.alias)]),
                 busy: false,
             });
         }
@@ -1521,7 +1522,7 @@ impl App {
             hit: Hit::BtPower,
             more: rename.then_some((Hit::BtName, G_PENCIL)),
             tile: None,
-            title: "Bluetooth".into(),
+            title: tr("Bluetooth").into(),
             sub,
             tone: Tone::Normal,
             trail: Trail::Switch(on),
@@ -1533,21 +1534,21 @@ impl App {
             ..View::default()
         };
         if !snap.reachable {
-            return compact("Not available", "The Bluetooth service is not running");
+            return compact(tr("Not available"), tr("The Bluetooth service is not running"));
         }
         if !snap.present {
-            return compact("Not available", "This computer has no Bluetooth");
+            return compact(tr("Not available"), tr("This computer has no Bluetooth"));
         }
         if !snap.powered {
-            return compact("Off", "Bluetooth is off");
+            return compact(tr("Off"), tr("Bluetooth is off"));
         }
         let connected = snap.devices.iter().filter(|d| d.connected).count();
         let sub = if snap.discoverable {
-            format!("Visible to others as “{}”", snap.alias)
+            crate::i18n::fill(tr("Visible to others as “{0}”"), &[("0", &snap.alias)])
         } else if connected > 0 {
-            format!("{connected} connected · this computer is “{}”", snap.alias)
+            crate::i18n::fill(tr("{connected} connected · this computer is “{0}”"), &[("connected", &connected), ("0", &snap.alias)])
         } else {
-            format!("This computer is “{}”", snap.alias)
+            crate::i18n::fill(tr("This computer is “{0}”"), &[("0", &snap.alias)])
         };
         let mut items = vec![power(sub, true, true)];
         let query = self.search_query();
@@ -1558,17 +1559,17 @@ impl App {
             let (sub, tone) = if busy(d) {
                 (
                     if g.bt_busy_was {
-                        "Disconnecting…"
+                        tr("Disconnecting…")
                     } else {
-                        "Connecting…"
+                        tr("Connecting…")
                     }
                     .to_owned(),
                     Tone::Busy,
                 )
             } else if d.connected {
-                ("Connected".to_owned(), Tone::Normal)
+                (tr("Connected").to_owned(), Tone::Normal)
             } else {
-                ("Paired".to_owned(), Tone::Normal)
+                (tr("Paired").to_owned(), Tone::Normal)
             };
             items.push(Item::Row {
                 hit: Hit::Dev(d.path.clone()),
@@ -1594,9 +1595,9 @@ impl App {
         if snap.discovering || !near.is_empty() {
             items.push(Item::Heading {
                 text: if snap.discovering {
-                    "Nearby · searching…".into()
+                    tr("Nearby · searching…").into()
                 } else {
-                    "Nearby".into()
+                    tr("Nearby").into()
                 },
                 busy: snap.discovering,
             });
@@ -1609,7 +1610,7 @@ impl App {
                 tile: Some(glyph),
                 title: d.name.clone(),
                 sub: if busy(d) {
-                    "Pairing…".into()
+                    tr("Pairing…").into()
                 } else {
                     kind.into()
                 },
@@ -1621,9 +1622,9 @@ impl App {
         if items.len() == 1 {
             items.push(Item::Empty(
                 if query.is_empty() {
-                    "No devices yet. Search to find one nearby"
+                    tr("No devices yet. Search to find one nearby")
                 } else {
-                    "No devices match"
+                    tr("No devices match")
                 }
                 .into(),
             ));
@@ -1659,21 +1660,21 @@ impl App {
         let Some(d) = self.bt_dev(path) else {
             return View {
                 strip: vec![btn(Hit::Back, G_BACK)],
-                items: vec![Item::Empty("This device is gone".into())],
+                items: vec![Item::Empty(tr("This device is gone").into())],
                 ..View::default()
             };
         };
         let (glyph, kind) = bt_kind(&d.icon);
         let state = if g.bt_busy.as_deref() == Some(path) {
             if g.bt_busy_was {
-                "Disconnecting…"
+                tr("Disconnecting…")
             } else {
-                "Connecting…"
+                tr("Connecting…")
             }
         } else if d.connected {
-            "Connected"
+            tr("Connected")
         } else {
-            "Paired, not connected"
+            tr("Paired, not connected")
         };
         let mut items = vec![Item::Card {
             glyph,
@@ -1687,18 +1688,18 @@ impl App {
         }];
         items.push(Item::Kv {
             hit: None,
-            key: "Type".into(),
+            key: tr("Type").into(),
             value: kind.into(),
         });
         if let Some(a) = g.bt_audio.as_ref().filter(|a| a.address == d.address) {
             if a.can_switch() {
                 items.push(Item::Choice {
-                    key: "Sound".into(),
+                    key: tr("Sound").into(),
                     opts: vec![
-                        (Hit::DevQuality(true), "High quality".into(), a.high_quality),
+                        (Hit::DevQuality(true), tr("High quality").into(), a.high_quality),
                         (
                             Hit::DevQuality(false),
-                            "Calls + mic".into(),
+                            tr("Calls + mic").into(),
                             !a.high_quality,
                         ),
                     ],
@@ -1707,28 +1708,28 @@ impl App {
             if !a.codec.is_empty() {
                 items.push(Item::Kv {
                     hit: None,
-                    key: "Codec".into(),
+                    key: tr("Codec").into(),
                     value: a.codec.clone(),
                 });
             }
             if a.has_sink() {
                 items.push(Item::Toggle {
                     hit: Hit::DevOutput,
-                    label: "Use for sound".into(),
-                    hint: "Plays this computer's sound through it".into(),
+                    label: tr("Use for sound").into(),
+                    hint: tr("Plays this computer's sound through it").into(),
                     on: a.is_output,
                 });
             }
         }
         items.push(Item::Toggle {
             hit: Hit::DevAuto,
-            label: "Connect automatically".into(),
-            hint: "When it is switched on and in range".into(),
+            label: tr("Connect automatically").into(),
+            hint: tr("When it is switched on and in range").into(),
             on: d.trusted,
         });
         items.push(Item::Kv {
             hit: None,
-            key: "Address".into(),
+            key: tr("Address").into(),
             value: d.address.clone(),
         });
         View {
@@ -1750,19 +1751,19 @@ impl App {
         let mut items = vec![
             Item::Card {
                 glyph: G_SEND,
-                title: "Files".into(),
-                sub: "Between this computer and paired devices".into(),
+                title: tr("Files").into(),
+                sub: tr("Between this computer and paired devices").into(),
                 extra: Extra::None,
                 rename: None,
             },
             Item::Toggle {
                 hit: Hit::BtReceive,
-                label: "Receive files".into(),
-                hint: "From paired devices, into Downloads".into(),
+                label: tr("Receive files").into(),
+                hint: tr("From paired devices, into Downloads").into(),
                 on: self.settings.bt_receive,
             },
             Item::Heading {
-                text: "Send a file to".into(),
+                text: tr("Send a file to").into(),
                 busy: false,
             },
         ];
@@ -1775,7 +1776,7 @@ impl App {
                 more: None,
                 tile: Some(bt_kind(&d.icon).0),
                 title: d.name.clone(),
-                sub: sending.map_or_else(|| "Choose a file…".to_owned(), |(_, t)| t.clone()),
+                sub: sending.map_or_else(|| tr("Choose a file…").to_owned(), |(_, t)| t.clone()),
                 tone: if sending.is_some() {
                     Tone::Busy
                 } else {
@@ -1786,7 +1787,7 @@ impl App {
             });
         }
         if !any {
-            items.push(Item::Empty("No paired phone or computer".into()));
+            items.push(Item::Empty(tr("No paired phone or computer").into()));
         }
         View {
             strip: vec![btn(Hit::Back, G_BACK)],
@@ -1818,9 +1819,9 @@ impl App {
             items: vec![Item::Card {
                 glyph,
                 sub: if confirm {
-                    "Does it show the same number?".into()
+                    tr("Does it show the same number?").into()
                 } else {
-                    "Type this on it, then press Enter".into()
+                    tr("Type this on it, then press Enter").into()
                 },
                 title: name,
                 extra: Extra::Code(spaced),
@@ -2534,7 +2535,7 @@ impl App {
                         Extra::Battery(_) | Extra::Meter(..) => {
                             let (b, line) = match extra {
                                 Extra::Meter(b, line) => (b, line.clone()),
-                                Extra::Battery(b) => (b, format!("Battery {b}%")),
+                                Extra::Battery(b) => (b, crate::i18n::fill(tr("Battery {b}%"), &[("b", &b)])),
                                 _ => unreachable!("matched above"),
                             };
                             let bw = 150.0 * s;
@@ -2989,9 +2990,9 @@ impl App {
                 return;
             }
             let prompt = if self.gear_page() == Some(PageKind::Net) {
-                "Search networks…"
+                tr("Search networks…")
             } else {
-                "Search devices…"
+                tr("Search devices…")
             };
             self.open_gear_field(Field {
                 kind: FieldKind::Search,
@@ -3289,7 +3290,7 @@ impl App {
             Hit::Hidden => self.open_gear_field(Field {
                 kind: FieldKind::HiddenSsid,
                 text: String::new(),
-                prompt: "Name of the hidden network".into(),
+                prompt: tr("Name of the hidden network").into(),
                 glyph: G_WIFI[3],
                 secret: false,
                 show: false,
@@ -3357,7 +3358,7 @@ impl App {
                 self.open_gear_field(Field {
                     kind: FieldKind::HsName,
                     text,
-                    prompt: "Hotspot name".into(),
+                    prompt: tr("Hotspot name").into(),
                     glyph: G_PENCIL,
                     secret: false,
                     show: false,
@@ -3366,7 +3367,7 @@ impl App {
             Hit::HsPass => self.open_gear_field(Field {
                 kind: FieldKind::HsPass,
                 text: String::new(),
-                prompt: "New password, 8 characters or more".into(),
+                prompt: tr("New password, 8 characters or more").into(),
                 glyph: G_LOCK,
                 secret: true,
                 show: true,
@@ -3384,7 +3385,7 @@ impl App {
                 self.open_gear_field(Field {
                     kind: FieldKind::AdapterName,
                     text,
-                    prompt: "Name of this computer".into(),
+                    prompt: tr("Name of this computer").into(),
                     glyph: G_PENCIL,
                     secret: false,
                     show: false,
@@ -3491,9 +3492,9 @@ impl App {
             Hit::NetIp(false) if detail.manual => self.net_send(NetCommand::AutoIp(ssid)),
             Hit::NetEdit(key) => {
                 let (text, prompt) = match key {
-                    EditKey::Ip => (detail.ip, "IP address"),
-                    EditKey::Gateway => (detail.gateway, "Router address"),
-                    EditKey::Dns => (detail.dns, "DNS server"),
+                    EditKey::Ip => (detail.ip, tr("IP address")),
+                    EditKey::Gateway => (detail.gateway, tr("Router address")),
+                    EditKey::Dns => (detail.dns, tr("DNS server")),
                 };
                 self.open_gear_field(Field {
                     kind: FieldKind::Edit(key),
@@ -3540,7 +3541,7 @@ impl App {
             Hit::DevRename => self.open_gear_field(Field {
                 kind: FieldKind::Rename(path),
                 text: d.name,
-                prompt: "New name for this device".into(),
+                prompt: tr("New name for this device").into(),
                 glyph: G_PENCIL,
                 secret: false,
                 show: false,
@@ -3741,7 +3742,7 @@ impl App {
                     ..
                 } => {
                     let extra = match extra {
-                        Extra::Qr(_, line) => format!("Qr({line})"),
+                        Extra::Qr(_, line) => crate::i18n::fill(tr("Qr({line})"), &[("line", &line)]),
                         other => format!("{other:?}"),
                     };
                     format!("card [{title}] [{sub}] {extra} rename={rename:?}")
@@ -3762,7 +3763,7 @@ impl App {
                 ),
                 Item::Empty(t) => format!("empty [{t}]"),
                 Item::Note(t) => format!("note [{t}]"),
-                Item::Graph(v) => format!("graph {} points", v.len()),
+                Item::Graph(v) => crate::i18n::fill(tr("graph {0} points"), &[("0", &v.len())]),
                 Item::Cores(v) => format!("cores {}", v.len()),
                 Item::Bar(v) => format!(
                     "bar {}",
@@ -3797,7 +3798,7 @@ impl App {
 
 fn password_field(ssid: String, hidden: bool) -> Field {
     Field {
-        prompt: format!("Password for {ssid}"),
+        prompt: crate::i18n::fill(tr("Password for {ssid}"), &[("ssid", &ssid)]),
         kind: FieldKind::Password { ssid, hidden },
         text: String::new(),
         glyph: G_LOCK,

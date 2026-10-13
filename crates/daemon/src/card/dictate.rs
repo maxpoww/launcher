@@ -33,6 +33,7 @@ use tracing::{info, warn};
 
 use super::{voice, HOLD_MS};
 use crate::App;
+use crate::i18n::tr;
 
 /// The key is down.
 pub(super) struct Dictation {
@@ -346,7 +347,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = child.wait();
             let said = match voice::heard(&path, true) {
-                voice::Heard::Nothing => Err("Nothing was heard. Is the microphone muted or off?"),
+                voice::Heard::Nothing => Err(tr("Nothing was heard. Is the microphone muted or off?")),
                 voice::Heard::TooLoud(hiss) => Err(voice::mic_turn_down(hiss)),
                 voice::Heard::Sound => Ok(()),
             };
@@ -357,7 +358,7 @@ impl App {
             } else if let Some((cli, model)) = engine {
                 voice::transcribe(&cli, &model, &path, Some(&engine_of.engine))
             } else {
-                Err("The speech engine is not installed")
+                Err(tr("The speech engine is not installed"))
             };
             let _ = std::fs::remove_file(&path);
             let _ = tx.send(said);
@@ -372,7 +373,7 @@ impl App {
                 return;
             }
             match said {
-                Ok(text) if text.trim().is_empty() => app.dictate_say("Nothing was made out"),
+                Ok(text) if text.trim().is_empty() => app.dictate_say(tr("Nothing was made out")),
                 Ok(text) => {
                     info!("dictation: {} characters written", text.chars().count());
                     app.dictate_show(None);
@@ -395,11 +396,11 @@ impl App {
         // (The pill is a line of some thirty letters: the card's sentences,
         // which have a whole line under its box, are said shorter here.)
         let why = match why {
-            w if w.starts_with("Nothing was heard") => "Nothing was heard",
-            w if w.starts_with("The microphone is muted") => "The microphone is muted",
-            w if w.starts_with("The microphone was too loud") => "Mic was too loud: say it again",
-            w if w.starts_with("Too much noise") => "Too much noise",
-            w if w.contains("speech engine") => "No speech engine installed",
+            w if w.starts_with("Nothing was heard") => tr("Nothing was heard"),
+            w if w.starts_with("The microphone is muted") => tr("The microphone is muted"),
+            w if w.starts_with("The microphone was too loud") => tr("Mic was too loud: say it again"),
+            w if w.starts_with("Too much noise") => tr("Too much noise"),
+            w if w.contains("speech engine") => tr("No speech engine installed"),
             w => w,
         };
         let since = Instant::now();

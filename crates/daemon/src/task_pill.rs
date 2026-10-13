@@ -155,7 +155,7 @@ impl App {
         if label != self.task_pill.measured || self.task_pill.pct_w <= 0.0 {
             self.task_pill.label_w = r.measure_text(&label, font_px, TEXT_FONT);
             self.task_pill.pct_w = r.measure_text(WIDEST, font_px, TEXT_FONT);
-            self.task_pill.cancel_w = r.measure_text(CANCEL, font_px, TEXT_FONT);
+            self.task_pill.cancel_w = r.measure_text(crate::i18n::tr(CANCEL), font_px, TEXT_FONT);
             self.task_pill.measured = label;
         }
         if number != self.task_pill.num_measured {
@@ -542,7 +542,7 @@ impl App {
             self.push_task_chip(scene, *chip, text, ink, (1.0 - e) * a, false);
         }
         if let Some(cancel) = parts.cancel {
-            self.push_task_chip(scene, cancel, CANCEL, ink, a * whole, ptr.is_some_and(|p| cancel.contains(p)));
+            self.push_task_chip(scene, cancel, crate::i18n::tr(CANCEL), ink, a * whole, ptr.is_some_and(|p| cancel.contains(p)));
         }
         let ty = band.y + (band.h - line_px) / 2.0;
         let color = Some([ink[0], ink[1], ink[2], ink[3] * a]);
@@ -611,7 +611,7 @@ impl App {
                 });
             }
             let cancel = self.task_row_cancel(rr);
-            self.push_task_chip(scene, cancel, CANCEL, ink, solid, ptr.is_some_and(|p| cancel.contains(p)));
+            self.push_task_chip(scene, cancel, crate::i18n::tr(CANCEL), ink, solid, ptr.is_some_and(|p| cancel.contains(p)));
             let ty = rr.y + (rr.h - line_px) / 2.0;
             let slot_x = cancel.x - CHIP_GAP - slot;
             let words_w = (slot_x - GAP - (rr.x + PILL_PAD_X)).max(1.0);

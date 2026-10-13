@@ -22,6 +22,7 @@ use crate::sys::{
     AppUse, Disk, Drive, Junk, Live, Machine, SysCommand, SysEvent, SysHandle, SysPage,
 };
 use crate::App;
+use crate::i18n::tr;
 
 const G_CPU: &str = "\u{f2db}";
 const G_RAM: &str = "\u{f1c0}";
@@ -218,26 +219,26 @@ pub(crate) fn size_text(bytes: u64) -> String {
 /// "3 h 20 min", "35 min", "2 days".
 pub(crate) fn span_text(minutes: u64) -> String {
     match minutes {
-        m if m >= 2 * 24 * 60 => format!("{} days", m / (24 * 60)),
+        m if m >= 2 * 24 * 60 => crate::i18n::fill(tr("{0} days"), &[("0", &(m / (24 * 60)))]),
         m if m >= 60 && m % 60 == 0 => format!("{} h", m / 60),
-        m if m >= 60 => format!("{} h {} min", m / 60, m % 60),
-        m => format!("{m} min"),
+        m if m >= 60 => crate::i18n::fill(tr("{0} h {1} min"), &[("0", &(m / 60)), ("1", &(m % 60))]),
+        m => crate::i18n::fill(tr("{m} min"), &[("m", &m)]),
     }
 }
 
 fn mode_name(profile: &str) -> &'static str {
     match profile {
-        "power-saver" => "Saver",
-        "balanced" => "Balanced",
-        _ => "Performance",
+        "power-saver" => tr("Saver"),
+        "balanced" => tr("Balanced"),
+        _ => tr("Performance"),
     }
 }
 
 fn mode_note(profile: &str) -> &'static str {
     match profile {
-        "power-saver" => "Lasts longest. Slower bursts",
-        "balanced" => "Full speed when something needs it",
-        _ => "Fastest. The fans and the battery pay for it",
+        "power-saver" => tr("Lasts longest. Slower bursts"),
+        "balanced" => tr("Full speed when something needs it"),
+        _ => tr("Fastest. The fans and the battery pay for it"),
     }
 }
 
@@ -619,11 +620,11 @@ impl App {
         (crate::launch::on_path("golem-autobrightness") && has_light_sensor()).then(|| {
             Item::Toggle {
                 hit: sys(SysHit::AutoBright),
-                label: "Automatic brightness".into(),
+                label: tr("Automatic brightness").into(),
                 hint: if has_keyboard_light() {
-                    "Screen and keyboard follow the room's light".into()
+                    tr("Screen and keyboard follow the room's light").into()
                 } else {
-                    "The screen follows the room's light".into()
+                    tr("The screen follows the room's light").into()
                 },
                 on: !Self::autobright_off_path().exists(),
             }
@@ -760,11 +761,11 @@ impl App {
             .map(|a| {
                 let name = self.app_name(a);
                 let sub = if a.system {
-                    "Part of the system".to_owned()
+                    tr("Part of the system").to_owned()
                 } else {
                     match a.windows.len() {
-                        0 | 1 => "1 window".to_owned(),
-                        n => format!("{n} windows"),
+                        0 | 1 => tr("1 window").to_owned(),
+                        n => crate::i18n::fill(tr("{n} windows"), &[("n", &n)]),
                     }
                 };
                 row_with(
@@ -778,9 +779,9 @@ impl App {
             .collect();
         if rows.is_empty() {
             rows.push(head(if query.is_empty() {
-                "Nothing is open"
+                tr("Nothing is open")
             } else {
-                "No app matches"
+                tr("No app matches")
             }));
         }
         rows
@@ -789,8 +790,8 @@ impl App {
     fn system_toggle(&self) -> Item {
         Item::Toggle {
             hit: sys(SysHit::SystemTasks),
-            label: "Show system tasks".into(),
-            hint: "What Golem itself is running".into(),
+            label: tr("Show system tasks").into(),
+            hint: tr("What Golem itself is running").into(),
             on: self.gear.pages.show_system,
         }
     }
@@ -803,13 +804,13 @@ impl App {
         if let Some(t) = l.temp {
             parts.push(format!("{t:.0}°"));
         }
-        parts.push(format!("{} cores", p.machine.cores));
+        parts.push(crate::i18n::fill(tr("{0} cores"), &[("0", &p.machine.cores)]));
         let status = row_with(
             row(
                 Some(G_CPU),
-                "Processor",
+                tr("Processor"),
                 if hot {
-                    "Running hot, so it slows itself down".to_owned()
+                    tr("Running hot, so it slows itself down").to_owned()
                 } else {
                     parts.join(" · ")
                 },
@@ -828,7 +829,7 @@ impl App {
             if self.stats_page_for(PageKind::Battery).is_some() {
                 items.push(Item::Kv {
                     hit: Some(sys(SysHit::PowerPage)),
-                    key: "Power mode".into(),
+                    key: tr("Power mode").into(),
                     value: mode_name(profile).into(),
                 });
             } else {
@@ -837,7 +838,7 @@ impl App {
                 items.push(Item::Note(mode_note(profile).into()));
             }
         }
-        items.push(head("Using the processor"));
+        items.push(head(tr("Using the processor")));
         items.extend(self.app_rows(|a| f64::from(a.cpu), |a| format!("{:.0}%", a.cpu)));
         items.push(self.system_toggle());
         View {
@@ -854,15 +855,11 @@ impl App {
         let status = row_with(
             row(
                 Some(G_RAM),
-                "Memory",
+                tr("Memory"),
                 if tight {
-                    "Almost full. Apps may slow down".to_owned()
+                    tr("Almost full. Apps may slow down").to_owned()
                 } else {
-                    format!(
-                        "{} of {} in use",
-                        size_text(l.mem_apps),
-                        size_text(l.mem_total)
-                    )
+                    crate::i18n::fill(tr("{0} of {1} in use"), &[("0", &(size_text(l.mem_apps))), ("1", &(size_text(l.mem_total)))])
                 },
             ),
             Hit::None,
@@ -880,18 +877,18 @@ impl App {
         let mut items = vec![
             status,
             Item::Bar(vec![
-                seg("Apps", l.mem_apps, 1.0),
-                seg("Kept ready", l.mem_cache, 0.5),
-                seg("Free", l.mem_free, 0.16),
+                seg(tr("Apps"), l.mem_apps, 1.0),
+                seg(tr("Kept ready"), l.mem_cache, 0.5),
+                seg(tr("Free"), l.mem_free, 0.16),
             ]),
         ];
         if let Some((orig, compr)) = l.packed {
             items.push(kv(
-                "Packed away",
+                tr("Packed away"),
                 if orig < 64 * 1024 * 1024 {
-                    "Nothing. There is room".to_owned()
+                    tr("Nothing. There is room").to_owned()
                 } else {
-                    format!("{} squeezed into {}", size_text(orig), size_text(compr))
+                    crate::i18n::fill(tr("{0} squeezed into {1}"), &[("0", &(size_text(orig))), ("1", &(size_text(compr)))])
                 },
             ));
         }
@@ -900,8 +897,8 @@ impl App {
                 items.push(row_with(
                     row(
                         Some(G_BOLT),
-                        format!("Close {}", self.app_name(big)),
-                        format!("Frees about {}", size_text(big.mem)),
+                        crate::i18n::fill(tr("Close {0}"), &[("0", &(self.app_name(big)))]),
+                        crate::i18n::fill(tr("Frees about {0}"), &[("0", &(size_text(big.mem)))]),
                     ),
                     sys(SysHit::AppClose(big.key.clone())),
                     None,
@@ -910,7 +907,7 @@ impl App {
                 ));
             }
         }
-        items.push(head("Using the most memory"));
+        items.push(head(tr("Using the most memory")));
         items.extend(self.app_rows(|a| a.mem as f64, |a| size_text(a.mem)));
         items.push(self.system_toggle());
         View {
@@ -922,7 +919,7 @@ impl App {
 
     fn mode_choice(&self, current: &str) -> Item {
         Item::Choice {
-            key: "Mode".into(),
+            key: tr("Mode").into(),
             opts: self
                 .gear
                 .pages
@@ -947,8 +944,8 @@ impl App {
             return View {
                 items: vec![row(
                     Some(G_BATTERY),
-                    "Battery",
-                    "No battery in this computer",
+                    tr("Battery"),
+                    tr("No battery in this computer"),
                 )],
                 ..View::default()
             };
@@ -956,16 +953,16 @@ impl App {
         let low = !b.charging && !b.full && b.pct <= SAVER_AT;
         let time = b.minutes.map(|m| span_text(u64::from(m)));
         let state = if b.charging {
-            time.map_or("charging".to_owned(), |t| format!("charging · full in {t}"))
+            time.map_or("charging".to_owned(), |t| crate::i18n::fill(tr("charging · full in {t}"), &[("t", &t)]))
         } else if b.full {
             "plugged in".to_owned()
         } else {
-            time.map_or("on battery".to_owned(), |t| format!("about {t} left"))
+            time.map_or("on battery".to_owned(), |t| crate::i18n::fill(tr("about {t} left"), &[("t", &t)]))
         };
         let mut items = vec![row_with(
             row(
                 Some(if b.charging { G_BOLT } else { G_BATTERY }),
-                "Battery",
+                tr("Battery"),
                 format!("{}% · {state}", b.pct),
             ),
             Hit::None,
@@ -977,7 +974,7 @@ impl App {
             items.push(self.mode_choice(profile));
             items.push(Item::Note(
                 if p.saver_from.is_some() {
-                    "On Saver because the battery is low"
+                    tr("On Saver because the battery is low")
                 } else {
                     mode_note(profile)
                 }
@@ -986,8 +983,8 @@ impl App {
             if l.profiles.iter().any(|p| p == "power-saver") {
                 items.push(Item::Toggle {
                     hit: sys(SysHit::AutoSaver),
-                    label: "Save battery when low".into(),
-                    hint: format!("Switches to Saver below {SAVER_AT}%"),
+                    label: tr("Save battery when low").into(),
+                    hint: crate::i18n::fill(tr("Switches to Saver below {SAVER_AT}%"), &[("SAVER_AT", &SAVER_AT)]),
                     on: !self.settings.battery_saver_off,
                 });
             }
@@ -995,16 +992,16 @@ impl App {
         if b.limit_writable {
             items.push(Item::Toggle {
                 hit: sys(SysHit::ChargeLimit),
-                label: "Stop charging at 80%".into(),
-                hint: "Keeps the battery healthy for more years".into(),
+                label: tr("Stop charging at 80%").into(),
+                hint: tr("Keeps the battery healthy for more years").into(),
                 on: b.limit.is_some_and(|l| l <= 80),
             });
         }
         if crate::launch::on_path("golem-caffeine") {
             items.push(Item::Toggle {
                 hit: sys(SysHit::Awake),
-                label: "Keep awake".into(),
-                hint: "No dimming, no sleep".into(),
+                label: tr("Keep awake").into(),
+                hint: tr("No dimming, no sleep").into(),
                 on: Self::caffeine_path().exists(),
             });
         }
@@ -1015,11 +1012,8 @@ impl App {
             items.push(row_with(
                 row(
                     Some(G_INFO),
-                    "Battery health",
-                    format!(
-                        "{}. Holds {health}% of what it did new",
-                        health_word(health)
-                    ),
+                    tr("Battery health"),
+                    crate::i18n::fill(tr("{0}. Holds {health}% of what it did new"), &[("0", &(health_word(health))), ("health", &health)]),
                 ),
                 sys(SysHit::Health),
                 Some((sys(SysHit::Health), G_MORE)),
@@ -1031,7 +1025,7 @@ impl App {
                 },
             ));
         }
-        items.push(head("Using the most power"));
+        items.push(head(tr("Using the most power")));
         items.extend(self.app_rows(|a| f64::from(a.cpu), |a| format!("{:.0}%", a.cpu)));
         View {
             items,
@@ -1058,7 +1052,7 @@ impl App {
                 secs.into_iter()
                     .map(|s| {
                         let label = if s == 0 {
-                            "Never".to_owned()
+                            tr("Never").to_owned()
                         } else {
                             span_text(u64::from(s / 60))
                         };
@@ -1068,7 +1062,7 @@ impl App {
             };
             if base_screen.is_some() {
                 items.push(Item::Choice {
-                    key: "Screen".into(),
+                    key: tr("Screen").into(),
                     opts: pills(
                         base_screen,
                         self.settings.screen_off_secs,
@@ -1079,7 +1073,7 @@ impl App {
             }
             if base_sleep.is_some() {
                 items.push(Item::Choice {
-                    key: "Sleep".into(),
+                    key: tr("Sleep").into(),
                     opts: pills(
                         base_sleep,
                         self.settings.sleep_secs,
@@ -1092,10 +1086,10 @@ impl App {
         if std::path::Path::new("/proc/acpi/button/lid").exists() {
             let nothing = self.settings.lid_nothing;
             items.push(Item::Choice {
-                key: "Lid".into(),
+                key: tr("Lid").into(),
                 opts: vec![
-                    (sys(SysHit::Lid(false)), "Sleep".into(), !nothing),
-                    (sys(SysHit::Lid(true)), "Nothing".into(), nothing),
+                    (sys(SysHit::Lid(false)), tr("Sleep").into(), !nothing),
+                    (sys(SysHit::Lid(true)), tr("Nothing").into(), nothing),
                 ],
             });
         }
@@ -1112,30 +1106,30 @@ impl App {
         let mut items = vec![
             Item::Card {
                 glyph: G_BATTERY,
-                title: "Battery health".into(),
+                title: tr("Battery health").into(),
                 sub: health_word(health).into(),
-                extra: Extra::Meter(health, format!("Holds {health}% of what it did new")),
+                extra: Extra::Meter(health, crate::i18n::fill(tr("Holds {health}% of what it did new"), &[("health", &health)])),
                 rename: None,
             },
-            kv("Holds now", format!("{:.1} Wh", b.full_wh)),
-            kv("When new", format!("{:.1} Wh", b.design_wh)),
+            kv(tr("Holds now"), format!("{:.1} Wh", b.full_wh)),
+            kv(tr("When new"), format!("{:.1} Wh", b.design_wh)),
         ];
         if let Some(c) = b.cycles {
-            items.push(kv("Cycles", c.to_string()));
+            items.push(kv(tr("Cycles"), c.to_string()));
         }
         if b.watts > 0.3 {
             items.push(kv(
-                if b.charging { "Charging at" } else { "Using" },
+                if b.charging { tr("Charging at") } else { tr("Using") },
                 format!("{:.1} W", b.watts),
             ));
         }
-        items.push(Item::Note("A battery counts as worn at about 80%.".into()));
+        items.push(Item::Note(tr("A battery counts as worn at about 80%.").into()));
         back_only(items)
     }
 
     fn app_detail_view(&self, key: &str) -> View {
         let Some(a) = self.app(key) else {
-            return back_only(vec![Item::Empty("It is closed now".into())]);
+            return back_only(vec![Item::Empty(tr("It is closed now").into())]);
         };
         let name = self.app_name(a);
         let mut strip = vec![btn(Hit::Back, G_BACK)];
@@ -1150,23 +1144,23 @@ impl App {
                     glyph: monogram(&name),
                     title: name,
                     sub: if a.system {
-                        "Part of the system".into()
+                        tr("Part of the system").into()
                     } else {
                         match a.windows.len() {
-                            0 | 1 => "1 window".into(),
-                            n => format!("{n} windows"),
+                            0 | 1 => tr("1 window").into(),
+                            n => crate::i18n::fill(tr("{n} windows"), &[("n", &n)]),
                         }
                     },
                     extra: Extra::None,
                     rename: None,
                 },
-                kv("Processor", format!("{:.0}%", a.cpu)),
-                kv("Memory", size_text(a.mem)),
+                kv(tr("Processor"), format!("{:.0}%", a.cpu)),
+                kv(tr("Memory"), size_text(a.mem)),
                 kv(
-                    "Made of",
+                    tr("Made of"),
                     match a.pids.len() {
-                        1 => "1 process".to_owned(),
-                        n => format!("{n} processes"),
+                        1 => tr("1 process").to_owned(),
+                        n => crate::i18n::fill(tr("{n} processes"), &[("n", &n)]),
                     },
                 ),
             ],
@@ -1185,25 +1179,25 @@ impl App {
             .is_some_and(|c| c.deploy.stale_generation);
         let (title, sub, tone, hit) = if p.live.updating {
             (
-                "Updating now…",
-                "Keep working. It finishes at the next restart".to_owned(),
+                tr("Updating now…"),
+                tr("Keep working. It finishes at the next restart").to_owned(),
                 Tone::Busy,
                 Hit::None,
             )
         } else if stale {
             (
-                "Restart to finish updating",
-                "Click to restart now".to_owned(),
+                tr("Restart to finish updating"),
+                tr("Click to restart now").to_owned(),
                 Tone::Warn,
                 sys(SysHit::AskRestart),
             )
         } else {
             (
-                "Up to date",
+                tr("Up to date"),
                 p.live
                     .last_update_secs
                     .map_or("Click to check now".to_owned(), |s| {
-                        format!("Checked {} ago", span_text(s / 60))
+                        crate::i18n::fill(tr("Checked {0} ago"), &[("0", &(span_text(s / 60)))])
                     }),
                 Tone::Normal,
                 sys(SysHit::CheckUpdates),
@@ -1214,13 +1208,13 @@ impl App {
                 row(
                     Some(G_LAPTOP),
                     if m.host.is_empty() {
-                        "This computer".to_owned()
+                        tr("This computer").to_owned()
                     } else {
                         m.host.clone()
                     },
                     // "Golem 26.05 (Yarara)": the release's own name is for the
                     // details view; the row has room for the version.
-                    format!("{} · up {on_for}", m.os.split(" (").next().unwrap_or(&m.os)),
+                    crate::i18n::fill(tr("{0} · up {on_for}"), &[("0", &(m.os.split(" (").next().unwrap_or(&m.os))), ("on_for", &on_for)]),
                 ),
                 sys(SysHit::About),
                 Some((sys(SysHit::About), G_MORE)),
@@ -1236,11 +1230,11 @@ impl App {
             ),
             Item::Toggle {
                 hit: sys(SysHit::Float),
-                label: "Floating windows".into(),
+                label: tr("Floating windows").into(),
                 hint: if self.floating_mode() {
-                    "Every window floats".into()
+                    tr("Every window floats").into()
                 } else {
-                    "Windows tile. Golem places them".into()
+                    tr("Windows tile. Golem places them").into()
                 },
                 on: self.floating_mode(),
             },
@@ -1248,8 +1242,8 @@ impl App {
         if crate::launch::on_path("golem-caffeine") {
             items.push(Item::Toggle {
                 hit: sys(SysHit::Awake),
-                label: "Keep awake".into(),
-                hint: "No dimming, no sleep".into(),
+                label: tr("Keep awake").into(),
+                hint: tr("No dimming, no sleep").into(),
                 on: Self::caffeine_path().exists(),
             });
         }
@@ -1259,12 +1253,12 @@ impl App {
         }
         items.push(Item::Toggle {
             hit: Hit::Airplane,
-            label: "Airplane mode".into(),
-            hint: "Wi-Fi and Bluetooth off".into(),
+            label: tr("Airplane mode").into(),
+            hint: tr("Wi-Fi and Bluetooth off").into(),
             on: self.settings.airplane,
         });
         items.push(row_with(
-            row(Some(G_COG), "All settings", "Screen, sound and the rest"),
+            row(Some(G_COG), tr("All settings"), tr("Screen, sound and the rest")),
             sys(SysHit::AllSettings),
             None,
             Trail::None,
@@ -1289,7 +1283,7 @@ impl App {
         let mut items = vec![Item::Card {
             glyph: G_LAPTOP,
             title: if m.host.is_empty() {
-                "This computer".into()
+                tr("This computer").into()
             } else {
                 m.host.clone()
             },
@@ -1298,15 +1292,15 @@ impl App {
             rename: None,
         }];
         if !m.model.is_empty() {
-            items.push(kv("Model", m.model.clone()));
+            items.push(kv(tr("Model"), m.model.clone()));
         }
-        items.push(kv("Processor", m.cpu.clone()));
-        items.push(kv("Memory", size_text(m.mem_bytes)));
+        items.push(kv(tr("Processor"), m.cpu.clone()));
+        items.push(kv(tr("Memory"), size_text(m.mem_bytes)));
         if !m.cards.is_empty() {
             let names: Vec<&str> = m.cards.iter().map(|c| c.name.as_str()).collect();
-            items.push(kv("Graphics", names.join(" · ")));
+            items.push(kv(tr("Graphics"), names.join(" · ")));
         }
-        items.push(kv("On for", span_text(p.live.uptime_secs / 60)));
+        items.push(kv(tr("On for"), span_text(p.live.uptime_secs / 60)));
         back_only(items)
     }
 
@@ -1316,31 +1310,31 @@ impl App {
         let cards = &p.machine.cards;
         let mut items = vec![row(
             Some(G_GPU),
-            "Graphics",
+            tr("Graphics"),
             usage.map_or_else(
                 || match cards.len() {
-                    1 => "1 graphics card".to_owned(),
-                    n => format!("{n} graphics cards"),
+                    1 => tr("1 graphics card").to_owned(),
+                    n => crate::i18n::fill(tr("{n} graphics cards"), &[("n", &n)]),
                 },
-                |u| format!("{u:.0}% busy"),
+                |u| crate::i18n::fill(tr("{u}% busy"), &[("u", &format!("{:.0}", u))]),
             ),
         )];
         if usage.is_some() {
             items.push(Item::Graph(p.gpu_hist.clone()));
         }
         items.push(head(if cards.len() == 1 {
-            "Graphics card"
+            tr("Graphics card")
         } else {
-            "Graphics cards"
+            tr("Graphics cards")
         }));
         for (i, c) in cards.iter().enumerate() {
             let awake = p.live.cards_awake.get(i).copied().unwrap_or(c.awake);
             let sub = if c.primary {
-                "In use. Drives the screen"
+                tr("In use. Drives the screen")
             } else if awake {
-                "Awake. An app is using it"
+                tr("Awake. An app is using it")
             } else {
-                "Asleep. Wakes for apps that ask"
+                tr("Asleep. Wakes for apps that ask")
             };
             items.push(row_with(
                 row(Some(G_GPU), c.name.clone(), sub),
@@ -1355,7 +1349,7 @@ impl App {
             ));
         }
         if self.has_fast_card() {
-            items.push(head("Open with the fast card"));
+            items.push(head(tr("Open with the fast card")));
             for id in &self.settings.gpu_fast {
                 let name = self
                     .entries
@@ -1372,8 +1366,8 @@ impl App {
             items.push(row_with(
                 row(
                     Some(G_PLUS),
-                    "Add an app",
-                    "It opens on the fast card from then on",
+                    tr("Add an app"),
+                    tr("It opens on the fast card from then on"),
                 ),
                 sys(SysHit::FastAdd),
                 None,
@@ -1386,11 +1380,11 @@ impl App {
             items.push(row_with(
                 row(
                     Some(G_FILM),
-                    "Video playback",
+                    tr("Video playback"),
                     if on_card > 0 {
-                        "Decoded by the graphics card"
+                        tr("Decoded by the graphics card")
                     } else {
-                        "Decoded by the processor"
+                        tr("Decoded by the processor")
                     },
                 ),
                 sys(SysHit::Video),
@@ -1400,19 +1394,19 @@ impl App {
             ));
         }
         let light = crate::display::GolemSettings::load().light_effects;
-        items.push(head("Looks"));
+        items.push(head(tr("Looks")));
         items.push(Item::Choice {
-            key: "Effects".into(),
+            key: tr("Effects").into(),
             opts: vec![
-                (sys(SysHit::Effects(false)), "Full".into(), !light),
-                (sys(SysHit::Effects(true)), "Light".into(), light),
+                (sys(SysHit::Effects(false)), tr("Full").into(), !light),
+                (sys(SysHit::Effects(true)), tr("Light").into(), light),
             ],
         });
         items.push(Item::Note(
             if light {
-                "No blur. For weak graphics and long battery"
+                tr("No blur. For weak graphics and long battery")
             } else {
-                "Blur and glass everywhere"
+                tr("Blur and glass everywhere")
             }
             .into(),
         ));
@@ -1441,24 +1435,24 @@ impl App {
                 glyph: G_GPU,
                 title: c.name.clone(),
                 sub: if c.primary {
-                    "In use".into()
+                    tr("In use").into()
                 } else if awake {
-                    "Awake".into()
+                    tr("Awake").into()
                 } else {
-                    "Asleep".into()
+                    tr("Asleep").into()
                 },
                 extra: Extra::None,
                 rename: None,
             },
             kv(
-                "Role",
+                tr("Role"),
                 if c.primary {
-                    "Drives the screen"
+                    tr("Drives the screen")
                 } else {
-                    "Wakes for apps that ask for it"
+                    tr("Wakes for apps that ask for it")
                 },
             ),
-            kv("Driver", c.driver.clone()),
+            kv(tr("Driver"), c.driver.clone()),
         ])
     }
 
@@ -1469,13 +1463,13 @@ impl App {
         let mut items = vec![row_with(
             row(
                 Some(G_DISK),
-                "Storage",
+                tr("Storage"),
                 if failing {
-                    "This drive is failing. Back up now".to_owned()
+                    tr("This drive is failing. Back up now").to_owned()
                 } else if d.total == 0 {
-                    "Reading…".to_owned()
+                    tr("Reading…").to_owned()
                 } else {
-                    format!("{} of {} used", size_text(d.used), size_text(d.total))
+                    crate::i18n::fill(tr("{0} of {1} used"), &[("0", &(size_text(d.used))), ("1", &(size_text(d.total)))])
                 },
             ),
             Hit::None,
@@ -1485,7 +1479,7 @@ impl App {
         )];
         if d.measured {
             let mut segs = vec![(
-                format!("Apps and system {}", size_text(d.system_bytes)),
+                crate::i18n::fill(tr("Apps and system {0}"), &[("0", &(size_text(d.system_bytes)))]),
                 d.system_bytes as f32,
                 1.0,
             )];
@@ -1498,13 +1492,13 @@ impl App {
                 ));
             }
             segs.push((
-                format!("Everything else {}", size_text(d.other_bytes)),
+                crate::i18n::fill(tr("Everything else {0}"), &[("0", &(size_text(d.other_bytes)))]),
                 d.other_bytes as f32,
                 0.22,
             ));
             items.push(Item::Bar(segs));
             items.push(row_with(
-                row(Some(G_COG), "Apps and system", ""),
+                row(Some(G_COG), tr("Apps and system"), ""),
                 Hit::None,
                 None,
                 Trail::Text(size_text(d.system_bytes)),
@@ -1520,23 +1514,23 @@ impl App {
                 ));
             }
             items.push(row_with(
-                row(Some(G_FOLDER), "Everything else", ""),
+                row(Some(G_FOLDER), tr("Everything else"), ""),
                 Hit::None,
                 None,
                 Trail::Text(size_text(d.other_bytes)),
                 Tone::Normal,
             ));
-            items.push(head("Free up space"));
+            items.push(head(tr("Free up space")));
             let known: u64 = d.junk.iter().filter_map(|(_, b)| *b).sum();
             items.push(row_with(
                 row(
                     Some(G_TRASH),
-                    "Clean up",
+                    tr("Clean up"),
                     match p.freed {
                         Some(f) if known < 64 * 1024 * 1024 => {
-                            format!("Clean. {} freed", size_text(f))
+                            crate::i18n::fill(tr("Clean. {0} freed"), &[("0", &(size_text(f)))])
                         }
-                        _ => format!("About {} can go: trash and caches", size_text(known)),
+                        _ => crate::i18n::fill(tr("About {0} can go: trash and caches"), &[("0", &(size_text(known)))]),
                     },
                 ),
                 sys(SysHit::Clean),
@@ -1546,11 +1540,11 @@ impl App {
             ));
         } else {
             items.push(Item::Heading {
-                text: "Measuring what fills it…".into(),
+                text: tr("Measuring what fills it…").into(),
                 busy: true,
             });
         }
-        items.push(head("Drives"));
+        items.push(head(tr("Drives")));
         for (i, x) in d.drives.iter().enumerate() {
             let kind = if x.rotational { "spinning disk" } else { "SSD" };
             if x.removable {
@@ -1572,10 +1566,10 @@ impl App {
                         Some(G_DISK),
                         x.name.clone(),
                         if bad {
-                            "Failing. Back up now".to_owned()
+                            tr("Failing. Back up now").to_owned()
                         } else {
                             let health = if x.failing == Some(false) {
-                                "Healthy · "
+                                tr("Healthy · ")
                             } else {
                                 ""
                             };
@@ -1608,7 +1602,7 @@ impl App {
                 extra: Extra::None,
                 rename: None,
             },
-            head("The biggest things in it"),
+            head(tr("The biggest things in it")),
         ];
         for (name, bytes) in &f.top {
             items.push(row_with(
@@ -1652,15 +1646,15 @@ impl App {
         let any = Junk::ALL.iter().any(|j| self.junk_chosen(*j));
         let mut items = vec![Item::Card {
             glyph: G_TRASH,
-            title: "Clean up".into(),
+            title: tr("Clean up").into(),
             sub: if p.cleaning {
-                "Cleaning…".into()
+                tr("Cleaning…").into()
             } else if let Some(f) = p.freed {
-                format!("Done. {} freed", size_text(f))
+                crate::i18n::fill(tr("Done. {0} freed"), &[("0", &(size_text(f)))])
             } else if any {
-                format!("{} chosen", size_text(chosen))
+                crate::i18n::fill(tr("{0} chosen"), &[("0", &(size_text(chosen)))])
             } else {
-                "Nothing chosen".into()
+                tr("Nothing chosen").into()
             },
             extra: Extra::None,
             rename: None,
@@ -1672,16 +1666,16 @@ impl App {
             .filter(|(j, _)| *j != Junk::System || p.machine.has_system_clean)
         {
             let (name, hint) = match j {
-                Junk::Trash => ("Trash", "Files you already threw away"),
-                Junk::Caches => ("App caches and thumbnails", "Apps rebuild them as needed"),
+                Junk::Trash => (tr("Trash"), tr("Files you already threw away")),
+                Junk::Caches => (tr("App caches and thumbnails"), tr("Apps rebuild them as needed")),
                 Junk::Browser if p.disk.browser_running => {
-                    ("Browser cache", "Close the browser first")
+                    (tr("Browser cache"), tr("Close the browser first"))
                 }
-                Junk::Browser => ("Browser cache", "Pages load a little slower once"),
-                Junk::Store => ("Unused system files", "What no system version still needs"),
+                Junk::Browser => (tr("Browser cache"), tr("Pages load a little slower once")),
+                Junk::Store => (tr("Unused system files"), tr("What no system version still needs")),
                 Junk::System => (
-                    "Old system versions and logs",
-                    "Keeps the last two versions",
+                    tr("Old system versions and logs"),
+                    tr("Keeps the last two versions"),
                 ),
             };
             items.push(Item::Toggle {
@@ -1696,18 +1690,18 @@ impl App {
             row(
                 Some(G_CHECK),
                 if p.cleaning {
-                    "Cleaning…"
+                    tr("Cleaning…")
                 } else {
-                    "Clean now"
+                    tr("Clean now")
                 },
                 if p.cleaning {
                     String::new()
                 } else if p.freed.is_some() && chosen < 1024 * 1024 {
-                    "Nothing left to clean".to_owned()
+                    tr("Nothing left to clean").to_owned()
                 } else if any {
-                    format!("Frees {} or more", size_text(chosen))
+                    crate::i18n::fill(tr("Frees {0} or more"), &[("0", &(size_text(chosen)))])
                 } else {
-                    "Choose something above".to_owned()
+                    tr("Choose something above").to_owned()
                 },
             ),
             if any && !p.cleaning {
@@ -1720,12 +1714,12 @@ impl App {
             if p.cleaning { Tone::Busy } else { Tone::Normal },
         ));
         if let Some(i) = p.disk.folders.iter().position(|f| f.name == "Downloads") {
-            items.push(head("Yours to decide"));
+            items.push(head(tr("Yours to decide")));
             items.push(row_with(
                 row(
                     Some(G_FOLDER),
-                    format!("Downloads · {}", size_text(p.disk.folders[i].bytes)),
-                    "Your files. Opens the folder, deletes nothing",
+                    crate::i18n::fill(tr("Downloads · {0}"), &[("0", &(size_text(p.disk.folders[i].bytes)))]),
+                    tr("Your files. Opens the folder, deletes nothing"),
                 ),
                 sys(SysHit::OpenFolder(i)),
                 None,
@@ -1739,7 +1733,7 @@ impl App {
     fn drive_view(&self, i: usize) -> View {
         let p = &self.gear.pages;
         let Some(x) = p.disk.drives.get(i) else {
-            return back_only(vec![Item::Empty("It was unplugged".into())]);
+            return back_only(vec![Item::Empty(tr("It was unplugged").into())]);
         };
         if x.removable {
             return self.ext_view(i, x);
@@ -1748,57 +1742,57 @@ impl App {
             glyph: G_DISK,
             title: x.name.clone(),
             sub: match x.failing {
-                Some(true) => "Failing. Copy your files somewhere else now".into(),
-                Some(false) => "Healthy".into(),
-                None => "It does not report its health".into(),
+                Some(true) => tr("Failing. Copy your files somewhere else now").into(),
+                Some(false) => tr("Healthy").into(),
+                None => tr("It does not report its health").into(),
             },
             extra: Extra::None,
             rename: None,
         }];
         items.push(kv(
-            "Kind",
+            tr("Kind"),
             format!(
                 "{} · {}",
-                if x.rotational { "Spinning disk" } else { "SSD" },
+                if x.rotational { tr("Spinning disk") } else { "SSD" },
                 size_text(x.size)
             ),
         ));
         if let Some(w) = x.wear_pct {
-            items.push(kv("Wear", format!("{w}% used up")));
+            items.push(kv(tr("Wear"), crate::i18n::fill(tr("{w}% used up"), &[("w", &w)])));
         }
         if let Some(t) = x.temp_c {
-            items.push(kv("Temperature", format!("{t:.0}°")));
+            items.push(kv(tr("Temperature"), format!("{t:.0}°")));
         }
         if let Some(h) = x.power_on_hours {
-            items.push(kv("Powered on", span_text(h * 60)));
+            items.push(kv(tr("Powered on"), span_text(h * 60)));
         }
         if x.system {
-            items.push(kv("Care", "Kept in shape weekly"));
+            items.push(kv(tr("Care"), tr("Kept in shape weekly")));
             let (title, sub, tone, hit) = match p.erase {
                 Erase::Running(pct) => (
-                    "Stop erasing",
-                    format!("Erasing… {pct}%"),
+                    tr("Stop erasing"),
+                    crate::i18n::fill(tr("Erasing… {pct}%"), &[("pct", &pct)]),
                     Tone::Busy,
                     sys(SysHit::StopErase),
                 ),
                 Erase::Done => (
-                    "Erase empty space",
-                    "Done".to_owned(),
+                    tr("Erase empty space"),
+                    tr("Done").to_owned(),
                     Tone::Normal,
                     sys(SysHit::AskErase),
                 ),
                 Erase::Refused => (
-                    "Erase empty space",
-                    "This system does not allow it yet".to_owned(),
+                    tr("Erase empty space"),
+                    tr("This system does not allow it yet").to_owned(),
                     Tone::Warn,
                     Hit::None,
                 ),
                 Erase::Idle => (
-                    "Erase empty space",
+                    tr("Erase empty space"),
                     if x.rotational {
-                        "Writes over it. Takes hours".to_owned()
+                        tr("Writes over it. Takes hours").to_owned()
                     } else {
-                        "Trims the drive. A few seconds".to_owned()
+                        tr("Trims the drive. A few seconds").to_owned()
                     },
                     Tone::Normal,
                     sys(SysHit::AskErase),
@@ -1880,9 +1874,9 @@ impl App {
                 self.set_stats_box(false);
                 run_detached("systemctl", vec!["suspend".into()]);
             }
-            SysHit::AskRestart => self.gear_arm("Restart now? Click again", sys(SysHit::DoRestart)),
+            SysHit::AskRestart => self.gear_arm(tr("Restart now? Click again"), sys(SysHit::DoRestart)),
             SysHit::DoRestart => run_detached("systemctl", vec!["reboot".into()]),
-            SysHit::AskOff => self.gear_arm("Power off? Click again", sys(SysHit::DoOff)),
+            SysHit::AskOff => self.gear_arm(tr("Power off? Click again"), sys(SysHit::DoOff)),
             SysHit::DoOff => run_detached("systemctl", vec!["poweroff".into()]),
             SysHit::App(key) => self.page_view(PView::App(key)),
             SysHit::AppClose(key) => {
@@ -1898,7 +1892,7 @@ impl App {
             SysHit::AskKill(key) => {
                 let name = self.app(&key).map(|a| self.app_name(a)).unwrap_or_default();
                 self.gear_arm(
-                    &format!("Force quit {name}? Click again"),
+                    &crate::i18n::fill(tr("Force quit {name}? Click again"), &[("name", &name)]),
                     sys(SysHit::DoKill(key)),
                 );
             }
@@ -1957,7 +1951,7 @@ impl App {
             }
             SysHit::FastAdd => self.gear_ask(
                 PField::FastApp,
-                "Name of the app",
+                tr("Name of the app"),
                 G_PLUS,
                 false,
                 String::new(),
@@ -1995,7 +1989,7 @@ impl App {
             SysHit::AskClean => {
                 let n = self.junk_bytes(true);
                 self.gear_arm(
-                    &format!("Remove {} for good? Click again", size_text(n)),
+                    &crate::i18n::fill(tr("Remove {0} for good? Click again"), &[("0", &(size_text(n)))]),
                     sys(SysHit::DoClean),
                 );
             }
@@ -2038,9 +2032,9 @@ impl App {
                     .any(|d: &Drive| d.system && d.rotational);
                 self.gear_arm(
                     if hours {
-                        "Erase empty space? Takes hours. Click again"
+                        tr("Erase empty space? Takes hours. Click again")
                     } else {
-                        "Erase empty space? Click again"
+                        tr("Erase empty space? Click again")
                     },
                     sys(SysHit::DoErase),
                 );
@@ -2231,9 +2225,9 @@ fn fit_label(name: &str, fstype: &str) -> String {
 
 fn health_word(pct: u8) -> &'static str {
     match pct {
-        80..=u8::MAX => "Good",
-        60..=79 => "Worn",
-        _ => "Needs replacing",
+        80..=u8::MAX => tr("Good"),
+        60..=79 => tr("Worn"),
+        _ => tr("Needs replacing"),
     }
 }
 

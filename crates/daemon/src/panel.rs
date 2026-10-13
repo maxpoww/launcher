@@ -59,6 +59,7 @@ use crate::options::{FONT_PX, LINE_PX, PILL_PAD_X, TEXT_FONT};
 use crate::state::Target;
 use crate::{apps, groups, App};
 use waverunner_proto::Command;
+use crate::i18n::tr;
 
 /// One pill of a field: its name, the layer it starts on (0 near, 1
 /// middle, 2 far), and its search keywords.
@@ -221,8 +222,8 @@ fn names(progs: &[&crate::modules::Program], n: usize) -> String {
     match (shown.len(), more) {
         (0, _) => String::new(),
         (1, 0) => shown[0].to_owned(),
-        (_, 0) => format!("{} and {}", shown[..shown.len() - 1].join(", "), shown[shown.len() - 1]),
-        (_, m) => format!("{} and {m} more", shown.join(", ")),
+        (_, 0) => crate::i18n::fill(tr("{0} and {1}"), &[("0", &(shown[..shown.len() - 1].join(", "))), ("1", &(shown[shown.len() - 1]))]),
+        (_, m) => crate::i18n::fill(tr("{0} and {m} more"), &[("0", &(shown.join(", "))), ("m", &m)]),
     }
 }
 
@@ -330,13 +331,15 @@ impl Usage {
 
 /// How well a setting matches a (lowercased, trimmed) search: 0 its name
 /// starts with it, 1 its name contains it, 2 a keyword does; `None` no match.
-fn match_rank(label: &str, keywords: &str, q: &str) -> Option<u8> {
+fn match_rank(label: &'static str, keywords: &'static str, q: &str) -> Option<u8> {
+    // Its name and keywords in English, and in the shell's language.
     let name = label.to_lowercase();
-    if name.starts_with(q) {
+    let shown = crate::i18n::tr(label).to_lowercase();
+    if name.starts_with(q) || shown.starts_with(q) {
         Some(0)
-    } else if name.contains(q) {
+    } else if name.contains(q) || shown.contains(q) {
         Some(1)
-    } else if keywords.contains(q) {
+    } else if keywords.contains(q) || crate::i18n::tr(keywords).contains(q) {
         Some(2)
     } else {
         None
@@ -449,7 +452,11 @@ impl Pill {
     /// Whether it matches a (lowercased) search: in its name or any of its
     /// keywords.
     fn matches(&self, query: &str) -> bool {
-        self.label.to_lowercase().contains(query) || self.keywords.contains(query)
+        // In English and in the shell's language: either finds it.
+        self.label.to_lowercase().contains(query)
+            || self.keywords.contains(query)
+            || crate::i18n::tr(self.label).to_lowercase().contains(query)
+            || crate::i18n::tr(self.keywords).contains(query)
     }
 }
 
@@ -680,7 +687,7 @@ impl Panel {
             for (l, &f) in LAYER_SCALE.iter().enumerate() {
                 let h = pill_h * f;
                 p.h[l] = h;
-                p.w[l] = (measure(p.label, FONT_PX * scale * f) + 2.0 * PILL_PAD_X * scale * f).max(h);
+                p.w[l] = (measure(crate::i18n::tr(p.label), FONT_PX * scale * f) + 2.0 * PILL_PAD_X * scale * f).max(h);
             }
         }
         if self.modules {
@@ -1043,13 +1050,13 @@ impl Panel {
             return None;
         }
         let Some(v) = &self.display else {
-            out.subtitle = "No screen to set.".to_owned();
+            out.subtitle = tr("No screen to set.").to_owned();
             return Some(out);
         };
         let mut y = top;
         if label == "Scale" {
             let (lw, lh) = v.looks_like();
-            out.subtitle = format!("{} · looks like {lw} × {lh}", v.screen);
+            out.subtitle = crate::i18n::fill(tr("{0} · looks like {lw} × {lh}"), &[("0", &v.screen), ("lw", &lw), ("lh", &lh)]);
             let chips = v
                 .stops
                 .iter()
@@ -1076,10 +1083,10 @@ impl Panel {
             // A panel with ONE mode (the MacBook Air, the ASUS X550LC): say
             // so, rather than leave a lone lit pill that looks broken.
             if v.sizes.len() < 2 {
-                y = self.caption(&mut out, y, "This screen has one resolution.".to_owned());
+                y = self.caption(&mut out, y, tr("This screen has one resolution.").to_owned());
             }
             if v.rates.len() > 1 {
-                y = self.caption(&mut out, y, "Refresh rate".to_owned());
+                y = self.caption(&mut out, y, tr("Refresh rate").to_owned());
                 let chips = v
                     .rates
                     .iter()
@@ -1091,11 +1098,11 @@ impl Panel {
                 y = self.flow(&mut out, y, 96.0, chips);
             }
             if let Some(left) = self.keep_left {
-                let text = format!("Keep this resolution? Going back in {:.0} s", left.ceil().max(1.0));
+                let text = crate::i18n::fill(tr("Keep this resolution? Going back in {0} s"), &[("0", &format!("{:.0}", left.ceil().max(1.0)))]);
                 y = self.caption(&mut out, y, text);
                 let chips = vec![
-                    ("Keep".to_owned(), true, PanelAction::Keep),
-                    ("Go back".to_owned(), false, PanelAction::Revert),
+                    (tr("Keep").to_owned(), true, PanelAction::Keep),
+                    (tr("Go back").to_owned(), false, PanelAction::Revert),
                 ];
                 y = self.flow(&mut out, y, 120.0, chips);
             }
@@ -1233,12 +1240,12 @@ impl Panel {
                 (true, false, _) => {
                     let mut parts = Vec::new();
                     if !add.is_empty() {
-                        parts.push(format!("{} to add", add.len()));
+                        parts.push(crate::i18n::fill(tr("{0} to add"), &[("0", &add.len())]));
                     }
                     if !remove.is_empty() {
-                        parts.push(format!("{} to remove", remove.len()));
+                        parts.push(crate::i18n::fill(tr("{0} to remove"), &[("0", &remove.len())]));
                     }
-                    (ModButton::Apply, "Apply changes".to_owned(), vec![parts.join(" · ")], Some((ModLink::Undo, "undo")))
+                    (ModButton::Apply, tr("Apply changes").to_owned(), vec![parts.join(" · ")], Some((ModLink::Undo, "undo")))
                 }
                 (true, true, _) => {
                     let mut say = Vec::new();
@@ -1251,30 +1258,30 @@ impl Panel {
                     let n = add.len() + remove.len();
                     let mut sub = Vec::new();
                     if !remove.is_empty() {
-                        sub.push(format!("{} will be removed.", names(&remove, 3)));
-                        sub.push("Your files stay where they are.".to_owned());
+                        sub.push(crate::i18n::fill(tr("{0} will be removed."), &[("0", &(names(&remove, 3)))]));
+                        sub.push(tr("Your files stay where they are.").to_owned());
                     } else {
                         sub.push(format!("{}.", names(&add, 4)));
                     }
                     let kind = if remove.is_empty() { ModButton::Confirm } else { ModButton::ConfirmRemove };
-                    (kind, format!("Yes, {} {}", say.join(" and "), plural(n)), sub, Some((ModLink::KeepChoosing, "keep choosing")))
+                    (kind, crate::i18n::fill(tr("Yes, {0} {1}"), &[("0", &(say.join(" and "))), ("1", &(plural(n)))]), sub, Some((ModLink::KeepChoosing, "keep choosing")))
                 }
                 (false, _, true) => (
                     ModButton::InstallRecommended,
-                    "Install recommended".to_owned(),
-                    vec!["or switch on the programs you want".to_owned()],
+                    tr("Install recommended").to_owned(),
+                    vec![tr("or switch on the programs you want").to_owned()],
                     None,
                 ),
                 (false, false, false) => (
                     ModButton::Uninstall,
-                    "Uninstall all".to_owned(),
-                    vec!["or switch programs on and off".to_owned()],
+                    tr("Uninstall all").to_owned(),
+                    vec![tr("or switch programs on and off").to_owned()],
                     None,
                 ),
                 (false, true, false) => (
                     ModButton::ConfirmRemove,
-                    format!("Yes, uninstall {} {}", have.len(), plural(have.len())),
-                    vec!["Your files stay where they are.".to_owned()],
+                    crate::i18n::fill(tr("Yes, uninstall {0} {1}"), &[("0", &have.len()), ("1", &(plural(have.len())))]),
+                    vec![tr("Your files stay where they are.").to_owned()],
                     Some((ModLink::KeepThem, "keep them")),
                 ),
             };
@@ -1599,7 +1606,7 @@ impl Panel {
             // cache with one entry per frame.
             let resting = (k - 1.0).abs() < 0.001 && p.exit.is_none();
             out.labels.push(Label {
-                text: p.label.to_owned(),
+                text: crate::i18n::tr(p.label).to_owned(),
                 pos: (rect.x + w / 2.0, rect.y + (h - line) / 2.0),
                 max_w: w,
                 font_px: font,
@@ -1655,7 +1662,7 @@ impl Panel {
                 let font = FONT_PX * s * LAYER_SCALE[d];
                 let line = LINE_PX * s * LAYER_SCALE[d];
                 out.labels.push(Label {
-                    text: p.label.to_owned(),
+                    text: crate::i18n::tr(p.label).to_owned(),
                     pos: (r.x + r.w / 2.0, r.y + (r.h - line) / 2.0),
                     max_w: r.w,
                     font_px: font,
@@ -1712,7 +1719,7 @@ impl Panel {
         };
         let cx = fw / 2.0;
         let mut y = 30.0 * s;
-        text(out, p.label.to_owned(), cx, y, 30.0, 36.0, 1.0);
+        text(out, crate::i18n::tr(p.label).to_owned(), cx, y, 30.0, 36.0, 1.0);
         y += 44.0 * s;
         if let Some(content) = self.open_content(p.label) {
             // A real setting: its choices as floating pills, the one in use
@@ -1752,7 +1759,7 @@ impl Panel {
                 let ink_a = if chip.on || hot { 1.0 } else { LAYER_INK[1] };
                 text(out, chip.text, x0 + r.w / 2.0, y0 + (r.h - line) / 2.0, 16.0, 20.0, ink_a);
             }
-            text(out, "Esc or a click on the empty space closes".to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
+            text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
             return;
         }
         // A module: its programs as a list of switches, ONE button at the foot.
@@ -1812,8 +1819,8 @@ impl Panel {
                 let name_w = self.name_w.get(row.prog.name.as_str()).copied().unwrap_or(0.0);
                 inside.labels.push(left(row.prog.name.clone(), pad, MOD_NAME_PX, 1.0, rw - 2.0 * pad - sw.0));
                 let what = match (on, was) {
-                    (true, false) => format!("will be added · {}", row.prog.what),
-                    (false, true) => format!("will be removed · {}", row.prog.what),
+                    (true, false) => crate::i18n::fill(tr("will be added · {0}"), &[("0", &row.prog.what)]),
+                    (false, true) => crate::i18n::fill(tr("will be removed · {0}"), &[("0", &row.prog.what)]),
                     _ => row.prog.what.clone(),
                 };
                 let dx = pad + name_w + 10.0 * s;
@@ -1856,7 +1863,7 @@ impl Panel {
                 text(out, t.to_string(), cx, r.y, 15.5, 20.0, if hot { 1.0 } else { 0.85 });
                 rect(out, cx - r.w / 2.0 + 4.0 * s, r.y + 19.0 * s, r.w - 8.0 * s, 1.0 * s, 0.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.5]);
             }
-            text(out, "Esc or a click on the empty space closes".to_owned(), cx, l.hint_y, 12.0, 16.0, 0.4);
+            text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, l.hint_y, 12.0, 16.0, 0.4);
             return;
         }
         text(out, format!("Placeholder for the {} controls.", p.label.to_lowercase()), cx, y, 14.0, 18.0, 0.55);
@@ -1873,7 +1880,7 @@ impl Panel {
             crate::options::srgb_to_linear(0.35),
             1.0,
         ];
-        let rows: [(&str, u8); 3] = [("Level", 0), ("Automatic", 1), ("Apply to", 2)];
+        let rows: [(&str, u8); 3] = [(tr("Level"), 0), (tr("Automatic"), 1), (tr("Apply to"), 2)];
         for (i, (name, kind)) in rows.iter().enumerate() {
             let a = self.clock * TAU / (13.0 + 2.5 * i as f32) + 1.9 * i as f32;
             let (ox, oy) = (1.1 * s * a.cos(), 1.1 * s * a.sin());
@@ -1902,7 +1909,7 @@ impl Panel {
             }
             y += rh + 22.0 * s;
         }
-        text(out, "Esc or a click on the empty space closes".to_owned(), cx, y + 6.0 * s, 12.0, 16.0, 0.4);
+        text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, y + 6.0 * s, 12.0, 16.0, 0.4);
     }
 }
 
@@ -2393,7 +2400,7 @@ impl App {
         UiFacts {
             dnd: self.notif_muted(),
             night_k: self.screen.temperature_k.unwrap_or(crate::screen::NEUTRAL_K),
-            updates: crate::i18n::tr(if stale { "Restart to finish updating" } else { "Up to date" }).to_owned(),
+            updates: crate::i18n::tr(if stale { tr("Restart to finish updating") } else { tr("Up to date") }).to_owned(),
             has_bt: self.stats_page_for(PageKind::Bt).is_some(),
             has_battery: self.stats_page_for(PageKind::Battery).is_some(),
         }

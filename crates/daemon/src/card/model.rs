@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use crate::i18n::tr;
 
 /// A text keeps this many lines on the card; the whole of it still leaves
 /// with a drag.
@@ -187,7 +188,7 @@ pub(super) fn session_row(session: &Past) -> Item {
             .unwrap_or("")
             .trim()
             .to_owned(),
-        None => "Nothing yet".to_owned(),
+        None => tr("Nothing yet").to_owned(),
     };
     Item {
         id: session.id,
@@ -250,7 +251,7 @@ fn when_text_in(at: u64, now: u64, month_first: bool) -> String {
         return hm;
     }
     if days < 7 {
-        return format!("{days}d ago");
+        return crate::i18n::fill(tr("{days}d ago"), &[("days", &days)]);
     }
     let (month, day) = (then.tm_mon + 1, then.tm_mday);
     let date = if month_first {
@@ -441,7 +442,7 @@ pub(super) fn file_body(path: &Path) -> String {
         match std::fs::read_dir(path) {
             Ok(dir) => {
                 let n = dir.count();
-                format!("{name}/ · {n} item{}", if n == 1 { "" } else { "s" })
+                crate::i18n::fill(tr("{name}/ · {n} item{0}"), &[("name", &name), ("n", &n), ("0", &(if n == 1 { "" } else { "s" }))])
             }
             Err(_) => format!("{name}/"),
         }

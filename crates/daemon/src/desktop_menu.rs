@@ -19,6 +19,7 @@
 //! opens and closes it and acts on a row.
 
 use crate::content::{GridContent, Label, Rect, RectInst, Scene, FONT_BOLD};
+use crate::i18n::tr;
 
 /// What a row does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,31 +136,31 @@ pub(crate) struct MenuPaint {
 pub(crate) fn rows(on_item: bool, many: bool) -> Vec<Row> {
     if on_item && many {
         vec![
-            Row::Item { label: "Open", action: Action::Open, danger: false },
+            Row::Item { label: tr("Open"), action: Action::Open, danger: false },
             Row::Sep,
-            Row::Item { label: "Move to", action: Action::MoveTo, danger: false },
-            Row::Item { label: "Move to Home", action: Action::MoveToHome, danger: false },
-            Row::Item { label: "Move to bin", action: Action::MoveToBin, danger: true },
+            Row::Item { label: tr("Move to"), action: Action::MoveTo, danger: false },
+            Row::Item { label: tr("Move to Home"), action: Action::MoveToHome, danger: false },
+            Row::Item { label: tr("Move to bin"), action: Action::MoveToBin, danger: true },
         ]
     } else if on_item {
         vec![
-            Row::Item { label: "Open", action: Action::Open, danger: false },
-            Row::Item { label: "Open in terminal", action: Action::OpenTerminal, danger: false },
+            Row::Item { label: tr("Open"), action: Action::Open, danger: false },
+            Row::Item { label: tr("Open in terminal"), action: Action::OpenTerminal, danger: false },
             Row::Sep,
-            Row::Item { label: "Rename", action: Action::Rename, danger: false },
+            Row::Item { label: tr("Rename"), action: Action::Rename, danger: false },
             Row::Sep,
-            Row::Item { label: "Move to", action: Action::MoveTo, danger: false },
-            Row::Item { label: "Move to Home", action: Action::MoveToHome, danger: false },
-            Row::Item { label: "Move to bin", action: Action::MoveToBin, danger: true },
+            Row::Item { label: tr("Move to"), action: Action::MoveTo, danger: false },
+            Row::Item { label: tr("Move to Home"), action: Action::MoveToHome, danger: false },
+            Row::Item { label: tr("Move to bin"), action: Action::MoveToBin, danger: true },
             Row::Sep,
             // Last, and opened by HOVER: the menu turns into the box.
-            Row::Item { label: "Properties", action: Action::Properties, danger: false },
+            Row::Item { label: tr("Properties"), action: Action::Properties, danger: false },
         ]
     } else {
         vec![
-            Row::Item { label: "New folder", action: Action::NewFolder, danger: false },
+            Row::Item { label: tr("New folder"), action: Action::NewFolder, danger: false },
             Row::Sep,
-            Row::Item { label: "Clean up", action: Action::CleanUp, danger: false },
+            Row::Item { label: tr("Clean up"), action: Action::CleanUp, danger: false },
         ]
     }
 }
@@ -204,9 +205,9 @@ impl Limits {
 /// The rows of a plugged-in volume's menu.
 pub(crate) fn volume_rows(v: &Volume) -> Vec<Row> {
     let item = |label: &'static str, action: Action| Row::Item { label, action, danger: false };
-    let mut rows = vec![item("Open", Action::Open)];
+    let mut rows = vec![item(tr("Open"), Action::Open)];
     if !v.closed {
-        rows.push(item("Open in terminal", Action::OpenTerminal));
+        rows.push(item(tr("Open in terminal"), Action::OpenTerminal));
     }
     // A phone. ONE list for its menu on the desktop and for the box of the
     // bar's phone pill (Max, 2026-10-11: "the box and the menu are not the
@@ -217,50 +218,50 @@ pub(crate) fn volume_rows(v: &Volume) -> Vec<Row> {
     if v.phone {
         let no_adb = v.limits.no_adb();
         if !no_adb {
-            rows.push(item("Mirror screen", Action::Mirror));
+            rows.push(item(tr("Mirror screen"), Action::Mirror));
             // The camera is a group of its own (Max, 2026-10-09). On: its
             // Stop, and its settings (flash, lens, picture).
             rows.push(Row::Sep);
             if v.limits.old_camera {
-                rows.push(Row::Note("Use as camera: needs Android 12 or newer"));
+                rows.push(Row::Note(tr("Use as camera: needs Android 12 or newer")));
             } else if v.camera {
-                rows.push(item("Stop camera", Action::CameraStop));
-                rows.push(item("Configure camera", Action::CameraSettings));
+                rows.push(item(tr("Stop camera"), Action::CameraStop));
+                rows.push(item(tr("Configure camera"), Action::CameraSettings));
             } else {
-                rows.push(item("Use as camera", Action::Camera));
+                rows.push(item(tr("Use as camera"), Action::Camera));
             }
         }
         // What a phone has for this computer (Max, 2026-10-09): its photos
         // (by its folder, when there is no adb), its internet.
         rows.push(Row::Sep);
-        rows.push(item("Import photos", Action::ImportPhotos));
+        rows.push(item(tr("Import photos"), Action::ImportPhotos));
         if !no_adb {
-            rows.push(item(if v.tether { "Stop phone's internet" } else { "Use phone's internet" }, Action::Tether));
+            rows.push(item(if v.tether { tr("Stop phone's internet") } else { tr("Use phone's internet") }, Action::Tether));
         }
     }
     if !v.closed {
         rows.push(Row::Sep);
-        rows.push(item("Eject", Action::Eject));
+        rows.push(item(tr("Eject"), Action::Eject));
     }
     // What stands between this phone and the rest, and how it is got past.
     if v.phone && (v.limits.no_files || v.limits.no_adb()) {
         rows.push(Row::Sep);
         if v.limits.no_files {
-            rows.push(item("It shows no files: what to do on the phone", Action::HelpFiles));
+            rows.push(item(tr("It shows no files: what to do on the phone"), Action::HelpFiles));
         }
         if v.limits.not_allowed {
-            rows.push(item("Allow this computer on the phone for more features", Action::HelpDebugging));
+            rows.push(item(tr("Allow this computer on the phone for more features"), Action::HelpDebugging));
         } else if v.limits.debugging_off {
-            rows.push(item("Turn on USB debugging for more features", Action::HelpDebugging));
+            rows.push(item(tr("Turn on USB debugging for more features"), Action::HelpDebugging));
         }
     }
     // Last: a phone's Configure box (a click), and Properties, opened by
     // coming onto it as on a file's menu. (Both ask the phone over adb.)
     rows.push(Row::Sep);
     if v.phone && !v.limits.no_adb() {
-        rows.push(item("Configure", Action::Configure));
+        rows.push(item(tr("Configure"), Action::Configure));
     }
-    rows.push(item("Properties", Action::Properties));
+    rows.push(item(tr("Properties"), Action::Properties));
     rows
 }
 
@@ -332,10 +333,10 @@ impl Menu {
     /// still being asked for.
     pub fn show_targets(&mut self, near: &[String], far: &[String], looking: bool, h: f32) {
         let mut rows = vec![
-            Row::Item { label: "‹  Back", action: Action::Back, danger: false },
+            Row::Item { label: tr("‹  Back"), action: Action::Back, danger: false },
             Row::Sep,
-            Row::Item { label: "Cut", action: Action::Cut, danger: false },
-            Row::Item { label: "Copy", action: Action::Copy, danger: false },
+            Row::Item { label: tr("Cut"), action: Action::Cut, danger: false },
+            Row::Item { label: tr("Copy"), action: Action::Copy, danger: false },
         ];
         let mut n = 0;
         for names in [near, far] {
@@ -350,10 +351,10 @@ impl Menu {
         }
         if looking {
             rows.push(Row::Sep);
-            rows.push(Row::Note("Looking for devices…"));
+            rows.push(Row::Note(tr("Looking for devices…")));
         } else if n == 0 {
             rows.push(Row::Sep);
-            rows.push(Row::Note("No devices found"));
+            rows.push(Row::Note(tr("No devices found")));
         }
         self.targets = true;
         self.set_rows(rows, h);
@@ -369,7 +370,7 @@ impl Menu {
 
     /// On a shortcut that is not yet let run: that, first.
     pub fn with_allow(mut self, h: f32) -> Self {
-        let mut rows = vec![Row::Item { label: "Allow to run", action: Action::AllowRun, danger: false }, Row::Sep];
+        let mut rows = vec![Row::Item { label: tr("Allow to run"), action: Action::AllowRun, danger: false }, Row::Sep];
         rows.append(&mut self.rows);
         self.set_rows(rows, h);
         self
@@ -387,7 +388,7 @@ impl Menu {
 
     /// The wallpaper's menu, with Paste on top (files are on the clipboard).
     pub fn with_paste(mut self, h: f32) -> Self {
-        let mut rows = vec![Row::Item { label: "Paste", action: Action::Paste, danger: false }, Row::Sep];
+        let mut rows = vec![Row::Item { label: tr("Paste"), action: Action::Paste, danger: false }, Row::Sep];
         rows.append(&mut self.rows);
         self.set_rows(rows, h);
         self

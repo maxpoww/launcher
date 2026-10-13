@@ -28,6 +28,7 @@ use wayland_client::WEnum;
 use crate::animation::{self, ease_toward, lerp, lerp4};
 use crate::content::{Label, Rect, RectInst, Scene, ShadowInst};
 use crate::{hypr, surface, App, BTN_LEFT, BTN_RIGHT};
+use crate::i18n::tr;
 
 /// Thickness of the top reveal strip (logical px) — the only pointer-sensitive
 /// band while the bar is hidden in fullscreen.
@@ -276,7 +277,7 @@ impl Module {
     /// header is a place.
     pub(crate) fn panel_title(self) -> &'static str {
         match self {
-            Module::Sunset => "Eye protection",
+            Module::Sunset => tr("Eye protection"),
         }
     }
 
@@ -1550,8 +1551,8 @@ fn date_now() -> String {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
-        let wd = WD[(tm.tm_wday as usize).min(6)];
-        let mo = MO[(tm.tm_mon as usize).min(11)];
+        let wd = crate::i18n::tr(WD[(tm.tm_wday as usize).min(6)]);
+        let mo = crate::i18n::tr(MO[(tm.tm_mon as usize).min(11)]);
         format!("{wd}, {} {mo} {}", tm.tm_mday, tm.tm_year + 1900)
     }
 }
@@ -2140,7 +2141,7 @@ impl App {
                     pills.push(Pill {
                         id: PillId::SunsetTurnOn,
                         rect: turn_on,
-                        text: SUNSET_TURN_ON_LABEL.to_owned(),
+                        text: crate::i18n::tr(SUNSET_TURN_ON_LABEL).to_owned(),
                         family: TEXT_FONT,
                         glyph_color: None,
                     });
@@ -2652,7 +2653,7 @@ impl App {
         // groomed, never truncated, never size-suffixed: the sentence is its own
         // text.
         if let Some(module) = self.module_shown.filter(|_| !self.overview_active) {
-            return Some(module.msg().to_string());
+            return Some(crate::i18n::tr(module.msg()).to_string());
         }
         // A hovered thumbnail is groomed WITHOUT a class: the one class we hold
         // belongs to the focused window, and letting it testify about someone
@@ -2715,7 +2716,7 @@ impl App {
             self.module_text_w = tw;
             if module.has_turn_on() {
                 let inner =
-                    r.measure_text(SUNSET_TURN_ON_LABEL, font_px, TEXT_FONT) + 2.0 * PILL_PAD_X;
+                    r.measure_text(crate::i18n::tr(SUNSET_TURN_ON_LABEL), font_px, TEXT_FONT) + 2.0 * PILL_PAD_X;
                 self.sunset_inner_w = inner;
                 tw += MODULE_GAP + inner + SUNSET_INNER_GAP;
                 if module.has_gear() {
@@ -6454,7 +6455,7 @@ impl App {
             None => self.eye_protection_on(),
         }
         // Before the resolve, while the offer is still on the bar to be read.
-        self.track_sunset_answer("Turned on", true);
+        self.track_sunset_answer(tr("Turned on"), true);
         self.resolve_sunset_prompt();
     }
 
@@ -6468,7 +6469,7 @@ impl App {
             Some(a) => (a.id.to_owned(), a.title.clone(), a.action.clone()),
             None => (
                 SUNSET_OFFER_ID.to_owned(),
-                SUNSET_OFFER_TITLE.to_owned(),
+                crate::i18n::tr(SUNSET_OFFER_TITLE).to_owned(),
                 options_engine::AffordanceAction::Daemon("eye_protection_on".into()),
             ),
         };
@@ -6981,7 +6982,7 @@ impl App {
                 Some(PillId::Window | PillId::SunsetTurnOn | PillId::ModuleSettings)
             )
         {
-            self.track_sunset_answer("Not now", false);
+            self.track_sunset_answer(tr("Not now"), false);
             self.resolve_sunset_prompt();
             return;
         }

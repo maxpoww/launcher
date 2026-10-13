@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use super::model::{Kind, PICTURES_DIR};
 use crate::App;
+use crate::i18n::tr;
 
 /// A recording in progress.
 pub(super) struct Rec {
@@ -283,16 +284,16 @@ pub(super) fn engine() -> Option<(PathBuf, PathBuf)> {
 /// (`talk`: to be written out, which needs the speech engine) — or why not.
 pub(super) fn recorder(talk: bool) -> Result<(Child, PathBuf), &'static str> {
     if talk && engine().is_none() {
-        return Err("Talk-to-text needs the speech engine (whisper), which is not installed");
+        return Err(tr("Talk-to-text needs the speech engine (whisper), which is not installed"));
     }
     if mic_muted() {
-        return Err("The microphone is muted. Unmute it and press again");
+        return Err(tr("The microphone is muted. Unmute it and press again"));
     }
-    let recorder = tool("WAVERUNNER_PW_RECORD", "pw-record").ok_or("No recorder found (pw-record)")?;
+    let recorder = tool("WAVERUNNER_PW_RECORD", "pw-record").ok_or(tr("No recorder found (pw-record)"))?;
     let dir = crate::persist::data_path(PICTURES_DIR);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         warn!("card: no folder for a recording ({e})");
-        return Err("The recorder did not start");
+        return Err(tr("The recorder did not start"));
     }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -325,7 +326,7 @@ pub(super) fn recorder(talk: bool) -> Result<(Child, PathBuf), &'static str> {
         .map(|child| (child, path))
         .map_err(|e| {
             warn!("card: the recorder did not start ({e})");
-            "The recorder did not start"
+            tr("The recorder did not start")
         })
 }
 
@@ -459,9 +460,9 @@ pub(super) fn mic_turn_down(hiss: f32) -> &'static str {
             .filter(|s| s.success())
     })();
     if turned.is_some() {
-        "The microphone was too loud: turned down. Say it again"
+        tr("The microphone was too loud: turned down. Say it again")
     } else {
-        "Too much noise to make anything out"
+        tr("Too much noise to make anything out")
     }
 }
 
@@ -509,7 +510,7 @@ pub(super) fn transcribe(
     }
     let out = out.map_err(|_| "The speech engine did not start")?;
     if !out.status.success() {
-        return Err("The speech engine could not read that");
+        return Err(tr("The speech engine could not read that"));
     }
     Ok(words(&String::from_utf8_lossy(&out.stdout)))
 }
@@ -590,7 +591,7 @@ impl App {
             if keep {
                 let why = match heard(&rec.path, talk) {
                     Heard::Sound => None,
-                    Heard::Nothing => Some("Nothing was heard. Is the microphone muted or off?"),
+                    Heard::Nothing => Some(tr("Nothing was heard. Is the microphone muted or off?")),
                     Heard::TooLoud(hiss) => Some(mic_turn_down(hiss)),
                 };
                 if let Some(why) = why {
@@ -615,7 +616,7 @@ impl App {
                 }
                 (true, true, None) => {
                     let _ = std::fs::remove_file(&rec.path);
-                    Done::Failed("The speech engine is not installed")
+                    Done::Failed(tr("The speech engine is not installed"))
                 }
             };
             let _ = tx.send(done);
@@ -647,7 +648,7 @@ impl App {
                         }
                     }
                     Done::Words(text) if text.is_empty() => {
-                        app.card.say = Some("Nothing was made out")
+                        app.card.say = Some(tr("Nothing was made out"))
                     }
                     // (On voice-to-text's page what was said goes into
                     // the WINDOW, and stays on the page as its last thing.)
@@ -745,7 +746,7 @@ impl App {
             return;
         };
         let Some(player) = tool("WAVERUNNER_PW_PLAY", "pw-play") else {
-            self.card.say = Some("No player found (pw-play)");
+            self.card.say = Some(tr("No player found (pw-play)"));
             return;
         };
         let speed = SPEEDS[self.card.voice_speed % SPEEDS.len()];

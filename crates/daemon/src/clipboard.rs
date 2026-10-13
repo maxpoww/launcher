@@ -45,6 +45,7 @@ use crate::options::{
     LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
+use crate::i18n::tr;
 
 /// Target width of the extended preview pill (mirrors the notification OPTION's
 /// preview so the two elements read as siblings). The open history box keeps it.
@@ -872,9 +873,9 @@ fn classify_image(mime: &str) -> Option<ClipEntry> {
     let path = crate::persist::data_path(&format!("clipboard-images/{hash:016x}.{ext}"));
     crate::persist::write_bytes("clipboard-image", &path, &bytes);
     let preview = if width > 0 {
-        format!("Image · {width}×{height}")
+        crate::i18n::fill(tr("Image · {width}×{height}"), &[("width", &width), ("height", &height)])
     } else {
-        "Image".into()
+        tr("Image").into()
     };
     Some(ClipEntry {
         hash,
@@ -2496,9 +2497,9 @@ impl App {
         let (text, col) = if empty {
             // The field serves whichever grid is up.
             let prompt = if self.emoji_open() {
-                "Search emoji…"
+                tr("Search emoji…")
             } else {
-                "Search clips…"
+                tr("Search clips…")
             };
             (crate::i18n::tr(prompt).to_owned(), dim)
         } else {

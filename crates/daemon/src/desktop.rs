@@ -53,6 +53,7 @@ use crate::desktop_menu::{Action, Menu, MenuPaint};
 use crate::desktop_props::Props;
 use crate::launch;
 use crate::App;
+use crate::i18n::tr;
 
 /// The one drop type the desktop takes, and the first it offers: a list of
 /// `file://` URIs. A drag out also offers the path as plain text, for a
@@ -898,8 +899,8 @@ fn phone_internet(name: &str, serial: Option<&str>, on: bool) -> Option<String> 
 /// (Max, 2026-10-09: "turn on USB debugging to use this feature").
 fn phone_refuses(name: &str, serial: &str) -> Option<String> {
     let what = match phone_debugging(serial) {
-        Debugging::Off => "turn on USB debugging on the phone (Settings, Developer options), then try again.",
-        Debugging::NotAllowed => "allow USB debugging for this computer on the phone, then try again.",
+        Debugging::Off => tr("turn on USB debugging on the phone (Settings, Developer options), then try again."),
+        Debugging::NotAllowed => tr("allow USB debugging for this computer on the phone, then try again."),
         Debugging::Ready | Debugging::Unknown => return None,
     };
     info!("desktop: {name} does not let us in: {what}");
@@ -3171,13 +3172,13 @@ impl App {
         let phone = self.desktop.volumes.iter().find(|v| v.phone && v.path.as_os_str() == item.path.as_str());
         if let Some(v) = phone {
             let state = if v.tether {
-                "Giving its internet"
+                tr("Giving its internet")
             } else if v.closed {
-                "Plugged in, not open"
+                tr("Plugged in, not open")
             } else {
-                "Plugged in, files open"
+                tr("Plugged in, files open")
             };
-            let rows = vec![("Kind", "Phone".to_owned()), ("State", state.to_owned())];
+            let rows = vec![(tr("Kind"), "Phone".to_owned()), (tr("State"), state.to_owned())];
             let props = Props::open_rows(&item.path, item.name.clone(), rows.clone(), at, menu, w as f32, h as f32);
             let (path, serial) = (item.path.clone(), phone_serial_of(v));
             info!("desktop: properties of {}", props.title);
@@ -3187,10 +3188,10 @@ impl App {
                 move || match serial.as_deref() {
                     Some(serial) if crate::desktop_phone::ready(serial) => {
                         let mut facts = crate::desktop_phone::facts(serial);
-                        facts.push(("Serial", serial.to_owned()));
+                        facts.push((tr("Serial"), serial.to_owned()));
                         facts
                     }
-                    Some(serial) => vec![("Serial", serial.to_owned()), ("Debugging", "Off, or not allowed".to_owned())],
+                    Some(serial) => vec![(tr("Serial"), serial.to_owned()), (tr("Debugging"), tr("Off, or not allowed").to_owned())],
                     None => Vec::new(),
                 },
                 move |app, facts| {
@@ -4983,9 +4984,9 @@ impl App {
         if let Some(v) = self.desktop.volumes.iter().find(|v| v.closed && v.path.as_os_str() == item.path.as_str()) {
             info!("desktop: {} is not open", item.name);
             let what = if v.tether {
-                "it is giving this computer its internet. Its files are back when that is stopped (its menu)."
+                tr("it is giving this computer its internet. Its files are back when that is stopped (its menu).")
             } else {
-                "unlock it and choose File transfer (or Allow) in its USB notification. It opens here by itself."
+                tr("unlock it and choose File transfer (or Allow) in its USB notification. It opens here by itself.")
             };
             let body = format!("{}: {}", item.name, crate::i18n::tr(what));
             std::thread::spawn(move || crate::desktop_send_notify(&body));

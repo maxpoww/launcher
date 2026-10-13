@@ -18,6 +18,7 @@
 use zbus::proxy;
 
 use super::types::ActiveNotification;
+use crate::i18n::tr;
 
 /// The private control interface exposed by `options-notify` for the OPTIONS
 /// frontend (see `options-notify/src/control.rs`).
@@ -111,8 +112,8 @@ pub async fn post_install_prompt(
         "OPTIONS",
         0,
         "system-software-install",
-        &format!("Install {service}"),
-        &format!("Add {service} as a webapp so its notifications open here."),
+        &crate::i18n::fill(tr("Install {service}"), &[("service", &service)]),
+        &crate::i18n::fill(tr("Add {service} as a webapp so its notifications open here."), &[("service", &service)]),
         Vec::new(),
         hints,
         8000,

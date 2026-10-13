@@ -61,6 +61,7 @@ use bar::*;
 use model::*;
 use place::*;
 use view::*;
+use crate::i18n::tr;
 
 /// How fast the card unrolls (the ease's rate, per second): 11 at first,
 /// then 22 (Max, 2026-10-08: *"the reveal animation, make it snappier"*), then
@@ -370,12 +371,12 @@ fn pair_of(item: &Item) -> (&'static str, &'static str) {
 /// A language's name, from its code.
 fn language_name(code: &str) -> &'static str {
     match code {
-        "es" => "Spanish",
+        "es" => tr("Spanish"),
         "en" => "English",
-        "fr" => "French",
-        "de" => "German",
-        "pt" => "Portuguese",
-        "it" => "Italian",
+        "fr" => tr("French"),
+        "de" => tr("German"),
+        "pt" => tr("Portuguese"),
+        "it" => tr("Italian"),
         _ => "?",
     }
 }
@@ -403,7 +404,7 @@ fn translate_pair(text: &str, from: &str, to: &str) -> String {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let Some(engine) = voice::tool("WAVERUNNER_TRANSLATE", "translateLocally") else {
-        return "(No translation engine on this computer yet)".to_owned();
+        return tr("(No translation engine on this computer yet)").to_owned();
     };
     let child = Command::new(engine)
         .args(["-m", &format!("{from}-{to}-tiny")])
@@ -413,7 +414,7 @@ fn translate_pair(text: &str, from: &str, to: &str) -> String {
         .stderr(Stdio::null())
         .spawn();
     let Ok(mut child) = child else {
-        return "(The translation engine did not start)".to_owned();
+        return tr("(The translation engine did not start)").to_owned();
     };
     if let Some(mut input) = child.stdin.take() {
         let _ = input.write_all(text.as_bytes());
@@ -423,18 +424,14 @@ fn translate_pair(text: &str, from: &str, to: &str) -> String {
         Ok(out) if out.status.success() => {
             let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
             if said.is_empty() {
-                "(Nothing came back)".to_owned()
+                tr("(Nothing came back)").to_owned()
             } else {
                 said
             }
         }
         // (It has no model for that pair.)
-        Ok(_) => format!(
-            "({} → {} is not on this computer yet)",
-            language_name(from),
-            language_name(to)
-        ),
-        Err(_) => "(The translation engine did not finish)".to_owned(),
+        Ok(_) => crate::i18n::fill(tr("({0} → {1} is not on this computer yet)"), &[("0", &(language_name(from))), ("1", &(language_name(to)))]),
+        Err(_) => tr("(The translation engine did not finish)").to_owned(),
     }
 }
 
@@ -1395,7 +1392,7 @@ impl Card {
             out.push(Item {
                 id: PINNED_ROW,
                 kind: Kind::Text,
-                body: "Pinned".to_owned(),
+                body: tr("Pinned").to_owned(),
                 path: None,
                 aspect: 0.0,
                 owned: false,
@@ -2048,7 +2045,7 @@ impl App {
                     Some(path) => self.serve_files(std::slice::from_ref(&path), false),
                     None => self.copy_text(&body),
                 }
-                self.card_flash("Copied");
+                self.card_flash(tr("Copied"));
                 return;
             }
             Page::Memory => {
@@ -2057,7 +2054,7 @@ impl App {
                     if self.card.keep_in(session, &item, now_secs()) {
                         self.card.items = self.card.memory.iter().map(session_row).collect();
                         self.card.lines.remove(&session);
-                        self.card_flash("Saved");
+                        self.card_flash(tr("Saved"));
                         self.card_save();
                     }
                     return;
@@ -2282,7 +2279,7 @@ impl App {
                     .filter(|it| {
                         it.parts
                             .iter()
-                            .any(|p| p.from.as_deref() == Some("Dictionary"))
+                            .any(|p| p.from.as_deref() == Some(tr("Dictionary")))
                     })
                     .map(|it| it.id)
                     .collect();
@@ -2405,7 +2402,7 @@ impl App {
         });
         let mut words = self.card_part(Kind::Text, text.to_owned(), None, false, 0.0);
         words.from = None;
-        let mut answer = self.card_part(Kind::Text, "Translating…".to_owned(), None, false, 0.0);
+        let mut answer = self.card_part(Kind::Text, tr("Translating…").to_owned(), None, false, 0.0);
         answer.from = Some(format!("{} → {}", language_name(from), language_name(to)));
         let answer_id = answer.id;
         let parts = vec![words, answer];
@@ -2481,16 +2478,16 @@ impl App {
         if word.split_whitespace().count() > 1 {
             answer(
                 self,
-                "One word",
-                "The dictionary can define one word at a time.".to_owned(),
+                tr("One word"),
+                tr("The dictionary can define one word at a time.").to_owned(),
             );
             return parts;
         }
         match self.dict_define(word) {
             // (Still being opened: `card_dict_loaded` looks it up again.)
-            None => answer(self, "Dictionary", "Opening the dictionary…".to_owned()),
+            None => answer(self, tr("Dictionary"), tr("Opening the dictionary…").to_owned()),
             Some(found) if found.is_empty() => {
-                answer(self, "Not found", format!("No entry for “{word}”."))
+                answer(self, tr("Not found"), crate::i18n::fill(tr("No entry for “{word}”."), &[("word", &word)]))
             }
             Some(found) => {
                 for (lang, definition, origin) in found {
@@ -2515,7 +2512,7 @@ impl App {
         let parts = self.card_look_up(word);
         let waiting = parts
             .iter()
-            .any(|p| p.from.as_deref() == Some("Dictionary"));
+            .any(|p| p.from.as_deref() == Some(tr("Dictionary")));
         let id = match edit.and_then(|id| self.card.items.iter_mut().find(|it| it.id == id)) {
             Some(item) => {
                 item.body = word.to_owned();
@@ -2557,7 +2554,7 @@ impl App {
             // (Still not open: it goes on waiting.)
             if parts
                 .iter()
-                .any(|p| p.from.as_deref() == Some("Dictionary"))
+                .any(|p| p.from.as_deref() == Some(tr("Dictionary")))
             {
                 self.card.looking.push(id);
             }
@@ -2837,7 +2834,7 @@ impl App {
                                 Page::Session | Page::Pinned | Page::Clipboard | Page::Memory
                             ) =>
                     {
-                        self.card_flash("Nothing to search");
+                        self.card_flash(tr("Nothing to search"));
                         return;
                     }
                     Some(s) if self.card.page != Page::Emoji => {
@@ -3052,7 +3049,7 @@ impl App {
                 self.card.lines.remove(&which);
             }
             self.card_save();
-            self.card_flash("Renamed");
+            self.card_flash(tr("Renamed"));
         }
     }
 
@@ -3680,7 +3677,7 @@ impl App {
             at: at.unwrap_or(0),
             was_open,
         });
-        self.card_flash_long("Session forgotten · Undo");
+        self.card_flash_long(tr("Session forgotten · Undo"));
         self.card_save();
         self.card_save_session();
         self.request_card_draw();
@@ -3708,7 +3705,7 @@ impl App {
         if said {
             if let Some(body) = self.card.item(id).map(|it| it.body.clone()) {
                 self.copy_text(&body);
-                self.card_flash("Copied");
+                self.card_flash(tr("Copied"));
             }
         } else if !composed {
             self.card_paste(id);
@@ -3776,11 +3773,11 @@ impl App {
             std::thread::spawn(move || {
                 let said = match voice::engine() {
                     Some((cli, model)) => match voice::transcribe(&cli, &model, &wav, None) {
-                        Ok(text) if text.trim().is_empty() => "(Nothing was made out)".to_owned(),
+                        Ok(text) if text.trim().is_empty() => tr("(Nothing was made out)").to_owned(),
                         Ok(text) => text,
                         Err(why) => format!("({why})"),
                     },
-                    None => "(The speech engine is not installed)".to_owned(),
+                    None => tr("(The speech engine is not installed)").to_owned(),
                 };
                 let _ = tx.send(said);
             });
@@ -3809,7 +3806,7 @@ impl App {
     pub(super) fn card_said(&mut self, text: &str) {
         let text = text.trim();
         if text.is_empty() {
-            self.card.say = Some("Nothing was made out");
+            self.card.say = Some(tr("Nothing was made out"));
             return;
         }
         let item = self.card_part(Kind::Text, text.to_owned(), None, false, 0.0);
@@ -3847,7 +3844,7 @@ impl App {
         match what {
             "Pin" => {
                 self.card.pin_copy(&item, now_secs());
-                self.card_flash("Pinned");
+                self.card_flash(tr("Pinned"));
             }
             "Memory" => {
                 let back = self.card.page;
@@ -3858,7 +3855,7 @@ impl App {
                 let title = self.card_host_title();
                 let new = self.card.begin(title, now_secs());
                 self.card.keep_in(new, &item, now_secs());
-                self.card_flash("Saved");
+                self.card_flash(tr("Saved"));
             }
         }
         self.card_save();
@@ -3889,7 +3886,7 @@ impl App {
         self.card_show(back);
         if kept {
             self.card_save();
-            self.card_flash("Saved");
+            self.card_flash(tr("Saved"));
         }
         self.request_card_draw();
     }
@@ -3904,7 +3901,7 @@ impl App {
             }
             self.card.pinned.retain(|it| it.id != id);
             self.card.lines.remove(&id);
-            self.card_flash("Removed");
+            self.card_flash(tr("Removed"));
             self.card_save();
             return;
         }
@@ -3921,7 +3918,7 @@ impl App {
             }
             self.card.items = self.card_clip_rows();
             self.card.lines.remove(&id);
-            self.card_flash("Removed");
+            self.card_flash(tr("Removed"));
             return;
         }
         let Some(at) = self.card.items.iter().position(|it| it.id == id) else {
@@ -3956,7 +3953,7 @@ impl App {
             page: self.card.page,
             open: self.card.open,
         });
-        self.card_flash_long("Removed · Undo");
+        self.card_flash_long(tr("Removed · Undo"));
         self.card_save();
         self.request_card_draw();
     }
@@ -4339,7 +4336,7 @@ impl App {
                 .chars()
                 .take(90)
                 .collect(),
-            None => "Nothing kept yet · scroll down for the card".to_owned(),
+            None => tr("Nothing kept yet · scroll down for the card").to_owned(),
         }
     }
 
@@ -5078,8 +5075,8 @@ impl App {
         let name = self.card.open_name();
         let recording = self.card.rec.as_ref().map(|r| (r.seconds(), r.talk()));
         let talk = match (recording, self.card.writing) {
-            (Some((_, true)), _) => Some("Listening…  press again to write it"),
-            (_, true) => Some("Writing what you said…"),
+            (Some((_, true)), _) => Some(tr("Listening…  press again to write it")),
+            (_, true) => Some(tr("Writing what you said…")),
             _ => None,
         };
         let playing = self.card.playing.as_ref().map(|p| (p.id, p.at()));
@@ -5091,18 +5088,14 @@ impl App {
         let held = recording
             .filter(|(_, talk)| !talk && self.card.held)
             .map(|(secs, _)| {
-                format!(
-                    "●  {}:{:02}   recording — let go to keep it",
-                    secs / 60,
-                    secs % 60
-                )
+                crate::i18n::fill(tr("●  {0}:{1}   recording — let go to keep it"), &[("0", &(secs / 60)), ("1", &format!("{:02}", secs % 60))])
             });
         let hint = match (hover, self.card.field, self.card.page) {
             _ if held.is_some() => held.as_deref().unwrap_or(""),
             _ if flash.is_some() => flash.as_deref().unwrap_or(""),
             _ if self.card.say.is_some() => self.card.say.unwrap_or(""),
             (_, Some(_), _) if self.card.picking.is_some() => {
-                "Click a session · Enter for a new one · Escape goes back"
+                tr("Click a session · Enter for a new one · Escape goes back")
             }
             (Some(Hover::Btn(which)), ..) => which.hint(),
             (_, None, _) => "",
@@ -5113,25 +5106,25 @@ impl App {
                     .and_then(|id| self.card.item(id))
                     .is_some_and(|it| it.kind == Kind::Voice) =>
             {
-                "Type a title and press Enter"
+                tr("Type a title and press Enter")
             }
             (_, Some(Field::Box), _) if recording.is_some_and(|r| r.1) => {
-                "Listening… Enter writes what you said"
+                tr("Listening… Enter writes what you said")
             }
-            (_, Some(Field::Box), _) if recording.is_some() => "Recording… Enter puts it in",
+            (_, Some(Field::Box), _) if recording.is_some() => tr("Recording… Enter puts it in"),
             (_, Some(Field::Box), _) => {
-                "Enter keeps it · Shift+Enter for a new line · Escape drops it"
+                tr("Enter keeps it · Shift+Enter for a new line · Escape drops it")
             }
-            (_, Some(Field::Name), _) => "Enter keeps the name · Escape leaves it",
+            (_, Some(Field::Name), _) => tr("Enter keeps the name · Escape leaves it"),
             (_, _, Page::Session) if self.card.open.is_some() => {
-                "Type to search · press Enter to create · hold Space to talk"
+                tr("Type to search · press Enter to create · hold Space to talk")
             }
-            (_, _, Page::Memory) => "Enter to create · type to search",
-            (_, _, Page::Clipboard) => "Click to paste · type to search",
-            (_, _, Page::Pinned) => "Type to search · press Enter to create · hold Space to talk",
-            (_, _, Page::Dictionary) => "Type to search · press Enter to look a word up",
-            (_, _, Page::Translate) => "Type to search · press Enter to translate",
-            (_, _, Page::Talk) => "Press the microphone, or hold Space to talk",
+            (_, _, Page::Memory) => tr("Enter to create · type to search"),
+            (_, _, Page::Clipboard) => tr("Click to paste · type to search"),
+            (_, _, Page::Pinned) => tr("Type to search · press Enter to create · hold Space to talk"),
+            (_, _, Page::Dictionary) => tr("Type to search · press Enter to look a word up"),
+            (_, _, Page::Translate) => tr("Type to search · press Enter to translate"),
+            (_, _, Page::Talk) => tr("Press the microphone, or hold Space to talk"),
             _ => "",
         };
         let view = View {
@@ -5218,7 +5211,7 @@ impl App {
                     .card
                     .picking
                     .is_some()
-                    .then_some("Keep in which session?"),
+                    .then_some(tr("Keep in which session?")),
                 choosing: self.card.picking.is_some(),
                 sealed: &self.card.sealed,
                 wide: &self.card.wide,

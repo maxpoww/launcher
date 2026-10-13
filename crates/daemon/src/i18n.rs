@@ -62,6 +62,47 @@ pub fn tr(en: &'static str) -> &'static str {
     }
 }
 
+/// A translated template with its `{name}` holes filled: the display form of
+/// what was a `format!`. The template is looked up whole, so the translator
+/// decides where each value goes in the sentence:
+///
+/// ```ignore
+/// fill(tr("Connected to {name}"), &[("name", &ssid)])
+/// ```
+///
+/// A hole with no value stays as written; a value with no hole is unused.
+pub fn fill(template: &str, values: &[(&str, &(dyn std::fmt::Display + Send + Sync))]) -> String {
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                let name = &after[..close];
+                match values.iter().find(|(k, _)| *k == name) {
+                    Some((_, v)) => {
+                        use std::fmt::Write;
+                        let _ = write!(out, "{v}");
+                    }
+                    None => {
+                        out.push('{');
+                        out.push_str(name);
+                        out.push('}');
+                    }
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// [`tr`] for strings that aren't literals in this crate — offer titles
 /// arrive from the options engine as `String`s, and they are user-visible
 /// (the pill tooltips), so they must hit the same table. The English text
@@ -187,6 +228,16 @@ fn locale_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_puts_each_value_in_its_hole() {
+        assert_eq!(fill("Connected to {name}", &[("name", &"HOLA")]), "Connected to HOLA");
+        // The translator's order, not the caller's.
+        assert_eq!(fill("{1} de {0} en uso", &[("0", &"8 GB"), ("1", &3.5)]), "3.5 de 8 GB en uso");
+        // An unknown hole and a lone brace are left as written.
+        assert_eq!(fill("{x} and {y", &[("y", &1)]), "{x} and {y");
+        assert_eq!(fill("no holes", &[]), "no holes");
+    }
 
     #[test]
     fn tr_without_init_returns_the_literal() {
