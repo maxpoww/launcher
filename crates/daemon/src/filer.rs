@@ -3802,7 +3802,7 @@ impl App {
             return;
         }
         // THE LEFT HAND (Max, 2026-10-13): with Alt held, W A S D walk as
-        // the arrows do, E goes forward and Q back — the mouse hand stays
+        // the arrows do, E is Enter and Q goes back — the mouse hand stays
         // on the mouse. (They are keys then, not letters: nothing is typed.)
         let (keysym, alt, utf8) = if alt {
             match keysym {
@@ -3810,7 +3810,8 @@ impl App {
                 Keysym::a | Keysym::A => (Keysym::Left, false, None),
                 Keysym::s | Keysym::S => (Keysym::Down, false, None),
                 Keysym::d | Keysym::D => (Keysym::Right, false, None),
-                Keysym::e | Keysym::E => return self.filer_forward(id),
+                // (E is Enter: it opens what the keys are on.)
+                Keysym::e | Keysym::E => (Keysym::Return, false, None),
                 Keysym::q | Keysym::Q => return self.filer_back(id),
                 other => (other, true, utf8),
             }
