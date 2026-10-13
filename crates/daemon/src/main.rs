@@ -1300,6 +1300,9 @@ fn main() -> anyhow::Result<()> {
     // If a previous daemon died while STAGE mode was up, its gap rules and its
     // maximized window outlived it. Put them back before the user sees them.
     stage::recover_if_stranded();
+    // The same for Escape: a daemon that died while a dictation was being
+    // written out left the key bound to its cancel (card/dictate.rs).
+    app.dictate_esc(false);
 
     info!("daemon up; try: waverunner-ctl toggle");
     // One view of the compositor per turn of the loop (hypr::SNAPSHOT).

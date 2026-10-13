@@ -652,6 +652,10 @@ pub(crate) struct Card {
     /// key: since when, and whether the card was on voice-to-text's page
     /// already (a tap then puts the card away).
     talk_key: Option<(Instant, bool)>,
+    /// An "up" that found nothing down: when (its "down" may be on its way).
+    dictate_up_at: Option<Instant>,
+    /// …and the "up" still to come of one that was cancelled with its key down.
+    dictate_up_owed: bool,
     /// …and what the bar's card pill shows of it.
     dictate_show: Option<dictate::Show>,
     /// The pill is growing to it, or going back: how much wider than round
@@ -2213,7 +2217,8 @@ impl App {
         self.card_drop_keys();
         let wait = match host {
             _ if typing => PASTE_FOCUS + 60,
-            Some(host) if focused.as_deref() != Some(host.as_str()) => {
+            // (The desktop's card has no window to give the focus to.)
+            Some(host) if host != DESK && focused.as_deref() != Some(host.as_str()) => {
                 crate::hypr::focus_window(&host);
                 PASTE_FOCUS
             }
@@ -2701,7 +2706,11 @@ impl App {
         if self.card.active.is_none() {
             self.card.active = crate::hypr::active_window();
         }
-        let focused = self.card.host.is_some() && self.card.active == self.card.host;
+        // (The desktop's card is "its window's" while no window has the
+        // focus: there is none to be the active one.)
+        let focused = self.card.host.is_some()
+            && (self.card.active == self.card.host
+                || (self.card.host.as_deref() == Some(DESK) && self.card_focused().is_none()));
         if on && focused && self.card.field.is_none() && !self.card.tabbed && self.card_present() {
             self.card_take_keys(Field::Card);
         }
@@ -3766,7 +3775,7 @@ impl App {
             let (tx, rx) = calloop::channel::channel::<String>();
             std::thread::spawn(move || {
                 let said = match voice::engine() {
-                    Some((cli, model)) => match voice::transcribe(&cli, &model, &wav) {
+                    Some((cli, model)) => match voice::transcribe(&cli, &model, &wav, None) {
                         Ok(text) if text.trim().is_empty() => "(Nothing was made out)".to_owned(),
                         Ok(text) => text,
                         Err(why) => format!("({why})"),
@@ -4124,14 +4133,21 @@ impl App {
     /// The stretch of the bar's row the card stands in right now (from,
     /// to): the bar draws no long pill there and takes no pointer there.
     pub(crate) fn card_banner_in_bar(&self) -> Option<(f32, f32)> {
-        let b = self.card.banner.filter(|b| b.in_bar)?;
+        let b = self.card.banner.filter(|b| b.in_bar && self.card_banner_drawn())?;
         Some((b.x, b.x + self.card.width()))
     }
 
     /// …the same stretch, and how far down the row the card's top is.
     pub(crate) fn card_banner_in_bar_at(&self) -> Option<(f32, f32, f32)> {
-        let b = self.card.banner.filter(|b| b.in_bar)?;
+        let b = self.card.banner.filter(|b| b.in_bar && self.card_banner_drawn())?;
         Some((b.x, b.x + self.card.width(), b.y))
+    }
+
+    /// Whether a card hung under the bar is being DRAWN (rolling up counts):
+    /// not while it is away for some cause, or under the overview — then
+    /// the bar has its row whole.
+    fn card_banner_drawn(&self) -> bool {
+        self.card.host.is_some() && !self.card.hidden() && !self.overview_active
     }
 
     /// Whether the card hangs under the bar right now.
@@ -4383,6 +4399,11 @@ impl App {
     /// Bring the card onto `addr`: it unrolls there from the top.
     fn card_summon(&mut self, addr: &str) {
         self.card_load();
+        // (Called back while it was rolling up from under the bar: that
+        // place is over — left, the card stood there with nothing to fold it.)
+        if self.card.banner.is_some_and(|b| b.closing) {
+            self.card.banner = None;
+        }
         // The text is wrapped to the card's width, which is the window's.
         let before = self.card.width();
         self.card.host = Some(addr.to_owned());
@@ -5423,7 +5444,7 @@ impl App {
                     // card from another window activates the card on the
                     // calling window"*): the card is its window's, and from
                     // then on the pointer gives it the keys.
-                    if let Some(host) = self.card.host.clone() {
+                    if let Some(host) = self.card.host.clone().filter(|h| h != DESK) {
                         if self.card.active.as_deref() != Some(host.as_str()) {
                             crate::hypr::focus_window(&host);
                             self.card.active = Some(host);
@@ -6071,7 +6092,7 @@ impl App {
             // brings the card up at that page, held it is dictation with no
             // card at all (`dictate.rs`).
             "dictate" => match rest {
-                "down" => self.dictate_down().to_owned(),
+                "down" => self.dictate_down(),
                 "up" => self.dictate_up(),
                 "cancel" => self.dictate_cancel().to_string(),
                 _ => "card dictate down|up|cancel".to_owned(),

@@ -299,12 +299,28 @@ pub(super) fn recorder(talk: bool) -> Result<(Child, PathBuf), &'static str> {
         .map_or(0, |d| d.as_millis());
     let path = dir.join(format!("voice-{stamp}.wav"));
     // (16 kHz mono is what speech needs, and what the engine reads.)
-    Command::new(recorder)
+    let mut command = Command::new(recorder);
+    command
         .args(["--rate", "16000", "--channels", "1", "--format", "s16"])
         .arg(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    // The recorder ENDS WITH THE DOCK. Left to itself it went on recording
+    // the microphone, for ever, into a file nobody would read, when the dock
+    // was killed or crashed while a key was held.
+    // SAFETY: `prctl` is async-signal-safe and touches nothing of ours.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            // (The signal as a full word: `prctl` takes its arguments as
+            // longs, and an int left the upper half to chance — the kernel
+            // then refused it, silently. Measured: the recorder lived on.)
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT as libc::c_ulong);
+            Ok(())
+        });
+    }
+    command
         .spawn()
         .map(|child| (child, path))
         .map_err(|e| {
@@ -347,6 +363,9 @@ pub(super) enum Heard {
 /// the noise, and the share of clipped samples that says the same.
 const HISS: f32 = 1500.0;
 const CLIPPED: f32 = 0.05;
+/// …and how even that hiss is: its loud tenth under this many times its
+/// quiet one.
+const EVEN: f32 = 2.0;
 /// A voice stands out of the room it is in: the loud tenth of talk is this
 /// many times its quiet tenth, and at least this loud.
 const VOICE_OVER: f32 = 3.0;
@@ -354,6 +373,9 @@ const VOICE_LEAST: f32 = 150.0;
 /// Where a microphone that was too loud is turned down to: the level of its
 /// hiss afterwards.
 const HISS_AFTER: f32 = 200.0;
+/// Above this volume a microphone's own amplifier is in play (on the Acer
+/// the boost comes in past 0.40).
+const MIC_BOOSTED: f32 = 0.45;
 
 /// Listen to the 16-bit recording at `wav` before it is used (`talk`: it is
 /// to be written out, so it must have a voice in it).
@@ -389,7 +411,10 @@ pub(super) fn heard(wav: &PathBuf, talk: bool) -> Heard {
     levels.sort_by(f32::total_cmp);
     let (quiet, loud) = (levels[levels.len() / 10], levels[levels.len() * 9 / 10]);
     let clipped = samples.iter().filter(|&&x| x.unsigned_abs() >= 32700).count() as f32 / samples.len() as f32;
-    if quiet > HISS || (clipped > CLIPPED && quiet > HISS / 2.0) {
+    // (An amplifier's hiss is EVEN — its loud tenth 1.3 times its quiet one
+    // on the Acer; music, a crowd, a voice close by rise and fall. Only talk
+    // is judged: a voice note of a loud place is the owner's to keep.)
+    if talk && loud < quiet * EVEN && (quiet > HISS || (clipped > CLIPPED && quiet > HISS / 2.0)) {
         return Heard::TooLoud(quiet);
     }
     let peak = samples.iter().map(|&x| i32::from(x).abs()).max().unwrap_or(0);
@@ -411,7 +436,14 @@ pub(super) fn mic_turn_down(hiss: f32) -> &'static str {
             .stderr(Stdio::null())
             .output()
             .ok()?;
-        let now: f32 = String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1)?.parse().ok()?;
+        // (A decimal comma, where the owner's numbers are written with one.)
+        let now: f32 = String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1)?.replace(',', ".").parse().ok()?;
+        // (Only a microphone that is turned UP can be its own noise: below
+        // this its boost is off, and a recording this loud is the ROOM —
+        // music, a crowd. That is not ours to turn down, again and again.)
+        if now <= MIC_BOOSTED {
+            return None;
+        }
         let to = mic_level_for(now, hiss);
         if to >= now {
             return None;
@@ -429,7 +461,7 @@ pub(super) fn mic_turn_down(hiss: f32) -> &'static str {
     if turned.is_some() {
         "The microphone was too loud: turned down. Say it again"
     } else {
-        "The microphone is too loud: turn its volume down"
+        "Too much noise to make anything out"
     }
 }
 
@@ -445,17 +477,37 @@ pub(super) fn transcribe(
     cli: &PathBuf,
     model: &PathBuf,
     wav: &PathBuf,
+    // Where its process id is left while it runs, for whoever may stop it.
+    running: Option<&std::sync::atomic::AtomicI32>,
 ) -> Result<String, &'static str> {
-    let out = Command::new(cli)
+    let mut command = Command::new(cli);
+    command
         .arg("-m")
         .arg(model)
         .arg("-f")
         .arg(wav)
         .args(["-l", "auto", "-nt", "-np"])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| "The speech engine did not start")?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // (It ends with the dock, as the recorder does.)
+    // SAFETY: `prctl` is async-signal-safe and touches nothing of ours.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
+            Ok(())
+        });
+    }
+    let child = command.spawn().map_err(|_| "The speech engine did not start")?;
+    if let Some(running) = running {
+        running.store(child.id() as i32, std::sync::atomic::Ordering::Relaxed);
+    }
+    let out = child.wait_with_output();
+    if let Some(running) = running {
+        running.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    let out = out.map_err(|_| "The speech engine did not start")?;
     if !out.status.success() {
         return Err("The speech engine could not read that");
     }
@@ -554,7 +606,7 @@ impl App {
                 }
                 (true, false, _) => Done::Note(rec.path, secs.round().max(1.0) as u32),
                 (true, true, Some((cli, model))) => {
-                    let said = transcribe(&cli, &model, &rec.path);
+                    let said = transcribe(&cli, &model, &rec.path, None);
                     let _ = std::fs::remove_file(&rec.path);
                     match said {
                         Ok(text) => Done::Words(text),
@@ -758,6 +810,7 @@ impl App {
     /// The card is going away: nothing goes on recording or playing.
     pub(super) fn card_voice_quiet(&mut self) {
         self.card_record_stop(false);
+        self.card.talk_key = None;
         self.card.paused = None;
         if let Some(mut playing) = self.card.playing.take() {
             let _ = playing.child.kill();
@@ -909,6 +962,12 @@ mod tests {
         assert_eq!(heard(&wav("even.wav", &hiss(900, 40000)), true), Heard::Nothing);
         assert_eq!(heard(&wav("even-note.wav", &hiss(900, 40000)), false), Heard::Sound);
         assert!(matches!(heard(&wav("noise.wav", &hiss(32767, 40000)), true), Heard::TooLoud(h) if h > 10000.0));
+        assert_eq!(heard(&wav("noise-note.wav", &hiss(32767, 40000)), false), Heard::Sound);
+        // A LOUD ROOM is not a microphone to turn down: it rises and falls.
+        let mut room = hiss(4000, 12000);
+        room.extend(tone(20000.0, 16000));
+        room.extend(hiss(4000, 12000));
+        assert_eq!(heard(&wav("loud-room.wav", &room), true), Heard::Sound);
         assert_eq!(heard(&wav("short.wav", &[0, 900, -4000, 12]), true), Heard::Nothing);
         // The Acer's microphone at 100 % is brought to about a fifth, where
         // it heard the sentence; one a little hissy is taken down a step.

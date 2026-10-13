@@ -25,7 +25,7 @@
 
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -49,11 +49,38 @@ pub(super) struct Dictation {
 pub(crate) enum Show {
     /// Recording, since then.
     Listening(Instant),
-    /// What was said is being written out, since then; the flag is raised
-    /// if it is cancelled meanwhile.
-    Writing(Instant, Arc<AtomicBool>),
+    /// What was said is being written out, since then; and the way to stop
+    /// that, if it is cancelled meanwhile.
+    Writing(Instant, Arc<Halt>),
     /// Something went wrong: said for a moment (since then).
     Said(&'static str, Instant),
+}
+
+/// Stopping what is being written out: the flag its result is dropped by,
+/// and the speech engine's process, which is KILLED — left to finish, a
+/// cancelled sentence went on taking the processor for as long as it took
+/// (twenty seconds on the old MacBook), under the next one.
+#[derive(Debug, Default)]
+pub(crate) struct Halt {
+    halted: AtomicBool,
+    engine: AtomicI32,
+}
+
+impl Halt {
+    fn halt(&self) {
+        self.halted.store(true, Ordering::Relaxed);
+        let pid = self.engine.load(Ordering::Relaxed);
+        if pid > 0 {
+            // SAFETY: a signal to a child of ours that its thread still waits for.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+
+    fn halted(&self) -> bool {
+        self.halted.load(Ordering::Relaxed)
+    }
 }
 
 /// How often the seconds are looked at, and a frame of what moves.
@@ -66,6 +93,8 @@ const MORPH_MS: f32 = 200.0;
 const LONGEST_S: u64 = 180;
 /// How long something that went wrong stays said on the bar.
 const SAID_MS: u64 = 2600;
+/// An "up" that arrives this soon before its own "down" was that tap's.
+const CROSSED_MS: u128 = 400;
 /// From the words being offered to the paste key: the selection is the
 /// dock's before the window asks for it.
 const PASTE_AFTER_MS: u64 = 80;
@@ -92,11 +121,15 @@ impl App {
     /// again). Escape is taken for as long as something is written out.
     fn dictate_show(&mut self, show: Option<Show>) {
         self.card.dictate_from = Some((self.card_dictate_extra(), Instant::now()));
-        let writing = matches!(show, Some(Show::Writing(..)));
+        // (Listening too, not only while it is written out: with Super still
+        // down — it is, the key is Super+Space — Escape is Super+Escape, the
+        // key that puts the computer to SLEEP. The config's bind for that
+        // one asks `golem_dictating` first; found in review, 2026-10-13.)
+        let on = matches!(show, Some(Show::Listening(_) | Show::Writing(..)));
         self.card.dictate_show = show;
-        if writing != self.card.dictate_esc {
-            self.card.dictate_esc = writing;
-            self.dictate_esc(writing);
+        if on != self.card.dictate_esc {
+            self.card.dictate_esc = on;
+            self.dictate_esc(on);
         }
         self.sync_options_input();
         self.draw_options();
@@ -108,7 +141,13 @@ impl App {
     /// a compositor bind for exactly that long — and `golem_dictating` tells
     /// the config, whose Super+Escape must not suspend the computer under a
     /// hand that has not let go of Super yet (hyprland.lua).
-    fn dictate_esc(&self, on: bool) {
+    ///
+    /// Also called once as the dock starts (`main`), to give the key BACK: a dock
+    /// that died while something was being written out left its bind in the
+    /// compositor, and Escape was then eaten everywhere (and Super+Escape
+    /// no longer put the computer to sleep) until the next dictation ended
+    /// — shown in the rig, 2026-10-13, by killing the dock at that moment.
+    pub(crate) fn dictate_esc(&self, on: bool) {
         let ctl = crate::hypr::ctl_program();
         let mut lua = format!("golem_dictating = {on} hl.unbind(\"ESCAPE\") ");
         if let (true, Some(ctl)) = (on, &ctl) {
@@ -123,22 +162,31 @@ impl App {
     }
 
     /// The key went down.
-    pub(super) fn dictate_down(&mut self) -> &'static str {
+    pub(super) fn dictate_down(&mut self) -> String {
+        // ("up" came FIRST: the two are two programs started a moment apart,
+        // and on a quick tap the second can win. It was a tap.)
+        self.card.dictate_up_owed = false;
+        if self.card.dictate_up_at.take().is_some_and(|at| at.elapsed().as_millis() < CROSSED_MS) {
+            return self.card_command("at voice");
+        }
         // THE CARD IS UP HERE: the key is the card's. It turns to
         // voice-to-text's page and listens at once, as Space held on that
         // page does; let go, what was said is written by the card (Max,
         // 2026-10-12: "all of the keybinds should go to the card because
         // it's open").
         if self.card_up_here() && self.card.dictation.is_none() && self.card.talk_key.is_none() {
+            // (Something is being recorded from the card's own buttons: the
+            // key leaves it alone — a tap would have thrown it away.)
+            if self.card.rec.is_some() {
+                return "busy".to_owned();
+            }
             let was_talk = self.card.page == super::Page::Talk;
             if !was_talk {
                 self.card_show(super::Page::Talk);
             }
-            if self.card.rec.is_none() {
-                self.card_record_start(true);
-            }
+            self.card_record_start(true);
             self.card.talk_key = Some((Instant::now(), was_talk));
-            return "down (the card)";
+            return "down (the card)".to_owned();
         }
         // (Down already — a key that repeats — or the card is recording, or
         // the last thing said is still being written out.)
@@ -146,12 +194,12 @@ impl App {
             || self.card.rec.is_some()
             || matches!(self.card.dictate_show, Some(Show::Writing(..)))
         {
-            return "busy";
+            return "busy".to_owned();
         }
         let since = Instant::now();
         self.card.dictation = Some(Dictation { rec: voice::recorder(true), since, held: false });
         self.after_ms(HOLD_MS, move |app| app.dictate_held(since));
-        "down"
+        "down".to_owned()
     }
 
     /// Still down after `HOLD_MS`: it is dictation, and the pill says so.
@@ -181,7 +229,11 @@ impl App {
                 return;
             }
             if since.elapsed().as_secs() >= LONGEST_S {
-                app.dictate_up();
+                // (Its "up" never came — the config was reloaded, the two
+                // messages crossed: what it recorded is three minutes of the
+                // room, and is thrown away, not pasted into a window.)
+                info!("dictation: no key-up in {LONGEST_S} s — dropped");
+                app.dictate_drop();
             } else {
                 app.draw_options();
                 app.dictate_tick(since);
@@ -221,9 +273,9 @@ impl App {
                 info!("dictation: cancelled from the bar");
                 self.dictate_drop();
             }
-            Some(Show::Writing(_, stop)) => {
+            Some(Show::Writing(_, halt)) => {
                 info!("dictation: cancelled from the bar");
-                stop.store(true, Ordering::Relaxed);
+                halt.halt();
                 self.dictate_show(None);
             }
             Some(Show::Said(..)) => self.dictate_show(None),
@@ -237,6 +289,8 @@ impl App {
         let Some(d) = self.card.dictation.take() else {
             return;
         };
+        // (Its key is still down, unless this is the tap's own drop.)
+        self.card.dictate_up_owed = d.held;
         if let Ok((mut child, path)) = d.rec {
             let _ = child.kill();
             std::thread::spawn(move || {
@@ -252,7 +306,9 @@ impl App {
     /// The key came up. A tap: the card, at voice-to-text. Held: what was
     /// said is written out, then pasted into the window.
     pub(super) fn dictate_up(&mut self) -> String {
-        if let Some((since, was_talk)) = self.card.talk_key.take() {
+        // (A talk key whose "up" was lost long ago is nobody's now.)
+        let talk_key = self.card.talk_key.take().filter(|(since, _)| since.elapsed().as_secs() < LONGEST_S);
+        if let Some((since, was_talk)) = talk_key {
             if since.elapsed().as_millis() as u64 >= HOLD_MS {
                 self.card_record_stop(true);
                 return "writing (the card)".to_owned();
@@ -263,6 +319,11 @@ impl App {
             return if was_talk { self.card_command("at voice") } else { "at voice".to_owned() };
         }
         let Some(held) = self.card.dictation.as_ref().map(|d| d.held) else {
+            // (The "up" of a dictation that was cancelled, or dropped, while
+            // the key was still down is that one's: it announces no tap.)
+            if !std::mem::take(&mut self.card.dictate_up_owed) {
+                self.card.dictate_up_at = Some(Instant::now());
+            }
             return "not down".to_owned();
         };
         if !held {
@@ -277,8 +338,9 @@ impl App {
         unsafe {
             libc::kill(child.id() as libc::pid_t, libc::SIGINT);
         }
-        let (since, stop) = (Instant::now(), Arc::new(AtomicBool::new(false)));
-        self.dictate_show(Some(Show::Writing(since, stop.clone())));
+        let (since, halt) = (Instant::now(), Arc::new(Halt::default()));
+        self.dictate_show(Some(Show::Writing(since, halt.clone())));
+        let engine_of = halt.clone();
         let engine = voice::engine();
         let (tx, rx) = calloop::channel::channel::<Result<String, &'static str>>();
         std::thread::spawn(move || {
@@ -290,8 +352,10 @@ impl App {
             };
             let said = if let Err(why) = said {
                 Err(why)
+            } else if engine_of.halted() {
+                Err("")
             } else if let Some((cli, model)) = engine {
-                voice::transcribe(&cli, &model, &path)
+                voice::transcribe(&cli, &model, &path, Some(&engine_of.engine))
             } else {
                 Err("The speech engine is not installed")
             };
@@ -304,7 +368,7 @@ impl App {
             };
             // (Cancelled from the bar while it was written: the pill has
             // gone back already, and nothing is pasted.)
-            if stop.load(Ordering::Relaxed) {
+            if halt.halted() {
                 return;
             }
             match said {
@@ -334,7 +398,7 @@ impl App {
             w if w.starts_with("Nothing was heard") => "Nothing was heard",
             w if w.starts_with("The microphone is muted") => "The microphone is muted",
             w if w.starts_with("The microphone was too loud") => "Mic was too loud: say it again",
-            w if w.starts_with("The microphone is too loud") => "Mic too loud: turn it down",
+            w if w.starts_with("Too much noise") => "Too much noise",
             w if w.contains("speech engine") => "No speech engine installed",
             w => w,
         };
