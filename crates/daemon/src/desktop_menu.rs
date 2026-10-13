@@ -79,6 +79,9 @@ pub(crate) enum Action {
     /// selection into an archive.
     Extract,
     Compress,
+    /// A file manager window: turn the page to the apps that open this
+    /// kind of file (each then a `SendTo`).
+    OpenWith,
 }
 
 /// One row: an action, or a rule between groups.

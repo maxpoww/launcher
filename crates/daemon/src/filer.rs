@@ -646,6 +646,47 @@ pub(crate) struct Asked {
     pub by_hand: bool,
     /// The thing is an archive (a zip, a tarball…).
     pub archive: bool,
+    /// The thing is a file (it can be opened with an app of one's choice).
+    pub file: bool,
+}
+
+/// The apps `gio mime <type>` names for a kind of file, as desktop ids
+/// (no `.desktop`): the default first, then the others, each once.
+pub(crate) fn parse_gio_mime(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        // "Default application for “x/y”: id.desktop", then tab-set lists.
+        let id = match line.strip_prefix('\t') {
+            Some(id) => id,
+            None => match line.split_once("”: ").or_else(|| line.split_once("': ")) {
+                Some((head, id)) if head.starts_with("Default application") => id,
+                _ => continue,
+            },
+        };
+        let id = id.trim().trim_end_matches(".desktop").to_owned();
+        if !id.is_empty() && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// The apps that say they open the file at `path` (see `parse_gio_mime`).
+/// Asks two programs: call it off the loop.
+fn apps_for(path: &str) -> Vec<String> {
+    let said = |program: &str, args: &[&str]| -> String {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    let kind = said("xdg-mime", &["query", "filetype", path]);
+    let kind = kind.trim();
+    if kind.is_empty() {
+        return Vec::new();
+    }
+    parse_gio_mime(&said("gio", &["mime", kind]))
 }
 
 /// Whether `name` is an archive the system's archiver opens.
@@ -704,6 +745,7 @@ pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
         bin,
         by_hand,
         archive,
+        file,
     } = asked;
     let row = |label: &'static str, action: Action| Row::Item {
         label,
@@ -747,7 +789,11 @@ pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
             bin,
         ]
     } else if on_item {
-        let mut rows = vec![row(tr("Open"), Action::Open), row(tr("Open in terminal"), Action::OpenTerminal)];
+        let mut rows = vec![row(tr("Open"), Action::Open)];
+        if file {
+            rows.push(row(tr("Open with"), Action::OpenWith));
+        }
+        rows.push(row(tr("Open in terminal"), Action::OpenTerminal));
         if archive {
             rows.push(row(tr("Extract here"), Action::Extract));
         }
@@ -886,6 +932,10 @@ struct Win {
 
     /// A row that cannot be undone was clicked once: the second click does it.
     armed: Option<Action>,
+    /// What the menu that is up was made from (its first page, for Back),
+    /// and the apps of its "Open with" page: name, command, in a terminal.
+    asked: Option<Asked>,
+    open_with: Vec<(String, String, bool)>,
     /// The place a hovering drag would be let go onto.
     drop_place: Option<usize>,
     /// A hovering drag is near the field's top (< 0) or bottom (> 0) edge:
@@ -1469,6 +1519,8 @@ impl App {
             rename: None,
             rename_next: None,
             armed: None,
+            asked: None,
+            open_with: Vec::new(),
             drop_place: None,
             edge: 0.0,
             edge_at: (0.0, 0.0),
@@ -1840,14 +1892,21 @@ impl App {
         let archive = item
             .and_then(|i| win.items.get(i))
             .is_some_and(|it| it.kind == Kind::File && is_archive(&it.name));
-        let rows = menu_rows(Asked {
+        let file = item
+            .and_then(|i| win.items.get(i))
+            .is_some_and(|it| it.kind == Kind::File);
+        let asked = Asked {
             on_item: path.is_some(),
             many,
             paste,
             bin: win.in_bin(),
             by_hand,
             archive,
-        });
+            file,
+        };
+        let rows = menu_rows(asked);
+        win.asked = Some(asked);
+        win.open_with.clear();
         if rows.is_empty() {
             return;
         }
@@ -1855,6 +1914,69 @@ impl App {
         win.menu = Some(Menu::open(item.filter(|_| path.is_some()), many, at, w, h).with_rows(rows, h));
         win.menu_path = path;
         win.props = None;
+        self.filer_request_draw(id);
+    }
+
+    /// The menu's "Open with": its page turns to the apps that say they
+    /// open this kind of file — asked off the loop, "Looking for apps…"
+    /// meanwhile — each by its name, the system's own choice first.
+    fn filer_menu_apps(&mut self, id: u32) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let (Some(path), h) = (win.menu_path.clone(), win.virt().1) else {
+            return;
+        };
+        let back = || Row::Item {
+            label: tr("‹  Back"),
+            action: Action::Back,
+            danger: false,
+        };
+        win.menu = win
+            .menu
+            .take()
+            .map(|m| m.with_rows(vec![back(), Row::Sep, Row::Note(tr("Looking for apps…"))], h));
+        self.filer_request_draw(id);
+        let asked = path.clone();
+        self.desktop_off_loop(
+            move || apps_for(&asked),
+            move |app, ids| {
+                // Each id as the dock knows it: its name and its command.
+                let apps: Vec<(String, String, bool)> = ids
+                    .iter()
+                    .filter_map(|id| app.entries.iter().find(|e| &e.id == id))
+                    .map(|e| (e.name.clone(), e.exec.clone(), e.needs_terminal))
+                    .collect();
+                let Some(win) = app.filer.win_mut(id).filter(|w| w.menu_path.as_ref() == Some(&path)) else {
+                    return;
+                };
+                let h = win.virt().1;
+                let mut rows = vec![back(), Row::Sep];
+                if apps.is_empty() {
+                    rows.push(Row::Note(tr("No app says it opens this")));
+                }
+                rows.extend(apps.iter().enumerate().map(|(n, (name, ..))| Row::Target {
+                    label: name.clone(),
+                    action: Action::SendTo(n),
+                }));
+                win.open_with = apps;
+                win.menu = win.menu.take().map(|m| m.with_rows(rows, h));
+                app.filer_hover(id);
+                app.filer_request_draw(id);
+            },
+        );
+    }
+
+    /// Back to the menu's first page.
+    fn filer_menu_back(&mut self, id: u32) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let (Some(asked), h) = (win.asked, win.virt().1) else {
+            return;
+        };
+        win.menu = win.menu.take().map(|m| m.with_rows(menu_rows(asked), h));
+        self.filer_hover(id);
         self.filer_request_draw(id);
     }
 
@@ -1992,6 +2114,18 @@ impl App {
                 info!("files: {exec}");
                 if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
                     error!("files: the archiver could not be started: {e:#}");
+                }
+            }
+            Action::SendTo(n) => {
+                // A pick on the "Open with" page: that app, this file.
+                let (Some((name, exec, terminal)), Some(path)) = (win.open_with.get(n).cloned(), selected.first())
+                else {
+                    return;
+                };
+                info!("files: {path} opened with {name}");
+                let exec = format!("{exec} {}", launch::shell_quote(path));
+                if let Err(e) = launch::launch(&exec, terminal, &self.config.launch.terminal) {
+                    error!("files: {name} could not be started: {e:#}");
                 }
             }
             Action::NewFolder => self.filer_new_folder(id),
@@ -3179,9 +3313,13 @@ impl App {
             if over != menu.hover {
                 menu.hover = over;
                 let props = over.and_then(|r| menu.action(r)) == Some(Action::Properties);
+                let back = over.and_then(|r| menu.action(r)) == Some(Action::Back);
                 if let (true, Some(i)) = (props, menu.item) {
                     let menu = win.menu.take();
                     self.filer_open_props(id, i, at, menu);
+                } else if back {
+                    // (Coming onto Back turns the page back, as on the desktop.)
+                    self.filer_menu_back(id);
                 } else {
                     self.filer_request_draw(id);
                 }
@@ -3323,6 +3461,14 @@ impl App {
                         }
                         self.filer_request_draw(id);
                         return;
+                    }
+                    // Turning the page keeps the menu up (the desktop's
+                    // "Move to"): to the apps that open this, and back.
+                    if action == Action::OpenWith {
+                        return self.filer_menu_apps(id);
+                    }
+                    if action == Action::Back {
+                        return self.filer_menu_back(id);
                     }
                     let item = menu.item;
                     win.menu = None;
@@ -4264,10 +4410,15 @@ impl App {
                     if let Some(i) = item {
                         self.filer_open_props(id, i, at, None);
                     }
+                } else if matches!(action, Action::OpenWith | Action::Back) {
+                    return "a page turn: only with a pointer".to_owned();
                 } else {
                     self.filer_act(id, action, item, at);
                 }
             }
+            // (With a menu up on a file: its "Open with" page, and back.)
+            "apps" => self.filer_menu_apps(id),
+            "menuback" => self.filer_menu_back(id),
             "copy" => self.filer_act(id, Action::Copy, None, (0.0, 0.0)),
             "cut" => self.filer_act(id, Action::Cut, None, (0.0, 0.0)),
             "paste" => self.filer_act(id, Action::Paste, None, (0.0, 0.0)),
@@ -4601,6 +4752,7 @@ mod tests {
             bin: InBin::No,
             by_hand: false,
             archive: false,
+            file: false,
         };
         let actions = |rows: Vec<Row>| -> Vec<Action> {
             rows.into_iter()
@@ -4610,29 +4762,35 @@ mod tests {
                 })
                 .collect()
         };
-        let one = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false }));
+        let one = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false }));
         assert_eq!(one.first(), Some(&Action::Open));
         // Properties is last: it is the row the menu turns into a box from.
         assert_eq!(one.last(), Some(&Action::Properties));
         assert!(one.contains(&Action::Rename) && !one.contains(&Action::Paste));
         // A group: nothing that is about ONE thing.
-        let many = actions(menu_rows(Asked { on_item: true, many: true, paste: false, bin: InBin::No, by_hand: false, archive: false }));
+        let many = actions(menu_rows(Asked { on_item: true, many: true, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false }));
         assert!(!many.contains(&Action::Rename) && !many.contains(&Action::Properties));
         assert!(many.contains(&Action::Cut) && many.contains(&Action::MoveToBin));
         // The folder itself: Paste only with files on the clipboard.
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false })).first(), Some(&Action::Paste));
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: false, bin: InBin::No, by_hand: false, archive: false })).first(), Some(&Action::NewFolder));
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false })).first(), Some(&Action::Paste));
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false })).first(), Some(&Action::NewFolder));
         // An archive can be opened out; anything can be packed.
         let zip = actions(menu_rows(Asked { archive: true, ..asked(true, false) }));
         assert!(zip.contains(&Action::Extract) && zip.contains(&Action::Compress));
         assert!(!one.contains(&Action::Extract) && many.contains(&Action::Compress));
         assert!(is_archive("Fotos.ZIP") && is_archive("a.tar.gz") && !is_archive("zip.txt"));
+        // A file can be opened with an app of one's choice; a folder not.
+        assert!(actions(menu_rows(Asked { file: true, ..asked(true, false) })).contains(&Action::OpenWith));
+        assert!(!one.contains(&Action::OpenWith));
+        let said = "Default application for “image/png”: org.gnome.Loupe.desktop\nRegistered applications:\n\torg.gnome.Loupe.desktop\n\tseam.desktop\nRecommended applications:\n\tseam.desktop\n";
+        assert_eq!(parse_gio_mime(said), ["org.gnome.Loupe", "seam"]);
+        assert!(parse_gio_mime("No default applications for “x/y”\n").is_empty());
         // In the bin: back or gone, and the bin emptied; never a new thing.
-        let binned = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false }));
+        let binned = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false }));
         assert!(binned.contains(&Action::PutBack) && binned.contains(&Action::Erase));
         assert!(!binned.contains(&Action::Rename) && !binned.contains(&Action::MoveToBin));
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false })), [Action::EmptyBin]);
-        assert!(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Deeper, by_hand: false, archive: false }).is_empty());
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false })), [Action::EmptyBin]);
+        assert!(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Deeper, by_hand: false, archive: false, file: false }).is_empty());
     }
 
     #[test]

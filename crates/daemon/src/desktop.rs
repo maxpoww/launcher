@@ -2993,7 +2993,12 @@ impl App {
             // (Turning the page is the release handler's: the menu stays up.)
             Action::MoveTo | Action::Back => {}
             // (The bin's rows are the file manager's: `filer.rs`.)
-            Action::PutBack | Action::Erase | Action::EmptyBin | Action::Extract | Action::Compress => {}
+            Action::PutBack
+            | Action::Erase
+            | Action::EmptyBin
+            | Action::Extract
+            | Action::Compress
+            | Action::OpenWith => {}
             Action::Camera => self.desktop_camera_use(item),
             // (Pages of the bar's phone pill's box.)
             Action::CameraSettings | Action::HelpDebugging | Action::HelpFiles => self.phone_pill_show(action),

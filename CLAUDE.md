@@ -825,7 +825,12 @@ The big daemon files are cohesive but long — go straight to the function:
   `DEEP_DEPTH` deep, `DEEP_TIME`, `DEEP_MAX` things, links to folders not followed) and what is
   found there follows the folder's own (`Win::deep`, `deep_from`, `show_found`; `deep_gen` drops
   a late answer), each said with its folder (`below`: dim under the name, before it in the
-  list). NOT BUILT:
+  list). OPEN WITH (a file's menu): the row turns the menu's PAGE, as the desktop's "Move to"
+  does (`filer_menu_apps` / `filer_menu_back`, `Win::asked`; Back also on hover) to the apps
+  that say they open that kind of file — `xdg-mime query filetype` then `gio mime`, off the
+  loop (`apps_for`, `parse_gio_mime`), each id looked up in the dock's own index for its name
+  and command (`Win::open_with`, `Action::SendTo(n)`). Rig: `files apps` / `menuback` with a
+  menu up. NOT BUILT:
   `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
