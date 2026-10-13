@@ -5,10 +5,56 @@
 //! immediately so the daemon never accumulates zombies.
 
 use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::sync::OnceLock;
 
 use anyhow::{bail, Context};
 use tracing::info;
+
+/// Hyprland's "open this where it was started" ticket.
+///
+/// Every process the compositor execs gets `HL_INITIAL_WORKSPACE_TOKEN=<id>`
+/// in its environment, bound to the workspace that was showing at that
+/// moment; the first WINDOW to open from a process carrying it is sent to
+/// that workspace, silently, and the ticket is spent
+/// (`misc:initial_workspace_tracking = 1`). For an app started from a keybind
+/// that is the point of it. For THIS process it is a trap: the compositor
+/// execs the daemon too, the daemon never opens a window (its surfaces are
+/// layers), so its ticket is never spent — and every app it launches inherits
+/// the ticket. The first one to open a window went to wherever the DAEMON had
+/// been started: workspace 1 after a login, or whatever was showing at its
+/// last restart (Max, 2026-10-13: apps from the dock and fast launch *"se
+/// abren en el workspace en el que estaba antes"*). After that one the ticket
+/// was spent and launches behaved, until the next restart armed another.
+///
+/// So the ticket is dropped twice over: from the daemon's own environment as
+/// it starts (`drop_workspace_ticket`), and from the environment handed to
+/// every launch (`launch_env`) — which holds even if something puts one back.
+/// An app the dock starts opens on the workspace you are on when it appears.
+pub const WORKSPACE_TICKET: &str = "HL_INITIAL_WORKSPACE_TOKEN";
+
+/// Drop the compositor's ticket from this process (see [`WORKSPACE_TICKET`]).
+/// Call it first thing in `main`, before any thread exists. Returns whether
+/// there was one, for the log.
+pub fn drop_workspace_ticket() -> bool {
+    let had = std::env::var_os(WORKSPACE_TICKET).is_some();
+    std::env::remove_var(WORKSPACE_TICKET);
+    had
+}
+
+/// The environment a launched app gets: this process's, less the ticket.
+/// Built in the parent — nothing may allocate between `fork` and `exec`.
+fn launch_env() -> Vec<CString> {
+    std::env::vars_os()
+        .filter(|(k, _)| k != WORKSPACE_TICKET)
+        .filter_map(|(k, v)| {
+            let mut kv = k.as_bytes().to_vec();
+            kv.push(b'=');
+            kv.extend_from_slice(v.as_bytes());
+            CString::new(kv).ok()
+        })
+        .collect()
+}
 
 /// Launch `exec` (a shell command line, field codes already stripped)
 /// fully detached from the daemon. `Terminal=true` entries run inside
@@ -25,10 +71,14 @@ pub fn launch(exec: &str, needs_terminal: bool, terminal: &str) -> anyhow::Resul
     let sh = CString::new("/bin/sh").context("sh path")?;
     let dash_c = CString::new("-c").context("-c arg")?;
     let cmd = CString::new(line).context("exec line contains a NUL byte")?;
+    let env = launch_env();
+    let mut envp: Vec<*const libc::c_char> = env.iter().map(|e| e.as_ptr()).collect();
+    envp.push(std::ptr::null());
 
     // SAFETY: standard double-fork daemonization. Between fork and exec
     // the child only calls async-signal-safe functions (setsid, fork,
-    // open, dup2, execv, _exit) — no allocation, no locks.
+    // open, dup2, execve, _exit) — no allocation, no locks. (`envp` and the
+    // strings it points into were built above, in the parent.)
     unsafe {
         match libc::fork() {
             -1 => bail!("fork failed: {}", std::io::Error::last_os_error()),
@@ -48,7 +98,7 @@ pub fn launch(exec: &str, needs_terminal: bool, terminal: &str) -> anyhow::Resul
                             }
                         }
                         let argv = [sh.as_ptr(), dash_c.as_ptr(), cmd.as_ptr(), std::ptr::null()];
-                        libc::execv(sh.as_ptr(), argv.as_ptr());
+                        libc::execve(sh.as_ptr(), argv.as_ptr(), envp.as_ptr());
                         libc::_exit(127);
                     }
                     _ => libc::_exit(0),
@@ -195,6 +245,22 @@ pub fn banner_cmd(pkg: &str, version: Option<&str>, program: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launch_never_carries_the_compositors_workspace_ticket() {
+        // One test owns the variable (tests share the process environment).
+        std::env::set_var(WORKSPACE_TICKET, "d0c5-stale");
+        let has = |env: &[CString]| env.iter().any(|e| e.to_bytes().starts_with(b"HL_INITIAL_WORKSPACE_TOKEN="));
+        // Even with one in our own environment, the launch's has none…
+        assert!(!has(&launch_env()));
+        // …and the rest of the environment is passed on.
+        assert!(launch_env().iter().any(|e| e.to_bytes().starts_with(b"PATH=")));
+        // The daemon drops its own at start, and says whether it had one.
+        assert!(drop_workspace_ticket());
+        assert!(std::env::var_os(WORKSPACE_TICKET).is_none());
+        assert!(!drop_workspace_ticket());
+        assert!(!has(&launch_env()));
+    }
 
     #[test]
     fn shell_quote_wraps_and_escapes() {

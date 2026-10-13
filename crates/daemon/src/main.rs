@@ -210,6 +210,11 @@ fn main() -> anyhow::Result<()> {
     // returning to the OS: the single biggest RAM lever for the 4 GB target.
     tune_allocator();
 
+    // The compositor's "open this where it was started" ticket must not ride
+    // into every app we launch (see `launch::WORKSPACE_TICKET`). Dropped
+    // before any thread exists — the environment is not safe to change later.
+    let had_workspace_ticket = launch::drop_workspace_ticket();
+
     // Logs go to stderr AND a file of this session's: the daemon Hyprland
     // starts at login has a stderr nobody can read (not the journal — found
     // the hard way on 2026-10-07, chasing a drop that "got screwed" with
@@ -223,6 +228,10 @@ fn main() -> anyhow::Result<()> {
         .with_ansi(false)
         .with_writer(logging::Tee::open())
         .init();
+
+    if had_workspace_ticket {
+        info!("dropped the compositor's initial-workspace ticket: launched apps open on the workspace that is showing");
+    }
 
     // Owner-only state dirs (clipboard text + notification bodies live
     // there) — before any store is written this session.
