@@ -69,7 +69,7 @@ impl App {
 
     /// How much shorter the open card should be: the Apps rows the page in
     /// view leaves empty (Max, 2026-09-30: "card shrinks to fit"). Full
-    /// height on the control panel; a box open keeps its three rows; held
+    /// height on the control panel; a box open in the grid gets its row's room; held
     /// while a drag is in hand so the grid doesn't move under it.
     pub(crate) fn apps_trim_target(&self) -> f32 {
         if self.control_panel {
@@ -101,11 +101,18 @@ impl App {
             slots.iter().filter(|&&d| d / per_page == page).map(|&d| d % per_page).max()
         };
         let needed = last.map_or(1, |l| l / cols + 1);
-        let floor = if self.stack_open() { content::OPEN_BOX_COLS } else { 1 };
-        let keep = needed.max(floor).min(rows);
+        let keep = needed.min(rows);
+        // A box open in the grid: the room its row takes under its tile.
+        let cell = content::GRID_CELL_H * self.icon_scale();
+        let box_room = if self.app_group.is_some() || self.dir_stack.as_ref().is_some_and(|ds| ds.in_grid) {
+            let cells = (content::BOX_CELL_MIN_W * self.icon_scale(), cell);
+            content::row_cells(self.box_fill(), cells, sec.viewport.w).0 .1
+        } else {
+            0.0
+        };
         // Aimed with the room the Controls band is heading for, so the Apps
         // viewport lands on exactly `keep` rows.
-        (room - keep as f32 * content::GRID_CELL_H * self.icon_scale()).max(0.0)
+        (room - keep as f32 * cell - box_room).max(0.0)
     }
 
     /// The Controls row's pill height: the control panel's near layer.
@@ -213,10 +220,9 @@ impl App {
             }
             layout.controls = rects;
         }
-        // Place the open box: its members in rows over its tile
-        // (`content::row_box`). A grid box (and a dock folder or pinned
-        // directory opened with the card up) keeps inside the Apps grid; a
-        // dock stack floats over its dock icon.
+        // Place the open box. A dock stack floats over its dock icon
+        // (`content::row_box`); a grid box (and a dock folder or pinned
+        // directory opened with the card up) opens in the Apps grid.
         if let (Some(_), Some((ox, oy))) = (layout.open_box, self.box_origin(&layout)) {
             let scale = self.icon_scale();
             let cell = content::GRID_CELL_H * scale;
@@ -248,20 +254,23 @@ impl App {
                         content::row_box(dock_rect, n, cells, area, content::BOX_GAP)
                     })
             } else {
-                // The tile's cell, from its icon's centre.
-                let (cw, icon) = (content::GRID_CELL_W * scale, content::GRID_ICON * scale);
-                let tile = content::Rect::new(
-                    ox - cw / 2.0,
-                    oy - icon / 2.0 - content::GRID_ICON_TOP * scale,
-                    cw,
-                    cell,
-                );
-                // The Apps grid, and the gap's worth of its title line: a
-                // row over a second-row tile takes the whole first row.
+                // A box in the grid opens under its tile's row, the rows
+                // below making room for it (`content::AppsPart`). Where
+                // the grid can't hold it the tile's row gives the rest,
+                // moving up — never past the grid's top.
                 let vp = layout.sections[content::SECTION_APPS].viewport;
-                let gap = content::BOX_GAP;
-                let area = content::Rect::new(vp.x, vp.y - gap, vp.w, vp.h + gap);
-                Some(content::row_box(tile, n, cells, area, gap))
+                // It takes whole rows' room, so a full grid stays on its
+                // rows: the last ones leave whole.
+                let ((w, h), grid) = content::row_cells(n, cells, vp.w);
+                let cw = content::GRID_CELL_W * scale;
+                let tile = content::Rect::new(ox - cw / 2.0, oy, cw, 0.0);
+                let row = if oy >= vp.y { ((oy - vp.y) / cell).floor() as isize } else { -1 };
+                let split = vp.y + (row + 1) as f32 * cell;
+                let up = (split + h - (vp.y + vp.h)).clamp(0.0, (row.max(0) as f32 * cell).max(0.0));
+                let t = self.group_expand();
+                layout.apps_part = Some(content::AppsPart { row, up: up * t, down: (h - up) * t });
+                let x = content::row_box_x(tile, w, vp);
+                Some((content::Rect::new(x, split - up, w, h), grid))
             };
             if let Some((rect, grid)) = placed {
                 layout.open_box = Some(rect);
@@ -951,12 +960,7 @@ impl App {
                 self.dirty = true;
             }
         }
-        let group_expand = {
-            let t = self.group_anim.clamp(0.0, 1.0);
-            // Smootheststep (7th order): zero velocity, acceleration *and*
-            // jerk at both ends — an extra-gentle takeoff and landing.
-            t * t * t * t * (35.0 + t * (-84.0 + t * (70.0 + t * -20.0)))
-        };
+        let group_expand = self.group_expand();
 
         let drag_frame = self
             .gesture
@@ -1368,7 +1372,10 @@ impl App {
                 dock_hidden,
                 dock_slide: &self.dock_slide,
                 group_expand,
-                group_origin: self.box_origin(&layout),
+                // (Its tile moves up with its row where the grid is full.)
+                group_origin: self.box_origin(&layout).map(|(x, y)| {
+                    (x, y - layout.apps_part.filter(|p| p.row >= 0).map_or(0.0, |p| p.up))
+                }),
                 open_box_members: &open_box_members,
                 panel: self.panel_mix >= 0.999,
                 panel_mix: self.panel_mix,

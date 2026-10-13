@@ -694,8 +694,10 @@ pub struct Layout {
     /// (a grid tile's cell, or a dock folder's icon). Present only while a
     /// box is open. A click inside is inert (only outside closes).
     pub open_box: Option<Rect>,
-    /// That box's member grid: (columns, rows) of square cells.
+    /// That box's member grid: (columns, rows) of cells.
     pub open_box_grid: (usize, usize),
+    /// The Apps rows parted around a box open in the grid.
+    pub apps_part: Option<AppsPart>,
     /// The band under Files while a search matches settings or modules:
     /// each row's title position and the band its pills sit in (pill
     /// height, grid width) — the Controls row, then the Modules row.
@@ -1119,6 +1121,7 @@ pub fn layout(
         search_btn,
         open_box,
         open_box_grid: (OPEN_BOX_COLS, OPEN_BOX_COLS),
+        apps_part: None,
         control_bands,
         controls: Vec::new(),
         apps_full_h: fits as f32 * grid_cell_h,
@@ -1184,50 +1187,84 @@ pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
     })
 }
 
-/// Gap between an open box and its tile (a grid tile's cell, a dock
-/// folder's icon): the page dots sit in it.
+/// Gap between a dock folder's open box and its icon: the page dots sit
+/// in it.
 pub const BOX_GAP: f32 = 12.0;
 
 /// The narrowest an open box's cell gets to keep its members on one row:
 /// the icon and a little air (names shorten to fit).
 pub const BOX_CELL_MIN_W: f32 = GRID_ICON + 12.0;
 
-/// The open box at rest (Max, 2026-10-13: "fila/s arriba del tile"): `n`
-/// members in rows of cells `cell` high, centred over `anchor` (its tile)
-/// and `gap` above it, kept inside `area`. One row while it fits `area`'s
-/// width — the cells `cell` wide, narrowing down to `min_w` before a
-/// second row is taken; past that the rows are evened out. With no room
-/// above the tile (a top-row tile, a dock folder with the card up) the
-/// rows hang under it. Returns the rect and its (columns, rows).
+/// The Apps grid parted around a box open in it (Max, 2026-10-13: "como
+/// macOS, la línea se abre abajo del icono, y la línea de abajo se mueve"):
+/// the box's row opens under its tile's row and the rows below make room.
+/// Where the grid can't grow any further the tile's row and those over it
+/// give the rest, moving up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppsPart {
+    /// The tile's row; -1 for a box from the dock (every row is below it).
+    pub row: isize,
+    /// How far rows up to `row` have moved up, and the rest down (px, at
+    /// the open animation's progress).
+    pub up: f32,
+    pub down: f32,
+}
+
+impl AppsPart {
+    /// How far grid row `row` is from its resting place.
+    pub fn shift(&self, row: usize) -> f32 {
+        if row as isize <= self.row {
+            -self.up
+        } else {
+            self.down
+        }
+    }
+
+    /// The resting height of what is drawn at `y`, in a grid whose rows
+    /// are `cell_h` high from `top`; `None` in the room the rows made.
+    pub fn rest_y(&self, top: f32, cell_h: f32, y: f32) -> Option<f32> {
+        let split = top + (self.row + 1) as f32 * cell_h;
+        if y < split - self.up {
+            Some(y + self.up)
+        } else if y >= split + self.down {
+            Some(y - self.down)
+        } else {
+            None
+        }
+    }
+}
+
+/// An open box's rows: `n` members in cells `cell` high across `area_w`.
+/// One row while it fits — the cells `cell` wide, narrowing down to
+/// `min_w` before a second row is taken; past that the rows are evened
+/// out. Returns its size and its (columns, rows).
+pub fn row_cells(n: usize, (min_w, cell): (f32, f32), area_w: f32) -> ((f32, f32), (usize, usize)) {
+    let n = n.clamp(1, OPEN_BOX_CAP);
+    let min_w = min_w.clamp(1.0, cell.max(1.0));
+    let fit = ((area_w / min_w + 0.001).floor() as usize).max(1);
+    let rows = n.div_ceil(fit);
+    let cols = n.div_ceil(rows);
+    let cell_w = (area_w / cols as f32).clamp(min_w, cell.max(min_w));
+    ((cols as f32 * cell_w, rows as f32 * cell), (cols, rows))
+}
+
+/// A dock folder's open box at rest: its rows (`row_cells`) centred over
+/// `anchor` (the dock icon) and `gap` above it, kept inside `area`.
 pub fn row_box(
     anchor: Rect,
     n: usize,
-    (min_w, cell): (f32, f32),
+    cells: (f32, f32),
     area: Rect,
     gap: f32,
 ) -> (Rect, (usize, usize)) {
-    let n = n.clamp(1, OPEN_BOX_CAP);
-    let min_w = min_w.clamp(1.0, cell.max(1.0));
-    let fit = ((area.w / min_w + 0.001).floor() as usize).max(1);
-    let rows = n.div_ceil(fit);
-    let cols = n.div_ceil(rows);
-    let cell_w = (area.w / cols as f32).clamp(min_w, cell.max(min_w));
-    let (w, h) = (cols as f32 * cell_w, rows as f32 * cell);
-    let cx = anchor.x + anchor.w / 2.0;
-    let x = (cx - w / 2.0).clamp(area.x, (area.x + area.w - w).max(area.x));
-    let (top, bottom) = (area.y, area.y + area.h);
-    let above = anchor.y - gap - h;
-    let below = anchor.y + anchor.h + gap;
-    let y = if above >= top {
-        above
-    } else if below + h <= bottom {
-        below
-    } else if anchor.y - top >= bottom - (anchor.y + anchor.h) {
-        top
-    } else {
-        (bottom - h).max(top)
-    };
-    (Rect::new(x, y, w, h), (cols, rows))
+    let ((w, h), grid) = row_cells(n, cells, area.w);
+    let x = row_box_x(anchor, w, area);
+    (Rect::new(x, (anchor.y - gap - h).max(area.y), w, h), grid)
+}
+
+/// An open box's left edge: `w` wide, centred on `anchor`, inside `area`.
+pub fn row_box_x(anchor: Rect, w: f32, area: Rect) -> f32 {
+    (anchor.x + anchor.w / 2.0 - w / 2.0).clamp(area.x, (area.x + area.w - w).max(area.x))
 }
 
 /// Which item (if any) the pointer is over.
@@ -1279,7 +1316,15 @@ pub fn hit_test(
             let cell_w = sec.viewport.w / sec.cols.max(1) as f32;
             // (Not viewport.h / rows: a trimmed Apps viewport is shorter.)
             let cell_h = cell_w * GRID_CELL_H / GRID_CELL_W;
-            let row = ((pos.1 - sec.viewport.y) / cell_h).floor() as usize;
+            // Apps rows parted around an open box: back to where they rest.
+            let y = match layout.apps_part.filter(|_| s == SECTION_APPS) {
+                Some(part) => match part.rest_y(sec.viewport.y, cell_h, pos.1) {
+                    Some(y) => y,
+                    None => continue,
+                },
+                None => pos.1,
+            };
+            let row = ((y - sec.viewport.y) / cell_h).floor() as usize;
             let row_start = page * sec.cols * sec.rows + row * sec.cols;
             let col_f = (adjusted_x - page as f32 * page_w - sec.row_shift(row_start)) / cell_w;
             let col = col_f.floor() as usize;
@@ -2491,9 +2536,11 @@ pub fn scene(
                 let (row, col) = (within / sec.cols, within % sec.cols);
                 let rel0 = (page as f32 * page_w - sec.scroll).rem_euclid(total_w);
                 let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
+                // Apps rows part around a box open in the grid.
+                let part = layout.apps_part.filter(|_| s == SECTION_APPS).map_or(0.0, |p| p.shift(row));
                 (
                     sec.viewport.x + rel + col as f32 * grid_cell_w + sec.row_shift(i),
-                    sec.viewport.y + row as f32 * grid_cell_h,
+                    sec.viewport.y + row as f32 * grid_cell_h + part,
                 )
             };
             let (x0, y0) = corner(i0);
@@ -2568,7 +2615,7 @@ pub fn scene(
                 let ly = cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP;
                 cx + half > b.x
                     && cx - half < b.x + b.w
-                    && ly + LABEL_LINE_PX > b.y
+                    && ly + LABEL_FONT_PX > b.y
                     && ly < b.y + b.h
             });
             // The Recycle Bin, if it's been moved onto the grid: the same
@@ -3135,7 +3182,8 @@ pub fn scene(
                     boxgrid.labels.push(Label {
                         text: truncate_label(&entry.name, cell - 4.0, LABEL_FONT_PX),
                         pos: (cx, cy + size / 2.0 + 3.0),
-                        max_w: cell - 4.0,
+                        // (The whole cell: a name that just fits must not wrap.)
+                        max_w: cell,
                         font_px: LABEL_FONT_PX,
                         line_px: LABEL_LINE_PX,
                         centered: true,
@@ -3149,8 +3197,9 @@ pub fn scene(
             }
         }
         scene.grids.push(boxgrid);
-        // Page dots between the box and its tile (own grid so they aren't
-        // clipped to it).
+        // Page dots (own grid so they aren't clipped to the box): between
+        // a dock stack and its icon; on the bottom edge of a box in the
+        // grid, where the row under it leaves them air.
         let (page, pages) = open_box_pages;
         if pages > 1 && t > 0.6 {
             let mut dots = GridContent {
@@ -3160,11 +3209,7 @@ pub fn scene(
             let dot_r = 3.0;
             let spacing = 12.0;
             let total_w = pages as f32 * spacing - (spacing - dot_r * 2.0);
-            let dy = if box_rect.y + box_rect.h / 2.0 < oy {
-                box_rect.y + box_rect.h + BOX_GAP / 2.0
-            } else {
-                box_rect.y - BOX_GAP / 2.0
-            };
+            let dy = box_rect.y + box_rect.h + if box_over_dock { BOX_GAP / 2.0 } else { 0.0 };
             let x0 = box_rect.x + box_rect.w / 2.0 - total_w / 2.0;
             let hl = dock_highlight;
             for p in 0..pages {
@@ -3724,22 +3769,33 @@ mod tests {
     }
 
     #[test]
-    fn row_box_evens_its_rows_and_hangs_under_a_top_tile() {
-        let area = Rect::new(0.0, 100.0, 7.0 * 80.0, 300.0);
-        let tile = Rect::new(200.0, 300.0, 100.0, 80.0);
+    fn row_cells_narrow_before_taking_a_second_row() {
         // Nine fit across once their cells narrow: still one row.
-        let (r, grid) = row_box(tile, 9, (60.0, 80.0), area, 2.0);
+        let ((w, h), grid) = row_cells(9, (60.0, 80.0), 560.0);
         assert_eq!(grid, (9, 1));
-        assert!((r.w - area.w).abs() < 0.01);
+        assert!((w - 560.0).abs() < 0.01 && (h - 80.0).abs() < 0.01);
         // Nine members where eight fit at the narrowest: two rows, 5 + 4.
-        let (r, grid) = row_box(tile, 9, (70.0, 80.0), area, 2.0);
+        let ((w, h), grid) = row_cells(9, (70.0, 80.0), 560.0);
         assert_eq!(grid, (5, 2));
-        assert!((r.w - 400.0).abs() < 0.01, "evened rows get their full cells back");
-        assert!(r.y + r.h <= tile.y, "over the tile");
-        // No room above a top-row tile: the rows hang under it.
-        let top = Rect::new(200.0, 100.0, 100.0, 80.0);
-        let (r, _) = row_box(top, 9, (70.0, 80.0), area, 2.0);
-        assert!(r.y >= top.y + top.h, "under the tile");
+        assert!((w - 400.0).abs() < 0.01, "evened rows get their full cells back");
+        assert!((h - 160.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parted_rows_map_back_to_where_they_rest() {
+        // Rows of 80 from y = 100, parted under row 1: 10 up, 90 down.
+        let part = AppsPart { row: 1, up: 10.0, down: 90.0 };
+        assert_eq!(part.shift(0), -10.0);
+        assert_eq!(part.shift(1), -10.0);
+        assert_eq!(part.shift(2), 90.0);
+        // Row 1 is drawn at 170..250; the room made is 250..350.
+        assert_eq!(part.rest_y(100.0, 80.0, 200.0), Some(210.0));
+        assert_eq!(part.rest_y(100.0, 80.0, 300.0), None);
+        assert_eq!(part.rest_y(100.0, 80.0, 360.0), Some(270.0));
+        // A box from the dock: every row is below it.
+        let part = AppsPart { row: -1, up: 0.0, down: 90.0 };
+        assert_eq!(part.shift(0), 90.0);
+        assert_eq!(part.rest_y(100.0, 80.0, 150.0), None);
     }
 
     /// The card and the row it holds are one movement (Max, 2026-09-13).

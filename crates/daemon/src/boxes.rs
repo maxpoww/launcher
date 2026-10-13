@@ -107,8 +107,17 @@ impl App {
     /// so the box collapses back exactly onto the resting tile — no jump.
     pub(crate) fn open_group(&mut self, g: usize) {
         let layout = self.current_layout();
+        // Another box open in the grid has its rows parted: the tile's
+        // place is where it rests.
+        let cell_h = content::GRID_CELL_H * self.icon_scale();
+        let top = layout.sections[content::SECTION_APPS].viewport.y;
+        let at_rest = |pos: (f32, f32)| match layout.apps_part {
+            Some(part) => (pos.0, part.rest_y(top, cell_h, pos.1).unwrap_or(pos.1)),
+            None => pos,
+        };
         self.group_origin =
             self.pointer_pos
+                .map(at_rest)
                 .map(|pos| match self.apps_display_cell(&layout, pos) {
                     Some((_, fx, fy)) => {
                         // The grid draws at `icon_scale`: so does its cell.
@@ -308,6 +317,14 @@ impl App {
                 .find(|e| e.id == id)
                 .map(|e| e.name.clone())
         })
+    }
+
+    /// The box's open/close progress, eased. Smootheststep (7th order):
+    /// zero velocity, acceleration *and* jerk at both ends — an
+    /// extra-gentle takeoff and landing.
+    pub(crate) fn group_expand(&self) -> f32 {
+        let t = self.group_anim.clamp(0.0, 1.0);
+        t * t * t * t * (35.0 + t * (-84.0 + t * (70.0 + t * -20.0)))
     }
 
     /// How many cells the open box lays out: its fullest page (a box's
