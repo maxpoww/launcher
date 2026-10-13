@@ -1324,7 +1324,7 @@ impl App {
         // once the thumbnailer has it.
         let quick_images: Vec<(content::Rect, u32, f32)> = quick
             .as_ref()
-            .map(|(_, _, draw)| draw.images.clone())
+            .map(|(_, _, _, draw)| draw.images.clone())
             .unwrap_or_default()
             .into_iter()
             .filter_map(|(r, file)| self.picture_layer(&file).map(|(layer, shape)| (r, layer, shape)))
@@ -1333,7 +1333,7 @@ impl App {
         // made — ever) shows its name instead.
         let quick_names: Vec<(content::Rect, String)> = quick
             .as_ref()
-            .map(|(_, _, draw)| draw.images.clone())
+            .map(|(_, _, _, draw)| draw.images.clone())
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, file)| !self.has_picture(file))
@@ -1342,9 +1342,10 @@ impl App {
                 (r, name)
             })
             .collect();
-        let quick_draw = quick.as_ref().map(|(rect, a, draw)| content::QuickDraw {
+        let quick_draw = quick.as_ref().map(|(rect, a, scale, draw)| content::QuickDraw {
             rect: *rect,
             a: *a,
+            scale: *scale,
             draw,
             images: &quick_images,
             names: &quick_names,

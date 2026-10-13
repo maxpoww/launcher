@@ -625,6 +625,10 @@ pub struct DockOverflow {
 pub struct QuickDraw<'a> {
     pub rect: Rect,
     pub a: f32,
+    /// How big it is drawn, of `rect` and all that is on it, about the
+    /// rect's centre: it comes and goes as a window does (`panel.rs`,
+    /// "THE COMPOSITOR'S OWN WINDOW MOTION").
+    pub scale: f32,
     pub draw: &'a crate::panel::PanelDraw,
     /// Its pictures: where each goes and the texture layer it is on.
     pub images: &'a [(Rect, u32, f32)],
@@ -663,7 +667,14 @@ pub struct FastPill {
 /// centred on a clear square; the square is sized so the picture (of shape
 /// `shape`, width over height) is as big as fits inside its tile.
 fn picture_tiles(scene: &mut Scene, images: &[(Rect, u32, f32)]) {
+    picture_tiles_as(scene, images, |r| r);
+}
+
+/// [`picture_tiles`], each tile put where `place` says (a box coming or
+/// going: its pictures move with it).
+fn picture_tiles_as(scene: &mut Scene, images: &[(Rect, u32, f32)], place: impl Fn(Rect) -> Rect) {
     for &(tile, layer, shape) in images {
+        let tile = place(tile);
         let shape = shape.clamp(0.2, 5.0);
         let side = if shape >= 1.0 { tile.w.min(tile.h * shape) } else { tile.h.min(tile.w / shape) };
         scene.overlay.push(IconInst {
@@ -3475,11 +3486,23 @@ pub fn scene(
             fill[3] = config.theme.open_alpha(fill[3]);
         }
         fill[3] *= q.a;
-        let radius = BOX_CORNER_RADIUS;
-        scene.rects.push(RectInst { rect: q.rect, radius, color: fill, glass: 1.0, border: 0.0 });
-        scene.rects.push(RectInst { rect: q.rect, radius, color: plate_rim(fill), glass: 0.0, border: 1.0 });
+        // Everything about the box's centre, at the size it is this frame.
+        let k = q.scale;
+        let (cx, cy) = (q.rect.x + q.rect.w / 2.0, q.rect.y + q.rect.h / 2.0);
+        let at = |x: f32, y: f32| (cx + (x - cx) * k, cy + (y - cy) * k);
+        let place = |r: Rect| {
+            let (x, y) = at(r.x, r.y);
+            Rect::new(x, y, r.w * k, r.h * k)
+        };
+        let still = (k - 1.0).abs() < 0.001;
+        let radius = BOX_CORNER_RADIUS * k;
+        let frame = place(q.rect);
+        scene.rects.push(RectInst { rect: frame, radius, color: fill, glass: 1.0, border: 0.0 });
+        scene.rects.push(RectInst { rect: frame, radius, color: plate_rim(fill), glass: 0.0, border: 1.0 });
         for r in &q.draw.rects {
             let mut r = *r;
+            r.rect = place(r.rect);
+            r.radius *= k;
             if r.border == 0.0 {
                 scene.rects.push(RectInst {
                     rect: r.rect,
@@ -3492,30 +3515,48 @@ pub fn scene(
             r.color[3] *= q.a;
             scene.rects.push(r);
         }
-        for l in &q.draw.labels {
-            let mut l = l.clone();
+        let write = |scene: &mut Scene, mut l: Label| {
+            l.pos = at(l.pos.0, l.pos.1);
+            l.max_w *= k;
+            l.font_px *= k;
+            l.line_px *= k;
+            l.clip = l.clip.map(place);
+            // (A size that changes every frame is not worth keeping.)
+            l.cache &= still;
             if let Some(c) = &mut l.color {
                 c[3] *= q.a;
             }
-            scene.labels.push(l);
+            // (Too small to read is too small to shape.)
+            if l.font_px >= 2.0 {
+                scene.labels.push(l);
+            }
+        };
+        for l in &q.draw.labels {
+            write(&mut scene, l.clone());
         }
-        if q.a > 0.97 {
-            picture_tiles(&mut scene, q.images);
+        // Its pictures are on it while it is more there than not (a
+        // picture has no opacity of its own — and a tint is the mark of an
+        // app about to be removed, never a way to dim one).
+        if q.a > 0.5 {
+            picture_tiles_as(&mut scene, q.images, place);
             for (tile, name) in q.names {
                 let px = (tile.h * 0.11).clamp(9.0, 14.0);
-                scene.labels.push(Label {
-                    text: name.clone(),
-                    pos: (tile.x + tile.w / 2.0, tile.y + (tile.h - px * 1.25) / 2.0),
-                    max_w: tile.w - px,
-                    font_px: px,
-                    line_px: px * 1.25,
-                    centered: true,
-                    dim: false,
-                    cache: false,
-                    family: crate::options::TEXT_FONT,
-                    color: Some([q.ink[0], q.ink[1], q.ink[2], q.ink[3] * 0.5]),
-                    clip: Some(*tile),
-                });
+                write(
+                    &mut scene,
+                    Label {
+                        text: name.clone(),
+                        pos: (tile.x + tile.w / 2.0, tile.y + (tile.h - px * 1.25) / 2.0),
+                        max_w: tile.w - px,
+                        font_px: px,
+                        line_px: px * 1.25,
+                        centered: true,
+                        dim: false,
+                        cache: false,
+                        family: crate::options::TEXT_FONT,
+                        color: Some([q.ink[0], q.ink[1], q.ink[2], q.ink[3] * 0.5]),
+                        clip: Some(*tile),
+                    },
+                );
             }
         }
     }
