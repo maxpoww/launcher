@@ -1330,6 +1330,8 @@ fn main() -> anyhow::Result<()> {
     // The file manager's windows that stood open when the dock last went
     // down within this login come back on their folders.
     app.filer_restore_session();
+    // …and it answers "show in folder" for every other app.
+    app.filer_serve_dbus();
 
     info!("daemon up; try: waverunner-ctl toggle");
     // One view of the compositor per turn of the loop (hypr::SNAPSHOT).

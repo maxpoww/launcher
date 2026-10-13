@@ -790,6 +790,99 @@ pub(crate) fn complete_path(text: &str, home: &Path) -> String {
     format!("{head}/{common}{tail}")
 }
 
+/// "SHOW IN FOLDER": what another app asks of the system's file manager
+/// over `org.freedesktop.FileManager1` (a browser's downloads, a mail
+/// attachment) — these folders opened, or these things shown in theirs.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Shown {
+    Folders(Vec<String>),
+    Items(Vec<String>),
+}
+
+/// The D-Bus face of the file manager: it only hands what is asked to the
+/// loop, where the windows are.
+struct FileManager1 {
+    asked: calloop::channel::Sender<Shown>,
+}
+
+#[zbus::interface(name = "org.freedesktop.FileManager1")]
+impl FileManager1 {
+    fn show_folders(&self, uris: Vec<String>, _startup_id: String) {
+        let _ = self.asked.send(Shown::Folders(uris));
+    }
+
+    fn show_items(&self, uris: Vec<String>, _startup_id: String) {
+        let _ = self.asked.send(Shown::Items(uris));
+    }
+
+    /// (No box of its own from here: the thing is shown, its menu has it.)
+    fn show_item_properties(&self, uris: Vec<String>, _startup_id: String) {
+        let _ = self.asked.send(Shown::Items(uris));
+    }
+}
+
+/// Be `org.freedesktop.FileManager1` on the session bus for as long as the
+/// dock lives. The name is asked for over whoever has it (a file manager
+/// that lets go gives it at once; one that does not, when it ends — we
+/// wait in line). On a thread of its own.
+fn serve_file_manager(asked: calloop::channel::Sender<Shown>) {
+    let spawned = std::thread::Builder::new().name("files-dbus".into()).spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!("files: cannot build the D-Bus runtime: {e}");
+                return;
+            }
+        };
+        rt.block_on(async move {
+            let served: zbus::Result<zbus::Connection> = async {
+                let conn = zbus::connection::Builder::session()?
+                    .serve_at("/org/freedesktop/FileManager1", FileManager1 { asked })?
+                    .build()
+                    .await?;
+                let got = conn
+                    .request_name_with_flags(
+                        "org.freedesktop.FileManager1",
+                        zbus::fdo::RequestNameFlags::ReplaceExisting.into(),
+                    )
+                    .await?;
+                info!("files: org.freedesktop.FileManager1 on the session bus ({got:?})");
+                Ok(conn)
+            }
+            .await;
+            match served {
+                // (The connection is what serves: it is held for good.)
+                Ok(_conn) => std::future::pending::<()>().await,
+                Err(e) => warn!("files: \"show in folder\" stays another's (D-Bus: {e})"),
+            }
+        });
+    });
+    if let Err(e) = spawned {
+        warn!("files: cannot spawn the D-Bus thread: {e}");
+    }
+}
+
+/// The folders to open for what was asked, each with the thing to show
+/// selected in it (the first asked of that folder), in the order asked.
+pub(crate) fn shown_places(asked: &Shown) -> Vec<(PathBuf, Option<PathBuf>)> {
+    let paths = |uris: &[String]| crate::desktop::uri_list_paths(&uris.join("\n"));
+    match asked {
+        Shown::Folders(uris) => paths(uris).into_iter().map(|dir| (dir, None)).collect(),
+        Shown::Items(uris) => {
+            let mut out: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+            for item in paths(uris) {
+                let Some(dir) = item.parent().map(Path::to_path_buf) else {
+                    continue;
+                };
+                if !out.iter().any(|(d, _)| *d == dir) {
+                    out.push((dir, Some(item)));
+                }
+            }
+            out
+        }
+    }
+}
+
 /// A name being typed in place.
 #[derive(Debug, Clone, PartialEq)]
 struct Rename {
@@ -1872,6 +1965,32 @@ impl App {
         wins.sort();
         let dirs: Vec<String> = wins.into_iter().map(|(_, d)| d).collect();
         crate::persist::write_json("files-session", &session_path(), &dirs);
+    }
+
+    /// Start answering "show in folder" (`serve_file_manager`): what is
+    /// asked comes to the loop and opens windows.
+    pub(crate) fn filer_serve_dbus(&mut self) {
+        let (tx, rx) = calloop::channel::channel::<Shown>();
+        let heard = self.loop_handle.insert_source(rx, |event, _, app: &mut App| {
+            if let calloop::channel::Event::Msg(asked) = event {
+                info!("files: asked over D-Bus: {asked:?}");
+                for (dir, item) in shown_places(&asked).into_iter().take(8) {
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    app.filer_open(dir);
+                    // (Its folder is being listed: it comes up selected.)
+                    if let (Some(item), Some(id)) = (item, app.filer.newest()) {
+                        if let Some(win) = app.filer.win_mut(id) {
+                            win.reveal = Some(item.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+        });
+        if heard.is_ok() {
+            serve_file_manager(tx);
+        }
     }
 
     /// The dock was started again within one login: the windows that stood
@@ -5297,6 +5416,24 @@ mod tests {
         assert_eq!(complete_path(&s("Documents/n"), &d), s("Documents/note.txt"));
         assert_eq!(complete_path(&s("zzz"), &d), s("zzz"));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn show_in_folder_opens_each_folder_once_with_its_thing() {
+        let items = Shown::Items(vec![
+            "file:///home/max/Downloads/a%20b.pdf".to_owned(),
+            "file:///home/max/Downloads/c.zip".to_owned(),
+            "file:///tmp/x.txt".to_owned(),
+        ]);
+        assert_eq!(
+            shown_places(&items),
+            [
+                (PathBuf::from("/home/max/Downloads"), Some(PathBuf::from("/home/max/Downloads/a b.pdf"))),
+                (PathBuf::from("/tmp"), Some(PathBuf::from("/tmp/x.txt"))),
+            ]
+        );
+        let folders = Shown::Folders(vec!["file:///home/max/Pictures".to_owned()]);
+        assert_eq!(shown_places(&folders), [(PathBuf::from("/home/max/Pictures"), None)]);
     }
 
     #[test]

@@ -780,8 +780,13 @@ The big daemon files are cohesive but long — go straight to the function:
   (`filer_bring`). IT IS THE SYSTEM'S FILE MANAGER (Max, 2026-10-13): the entry claims `inode/directory` and is made
   the default for it ONCE (`xdg-mime default`, marker `files-default-set`; Golem's `home.nix` names
   it first), and the shell's own folders open in it directly — the desktop's (`desktop_activate`),
-  a notification's "view" (`notif_open`). Not taken over: `org.freedesktop.FileManager1` (a
-  browser's "show in folder" still asks Nautilus). THE TILE: `materialize_entry` writes `golem-files.desktop` ("Golem Files",
+  a notification's "view" (`notif_open`). "SHOW IN FOLDER" is ours too: the dock IS
+  `org.freedesktop.FileManager1` on the session bus (`serve_file_manager`, a thread with its own
+  runtime; the name asked for over whoever holds it, else waited for in line): ShowFolders opens
+  them, ShowItems / ShowItemProperties open each thing's folder with it selected
+  (`Shown`, `shown_places`, `filer_serve_dbus`). ⚠ a test rig must NOT share the owner's session
+  bus (it would answer for the real desktop): give it `DBUS_SESSION_BUS_ADDRESS` of a private
+  `dbus-daemon`, then `gdbus call --session --dest org.freedesktop.FileManager1 …`. THE TILE: `materialize_entry` writes `golem-files.desktop` ("Golem Files",
   `Exec=<the ctl beside the daemon> files`, `StartupWMClass=golem-files`) at start; it claims no
   file type. MAKE ROOM (Max,
   2026-10-13: "que hagan espacio como en el grid de aplicaciones… usa el mismo código"): while a
