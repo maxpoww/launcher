@@ -31,11 +31,21 @@ pub enum Event {
     /// stream (an audio-only `.mp4`/`.mov`/…): the daemon reclassifies it
     /// to the audio icon instead of leaving a misleading video icon.
     AudioOnly { path: String },
+    /// A picture that MOVES (a GIF, a video), as a short loop: its first
+    /// seconds as `ICON_SIZE`² premultiplied RGBA frames (no mips — they
+    /// are made as each is shown), [`MOVING_FPS`] a second. Empty: none
+    /// could be made.
+    Moving { path: String, frames: Vec<Vec<u8>> },
 }
+
+/// A moving preview: how many frames a second, and how long a loop.
+pub const MOVING_FPS: u32 = 12;
+const MOVING_SECS: u32 = 4;
 
 /// Handle to the thumbnailer thread.
 pub struct Thumbs {
     requests: mpsc::Sender<String>,
+    moving: mpsc::Sender<String>,
 }
 
 impl Thumbs {
@@ -43,6 +53,74 @@ impl Thumbs {
     pub fn request(&self, path: &str) {
         let _ = self.requests.send(path.to_owned());
     }
+
+    /// Queue the moving preview of a GIF or a video (answered with
+    /// [`Event::Moving`], on a thread of its own: a still never waits
+    /// behind one).
+    pub fn request_moving(&self, path: &str) {
+        let _ = self.moving.send(path.to_owned());
+    }
+}
+
+/// The program that reads the frames of what moves: the one named by
+/// `WAVERUNNER_FFMPEG` (the dev launcher builds one and names it, as it
+/// does the wallpaper player), else the one on the PATH.
+fn ffmpeg_tool() -> Option<String> {
+    if let Some(named) = std::env::var("WAVERUNNER_FFMPEG").ok().filter(|p| std::path::Path::new(p).is_file()) {
+        return Some(named);
+    }
+    crate::launch::on_path("ffmpeg").then(|| "ffmpeg".to_owned())
+}
+
+/// Whether moving previews can be made on this computer at all.
+pub fn can_move() -> bool {
+    ffmpeg_tool().is_some()
+}
+
+/// The first seconds of the GIF or video at `path` as frames: each the
+/// whole picture centred on a clear square, as a still thumbnail is.
+fn moving_frames(path: &str) -> Vec<Vec<u8>> {
+    let Some(tool) = ffmpeg_tool() else {
+        return Vec::new();
+    };
+    let n = ICON_SIZE;
+    let filter = format!(
+        "fps={MOVING_FPS},scale={n}:{n}:force_original_aspect_ratio=decrease,format=rgba,pad={n}:{n}:-1:-1:color=black@0"
+    );
+    let out = std::process::Command::new(tool)
+        .args(["-v", "error", "-nostdin", "-t", &MOVING_SECS.to_string(), "-i", path])
+        .args(["-an", "-vf", &filter, "-frames:v", &(MOVING_FPS * MOVING_SECS).to_string()])
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let bytes = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(o) => {
+            warn!("thumb: ffmpeg exited {} for {path}", o.status);
+            return Vec::new();
+        }
+        Err(e) => {
+            warn!("thumb: ffmpeg failed to run: {e}");
+            return Vec::new();
+        }
+    };
+    let one = (n * n * 4) as usize;
+    bytes
+        .chunks_exact(one)
+        .map(|frame| {
+            // Premultiplied, as the icon pipeline is throughout (a GIF may
+            // have clear parts; a video has none).
+            let mut px = frame.to_vec();
+            for p in px.chunks_exact_mut(4).filter(|p| p[3] != 255) {
+                let a = p[3] as u32;
+                p[0] = (p[0] as u32 * a / 255) as u8;
+                p[1] = (p[1] as u32 * a / 255) as u8;
+                p[2] = (p[2] as u32 * a / 255) as u8;
+            }
+            px
+        })
+        .collect()
 }
 
 /// Whether a file can plausibly get a real thumbnail (images always,
@@ -57,6 +135,7 @@ pub fn thumbable(name: &str) -> bool {
 /// Spawn the thumbnailer thread. It exits when either channel closes.
 pub fn spawn(results: Sender<Event>) -> Thumbs {
     let (requests, rx) = mpsc::channel::<String>();
+    let results_moving = results.clone();
     let spawned = std::thread::Builder::new()
         .name("waverunner-thumbs".into())
         .spawn(move || {
@@ -84,7 +163,20 @@ pub fn spawn(results: Sender<Event>) -> Thumbs {
     if let Err(e) = spawned {
         warn!("cannot spawn thumbnailer thread: {e}");
     }
-    Thumbs { requests }
+    let (moving, moving_rx) = mpsc::channel::<String>();
+    let spawned = std::thread::Builder::new().name("waverunner-moving".into()).spawn(move || {
+        while let Ok(path) = moving_rx.recv() {
+            let frames = moving_frames(&path);
+            debug!("thumb: {} moving frames for {path}", frames.len());
+            if results_moving.send(Event::Moving { path, frames }).is_err() {
+                return;
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        warn!("cannot spawn the moving previews' thread: {e}");
+    }
+    Thumbs { requests, moving }
 }
 
 /// Produce one thumbnail: cache, then in-process decode, then external

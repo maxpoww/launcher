@@ -94,6 +94,14 @@ MPVPAPER="$(timeout $WAIT nix build --out-link "$STATE/mpvpaper" --print-out-pat
 if [ -n "$MPVPAPER" ]; then
   export WAVERUNNER_MPVPAPER="$MPVPAPER/bin/mpvpaper"
 fi
+# What reads the frames of a moving wallpaper for its preview in the
+# wallpapers' box: ffmpeg, the same way (an installed Golem has it on the
+# PATH). `.bin`: the program alone; its out-link gets the output's name.
+FFMPEG="$(timeout $WAIT nix build --out-link "$STATE/ffmpeg" --print-out-paths --inputs-from /home/max/launcher nixpkgs#ffmpeg-headless.bin 2>/dev/null)"
+[ -z "$FFMPEG" ] && [ -e "$STATE/ffmpeg-bin" ] && FFMPEG="$STATE/ffmpeg-bin"
+if [ -n "$FFMPEG" ]; then
+  export WAVERUNNER_FFMPEG="$FFMPEG/bin/ffmpeg"
+fi
 PROFILE="${WAVERUNNER_PROFILE:-release}"
 BIN="/home/max/launcher/target/$PROFILE/waverunner"
 if [ ! -x "$BIN" ]; then
