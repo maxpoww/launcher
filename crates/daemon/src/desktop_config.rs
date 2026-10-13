@@ -310,7 +310,7 @@ impl Config {
             if on {
                 b.labels.push(centred("✓", tick, [0.05, 0.08, 0.08, ink[3]]));
             }
-            b.labels.push(text(kind.label, (cx + 24.0, cy), col_w - 100.0, FONT_PX, LINE_PX, false, at(0.92)));
+            b.labels.push(text(crate::i18n::tr(kind.label), (cx + 24.0, cy), col_w - 100.0, FONT_PX, LINE_PX, false, at(0.92)));
             let size = self.sizes.get(kind.key).map(|s| crate::desktop_props::size_text(*s)).unwrap_or_default();
             b.labels.push(text(&size, (cx + col_w - 70.0, cy), 70.0, FONT_PX, LINE_PX, false, at(DIM)));
             b.hits.push((Hit::Kind(i), Rect::new(cx - 4.0, cy - 4.0, col_w, ROW_H - 2.0)));

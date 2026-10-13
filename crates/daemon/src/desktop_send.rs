@@ -328,7 +328,7 @@ pub(crate) fn send(paths: &[PathBuf], target: &Target) -> String {
             );
             // Not in the stick's cache only: on it, so it can be pulled.
             let _ = Command::new("sync").arg("-f").arg(dir).status();
-            outcome(brought.len(), failed, "moved to", &target.name)
+            outcome(brought.len(), failed, tr("moved to"), &target.name)
         }
         Place::Device(id) => {
             let (mut sent, mut failed) = (0, 0);
@@ -359,14 +359,14 @@ pub(crate) fn send(paths: &[PathBuf], target: &Target) -> String {
                 }
             }
             info!("desktop: {sent} sent to {} ({failed} failed)", target.name);
-            outcome(sent, failed, "sent to", &target.name)
+            outcome(sent, failed, tr("sent to"), &target.name)
         }
     }
 }
 
 /// "3 files moved to PHOTOS", "1 file sent to Pixel 8 · 1 could not be".
 fn outcome(done: usize, failed: usize, verb: &str, name: &str) -> String {
-    let files = |n: usize| format!("{n} {}", if n == 1 { "file" } else { "files" });
+    let files = |n: usize| format!("{n} {}", if n == 1 { tr("file") } else { tr("files") });
     match (done, failed) {
         (0, f) => crate::i18n::fill(tr("{0} could not be {verb} {name}"), &[("0", &(files(f))), ("verb", &verb), ("name", &name)]),
         (d, 0) => format!("{} {verb} {name}", files(d)),

@@ -228,7 +228,7 @@ fn names(progs: &[&crate::modules::Program], n: usize) -> String {
 }
 
 fn plural(n: usize) -> &'static str {
-    if n == 1 { "program" } else { "programs" }
+    if n == 1 { tr("program") } else { tr("programs") }
 }
 
 // ---- The layers --------------------------------------------------------
@@ -1245,7 +1245,7 @@ impl Panel {
                     if !remove.is_empty() {
                         parts.push(crate::i18n::fill(tr("{0} to remove"), &[("0", &remove.len())]));
                     }
-                    (ModButton::Apply, tr("Apply changes").to_owned(), vec![parts.join(" · ")], Some((ModLink::Undo, "undo")))
+                    (ModButton::Apply, tr("Apply changes").to_owned(), vec![parts.join(" · ")], Some((ModLink::Undo, tr("undo"))))
                 }
                 (true, true, _) => {
                     let mut say = Vec::new();
@@ -1264,7 +1264,7 @@ impl Panel {
                         sub.push(format!("{}.", names(&add, 4)));
                     }
                     let kind = if remove.is_empty() { ModButton::Confirm } else { ModButton::ConfirmRemove };
-                    (kind, crate::i18n::fill(tr("Yes, {0} {1}"), &[("0", &(say.join(" and "))), ("1", &(plural(n)))]), sub, Some((ModLink::KeepChoosing, "keep choosing")))
+                    (kind, crate::i18n::fill(tr("Yes, {0} {1}"), &[("0", &(say.join(" and "))), ("1", &(plural(n)))]), sub, Some((ModLink::KeepChoosing, tr("keep choosing"))))
                 }
                 (false, _, true) => (
                     ModButton::InstallRecommended,
@@ -1282,7 +1282,7 @@ impl Panel {
                     ModButton::ConfirmRemove,
                     crate::i18n::fill(tr("Yes, uninstall {0} {1}"), &[("0", &have.len()), ("1", &(plural(have.len())))]),
                     vec![tr("Your files stay where they are.").to_owned()],
-                    Some((ModLink::KeepThem, "keep them")),
+                    Some((ModLink::KeepThem, tr("keep them"))),
                 ),
             };
         // From the foot up: the hint, the link, the lines, the button.
@@ -1904,7 +1904,7 @@ impl Panel {
                     rect(out, tx + tw - 3.5 * s - knob, ty + (th - knob) / 2.0, knob, knob, knob / 2.0, dark);
                 }
                 _ => {
-                    text(out, "this screen".to_owned(), x0 + rw - 75.0 * s, y0 + (rh - 17.0 * s) / 2.0, 13.0, 17.0, 0.7);
+                    text(out, tr("this screen").to_owned(), x0 + rw - 75.0 * s, y0 + (rh - 17.0 * s) / 2.0, 13.0, 17.0, 0.7);
                 }
             }
             y += rh + 22.0 * s;
@@ -2423,6 +2423,8 @@ impl App {
                 info!("control panel: the shell speaks another language from now");
                 self.panel.relabel();
                 self.panel_parked.relabel();
+                // The open setting was read in the old language.
+                self.settings_panel_mut().control_ask = true;
                 self.schedule_frame();
                 self.draw_options();
             }

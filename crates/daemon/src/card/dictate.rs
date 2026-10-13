@@ -395,13 +395,26 @@ impl App {
         info!("dictation: {why}");
         // (The pill is a line of some thirty letters: the card's sentences,
         // which have a whole line under its box, are said shorter here.)
-        let why = match why {
-            w if w.starts_with("Nothing was heard") => tr("Nothing was heard"),
-            w if w.starts_with("The microphone is muted") => tr("The microphone is muted"),
-            w if w.starts_with("The microphone was too loud") => tr("Mic was too loud: say it again"),
-            w if w.starts_with("Too much noise") => tr("Too much noise"),
-            w if w.contains("speech engine") => tr("No speech engine installed"),
-            w => w,
+        // (They arrive in the shell's language, so each is told by its
+        // sentence in that language as well as in English.)
+        let is = |en: &'static str| why.starts_with(en) || why.starts_with(tr(en));
+        let why = if is("Nothing was heard") {
+            tr("Nothing was heard")
+        } else if is("The microphone is muted") {
+            tr("The microphone is muted")
+        } else if is("The microphone was too loud") {
+            tr("Mic was too loud: say it again")
+        } else if is("Too much noise") {
+            tr("Too much noise")
+        } else if why.contains("speech engine")
+            || is("The speech engine is not installed")
+            || is("Talk-to-text needs the speech engine (whisper), which is not installed")
+            || is("The speech engine did not start")
+            || is("The speech engine could not read that")
+        {
+            tr("No speech engine installed")
+        } else {
+            why
         };
         let since = Instant::now();
         self.dictate_show(Some(Show::Said(why, since)));

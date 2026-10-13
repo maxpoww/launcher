@@ -1086,7 +1086,7 @@ impl App {
             NetView::List => {}
         }
         if self.settings.airplane {
-            return Self::airplane_view("networks");
+            return Self::airplane_view(tr("networks"));
         }
         let power = |sub: &str, on: bool| Item::Row {
             hit: Hit::WifiPower,
@@ -1516,7 +1516,7 @@ impl App {
             BtView::List => {}
         }
         if self.settings.airplane {
-            return Self::airplane_view("devices");
+            return Self::airplane_view(tr("devices"));
         }
         let power = |sub: String, on: bool, rename: bool| Item::Row {
             hit: Hit::BtPower,
@@ -1800,7 +1800,7 @@ impl App {
     fn bt_pair_view(&self, path: &str) -> View {
         let (name, glyph) = self
             .bt_dev(path)
-            .map_or(("the device".to_owned(), G_BT), |d| {
+            .map_or((tr("the device").to_owned(), G_BT), |d| {
                 (d.name.clone(), bt_kind(&d.icon).0)
             });
         let (code, confirm) = self.gear.pair.clone().unwrap_or_default();

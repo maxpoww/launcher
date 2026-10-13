@@ -1,0 +1,3 @@
+# Strings that reach the translator some other way than a tr("…") literal or a
+# constant table apply.py knows: one per line, Rust escapes allowed.
+turn on

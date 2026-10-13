@@ -133,10 +133,10 @@ pub(crate) fn contains_text(folders: usize, files: usize, hidden: usize) -> Stri
     };
     let mut parts = Vec::new();
     if folders > 0 {
-        parts.push(n(folders, "folder", "folders"));
+        parts.push(n(folders, tr("folder"), tr("folders")));
     }
     if files > 0 {
-        parts.push(n(files, "file", "files"));
+        parts.push(n(files, tr("file"), tr("files")));
     }
     if parts.is_empty() {
         return tr("Nothing").to_owned();

@@ -58,8 +58,32 @@ pub fn init() {
 pub fn tr(en: &'static str) -> &'static str {
     match table().and_then(|t| t.get(en)) {
         Some(s) => s.as_str(),
+        None if pseudo() => marked(en),
         None => en,
     }
+}
+
+/// `WAVERUNNER_I18N=pseudo`: no language, but every string that goes through
+/// the translator comes back between « and ». What is on the screen without
+/// them is a string a translator would never be shown — the test of how
+/// much of the shell is translatable (`tools/i18n/README.md`).
+fn pseudo() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WAVERUNNER_I18N").is_ok_and(|v| v == "pseudo"))
+}
+
+fn marked(en: &str) -> &'static str {
+    static SEEN: std::sync::Mutex<Option<HashMap<String, &'static str>>> = std::sync::Mutex::new(None);
+    let Ok(mut seen) = SEEN.lock() else {
+        return "«?»";
+    };
+    let seen = seen.get_or_insert_with(HashMap::new);
+    if let Some(s) = seen.get(en) {
+        return s;
+    }
+    let s: &'static str = Box::leak(format!("«{en}»").into_boxed_str());
+    seen.insert(en.to_owned(), s);
+    s
 }
 
 /// A translated template with its `{name}` holes filled: the display form of
@@ -111,6 +135,7 @@ pub fn fill(template: &str, values: &[(&str, &(dyn std::fmt::Display + Send + Sy
 pub fn tr_dyn(en: &str) -> &str {
     match table().and_then(|t| t.get(en)) {
         Some(s) => s.as_str(),
+        None if pseudo() => marked(en),
         None => en,
     }
 }
@@ -118,7 +143,7 @@ pub fn tr_dyn(en: &str) -> &str {
 fn load_table() -> HashMap<String, String> {
     // Explicit file override wins (the dictionary's `$WAVERUNNER_DICT` shape).
     if let Ok(path) = std::env::var("WAVERUNNER_I18N") {
-        if !path.is_empty() {
+        if !path.is_empty() && path != "pseudo" {
             return read_file(std::path::Path::new(&path)).unwrap_or_default();
         }
     }
@@ -228,6 +253,101 @@ fn locale_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The string literals handed to `tr(…)` / `tr_dyn(…)` in a source text.
+    fn tr_literals(src: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for marker in ["tr(\"", "tr_dyn(\""] {
+            let mut rest = src;
+            while let Some(at) = rest.find(marker) {
+                // (`str(`, `attr(`…: only the whole word.)
+                let whole = !rest[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+                let body = &rest[at + marker.len()..];
+                let mut text = String::new();
+                let mut chars = body.chars();
+                let mut closed = false;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
+                        '\\' => match chars.next() {
+                            Some('n') => text.push('\n'),
+                            Some('t') => text.push('\t'),
+                            Some(other) => text.push(other),
+                            None => break,
+                        },
+                        c => text.push(c),
+                    }
+                }
+                // Only `tr("…")` with nothing after the literal: a call that
+                // goes on (`tr("a" …`) is not a plain key.
+                if whole && closed && chars.as_str().trim_start().starts_with(')') && !text.contains("\\u{") {
+                    found.push(text);
+                }
+                rest = &rest[at + marker.len()..];
+            }
+        }
+        found
+    }
+
+    fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                sources(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    /// Every string the shell hands the translator has its Spanish: a new
+    /// `tr("…")` without an entry in `assets/i18n/es.json` fails here, with
+    /// the strings to add. (The other half — a visible literal that never
+    /// reaches `tr` — is `tools/i18n/scan.py`'s to find.)
+    #[test]
+    fn every_translated_string_has_its_spanish() {
+        let es: HashMap<String, String> = serde_json::from_str(EMBEDDED[0].1).expect("es.json parses");
+        let mut files = Vec::new();
+        sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        assert!(files.len() > 50, "the daemon's sources were not found");
+        let mut missing = Vec::new();
+        for file in files {
+            let src = std::fs::read_to_string(&file).unwrap_or_default();
+            // (Tests hand `tr` strings of their own.)
+            let body = src.split("\n#[cfg(test)]").next().unwrap_or(&src);
+            for key in tr_literals(body) {
+                if !es.contains_key(&key) && !missing.contains(&key) {
+                    missing.push(key);
+                }
+            }
+        }
+        assert!(missing.is_empty(), "no Spanish for {} string(s): {missing:#?}", missing.len());
+    }
+
+    /// A translation keeps the holes of its English: a `{name}` lost or
+    /// misspelt would show the braces, or drop a value.
+    #[test]
+    fn a_translation_keeps_its_holes() {
+        let es: HashMap<String, String> = serde_json::from_str(EMBEDDED[0].1).expect("es.json parses");
+        let holes = |s: &str| {
+            let mut found: Vec<String> = Vec::new();
+            let mut rest = s;
+            while let Some(open) = rest.find('{') {
+                let Some(close) = rest[open..].find('}') else { break };
+                found.push(rest[open..open + close + 1].to_owned());
+                rest = &rest[open + close + 1..];
+            }
+            found.sort();
+            found
+        };
+        for (en, spanish) in &es {
+            assert_eq!(holes(en), holes(spanish), "{en:?} → {spanish:?}");
+            assert!(!spanish.is_empty(), "{en:?} has an empty translation");
+        }
+    }
 
     #[test]
     fn fill_puts_each_value_in_its_hole() {

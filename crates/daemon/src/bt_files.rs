@@ -373,7 +373,7 @@ impl ObexAgent {
         };
         if !is_paired(&from).await {
             warn!("bt files: refused {name} from {from}: not a paired device");
-            return Err(refuse("not paired"));
+            return Err(refuse(tr("not paired")));
         }
         let conn = conn.clone();
         let (path, kept) = (transfer.to_string(), name.clone());

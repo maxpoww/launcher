@@ -953,11 +953,11 @@ impl App {
         let low = !b.charging && !b.full && b.pct <= SAVER_AT;
         let time = b.minutes.map(|m| span_text(u64::from(m)));
         let state = if b.charging {
-            time.map_or("charging".to_owned(), |t| crate::i18n::fill(tr("charging · full in {t}"), &[("t", &t)]))
+            time.map_or(tr("charging").to_owned(), |t| crate::i18n::fill(tr("charging · full in {t}"), &[("t", &t)]))
         } else if b.full {
-            "plugged in".to_owned()
+            tr("plugged in").to_owned()
         } else {
-            time.map_or("on battery".to_owned(), |t| crate::i18n::fill(tr("about {t} left"), &[("t", &t)]))
+            time.map_or(tr("on battery").to_owned(), |t| crate::i18n::fill(tr("about {t} left"), &[("t", &t)]))
         };
         let mut items = vec![row_with(
             row(
@@ -1196,7 +1196,7 @@ impl App {
                 tr("Up to date"),
                 p.live
                     .last_update_secs
-                    .map_or("Click to check now".to_owned(), |s| {
+                    .map_or(tr("Click to check now").to_owned(), |s| {
                         crate::i18n::fill(tr("Checked {0} ago"), &[("0", &(span_text(s / 60)))])
                     }),
                 Tone::Normal,
@@ -1546,7 +1546,7 @@ impl App {
         }
         items.push(head(tr("Drives")));
         for (i, x) in d.drives.iter().enumerate() {
-            let kind = if x.rotational { "spinning disk" } else { "SSD" };
+            let kind = if x.rotational { tr("spinning disk") } else { "SSD" };
             if x.removable {
                 items.push(row_with(
                     row(Some(G_USB), x.name.clone(), self.ext_status(x)),

@@ -62,9 +62,9 @@ impl Every {
 
     pub fn label(self) -> &'static str {
         match self {
-            Every::Hour => "When it joins the Wi-Fi, then hourly",
-            Every::Quarter => "Every 15 minutes",
-            Every::Day => "Once a day",
+            Every::Hour => crate::i18n::tr("When it joins the Wi-Fi, then hourly"),
+            Every::Quarter => crate::i18n::tr("Every 15 minutes"),
+            Every::Day => crate::i18n::tr("Once a day"),
         }
     }
 

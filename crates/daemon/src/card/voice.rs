@@ -500,7 +500,7 @@ pub(super) fn transcribe(
             Ok(())
         });
     }
-    let child = command.spawn().map_err(|_| "The speech engine did not start")?;
+    let child = command.spawn().map_err(|_| tr("The speech engine did not start"))?;
     if let Some(running) = running {
         running.store(child.id() as i32, std::sync::atomic::Ordering::Relaxed);
     }
@@ -508,7 +508,7 @@ pub(super) fn transcribe(
     if let Some(running) = running {
         running.store(0, std::sync::atomic::Ordering::Relaxed);
     }
-    let out = out.map_err(|_| "The speech engine did not start")?;
+    let out = out.map_err(|_| tr("The speech engine did not start"))?;
     if !out.status.success() {
         return Err(tr("The speech engine could not read that"));
     }

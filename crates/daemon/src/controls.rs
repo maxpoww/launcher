@@ -235,8 +235,18 @@ fn choice(text: impl Into<String>, on: bool, value: impl Into<String>) -> Choice
 }
 
 fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: Vec<Choice>) -> Group {
+    // A pill is as wide as its group's longest word needs: the widths given
+    // are for the English, and another language's words run longer.
+    let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
+    let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
     Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices }
 }
+
+/// A letter of a choice pill's text, on average, and the air at each end,
+/// in the panel's design pixels; and the widest a pill may grow.
+const LETTER: f32 = 8.4;
+const PILL_AIR: f32 = 16.0;
+const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
@@ -529,7 +539,7 @@ pub(crate) fn parse_recording(dump: &serde_json::Value) -> Vec<String> {
                 props["application.name"]
                     .as_str()
                     .or_else(|| props["node.name"].as_str())
-                    .unwrap_or("An app")
+                    .unwrap_or(tr("An app"))
                     .to_owned()
             })
         })

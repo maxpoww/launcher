@@ -2869,7 +2869,7 @@ pub fn scene(
     if !layout.control_bands.is_empty() && !layout.controls.is_empty() && !panel {
         // One title per row: Controls over the settings, Modules over the modules.
         let has = |m: bool| control_modules.contains(&m);
-        let names: Vec<&str> = [(false, "Controls"), (true, "Modules")].into_iter().filter(|&(m, _)| has(m)).map(|(_, n)| n).collect();
+        let names: Vec<&str> = [(false, "Controls"), (true, "Modules")].into_iter().filter(|&(m, _)| has(m)).map(|(_, n)| crate::i18n::tr(n)).collect();
         for (&(title, _), name) in layout.control_bands.iter().zip(names) {
             scene.labels.push(Label {
                 text: crate::i18n::tr(name).to_string(),

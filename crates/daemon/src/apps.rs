@@ -556,7 +556,7 @@ fn cli_tiles_from(
         .map(|(attr, _, _)| AppEntry {
             id: attr.clone(),
             name: attr.clone(),
-            description: Some("Command-line tool".to_owned()),
+            description: Some(crate::i18n::tr("Command-line tool").to_owned()),
             // attr ≈ the package's main program (the banner's "run:").
             exec: format!(
                 "{} exec \"${{SHELL:-bash}}\"",

@@ -356,7 +356,7 @@ pub(crate) struct PhonePill {
 /// "5 min ago", "2 h ago", "3 days ago".
 fn ago(secs: u64) -> String {
     match secs {
-        0..=89 => "just now".to_owned(),
+        0..=89 => tr("just now").to_owned(),
         90..=5399 => crate::i18n::fill(tr("{0} min ago"), &[("0", &((secs + 30) / 60))]),
         5400..=129_599 => crate::i18n::fill(tr("{0} h ago"), &[("0", &((secs + 1800) / 3600))]),
         _ => crate::i18n::fill(tr("{0} days ago"), &[("0", &((secs + 43_200) / 86_400))]),
