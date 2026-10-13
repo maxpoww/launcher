@@ -18,7 +18,7 @@ use std::sync::mpsc;
 
 use calloop::channel::Sender;
 use resvg::tiny_skia;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use waverunner_core::index::{AppEntry, DesktopIndex};
 
 /// Side length of every rasterized icon, in pixels. All icons are
@@ -769,6 +769,7 @@ impl DiskCache {
     /// (truncated write or a stale format/`ICON_SIZE`).
     fn load(file: &std::path::Path) -> Option<Vec<u8>> {
         let pixels = std::fs::read(file).ok()?;
+        still_used(file);
         (pixels.len() == ICON_CHAIN_BYTES).then_some(pixels)
     }
 
@@ -1034,6 +1035,64 @@ fn mtime_secs(path: &str) -> u64 {
 }
 
 /// `$XDG_CACHE_HOME`, falling back to `~/.cache`.
+/// A kept file was read: its date says so (at most once a day), which is
+/// what [`prune_caches`] goes by.
+pub(crate) fn still_used(file: &std::path::Path) {
+    let day = std::time::Duration::from_secs(24 * 3600);
+    let old = std::fs::metadata(file).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e > day));
+    if old {
+        if let Ok(f) = std::fs::File::options().write(true).open(file) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+    }
+}
+
+/// How long a kept file may go unread before it is let go, and how long an
+/// icon cache of ANOTHER tuning (an older build's) may stand untouched.
+const KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(45 * 24 * 3600);
+const OLD_TUNING_FOR: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// THE CACHE IS KEPT SMALL. Nothing ever left `~/.cache/waverunner`: every
+/// change of the icons' tuning opened a new `icons-…` directory beside the
+/// old ones (fourteen dead ones, half a gigabyte, on Max's computer by
+/// 2026-10-13), and every icon whose store path changed left its 350 KB
+/// tile behind. Once, a while after the start and out of the way: the icon
+/// caches of other tunings that nothing has written to in a week go whole;
+/// in this build's own, and among the kept previews and posters, the files
+/// nothing has read in 45 days go.
+pub(crate) fn prune_caches() {
+    let spawned = std::thread::Builder::new().name("cache-prune".into()).spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(40));
+        let base = cache_base().join("waverunner");
+        let mine = DiskCache::new().dir;
+        let unused = |p: &std::path::Path, more_than: std::time::Duration| {
+            std::fs::metadata(p).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e > more_than))
+        };
+        let (mut dirs, mut files) = (0u32, 0u32);
+        for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("icons-") && path.is_dir() && path != mine && unused(&path, OLD_TUNING_FOR) {
+                dirs += u32::from(std::fs::remove_dir_all(&path).is_ok());
+            }
+        }
+        for dir in [mine, base.join("previews"), base.join("posters")] {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_file() && unused(&path, KEPT_FOR) {
+                    files += u32::from(std::fs::remove_file(&path).is_ok());
+                }
+            }
+        }
+        if dirs + files > 0 {
+            info!("cache: let go of {dirs} old icon cache(s) and {files} file(s) nothing had read in 45 days");
+        }
+    });
+    if let Err(e) = spawned {
+        warn!("cache: no thread to prune on: {e}");
+    }
+}
+
 pub(crate) fn cache_base() -> PathBuf {
     std::env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)

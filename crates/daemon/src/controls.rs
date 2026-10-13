@@ -1117,6 +1117,7 @@ fn poster(path: &str) -> Option<String> {
     let file = dir.join(format!("{h:016x}.png"));
     let name = file.to_string_lossy().into_owned();
     if file.is_file() {
+        crate::apps::still_used(&file);
         return Some(name);
     }
     std::fs::create_dir_all(&dir).ok()?;

@@ -271,7 +271,9 @@ fn kept_path(path: &str) -> Option<PathBuf> {
 
 /// The kept preview of a picture, if it is there and whole.
 fn kept_preview(path: &str) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(kept_path(path)?).ok()?;
+    let file = kept_path(path)?;
+    let bytes = std::fs::read(&file).ok()?;
+    crate::apps::still_used(&file);
     // (The same length a freshly made one has: anything else is a stale or
     // cut-short file.)
     let whole = crate::apps::with_mips(vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize]).len();
