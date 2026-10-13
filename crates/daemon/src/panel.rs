@@ -558,6 +558,47 @@ struct OpenBox {
     want: f32,
     /// The pill's drawn rect when clicked (field-relative).
     from: Rect,
+    /// A box of its own (solo) comes and goes as a WINDOW does: `pop` is
+    /// how grown it is (0..1, sprung — it may pass 1 a little), `vel` that
+    /// spring's speed, `shown` how far its fade has run (0..1, linear).
+    pop: f32,
+    vel: f32,
+    shown: f32,
+}
+
+/// THE COMPOSITOR'S OWN WINDOW MOTION, for a box that stands mid-screen
+/// like a window (Max, 2026-10-13: "las animaciones de las cajas son
+/// diferentes a las de hyprland. se ve raro. necesitamos que se vea
+/// nativo, unificado"). The numbers are Golem's `hyprland.lua`, and must
+/// follow it: a window pops in from 1 % of its size on the spring "easy"
+/// (`windowsIn`) while it fades in over 173 ms (`fadeIn`); it pops out
+/// straight in 149 ms (`windowsOut`) while it fades over 146 ms
+/// (`fadeOut`); both fades on the curve "almostLinear".
+const WINDOW_POP_FROM: f32 = 0.01;
+const WINDOW_SPRING: (f32, f32) = (322.8714, 33.6891); // stiffness, dampening (mass 1)
+const WINDOW_FADE_IN: f32 = 0.173;
+const WINDOW_FADE_OUT: f32 = 0.146;
+const WINDOW_POP_OUT: f32 = 0.149;
+const ALMOST_LINEAR: [f32; 4] = [0.5, 0.5, 0.75, 1.0];
+
+/// A CSS-style cubic bezier (from 0,0 to 1,1 through the two points of
+/// `c`): its height where it is `x` along.
+fn bezier(c: [f32; 4], x: f32) -> f32 {
+    let at = |a: f32, b: f32, t: f32| {
+        let u = 1.0 - t;
+        3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
+    };
+    let x = x.clamp(0.0, 1.0);
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..20 {
+        let mid = (lo + hi) / 2.0;
+        if at(c[0], c[2], mid) < x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    at(c[1], c[3], (lo + hi) / 2.0)
 }
 
 /// What the panel draws this frame, in surface coordinates. `content` puts
@@ -661,7 +702,7 @@ impl Panel {
         let Some(i) = self.pills.iter().position(|p| p.label == label) else {
             return false;
         };
-        self.open = Some(OpenBox { pill: i, k: 0.0, want: 1.0, from });
+        self.open = Some(OpenBox { pill: i, k: 1.0, want: 1.0, from, pop: 0.0, vel: 0.0, shown: 0.0 });
         self.focus = None;
         self.control = None;
         self.control_ask = crate::controls::is_control(self.pills[i].label);
@@ -780,9 +821,12 @@ impl Panel {
         self.open.as_ref().is_some_and(|o| self.pills[o.pill].label == label)
     }
 
-    /// How open the box is, 0..1.
-    pub(crate) fn solo_k(&self) -> f32 {
-        self.open.as_ref().map_or(0.0, |o| o.k)
+    /// The solo box this frame, as a window would be: how big (of its
+    /// size at rest, about its centre) and how present (0..1).
+    pub(crate) fn solo_pose(&self) -> (f32, f32) {
+        self.open.as_ref().map_or((1.0, 0.0), |o| {
+            (WINDOW_POP_FROM + (1.0 - WINDOW_POP_FROM) * o.pop, bezier(ALMOST_LINEAR, o.shown))
+        })
     }
 
     /// How tall the open setting's content is, from the field's top.
@@ -1100,6 +1144,9 @@ impl Panel {
             k: 0.0,
             want: 1.0,
             from: Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h),
+            pop: 0.0,
+            vel: 0.0,
+            shown: 0.0,
         });
         self.hot = None;
         if self.modules {
@@ -1748,8 +1795,32 @@ impl Panel {
                 let (w, h) = (p.w[d] * k, p.h[d] * k);
                 open.from = Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h);
             }
-            open.k = approach(open.k, open.want, OPEN_RATE, dt);
-            if open.want == 0.0 && open.k < 0.01 {
+            if self.solo {
+                // A box of its own: the content stands as at rest; the whole
+                // box comes and goes the window's way (`solo_pose`).
+                open.k = 1.0;
+                if open.want > 0.0 {
+                    open.shown = (open.shown + dt / WINDOW_FADE_IN).min(1.0);
+                    if crate::animation::reduce_motion() {
+                        (open.pop, open.vel) = (1.0, 0.0);
+                    }
+                    let mut left = dt.clamp(0.0, 0.1);
+                    while left > 0.0 {
+                        let h = left.min(1.0 / 240.0);
+                        open.vel += (-WINDOW_SPRING.0 * (open.pop - 1.0) - WINDOW_SPRING.1 * open.vel) * h;
+                        open.pop += open.vel * h;
+                        left -= h;
+                    }
+                } else {
+                    open.vel = 0.0;
+                    open.pop = (open.pop - dt / WINDOW_POP_OUT).max(0.0);
+                    open.shown = (open.shown - dt / WINDOW_FADE_OUT).max(0.0);
+                }
+            } else {
+                open.k = approach(open.k, open.want, OPEN_RATE, dt);
+            }
+            let gone = if self.solo { open.shown <= 0.0 } else { open.k < 0.01 };
+            if open.want == 0.0 && gone {
                 self.open = None;
             }
         }
@@ -2911,9 +2982,10 @@ impl App {
         }
     }
 
-    /// One frame of the quick box: its rect, how present it is (0..1) and
-    /// what it draws. `None`: no box.
-    pub(crate) fn quick_frame(&mut self, dt: f32, paint: PanelPaint) -> Option<(Rect, f32, PanelDraw)> {
+    /// One frame of the quick box: its rect at rest, how present it is
+    /// (0..1), how big of that rect it is drawn (about its centre) and what
+    /// it draws. `None`: no box.
+    pub(crate) fn quick_frame(&mut self, dt: f32, paint: PanelPaint) -> Option<(Rect, f32, f32, PanelDraw)> {
         if !self.quick.solo_up() {
             return None;
         }
@@ -2930,8 +3002,8 @@ impl App {
         }
         let pointer = self.pointer_pos;
         self.quick.step(dt, pointer);
-        let k = self.quick.solo_k();
-        // Folded all the way: the quick controls are over.
+        let (scale, a) = self.quick.solo_pose();
+        // Gone: the quick controls are over.
         if !self.quick.solo_up() {
             if let Some(label) = self.fast.boxed.take() {
                 self.quick_left(label);
@@ -2942,14 +3014,16 @@ impl App {
             return None;
         }
         let draw = self.quick.draw(paint);
-        Some((rect, smoothstep((k / 0.6).clamp(0.0, 1.0)), draw))
+        Some((rect, a, scale, draw))
     }
 
     /// A key while the quick box is up: the arrows and Tab walk its
-    /// choices, Enter or Space picks, Escape folds it.
+    /// choices, Enter or Space picks, Escape closes it — the box and the
+    /// quick controls under it, at once (Max, 2026-10-13: "esc debería
+    /// cerrar todo").
     pub(crate) fn quick_key(&mut self, keysym: Keysym) {
         if !self.panel_keys(keysym, true) && keysym == Keysym::Escape {
-            self.quick.close_solo();
+            self.close_fast_launch();
         }
         self.schedule_frame();
     }
@@ -2988,8 +3062,7 @@ impl App {
     pub(crate) fn quick_click(&mut self, pos: (f32, f32)) {
         let rect = self.quick_rect();
         if !rect.contains(pos) {
-            self.quick.close_solo();
-            self.schedule_frame();
+            self.close_fast_launch();
             return;
         }
         let Some(label) = self.quick.open.as_ref().map(|o| self.quick.pills[o.pill].label) else {

@@ -596,6 +596,10 @@ impl App {
         self.fast.open = false;
         if let Some(label) = self.fast.boxed.take() {
             self.quick_left(label);
+            // The box goes as a window does, and nothing is left under it:
+            // the card it came from must not show again on the way out (it
+            // did, for half a second — Max, 2026-10-13).
+            self.fast.card_a = 0.0;
         }
         self.quick.close_solo();
         if self.interactive && self.ui.target() != crate::state::Target::Open {
