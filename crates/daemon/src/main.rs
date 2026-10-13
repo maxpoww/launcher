@@ -5189,80 +5189,29 @@ impl App {
                     self.dock_names_warm = false;
                 }
             }
-            // Dock hover-switch: once a box has been opened *from the dock*
-            // (by an explicit click), gliding the pointer onto a different
-            // dock folder or directory switches straight to it — no click
-            // needed, whether the box floats over the dock or opened into
-            // the grid. Armed only for dock-origin boxes, so it ends the
-            // moment the box is dismissed (click-out / Escape) and never
-            // fires for a box opened from a grid folder tile.
-            if self.stack_open() && self.box_from_dock {
-                if let Some(Hit::DockIcon(slot)) = hover {
-                    self.hover_switch_dock_box(slot);
+            // Hover-switch (Max, 2026-10-13: "si hay un grupo abierto y yo
+            // hover en otro, se abre automáticamente"): with a box open,
+            // gliding the pointer onto ANOTHER group or pinned folder — on
+            // the dock or in the grid — opens that one in its place, no
+            // click needed. Anything else under the pointer leaves the open
+            // box alone: it stays until it is closed.
+            if self.stack_open() && self.gesture.dragging.is_none() && self.box_drag.is_none() {
+                if let Some(hit) = hover {
+                    let other = match self.hit_box_target(hit) {
+                        Some(BoxTarget::Group(g)) => self.open_box_group() != Some(g),
+                        Some(BoxTarget::Dir(id)) => {
+                            self.dir_stack.as_ref().map(|ds| ds.id.as_str()) != Some(id.as_str())
+                        }
+                        None => false,
+                    };
+                    if other {
+                        self.activate_hit(hit);
+                    }
                 }
             }
             self.schedule_frame();
         }
         self.apply_cursor();
-    }
-
-    /// React to the pointer gliding onto dock slot `slot` while a dock box
-    /// is open: hovering a *different* folder/directory switches straight to
-    /// it; hovering the already-open box's own icon keeps it open; hovering
-    /// any other icon (a plain app) closes the box so that icon is clickable.
-    fn hover_switch_dock_box(&mut self, slot: usize) {
-        let Some(&idx) = self.dock_order.get(slot) else {
-            return;
-        };
-        match self.kinds.get(idx) {
-            Some(apps::EntryKind::Group) => {
-                // The Recycle Bin switches to its trash view (a dir stack), not
-                // a group folder.
-                if self
-                    .entries
-                    .get(idx)
-                    .is_some_and(|e| groups::is_trash(&e.id))
-                {
-                    let already = self.dir_stack.as_ref().is_some_and(|ds| ds.is_trash);
-                    if !already {
-                        self.open_trash_stack();
-                    }
-                    return;
-                }
-                let g = self
-                    .entries
-                    .get(idx)
-                    .and_then(|e| e.id.strip_prefix("group:"))
-                    .and_then(|gid| self.groups.index_by_id(gid));
-                match g {
-                    Some(g) if self.open_box_group() != Some(g) => self.open_dock_folder(g),
-                    Some(_) => {} // the open box's own icon: keep it open
-                    None => self.close_group(),
-                }
-            }
-            Some(apps::EntryKind::File) => {
-                let dir = self.entries.get(idx).and_then(|e| {
-                    let path = e.description.clone()?;
-                    std::fs::metadata(&path)
-                        .ok()?
-                        .is_dir()
-                        .then(|| (e.id.clone(), path))
-                });
-                match dir {
-                    Some((id, path)) => {
-                        let same =
-                            self.dir_stack.as_ref().map(|d| d.id.as_str()) == Some(id.as_str());
-                        if !same {
-                            self.open_dir_stack(id, path);
-                        }
-                    }
-                    // A plain (non-directory) pinned file: close so it's clickable.
-                    None => self.close_group(),
-                }
-            }
-            // Any other dock icon (a plain app): close the box.
-            _ => self.close_group(),
-        }
     }
 
     /// Reflect what's under the pointer in its cursor: the pointing hand
@@ -6397,7 +6346,8 @@ impl App {
                     // The pointer may be back on the dock without a fresh
                     // Enter to have cancelled us (stale focus) — don't hide
                     // out from under it.
-                    if !matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))) {
+                    // Nor from under a box left open over it.
+                    if !app.stack_open() && !matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))) {
                         // Fully hide, or just fall back to the parked dock
                         // when the zone is free (intellihide).
                         app.dismiss();
@@ -7301,7 +7251,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 app.update_hover();
                 if app.ui.target() != Target::Hidden {
                     app.schedule_frame(); // relax any magnification
-                    if app.config.input.autohide {
+                    // An open box stays until it is closed (Max, 2026-10-13:
+                    // "queda abierto hasta que yo lo cierre"): the pointer
+                    // going away takes neither it nor the dock under it.
+                    if app.config.input.autohide && !app.stack_open() {
                         if app.ui.target() == Target::Open {
                             // Full popup is up and the pointer left — the user
                             // clicked or moved to another window. Dismiss now;
