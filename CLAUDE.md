@@ -741,7 +741,8 @@ The big daemon files are cohesive but long — go straight to the function:
   by value), followed with inotify per window (60 ms coalesce). Click = select (Ctrl adds), double
   click = open (a folder here, a file through `xdg-open`), mouse side buttons / Backspace /
   Alt+←→↑ = back, forward, up (coming out of a folder leaves it selected — `Win::reveal`), arrows
-  walk, Enter opens, typing searches (below), Ctrl+A/H/R/N/W, F5. The ground is the
+  walk, Enter opens, with ALT held W A S D walk as the arrows and E / Q go forward / back (the left
+  hand's keys), typing searches (below), Ctrl+A/H/R/N/W, F5. The ground is the
   dock's colour made solid (colours are LINEAR here). THE MENU (2026-10-13, second cut) is the
   desktop's `Menu` with this window's rows (`menu_rows`, `Menu::with_rows`), drawn IN the window
   (names under it are left out — `covered`; it cannot hang past the window's edge): on a thing

@@ -3801,6 +3801,22 @@ impl App {
             }
             return;
         }
+        // THE LEFT HAND (Max, 2026-10-13): with Alt held, W A S D walk as
+        // the arrows do, E goes forward and Q back — the mouse hand stays
+        // on the mouse. (They are keys then, not letters: nothing is typed.)
+        let (keysym, alt, utf8) = if alt {
+            match keysym {
+                Keysym::w | Keysym::W => (Keysym::Up, false, None),
+                Keysym::a | Keysym::A => (Keysym::Left, false, None),
+                Keysym::s | Keysym::S => (Keysym::Down, false, None),
+                Keysym::d | Keysym::D => (Keysym::Right, false, None),
+                Keysym::e | Keysym::E => return self.filer_forward(id),
+                Keysym::q | Keysym::Q => return self.filer_back(id),
+                other => (other, true, utf8),
+            }
+        } else {
+            (keysym, alt, utf8)
+        };
         // A search that is open takes what is typed; the keys that walk
         // and open go on to the things found.
         if let Some(find) = win.find.clone() {
@@ -4052,6 +4068,12 @@ impl App {
                     "home" => Keysym::Home,
                     "end" => Keysym::End,
                     "f2" => Keysym::F2,
+                    "w" => Keysym::w,
+                    "a" => Keysym::a,
+                    "s" => Keysym::s,
+                    "d" => Keysym::d,
+                    "e" => Keysym::e,
+                    "q" => Keysym::q,
                     _ => return format!("no key {rest}"),
                 };
                 self.filer_key(id, key, None);
