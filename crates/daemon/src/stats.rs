@@ -581,6 +581,29 @@ impl App {
         }
     }
 
+    /// How long a page opened from elsewhere waits for the hand.
+    const ARRIVE_HOLD: Duration = Duration::from_secs(4);
+
+    /// Show the page of `kind` from somewhere else on the shell (the control
+    /// panel's "More…"): out and open, and held long enough for the hand to
+    /// arrive. `false`: this machine has no such page.
+    pub(crate) fn stats_show_page(&mut self, kind: PageKind) -> bool {
+        let Some(page) = self.stats_page_for(kind) else {
+            return false;
+        };
+        if !self.stats.reveal {
+            self.stats.reveal = true;
+            self.stats.last = None;
+            self.measure_stats();
+            self.schedule_stats_frame();
+        }
+        if !(self.stats.open && self.stats_page() == page) {
+            self.stats_open_page(page);
+        }
+        self.schedule_stats_collapse(Self::ARRIVE_HOLD);
+        true
+    }
+
     /// Open or close the panel. The page is left alone: the wheel and the debug
     /// verb are not buttons, so the panel comes back showing whatever was last
     /// chosen (page 1 until something is).

@@ -20,6 +20,7 @@ mod bt_files;
 mod clip_source;
 mod clipboard;
 mod content;
+mod controls;
 mod damage;
 mod deck;
 mod deck_thumbs;
@@ -214,6 +215,8 @@ fn main() -> anyhow::Result<()> {
     // into every app we launch (see `launch::WORKSPACE_TICKET`). Dropped
     // before any thread exists — the environment is not safe to change later.
     let had_workspace_ticket = launch::drop_workspace_ticket();
+    // The time zone chosen in the control panel is this process's own too.
+    controls::adopt_zone(display::GolemSettings::load().time_zone.as_deref());
 
     // Logs go to stderr AND a file of this session's: the daemon Hyprland
     // starts at login has a stderr nobody can read (not the journal — found
@@ -820,6 +823,7 @@ fn main() -> anyhow::Result<()> {
         control_panel: false,
         control_panel_opening: false,
         panel: panel::Panel::load(),
+        controls: None,
         panel_parked: panel::Panel::load_modules(),
         panel_swap_t: 1.0,
         panel_mix: 0.0,
@@ -1259,6 +1263,8 @@ fn main() -> anyhow::Result<()> {
     // which forgets it when it restarts, while the store still remembers
     // (`settings.rs`).
     app.reassert_floating_mode();
+    // The control panel's choices that live outside the compositor.
+    controls::reassert();
     app.gear_startup();
     // Each app's remembered window place rides its own rule (`window_memory`).
     app.reassert_place_rules();
@@ -1929,6 +1935,8 @@ pub struct App {
     control_panel_opening: bool,
     /// The control panel's field: its pills, layers and open setting.
     panel: panel::Panel,
+    /// The control panel's settings worker, started at the first read.
+    controls: Option<controls::ControlsHandle>,
     /// The field not on show: the card shows one field at a time — the
     /// settings or the MODULES — and `panel_switch` trades them.
     panel_parked: panel::Panel,

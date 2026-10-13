@@ -1601,6 +1601,17 @@ pub fn monitors_json() -> Option<serde_json::Value> {
     serde_json::from_str(&request("j/monitors").ok()?).ok()
 }
 
+/// One of the compositor's config values as text (`j/getoption`): its
+/// `str` for a string option, else its number.
+pub fn option_text(name: &str) -> Option<String> {
+    let json = reply_json(&format!("j/getoption {name}"))?;
+    json["str"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| json["float"].as_f64().map(|v| v.to_string()))
+        .or_else(|| json["int"].as_i64().map(|v| v.to_string()))
+}
+
 /// Where the pointer is, in the compositor's global logical coordinates.
 pub fn cursor_pos() -> Option<(f64, f64)> {
     let json = reply_json("j/cursorpos")?;

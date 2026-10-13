@@ -25,22 +25,38 @@
 //! that is a lock-free read. Tests never call `init`, so they see English.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use tracing::{info, warn};
 
-static TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+/// The table in use. Swapped whole when the language changes; a replaced
+/// table is leaked on purpose, because `tr` hands out `&'static str`s into
+/// it (a language change is a handful of kilobytes, a handful of times).
+static TABLE: AtomicPtr<HashMap<String, String>> = AtomicPtr::new(std::ptr::null_mut());
 
-/// Load the translation table for the session locale. Call once, before the
-/// first draw and before threads that call [`tr`] exist.
+/// The catalogues that ship inside the binary: a language works on every
+/// machine the shell runs on, with nothing to install beside it. A file in
+/// the data directory with the same tag wins over these (a translator's
+/// working copy).
+const EMBEDDED: [(&str, &str); 1] = [("es", include_str!("../assets/i18n/es.json"))];
+
+fn table() -> Option<&'static HashMap<String, String>> {
+    // SAFETY: the pointer is null or a leaked `Box`, never freed.
+    unsafe { TABLE.load(Ordering::Acquire).as_ref() }
+}
+
+/// Load the translation table for the session's language. Called once at
+/// start, and again whenever the owner picks another language.
 pub fn init() {
-    let _ = TABLE.set(load_table());
+    let map = load_table();
+    let ptr = if map.is_empty() { std::ptr::null_mut() } else { Box::into_raw(Box::new(map)) };
+    TABLE.store(ptr, Ordering::Release);
 }
 
 /// The display form of an English source string: its translation when the
 /// loaded table has one, the literal itself otherwise.
 pub fn tr(en: &'static str) -> &'static str {
-    match TABLE.get().and_then(|t| t.get(en)) {
+    match table().and_then(|t| t.get(en)) {
         Some(s) => s.as_str(),
         None => en,
     }
@@ -52,7 +68,7 @@ pub fn tr(en: &'static str) -> &'static str {
 /// is the key exactly as with [`tr`]; a translation (being `'static`)
 /// happily outlives any input lifetime.
 pub fn tr_dyn(en: &str) -> &str {
-    match TABLE.get().and_then(|t| t.get(en)) {
+    match table().and_then(|t| t.get(en)) {
         Some(s) => s.as_str(),
         None => en,
     }
@@ -65,8 +81,10 @@ fn load_table() -> HashMap<String, String> {
             return read_file(std::path::Path::new(&path)).unwrap_or_default();
         }
     }
+    // The language chosen in the control panel, then the session's.
+    let chosen = crate::display::GolemSettings::load().language;
     let Some(tags) = locale_tags(
-        std::env::var("LC_ALL").ok(),
+        chosen.or_else(|| std::env::var("LC_ALL").ok()),
         std::env::var("LC_MESSAGES").ok(),
         std::env::var("LANG").ok(),
     ) else {
@@ -78,8 +96,54 @@ fn load_table() -> HashMap<String, String> {
             info!("i18n: loaded {} strings from {}", map.len(), path.display());
             return map;
         }
+        if let Some((_, text)) = EMBEDDED.iter().find(|(t, _)| *t == tag) {
+            match serde_json::from_str::<HashMap<String, String>>(text) {
+                Ok(map) => {
+                    info!("i18n: {} strings of the built-in {tag} catalogue", map.len());
+                    return map;
+                }
+                Err(e) => warn!("i18n: the built-in {tag} catalogue does not parse: {e}"),
+            }
+        }
     }
     HashMap::new()
+}
+
+/// The languages there is a catalogue for (their tags), besides English.
+pub fn catalogues() -> Vec<String> {
+    let mut tags: Vec<String> = EMBEDDED.iter().map(|(t, _)| (*t).to_owned()).collect();
+    let dir = crate::persist::data_path("i18n");
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(tag) = name.strip_suffix(".json") {
+            // `es_BO.json` is a country's wording of `es`, not another language.
+            if !tag.contains('_') && !tags.iter().any(|t| t == tag) {
+                tags.push(tag.to_owned());
+            }
+        }
+    }
+    tags.sort();
+    tags
+}
+
+/// A language's name as its speakers write it.
+pub fn language_name(tag: &str) -> String {
+    match tag {
+        "en" => "English",
+        "es" => "Español",
+        "pt" => "Português",
+        "fr" => "Français",
+        "de" => "Deutsch",
+        "it" => "Italiano",
+        "nl" => "Nederlands",
+        "pl" => "Polski",
+        "tr" => "Türkçe",
+        "ru" => "Русский",
+        "ja" => "日本語",
+        "zh" => "中文",
+        other => other,
+    }
+    .to_owned()
 }
 
 fn read_file(path: &std::path::Path) -> Option<HashMap<String, String>> {

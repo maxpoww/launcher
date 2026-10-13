@@ -42,18 +42,29 @@ pub fn drop_workspace_ticket() -> bool {
     had
 }
 
-/// The environment a launched app gets: this process's, less the ticket.
+/// The environment a launched app gets: this process's, less the ticket,
+/// with the language and the time zone chosen in the control panel in place
+/// of the session's (an app started now follows a choice made a moment ago;
+/// the rest of the session follows at the next login).
 /// Built in the parent — nothing may allocate between `fork` and `exec`.
 fn launch_env() -> Vec<CString> {
-    std::env::vars_os()
-        .filter(|(k, _)| k != WORKSPACE_TICKET)
+    let chosen = crate::controls::session_vars(&crate::display::GolemSettings::load());
+    env_with(std::env::vars_os(), &chosen)
+}
+
+/// `vars` less the ticket, with `chosen` put in place of their namesakes.
+fn env_with(vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>, chosen: &[(&str, String)]) -> Vec<CString> {
+    let mut env: Vec<CString> = vars
+        .filter(|(k, _)| k != WORKSPACE_TICKET && !chosen.iter().any(|(c, _)| k.to_str() == Some(*c)))
         .filter_map(|(k, v)| {
             let mut kv = k.as_bytes().to_vec();
             kv.push(b'=');
             kv.extend_from_slice(v.as_bytes());
             CString::new(kv).ok()
         })
-        .collect()
+        .collect();
+    env.extend(chosen.iter().filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok()));
+    env
 }
 
 /// Launch `exec` (a shell command line, field codes already stripped)
@@ -266,6 +277,16 @@ mod tests {
     fn shell_quote_wraps_and_escapes() {
         assert_eq!(shell_quote("nvim"), "'nvim'");
         assert_eq!(shell_quote("echo 'hi'"), r"'echo '\''hi'\'''");
+    }
+
+    #[test]
+    fn a_launch_carries_the_chosen_language_and_zone() {
+        let vars = [("LANG", "en_US.UTF-8"), ("HOME", "/home/x"), (WORKSPACE_TICKET, "t")]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()));
+        let env = env_with(vars, &[("LANG", "es_BO.UTF-8".to_owned()), ("TZ", "America/La_Paz".to_owned())]);
+        let text: Vec<&str> = env.iter().filter_map(|c| c.to_str().ok()).collect();
+        assert_eq!(text, ["HOME=/home/x", "LANG=es_BO.UTF-8", "TZ=America/La_Paz"]);
     }
 
     #[test]

@@ -2228,6 +2228,11 @@ impl App {
     }
 
     /// Toggle notification muting (from a click on the mute pill).
+    /// Whether do not disturb is on.
+    pub(crate) fn notif_muted(&self) -> bool {
+        self.notif.muted
+    }
+
     pub(crate) fn toggle_notif_mute(&mut self) {
         self.notif.muted = !self.notif.muted;
         self.save_notif_prefs();

@@ -52,6 +52,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::content::{self, Label, Layout, Rect, RectInst, ShadowInst};
+use crate::controls::{ControlCommand, ControlEvent, ControlView, UiFacts};
+use crate::gear::PageKind;
 use crate::display::DisplayView;
 use crate::options::{FONT_PX, LINE_PX, PILL_PAD_X, TEXT_FONT};
 use crate::state::Target;
@@ -93,6 +95,12 @@ const SETTINGS: [Item; 24] = [
     ("Default apps", 2, "applications browser open with"),
     ("Privacy", 2, "security permissions camera location"),
 ];
+
+/// The setting whose name, without spaces or capitals, is `name`.
+pub(crate) fn setting_named(name: &str) -> Option<&'static str> {
+    let flat = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    SETTINGS.iter().map(|s| s.0).find(|label| flat(label) == flat(name))
+}
 
 /// How long the settings and the modules take to trade places.
 const PANEL_SWAP_SECS: f32 = 0.30;
@@ -466,6 +474,9 @@ pub(crate) enum PanelAction {
     /// Keep, or give up, the resolution being tried.
     Keep,
     Revert,
+    /// A choice of one of the other settings ([`crate::controls`]): the
+    /// group it is in and its place there.
+    Pick { group: u8, index: u8 },
 }
 
 /// One choice of an open setting: a floating pill, lit when it is the one
@@ -570,6 +581,10 @@ pub(crate) struct Panel {
     keep_left: Option<f32>,
     /// What the last click asked for, until `App` takes it.
     action: Option<PanelAction>,
+    /// The open setting as last read, when it is one of
+    /// [`crate::controls`]'; `control_ask`: it wants reading.
+    control: Option<ControlView>,
+    control_ask: bool,
 }
 
 impl Panel {
@@ -872,6 +887,10 @@ impl Panel {
         if is_display_setting(self.pills[i].label) {
             self.display_at = Some(Instant::now());
         }
+        if !self.modules && crate::controls::is_control(self.pills[i].label) {
+            self.control = None;
+            self.control_ask = true;
+        }
         // The swap happens now, behind the setting growing over the field.
         self.record_use(i, now_secs());
     }
@@ -901,6 +920,57 @@ impl Panel {
         if let Some(view) = &mut self.display {
             view.scale = scale;
         }
+    }
+
+    /// The language changed: the pills are measured and laid out again.
+    pub(crate) fn relabel(&mut self) {
+        self.key = (0.0, 0.0, 0.0);
+    }
+
+    /// The open setting, when it is one of [`crate::controls`]'.
+    pub(crate) fn open_control_label(&self) -> Option<&'static str> {
+        let label = self.pills[self.open.as_ref()?.pill].label;
+        (!self.modules && crate::controls::is_control(label)).then_some(label)
+    }
+
+    /// The open setting as last read.
+    pub(crate) fn control_view(&self) -> Option<&ControlView> {
+        self.control.as_ref()
+    }
+
+    /// The setting that wants reading, once.
+    pub(crate) fn control_due(&mut self) -> Option<&'static str> {
+        if !std::mem::take(&mut self.control_ask) {
+            return None;
+        }
+        self.open_control_label()
+    }
+
+    /// The open setting as just read. A view of a setting that is no
+    /// longer the open one is dropped.
+    pub(crate) fn set_control(&mut self, view: ControlView) -> bool {
+        if self.open_control_label() != Some(view.label) {
+            return false;
+        }
+        self.control = Some(view);
+        true
+    }
+
+    /// The choice at (`group`, `index`) of the open setting: its setting,
+    /// its group's key and its value. It is lit from now, before the
+    /// machine has been read back (the read confirms or corrects it).
+    pub(crate) fn control_pick(&mut self, group: u8, index: u8) -> Option<(&'static str, &'static str, String)> {
+        let label = self.open_control_label()?;
+        let view = self.control.as_mut().filter(|v| v.label == label)?;
+        let g = view.groups.get_mut(group as usize)?;
+        let value = g.choices.get(index as usize)?.value.clone();
+        // One of several: the pick is the lit one. A lone pill is a button.
+        if g.choices.len() > 1 {
+            for (i, c) in g.choices.iter_mut().enumerate() {
+                c.on = i == index as usize;
+            }
+        }
+        Some((label, g.key, value))
     }
 
     /// What the last click asked for, once.
@@ -944,12 +1014,34 @@ impl Panel {
     /// The content of the open setting `label`, if it is a real one: the
     /// screen's choices for Scale and Resolution. `None`: a placeholder.
     fn open_content(&self, label: &str) -> Option<OpenContent> {
-        if !is_display_setting(label) {
-            return None;
-        }
         let s = self.scale;
         let top = CONTENT_TOP * s;
         let mut out = OpenContent { subtitle: String::new(), captions: Vec::new(), chips: Vec::new(), foot_y: top };
+        if !self.modules && crate::controls::is_control(label) {
+            // Not read yet: the bare card, for the moment the read takes.
+            let Some(view) = self.control.as_ref().filter(|v| v.label == label) else {
+                return Some(out);
+            };
+            out.subtitle = view.subtitle.clone();
+            let mut y = top;
+            for (gi, g) in view.groups.iter().enumerate() {
+                if let Some(c) = &g.caption {
+                    y = self.caption(&mut out, y, c.clone());
+                }
+                let chips = g
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .map(|(ci, c)| (c.text.clone(), c.on, PanelAction::Pick { group: gi as u8, index: ci as u8 }))
+                    .collect();
+                y = self.flow(&mut out, y, g.width, chips);
+            }
+            out.foot_y = (y - (GROUP_GAP - 12.0) * s).max(top);
+            return Some(out);
+        }
+        if !is_display_setting(label) {
+            return None;
+        }
         let Some(v) = &self.display else {
             out.subtitle = "No screen to set.".to_owned();
             return Some(out);
@@ -2196,6 +2288,10 @@ impl App {
             let view = self.display_view();
             self.panel.set_display(view);
         }
+        if let Some(label) = self.panel.control_due() {
+            let ui = self.ui_facts();
+            self.controls_send(ControlCommand::Read(label, ui));
+        }
         self.panel.keep_left = self.display_keep_left();
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
@@ -2268,10 +2364,118 @@ impl App {
                 Some(PanelAction::Mode { w, h, hz }) => self.set_display_mode(w, h, hz),
                 Some(PanelAction::Keep) => self.keep_display(),
                 Some(PanelAction::Revert) => self.revert_display(),
+                Some(PanelAction::Pick { group, index }) => self.control_pick(group, index),
                 None => {}
             }
             self.schedule_frame();
         }
+    }
+
+    /// Hand the settings' worker a command, starting it at the first one.
+    fn controls_send(&mut self, cmd: ControlCommand) {
+        if self.controls.is_none() {
+            let (tx, rx) = calloop::channel::channel::<ControlEvent>();
+            let _ = self.loop_handle.insert_source(rx, |ev, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(e) = ev {
+                    app.on_control_event(e);
+                }
+            });
+            self.controls = Some(crate::controls::spawn(tx));
+        }
+        if let Some(h) = &self.controls {
+            h.send(cmd);
+        }
+    }
+
+    /// What only this thread knows about the settings.
+    fn ui_facts(&self) -> UiFacts {
+        let stale = self.brain.as_ref().is_some_and(|c| c.deploy.stale_generation);
+        UiFacts {
+            dnd: self.notif_muted(),
+            night_k: self.screen.temperature_k.unwrap_or(crate::screen::NEUTRAL_K),
+            updates: crate::i18n::tr(if stale { "Restart to finish updating" } else { "Up to date" }).to_owned(),
+            has_bt: self.stats_page_for(PageKind::Bt).is_some(),
+            has_battery: self.stats_page_for(PageKind::Battery).is_some(),
+        }
+    }
+
+    fn on_control_event(&mut self, ev: ControlEvent) {
+        match ev {
+            ControlEvent::View(view) => {
+                if self.settings_panel_mut().set_control(view) {
+                    self.schedule_frame();
+                }
+            }
+            ControlEvent::Zone(zone) => {
+                crate::controls::adopt_zone(Some(&zone));
+                self.schedule_frame();
+                self.draw_options();
+            }
+            ControlEvent::Language => {
+                crate::i18n::init();
+                info!("control panel: the shell speaks another language from now");
+                self.panel.relabel();
+                self.panel_parked.relabel();
+                self.schedule_frame();
+                self.draw_options();
+            }
+        }
+    }
+
+    /// [`Self::control_pick`] for the `display pick` verb: says what is
+    /// there when the place is empty.
+    pub(crate) fn control_pick_at(&mut self, group: u8, index: u8) {
+        if let Some(view) = self.panel.control_view() {
+            let shape: Vec<String> =
+                view.groups.iter().map(|g| format!("{}×{}", g.key, g.choices.len())).collect();
+            info!("control panel: {} · {:?} · groups {shape:?}", view.label, view.subtitle);
+        }
+        self.control_pick(group, index);
+        self.schedule_frame();
+    }
+
+    /// A choice of an open setting was clicked: the ones that are this
+    /// thread's to make are made here, the rest go to the worker; either
+    /// way the setting is read again.
+    fn control_pick(&mut self, group: u8, index: u8) {
+        let Some((label, key, value)) = self.panel.control_pick(group, index) else {
+            return;
+        };
+        info!("control panel: {label}: {key} = {value}");
+        if !crate::controls::ui_key(key) {
+            let ui = self.ui_facts();
+            self.controls_send(ControlCommand::Set { label, key, value, ui });
+            return;
+        }
+        match key {
+            "night" => {
+                if let Ok(k) = value.parse::<u32>() {
+                    self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
+                }
+            }
+            "dnd" => {
+                if self.notif_muted() != (value == "on") {
+                    self.toggle_notif_mute();
+                }
+            }
+            "open" => {
+                let kind = match value.as_str() {
+                    "net" => PageKind::Net,
+                    "bt" => PageKind::Bt,
+                    "bat" => PageKind::Battery,
+                    _ => PageKind::Gear,
+                };
+                // The card folds away and the gear box takes over.
+                self.handle_command(Command::Collapse);
+                if !self.stats_show_page(kind) {
+                    info!("control panel: this machine has no {value} page");
+                }
+                return;
+            }
+            _ => {}
+        }
+        let ui = self.ui_facts();
+        self.controls_send(ControlCommand::Read(label, ui));
     }
 
     /// Open the control panel on the setting `label`, from wherever the
@@ -2661,9 +2865,9 @@ mod tests {
         let mut p = panel();
         p.field = Rect::new(0.0, 0.0, 960.0, 560.0);
         p.step(0.0, None);
-        p.open_named("Wi-Fi");
+        p.open_named("Accent colour");
         assert!(!p.display_due());
-        assert!(p.open_content("Wi-Fi").is_none());
+        assert!(p.open_content("Accent colour").is_none());
         let draw = p.draw(PanelPaint { ink: [1.0; 4], bright: false });
         assert!(!draw.rects.is_empty());
         // Its sample rows take a click without asking for anything.

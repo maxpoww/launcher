@@ -301,6 +301,14 @@ pub(crate) struct DisplayChoice {
     pub position: Option<String>,
 }
 
+/// The keyboard layout the owner chose, in xkb's names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct KeyboardChoice {
+    pub layout: String,
+    #[serde(default)]
+    pub variant: String,
+}
+
 /// `~/.config/golem/settings.json`: the owner's live settings. Only
 /// `displays` is this module's; the rest is carried through untouched.
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -311,6 +319,27 @@ pub(crate) struct GolemSettings {
     /// Light effects: the compositor's blur off (the gear's Graphics page).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub light_effects: bool,
+    /// The control panel's own choices ([`crate::controls`]); absent means
+    /// the system's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyboard: Option<KeyboardChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub natural_scroll: Option<bool>,
+    /// The pointer's speed, -1..1 (the compositor's `input.sensitivity`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_speed: Option<f64>,
+    /// The apps' look: dark, or light.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark: Option<bool>,
+    /// The session's locale (`es_BO.UTF-8`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// The session's time zone (`America/La_Paz`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    /// The picture on the desktop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallpaper: Option<String>,
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
 }
@@ -350,6 +379,10 @@ impl GolemSettings {
             out.push_str(LIGHT_EFFECTS_LUA);
             out.push('\n');
         }
+        for line in self.input_lua() {
+            out.push_str(&line);
+            out.push('\n');
+        }
         for (selector, choice) in &self.displays {
             match monitor_rule(selector, choice) {
                 Some(rule) => {
@@ -360,6 +393,63 @@ impl GolemSettings {
             }
         }
         out
+    }
+}
+
+impl GolemSettings {
+    /// Write the file after a change made from outside this module.
+    pub(crate) fn store(&self) {
+        self.save();
+    }
+
+    /// The input choices as the compositor's config calls: what is run now
+    /// and what the saved file holds. A choice that does not read as one is
+    /// left out.
+    fn input_lua(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(k) = &self.keyboard {
+            if crate::controls::valid_xkb(&k.layout) && crate::controls::valid_xkb(&k.variant) && !k.layout.is_empty() {
+                lines.push(format!(
+                    "hl.config({{ [\"input.kb_layout\"] = {}, [\"input.kb_variant\"] = {} }})",
+                    lua_quote(&k.layout),
+                    lua_quote(&k.variant)
+                ));
+            } else {
+                warn!("golem settings: leaving out the keyboard {k:?}");
+            }
+        }
+        if let Some(on) = self.natural_scroll {
+            lines.push(format!("hl.config({{ [\"input.touchpad.natural_scroll\"] = {on} }})"));
+        }
+        if let Some(speed) = self.pointer_speed.filter(|s| (-1.0..=1.0).contains(s)) {
+            lines.push(format!("hl.config({{ [\"input.sensitivity\"] = {speed} }})"));
+        }
+        lines
+    }
+
+    /// Save the file and put the input choices on the compositor now.
+    fn store_and_apply_input(&self) {
+        self.save();
+        for line in self.input_lua() {
+            if !hypr::eval_ok(&line) {
+                warn!("golem settings: the compositor refused {line}");
+            }
+        }
+    }
+
+    pub(crate) fn set_keyboard(&mut self, layout: &str, variant: &str) {
+        self.keyboard = Some(KeyboardChoice { layout: layout.to_owned(), variant: variant.to_owned() });
+        self.store_and_apply_input();
+    }
+
+    pub(crate) fn set_natural_scroll(&mut self, on: bool) {
+        self.natural_scroll = Some(on);
+        self.store_and_apply_input();
+    }
+
+    pub(crate) fn set_pointer_speed(&mut self, speed: f64) {
+        self.pointer_speed = Some(speed);
+        self.store_and_apply_input();
     }
 }
 
@@ -729,8 +819,22 @@ impl App {
             (Some("show"), Some(which)) => match which {
                 "scale" => self.show_control("Scale"),
                 "resolution" => self.show_control("Resolution"),
-                _ => warn!("display: no setting called {which:?}"),
+                // Any other setting of the panel, by its name without spaces
+                // or capitals ("keyboardlayout", "timezone").
+                other => match crate::panel::setting_named(other) {
+                    Some(label) => self.show_control(label),
+                    None => warn!("display: no setting called {which:?}"),
+                },
             },
+            // A click on a choice of the open setting, without a pointer:
+            // its group and its place there, counted from 0.
+            (Some("pick"), Some(group)) => {
+                let index = words.next().and_then(|w| w.parse::<u8>().ok()).unwrap_or(0);
+                match group.parse::<u8>() {
+                    Ok(group) => self.control_pick_at(group, index),
+                    Err(_) => warn!("display: pick <group> <index>"),
+                }
+            }
             (None, _) => {
                 for m in monitors() {
                     let stops = scale_stops(m.mode.w, m.mode.h, m.scale);
