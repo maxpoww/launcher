@@ -192,7 +192,48 @@ The big daemon files are cohesive but long — go straight to the function:
 - `install.rs` / `applier.rs` / `nix.rs` — declarative install flow + nixpkgs index.
 - `hypr.rs` — all compositor IPC (dispatch + JSON reads).
 - `panel.rs` — the control panel (the card as a field of settings pills); an open setting's
-  content is `open_content` (real: Scale, Resolution) or the placeholder rows.
+  content is `open_content`: Scale and Resolution from `display.rs`, every other setting from
+  `controls.rs` (only Accent colour is still the placeholder rows).
+- `controls.rs` — THE OTHER SETTINGS (2026-10-13): what each one shows open and what a click on
+  a choice does, in the idiom Scale and Resolution set — a subtitle, then groups of choice pills,
+  the one in use lit (`ControlView { subtitle, groups: [Group { caption, key, width, choices }] }`).
+  A worker thread (spawned at the first read, asleep otherwise) reads the machine (`read(label)`)
+  and carries out a pick (`apply(key, value)`); every program it asks (`wpctl`, `pw-dump`,
+  `nmcli`, `bluetoothctl`, `powerprofilesctl`, `gsettings`, `golem-brightness`, `xdg-mime`,
+  `awww`, `locale`) is ended at 4 s (`finish`). The panel asks for a read when a setting opens
+  (`control_due`) and after each pick; a pick is lit at once and the read confirms it. The keys
+  that are the UI thread's (`ui_key`: `night` → `set_screen_temperature`, `dnd` →
+  `toggle_notif_mute`, `open` → the gear box's page via `stats_show_page`) are run in
+  `App::control_pick`. WHERE A CHOICE LIVES: the compositor's (keyboard layout, natural
+  scrolling, pointer speed) follow the display settings' three steps — live `hl.config`,
+  `~/.config/golem/settings.json`, the generated `settings.lua` (`GolemSettings::input_lua`);
+  the SESSION's (language, time zone) are saved there too, handed to every app the dock starts
+  (`launch::launch_env`), written for the next login (`~/.config/uwsm/env`, a marked block) and
+  taken by the shell itself at once (`i18n::init`, `adopt_zone`); the rest belong to their own
+  services (PipeWire, NetworkManager, dconf…). A `settings.json` written by something else — the
+  installer seeds language, zone and keyboard — takes effect as the dock starts
+  (`controls::reassert`). TIME ZONE is chosen in three folded steps (region → the hour the clock
+  should show there → the place, a screenful at a time; `ZonePick`). Pointer-free:
+  `waverunner-ctl display show <setting without spaces>` and `display pick <group> <n>` (both
+  counted from 0; a pick of a place that is not there logs what is). ⚠ in a test rig these picks
+  are REAL for what is not the compositor's: never pick volume, Wi-Fi, Bluetooth, dark mode or a
+  power mode from a rig that can reach the live session's PipeWire or buses.
+- `i18n.rs` + `tools/i18n/` — THE SHELL'S LANGUAGES (2026-10-13). Every visible string goes
+  through `tr("English")`, a sentence with values through `fill(tr("… {name} …"), &[("name",
+  &v)])`; the catalogue is `assets/i18n/<tag>.json`, built into the binary (Spanish is whole).
+  The language changes live (the control panel's Language). A string that is ALSO an id (a
+  setting's name, a menu's row, a stored marker like the card's "Voice note") stays as written
+  in its table and is translated where it is drawn. `tools/i18n/README.md` has the tools
+  (`scan.py` finds what is not wrapped, `apply.py` wraps, `extract.py --missing es.json`) and
+  `WAVERUNNER_I18N=pseudo` (every translated string between « »). `cargo test` fails on a
+  `tr("…")` with no Spanish.
+- `modules.rs` — MODULES: the catalog (`assets/modules.json`) and its Apply
+  (`App::modules_apply`, 2026-10-13): each package goes through `start_managed_install` /
+  `Request::Remove` — the drag-install pipeline, so a module is ONE rebuild — a web program is
+  its catalog webapp (`webapp_slug`), the task pill counts the programs home (`ModuleJob`,
+  `module_program_done` from `nix::Event::Done`) and a notice says how it ended. The system a
+  program needs beside its package (Steam's 32-bit graphics, Docker's daemon…) is Golem's
+  `system/Modular/desktop/app-setup.nix`, keyed on the installed packages' names.
 - `display.rs` — LIVE display settings (scale, resolution): reads the screen (`j/monitors`),
   applies an `hl.monitor` rule at once, saves the owner's choice to
   `~/.config/golem/settings.json` + the generated `settings.lua` that Golem's `hyprland.lua`
