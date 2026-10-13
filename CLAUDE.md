@@ -830,7 +830,16 @@ The big daemon files are cohesive but long — go straight to the function:
   that say they open that kind of file — `xdg-mime query filetype` then `gio mime`, off the
   loop (`apps_for`, `parse_gio_mime`), each id looked up in the dock's own index for its name
   and command (`Win::open_with`, `Action::SendTo(n)`). Rig: `files apps` / `menuback` with a
-  menu up. NOT BUILT:
+  menu up. UNDO (Ctrl+Z, `filer_undo`): the last thirty things done in file windows
+  (`Filer::undo`, `Undo`, recorded by `filer_did`): a name goes back, things moved go back where
+  they were (`undo_of` tells a move from a copy by what was left behind), copies go to the bin,
+  what was thrown away comes back (`filer_bin` keeps its names in the bin), a new folder goes
+  while it is still empty — never over something that took a place since; what was done is said
+  as a notification (`take_back`). Not undone: a hand arrangement, an emptied bin, a delete for
+  good, what the dock's bin took. A PATH CAN BE TYPED (Ctrl+L, or a `/` or `~` typed —
+  `Win::go_to`, drawn in the steps' place): Enter goes (`typed_place`; a file's folder comes up
+  with the file selected), Tab finishes the name as far as one thing can be meant
+  (`complete_path`), Escape or a click leaves. Rig: `files undo`, `files path <text>`. NOT BUILT:
   `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll

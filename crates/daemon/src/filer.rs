@@ -622,6 +622,151 @@ pub(crate) fn span(anchor: usize, to: usize) -> std::ops::RangeInclusive<usize> 
     anchor.min(to)..=anchor.max(to)
 }
 
+/// Something done in a file window that Ctrl+Z takes back.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Undo {
+    Renamed { from: PathBuf, to: PathBuf },
+    /// Each thing: where it was, where it is now.
+    Moved(Vec<(PathBuf, PathBuf)>),
+    /// The copies made.
+    Copied(Vec<PathBuf>),
+    /// Thrown away: their names in the bin.
+    Binned(Vec<String>),
+    /// A folder made.
+    Made(PathBuf),
+}
+
+/// What bringing `sources` in did, as things to take back: those that are
+/// no longer where they were moved, the others were copied. (Only when
+/// every one arrived — else which is which cannot be told.)
+pub(crate) fn undo_of(sources: &[PathBuf], brought: &[PathBuf]) -> Vec<Undo> {
+    if sources.len() != brought.len() {
+        return Vec::new();
+    }
+    let (mut moved, mut copied) = (Vec::new(), Vec::new());
+    for (from, now) in sources.iter().zip(brought).filter(|(a, b)| a != b) {
+        if from.exists() {
+            copied.push(now.clone());
+        } else {
+            moved.push((from.clone(), now.clone()));
+        }
+    }
+    let mut out = Vec::new();
+    if !moved.is_empty() {
+        out.push(Undo::Moved(moved));
+    }
+    if !copied.is_empty() {
+        out.push(Undo::Copied(copied));
+    }
+    out
+}
+
+/// Take `undo` back; what to say of it (`None`: nothing could be done).
+fn take_back(undo: Undo) -> Option<String> {
+    use crate::i18n::fill;
+    let trash = crate::trash::Trash::home();
+    match undo {
+        Undo::Renamed { from, to } => (to.exists() && !from.exists() && std::fs::rename(&to, &from).is_ok())
+            .then(|| tr("Undone: it has its old name again").to_owned()),
+        Undo::Moved(pairs) => {
+            // Each back where it was — never over something there now.
+            let n = pairs
+                .iter()
+                .filter(|(from, now)| {
+                    now.exists()
+                        && !from.exists()
+                        && (std::fs::rename(now, from).is_ok()
+                            || (crate::desktop_send::copy_all_metered(now, from, None).is_ok()
+                                && (if now.is_dir() {
+                                    std::fs::remove_dir_all(now)
+                                } else {
+                                    std::fs::remove_file(now)
+                                })
+                                .is_ok()))
+                })
+                .count();
+            (n > 0).then(|| fill(tr("Undone: {n} moved back"), &[("n", &n)]))
+        }
+        Undo::Copied(copies) => {
+            let n = copies.iter().filter(|c| c.exists() && trash.trash(c).is_ok()).count();
+            (n > 0).then(|| fill(tr("Undone: {n} copies moved to the bin"), &[("n", &n)]))
+        }
+        Undo::Binned(names) => {
+            let known = trash.list();
+            let n = names
+                .iter()
+                .filter(|name| {
+                    known
+                        .iter()
+                        .find(|t| &t.name == *name)
+                        .is_some_and(|t| !t.original_path.exists() && trash.restore(name).is_ok())
+                })
+                .count();
+            (n > 0).then(|| fill(tr("Undone: {n} put back from the bin"), &[("n", &n)]))
+        }
+        // (Only while it is still empty: what was put in it since is not ours to take.)
+        Undo::Made(path) => std::fs::remove_dir(&path)
+            .is_ok()
+            .then(|| tr("Undone: the new folder is gone").to_owned()),
+    }
+}
+
+/// The folder a typed path stands for: `~` is Home; a file's is the one
+/// it is in (and the file, to be shown there).
+pub(crate) fn typed_place(text: &str, home: &Path) -> Option<(PathBuf, Option<PathBuf>)> {
+    let text = text.trim();
+    let path = match text.strip_prefix('~') {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(text),
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+    if path.is_dir() {
+        Some((path, None))
+    } else if path.exists() {
+        Some((path.parent()?.to_path_buf(), Some(path)))
+    } else {
+        None
+    }
+}
+
+/// Tab in a typed path: as much of the name being typed as only one thing
+/// in that folder can be (a folder gets its `/`); the text as it was when
+/// nothing there starts so.
+pub(crate) fn complete_path(text: &str, home: &Path) -> String {
+    let Some((head, part)) = text.rsplit_once('/') else {
+        return text.to_owned();
+    };
+    let dir = match head.strip_prefix('~') {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None if head.is_empty() => PathBuf::from("/"),
+        None => PathBuf::from(head),
+    };
+    let mut names: Vec<(String, bool)> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            (name.starts_with(part) && (part.starts_with('.') || !name.starts_with('.')))
+                .then(|| (name, e.path().is_dir()))
+        })
+        .collect();
+    names.sort();
+    let Some((first, is_dir)) = names.first().cloned() else {
+        return text.to_owned();
+    };
+    // As far as they all agree.
+    let mut common: String = first.clone();
+    for (name, _) in &names[1..] {
+        let same = common.chars().zip(name.chars()).take_while(|(a, b)| a == b).count();
+        common = common.chars().take(same).collect();
+    }
+    let tail = if names.len() == 1 && is_dir { "/" } else { "" };
+    format!("{head}/{common}{tail}")
+}
+
 /// A name being typed in place.
 #[derive(Debug, Clone, PartialEq)]
 struct Rename {
@@ -861,6 +1006,9 @@ struct Win {
     /// the flag is set; and what the disk says of each.
     sort: (SortKey, bool),
     meta: HashMap<String, Meta>,
+    /// A path being typed in the head (Ctrl+L, or a `/` or `~` typed):
+    /// Enter goes there.
+    go_to: Option<String>,
     /// A search of this folder: what is typed (the field is out while this
     /// is `Some`), and everything the folder holds — `items` is then only
     /// what was found.
@@ -1086,6 +1234,8 @@ pub(crate) struct Filer {
     /// A drag over one of the windows.
     dnd: Option<Hovering>,
     orders: Orders,
+    /// What Ctrl+Z takes back, the newest last.
+    undo: Vec<Undo>,
 }
 
 impl Filer {
@@ -1100,6 +1250,7 @@ impl Filer {
             drag: None,
             dnd: None,
             orders: Orders::default(),
+            undo: Vec::new(),
         }
     }
 
@@ -1474,6 +1625,7 @@ impl App {
             list: self.settings.files_list,
             sort: (SortKey::Name, false),
             meta: HashMap::new(),
+            go_to: None,
             find: None,
             all: Vec::new(),
             deep: Vec::new(),
@@ -1645,6 +1797,7 @@ impl App {
         win.gap = None;
         win.edge = 0.0;
         win.slide.clear();
+        win.go_to = None;
         win.find = None;
         win.all.clear();
         win.deep.clear();
@@ -2094,10 +2247,8 @@ impl App {
                 }
             }
             Action::MoveToBin => {
-                for path in selected {
-                    info!("files: {path} → Recycle Bin");
-                    self.trash_file(&path); // the folder's watch takes it off the window
-                }
+                let paths: Vec<PathBuf> = selected.iter().map(PathBuf::from).collect();
+                self.filer_bin(&paths); // the folder's watch takes them off the window
             }
             // Archives are the system archiver's work (File Roller, which
             // Golem ships): it shows how far it is and asks what it must.
@@ -2153,6 +2304,7 @@ impl App {
             return;
         };
         let into = dir.clone();
+        let sources = paths.clone();
         let task = self.filer_copy_task(&paths, &dir, cut, cut);
         self.desktop_off_loop(
             move || {
@@ -2169,6 +2321,9 @@ impl App {
             },
             move |app, (brought, failed)| {
                 app.filer_say_failed(failed);
+                for undo in undo_of(&sources, &brought) {
+                    app.filer_did(undo);
+                }
                 info!(
                     "files: pasted {} into {} ({}; {failed} failed)",
                     brought.len(),
@@ -2222,6 +2377,74 @@ impl App {
         Some(self.task_begin(&crate::i18n::fill(words, &[("what", &what), ("where", &place)])))
     }
 
+    /// Throw `paths` away, remembering their names in the bin so Ctrl+Z
+    /// can put them back.
+    fn filer_bin(&mut self, paths: &[PathBuf]) {
+        let trash = crate::trash::Trash::home();
+        let mut names = Vec::new();
+        for path in paths {
+            match trash.trash(path) {
+                Ok(item) => {
+                    info!("files: {} → Recycle Bin", path.display());
+                    names.push(item.name);
+                }
+                Err(e) => warn!("files: cannot throw {} away: {e}", path.display()),
+            }
+        }
+        if !names.is_empty() {
+            self.filer_did(Undo::Binned(names));
+        }
+        // (The dock's Files section and its bin show it too.)
+        self.refilter();
+    }
+
+    /// Remember something done, for Ctrl+Z (the last thirty).
+    fn filer_did(&mut self, undo: Undo) {
+        self.filer.undo.push(undo);
+        if self.filer.undo.len() > 30 {
+            self.filer.undo.remove(0);
+        }
+    }
+
+    /// Ctrl+Z: take back the last thing done in a file window — a name, a
+    /// move, a copy, a throwing away, a new folder — and say so.
+    fn filer_undo(&mut self) {
+        let said = match self.filer.undo.pop() {
+            None => tr("Nothing to undo").to_owned(),
+            Some(undo) => {
+                info!("files: undo {undo:?}");
+                take_back(undo).unwrap_or_else(|| tr("That could not be undone").to_owned())
+            }
+        };
+        std::thread::spawn(move || crate::desktop_send_notify(&said));
+        self.refilter();
+        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.filer_list(id);
+        }
+    }
+
+    /// Enter in the typed path: go to the folder it stands for (a file's
+    /// folder comes up with the file selected); a path that is nothing
+    /// stays in the field.
+    fn filer_go_typed(&mut self, id: u32) {
+        let Some(text) = self.filer.win(id).and_then(|w| w.go_to.clone()) else {
+            return;
+        };
+        let Some((dir, file)) = typed_place(&text, &home()) else {
+            return;
+        };
+        if let Some(win) = self.filer.win_mut(id) {
+            win.go_to = None;
+            win.reveal = file.map(|f| f.to_string_lossy().into_owned());
+            if win.dir == dir {
+                self.filer_list(id);
+                return self.filer_request_draw(id);
+            }
+        }
+        self.filer_go(id, dir);
+    }
+
     /// Some things could not be copied: said once, as a notification.
     fn filer_say_failed(&mut self, failed: usize) {
         if failed > 0 {
@@ -2253,6 +2476,7 @@ impl App {
         }
         info!("files: new folder {}", path.display());
         win.rename_next = Some(path.to_string_lossy().into_owned());
+        self.filer_did(Undo::Made(path));
         self.filer_list(id);
     }
 
@@ -2295,6 +2519,10 @@ impl App {
         if let Some(new) = commit.then(|| crate::desktop::rename_file(&old, &name)).flatten() {
             // In a folder arranged by hand it keeps its place under its new name.
             let dir = win.dir.clone();
+            self.filer_did(Undo::Renamed {
+                from: old.clone(),
+                to: new.clone(),
+            });
             let (was, now) = (file_name(&old), file_name(&new));
             if let Some(mut order) = self.filer.orders.of(&dir).cloned() {
                 for n in order.iter_mut().filter(|n| **n == was) {
@@ -2915,6 +3143,25 @@ impl App {
                 from -= 1;
                 used += STEP_GAP + widths[from];
             }
+            // A path being typed stands in the steps' place.
+            if let Some(text) = win.go_to.as_ref() {
+                let field = Rect::new(left - 10.0, mid - 13.0, room + 10.0, 26.0);
+                scene.rects.push(rect(field, 13.0, [0.0, 0.0, 0.0, 0.35]));
+                scene.rects.push(RectInst {
+                    border: 1.0,
+                    ..rect(field, 13.0, [1.0, 1.0, 1.0, 0.16])
+                });
+                let tw = renderer.measure_text(text, TEXT_PX, None);
+                // (A long one shows its end, where the typing is.)
+                let x = (left + 2.0).min(field.x + field.w - 12.0 - tw);
+                scene.labels.push(Label {
+                    cache: false,
+                    clip: Some(field),
+                    ..label(text, (x, mid - TEXT_LINE / 2.0), tw + 4.0, false, false)
+                });
+                scene.rects.push(rect(Rect::new(x + tw + 1.0, mid - TEXT_LINE / 2.0 + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
+                from = steps.len();
+            }
             let mut x = left;
             for (n, ((name, path), tw)) in steps.iter().zip(&widths).enumerate().skip(from) {
                 if n > from {
@@ -3527,6 +3774,9 @@ impl App {
         if win.rename.is_some() {
             self.filer_end_rename(id, true);
         }
+        if let Some(win) = self.filer.win_mut(id) {
+            win.go_to = None;
+        }
         match button {
             0x110 => self.filer_click(id, serial),
             0x111 => {
@@ -3994,10 +4244,8 @@ impl App {
         // Into the bin (its window, or its place): thrown away, not moved
         // into its folder — the bin keeps a record of where each came from.
         if dir.starts_with(bin_root()) {
-            for path in paths.iter().filter(|p| !p.starts_with(bin_root())) {
-                info!("files: {} → Recycle Bin", path.display());
-                self.trash_file(&path.to_string_lossy());
-            }
+            let out: Vec<PathBuf> = paths.into_iter().filter(|p| !p.starts_with(bin_root())).collect();
+            self.filer_bin(&out);
             then();
             self.filer_list(id);
             return;
@@ -4005,6 +4253,7 @@ impl App {
         let into = dir.clone();
         let mut then = Some(then);
         // (Across disks a drop is a copy: what was dragged stays where it was.)
+        let sources = paths.clone();
         let task = self.filer_copy_task(&paths, &dir, may_move, false);
         self.desktop_off_loop(
             move || {
@@ -4024,6 +4273,9 @@ impl App {
             },
             move |app, (brought, failed)| {
                 app.filer_say_failed(failed);
+                for undo in undo_of(&sources, &brought) {
+                    app.filer_did(undo);
+                }
                 info!("files: {} thing(s) brought into {}", brought.len(), dir.display());
                 if let Some(then) = then.take() {
                     then();
@@ -4201,6 +4453,24 @@ impl App {
         } else {
             (keysym, alt, utf8)
         };
+        // A path being typed takes every key: Enter goes, Tab completes,
+        // Escape leaves.
+        if let Some(text) = win.go_to.as_mut() {
+            match keysym {
+                Keysym::Return | Keysym::KP_Enter => return self.filer_go_typed(id),
+                Keysym::Escape => win.go_to = None,
+                Keysym::BackSpace => {
+                    text.pop();
+                }
+                Keysym::Tab => *text = complete_path(text, &home()),
+                _ => {
+                    if let Some(t) = utf8.filter(|t| !ctrl && !alt && !t.is_empty() && !t.chars().any(char::is_control)) {
+                        text.push_str(t);
+                    }
+                }
+            }
+            return self.filer_request_draw(id);
+        }
         // A search that is open takes what is typed; the keys that walk
         // and open go on to the things found.
         if let Some(find) = win.find.clone() {
@@ -4271,6 +4541,16 @@ impl App {
                 }
             }
             Keysym::F5 => self.filer_list(id),
+            Keysym::z | Keysym::Z if ctrl => self.filer_undo(),
+            Keysym::l | Keysym::L if ctrl => {
+                // The way here, as a path to be typed over.
+                let mut text = win.dir.to_string_lossy().into_owned();
+                if !text.ends_with('/') {
+                    text.push('/');
+                }
+                win.go_to = Some(text);
+                self.filer_request_draw(id);
+            }
             Keysym::f | Keysym::F if ctrl => {
                 let open = win.find.is_none();
                 self.filer_find(id, open.then(String::new));
@@ -4316,6 +4596,11 @@ impl App {
                 };
                 if text.trim().is_empty() {
                     return;
+                }
+                // (A `/` or a `~` begins a path, not a name.)
+                if text == "/" || text == "~" {
+                    win.go_to = Some(text.to_owned());
+                    return self.filer_request_draw(id);
                 }
                 self.filer_find(id, Some(text.to_owned()));
             }
@@ -4469,6 +4754,14 @@ impl App {
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
             "zoom" => return self.zoom("files", rest),
+            "undo" => self.filer_undo(),
+            "path" => {
+                // `path <text>`: as typed in the head, then Enter; `path? <text>`: Tab.
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.go_to = Some(rest.to_owned());
+                }
+                self.filer_go_typed(id);
+            }
             "view" => self.filer_set_list(rest == "list"),
             "find" => self.filer_find(id, (rest != "-").then(|| rest.to_owned())),
             "sort" => {
@@ -4924,6 +5217,63 @@ mod tests {
         assert_eq!(below(&got[1].path, &dir), "a/b");
         assert_eq!(search_below(&dir, "informe", true).len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_was_done_can_be_taken_back() {
+        let d = std::env::temp_dir().join(format!("waverunner-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("a")).unwrap();
+        std::fs::create_dir_all(d.join("b")).unwrap();
+        std::fs::write(d.join("a/x.txt"), "x").unwrap();
+        std::fs::write(d.join("a/y.txt"), "y").unwrap();
+        // x was moved to b, y copied: told apart by what is left behind.
+        std::fs::rename(d.join("a/x.txt"), d.join("b/x.txt")).unwrap();
+        std::fs::copy(d.join("a/y.txt"), d.join("b/y.txt")).unwrap();
+        let sources = [d.join("a/x.txt"), d.join("a/y.txt")];
+        let brought = [d.join("b/x.txt"), d.join("b/y.txt")];
+        let undos = undo_of(&sources, &brought);
+        assert_eq!(undos.len(), 2);
+        assert_eq!(undos[0], Undo::Moved(vec![(d.join("a/x.txt"), d.join("b/x.txt"))]));
+        assert!(take_back(undos[0].clone()).is_some());
+        assert!(d.join("a/x.txt").exists() && !d.join("b/x.txt").exists());
+        // Not every one arrived: nothing is guessed.
+        assert!(undo_of(&sources, &brought[..1]).is_empty());
+        // A name goes back; a new folder goes only while it is empty.
+        std::fs::rename(d.join("a/x.txt"), d.join("a/z.txt")).unwrap();
+        let renamed = Undo::Renamed {
+            from: d.join("a/x.txt"),
+            to: d.join("a/z.txt"),
+        };
+        assert!(take_back(renamed).is_some() && d.join("a/x.txt").exists());
+        assert!(take_back(Undo::Made(d.join("a"))).is_none());
+        std::fs::create_dir(d.join("new")).unwrap();
+        assert!(take_back(Undo::Made(d.join("new"))).is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_typed_path_names_a_folder_and_tab_finishes_it() {
+        let d = std::env::temp_dir().join(format!("waverunner-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Documents/Work")).unwrap();
+        std::fs::create_dir_all(d.join("Downloads")).unwrap();
+        std::fs::write(d.join("Documents/note.txt"), "x").unwrap();
+        let s = |p: &str| format!("{}/{p}", d.display());
+        assert_eq!(typed_place("~/Documents", &d), Some((d.join("Documents"), None)));
+        assert_eq!(
+            typed_place(&s("Documents/note.txt"), &d),
+            Some((d.join("Documents"), Some(d.join("Documents/note.txt"))))
+        );
+        assert_eq!(typed_place("nowhere", &d), None);
+        assert_eq!(typed_place(&s("nowhere"), &d), None);
+        // Two start with "Do": as far as they agree. One: all of it, and its slash.
+        assert_eq!(complete_path(&s("D"), &d), s("Do"));
+        assert_eq!(complete_path(&s("Doc"), &d), s("Documents/"));
+        assert_eq!(complete_path("~/Dow", &d), "~/Downloads/");
+        assert_eq!(complete_path(&s("Documents/n"), &d), s("Documents/note.txt"));
+        assert_eq!(complete_path(&s("zzz"), &d), s("zzz"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
