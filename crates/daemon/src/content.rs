@@ -698,6 +698,9 @@ pub struct Layout {
     pub open_box_grid: (usize, usize),
     /// How many members its line holds — its page (`row_cells`).
     pub open_box_cap: usize,
+    /// The scale a stack over the dock draws its members at: the icon
+    /// scale times its zoom (Ctrl +/−, `zoom.rs`).
+    pub open_box_scale: f32,
     /// The Apps rows parted around a box open in the grid.
     pub apps_part: Option<AppsPart>,
     /// The band under Files while a search matches settings or modules:
@@ -1124,6 +1127,7 @@ pub fn layout(
         open_box,
         open_box_grid: (OPEN_BOX_COLS, OPEN_BOX_COLS),
         open_box_cap: OPEN_BOX_CAP,
+        open_box_scale: icon_scale,
         apps_part: None,
         control_bands,
         controls: Vec::new(),
@@ -3144,8 +3148,9 @@ pub fn scene(
         // the dock a dock icon a size up, in a cell just wide enough for
         // the name; in the grid a grid icon in a grid cell, on the grid's
         // columns.
-        let member_icon = if box_over_dock { STACK_ICON * icon_scale } else { grid_icon };
-        let icon_cy = if box_over_dock { STACK_ICON_TOP * icon_scale } else { grid_icon_top } + member_icon / 2.0;
+        let stack_scale = layout.open_box_scale;
+        let member_icon = if box_over_dock { STACK_ICON * stack_scale } else { grid_icon };
+        let icon_cy = if box_over_dock { STACK_ICON_TOP * stack_scale } else { grid_icon_top } + member_icon / 2.0;
         let name_w = cell - if box_over_dock { 6.0 } else { 12.0 };
         let place = |di: usize| -> (f32, f32) {
             let cap = layout.open_box_cap.max(1);

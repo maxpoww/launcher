@@ -13,7 +13,14 @@
 //!   multiplies the icon scale its grid is laid out at; an icon keeps its
 //!   cell, counted in cells.
 //!
-//! Both are the owner's standing choice (`settings.json`).
+//! - **A group open over the dock** (Max, 2026-10-13: *"add ctrl+ +- to zoom
+//!   in and out on the group on top of the dock, and ctrl+0 to reset"*) is
+//!   zoomed while it is OPEN: the dock has no keyboard either, so the keys
+//!   are compositor binds for as long as the stack stands, the bar's way
+//!   (and before the bar's, should the pointer be on it). Its zoom
+//!   multiplies the scale its members are drawn at.
+//!
+//! All are the owner's standing choice (`settings.json`).
 
 use tracing::info;
 
@@ -63,16 +70,23 @@ impl App {
         factor(self.settings.desktop_zoom)
     }
 
-    /// Zoom the bar or the desktop (`what`) in, out, back, or to a number
-    /// (`how`). What was done.
+    /// How much bigger than their own size a dock stack's members are.
+    pub(crate) fn stack_zoom(&self) -> f32 {
+        factor(self.settings.stack_zoom)
+    }
+
+    /// Zoom the bar, the desktop or a dock stack (`what`) in, out, back, or
+    /// to a number (`how`). What was done.
     pub(crate) fn zoom(&mut self, what: &str, how: &str) -> String {
+        const USAGE: &str = "zoom bar|desktop|stack in|out|reset|<n>";
         let now = match what {
             "bar" => self.bar_zoom(),
             "desktop" => self.desktop_zoom(),
-            _ => return "zoom bar|desktop in|out|reset|<n>".to_owned(),
+            "stack" => self.stack_zoom(),
+            _ => return USAGE.to_owned(),
         };
         let Some(to) = stepped(now, how) else {
-            return "zoom bar|desktop in|out|reset|<n>".to_owned();
+            return USAGE.to_owned();
         };
         if (to - now).abs() < 0.001 {
             return format!("{what} zoom stays {to}");
@@ -85,6 +99,12 @@ impl App {
             // the windows), its text, its boxes — as for a change of screen.
             self.sync_options_zone();
             self.tasks_changed();
+        } else if what == "stack" {
+            self.settings.stack_zoom = to;
+            self.settings.save();
+            // Its plate changed size: so did what the pointer may touch.
+            self.sync_input_region();
+            self.schedule_frame();
         } else {
             self.settings.desktop_zoom = to;
             self.settings.save();
@@ -100,19 +120,37 @@ impl App {
             return;
         }
         self.bar_zoom_keys = on;
+        self.sync_zoom_keys();
+    }
+
+    /// Bind Ctrl +/−/0 to what they zoom now — a group open over the dock,
+    /// else the bar under the pointer — or give them back.
+    pub(crate) fn sync_zoom_keys(&mut self) {
+        let stack = self.dock_stack.is_some() || self.dir_stack.as_ref().is_some_and(|ds| !ds.in_grid);
+        let want = if stack {
+            Some("stack")
+        } else if self.bar_zoom_keys {
+            Some("bar")
+        } else {
+            None
+        };
+        if want == self.zoom_keys_for {
+            return;
+        }
+        self.zoom_keys_for = want;
         let ctl = crate::hypr::ctl_program();
         let mut lua = String::new();
         for (key, how) in KEYS {
             lua.push_str(&format!("hl.unbind(\"{key}\") "));
-            if let (true, Some(ctl)) = (on, &ctl) {
+            if let (Some(what), Some(ctl)) = (want, &ctl) {
                 lua.push_str(&format!(
-                    "hl.bind(\"{key}\", hl.dsp.exec_cmd(\"{} debug-desktop zoom bar {how}\")) ",
+                    "hl.bind(\"{key}\", hl.dsp.exec_cmd(\"{} debug-desktop zoom {what} {how}\")) ",
                     ctl.display()
                 ));
             }
         }
         let ok = crate::hypr::eval_ok(&lua);
-        tracing::debug!("zoom: Ctrl +/- {} for the bar (compositor said {ok})", if on { "taken" } else { "given back" });
+        tracing::debug!("zoom: Ctrl +/- are {want:?}'s (compositor said {ok})");
     }
 }
 

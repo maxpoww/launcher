@@ -5060,7 +5060,27 @@ impl App {
             };
         }
         // `taskbox open|close`: the task pill's box, without a scroll.
-        // `zoom bar|desktop in|out|reset|<n>` (what Ctrl +/−/0 do).
+        // `zoom bar|desktop|stack in|out|reset|<n>` (what Ctrl +/−/0 do).
+        // `stack open|close`: the first group pinned to the dock, as a click
+        // on its icon opens it (a rig has no pointer to click with).
+        if let Some(rest) = what.strip_prefix("stack ") {
+            if rest.trim() == "close" {
+                self.close_group();
+                return "stack closed".to_owned();
+            }
+            let pinned = self.pins.pins().iter().find_map(|p| {
+                p.strip_prefix("group:")
+                    .filter(|gid| !crate::groups::is_trash(gid))
+                    .and_then(|gid| self.groups.index_by_id(gid))
+            });
+            return match pinned {
+                Some(g) => {
+                    self.open_dock_folder(g);
+                    format!("stack {g} open")
+                }
+                None => "no group is pinned to the dock".to_owned(),
+            };
+        }
         if let Some(rest) = what.strip_prefix("zoom ") {
             let (target, how) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
             return self.zoom(target, how);

@@ -244,8 +244,11 @@ impl App {
                     .map(|&dock_rect| {
                         // A second dock over the dock, a gap over its
                         // plate: its members a size up, their names under.
-                        let slot = content::STACK_CELL_W * scale;
-                        let band = content::stack_cell_h(scale);
+                        // (Ctrl +/− zooms them: `zoom.rs`.)
+                        let stack = scale * self.stack_zoom();
+                        layout.open_box_scale = stack;
+                        let slot = content::STACK_CELL_W * stack;
+                        let band = content::stack_cell_h(stack);
                         let dock_h = self.config.window.input_bar_height as f32 * scale;
                         let m = content::DRAG_MARGIN_X + content::DOCK_PAD_X * scale;
                         let area = content::Rect::new(
@@ -968,6 +971,8 @@ impl App {
             }
         }
         let group_expand = self.group_expand();
+        // Ctrl +/−/0 are a dock stack's for as long as one is open.
+        self.sync_zoom_keys();
 
         let drag_frame = self
             .gesture

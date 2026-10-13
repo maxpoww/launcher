@@ -671,6 +671,7 @@ fn main() -> anyhow::Result<()> {
         task_tx: None,
         task_pill: task_pill::TaskPill::default(),
         bar_zoom_keys: false,
+        zoom_keys_for: None,
         phone_pill: phone_pill::PhonePill::default(),
         desktop_layer,
         desktop_renderer: None,
@@ -1566,8 +1567,11 @@ pub struct App {
     pub(crate) tasks: tasks::Tasks,
     task_tx: Option<calloop::channel::Sender<tasks::Report>>,
     task_pill: task_pill::TaskPill,
-    /// Ctrl +/−/0 are bound to the bar's zoom (the pointer is on it).
+    /// The pointer is on the bar: Ctrl +/−/0 are its zoom's, unless a dock
+    /// stack is open.
     bar_zoom_keys: bool,
+    /// What Ctrl +/−/0 are bound to zoom now (`zoom.rs`).
+    zoom_keys_for: Option<&'static str>,
     /// The bar's phone pill (`phone_pill.rs`).
     phone_pill: phone_pill::PhonePill,
     desktop_layer: Option<LayerSurface>,

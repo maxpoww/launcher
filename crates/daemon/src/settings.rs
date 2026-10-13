@@ -48,6 +48,9 @@ pub(crate) struct Settings {
     /// desktop's icons than the dock's (Ctrl +/−, `zoom.rs`; 0 = never set = 1).
     pub(crate) bar_zoom: f32,
     pub(crate) desktop_zoom: f32,
+    /// The same for a group open over the dock: its members than their
+    /// own size.
+    pub(crate) stack_zoom: f32,
 }
 
 impl Settings {
