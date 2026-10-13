@@ -439,6 +439,12 @@ impl App {
                 desktop_ids,
             } => {
                 debug!("declarative op for {id}: ok={ok}");
+                // A module's Apply counts its programs home.
+                match &op {
+                    nix::DoneOp::Remove { attr } => self.module_program_done(&attr.clone(), ok),
+                    nix::DoneOp::Install => self.module_program_done(&id.clone(), ok),
+                    nix::DoneOp::Reconcile => {}
+                }
                 match op {
                     nix::DoneOp::Reconcile => {
                         if ok {

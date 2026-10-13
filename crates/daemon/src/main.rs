@@ -824,6 +824,7 @@ fn main() -> anyhow::Result<()> {
         control_panel_opening: false,
         panel: panel::Panel::load(),
         controls: None,
+        module_job: None,
         panel_parked: panel::Panel::load_modules(),
         panel_swap_t: 1.0,
         panel_mix: 0.0,
@@ -1937,6 +1938,8 @@ pub struct App {
     panel: panel::Panel,
     /// The control panel's settings worker, started at the first read.
     controls: Option<controls::ControlsHandle>,
+    /// The module whose Apply is on its way through the rebuild.
+    module_job: Option<modules::ModuleJob>,
     /// The field not on show: the card shows one field at a time — the
     /// settings or the MODULES — and `panel_switch` trades them.
     panel_parked: panel::Panel,

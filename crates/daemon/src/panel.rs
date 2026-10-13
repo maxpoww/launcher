@@ -2162,20 +2162,32 @@ impl App {
         }
     }
 
-    /// The catalog programs this computer has: an app in the grid by the
-    /// program's name (lowercased).
-    fn modules_installed(&self) -> std::collections::HashSet<String> {
+    /// The catalog programs this computer has (their names, lowercased): a
+    /// package the dock installed or is installing, a webapp installed from
+    /// the catalog — and, for what came with the system, an app in the grid
+    /// by the program's name.
+    pub(crate) fn modules_installed(&self) -> std::collections::HashSet<String> {
         let have: std::collections::HashSet<String> = (0..self.base_len.min(self.entries.len()))
             .filter(|&i| self.kinds.get(i) == Some(&apps::EntryKind::App) && !self.is_catalog_webapp(i))
             .map(|i| self.entries[i].name.to_lowercase())
             .collect();
+        let listed: std::collections::HashSet<String> = crate::applier::list_attrs().into_iter().collect();
+        let webapps = crate::webapps::load_catalog();
         crate::modules::catalog()
             .modules
             .iter()
             .flat_map(|m| m.groups.iter().flat_map(|g| &g.programs))
+            .filter(|p| match (&p.pkg, &p.web) {
+                (Some(attr), _) => listed.contains(attr) || self.managed.contains(attr) || have.contains(&p.name.to_lowercase()),
+                (None, Some(url)) => crate::modules::webapp_slug(url, &webapps).is_some_and(|s| self.managed_webapps.contains(&s)),
+                _ => false,
+            })
             .map(|p| p.name.to_lowercase())
-            .filter(|n| have.contains(n))
             .collect()
+    }
+
+    pub(crate) fn modules_panel_mut(&mut self) -> &mut Panel {
+        if self.panel.is_modules() { &mut self.panel } else { &mut self.panel_parked }
     }
 
     /// The gear was clicked: the control panel's settings (see
@@ -2362,7 +2374,7 @@ impl App {
             // A module's Apply: the wanted set goes to the system side, and
             // the card folds away.
             if let Some((module, add, remove)) = self.panel.pending_apply.take() {
-                crate::modules::apply(module, &add, &remove);
+                self.modules_apply(module, &add, &remove);
                 self.handle_command(Command::Collapse);
                 return;
             }

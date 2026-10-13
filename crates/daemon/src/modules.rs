@@ -246,9 +246,172 @@ pub(crate) fn apply(module: &str, add: &[&Program], remove: &[&Program]) {
     }
 }
 
+/// The catalog webapp a module's web program stands for: the entry at the
+/// same address (its host, a leading `www.` aside). `None`: the catalog
+/// does not carry it.
+pub(crate) fn webapp_slug(url: &str, catalog: &[crate::webapps::WebappEntry]) -> Option<String> {
+    let host = |u: &str| crate::webapps::url_host(u).map(|h| h.trim_start_matches("www.").to_lowercase());
+    let want = host(url)?;
+    // The same page first, then the same site.
+    let same_page = |e: &&crate::webapps::WebappEntry| e.url.trim_end_matches('/') == url.trim_end_matches('/');
+    catalog
+        .iter()
+        .find(same_page)
+        .or_else(|| catalog.iter().find(|e| host(&e.url).as_deref() == Some(want.as_str())))
+        .map(|e| e.slug.clone())
+}
+
+/// A module being installed or removed: what is still on its way through
+/// the rebuild, on the task pill until the last of it lands.
+pub(crate) struct ModuleJob {
+    pub name: String,
+    task: crate::tasks::TaskHandle,
+    waiting: BTreeSet<String>,
+    total: u64,
+    failed: u64,
+    /// Whether it is taking programs away (the closing words differ).
+    removing: bool,
+}
+
+impl crate::App {
+    /// The module's Apply, carried out: every program goes through the
+    /// pipeline a drag into the grid uses (`packages.list` → the privileged
+    /// helper → ONE rebuild for all of them, see [`crate::applier`]); a web
+    /// program is its catalog webapp, installed at once. The selection file
+    /// is still written: it is the record of what was asked for.
+    pub(crate) fn modules_apply(&mut self, module: &'static str, add: &[&'static Program], remove: &[&'static Program]) {
+        apply(module, add, remove);
+        let catalog = crate::webapps::load_catalog();
+        let mut waiting = BTreeSet::new();
+        let mut web_changed = false;
+        for p in add {
+            match (&p.pkg, &p.web) {
+                (Some(attr), _) => {
+                    if !self.managed.contains(attr) && !crate::applier::is_installed(attr) && !self.busy_ids.contains(attr) {
+                        self.start_managed_install(attr, Vec::new());
+                        waiting.insert(attr.clone());
+                    }
+                }
+                (None, Some(url)) => match webapp_slug(url, &catalog) {
+                    Some(slug) if !self.managed_webapps.contains(&slug) => {
+                        self.managed_webapps.add(&slug);
+                        web_changed = true;
+                    }
+                    Some(_) => {}
+                    None => info!("modules: {} is not in the webapp catalog; left out", p.name),
+                },
+                _ => {}
+            }
+        }
+        for p in remove {
+            match (&p.pkg, &p.web) {
+                (Some(attr), _) => {
+                    if self.managed.contains(attr) && !self.busy_ids.contains(attr) {
+                        // The app's own tile, when it has one, so its windows
+                        // are closed and its pin goes; else the bare package.
+                        let tile = self.managed.desktop_ids_for(attr).into_iter().find(|id| self.removable_ids.contains(id));
+                        let started = match tile {
+                            Some(id) => self.uninstall_app(&id),
+                            None => {
+                                self.busy_ids.insert(attr.clone());
+                                self.nix.request(crate::nix::Request::Remove { id: attr.clone(), attr: attr.clone() });
+                                true
+                            }
+                        };
+                        if started {
+                            waiting.insert(attr.clone());
+                        }
+                    }
+                }
+                (None, Some(url)) => {
+                    if let Some(slug) = webapp_slug(url, &catalog).filter(|s| self.managed_webapps.contains(s)) {
+                        let id = crate::webapps::id_for_slug(&slug);
+                        self.kill_app_windows(&id);
+                        self.managed_webapps.remove(&slug);
+                        self.pins.unpin(&id);
+                        web_changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if web_changed {
+            self.refilter();
+            self.schedule_frame();
+        }
+        if waiting.is_empty() {
+            return;
+        }
+        let removing = add.is_empty();
+        let label = crate::i18n::fill(
+            crate::i18n::tr(if removing { "Removing {module}" } else { "Installing {module}" }),
+            &[("module", &crate::i18n::tr_dyn(module))],
+        );
+        let total = waiting.len() as u64;
+        let task = self.task_begin(&label);
+        task.set(0, total);
+        info!("modules: {module}: {total} program(s) through the rebuild");
+        self.module_job = Some(ModuleJob { name: module.to_owned(), task, waiting, total, failed: 0, removing });
+    }
+
+    /// One program of the module being applied came out of the rebuild.
+    pub(crate) fn module_program_done(&mut self, attr: &str, ok: bool) {
+        let Some(job) = self.module_job.as_mut() else {
+            return;
+        };
+        if !job.waiting.remove(attr) {
+            return;
+        }
+        if !ok {
+            job.failed += 1;
+        }
+        job.task.set(job.total - job.waiting.len() as u64, job.total);
+        if !job.waiting.is_empty() {
+            return;
+        }
+        let Some(job) = self.module_job.take() else {
+            return;
+        };
+        let name = crate::i18n::tr_dyn(&job.name).to_owned();
+        let body = if job.failed == 0 {
+            crate::i18n::fill(
+                crate::i18n::tr(if job.removing { "{module} was removed." } else { "{module} is ready." }),
+                &[("module", &name)],
+            )
+        } else if job.failed == job.total {
+            crate::i18n::fill(crate::i18n::tr("{module} could not be changed. Nothing was touched."), &[("module", &name)])
+        } else {
+            crate::i18n::fill(
+                crate::i18n::tr("{module}: {n} of {total} programs could not be changed."),
+                &[("module", &name), ("n", &job.failed), ("total", &job.total)],
+            )
+        };
+        crate::desktop_send_notify_open(crate::i18n::tr("Modules"), "package-x-generic", &body, None);
+        // What is installed changed: the open module shows it.
+        let installed = self.modules_installed();
+        self.modules_panel_mut().set_installed(installed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_web_program_is_its_catalog_webapp() {
+        let entry = |name: &str, url: &str| crate::webapps::WebappEntry {
+            name: name.into(),
+            url: url.into(),
+            icon: name.into(),
+            slug: crate::webapps::slug_of(name),
+            recommended: false,
+        };
+        let catalog = [entry("YouTube", "https://www.youtube.com"), entry("YouTube Studio", "https://studio.youtube.com/")];
+        // The same page, a trailing slash aside; else the same site.
+        assert_eq!(webapp_slug("https://studio.youtube.com", &catalog).as_deref(), Some("youtube-studio"));
+        assert_eq!(webapp_slug("https://youtube.com/feed", &catalog).as_deref(), Some("youtube"));
+        assert_eq!(webapp_slug("https://example.org", &catalog), None);
+    }
 
     #[test]
     fn the_built_in_catalog_reads_and_is_whole() {

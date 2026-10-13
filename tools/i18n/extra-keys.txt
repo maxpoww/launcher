@@ -1,3 +1,37 @@
 # Strings that reach the translator some other way than a tr("…") literal or a
 # constant table apply.py knows: one per line, Rust escapes allowed.
 turn on
+# A module's Apply (modules.rs: chosen at run time).
+Removing {module}
+Installing {module}
+{module} was removed.
+{module} is ready.
+{module} could not be changed. Nothing was touched.
+{module}: {n} of {total} programs could not be changed.
+# The modules' names (assets/modules.json), translated where they are drawn.
+Office
+Internet
+Social
+Media & Entertainment
+Gaming
+Productivity
+Content Creation
+Photography
+Education
+Kids
+AI
+Remote Work
+Privacy & Security
+Music Production
+Video Editing
+Graphic Design
+3D & Printing
+Writing
+Web Design
+Development
+Commerce
+Trading & Finance
+Science & Data
+Accessibility
+Windows Apps
+Coming soon
