@@ -242,6 +242,27 @@ impl Layout {
         Some(row * self.cols + col).filter(|&i| i < n)
     }
 
+    /// Where a thing stands at display slot `idx` — between two cells while
+    /// it glides from one to the next (the Apps grid's `cell_pos`).
+    pub fn cell_at(&self, idx: f32) -> Rect {
+        let i0 = idx.max(0.0).floor() as usize;
+        let frac = (idx - i0 as f32).clamp(0.0, 1.0);
+        let a = self.cell(i0);
+        if frac <= f32::EPSILON {
+            return a;
+        }
+        let b = self.cell(i0 + 1);
+        Rect::new(a.x + (b.x - a.x) * frac, a.y + (b.y - a.y) * frac, a.w, a.h)
+    }
+
+    /// The display slot under `pos` (past the last one too) and how far
+    /// across it the pointer is, the field scrolled by `scroll`.
+    pub fn slot_at(&self, pos: (f32, f32), scroll: f32) -> (usize, f32) {
+        let x = ((pos.0 - self.body.x - PAD) / self.pitch).clamp(0.0, self.cols as f32 - 0.001);
+        let row = ((pos.1 - self.body.y - PAD + scroll) / self.ch).max(0.0) as usize;
+        (row * self.cols + x as usize, x.fract())
+    }
+
     /// The items with any part on screen at `scroll`.
     pub fn in_view(&self, scroll: f32, n: usize) -> std::ops::Range<usize> {
         let first = ((scroll - PAD) / self.ch).floor().max(0.0) as usize;
@@ -320,6 +341,93 @@ pub(crate) fn band_hits(layout: &Layout, a: (f32, f32), b: (f32, f32), n: usize)
         .collect()
 }
 
+/// MAKE ROOM (Max, 2026-10-13: "que hagan espacio como en el grid de
+/// aplicaciones"): the display slot of the thing `rank`th among those NOT in
+/// hand, while a gap `n` slots wide stands open at `gap` — the Apps grid's
+/// reflow (`pages::shifted_slot`, which this equals for one icon on one
+/// page), for a group as well.
+pub(crate) fn parted(rank: usize, gap: usize, n: usize) -> usize {
+    if rank >= gap {
+        rank + n
+    } else {
+        rank
+    }
+}
+
+/// Where the gap goes for a pointer over display slot `d`, `fx` of the way
+/// across it: before or after the thing standing there, by which half of
+/// it the pointer is on (the grid's rule for an icon coming in); over the
+/// gap itself it stays. `m` things are not in hand.
+pub(crate) fn gap_at(d: usize, fx: f32, gap_now: usize, n: usize, m: usize) -> usize {
+    let rank = if d < gap_now {
+        d
+    } else if d >= gap_now + n {
+        d - n
+    } else {
+        return gap_now.min(m);
+    };
+    (rank + usize::from(fx >= 0.5)).min(m)
+}
+
+/// A folder's things in the order its owner gave them: those named in
+/// `order` first, as it says, then whatever came since, as listed.
+pub(crate) fn arranged(items: Vec<Item>, order: &[String]) -> Vec<Item> {
+    let place: HashMap<&str, usize> = order.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+    let mut keyed: Vec<(usize, usize, Item)> = items
+        .into_iter()
+        .enumerate()
+        .map(|(i, it)| {
+            let at = place.get(file_name(Path::new(&it.path)).as_str()).copied().unwrap_or(usize::MAX);
+            (at, i, it)
+        })
+        .collect();
+    keyed.sort_by_key(|(at, i, _)| (*at, *i));
+    keyed.into_iter().map(|(_, _, it)| it).collect()
+}
+
+/// The folders arranged by hand: each one's names in its owner's order
+/// (`files-order.json` in the data dir), read at first use.
+#[derive(Default)]
+struct Orders {
+    loaded: bool,
+    map: HashMap<String, Vec<String>>,
+}
+
+impl Orders {
+    /// Folders remembered at most: past it, those that are gone go.
+    const MAX: usize = 400;
+
+    fn load(&mut self) {
+        if !self.loaded {
+            self.loaded = true;
+            self.map = crate::persist::read_json(&crate::persist::data_path("files-order.json")).unwrap_or_default();
+        }
+    }
+
+    fn of(&mut self, dir: &Path) -> Option<&Vec<String>> {
+        self.load();
+        self.map.get(dir.to_string_lossy().as_ref())
+    }
+
+    /// Give `dir` an order, or (`None`) take it back to by-name.
+    fn set(&mut self, dir: &Path, order: Option<Vec<String>>) {
+        self.load();
+        let key = dir.to_string_lossy().into_owned();
+        match order {
+            Some(order) => {
+                self.map.insert(key, order);
+            }
+            None => {
+                self.map.remove(&key);
+            }
+        }
+        if self.map.len() > Self::MAX {
+            self.map.retain(|dir, _| Path::new(dir).is_dir());
+        }
+        crate::persist::write_json("files-order", &crate::persist::data_path("files-order.json"), &self.map);
+    }
+}
+
 /// A name being typed in place.
 #[derive(Debug, Clone, PartialEq)]
 struct Rename {
@@ -370,7 +478,7 @@ fn list_bin() -> Vec<Item> {
 /// The rows of a right click: on one thing, on one of `many` selected, or
 /// on the folder itself (`paste`: files are on the clipboard) — and in the
 /// bin, what the bin is for.
-pub(crate) fn menu_rows(on_item: bool, many: bool, paste: bool, bin: InBin) -> Vec<Row> {
+pub(crate) fn menu_rows(on_item: bool, many: bool, paste: bool, bin: InBin, by_hand: bool) -> Vec<Row> {
     let row = |label: &'static str, action: Action| Row::Item {
         label,
         action,
@@ -435,6 +543,11 @@ pub(crate) fn menu_rows(on_item: bool, many: bool, paste: bool, bin: InBin) -> V
             Row::Sep,
             row(tr("Open in terminal"), Action::OpenTerminal),
         ]);
+        // A folder arranged by hand can go back to being in order of name
+        // (the desktop's own word for it).
+        if by_hand {
+            rows.extend([Row::Sep, row(tr("Clean up"), Action::CleanUp)]);
+        }
         rows
     }
 }
@@ -518,6 +631,12 @@ struct Win {
     armed: Option<Action>,
     /// The place a hovering drag would be let go onto.
     drop_place: Option<usize>,
+    /// Where each thing is drawn, as a display slot (its own place in the
+    /// list at rest; easing to make room while a drag is over the window).
+    slide: Vec<f32>,
+    /// The gap a hovering drag has open, counted among the things not in
+    /// hand: where what it carries would land.
+    gap: Option<usize>,
     press: Option<Press>,
     /// A rubber band being drawn: where it began and where the pointer is,
     /// in the field's unscrolled coordinates, and what was selected before
@@ -528,6 +647,21 @@ struct Win {
 }
 
 impl Win {
+    /// The room made is where what comes will stay: the names not in hand
+    /// (`carried`), in order, before and after the gap — for a drop into
+    /// the folder shown. The gap is closed.
+    fn arrangement(&mut self, dir: &Path, carried: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+        let g = self.gap.take().filter(|_| dir == self.dir)?;
+        let names: Vec<String> = self
+            .items
+            .iter()
+            .filter(|it| !carried.contains(&it.path))
+            .map(|it| file_name(Path::new(&it.path)))
+            .collect();
+        let g = g.min(names.len());
+        Some((names[..g].to_vec(), names[g..].to_vec()))
+    }
+
     /// Whether this window is on the bin, or in a folder thrown away.
     fn in_bin(&self) -> InBin {
         let bin = bin_root();
@@ -599,6 +733,7 @@ pub(crate) struct Filer {
     drag: Option<Lifted>,
     /// A drag over one of the windows.
     dnd: Option<Hovering>,
+    orders: Orders,
 }
 
 impl Filer {
@@ -612,6 +747,7 @@ impl Filer {
             icons: None,
             drag: None,
             dnd: None,
+            orders: Orders::default(),
         }
     }
 
@@ -1029,6 +1165,8 @@ impl App {
             rename_next: None,
             armed: None,
             drop_place: None,
+            slide: Vec::new(),
+            gap: None,
             press: None,
             band: None,
             drop_on: None,
@@ -1143,6 +1281,8 @@ impl App {
         win.press = None;
         win.band = None;
         win.drop_on = None;
+        win.gap = None;
+        win.slide.clear();
         win.selected.clear();
         win.cursor = None;
         win.click = None;
@@ -1213,6 +1353,16 @@ impl App {
 
     fn filer_listed(&mut self, id: u32, generation: u64, listed: Result<Vec<Item>, std::io::Error>) {
         let icon_scale = self.icon_scale();
+        // A folder arranged by hand is shown as it was left.
+        let order = self
+            .filer
+            .win(id)
+            .map(|w| w.dir.clone())
+            .and_then(|dir| self.filer.orders.of(&dir).cloned());
+        let listed = listed.map(|items| match &order {
+            Some(order) => arranged(items, order),
+            None => items,
+        });
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -1302,6 +1452,11 @@ impl App {
     /// selected if it was not — a group stays a group), or the folder's.
     fn filer_open_menu(&mut self, id: u32, at: (f32, f32), item: Option<usize>) {
         let paste = self.clipboard_files().is_some();
+        let by_hand = self
+            .filer
+            .win(id)
+            .map(|w| w.dir.clone())
+            .is_some_and(|dir| self.filer.orders.of(&dir).is_some());
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -1316,7 +1471,7 @@ impl App {
             _ => win.selected.clear(),
         }
         let many = path.is_some() && win.selected.len() > 1;
-        let rows = menu_rows(path.is_some(), many, paste, win.in_bin());
+        let rows = menu_rows(path.is_some(), many, paste, win.in_bin(), by_hand);
         if rows.is_empty() {
             return;
         }
@@ -1441,6 +1596,11 @@ impl App {
                 }
             }
             Action::NewFolder => self.filer_new_folder(id),
+            Action::CleanUp => {
+                info!("files: {} is in order of name again", dir.display());
+                self.filer.orders.set(&dir, None);
+                self.filer_list(id);
+            }
             Action::Properties => {
                 if let Some(i) = item {
                     self.filer_open_props(id, i, at, None);
@@ -1546,6 +1706,18 @@ impl App {
             .is_some_and(|it| it.kind == Kind::File);
         let name = crate::desktop::typed_name(&rename.text, &old, is_file);
         if let Some(new) = commit.then(|| crate::desktop::rename_file(&old, &name)).flatten() {
+            // In a folder arranged by hand it keeps its place under its new name.
+            let dir = win.dir.clone();
+            let (was, now) = (file_name(&old), file_name(&new));
+            if let Some(mut order) = self.filer.orders.of(&dir).cloned() {
+                for n in order.iter_mut().filter(|n| **n == was) {
+                    *n = now.clone();
+                }
+                self.filer.orders.set(&dir, Some(order));
+            }
+            let Some(win) = self.filer.win_mut(id) else {
+                return;
+            };
             let new = new.to_string_lossy().into_owned();
             win.selected.clear();
             win.reveal = Some(new);
@@ -2050,9 +2222,51 @@ impl App {
         let covered = |r: Rect| {
             cover.is_some_and(|c| r.x < c.x + c.w && c.x < r.x + r.w && r.y < c.y + c.h && c.y < r.y + r.h)
         };
+        // MAKE ROOM: what is in hand leaves its place, and while a drag is
+        // over the window the rest part around where it would land — each
+        // easing to its display slot at the Apps grid's rate.
+        let in_hand: HashSet<&str> = self
+            .filer
+            .drag
+            .as_ref()
+            .map(|d| d.paths.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let width = self.filer.drag.as_ref().map_or(1, |d| d.paths.len());
+        if win.slide.len() != win.items.len() {
+            win.slide = (0..win.items.len()).map(|i| i as f32).collect();
+        }
+        let mut gliding = false;
+        let mut rank = 0usize;
+        for (i, item) in win.items.iter().enumerate() {
+            if in_hand.contains(item.path.as_str()) {
+                continue;
+            }
+            let target = win.gap.map_or(rank, |g| parted(rank, g, width)) as f32;
+            rank += 1;
+            if win.slide[i] != target {
+                let (v, m) = crate::animation::ease_toward(win.slide[i], target, dt, crate::frame::MAKEROOM_RATE, 0.005);
+                win.slide[i] = v;
+                gliding |= m;
+            }
+        }
+        if gliding {
+            moving = true;
+            win.last_frame = Some(now);
+        }
+        // (While things are out of their places, a few more rows are drawn
+        // than those on screen at rest.)
+        let view = if win.gap.is_some() || gliding || !in_hand.is_empty() {
+            let spare = width + 2 * layout.cols;
+            view.start.saturating_sub(spare)..(view.end + spare).min(win.items.len())
+        } else {
+            view
+        };
         for i in view {
             let item = &win.items[i];
-            let mut cell = layout.cell(i);
+            if in_hand.contains(item.path.as_str()) {
+                continue;
+            }
+            let mut cell = layout.cell_at(win.slide[i]);
             cell.y -= win.scroll;
             if win.selected.contains(&item.path) || win.drop_on == Some(i) {
                 grid.rects.push(rect(
@@ -2586,6 +2800,9 @@ impl App {
             image.surface().commit();
         }
         info!("files: {} in hand ({} in all)", item.name, paths.len());
+        // Its place stays open until the pointer says otherwise.
+        let hole = (win.in_bin() == InBin::No)
+            .then(|| win.items[..i].iter().filter(|it| !paths.contains(&it.path)).count());
         self.filer.drag = Some(Lifted {
             win: id,
             paths,
@@ -2593,6 +2810,10 @@ impl App {
             _icon: image,
             action: DndAction::empty(),
         });
+        if let Some(win) = self.filer.win_mut(id) {
+            win.gap = hole;
+        }
+        self.filer_request_draw(id);
     }
 
     /// Another app (or one of our own surfaces) asked for the files in
@@ -2638,6 +2859,14 @@ impl App {
         let win = drag.win;
         drop(drag); // the source and the image go with it
         self.schedule_frame();
+        // Every window closes the room it had made.
+        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        for id in ids {
+            if let Some(w) = self.filer.win_mut(id) {
+                w.gap = None;
+            }
+            self.filer_request_draw(id);
+        }
         if done {
             self.filer_list(win);
         }
@@ -2661,27 +2890,60 @@ impl App {
     /// The hovering drag moved: over a folder, that folder is where it
     /// would go (and is washed to say so).
     pub(crate) fn filer_dnd_motion(&mut self, x: f32, y: f32) {
-        let icon_scale = self.icon_scale();
-        let carried = self.filer.drag_paths();
         let Some(id) = self.filer.dnd.as_ref().map(|d| d.win) else {
             return;
         };
+        self.filer_drag_over(id, x, y);
+    }
+
+    /// A drag is at (`x`, `y`) on window `id`: what it would be let go
+    /// onto, and the room made for it.
+    fn filer_drag_over(&mut self, id: u32, x: f32, y: f32) {
+        let icon_scale = self.icon_scale();
+        let carried = self.filer.drag_paths();
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
         let at = (x / win.zoom, y / win.zoom);
-        let onto = win
-            .layout(icon_scale)
-            .index_at(at, win.scroll, win.items.len())
-            .filter(|&i| {
-                let it = &win.items[i];
-                matches!(it.kind, Kind::Folder | Kind::Volume) && !carried.contains(&it.path)
-            });
+        let layout = win.layout(icon_scale);
         // Over the places: onto that place (the bin among them).
         let place = win.hits.places.iter().position(|r| r.contains(at));
-        if onto != win.drop_on || place != win.drop_place {
+        // In the field: the things not in hand, and which of them — if any
+        // — stands where the pointer is, the room made counted in.
+        let rest: Vec<usize> = (0..win.items.len())
+            .filter(|&i| !carried.contains(&win.items[i].path))
+            .collect();
+        let (n, m) = (carried.len().max(1), rest.len());
+        let in_field = place.is_none() && layout.body.contains(at) && win.in_bin() == InBin::No;
+        let (d, fx) = layout.slot_at(at, win.scroll);
+        let gap_now = win.gap.unwrap_or(m);
+        let under = if d < gap_now {
+            rest.get(d).copied()
+        } else if d >= gap_now + n {
+            rest.get(d - n).copied()
+        } else {
+            None
+        };
+        // On a folder's middle: into it, and nothing moves (the grid's
+        // "a neighbour holds still so it can be dropped onto"). Anywhere
+        // else in the field: the gap goes where the pointer is.
+        let onto = under.filter(|&i| {
+            layout.body.contains(at)
+                && place.is_none()
+                && matches!(win.items[i].kind, Kind::Folder | Kind::Volume)
+                && (0.22..0.78).contains(&fx)
+        });
+        let gap = if !in_field {
+            None
+        } else if onto.is_some() {
+            win.gap
+        } else {
+            Some(gap_at(d, fx, gap_now, n, m))
+        };
+        if onto != win.drop_on || place != win.drop_place || gap != win.gap {
             win.drop_on = onto;
             win.drop_place = place;
+            win.gap = gap;
             self.filer_request_draw(id);
         }
     }
@@ -2701,6 +2963,7 @@ impl App {
             if let Some(win) = self.filer.win_mut(dnd.win) {
                 win.drop_on = None;
                 win.drop_place = None;
+                win.gap = None;
             }
             self.filer_request_draw(dnd.win);
         }
@@ -2714,6 +2977,7 @@ impl App {
             return;
         };
         let id = dnd.win;
+        let carried = self.filer.drag_paths();
         let Some(win) = self.filer.win_mut(id) else {
             dnd.offer.destroy();
             return;
@@ -2725,6 +2989,10 @@ impl App {
                 .and_then(|i| win.items.get(i))
                 .map_or_else(|| win.dir.clone(), |it| PathBuf::from(&it.path)),
         };
+        // Let go in the room made for it: that is where it stays — the
+        // folder is arranged by hand from now on (its names, in order, with
+        // the place what comes goes to).
+        let arrange = win.arrangement(&dir, &carried);
         win.drop_on = None;
         self.filer_request_draw(id);
         // The live offer (the one kept since `enter` is a snapshot).
@@ -2764,7 +3032,8 @@ impl App {
                     let may_move =
                         dropped.source_actions.is_empty() || dropped.source_actions.contains(DndAction::Move);
                     let offer = dropped.clone();
-                    app.filer_bring(id, crate::desktop::uri_list_paths(&text), dir.clone(), may_move, move || {
+                    let paths = crate::desktop::uri_list_paths(&text);
+                    app.filer_bring(id, paths, dir.clone(), may_move, arrange.clone(), move || {
                         // Done, whatever came of the files: the source must
                         // always hear the end of its drag.
                         offer.finish();
@@ -2787,6 +3056,7 @@ impl App {
         paths: Vec<PathBuf>,
         dir: PathBuf,
         may_move: bool,
+        arrange: Option<(Vec<String>, Vec<String>)>,
         then: impl FnOnce() + 'static,
     ) {
         // Into the bin (its window, or its place): thrown away, not moved
@@ -2808,6 +3078,14 @@ impl App {
                 info!("files: {} thing(s) brought into {}", brought.len(), dir.display());
                 if let Some(then) = then.take() {
                     then();
+                }
+                // What came stands where it was let go.
+                if let Some((before, after)) = arrange.clone() {
+                    let came: Vec<String> = brought.iter().map(|p| file_name(p)).collect();
+                    let mut order: Vec<String> = before.into_iter().filter(|n| !came.contains(n)).collect();
+                    order.extend(came.iter().cloned());
+                    order.extend(after.into_iter().filter(|n| !came.contains(n)));
+                    app.filer.orders.set(&dir, Some(order));
                 }
                 if let Some(win) = app.filer.win_mut(id).filter(|w| w.dir == dir) {
                     win.selected = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
@@ -3181,19 +3459,39 @@ impl App {
                 self.filer_travel(id);
             }
             "unband" => self.filer_button(id, 0x110, false, 0),
+            "over" => {
+                // `over <x> <y>`: as a drag hovering there; `over` alone: gone.
+                let n: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                match n[..] {
+                    [x, y] => {
+                        let zoom = self.filer.win(id).map_or(1.0, |w| w.zoom);
+                        self.filer_drag_over(id, x * zoom, y * zoom);
+                    }
+                    _ => {
+                        if let Some(win) = self.filer.win_mut(id) {
+                            win.gap = None;
+                            win.drop_on = None;
+                            win.drop_place = None;
+                        }
+                        self.filer_request_draw(id);
+                    }
+                }
+            }
             "drop" => {
                 // `drop <n|-> <path…>`: as files let go on folder n, or on
                 // the folder shown.
                 let mut words = rest.split_whitespace();
                 let onto = words.next().and_then(|w| w.parse::<usize>().ok());
                 let paths: Vec<PathBuf> = words.map(&as_path).collect();
-                let Some(dir) = self.filer.win(id).map(|w| {
-                    onto.and_then(|i| w.items.get(i))
-                        .map_or_else(|| w.dir.clone(), |it| PathBuf::from(&it.path))
-                }) else {
+                let Some(win) = self.filer.win_mut(id) else {
                     return "closed".to_owned();
                 };
-                self.filer_bring(id, paths, dir, true, || {});
+                let dir = onto
+                    .and_then(|i| win.items.get(i))
+                    .map_or_else(|| win.dir.clone(), |it| PathBuf::from(&it.path));
+                // (After `over`: let go in the room made there.)
+                let arrange = win.arrangement(&dir, &[]);
+                self.filer_bring(id, paths, dir, true, arrange, || {});
             }
             "state" => {}
             _ => return format!("unknown: {what}"),
@@ -3410,24 +3708,24 @@ mod tests {
                 })
                 .collect()
         };
-        let one = actions(menu_rows(true, false, true, InBin::No));
+        let one = actions(menu_rows(true, false, true, InBin::No, false));
         assert_eq!(one.first(), Some(&Action::Open));
         // Properties is last: it is the row the menu turns into a box from.
         assert_eq!(one.last(), Some(&Action::Properties));
         assert!(one.contains(&Action::Rename) && !one.contains(&Action::Paste));
         // A group: nothing that is about ONE thing.
-        let many = actions(menu_rows(true, true, false, InBin::No));
+        let many = actions(menu_rows(true, true, false, InBin::No, false));
         assert!(!many.contains(&Action::Rename) && !many.contains(&Action::Properties));
         assert!(many.contains(&Action::Cut) && many.contains(&Action::MoveToBin));
         // The folder itself: Paste only with files on the clipboard.
-        assert_eq!(actions(menu_rows(false, false, true, InBin::No)).first(), Some(&Action::Paste));
-        assert_eq!(actions(menu_rows(false, false, false, InBin::No)).first(), Some(&Action::NewFolder));
+        assert_eq!(actions(menu_rows(false, false, true, InBin::No, false)).first(), Some(&Action::Paste));
+        assert_eq!(actions(menu_rows(false, false, false, InBin::No, false)).first(), Some(&Action::NewFolder));
         // In the bin: back or gone, and the bin emptied; never a new thing.
-        let binned = actions(menu_rows(true, false, true, InBin::Top));
+        let binned = actions(menu_rows(true, false, true, InBin::Top, false));
         assert!(binned.contains(&Action::PutBack) && binned.contains(&Action::Erase));
         assert!(!binned.contains(&Action::Rename) && !binned.contains(&Action::MoveToBin));
-        assert_eq!(actions(menu_rows(false, false, true, InBin::Top)), [Action::EmptyBin]);
-        assert!(menu_rows(false, false, true, InBin::Deeper).is_empty());
+        assert_eq!(actions(menu_rows(false, false, true, InBin::Top, false)), [Action::EmptyBin]);
+        assert!(menu_rows(false, false, true, InBin::Deeper, false).is_empty());
     }
 
     #[test]
@@ -3442,6 +3740,65 @@ mod tests {
         // Only as far as there are things; a band in a cell's margin touches nothing.
         assert_eq!(band_hits(&l, from, to, 3), vec![1, 2]);
         assert!(band_hits(&l, (a.x, a.y), (a.x + 6.0, a.y + 4.0), 40).is_empty());
+    }
+
+    #[test]
+    fn making_room_is_the_apps_grids_reflow_and_takes_a_group() {
+        // One icon on one page: the same answer as the grid's own function,
+        // for a thing of this window (it has a place to close) and for one
+        // coming in (it has none).
+        for origin in [Some(4usize), None] {
+            for gap in 0..10 {
+                let mut rank = 0;
+                for s in 0..10 {
+                    if Some(s) == origin {
+                        continue;
+                    }
+                    assert_eq!(
+                        parted(rank, gap.min(if origin.is_some() { 9 } else { 10 }), 1),
+                        crate::pages::shifted_slot(s, origin, gap.min(if origin.is_some() { 9 } else { 10 }), 1000),
+                        "slot {s}, origin {origin:?}, gap {gap}"
+                    );
+                    rank += 1;
+                }
+            }
+        }
+        // Three in hand: three slots stand open.
+        assert_eq!((0..5).map(|r| parted(r, 2, 3)).collect::<Vec<_>>(), [0, 1, 5, 6, 7]);
+    }
+
+    #[test]
+    fn the_gap_goes_to_the_side_of_a_thing_the_pointer_is_on() {
+        // Ten things at rest, nothing open yet (the gap rests past the end).
+        assert_eq!(gap_at(3, 0.2, 10, 1, 10), 3);
+        assert_eq!(gap_at(3, 0.7, 10, 1, 10), 4);
+        // Past the last thing: the end.
+        assert_eq!(gap_at(40, 0.1, 10, 1, 10), 10);
+        // Over the room already made, it stays; beyond it, slots count from after it.
+        assert_eq!(gap_at(4, 0.9, 4, 2, 10), 4);
+        assert_eq!(gap_at(6, 0.2, 4, 2, 10), 4);
+        assert_eq!(gap_at(6, 0.8, 4, 2, 10), 5);
+    }
+
+    #[test]
+    fn a_folder_arranged_by_hand_keeps_its_order_and_newcomers_go_last() {
+        let items = vec![item("a"), item("b"), item("c"), item("new")];
+        let order = ["c".to_owned(), "gone".to_owned(), "a".to_owned(), "b".to_owned()];
+        let names: Vec<String> = arranged(items, &order).into_iter().map(|it| it.name).collect();
+        assert_eq!(names, ["c", "a", "b", "new"]);
+    }
+
+    #[test]
+    fn a_thing_glides_between_two_cells() {
+        let l = Layout::new((920, 600), 1.0);
+        let (a, b) = (l.cell(2), l.cell(3));
+        let mid = l.cell_at(2.5);
+        assert!((mid.x - (a.x + b.x) / 2.0).abs() < 0.01 && (mid.y - a.y).abs() < 0.01);
+        assert_eq!(l.cell_at(3.0), b);
+        // The slot under a point, and how far across it.
+        let (d, fx) = l.slot_at((b.x + b.w / 2.0, b.y + 10.0), 0.0);
+        assert_eq!(d, 3);
+        assert!(fx > 0.3 && fx < 0.7);
     }
 
     #[test]

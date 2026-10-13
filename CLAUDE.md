@@ -778,7 +778,20 @@ The big daemon files are cohesive but long — go straight to the function:
   (`Win::drop_place`), and into the bin — its place or its window — means thrown away
   (`filer_bring`). THE TILE: `materialize_entry` writes `golem-files.desktop` ("Golem Files",
   `Exec=<the ctl beside the daemon> files`, `StartupWMClass=golem-files`) at start; it claims no
-  file type. NOT BUILT: a drag's auto-scroll and spring-open, list view, search,
+  file type. MAKE ROOM (Max,
+  2026-10-13: "que hagan espacio como en el grid de aplicaciones… usa el mismo código"): while a
+  drag is over a window the things part around where it would land — the Apps grid's reflow
+  generalised to a group (`parted`; a test holds it equal to `pages::shifted_slot` for one
+  icon), eased at the grid's `MAKEROOM_RATE` (`Win::slide`, a display slot per thing, drawn
+  through `Layout::cell_at`, the grid's `cell_pos`); what is in hand leaves its place
+  (`in_hand`), the gap (`Win::gap`, counted among what is not in hand) goes to the side of a
+  thing the pointer is on (`gap_at`, `Layout::slot_at`), and a FOLDER'S MIDDLE holds still to be
+  dropped into (`filer_drag_over`). Let go in the gap, it STAYS there: the folder is ARRANGED BY
+  HAND from then on (`Orders`, `files-order.json`: dir → names in order; `arranged` at every
+  listing, newcomers last; a rename keeps its place) — also how things of one window are put in
+  order by dragging. The ground's menu gets "Clean up" = by name again. Never in the bin. Rig:
+  `files over <x> <y>` (a drag hovering there; alone: gone), then `files drop - <path…>` lands
+  in the room made. NOT BUILT: a drag's auto-scroll and spring-open, list view, search,
   `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
