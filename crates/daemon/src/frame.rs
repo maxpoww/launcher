@@ -225,7 +225,6 @@ impl App {
         if let (Some(_), Some((_, oy))) = (layout.open_box, self.box_origin(&layout)) {
             let scale = self.icon_scale();
             let cell = content::GRID_CELL_H * scale;
-            let cells = (content::BOX_CELL_MIN_W * scale, cell);
             let n = self.box_total();
             // The dock icon a dock-anchored stack grows out of: a folder's
             // box id, or a pinned directory's entry id.
@@ -243,14 +242,19 @@ impl App {
                     .position(|&e| self.entries.get(e).is_some_and(|x| x.id == aid))
                     .and_then(|sl| layout.dock_slots.get(sl))
                     .map(|&dock_rect| {
-                        let m = content::DRAG_MARGIN_X;
+                        // A second dock over the dock: its slots, its
+                        // band's height, a gap over the dock's plate.
+                        let slot = content::DOCK_SLOT * scale;
+                        let band = self.config.window.input_bar_height as f32 * scale;
+                        let m = content::DRAG_MARGIN_X + content::DOCK_PAD_X * scale;
                         let area = content::Rect::new(
                             m,
                             0.0,
-                            (self.buffer_size.0 as f32 - 2.0 * m).max(cell),
-                            dock_rect.y,
+                            (self.buffer_size.0 as f32 - 2.0 * m).max(slot),
+                            layout.card_top,
                         );
-                        content::row_box(dock_rect, n, cells, area, content::BOX_GAP)
+                        let plate = content::Rect::new(dock_rect.x, layout.card_top, dock_rect.w, band);
+                        content::row_box(plate, n, (slot, band), area, content::BOX_GAP)
                     })
             } else {
                 // A box in the grid opens under its tile's row, the rows
@@ -260,15 +264,18 @@ impl App {
                 let vp = layout.sections[content::SECTION_APPS].viewport;
                 // It takes whole rows' room, so a full grid stays on its
                 // rows: the last ones leave whole.
-                let ((w, h), grid, cap) = content::row_cells(n, cells, vp.w);
+                // The grid's own cells, on its columns.
+                let cw = content::GRID_CELL_W * scale;
+                let ((w, h), grid, cap) = content::row_cells(n, (cw, cell), vp.w);
                 let row = if oy >= vp.y { ((oy - vp.y) / cell).floor() as isize } else { -1 };
                 let split = vp.y + (row + 1) as f32 * cell;
                 let up = (split + h - (vp.y + vp.h)).clamp(0.0, (row.max(0) as f32 * cell).max(0.0));
                 let t = self.group_expand();
                 layout.apps_part = Some(content::AppsPart { row, up: up * t, down: (h - up) * t });
                 // Its members stand centred in the line, whatever column
-                // the tile is in.
-                Some((content::Rect::new(vp.x + (vp.w - w) / 2.0, split - up, w, h), grid, cap))
+                // the tile is in — on whole columns, under the grid's icons.
+                let x = vp.x + ((cap - grid.0) / 2) as f32 * cw;
+                Some((content::Rect::new(x, split - up, w, h), grid, cap))
             };
             if let Some((rect, grid, cap)) = placed {
                 layout.open_box = Some(rect);

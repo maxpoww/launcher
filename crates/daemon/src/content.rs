@@ -246,8 +246,8 @@ const LAST_SECTION_AIR: f32 = 6.0;
 /// Fixed layout metrics (logical px). Config-independent for now; can
 /// move into `[theme]` if tuning is wanted.
 pub const DOCK_ICON: f32 = 40.0;
-const DOCK_SLOT: f32 = 44.0;
-const DOCK_PAD_X: f32 = 10.0;
+pub const DOCK_SLOT: f32 = 44.0;
+pub const DOCK_PAD_X: f32 = 10.0;
 /// Breathing room under the dock icons: the icon baseline floats this many
 /// px above the slot bottom instead of sitting ON it (Max, 2026-09-10: the
 /// icons sat flush on the bar's bottom edge, gap only above). With the
@@ -1194,10 +1194,6 @@ pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
 /// in it.
 pub const BOX_GAP: f32 = 12.0;
 
-/// The narrowest an open box's cell gets to keep its members on one row:
-/// the icon and a little air (names shorten to fit).
-pub const BOX_CELL_MIN_W: f32 = GRID_ICON + 12.0;
-
 /// The Apps grid parted around a box open in it (Max, 2026-10-13: "como
 /// macOS, la línea se abre abajo del icono, y la línea de abajo se mueve"):
 /// the box's row opens under its tile's row and the rows below make room.
@@ -1237,18 +1233,18 @@ impl AppsPart {
     }
 }
 
-/// An open box's line: a box of `n` members in cells `cell` high across
-/// `area_w`. The line holds as many as fit (Max, 2026-10-13: "tantos
-/// íconos como entren en la línea antes de que sea necesaria una página")
-/// — the cells `cell` wide, narrowing down to `min_w` to take them in;
-/// only what is over that goes to a next page. Returns its size, its
-/// (columns, rows) and how many members a page of it holds.
-pub fn row_cells(n: usize, (min_w, cell): (f32, f32), area_w: f32) -> ((f32, f32), (usize, usize), usize) {
-    let min_w = min_w.clamp(1.0, cell.max(1.0));
-    let cap = ((area_w / min_w + 0.001).floor() as usize).max(1);
+/// An open box's line: a box of `n` members in `cell`s across `area_w`.
+/// The line holds as many as fit (Max, 2026-10-13: "tantos íconos como
+/// entren en la línea antes de que sea necesaria una página"); only what
+/// is over that goes to a next page. The cells are those of where it is
+/// open (Max, same day: "que respete la estética del dock… de la caja"):
+/// the dock's slots over the dock, the grid's cells in the grid. Returns
+/// its size, its (columns, rows) and how many members a page of it holds.
+pub fn row_cells(n: usize, cell: (f32, f32), area_w: f32) -> ((f32, f32), (usize, usize), usize) {
+    let cell_w = cell.0.max(1.0);
+    let cap = ((area_w / cell_w + 0.001).floor() as usize).max(1);
     let cols = n.clamp(1, cap);
-    let cell_w = (area_w / cols as f32).clamp(min_w, cell.max(min_w));
-    ((cols as f32 * cell_w, cell), (cols, 1), cap)
+    ((cols as f32 * cell_w, cell.1), (cols, 1), cap)
 }
 
 /// A dock folder's open box at rest: its line (`row_cells`) centred over
@@ -1749,10 +1745,12 @@ pub fn scene(
             Some(Rect::new(vp.x, to.y, vp.w, to.h * group_expand.clamp(0.0, 1.0)))
         }
         // Over the dock: the same run upwards, from its bottom edge — the
-        // one next to its icon.
+        // one next to its icon. A plate like the dock's: its slots, and
+        // the dock's own padding at the ends.
         (false, Some(_), Some(to)) => {
             let h = to.h * group_expand.clamp(0.0, 1.0);
-            Some(Rect::new(to.x, to.y + to.h - h, to.w, h))
+            let pad = DOCK_PAD_X * icon_scale;
+            Some(Rect::new(to.x - pad, to.y + to.h - h, to.w + 2.0 * pad, h))
         }
         _ => None,
     };
@@ -3032,9 +3030,14 @@ pub fn scene(
     // so it sits opaquely over the loose grid behind it.
     if let Some(box_rect) = open_box_rect {
         let t = group_expand.clamp(0.0, 1.0);
-        // The shared box radius — the same corner as the fully-open main
-        // card, and rounder than the macOS-style dock behind it.
-        let radius = lerp(14.0, BOX_CORNER_RADIUS, t).min(box_rect.h / 2.0);
+        // The corner of where it is open: the dock's over the dock, the
+        // open card's in the grid.
+        let radius = if box_over_dock {
+            config.theme.corner_radius
+        } else {
+            lerp(14.0, BOX_CORNER_RADIUS, t)
+        }
+        .min(box_rect.h / 2.0);
         // Max, 2026-10-13: "centrados en la línea… desde el borde superior
         // se deslice hacia abajo", and over the dock "la misma animación
         // hacia arriba": the members ride out from behind the edge the box
@@ -3123,8 +3126,16 @@ pub fn scene(
         // mid-glide — the reflow itself is computed in `draw`, shared
         // with the grid): positions lerp between the cell centers of the
         // two neighboring slots, pages included.
-        // The icon and the name under it sit centred in the cell together.
-        let name_lift = (3.0 + LABEL_LINE_PX) / 2.0;
+        // Each member stands as its neighbours do: over the dock a dock
+        // icon in a dock slot, no name under it (its name shows on hover,
+        // like the dock's); in the grid a grid icon in a grid cell, on the
+        // grid's columns, its name under it.
+        let member_icon = if box_over_dock { dock_icon } else { grid_icon };
+        let icon_cy = if box_over_dock {
+            cell_h / 2.0 + dock_slot.min(cell_h) / 2.0 - dock_icon / 2.0
+        } else {
+            grid_icon_top + grid_icon / 2.0
+        };
         let place = |di: usize| -> (f32, f32) {
             let cap = layout.open_box_cap.max(1);
             let slot = di % cap;
@@ -3132,9 +3143,10 @@ pub fn scene(
             let page_x = (di / cap) as f32 * page_w - box_scroll;
             (
                 members_rect.x + page_x + (col as f32 + 0.5) * cell,
-                members_rect.y + (row as f32 + 0.5) * cell_h - name_lift,
+                members_rect.y + row as f32 * cell_h + icon_cy,
             )
         };
+        let mut hovered_member: Option<(usize, f32)> = None;
         for (m, &idx) in open_box_members.iter().enumerate() {
             if box_drag.is_some_and(|(h, _, _)| h == idx) {
                 continue; // dragged member: a ghost, not in the grid
@@ -3152,7 +3164,10 @@ pub fn scene(
             if open_cx < members_rect.x - cell || open_cx > members_rect.x + members_rect.w + cell {
                 continue;
             }
-            let (cx, cy, size) = (open_cx, open_cy, grid_icon);
+            let (cx, cy, size) = (open_cx, open_cy, member_icon);
+            if box_over_dock && hover == Some(Hit::OpenBoxCell(d0 % layout.open_box_cap.max(1))) && frac <= f32::EPSILON {
+                hovered_member = Some((idx, cx));
+            }
             boxgrid.icons.push(IconInst {
                 rect: Rect::new(cx - size / 2.0, cy - size / 2.0, size, size),
                 layer: layer_of(idx),
@@ -3178,13 +3193,12 @@ pub fn scene(
                     });
                 }
             }
-            // Each member's name rides under its icon.
-            if let Some(entry) = entries.get(idx) {
+            // In the grid each member's name rides under its icon.
+            if let Some(entry) = entries.get(idx).filter(|_| !box_over_dock) {
                 boxgrid.labels.push(Label {
-                    text: truncate_label(&entry.name, cell - 4.0, LABEL_FONT_PX),
-                    pos: (cx, cy + size / 2.0 + 3.0),
-                    // (The whole cell: a name that just fits must not wrap.)
-                    max_w: cell,
+                    text: truncate_label(&entry.name, cell - 12.0, LABEL_FONT_PX),
+                    pos: (cx, cy + size / 2.0 + GRID_LABEL_GAP),
+                    max_w: cell - 12.0,
                     font_px: LABEL_FONT_PX,
                     line_px: LABEL_LINE_PX,
                     centered: true,
@@ -3197,6 +3211,43 @@ pub fn scene(
             }
         }
         scene.grids.push(boxgrid);
+        // Over the dock the hovered member's name shows as the dock's do:
+        // a pill over the plate.
+        if let Some((idx, cx)) = hovered_member.filter(|_| t >= 1.0 && box_drag.is_none()) {
+            if let Some(name) = entries.get(idx).map(|e| e.name.clone()) {
+                let mut tip = GridContent {
+                    clip: Rect::new(0.0, 0.0, surface.0, surface.1),
+                    ..Default::default()
+                };
+                let (font_px, line_px) = (LABEL_FONT_PX, LABEL_FONT_PX * 1.3);
+                let pill_w = name.chars().count() as f32 * font_px * 0.52 + 16.0;
+                let pill_h = line_px + 6.0;
+                let pill_y = (box_rect.y - 6.0 - pill_h).max(2.0);
+                let mut bg = dock_bg;
+                bg[3] = bg[3].max(0.92);
+                tip.rects.push(RectInst {
+                    rect: Rect::new(cx - pill_w / 2.0, pill_y, pill_w, pill_h),
+                    radius: pill_h / 2.0,
+                    color: bg,
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                tip.labels.push(Label {
+                    text: name,
+                    pos: (cx, pill_y + (pill_h - line_px) / 2.0),
+                    max_w: pill_w,
+                    font_px,
+                    line_px,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: None,
+                    color: None,
+                    clip: None,
+                });
+                scene.grids.push(tip);
+            }
+        }
         // Page dots (own grid so they aren't clipped to the box): between
         // a dock stack and its icon; on the bottom edge of a box in the
         // grid, where the row under it leaves them air.
@@ -3756,31 +3807,27 @@ mod tests {
     fn row_box_is_one_row_over_its_tile() {
         let area = Rect::new(80.0, 0.0, 840.0, 500.0);
         let icon = Rect::new(480.0, 500.0, 40.0, 40.0); // centre x = 500
-        let (r, grid, _) = row_box(icon, 5, (60.0, 80.0), area, 12.0);
-        assert!((r.w - 400.0).abs() < 0.01, "full-width cells while they fit");
+        let (r, grid, _) = row_box(icon, 5, (80.0, 80.0), area, 12.0);
+        assert!((r.w - 400.0).abs() < 0.01);
         assert_eq!(grid, (5, 1));
         assert!((r.x + r.w / 2.0 - 500.0).abs() < 0.01);
         assert!((r.y + r.h - (icon.y - 12.0)).abs() < 0.01, "sits just over the tile");
         // A tile near the edge keeps the row inside the area.
         let edge = Rect::new(900.0, 500.0, 40.0, 40.0);
-        let (r, _, _) = row_box(edge, 5, (60.0, 80.0), area, 12.0);
+        let (r, _, _) = row_box(edge, 5, (80.0, 80.0), area, 12.0);
         assert!(r.x + r.w <= area.x + area.w + 0.01);
     }
 
     #[test]
     fn row_cells_fill_the_line_before_a_page_is_needed() {
-        // A few members: their cells at full width.
-        let ((w, h), grid, cap) = row_cells(4, (60.0, 80.0), 560.0);
-        assert_eq!((grid, cap), ((4, 1), 9));
-        assert!((w - 320.0).abs() < 0.01 && (h - 80.0).abs() < 0.01);
-        // Nine fit across once their cells narrow: all on the line.
-        let ((w, _), grid, _) = row_cells(9, (60.0, 80.0), 560.0);
-        assert_eq!(grid, (9, 1));
-        assert!((w - 560.0).abs() < 0.01);
+        // A few members: as many cells.
+        let ((w, h), grid, cap) = row_cells(4, (80.0, 90.0), 560.0);
+        assert_eq!((grid, cap), ((4, 1), 7));
+        assert!((w - 320.0).abs() < 0.01 && (h - 90.0).abs() < 0.01);
         // Thirty: the line is as full as it gets, the rest on next pages.
-        let ((w, h), grid, cap) = row_cells(30, (60.0, 80.0), 560.0);
-        assert_eq!((grid, cap), ((9, 1), 9));
-        assert!(w <= 560.0 + 0.01 && (h - 80.0).abs() < 0.01);
+        let ((w, h), grid, cap) = row_cells(30, (80.0, 90.0), 560.0);
+        assert_eq!((grid, cap), ((7, 1), 7));
+        assert!((w - 560.0).abs() < 0.01 && (h - 90.0).abs() < 0.01);
     }
 
     #[test]
