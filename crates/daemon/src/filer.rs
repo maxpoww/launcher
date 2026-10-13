@@ -122,6 +122,59 @@ pub(crate) fn found(all: &[Item], find: Option<&str>) -> Vec<Item> {
     }
 }
 
+/// A search goes on into the folders below, a moment after the typing
+/// stops: this deep, for this long, for at most this many things.
+const DEEP_WAIT: Duration = Duration::from_millis(250);
+const DEEP_DEPTH: usize = 7;
+const DEEP_TIME: Duration = Duration::from_secs(3);
+const DEEP_MAX: usize = 300;
+
+/// The things called something with `find` in it in the folders BELOW
+/// `dir` (its own are the listing's), nearest first. Links to folders are
+/// not followed, and dot folders only when `hidden`.
+pub(crate) fn search_below(dir: &Path, find: &str, hidden: bool) -> Vec<Item> {
+    let find = find.to_lowercase();
+    let started = Instant::now();
+    let mut out = Vec::new();
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> = std::collections::VecDeque::new();
+    queue.push_back((dir.to_path_buf(), 0));
+    while let Some((at, depth)) = queue.pop_front() {
+        if out.len() >= DEEP_MAX || started.elapsed() > DEEP_TIME {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        let mut here: Vec<Item> = Vec::new();
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !hidden && name.starts_with('.') {
+                continue;
+            }
+            // (The entry's own kind: a link is not gone into.)
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+            if is_dir && depth + 1 < DEEP_DEPTH {
+                queue.push_back((e.path(), depth + 1));
+            }
+            if depth > 0 && name.to_lowercase().contains(&find) {
+                here.push(crate::desktop::item_for(e.path(), name, is_dir));
+            }
+        }
+        here.sort_by(|a, b| by_name(&a.name, &b.name));
+        out.extend(here);
+    }
+    out.truncate(DEEP_MAX);
+    out
+}
+
+/// Where under `dir` a thing found below it is: its folder, from `dir`.
+pub(crate) fn below(path: &str, dir: &Path) -> String {
+    Path::new(path)
+        .parent()
+        .and_then(|p| p.strip_prefix(dir).ok())
+        .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+}
+
 /// What a folder's things are ordered by in a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SortKey {
@@ -767,6 +820,13 @@ struct Win {
     /// what was found.
     find: Option<String>,
     all: Vec<Item>,
+    /// What the search found in the folders below (they follow the
+    /// folder's own in `items`, from `deep_from` on); which search is
+    /// awaited; and whether one is still walking.
+    deep: Vec<Item>,
+    deep_from: usize,
+    deep_gen: u64,
+    deep_busy: bool,
     frame_pending: bool,
     dirty: bool,
     last_frame: Option<Instant>,
@@ -864,6 +924,17 @@ impl Win {
             .collect();
         let g = g.min(names.len());
         Some((names[..g].to_vec(), names[g..].to_vec()))
+    }
+
+    /// Put in `items` what is to be shown: all the folder holds, or — while
+    /// a search has words — what it found here, then what it found below.
+    fn show_found(&mut self) {
+        self.items = found(&self.all, self.find.as_deref());
+        self.deep_from = usize::MAX;
+        if self.find.as_ref().is_some_and(|f| !f.is_empty()) {
+            self.deep_from = self.items.len();
+            self.items.extend(self.deep.iter().cloned());
+        }
     }
 
     /// Whether this window is on the bin, or in a folder thrown away.
@@ -1355,6 +1426,10 @@ impl App {
             meta: HashMap::new(),
             find: None,
             all: Vec::new(),
+            deep: Vec::new(),
+            deep_from: usize::MAX,
+            deep_gen: 0,
+            deep_busy: false,
             frame_pending: false,
             dirty: false,
             last_frame: None,
@@ -1520,6 +1595,10 @@ impl App {
         win.slide.clear();
         win.find = None;
         win.all.clear();
+        win.deep.clear();
+        win.deep_from = usize::MAX;
+        win.deep_gen += 1;
+        win.deep_busy = false;
         win.selected.clear();
         win.cursor = None;
         win.anchor = None;
@@ -1659,8 +1738,8 @@ impl App {
         let cursor_path = win.cursor.and_then(|i| win.items.get(i)).map(|it| it.path.clone());
         match listed {
             Ok(items) => {
-                win.items = found(&items, win.find.as_deref());
                 win.all = items;
+                win.show_found();
                 win.failed = false;
             }
             Err(e) => {
@@ -2258,7 +2337,13 @@ impl App {
             return;
         };
         win.find = find;
-        win.items = found(&win.all, win.find.as_deref());
+        // (What was found below was for other words.)
+        win.deep.clear();
+        win.deep_gen += 1;
+        win.show_found();
+        let words = win.find.clone().filter(|f| !f.trim().is_empty());
+        win.deep_busy = words.is_some();
+        let (generation, dir, hidden) = (win.deep_gen, win.dir.clone(), win.hidden);
         // What is shown changed under everything that held a place in it.
         let present: HashSet<&str> = win.items.iter().map(|it| it.path.as_str()).collect();
         win.selected.retain(|p| present.contains(p.as_str()));
@@ -2275,6 +2360,37 @@ impl App {
         win.scroll_to = 0.0;
         self.filer_hover(id);
         self.filer_request_draw(id);
+        // …and, once the typing has stopped a moment, the folders below
+        // are searched too, off the loop.
+        let Some(words) = words else {
+            return;
+        };
+        let timer = calloop::timer::Timer::from_duration(DEEP_WAIT);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if app.filer.win(id).is_some_and(|w| w.deep_gen == generation) {
+                let (dir, words) = (dir.clone(), words.clone());
+                app.desktop_off_loop(
+                    move || {
+                        let items = search_below(&dir, &words, hidden);
+                        let meta = meta_of(&items);
+                        (items, meta)
+                    },
+                    move |app, (items, meta)| {
+                        let Some(win) = app.filer.win_mut(id).filter(|w| w.deep_gen == generation) else {
+                            return;
+                        };
+                        win.deep = items;
+                        win.meta.extend(meta);
+                        win.deep_busy = false;
+                        win.show_found();
+                        win.names.1.clear();
+                        win.slide.clear();
+                        app.filer_request_draw(id);
+                    },
+                );
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 
     /// Icons, or a list: the owner's standing choice for every window.
@@ -2831,7 +2947,13 @@ impl App {
                         ..label(&rename.text, (name_x, top), inner + 2.0, false, false)
                     });
                 } else if let Some(renderer) = win.renderer.as_mut() {
-                    let name = crate::desktop::fit_label(&item.name, name_w, &mut |t| {
+                    // (A thing found below is named with its folder.)
+                    let full = if i >= win.deep_from {
+                        format!("{}/{}", below(&item.path, &win.dir), item.name)
+                    } else {
+                        item.name.clone()
+                    };
+                    let name = crate::desktop::fit_label(&full, name_w, &mut |t| {
                         renderer.measure_text(t, TEXT_PX, None)
                     });
                     grid.labels.push(label(&name, (name_x, top), name_w + 2.0, false, false));
@@ -2852,9 +2974,17 @@ impl App {
             }
             if win.names.1[i].is_none() {
                 if let Some(renderer) = win.renderer.as_mut() {
-                    win.names.1[i] = Some(two_lines(&item.name, label_w, &mut |t| {
-                        renderer.measure_text(t, LABEL_FONT_PX, None)
-                    }));
+                    let mut measure = |t: &str| renderer.measure_text(t, LABEL_FONT_PX, None);
+                    win.names.1[i] = Some(if i >= win.deep_from {
+                        // Found below: its name on one line, its folder dim
+                        // on the other.
+                        (
+                            crate::desktop::fit_label(&item.name, label_w, &mut measure),
+                            crate::desktop::fit_label(&below(&item.path, &win.dir), label_w, &mut measure),
+                        )
+                    } else {
+                        two_lines(&item.name, label_w, &mut measure)
+                    });
                 }
             }
             if let Some(rename) = win.rename.as_ref().filter(|r| r.path == item.path) {
@@ -2912,7 +3042,7 @@ impl App {
                         (cell.x + cell.w / 2.0, icon.y + icon.h + LABEL_GAP + n as f32 * LABEL_LINE_PX),
                         label_w,
                         true,
-                        false,
+                        n == 1 && i >= win.deep_from,
                     )
                 });
             }
@@ -2920,6 +3050,8 @@ impl App {
         if win.items.is_empty() && !win.loading {
             let words = if win.failed {
                 tr("This folder can't be opened")
+            } else if win.deep_busy {
+                tr("Searching…")
             } else if win.find.as_ref().is_some_and(|f| !f.is_empty()) {
                 tr("Nothing found")
             } else if win.in_bin() == InBin::Top {
@@ -4616,6 +4748,24 @@ mod tests {
         assert_eq!(span(2, 5), 2..=5);
         assert_eq!(span(5, 2), 2..=5);
         assert_eq!(span(3, 3), 3..=3);
+    }
+
+    #[test]
+    fn a_search_goes_on_into_the_folders_below_nearest_first() {
+        let dir = std::env::temp_dir().join(format!("waverunner-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+        for f in ["Informe.txt", "a/informe 2.txt", "a/b/otro INFORME.pdf", "a/nada.txt", ".hidden/informe.txt"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let got = search_below(&dir, "informe", false);
+        // The folder's own things are the listing's, not this walk's.
+        let names: Vec<&str> = got.iter().map(|it| it.name.as_str()).collect();
+        assert_eq!(names, ["informe 2.txt", "otro INFORME.pdf"]);
+        assert_eq!(below(&got[1].path, &dir), "a/b");
+        assert_eq!(search_below(&dir, "informe", true).len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

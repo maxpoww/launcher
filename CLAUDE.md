@@ -820,7 +820,12 @@ The big daemon files are cohesive but long — go straight to the function:
   THE SESSION: the open windows' folders are noted in the runtime dir (`session_path`,
   `filer_note_session`) and a dock started again within the login opens them again
   (`filer_restore_session`, from `main` just before the loop) — where each stood is the
-  compositor's to give. NOT BUILT: search into sub-folders,
+  compositor's to give. THE SEARCH GOES ON BELOW: `DEEP_WAIT` after the
+  last letter the folders under this one are walked off the loop (`search_below`: breadth first,
+  `DEEP_DEPTH` deep, `DEEP_TIME`, `DEEP_MAX` things, links to folders not followed) and what is
+  found there follows the folder's own (`Win::deep`, `deep_from`, `show_found`; `deep_gen` drops
+  a late answer), each said with its folder (`below`: dim under the name, before it in the
+  list). NOT BUILT:
   `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
