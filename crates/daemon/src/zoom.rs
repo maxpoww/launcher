@@ -110,6 +110,9 @@ impl App {
             return USAGE.to_owned();
         };
         if (to - now).abs() < 0.001 {
+            if what == "fast" {
+                self.fast_touch();
+            }
             return format!("{what} zoom stays {to}");
         }
         info!("zoom: {what} {now} → {to}");
@@ -123,6 +126,9 @@ impl App {
         } else if what == "fast" {
             self.settings.fast_zoom = to;
             self.settings.save();
+            // Zooming is using it: its idle clock starts over (the keys come
+            // through the compositor, not through its own keyboard).
+            self.fast_touch();
             self.schedule_frame();
         } else if what == "stack" {
             self.settings.stack_zoom = to;
