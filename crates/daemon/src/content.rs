@@ -628,6 +628,10 @@ pub struct QuickDraw<'a> {
     pub draw: &'a crate::panel::PanelDraw,
     /// Its pictures: where each goes and the texture layer it is on.
     pub images: &'a [(Rect, u32, f32)],
+    /// The names of its pictures that have no preview, on their tiles; and
+    /// the ink they are written in.
+    pub names: &'a [(Rect, String)],
+    pub ink: [f32; 4],
     /// Its own colour this frame (the dock's, or — a wallpaper changing —
     /// already the new picture's: `App::quick_colours`).
     pub bg: [f32; 4],
@@ -3497,6 +3501,22 @@ pub fn scene(
         }
         if q.a > 0.97 {
             picture_tiles(&mut scene, q.images);
+            for (tile, name) in q.names {
+                let px = (tile.h * 0.11).clamp(9.0, 14.0);
+                scene.labels.push(Label {
+                    text: name.clone(),
+                    pos: (tile.x + tile.w / 2.0, tile.y + (tile.h - px * 1.25) / 2.0),
+                    max_w: tile.w - px,
+                    font_px: px,
+                    line_px: px * 1.25,
+                    centered: true,
+                    dim: false,
+                    cache: false,
+                    family: crate::options::TEXT_FONT,
+                    color: Some([q.ink[0], q.ink[1], q.ink[2], q.ink[3] * 0.5]),
+                    clip: Some(*tile),
+                });
+            }
         }
     }
 

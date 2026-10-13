@@ -153,6 +153,11 @@ impl App {
         None
     }
 
+    /// Whether the preview of the picture at `path` is in.
+    pub(crate) fn has_picture(&self, path: &str) -> bool {
+        self.thumb_map.contains_key(path)
+    }
+
     pub(crate) fn thumb_layer_base(&self) -> u32 {
         self.pkg_layer_base + (crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP) as u32
     }

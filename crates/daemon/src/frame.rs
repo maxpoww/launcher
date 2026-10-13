@@ -1329,8 +1329,28 @@ impl App {
             .into_iter()
             .filter_map(|(r, file)| self.picture_layer(&file).map(|(layer, shape)| (r, layer, shape)))
             .collect();
-        let quick_draw =
-            quick.as_ref().map(|(rect, a, draw)| content::QuickDraw { rect: *rect, a: *a, draw, images: &quick_images, bg: quick_bg });
+        // A picture with no preview (yet, or — a video where none can be
+        // made — ever) shows its name instead.
+        let quick_names: Vec<(content::Rect, String)> = quick
+            .as_ref()
+            .map(|(_, _, draw)| draw.images.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, file)| !self.has_picture(file))
+            .map(|(r, file)| {
+                let name = std::path::Path::new(&file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                (r, name)
+            })
+            .collect();
+        let quick_draw = quick.as_ref().map(|(rect, a, draw)| content::QuickDraw {
+            rect: *rect,
+            a: *a,
+            draw,
+            images: &quick_images,
+            names: &quick_names,
+            ink: quick_ink,
+            bg: quick_bg,
+        });
         let fast_draw = (self.fast.visible() && self.fast.boxed.is_none()).then_some(content::FastDraw {
             card: if self.fast.controls { fast_pill_card } else { fast_view.card },
             radius: fast_geo.radius,

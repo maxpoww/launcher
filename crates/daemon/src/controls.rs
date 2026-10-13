@@ -986,12 +986,54 @@ pub(crate) fn desktop_handles(text: &str, mime: &str) -> Option<String> {
 // -------------------------------------------------------------- wallpaper
 
 fn wallpaper_dir() -> std::path::PathBuf {
+    // (`WAVERUNNER_WALLPAPER_DIR`: another folder, for a test rig.)
+    if let Some(dir) = std::env::var_os("WAVERUNNER_WALLPAPER_DIR").filter(|d| !d.is_empty()) {
+        return std::path::PathBuf::from(dir);
+    }
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Pictures/Wallpapers")
 }
 
 /// The program that puts a picture on the desktop (`awww`, once `swww`).
 fn wallpaper_tool() -> Option<&'static str> {
     ["awww", "swww"].into_iter().find(|t| crate::launch::on_path(t))
+}
+
+/// The program that plays a video as the desktop's picture.
+const VIDEO_TOOL: &str = "mpvpaper";
+
+fn is_video_ext(ext: &str) -> bool {
+    matches!(ext, "mp4" | "webm" | "mkv" | "mov" | "m4v")
+}
+
+/// Whether the wallpaper at `path` is a video, and whether it moves at all
+/// (a video, or a GIF).
+pub(crate) fn wallpaper_is_video(path: &str) -> bool {
+    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| is_video_ext(&e.to_lowercase()))
+}
+
+pub(crate) fn wallpaper_moves(path: &str) -> bool {
+    wallpaper_is_video(path) || path.to_lowercase().ends_with(".gif")
+}
+
+/// Put the wallpaper at `path` on the desktop: a still or a GIF through the
+/// picture program (`fade`: with its second-long fade), a video through
+/// `mpvpaper`, looping and silent, over whatever picture is there. Any video
+/// playing is ended first. Returns whether it was put.
+fn show_wallpaper(path: &str, fade: bool) -> bool {
+    // (None playing: nothing to end, and that is not a failure.)
+    run("pkill", &["-x", VIDEO_TOOL]);
+    if wallpaper_is_video(path) {
+        // `-f`: it forks and plays on; `*`: every screen.
+        return run(VIDEO_TOOL, &["-f", "-o", "no-audio loop panscan=1.0", "*", path]);
+    }
+    let Some(tool) = wallpaper_tool() else {
+        return false;
+    };
+    if fade {
+        run(tool, &["img", path, "--transition-type", "fade", "--transition-duration", "1"])
+    } else {
+        run(tool, &["img", path, "--transition-type", "none"])
+    }
 }
 
 /// The most pictures shown.
@@ -1004,8 +1046,13 @@ fn pictures() -> Vec<std::path::PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
+            // Stills, and what moves: an animated GIF is the picture
+            // program's own to play; a video is played by `mpvpaper`, so
+            // videos are listed only where that is installed.
             p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-                matches!(e.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp")
+                let e = e.to_lowercase();
+                matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
+                    || (is_video_ext(&e) && crate::launch::on_path(VIDEO_TOOL))
             })
         })
         .collect();
@@ -1249,7 +1296,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             } else if wallpaper_tool().is_none() {
                 tr("This computer cannot change its wallpaper yet.").to_owned()
             } else {
-                tr("The pictures in Pictures/Wallpapers.").to_owned()
+                tr("The pictures in Pictures/Wallpapers. ▶ marks the ones that move.").to_owned()
             };
             if !found.is_empty() && wallpaper_tool().is_some() {
                 let choices = found
@@ -1431,14 +1478,10 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         }
         "wallpaper" => {
             let path = std::path::Path::new(value);
-            if path.starts_with(wallpaper_dir()) && path.is_file() {
-                if let Some(tool) = wallpaper_tool() {
-                    if run(tool, &["img", value, "--transition-type", "fade", "--transition-duration", "1"]) {
-                        let mut s = GolemSettings::load();
-                        s.wallpaper = Some(value.to_owned());
-                        s.store();
-                    }
-                }
+            if path.starts_with(wallpaper_dir()) && path.is_file() && show_wallpaper(value, true) {
+                let mut s = GolemSettings::load();
+                s.wallpaper = Some(value.to_owned());
+                s.store();
             }
         }
         k if k.starts_with("default:") => {
@@ -1491,10 +1534,10 @@ pub(crate) fn reassert() {
         }
         // The session puts ITS picture up as it starts (Golem's hyprland.lua);
         // the owner's goes over it once that has settled.
-        if let (Some(picture), Some(tool)) = (&s.wallpaper, wallpaper_tool()) {
+        if let Some(picture) = &s.wallpaper {
             std::thread::sleep(std::time::Duration::from_secs(5));
             if std::path::Path::new(picture).is_file() {
-                run(tool, &["img", picture, "--transition-type", "none"]);
+                show_wallpaper(picture, false);
             }
         }
     });
