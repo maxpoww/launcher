@@ -6891,6 +6891,8 @@ impl KeyboardHandler for App {
             if self.filer.keys == Some(id) {
                 self.filer.keys = None;
             }
+            // (A name still being typed keeps what was typed.)
+            self.filer_end_rename(id, true);
             return;
         }
         if self.card_layer.as_ref().is_some_and(|l| l.wl_surface() == surface) {

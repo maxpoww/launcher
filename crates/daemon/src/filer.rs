@@ -8,16 +8,24 @@
 //! scrolling, with the places down its left side and the way here along its
 //! top.
 //!
-//! This is the first cut: looking and going. A click selects, a double
-//! click opens (a folder in this window, a file in its app), the side
-//! buttons of the mouse / Backspace / Alt+arrows go back, forward and up,
-//! the arrows walk the icons and typing jumps to a name. The folder is
-//! listed off the loop and followed with inotify. Not here yet: the menu,
-//! drags, rename, copy and paste, the bin — the desktop's own, to be shared.
+//! A click selects, a double click opens (a folder in this window, a file
+//! in its app), the side buttons of the mouse / Backspace / Alt+arrows go
+//! back, forward and up, the arrows walk the icons and typing jumps to a
+//! name. The folder is listed off the loop and followed with inotify.
+//!
+//! A right click opens the desktop's own menu (`desktop_menu::Menu`, with
+//! this window's rows — `menu_rows`), drawn in the window: Open · Open in
+//! terminal · Cut · Copy · Rename · Move to bin · Properties on a thing,
+//! Paste · New folder · Open in terminal on the folder itself. A name is
+//! typed in place (`Rename`; the desktop's rules for the ending). The keys
+//! a file manager has: Ctrl+C/X/V, Delete, F2, Ctrl+Shift+N.
+//! Not here yet: drags in and out, the rubber band, the bin as a place.
 //!
 //! Pointer-free: `waverunner-ctl files [<folder>]` opens a window;
-//! `files go <folder>|back|forward|up|select <n>|activate <n>|key
-//! <name>|scroll <px>|hidden|close|state` drive the newest one.
+//! `files go <folder>|back|forward|up|select <n>|add <n>|activate <n>|key
+//! <name>|type <letters>|scroll <px>|hidden|menu [<n>]|pick <row>|copy|cut|
+//! paste|newfolder|rename <n>|bin|props <n>|close|state` drive the newest
+//! one (⚠ `bin`, `paste`, `pick` and a rename's Enter are REAL).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -40,6 +48,8 @@ use crate::content::{
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
 use crate::desktop::{Item, Kind};
+use crate::desktop_menu::{Action, Menu, MenuPaint, Row};
+use crate::desktop_props::Props;
 use crate::fractional::SurfaceKind;
 use crate::i18n::tr;
 use crate::{launch, App};
@@ -208,6 +218,67 @@ impl Layout {
     }
 }
 
+/// A name being typed in place.
+#[derive(Debug, Clone, PartialEq)]
+struct Rename {
+    path: String,
+    text: String,
+    /// The whole name is selected (as it opens): the first key replaces
+    /// it, a Backspace clears it.
+    all: bool,
+}
+
+/// The rows of a right click: on one thing, on one of `many` selected, or
+/// on the folder itself (`paste`: files are on the clipboard).
+pub(crate) fn menu_rows(on_item: bool, many: bool, paste: bool) -> Vec<Row> {
+    let row = |label: &'static str, action: Action| Row::Item {
+        label,
+        action,
+        danger: false,
+    };
+    let bin = Row::Item {
+        label: tr("Move to bin"),
+        action: Action::MoveToBin,
+        danger: true,
+    };
+    if on_item && many {
+        vec![
+            row(tr("Open"), Action::Open),
+            Row::Sep,
+            row(tr("Cut"), Action::Cut),
+            row(tr("Copy"), Action::Copy),
+            Row::Sep,
+            bin,
+        ]
+    } else if on_item {
+        vec![
+            row(tr("Open"), Action::Open),
+            row(tr("Open in terminal"), Action::OpenTerminal),
+            Row::Sep,
+            row(tr("Cut"), Action::Cut),
+            row(tr("Copy"), Action::Copy),
+            Row::Sep,
+            row(tr("Rename"), Action::Rename),
+            Row::Sep,
+            bin,
+            Row::Sep,
+            // Last, and opened by HOVER, as on the desktop.
+            row(tr("Properties"), Action::Properties),
+        ]
+    } else {
+        let mut rows = Vec::new();
+        if paste {
+            rows.extend([row(tr("Paste"), Action::Paste), Row::Sep]);
+        }
+        rows.extend([
+            row(tr("New folder"), Action::NewFolder),
+            Row::Sep,
+            row(tr("Open in terminal"), Action::OpenTerminal),
+        ]);
+        rows
+    }
+}
+
 /// The clickable parts whose places are only known once drawn.
 #[derive(Debug, Default)]
 struct Hits {
@@ -269,6 +340,16 @@ struct Win {
     hits: Hits,
     watch: Option<calloop::RegistrationToken>,
     reload_pending: bool,
+
+    /// The menu that is up, and the thing it was opened on (its place in
+    /// the list moves when the folder is read again).
+    menu: Option<Menu>,
+    menu_path: Option<String>,
+    props: Option<Props>,
+    rename: Option<Rename>,
+    /// A thing whose name is to be typed as soon as it is listed (a folder
+    /// just made).
+    rename_next: Option<String>,
 }
 
 impl Win {
@@ -713,6 +794,11 @@ impl App {
             hits: Hits::default(),
             watch: None,
             reload_pending: false,
+            menu: None,
+            menu_path: None,
+            props: None,
+            rename: None,
+            rename_next: None,
         });
         self.filer_places();
         self.filer_show(id, dir);
@@ -817,6 +903,10 @@ impl App {
         win.dir = dir.clone();
         win.items.clear();
         win.names.1.clear();
+        win.menu = None;
+        win.menu_path = None;
+        win.props = None;
+        win.rename = None;
         win.selected.clear();
         win.cursor = None;
         win.click = None;
@@ -909,6 +999,27 @@ impl App {
         // The selection follows the files; the keys stay on theirs.
         let present: HashSet<&str> = win.items.iter().map(|it| it.path.as_str()).collect();
         win.selected.retain(|p| present.contains(p.as_str()));
+        // What is up holds a thing by its path: carried over, or let go of
+        // if the thing went — Enter in a name must never name another.
+        if win.rename.as_ref().is_some_and(|r| !present.contains(r.path.as_str())) {
+            win.rename = None;
+        }
+        if let Some(path) = win.menu_path.clone() {
+            match win.items.iter().position(|it| it.path == path) {
+                Some(i) => {
+                    if let Some(menu) = win.menu.as_mut() {
+                        menu.item = Some(i);
+                    }
+                }
+                None => {
+                    win.menu = None;
+                    win.menu_path = None;
+                }
+            }
+        }
+        if win.props.as_ref().is_some_and(|p| !present.contains(p.path.as_str())) {
+            win.props = None;
+        }
         win.cursor = cursor_path.and_then(|p| win.items.iter().position(|it| it.path == p));
         let layout = win.layout(icon_scale);
         if let Some(i) = win
@@ -923,7 +1034,313 @@ impl App {
         let max = layout.max_scroll(win.items.len());
         win.scroll_to = win.scroll_to.min(max);
         win.scroll = win.scroll.min(max);
+        // A folder just made: its name is typed at once.
+        let named = win
+            .rename_next
+            .take()
+            .and_then(|p| win.items.iter().position(|it| it.path == p));
         self.filer_request_draw(id);
+        if let Some(i) = named {
+            self.filer_walk_to(id, i);
+            self.filer_begin_rename(id, i);
+        }
+    }
+
+    /// The selected things' paths, in the order they are shown.
+    fn filer_selected(&self, id: u32) -> Vec<String> {
+        self.filer.win(id).map_or_else(Vec::new, |w| {
+            w.items
+                .iter()
+                .filter(|it| w.selected.contains(&it.path))
+                .map(|it| it.path.clone())
+                .collect()
+        })
+    }
+
+    /// A right click at `at`: the menu for the thing under it (which is
+    /// selected if it was not — a group stays a group), or the folder's.
+    fn filer_open_menu(&mut self, id: u32, at: (f32, f32), item: Option<usize>) {
+        let paste = self.clipboard_files().is_some();
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let (w, h) = (win.size.0 as f32, win.size.1 as f32);
+        let path = item.and_then(|i| win.items.get(i)).map(|it| it.path.clone());
+        match (&path, item) {
+            (Some(path), Some(i)) => {
+                if !win.selected.contains(path) {
+                    win.select_only(i);
+                }
+            }
+            _ => win.selected.clear(),
+        }
+        let many = path.is_some() && win.selected.len() > 1;
+        let rows = menu_rows(path.is_some(), many, paste);
+        win.menu = Some(Menu::open(item.filter(|_| path.is_some()), many, at, w, h).with_rows(rows, h));
+        win.menu_path = path;
+        win.props = None;
+        self.filer_request_draw(id);
+    }
+
+    /// A row of the menu was chosen (or its key pressed): on the thing it
+    /// was opened on, else on what is selected.
+    fn filer_act(&mut self, id: u32, action: Action, item: Option<usize>, at: (f32, f32)) {
+        let selected = self.filer_selected(id);
+        let Some(win) = self.filer.win(id) else {
+            return;
+        };
+        let dir = win.dir.clone();
+        match action {
+            Action::Open => {
+                let all: Vec<usize> = win
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, it)| win.selected.contains(&it.path))
+                    .map(|(i, _)| i)
+                    .collect();
+                match (all.as_slice(), item) {
+                    ([one], _) => self.filer_activate(id, *one),
+                    ([], Some(i)) => self.filer_activate(id, i),
+                    // Several: each file in its app; this window stays here.
+                    (many, _) => {
+                        let files: Vec<usize> = many
+                            .iter()
+                            .copied()
+                            .filter(|&i| win.items.get(i).is_some_and(|it| !matches!(it.kind, Kind::Folder | Kind::Volume)))
+                            .collect();
+                        for i in files {
+                            self.filer_activate(id, i);
+                        }
+                    }
+                }
+            }
+            Action::OpenTerminal => {
+                // In the folder clicked, else in the one shown.
+                let at_dir = item
+                    .and_then(|i| win.items.get(i))
+                    .filter(|it| matches!(it.kind, Kind::Folder | Kind::Volume))
+                    .map_or_else(|| dir.to_string_lossy().into_owned(), |it| it.path.clone());
+                let exec = format!("cd {} && exec {}", launch::shell_quote(&at_dir), self.config.launch.terminal);
+                info!("files: terminal at {at_dir}");
+                if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
+                    error!("files: terminal launch failed: {e:#}");
+                }
+            }
+            Action::Cut | Action::Copy => {
+                if selected.is_empty() {
+                    return;
+                }
+                let cut = action == Action::Cut;
+                info!("files: {} {}", if cut { "cut" } else { "copied" }, selected.join(", "));
+                self.serve_files(&selected, cut);
+            }
+            Action::Paste => self.filer_paste(id),
+            Action::Rename => {
+                let i = item.or_else(|| win.items.iter().position(|it| selected.first() == Some(&it.path)));
+                if let Some(i) = i {
+                    self.filer_begin_rename(id, i);
+                }
+            }
+            Action::MoveToBin => {
+                for path in selected {
+                    info!("files: {path} → Recycle Bin");
+                    self.trash_file(&path); // the folder's watch takes it off the window
+                }
+            }
+            Action::NewFolder => self.filer_new_folder(id),
+            Action::Properties => {
+                if let Some(i) = item {
+                    self.filer_open_props(id, i, at, None);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The clipboard's files into the folder shown: copied, or moved if
+    /// they were cut. Off the loop; what arrived comes up selected.
+    fn filer_paste(&mut self, id: u32) {
+        let Some((paths, cut)) = self.clipboard_files() else {
+            return;
+        };
+        let Some(dir) = self.filer.win(id).map(|w| w.dir.clone()) else {
+            return;
+        };
+        let into = dir.clone();
+        self.desktop_off_loop(
+            move || crate::desktop_send::put(&paths, &into, cut),
+            move |app, (brought, failed)| {
+                info!(
+                    "files: pasted {} into {} ({}; {failed} failed)",
+                    brought.len(),
+                    dir.display(),
+                    if cut { "moved" } else { "copied" }
+                );
+                let now: Vec<String> = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                if cut {
+                    // The same files where they are now, as a plain copy: a
+                    // second paste must not look for what has moved.
+                    app.serve_files(&now, false);
+                }
+                if let Some(win) = app.filer.win_mut(id).filter(|w| w.dir == dir) {
+                    win.reveal = now.first().cloned();
+                    app.filer_list(id);
+                }
+            },
+        );
+    }
+
+    /// A new, empty folder here, named `untitled folder` (then `untitled
+    /// folder 2`…), its name opened for typing once it is listed.
+    fn filer_new_folder(&mut self, id: u32) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let dir = win.dir.clone();
+        let path = (1..)
+            .map(|n| {
+                if n == 1 {
+                    dir.join("untitled folder")
+                } else {
+                    dir.join(format!("untitled folder {n}"))
+                }
+            })
+            .find(|p| !p.exists())
+            .unwrap_or_else(|| dir.join("untitled folder"));
+        if let Err(e) = std::fs::create_dir(&path) {
+            error!("files: cannot make {}: {e}", path.display());
+            return;
+        }
+        info!("files: new folder {}", path.display());
+        win.rename_next = Some(path.to_string_lossy().into_owned());
+        self.filer_list(id);
+    }
+
+    /// Open item `i`'s name for typing, the whole of it selected. (The
+    /// window has the keyboard already: it is a window.)
+    fn filer_begin_rename(&mut self, id: u32, i: usize) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let Some(item) = win.items.get(i) else {
+            return;
+        };
+        if item.kind == Kind::Volume {
+            return;
+        }
+        // (A shortcut is renamed by its file, not its `Name=`.)
+        let (path, text) = (item.path.clone(), file_name(Path::new(&item.path)));
+        info!("files: renaming {text}");
+        win.select_only(i);
+        win.rename = Some(Rename { path, text, all: true });
+        self.filer_request_draw(id);
+    }
+
+    /// The name is settled: kept (`commit`, if it changed and is free) or
+    /// left as it was.
+    pub(crate) fn filer_end_rename(&mut self, id: u32, commit: bool) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let Some(rename) = win.rename.take() else {
+            return;
+        };
+        let old = PathBuf::from(&rename.path);
+        let is_file = win
+            .items
+            .iter()
+            .find(|it| it.path == rename.path)
+            .is_some_and(|it| it.kind == Kind::File);
+        let name = crate::desktop::typed_name(&rename.text, &old, is_file);
+        if let Some(new) = commit.then(|| crate::desktop::rename_file(&old, &name)).flatten() {
+            let new = new.to_string_lossy().into_owned();
+            win.selected.clear();
+            win.reveal = Some(new);
+            self.filer_list(id);
+        }
+        self.filer_request_draw(id);
+    }
+
+    /// A key while a name is being typed: text goes in (the first key
+    /// replaces the selected name), Backspace takes out, Enter keeps,
+    /// Escape leaves the old name.
+    fn filer_rename_key(&mut self, id: u32, keysym: Keysym, utf8: Option<&str>) {
+        let ctrl = self.modifiers.ctrl;
+        let Some(rename) = self.filer.win_mut(id).and_then(|w| w.rename.as_mut()) else {
+            return;
+        };
+        match keysym {
+            Keysym::Return | Keysym::KP_Enter => return self.filer_end_rename(id, true),
+            Keysym::Escape => return self.filer_end_rename(id, false),
+            Keysym::BackSpace => {
+                if rename.all {
+                    rename.text.clear();
+                    rename.all = false;
+                } else {
+                    rename.text.pop();
+                }
+            }
+            _ => {
+                let Some(text) = utf8.filter(|t| !ctrl && !t.is_empty() && !t.chars().any(char::is_control)) else {
+                    return;
+                };
+                if rename.all {
+                    rename.text.clear();
+                    rename.all = false;
+                }
+                rename.text.push_str(text);
+            }
+        }
+        self.filer_request_draw(id);
+    }
+
+    /// The Properties box for item `i`: grown out of `menu` when it comes
+    /// from its last row, by the pointer otherwise. A folder is weighed on
+    /// a thread.
+    fn filer_open_props(&mut self, id: u32, i: usize, at: (f32, f32), menu: Option<Menu>) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let Some(item) = win.items.get(i) else {
+            return;
+        };
+        let (w, h) = (win.size.0 as f32, win.size.1 as f32);
+        let props = Props::open(item, at, menu, w, h, &home());
+        if item.kind == Kind::Folder {
+            let path = item.path.clone();
+            let (tx, rx) = calloop::channel::channel::<(String, u64, u64)>();
+            std::thread::spawn(move || {
+                let (bytes, files) = crate::desktop_props::folder_size(Path::new(&path));
+                let _ = tx.send((path, bytes, files));
+            });
+            let _ = self.loop_handle.insert_source(rx, move |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg((path, bytes, files)) = event {
+                    if let Some(p) = app.filer.win_mut(id).and_then(|w| w.props.as_mut()).filter(|p| p.path == path) {
+                        p.set_size(bytes, files);
+                        app.filer_request_draw(id);
+                    }
+                }
+            });
+        }
+        info!("files: properties of {}", props.title);
+        if let Some(win) = self.filer.win_mut(id) {
+            win.menu = None;
+            win.props = Some(props);
+        }
+        self.filer_request_draw(id);
+    }
+
+    /// The menu's and the box's paint in a window: the boxes' own surface,
+    /// laid solid on the window's ground (there is no glass inside it).
+    fn filer_panel_paint(&self, rect: Rect, ground: [f32; 4]) -> MenuPaint {
+        let mut paint = self.desktop_panel_paint(rect);
+        let a = paint.fill[3];
+        for (c, g) in paint.fill.iter_mut().zip(ground).take(3) {
+            *c = *c * a + g * (1.0 - a);
+        }
+        paint.fill[3] = 1.0;
+        paint
     }
 
     /// Open item `i`: a folder in this window, a shortcut runs, anything
@@ -1185,8 +1602,19 @@ impl App {
             .last_frame
             .map(|l| now.duration_since(l).as_secs_f32().min(0.1))
             .unwrap_or(0.0);
-        let (scroll, moving) = crate::animation::ease_toward(win.scroll, win.scroll_to, dt, 18.0, 0.5);
+        let (scroll, mut moving) = crate::animation::ease_toward(win.scroll, win.scroll_to, dt, 18.0, 0.5);
         win.scroll = scroll;
+        // The menu's and the box's entrance, at the desktop's rates.
+        if let Some(menu) = win.menu.as_mut() {
+            let (t, m) = crate::animation::ease_toward(menu.t, 1.0, dt, 20.0, 0.004);
+            menu.t = t;
+            moving |= m;
+        }
+        if let Some(props) = win.props.as_mut() {
+            let (t, m) = crate::animation::ease_toward(props.t, 1.0, dt, 16.0, 0.004);
+            props.t = t;
+            moving |= m;
+        }
         win.last_frame = moving.then_some(now);
         self.filer_sync_icons(&mut win, &layout);
 
@@ -1301,6 +1729,12 @@ impl App {
         if win.names.0 != icon_scale || win.names.1.len() != win.items.len() {
             win.names = (icon_scale, vec![None; win.items.len()]);
         }
+        // Names are painted last of all: one under the menu or the box is
+        // left out, or it would show through (the desktop's lesson).
+        let cover = win.menu.as_ref().map(|m| m.rect).or(win.props.as_ref().map(|p| p.rect));
+        let covered = |r: Rect| {
+            cover.is_some_and(|c| r.x < c.x + c.w && c.x < r.x + r.w && r.y < c.y + c.h && c.y < r.y + r.h)
+        };
         for i in view {
             let item = &win.items[i];
             let mut cell = layout.cell(i);
@@ -1330,9 +1764,52 @@ impl App {
                     }));
                 }
             }
+            if let Some(rename) = win.rename.as_ref().filter(|r| r.path == item.path) {
+                // The field: a dark pill around what is typed, washed while
+                // all of it is selected, a caret after it (the desktop's).
+                let (cx, top) = (cell.x + cell.w / 2.0, icon.y + icon.h + LABEL_GAP);
+                let tw = win
+                    .renderer
+                    .as_mut()
+                    .map_or(0.0, |r| r.measure_text(&rename.text, LABEL_FONT_PX, None));
+                let inner = tw.max(24.0);
+                let field = Rect::new(cx - inner / 2.0 - 7.0, top - 2.0, inner + 14.0, LABEL_LINE_PX + 4.0);
+                grid.rects.push(rect(field, 7.0, [0.0, 0.0, 0.0, 0.6]));
+                grid.rects.push(RectInst {
+                    border: 1.0,
+                    ..rect(field, 7.0, [1.0, 1.0, 1.0, 0.18])
+                });
+                if rename.all && tw > 0.0 {
+                    grid.rects.push(rect(
+                        Rect::new(cx - tw / 2.0, top + 1.0, tw, LABEL_LINE_PX - 2.0),
+                        2.0,
+                        [1.0, 1.0, 1.0, 0.22],
+                    ));
+                }
+                grid.rects.push(rect(
+                    Rect::new(cx + tw / 2.0 + 1.0, top + 2.0, 1.0, LABEL_LINE_PX - 4.0),
+                    0.0,
+                    ink,
+                ));
+                grid.labels.push(Label {
+                    font_px: LABEL_FONT_PX,
+                    line_px: LABEL_LINE_PX,
+                    cache: false,
+                    ..label(&rename.text, (cx, top), inner + 2.0, true, false)
+                });
+                continue;
+            }
             let Some((first, second)) = win.names.1[i].as_ref() else {
                 continue;
             };
+            if covered(Rect::new(
+                cell.x,
+                icon.y + icon.h + LABEL_GAP,
+                cell.w,
+                2.0 * LABEL_LINE_PX,
+            )) {
+                continue;
+            }
             for (n, line) in [first, second].into_iter().enumerate().filter(|(_, l)| !l.is_empty()) {
                 grid.labels.push(Label {
                     font_px: LABEL_FONT_PX,
@@ -1370,6 +1847,13 @@ impl App {
         }
         scene.grids.push(grid);
         win.hits = hits;
+        // The menu and the box, over everything.
+        if let Some(menu) = win.menu.as_ref() {
+            menu.push(&mut scene, &self.filer_panel_paint(menu.rect, ground));
+        }
+        if let Some(props) = win.props.as_ref() {
+            props.push(&mut scene, &self.filer_panel_paint(props.rect, ground));
+        }
 
         let mut presented = false;
         {
@@ -1442,6 +1926,37 @@ impl App {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
+        if let (Some(menu), Some(at)) = (win.menu.as_mut(), win.ptr) {
+            // Only its rows answer; coming onto its last one, Properties,
+            // turns the menu into that box (the desktop's way).
+            let over = menu.hit(at);
+            if over != menu.hover {
+                menu.hover = over;
+                let props = over.and_then(|r| menu.action(r)) == Some(Action::Properties);
+                if let (true, Some(i)) = (props, menu.item) {
+                    let menu = win.menu.take();
+                    self.filer_open_props(id, i, at, menu);
+                } else {
+                    self.filer_request_draw(id);
+                }
+            }
+            return;
+        }
+        if let (Some(props), Some(at)) = (win.props.as_mut(), win.ptr) {
+            // Its Back row, on hover: the box turns back into the menu.
+            if props.back_rect().is_some_and(|r| r.contains(at)) {
+                if let Some(mut menu) = win.props.take().and_then(|p| p.back.map(|m| (m, p.rect))).map(|(mut m, from)| {
+                    m.grow_from = Some(from);
+                    m.t = 0.0;
+                    m
+                }) {
+                    menu.hover = menu.hit(at);
+                    win.menu = Some(menu);
+                }
+                self.filer_request_draw(id);
+            }
+            return;
+        }
         let layout = win.layout(icon_scale);
         let spot = win.ptr.map_or(Spot::Nothing, |p| win.spot(p, &layout));
         let changed = spot != win.hover;
@@ -1485,17 +2000,10 @@ impl App {
                 }
                 self.filer_hover(id);
             }
-            wl_pointer::Event::Button {
-                button,
-                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
-                ..
-            } => match button {
-                0x110 => self.filer_click(id),
-                // The mouse's side buttons.
-                0x113 => self.filer_back(id),
-                0x114 => self.filer_forward(id),
-                _ => {}
-            },
+            wl_pointer::Event::Button { button, state, .. } => {
+                let pressed = state == WEnum::Value(wl_pointer::ButtonState::Pressed);
+                self.filer_button(id, button, pressed);
+            }
             wl_pointer::Event::AxisSource { axis_source } => {
                 if let Some(win) = self.filer.win_mut(id) {
                     win.wheel = axis_source == WEnum::Value(wl_pointer::AxisSource::Wheel);
@@ -1536,6 +2044,82 @@ impl App {
         }
         self.filer_hover(id);
         self.filer_request_draw(id);
+    }
+
+    /// A button went down or up.
+    fn filer_button(&mut self, id: u32, button: u32, pressed: bool) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let at = win.ptr.unwrap_or_default();
+        // A menu that is up takes the click: a left press on a row acts
+        // when it comes back up on the same row; any other press closes it.
+        if let Some(menu) = win.menu.as_mut() {
+            let over = menu.hit(at);
+            if button == 0x110 && !pressed {
+                let chosen = menu.pressed.take().filter(|&r| Some(r) == over);
+                if let Some(action) = chosen.and_then(|r| menu.action(r)) {
+                    let item = menu.item;
+                    win.menu = None;
+                    win.menu_path = None;
+                    self.filer_request_draw(id);
+                    self.filer_act(id, action, item, at);
+                }
+                return;
+            }
+            if button == 0x110 && over.is_some() {
+                menu.pressed = over;
+                return;
+            }
+            if pressed {
+                win.menu = None;
+                win.menu_path = None;
+                self.filer_request_draw(id);
+                // A right press elsewhere opens the menu there instead.
+                if button != 0x111 {
+                    self.filer_hover(id);
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+        if !pressed {
+            return;
+        }
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        // A press anywhere puts the Properties box away and keeps a name
+        // being typed.
+        if win.props.take().is_some() {
+            self.filer_hover(id);
+            self.filer_request_draw(id);
+            return;
+        }
+        if win.rename.is_some() {
+            self.filer_end_rename(id, true);
+        }
+        match button {
+            0x110 => self.filer_click(id),
+            0x111 => {
+                let icon_scale = self.icon_scale();
+                let Some(win) = self.filer.win(id) else {
+                    return;
+                };
+                let layout = win.layout(icon_scale);
+                // The menu belongs to the icons' field: the head and the
+                // places have none.
+                if layout.body.contains(at) {
+                    let item = layout.index_at(at, win.scroll, win.items.len());
+                    self.filer_open_menu(id, at, item);
+                }
+            }
+            // The mouse's side buttons.
+            0x113 => self.filer_back(id),
+            0x114 => self.filer_forward(id),
+            _ => {}
+        }
     }
 
     /// A left press.
@@ -1615,6 +2199,21 @@ impl App {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
+        // A name being typed takes every key.
+        if win.rename.is_some() {
+            return self.filer_rename_key(id, keysym, utf8);
+        }
+        // Escape puts away what is up before anything else.
+        if win.menu.is_some() || win.props.is_some() {
+            if keysym == Keysym::Escape {
+                win.menu = None;
+                win.menu_path = None;
+                win.props = None;
+                self.filer_hover(id);
+                self.filer_request_draw(id);
+            }
+            return;
+        }
         let (n, cols) = (win.items.len(), win.layout(icon_scale).cols);
         let page = win.layout(icon_scale).body.h * 0.9;
         let at = win.cursor;
@@ -1662,6 +2261,13 @@ impl App {
                 }
             }
             Keysym::F5 => self.filer_list(id),
+            Keysym::F2 => self.filer_act(id, Action::Rename, None, (0.0, 0.0)),
+            Keysym::Delete => self.filer_act(id, Action::MoveToBin, None, (0.0, 0.0)),
+            Keysym::c | Keysym::C if ctrl => self.filer_act(id, Action::Copy, None, (0.0, 0.0)),
+            Keysym::x | Keysym::X if ctrl => self.filer_act(id, Action::Cut, None, (0.0, 0.0)),
+            Keysym::v | Keysym::V if ctrl => self.filer_act(id, Action::Paste, None, (0.0, 0.0)),
+            // (With Shift: Ctrl+N alone is another window.)
+            Keysym::N if ctrl => self.filer_act(id, Action::NewFolder, None, (0.0, 0.0)),
             Keysym::a if ctrl => {
                 win.selected = win.items.iter().map(|it| it.path.clone()).collect();
                 self.filer_request_draw(id);
@@ -1747,6 +2353,64 @@ impl App {
                     self.filer_walk_to(id, i);
                 }
             }
+            "add" => {
+                if let (Ok(i), Some(win)) = (rest.parse::<usize>(), self.filer.win_mut(id)) {
+                    if let Some(path) = win.items.get(i).map(|it| it.path.clone()) {
+                        win.selected.insert(path);
+                    }
+                    self.filer_request_draw(id);
+                }
+            }
+            "menu" => {
+                let icon_scale = self.icon_scale();
+                let Some(win) = self.filer.win(id) else {
+                    return "closed".to_owned();
+                };
+                let layout = win.layout(icon_scale);
+                let item = rest.parse::<usize>().ok().filter(|&i| i < win.items.len());
+                // Where a click would have been: the thing's middle, or the
+                // middle of the field.
+                let at = match item {
+                    Some(i) => {
+                        let c = layout.cell(i);
+                        (c.x + c.w / 2.0, c.y + c.h / 2.0 - win.scroll)
+                    }
+                    None => (layout.body.x + layout.body.w / 2.0, layout.body.y + layout.body.h / 2.0),
+                };
+                self.filer_open_menu(id, at, item);
+            }
+            "pick" => {
+                let Some((action, item, at)) = self.filer.win_mut(id).and_then(|w| {
+                    let menu = w.menu.take()?;
+                    w.menu_path = None;
+                    Some((menu.action(rest.parse().ok()?)?, menu.item, menu.at))
+                }) else {
+                    return "no such row".to_owned();
+                };
+                if action == Action::Properties {
+                    if let Some(i) = item {
+                        self.filer_open_props(id, i, at, None);
+                    }
+                } else {
+                    self.filer_act(id, action, item, at);
+                }
+            }
+            "copy" => self.filer_act(id, Action::Copy, None, (0.0, 0.0)),
+            "cut" => self.filer_act(id, Action::Cut, None, (0.0, 0.0)),
+            "paste" => self.filer_act(id, Action::Paste, None, (0.0, 0.0)),
+            "bin" => self.filer_act(id, Action::MoveToBin, None, (0.0, 0.0)),
+            "newfolder" => self.filer_act(id, Action::NewFolder, None, (0.0, 0.0)),
+            "rename" => {
+                if let Ok(i) = rest.parse::<usize>() {
+                    self.filer_begin_rename(id, i);
+                }
+            }
+            "props" => {
+                if let Ok(i) = rest.parse::<usize>() {
+                    let at = self.filer.win(id).map_or((0.0, 0.0), |w| (w.size.0 as f32 / 2.0, w.size.1 as f32 / 3.0));
+                    self.filer_open_props(id, i, at, None);
+                }
+            }
             "activate" => {
                 if let Ok(i) = rest.parse::<usize>() {
                     self.filer_activate(id, i);
@@ -1768,6 +2432,7 @@ impl App {
                     "escape" => Keysym::Escape,
                     "home" => Keysym::Home,
                     "end" => Keysym::End,
+                    "f2" => Keysym::F2,
                     _ => return format!("no key {rest}"),
                 };
                 self.filer_key(id, key, None);
@@ -1782,7 +2447,7 @@ impl App {
         };
         let layout = win.layout(icon_scale);
         format!(
-            "window {id} {}x{} on {} — {} items{}, {} cols, scroll {:.0}/{:.0}, selected {}, back {}, forward {}, places {}, layers {}/{}",
+            "window {id} {}x{} on {} — {} items{}, {} cols, scroll {:.0}/{:.0}, selected {}, back {}, forward {}, places {}, layers {}/{}, menu {}, props {}, rename {:?}",
             win.size.0,
             win.size.1,
             win.dir.display(),
@@ -1797,6 +2462,9 @@ impl App {
             win.places.len(),
             win.uploaded.iter().flatten().count(),
             win.capacity,
+            win.menu.as_ref().map_or(0, |m| m.rows.len()),
+            win.props.as_ref().map_or("-", |p| p.title.as_str()),
+            win.rename.as_ref().map(|r| r.text.as_str()),
         )
     }
 }
@@ -1973,6 +2641,30 @@ mod tests {
         let (a, b) = two_lines("abcdefghijklmnopqrstuvwxyz0123456789", 100.0, &mut measure);
         assert_eq!(a, "abcdefghij");
         assert!(b.ends_with('…') && b.chars().count() <= 10);
+    }
+
+    #[test]
+    fn the_menu_offers_what_makes_sense_for_what_was_clicked() {
+        let actions = |rows: Vec<Row>| -> Vec<Action> {
+            rows.into_iter()
+                .filter_map(|r| match r {
+                    Row::Item { action, .. } => Some(action),
+                    _ => None,
+                })
+                .collect()
+        };
+        let one = actions(menu_rows(true, false, true));
+        assert_eq!(one.first(), Some(&Action::Open));
+        // Properties is last: it is the row the menu turns into a box from.
+        assert_eq!(one.last(), Some(&Action::Properties));
+        assert!(one.contains(&Action::Rename) && !one.contains(&Action::Paste));
+        // A group: nothing that is about ONE thing.
+        let many = actions(menu_rows(true, true, false));
+        assert!(!many.contains(&Action::Rename) && !many.contains(&Action::Properties));
+        assert!(many.contains(&Action::Cut) && many.contains(&Action::MoveToBin));
+        // The folder itself: Paste only with files on the clipboard.
+        assert_eq!(actions(menu_rows(false, false, true)).first(), Some(&Action::Paste));
+        assert_eq!(actions(menu_rows(false, false, false)).first(), Some(&Action::NewFolder));
     }
 
     #[test]

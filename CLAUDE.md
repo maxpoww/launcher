@@ -742,10 +742,20 @@ The big daemon files are cohesive but long — go straight to the function:
   click = open (a folder here, a file through `xdg-open`), mouse side buttons / Backspace /
   Alt+←→↑ = back, forward, up (coming out of a folder leaves it selected — `Win::reveal`), arrows
   walk, Enter opens, typing goes to a name (`typed_match`), Ctrl+A/H/R/N/W, F5. The ground is the
-  dock's colour made solid (colours are LINEAR here). NOT BUILT (the desktop's own, to be shared
-  rather than copied — menu, Properties, rename, drags in and out, cut/copy/paste, the bin,
-  rubber band): next. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
+  dock's colour made solid (colours are LINEAR here). THE MENU (2026-10-13, second cut) is the
+  desktop's `Menu` with this window's rows (`menu_rows`, `Menu::with_rows`), drawn IN the window
+  (names under it are left out — `covered`; it cannot hang past the window's edge): on a thing
+  Open · Open in terminal · Cut · Copy · Rename · Move to bin · Properties (last, opened by HOVER,
+  `Props` grown from the menu, Back on hover), on a group Open · Cut · Copy · Move to bin, on the
+  folder [Paste ·] New folder · Open in terminal; a row acts on RELEASE (`filer_button`),
+  everything goes through `filer_act` — and so do the keys: Ctrl+C/X/V, Delete, F2, Ctrl+Shift+N,
+  Escape. Cut/copy = `serve_files`, paste = `desktop_send::put` off the loop (what came is left
+  selected), the bin = `trash_file`, a name is typed in place (`Rename`, by PATH; the rules are
+  the desktop's, now shared: `desktop::typed_name` / `rename_file`; a new folder's name is typed
+  as soon as it is listed — `rename_next`; the keyboard leaving keeps what was typed). NOT BUILT:
+  drags in and out, the rubber band, the bin as a place. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
-  <px>|hidden|close|state` drive the newest (⚠ `activate`/`key enter` on a file really opens it).
+  <px>|hidden|menu [<n>]|pick <row>|copy|cut|paste|newfolder|rename <n>|bin|props <n>|close|state`
+  drive the newest (⚠ `activate`/`key enter` on a file really opens it; `bin`, `paste`, `pick` are REAL).
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

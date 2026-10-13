@@ -376,6 +376,13 @@ impl Menu {
         self
     }
 
+    /// The same panel with rows of the caller's own (the file manager's
+    /// windows have their own lists).
+    pub fn with_rows(mut self, rows: Vec<Row>, h: f32) -> Self {
+        self.set_rows(rows, h);
+        self
+    }
+
     /// Back to the first page.
     pub fn show_main(&mut self, h: f32) {
         self.targets = false;

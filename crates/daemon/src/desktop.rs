@@ -619,6 +619,49 @@ pub(crate) fn locked_shortcut(item: &Item) -> Option<waverunner_core::index::App
         .flatten()
 }
 
+/// The name a typed one stands for. A FILE whose new name was typed without
+/// an ending keeps the one it had: the whole name is selected as the field
+/// opens, so "notes" typed over "notes.txt" made a file nothing would open
+/// any more. (To take the ending off on purpose, end the name with a dot.)
+pub(crate) fn typed_name(typed: &str, old: &Path, is_file: bool) -> String {
+    let typed = typed.trim();
+    let kept = (is_file && !typed.is_empty() && !typed.contains('.'))
+        .then(|| old.extension().map(|e| e.to_string_lossy().into_owned()))
+        .flatten();
+    match kept {
+        Some(ext) => format!("{typed}.{ext}"),
+        None => typed
+            .strip_suffix('.')
+            .filter(|n| !n.is_empty() && !n.contains('.'))
+            .unwrap_or(typed)
+            .to_owned(),
+    }
+}
+
+/// `fs::rename` `old` to `name` in its folder; where it is now. `None` when
+/// nothing was done: not a name, the same name, or one that is taken.
+pub(crate) fn rename_file(old: &Path, name: &str) -> Option<PathBuf> {
+    let dir = old.parent()?;
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        warn!("{name:?} is not a name");
+        return None;
+    }
+    let new = dir.join(name);
+    if new == old {
+        return None;
+    }
+    if new.exists() {
+        warn!("{} exists; {} keeps its name", new.display(), old.display());
+        return None;
+    }
+    if let Err(e) = std::fs::rename(old, &new) {
+        error!("cannot rename {} → {}: {e}", old.display(), new.display());
+        return None;
+    }
+    info!("{} → {}", old.display(), new.display());
+    Some(new)
+}
+
 /// The icon key for one of the dock's file-type carriers (`asset-folder`,
 /// `asset-image`, …): `asset:<themed icon name>`.
 pub(crate) fn asset_key(asset: &str) -> String {
@@ -3324,16 +3367,9 @@ impl App {
         // had: the whole name is selected as the field opens, so "notes"
         // typed over "notes.txt" made a file nothing would open any more.
         // (To take the ending off on purpose, end the name with a dot.)
-        let typed = rename.text.trim();
-        let kept = self
-            .desktop
-            .items
-            .get(rename.item)
-            .filter(|it| it.kind == Kind::File && !typed.is_empty() && !typed.contains('.'))
-            .and_then(|it| Path::new(&it.path).extension().map(|e| e.to_string_lossy().into_owned()));
-        let name = match kept {
-            Some(ext) => format!("{typed}.{ext}"),
-            None => typed.strip_suffix('.').filter(|n| !n.is_empty() && !n.contains('.')).unwrap_or(typed).to_owned(),
+        let name = match self.desktop.items.get(rename.item) {
+            Some(it) => typed_name(&rename.text, Path::new(&it.path), it.kind == Kind::File),
+            None => rename.text.trim().to_owned(),
         };
         let renamed = commit && self.desktop_apply_rename(rename.item, &name);
         if renamed {
@@ -3349,27 +3385,9 @@ impl App {
         let Some(it) = self.desktop.items.get(i) else {
             return false;
         };
-        let old = PathBuf::from(&it.path);
-        let Some(dir) = old.parent() else {
+        let Some(new) = rename_file(Path::new(&it.path), name) else {
             return false;
         };
-        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
-            warn!("desktop: {name:?} is not a name");
-            return false;
-        }
-        let new = dir.join(name);
-        if new == old {
-            return false;
-        }
-        if new.exists() {
-            warn!("desktop: {} exists; {} keeps its name", new.display(), old.display());
-            return false;
-        }
-        if let Err(e) = std::fs::rename(&old, &new) {
-            error!("desktop: cannot rename {} → {}: {e}", old.display(), new.display());
-            return false;
-        }
-        info!("desktop: {} → {}", old.display(), new.display());
         let (old_key, new_key) = (it.path.clone(), new.to_string_lossy().into_owned());
         if let Some(slot) = self.desktop.remembered.remove(&old_key) {
             self.desktop.remembered.insert(new_key.clone(), slot);
