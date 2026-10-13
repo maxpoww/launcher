@@ -105,8 +105,7 @@ impl App {
         // A box open in the grid: the room its row takes under its tile.
         let cell = content::GRID_CELL_H * self.icon_scale();
         let box_room = if self.app_group.is_some() || self.dir_stack.as_ref().is_some_and(|ds| ds.in_grid) {
-            let cells = (content::BOX_CELL_MIN_W * self.icon_scale(), cell);
-            content::row_cells(self.box_fill(), cells, sec.viewport.w).0 .1
+            cell
         } else {
             0.0
         };
@@ -227,7 +226,7 @@ impl App {
             let scale = self.icon_scale();
             let cell = content::GRID_CELL_H * scale;
             let cells = (content::BOX_CELL_MIN_W * scale, cell);
-            let n = self.box_fill();
+            let n = self.box_total();
             // The dock icon a dock-anchored stack grows out of: a folder's
             // box id, or a pinned directory's entry id.
             let dock_anchor: Option<String> = if let Some(g) = self.dock_stack {
@@ -261,7 +260,7 @@ impl App {
                 let vp = layout.sections[content::SECTION_APPS].viewport;
                 // It takes whole rows' room, so a full grid stays on its
                 // rows: the last ones leave whole.
-                let ((w, h), grid) = content::row_cells(n, cells, vp.w);
+                let ((w, h), grid, cap) = content::row_cells(n, cells, vp.w);
                 let row = if oy >= vp.y { ((oy - vp.y) / cell).floor() as isize } else { -1 };
                 let split = vp.y + (row + 1) as f32 * cell;
                 let up = (split + h - (vp.y + vp.h)).clamp(0.0, (row.max(0) as f32 * cell).max(0.0));
@@ -269,11 +268,12 @@ impl App {
                 layout.apps_part = Some(content::AppsPart { row, up: up * t, down: (h - up) * t });
                 // Its members stand centred in the line, whatever column
                 // the tile is in.
-                Some((content::Rect::new(vp.x + (vp.w - w) / 2.0, split - up, w, h), grid))
+                Some((content::Rect::new(vp.x + (vp.w - w) / 2.0, split - up, w, h), grid, cap))
             };
-            if let Some((rect, grid)) = placed {
+            if let Some((rect, grid, cap)) = placed {
                 layout.open_box = Some(rect);
                 layout.open_box_grid = grid;
+                layout.open_box_cap = cap;
             }
         }
         layout
@@ -1131,21 +1131,16 @@ impl App {
         let box_drag = self
             .box_drag
             .and_then(|(entry, pos)| self.box_drag_slot_target(pos).map(|gap| (entry, gap, pos)));
+        let (box_cap, box_pages) = self.box_pages();
         let (open_box_members, open_box_slots): (Vec<usize>, Vec<usize>) = self
             .stack_members()
             .map(|members| {
-                // All members with their display slots (page * PAGE_CAP
-                // + within — pages may be under-full); the box overlay
-                // pages them 3×3 via box_scroll.
+                // All members with their display slots: their order, the
+                // box's line filling before the next page (the box
+                // overlay pages them via box_scroll).
                 members
-                    .pages()
                     .iter()
                     .enumerate()
-                    .flat_map(|(p, page)| {
-                        page.iter()
-                            .enumerate()
-                            .map(move |(w, id)| (p * groups::PAGE_CAP + w, id))
-                    })
                     .filter_map(|(slot, id)| {
                         self.entries
                             .iter()
@@ -1182,7 +1177,7 @@ impl App {
             let s = open_box_slots.get(m).copied().unwrap_or(m);
             let target = match box_gap {
                 Some(g) if Some(e) != box_hidden => {
-                    pages::shifted_slot(s, box_origin, g, groups::PAGE_CAP) as f32
+                    pages::shifted_slot(s, box_origin, g, box_cap) as f32
                 }
                 _ => s as f32,
             };
@@ -1201,14 +1196,11 @@ impl App {
         if box_sliding {
             self.dirty = true;
         }
-        let open_box_pages = self
-            .stack_members()
-            .map(|members| {
-                // One reachable ghost page while a member is in hand.
-                let pages = members.pages().len().max(1) + usize::from(self.box_drag.is_some());
-                (self.box_page.min(pages - 1), pages)
-            })
-            .unwrap_or((0, 1));
+        let open_box_pages = if self.stack_members().is_some() {
+            (self.box_page.min(box_pages - 1), box_pages)
+        } else {
+            (0, 1)
+        };
         // Per-slot running flags for the macOS indicator dot.
         let dock_running: Vec<bool> = self
             .dock_order

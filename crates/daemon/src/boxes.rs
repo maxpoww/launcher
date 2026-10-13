@@ -327,23 +327,34 @@ impl App {
         t * t * t * t * (35.0 + t * (-84.0 + t * (70.0 + t * -20.0)))
     }
 
-    /// How many cells the open box lays out: its fullest page (a box's
-    /// pages may be under-full), or the members of one shrinking closed.
-    pub(crate) fn box_fill(&self) -> usize {
+    /// How many members the open box has to lay out (those of one
+    /// shrinking closed, once it is no longer open).
+    pub(crate) fn box_total(&self) -> usize {
         self.stack_members()
-            .map(|m| m.pages().iter().map(Vec::len).max().unwrap_or(0))
+            .map(|m| m.len())
             .or_else(|| self.closing_members.as_ref().map(Vec::len))
             .unwrap_or(0)
             .max(1)
     }
 
+    /// How many members a page of the open box holds — what its line takes
+    /// where it is open (`content::row_cells`) — and its pages. The stored
+    /// 3×3 pages don't show: the members fill the line in their order.
+    pub(crate) fn box_pages(&self) -> (usize, usize) {
+        let cap = self.current_layout().open_box_cap.max(1);
+        (cap, self.box_total().div_ceil(cap).max(1))
+    }
+
     /// The open box member id shown in slot `k` on the current page, if
     /// that slot is filled.
     pub(crate) fn open_box_member_id(&self, k: usize) -> Option<String> {
+        let (cap, pages) = self.box_pages();
+        if k >= cap {
+            return None;
+        }
         self.stack_members()?
-            .pages()
-            .get(self.box_page)?
-            .get(k)
+            .iter()
+            .nth(self.box_page.min(pages - 1) * cap + k)
             .cloned()
     }
 
@@ -431,10 +442,8 @@ impl App {
         }
     }
 
-    /// Drop the in-box drag: the member lands on the box page under the
-    /// pointer — before the member displayed at that 3×3 position, or
-    /// appended to the page's tail. A ghost-page drop creates the page,
-    /// and the member *stays* there: box pages keep gaps like the grid.
+    /// Drop the in-box drag: the member lands at the place under the
+    /// pointer — before the member displayed there, or at the end.
     pub(crate) fn drop_box_drag(&mut self) {
         let Some((entry_idx, pos)) = self.box_drag.take() else {
             return;
@@ -448,24 +457,27 @@ impl App {
             self.schedule_frame();
             return;
         };
-        let page = target / groups::PAGE_CAP;
-        // The member displayed at the drop position, resolved by the
-        // shared drop rule over the compacted display slots (dragged
-        // member excluded — it's the ghost in hand, and its page packs
-        // dense around the hole).
-        let anchor = self.groups.groups().get(g).and_then(|grp| {
-            let items = grp.members.pages().iter().enumerate().flat_map(|(p, pg)| {
-                pg.iter()
-                    .filter(|m| m.as_str() != member_id)
-                    .enumerate()
-                    .map(move |(w, m)| (p * groups::PAGE_CAP + w, m))
-            });
-            pages::drop_anchor(items, target, groups::PAGE_CAP).cloned()
-        });
+        let (cap, _) = self.box_pages();
+        // The member displayed at the drop position: the others in their
+        // order, the dragged one out of it (it's the ghost in hand). Its
+        // own page closed up around the hole it left; a later page still
+        // shows its members where they were, one place further on.
+        let (anchor, last_page) = match self.groups.groups().get(g) {
+            Some(grp) => {
+                let origin = grp.members.iter().position(|m| *m == member_id);
+                let at = match origin {
+                    Some(o) if target / cap > o / cap => target - 1,
+                    _ => target,
+                };
+                let anchor = grp.members.iter().filter(|m| **m != member_id).nth(at).cloned();
+                (anchor, grp.members.pages().len().saturating_sub(1))
+            }
+            None => (None, 0),
+        };
         info!("box drop: {member_id} -> slot {target} anchor {anchor:?}");
         match anchor {
             Some(a) => self.groups.move_member_before(g, &member_id, &a),
-            None => self.groups.move_member_to_page_end(g, &member_id, page),
+            None => self.groups.move_member_to_page_end(g, &member_id, last_page),
         }
         // The dropped member re-enters the glide at rest in its new slot
         // (it was the ghost in hand — gliding in from its old slot would
@@ -476,11 +488,12 @@ impl App {
     }
 
     /// Display slot under the pointer: the position on the current box
-    /// page, as `page * PAGE_CAP + within`.
+    /// page, as `page * cap + within` (`box_pages`).
     pub(crate) fn box_drag_slot_target(&self, pos: (f32, f32)) -> Option<usize> {
         let layout = self.current_layout();
         let slot = content::open_box_slot(layout.open_box?, layout.open_box_grid, pos);
-        Some(self.box_page * groups::PAGE_CAP + slot)
+        let cap = layout.open_box_cap.max(1);
+        Some(self.box_page * cap + slot.min(cap - 1))
     }
 
     /// Pull a box member out into the loose grid (the box shrinks closed).
@@ -511,7 +524,7 @@ impl App {
             .members
             .iter()
             .filter(|id| id.as_str() != member_id)
-            .take(groups::PAGE_CAP)
+            .take(self.box_pages().0)
             .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
             .collect();
         let from_dock_stack = self.dock_stack.is_some();
@@ -563,15 +576,12 @@ impl App {
     }
 
     /// Turn the open box a page (+1 next, -1 previous): wheel paging
-    /// wraps cyclically; drag paging cycles too (with its single ghost
-    /// page — see [`pager::Pager::turn`]).
+    /// wraps cyclically; drag paging cycles too.
     pub(crate) fn turn_box_page(&mut self, dir: i64, wrap: bool) {
-        let Some(n) = self.stack_members().map(|m| m.pages().len()) else {
+        if self.stack_members().is_none() {
             return;
-        };
-        // While reordering a member, one extra empty page is reachable
-        // at the end — drop there to park the member on a fresh page.
-        let pages = n.max(1) + usize::from(self.box_drag.is_some());
+        }
+        let (_, pages) = self.box_pages();
         let page_w = self
             .layout_at(self.ui.extent_of(Target::Open))
             .open_box

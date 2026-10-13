@@ -696,6 +696,8 @@ pub struct Layout {
     pub open_box: Option<Rect>,
     /// That box's member grid: (columns, rows) of cells.
     pub open_box_grid: (usize, usize),
+    /// How many members its line holds — its page (`row_cells`).
+    pub open_box_cap: usize,
     /// The Apps rows parted around a box open in the grid.
     pub apps_part: Option<AppsPart>,
     /// The band under Files while a search matches settings or modules:
@@ -1121,6 +1123,7 @@ pub fn layout(
         search_btn,
         open_box,
         open_box_grid: (OPEN_BOX_COLS, OPEN_BOX_COLS),
+        open_box_cap: OPEN_BOX_CAP,
         apps_part: None,
         control_bands,
         controls: Vec::new(),
@@ -1234,21 +1237,21 @@ impl AppsPart {
     }
 }
 
-/// An open box's rows: `n` members in cells `cell` high across `area_w`.
-/// One row while it fits — the cells `cell` wide, narrowing down to
-/// `min_w` before a second row is taken; past that the rows are evened
-/// out. Returns its size and its (columns, rows).
-pub fn row_cells(n: usize, (min_w, cell): (f32, f32), area_w: f32) -> ((f32, f32), (usize, usize)) {
-    let n = n.clamp(1, OPEN_BOX_CAP);
+/// An open box's line: a box of `n` members in cells `cell` high across
+/// `area_w`. The line holds as many as fit (Max, 2026-10-13: "tantos
+/// íconos como entren en la línea antes de que sea necesaria una página")
+/// — the cells `cell` wide, narrowing down to `min_w` to take them in;
+/// only what is over that goes to a next page. Returns its size, its
+/// (columns, rows) and how many members a page of it holds.
+pub fn row_cells(n: usize, (min_w, cell): (f32, f32), area_w: f32) -> ((f32, f32), (usize, usize), usize) {
     let min_w = min_w.clamp(1.0, cell.max(1.0));
-    let fit = ((area_w / min_w + 0.001).floor() as usize).max(1);
-    let rows = n.div_ceil(fit);
-    let cols = n.div_ceil(rows);
+    let cap = ((area_w / min_w + 0.001).floor() as usize).max(1);
+    let cols = n.clamp(1, cap);
     let cell_w = (area_w / cols as f32).clamp(min_w, cell.max(min_w));
-    ((cols as f32 * cell_w, rows as f32 * cell), (cols, rows))
+    ((cols as f32 * cell_w, cell), (cols, 1), cap)
 }
 
-/// A dock folder's open box at rest: its rows (`row_cells`) centred over
+/// A dock folder's open box at rest: its line (`row_cells`) centred over
 /// `anchor` (the dock icon) and `gap` above it, kept inside `area`.
 pub fn row_box(
     anchor: Rect,
@@ -1256,10 +1259,10 @@ pub fn row_box(
     cells: (f32, f32),
     area: Rect,
     gap: f32,
-) -> (Rect, (usize, usize)) {
-    let ((w, h), grid) = row_cells(n, cells, area.w);
+) -> (Rect, (usize, usize), usize) {
+    let ((w, h), grid, cap) = row_cells(n, cells, area.w);
     let x = row_box_x(anchor, w, area);
-    (Rect::new(x, (anchor.y - gap - h).max(area.y), w, h), grid)
+    (Rect::new(x, (anchor.y - gap - h).max(area.y), w, h), grid, cap)
 }
 
 /// An open box's left edge: `w` wide, centred on `anchor`, inside `area`.
@@ -1518,7 +1521,7 @@ pub struct FrameInput<'a> {
     /// field rises in from the card's bottom edge pushing the apps up and
     /// out under the dock (and back down the other way).
     pub panel_mix: f32,
-    /// Animated display slot of each member (`page * OPEN_BOX_CAP +
+    /// Animated display slot of each member (`page * open_box_cap +
     /// within`, parallel to `open_box_members`): box pages may be
     /// under-full, so slots — not list positions — decide where a member
     /// draws. Fractional mid-glide (the box's make-room reflow, computed
@@ -1571,13 +1574,12 @@ pub struct FrameInput<'a> {
 }
 
 /// The open box's slot under `pos` — the member's place on its page, the
-/// rows read left to right, top to bottom. Evened rows can leave cells
-/// past the page's ninth: those count as the last.
+/// rows read left to right, top to bottom.
 pub fn open_box_slot(b: Rect, (cols, rows): (usize, usize), pos: (f32, f32)) -> usize {
     let (cols, rows) = (cols.max(1), rows.max(1));
     let col = (((pos.0 - b.x) / (b.w / cols as f32)).floor().max(0.0) as usize).min(cols - 1);
     let row = (((pos.1 - b.y) / (b.h / rows as f32)).floor().max(0.0) as usize).min(rows - 1);
-    (row * cols + col).min(OPEN_BOX_CAP - 1)
+    row * cols + col
 }
 
 /// Rim colour for a plate-coloured tile: the fill's hue lifted toward
@@ -3124,9 +3126,10 @@ pub fn scene(
         // The icon and the name under it sit centred in the cell together.
         let name_lift = (3.0 + LABEL_LINE_PX) / 2.0;
         let place = |di: usize| -> (f32, f32) {
-            let slot = di % OPEN_BOX_CAP;
+            let cap = layout.open_box_cap.max(1);
+            let slot = di % cap;
             let (row, col) = (slot / cols, slot % cols);
-            let page_x = (di / OPEN_BOX_CAP) as f32 * page_w - box_scroll;
+            let page_x = (di / cap) as f32 * page_w - box_scroll;
             (
                 members_rect.x + page_x + (col as f32 + 0.5) * cell,
                 members_rect.y + (row as f32 + 0.5) * cell_h - name_lift,
@@ -3746,36 +3749,38 @@ mod tests {
         assert_eq!(open_box_slot(b, (5, 2), (110.0, 60.0)), 0);
         assert_eq!(open_box_slot(b, (5, 2), (590.0, 60.0)), 4);
         assert_eq!(open_box_slot(b, (5, 2), (110.0, 240.0)), 5);
-        // The tenth cell of an evened 5 × 2 is past the page's ninth member.
-        assert_eq!(open_box_slot(b, (5, 2), (590.0, 240.0)), 8);
+        assert_eq!(open_box_slot(b, (5, 2), (590.0, 240.0)), 9);
     }
 
     #[test]
     fn row_box_is_one_row_over_its_tile() {
         let area = Rect::new(80.0, 0.0, 840.0, 500.0);
         let icon = Rect::new(480.0, 500.0, 40.0, 40.0); // centre x = 500
-        let (r, grid) = row_box(icon, 5, (60.0, 80.0), area, 12.0);
+        let (r, grid, _) = row_box(icon, 5, (60.0, 80.0), area, 12.0);
         assert!((r.w - 400.0).abs() < 0.01, "full-width cells while they fit");
         assert_eq!(grid, (5, 1));
         assert!((r.x + r.w / 2.0 - 500.0).abs() < 0.01);
         assert!((r.y + r.h - (icon.y - 12.0)).abs() < 0.01, "sits just over the tile");
         // A tile near the edge keeps the row inside the area.
         let edge = Rect::new(900.0, 500.0, 40.0, 40.0);
-        let (r, _) = row_box(edge, 5, (60.0, 80.0), area, 12.0);
+        let (r, _, _) = row_box(edge, 5, (60.0, 80.0), area, 12.0);
         assert!(r.x + r.w <= area.x + area.w + 0.01);
     }
 
     #[test]
-    fn row_cells_narrow_before_taking_a_second_row() {
-        // Nine fit across once their cells narrow: still one row.
-        let ((w, h), grid) = row_cells(9, (60.0, 80.0), 560.0);
+    fn row_cells_fill_the_line_before_a_page_is_needed() {
+        // A few members: their cells at full width.
+        let ((w, h), grid, cap) = row_cells(4, (60.0, 80.0), 560.0);
+        assert_eq!((grid, cap), ((4, 1), 9));
+        assert!((w - 320.0).abs() < 0.01 && (h - 80.0).abs() < 0.01);
+        // Nine fit across once their cells narrow: all on the line.
+        let ((w, _), grid, _) = row_cells(9, (60.0, 80.0), 560.0);
         assert_eq!(grid, (9, 1));
-        assert!((w - 560.0).abs() < 0.01 && (h - 80.0).abs() < 0.01);
-        // Nine members where eight fit at the narrowest: two rows, 5 + 4.
-        let ((w, h), grid) = row_cells(9, (70.0, 80.0), 560.0);
-        assert_eq!(grid, (5, 2));
-        assert!((w - 400.0).abs() < 0.01, "evened rows get their full cells back");
-        assert!((h - 160.0).abs() < 0.01);
+        assert!((w - 560.0).abs() < 0.01);
+        // Thirty: the line is as full as it gets, the rest on next pages.
+        let ((w, h), grid, cap) = row_cells(30, (60.0, 80.0), 560.0);
+        assert_eq!((grid, cap), ((9, 1), 9));
+        assert!(w <= 560.0 + 0.01 && (h - 80.0).abs() < 0.01);
     }
 
     #[test]
