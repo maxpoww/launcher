@@ -70,6 +70,11 @@ pub(crate) enum Action {
     CleanUp,
     /// A shortcut that came from elsewhere: let it run from now on.
     AllowRun,
+    /// In the bin (a file manager window on it): back where it was thrown
+    /// away from, gone for good, and the whole bin gone for good.
+    PutBack,
+    Erase,
+    EmptyBin,
 }
 
 /// One row: an action, or a rule between groups.

@@ -299,14 +299,72 @@ struct Rename {
     all: bool,
 }
 
+/// Where a window is with respect to the bin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InBin {
+    /// An ordinary folder.
+    No,
+    /// The bin itself: what was thrown away, each thing able to go back.
+    Top,
+    /// A folder that was thrown away, opened: only looking and copying.
+    Deeper,
+}
+
+/// The bin's folder (`Trash/files` — what a window on the bin shows).
+pub(crate) fn bin_root() -> PathBuf {
+    crate::trash::Trash::home().files_root()
+}
+
+/// What is in the bin, newest first, each under the name it had.
+fn list_bin() -> Vec<Item> {
+    let trash = crate::trash::Trash::home();
+    trash
+        .list()
+        .into_iter()
+        .map(|t| {
+            let path = trash.file_path(&t.name);
+            let mut item = crate::desktop::item_for(path, t.display_name().to_owned(), t.is_dir);
+            // (A thrown-away shortcut is a file: nothing runs from the bin.)
+            if item.kind == Kind::Launcher {
+                item.kind = Kind::File;
+                item.exec = None;
+                item.name = t.display_name().to_owned();
+                item.icon = crate::desktop::asset_key("asset-file");
+            }
+            item
+        })
+        .collect()
+}
+
 /// The rows of a right click: on one thing, on one of `many` selected, or
-/// on the folder itself (`paste`: files are on the clipboard).
-pub(crate) fn menu_rows(on_item: bool, many: bool, paste: bool) -> Vec<Row> {
+/// on the folder itself (`paste`: files are on the clipboard) — and in the
+/// bin, what the bin is for.
+pub(crate) fn menu_rows(on_item: bool, many: bool, paste: bool, bin: InBin) -> Vec<Row> {
     let row = |label: &'static str, action: Action| Row::Item {
         label,
         action,
         danger: false,
     };
+    let danger = |label: &'static str, action: Action| Row::Item {
+        label,
+        action,
+        danger: true,
+    };
+    match (bin, on_item) {
+        (InBin::Top, true) => {
+            return vec![
+                row(tr("Open"), Action::Open),
+                Row::Sep,
+                row(tr("Put back"), Action::PutBack),
+                Row::Sep,
+                danger(tr("Delete for good"), Action::Erase),
+            ]
+        }
+        (InBin::Top, false) => return vec![danger(tr("Empty the bin"), Action::EmptyBin)],
+        (InBin::Deeper, true) => return vec![row(tr("Open"), Action::Open), Row::Sep, row(tr("Copy"), Action::Copy)],
+        (InBin::Deeper, false) => return Vec::new(),
+        (InBin::No, _) => {}
+    }
     let bin = Row::Item {
         label: tr("Move to bin"),
         action: Action::MoveToBin,
@@ -425,6 +483,10 @@ struct Win {
     /// just made).
     rename_next: Option<String>,
 
+    /// A row that cannot be undone was clicked once: the second click does it.
+    armed: Option<Action>,
+    /// The place a hovering drag would be let go onto.
+    drop_place: Option<usize>,
     press: Option<Press>,
     /// A rubber band being drawn: where it began and where the pointer is,
     /// in the field's unscrolled coordinates, and what was selected before
@@ -435,6 +497,18 @@ struct Win {
 }
 
 impl Win {
+    /// Whether this window is on the bin, or in a folder thrown away.
+    fn in_bin(&self) -> InBin {
+        let bin = bin_root();
+        if self.dir == bin {
+            InBin::Top
+        } else if self.dir.starts_with(&bin) {
+            InBin::Deeper
+        } else {
+            InBin::No
+        }
+    }
+
     fn layout(&self, icon_scale: f32) -> Layout {
         Layout::of(self.virt(), icon_scale)
     }
@@ -604,7 +678,7 @@ fn file_name(path: &Path) -> String {
 /// The places down the side: Home, the owner's folders that exist (under
 /// the names they have on disk), the phones' folder, then what is plugged
 /// in and open.
-pub(crate) fn places(home: &Path, user_dirs: &str, volumes: &[crate::mounts::Mounted]) -> Vec<Place> {
+pub(crate) fn places(home: &Path, user_dirs: &str, bin: &Path, volumes: &[crate::mounts::Mounted]) -> Vec<Place> {
     let mut out = vec![Place {
         name: tr("Home").to_owned(),
         path: home.to_path_buf(),
@@ -641,6 +715,13 @@ pub(crate) fn places(home: &Path, user_dirs: &str, volumes: &[crate::mounts::Mou
             start: false,
         });
     }
+    out.push(Place {
+        name: tr("Recycle Bin").to_owned(),
+        path: bin.to_path_buf(),
+        icon: "asset:user-trash".to_owned(),
+        gap: false,
+        start: true,
+    });
     let mut first = true;
     for v in volumes.iter().filter(|v| !v.closed) {
         out.push(Place {
@@ -915,6 +996,8 @@ impl App {
             props: None,
             rename: None,
             rename_next: None,
+            armed: None,
+            drop_place: None,
             press: None,
             band: None,
             drop_on: None,
@@ -950,7 +1033,7 @@ impl App {
                 .join("user-dirs.dirs"),
         )
         .unwrap_or_default();
-        let list = places(&home, &user_dirs, &self.desktop.volumes);
+        let list = places(&home, &user_dirs, &bin_root(), &self.desktop.volumes);
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
         for id in ids {
             if let Some(win) = self.filer.win_mut(id) {
@@ -1091,7 +1174,8 @@ impl App {
         win.loading = true;
         let (generation, dir, hidden) = (win.generation, win.dir.clone(), win.hidden);
         self.desktop_off_loop(
-            move || list(&dir, hidden),
+            // (The bin is read through its own records: names, newest first.)
+            move || if dir == bin_root() { Ok(list_bin()) } else { list(&dir, hidden) },
             move |app, listed| app.filer_listed(id, generation, listed),
         );
     }
@@ -1201,7 +1285,11 @@ impl App {
             _ => win.selected.clear(),
         }
         let many = path.is_some() && win.selected.len() > 1;
-        let rows = menu_rows(path.is_some(), many, paste);
+        let rows = menu_rows(path.is_some(), many, paste, win.in_bin());
+        if rows.is_empty() {
+            return;
+        }
+        win.armed = None;
         win.menu = Some(Menu::open(item.filter(|_| path.is_some()), many, at, w, h).with_rows(rows, h));
         win.menu_path = path;
         win.props = None;
@@ -1216,7 +1304,54 @@ impl App {
             return;
         };
         let dir = win.dir.clone();
+        let bin = win.in_bin();
+        // In the bin nothing is made, named, moved in or thrown away again.
+        if bin != InBin::No
+            && matches!(
+                action,
+                Action::Cut | Action::Paste | Action::Rename | Action::MoveToBin | Action::NewFolder
+            )
+        {
+            return;
+        }
         match action {
+            Action::PutBack | Action::Erase if bin == InBin::Top => {
+                let trash = crate::trash::Trash::home();
+                let known = trash.list();
+                for path in selected {
+                    let name = file_name(Path::new(&path));
+                    if action == Action::Erase {
+                        info!("files: {name} deleted for good");
+                        if let Err(e) = trash.erase(&name) {
+                            warn!("files: cannot delete {name}: {e}");
+                        }
+                        continue;
+                    }
+                    // Back where it was — never over something that has
+                    // taken its place since.
+                    let Some(was) = known.iter().find(|t| t.name == name) else {
+                        continue;
+                    };
+                    if was.original_path.exists() {
+                        let body = format!("{} {}", was.display_name(), tr("is already there: it stays in the bin"));
+                        std::thread::spawn(move || crate::desktop_send_notify(&body));
+                        continue;
+                    }
+                    match trash.restore(&name) {
+                        Ok(to) => info!("files: {name} put back at {}", to.display()),
+                        Err(e) => warn!("files: cannot put {name} back: {e}"),
+                    }
+                }
+                self.filer_list(id);
+            }
+            Action::EmptyBin if bin == InBin::Top => {
+                info!("files: the bin is emptied");
+                if let Err(e) = crate::trash::Trash::home().empty() {
+                    warn!("files: the bin could not be emptied whole: {e}");
+                }
+                self.filer_list(id);
+                self.schedule_frame();
+            }
             Action::Open => {
                 let all: Vec<usize> = win
                     .items
@@ -1842,7 +1977,7 @@ impl App {
                     y += ROW_GAP;
                 }
                 let row = Rect::new(6.0, y, layout.side_w - 12.0, ROW_H);
-                if win.dir == place.path {
+                if win.dir == place.path || win.drop_place == Some(n) {
                     scene.rects.push(rect(row, 8.0, WASH_HERE));
                 } else if win.hover == Spot::Place(n) {
                     scene.rects.push(rect(row, 8.0, WASH_HOVER));
@@ -1974,7 +2109,13 @@ impl App {
             }
         }
         if win.items.is_empty() && !win.loading {
-            let words = if win.failed { tr("This folder can't be opened") } else { tr("Empty folder") };
+            let words = if win.failed {
+                tr("This folder can't be opened")
+            } else if win.in_bin() == InBin::Top {
+                tr("The bin is empty")
+            } else {
+                tr("Empty folder")
+            };
             grid.labels.push(label(
                 words,
                 (layout.body.x + layout.body.w / 2.0, layout.body.y + layout.body.h / 2.0 - TEXT_LINE),
@@ -2230,6 +2371,16 @@ impl App {
             if button == 0x110 && !pressed {
                 let chosen = menu.pressed.take().filter(|&r| Some(r) == over);
                 if let Some(action) = chosen.and_then(|r| menu.action(r)) {
+                    // What cannot be undone is asked once: the row says so
+                    // and the menu stays for the second click.
+                    if matches!(action, Action::Erase | Action::EmptyBin) && win.armed != Some(action) {
+                        win.armed = Some(action);
+                        if let Some(Row::Item { label, .. }) = chosen.and_then(|r| menu.rows.get_mut(r)) {
+                            *label = tr("Click again to delete");
+                        }
+                        self.filer_request_draw(id);
+                        return;
+                    }
                     let item = menu.item;
                     win.menu = None;
                     win.menu_path = None;
@@ -2495,8 +2646,11 @@ impl App {
                 let it = &win.items[i];
                 matches!(it.kind, Kind::Folder | Kind::Volume) && !carried.contains(&it.path)
             });
-        if onto != win.drop_on {
+        // Over the places: onto that place (the bin among them).
+        let place = win.hits.places.iter().position(|r| r.contains(at));
+        if onto != win.drop_on || place != win.drop_place {
             win.drop_on = onto;
+            win.drop_place = place;
             self.filer_request_draw(id);
         }
     }
@@ -2515,6 +2669,7 @@ impl App {
         if let Some(dnd) = self.filer.dnd.take() {
             if let Some(win) = self.filer.win_mut(dnd.win) {
                 win.drop_on = None;
+                win.drop_place = None;
             }
             self.filer_request_draw(dnd.win);
         }
@@ -2532,11 +2687,14 @@ impl App {
             dnd.offer.destroy();
             return;
         };
-        let dir = win
-            .drop_on
-            .take()
-            .and_then(|i| win.items.get(i))
-            .map_or_else(|| win.dir.clone(), |it| PathBuf::from(&it.path));
+        let dir = match win.drop_place.take().and_then(|n| win.places.get(n)) {
+            Some(place) => place.path.clone(),
+            None => win
+                .drop_on
+                .and_then(|i| win.items.get(i))
+                .map_or_else(|| win.dir.clone(), |it| PathBuf::from(&it.path)),
+        };
+        win.drop_on = None;
         self.filer_request_draw(id);
         // The live offer (the one kept since `enter` is a snapshot).
         let offer = self
@@ -2600,6 +2758,17 @@ impl App {
         may_move: bool,
         then: impl FnOnce() + 'static,
     ) {
+        // Into the bin (its window, or its place): thrown away, not moved
+        // into its folder — the bin keeps a record of where each came from.
+        if dir.starts_with(bin_root()) {
+            for path in paths.iter().filter(|p| !p.starts_with(bin_root())) {
+                info!("files: {} → Recycle Bin", path.display());
+                self.trash_file(&path.to_string_lossy());
+            }
+            then();
+            self.filer_list(id);
+            return;
+        }
         let into = dir.clone();
         let mut then = Some(then);
         self.desktop_off_loop(
@@ -3210,18 +3379,24 @@ mod tests {
                 })
                 .collect()
         };
-        let one = actions(menu_rows(true, false, true));
+        let one = actions(menu_rows(true, false, true, InBin::No));
         assert_eq!(one.first(), Some(&Action::Open));
         // Properties is last: it is the row the menu turns into a box from.
         assert_eq!(one.last(), Some(&Action::Properties));
         assert!(one.contains(&Action::Rename) && !one.contains(&Action::Paste));
         // A group: nothing that is about ONE thing.
-        let many = actions(menu_rows(true, true, false));
+        let many = actions(menu_rows(true, true, false, InBin::No));
         assert!(!many.contains(&Action::Rename) && !many.contains(&Action::Properties));
         assert!(many.contains(&Action::Cut) && many.contains(&Action::MoveToBin));
         // The folder itself: Paste only with files on the clipboard.
-        assert_eq!(actions(menu_rows(false, false, true)).first(), Some(&Action::Paste));
-        assert_eq!(actions(menu_rows(false, false, false)).first(), Some(&Action::NewFolder));
+        assert_eq!(actions(menu_rows(false, false, true, InBin::No)).first(), Some(&Action::Paste));
+        assert_eq!(actions(menu_rows(false, false, false, InBin::No)).first(), Some(&Action::NewFolder));
+        // In the bin: back or gone, and the bin emptied; never a new thing.
+        let binned = actions(menu_rows(true, false, true, InBin::Top));
+        assert!(binned.contains(&Action::PutBack) && binned.contains(&Action::Erase));
+        assert!(!binned.contains(&Action::Rename) && !binned.contains(&Action::MoveToBin));
+        assert_eq!(actions(menu_rows(false, false, true, InBin::Top)), [Action::EmptyBin]);
+        assert!(menu_rows(false, false, true, InBin::Deeper).is_empty());
     }
 
     #[test]
