@@ -462,16 +462,21 @@ fn dark_now() -> bool {
         return dark;
     }
     // Golem ships dark; a machine that never chose is dark.
-    out("gsettings", &["get", "org.gnome.desktop.interface", "color-scheme"]).is_none_or(|v| !v.contains("light"))
+    out("dconf", &["read", "/org/gnome/desktop/interface/color-scheme"]).is_none_or(|v| !v.contains("light"))
 }
 
 /// Ask the apps for a look. GTK 4 / libadwaita apps and the browser follow
 /// at once (through the portal); GTK 3 apps at their next start.
+///
+/// Written with `dconf`, not `gsettings`: Golem's session carries no GSettings
+/// schemas on its data path (`gsettings` answers "No schemas installed" —
+/// found in the desktop VM, 2026-10-13), and dconf, where the values live,
+/// needs none.
 pub(crate) fn assert_dark(dark: bool) {
-    let scheme = if dark { "prefer-dark" } else { "prefer-light" };
-    let theme = if dark { "Adwaita-dark" } else { "Adwaita" };
-    run("gsettings", &["set", "org.gnome.desktop.interface", "color-scheme", scheme]);
-    run("gsettings", &["set", "org.gnome.desktop.interface", "gtk-theme", theme]);
+    let scheme = if dark { "'prefer-dark'" } else { "'prefer-light'" };
+    let theme = if dark { "'Adwaita-dark'" } else { "'Adwaita'" };
+    run("dconf", &["write", "/org/gnome/desktop/interface/color-scheme", scheme]);
+    run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", theme]);
 }
 
 // ------------------------------------------------------------------ power
