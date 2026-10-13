@@ -1039,6 +1039,33 @@ pub(crate) fn wallpaper_moves(path: &str) -> bool {
 /// ahí pero no funcionan".)
 const WALLPAPER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// How the players of moving wallpapers are found: by their command line
+/// (the program's own name is its wrapper's on NixOS). The bracket keeps
+/// the pattern from matching the very command that carries it.
+const PLAYERS: &str = "[m]pvpaper -f -o";
+
+/// End whatever is playing a moving wallpaper. Asked first; one that has
+/// not gone a moment later is ended outright — a player whose picture is
+/// covered may not be listening, and it would play on under the next one
+/// (seen in the test compositor, 2026-10-13). None playing is no failure.
+fn end_players() {
+    let Some(found) = out("pgrep", &["-f", PLAYERS]) else {
+        return;
+    };
+    let pids: Vec<&str> = found.split_whitespace().collect();
+    run("pkill", &["-f", PLAYERS]);
+    let alive = |pid: &str| std::path::Path::new("/proc").join(pid).exists();
+    for _ in 0..15 {
+        if !pids.iter().any(|p| alive(p)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    for pid in pids.iter().filter(|p| alive(p)) {
+        run("kill", &["-9", pid]);
+    }
+}
+
 /// Put the wallpaper at `path` on the desktop. A still goes through the
 /// picture program (`fade`: with its second-long fade). What MOVES — a
 /// video, and a GIF too — is played by `mpvpaper`, looping and silent, over
@@ -1050,13 +1077,14 @@ const WALLPAPER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(1
 /// `mpvpaper` still goes the slow way. Whatever was playing is ended
 /// first. Returns whether it was put: call it from a thread that may wait.
 fn show_wallpaper(path: &str, fade: bool) -> bool {
-    // (None playing: nothing to end, and that is not a failure. By its
-    // command line: the program's own name is its wrapper's on NixOS.)
-    run("pkill", &["-f", "[m]pvpaper -f -o"]);
+    end_players();
     if wallpaper_moves(path) {
         if let Some(player) = video_tool() {
-            // `-f`: it forks and plays on; `*`: every screen.
-            return run(&player, &["-f", "-o", "no-audio loop-file=inf panscan=1.0", "*", path]);
+            // `-f`: it forks and plays on; `*`: every screen. The graphics
+            // card decodes where it can (`hwdec`): a 1080p video cost 37 %
+            // of a core without it and 5 % with — a wallpaper plays all day.
+            let how = "no-audio loop-file=inf panscan=1.0 hwdec=auto-safe";
+            return run(&player, &["-f", "-o", how, "*", path]);
         }
         if wallpaper_is_video(path) {
             return false;
