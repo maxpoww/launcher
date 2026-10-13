@@ -40,6 +40,7 @@ mod dragging;
 mod drives;
 mod emoji;
 mod emoji_table;
+mod filer;
 mod files;
 mod focus_cycle;
 mod font_index;
@@ -679,6 +680,10 @@ fn main() -> anyhow::Result<()> {
         desktop_fscale,
         desktop_visible,
         desktop: desktop::Desktop::default(),
+        filer: filer::Filer::new(
+            smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok(),
+            fractional,
+        ),
         desktop_icons,
         desktop_frame_pending: false,
         desktop_dirty: false,
@@ -1583,6 +1588,8 @@ pub struct App {
     desktop_visible: Option<visible::SurfaceVisible>,
     /// The items, their cells and icon layers, hover and press.
     desktop: desktop::Desktop,
+    /// The file manager's windows (`filer.rs`).
+    filer: filer::Filer,
     /// The desktop's off-loop icon resolver (its own `IconLoader`).
     desktop_icons: Option<notif_icons::NotifIcons>,
     /// One desktop frame callback in flight at a time; a draw asked for
@@ -3302,6 +3309,11 @@ impl App {
             Command::DebugGear(what) => {
                 let done = self.gear_debug(&what);
                 info!("debug-gear: {done}");
+                return;
+            }
+            Command::Files(what) => {
+                let done = self.filer_command(&what);
+                info!("files: {done}");
                 return;
             }
             Command::DebugDesktop(what) => {
@@ -5800,6 +5812,17 @@ impl App {
     /// fractional-scale protocol).
     pub(crate) fn surface_scale(&self, kind: fractional::SurfaceKind) -> f32 {
         use fractional::SurfaceKind;
+        // A file window's scale and size are its own.
+        if let SurfaceKind::Files(id) = kind {
+            let fallback = self.config.desktop.render_scale.max(1) as f32;
+            let (scale, (w, h)) = self.filer.scale_of(id, fallback);
+            let long = w.max(h);
+            return if long == 0 {
+                scale
+            } else {
+                scale.min(renderer::MAX_TEXTURE_SIDE as f32 / long as f32)
+            };
+        }
         let (fs, fallback) = match kind {
             SurfaceKind::Dock => (&self.dock_fscale, self.config.window.render_scale),
             SurfaceKind::Options => (&self.options_fscale, self.config.options.render_scale),
@@ -5807,6 +5830,7 @@ impl App {
             SurfaceKind::Desktop => (&self.desktop_fscale, self.config.desktop.render_scale),
             SurfaceKind::DesktopTop => (&self.desktop_top.fscale, self.config.desktop.render_scale),
             SurfaceKind::Card => (&self.card_fscale, self.config.options.render_scale),
+            SurfaceKind::Files(_) => return 1.0, // answered above
         };
         let fallback = fallback.max(1) as f32;
         let scale = fs.as_ref().map_or(fallback, |f| f.scale_or(fallback));
@@ -5821,6 +5845,7 @@ impl App {
             SurfaceKind::Desktop => self.desktop_size,
             SurfaceKind::DesktopTop => self.desktop_top.size,
             SurfaceKind::Card => self.card_size,
+            SurfaceKind::Files(_) => (0, 0),
         };
         let long = w.max(h);
         if long == 0 {
@@ -5836,6 +5861,21 @@ impl App {
     pub(crate) fn rescale_surface(&mut self, kind: fractional::SurfaceKind) {
         use fractional::{physical, SurfaceKind};
         let scale = self.surface_scale(kind);
+        if let SurfaceKind::Files(id) = kind {
+            let (_, (w, h)) = self.filer.scale_of(id, scale);
+            if w == 0 || h == 0 {
+                return;
+            }
+            if let Some(renderer) = self.filer_renderer(id) {
+                renderer.set_scale(scale);
+                renderer.resize(physical(w, scale), physical(h, scale));
+            }
+            if let Some(fs) = self.filer.scale_slot(id) {
+                fs.set_logical_size(w, h);
+            }
+            self.filer_relayout(id);
+            return;
+        }
         let (size, renderer, fs) = match kind {
             SurfaceKind::Dock => (self.buffer_size, self.renderer.as_mut(), &self.dock_fscale),
             SurfaceKind::Options => (self.options_size, self.options_renderer.as_mut(), &self.options_fscale),
@@ -5851,6 +5891,7 @@ impl App {
                 &self.desktop_top.fscale,
             ),
             SurfaceKind::Card => (self.card_size, self.card_renderer.as_mut(), &self.card_fscale),
+            SurfaceKind::Files(_) => return, // done above
         };
         let (w, h) = size;
         let Some(renderer) = renderer else {
@@ -5878,6 +5919,7 @@ impl App {
             }
             SurfaceKind::DesktopTop => self.request_desktop_top_draw(),
             SurfaceKind::Card => self.request_card_draw(),
+            SurfaceKind::Files(_) => {}
         }
     }
 
@@ -6050,6 +6092,12 @@ impl App {
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // A file window with the keyboard is a window like any other: its
+        // keys are its own.
+        if let Some(id) = self.filer.keys {
+            self.filer_key(id, keysym, utf8);
+            return;
+        }
         // The card's input box, search or name being typed in takes every key.
         if self.card_typing() {
             self.card_key(keysym, utf8);
@@ -6396,6 +6444,11 @@ impl CompositorHandler for App {
         // that shows it.
         if self.is_dissolve_surface(surface) {
             self.dissolve_covered();
+            return;
+        }
+        // A file window's.
+        if let Some(id) = self.filer.id_of(surface) {
+            self.filer_frame(id);
             return;
         }
         // The deck runs its own tweens on its own renderer;
@@ -6789,6 +6842,10 @@ impl KeyboardHandler for App {
         _keysyms: &[Keysym],
     ) {
         debug!("keyboard focus gained");
+        if let Some(id) = self.filer.id_of(surface) {
+            self.filer.keys = Some(id);
+            return;
+        }
         if self
             .desktop_layer
             .as_ref()
@@ -6815,6 +6872,12 @@ impl KeyboardHandler for App {
         // releases its grab on every box close, which must not collapse an open
         // launcher or drop the window it means to hand focus back to.
         // (And the desktop, while a name is typed on it.)
+        if let Some(id) = self.filer.id_of(surface) {
+            if self.filer.keys == Some(id) {
+                self.filer.keys = None;
+            }
+            return;
+        }
         if self.card_layer.as_ref().is_some_and(|l| l.wl_surface() == surface) {
             self.card_keys_left();
             return;
@@ -7043,6 +7106,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         }
         // Whether the pointer is on ANY surface of ours: off all of them it is
         // on a window, and the desktop must not keep the keyboard from it.
+        // A file window is a window: the shell's own surfaces are left.
+        if let options::PointerSurface::Files(id) = app.pointer_surface {
+            if matches!(event, wl_pointer::Event::Enter { .. }) {
+                app.desktop.pointer_ours = false;
+                app.desktop_pointer_went();
+            }
+            app.filer_pointer(id, event);
+            return;
+        }
         match &event {
             wl_pointer::Event::Enter { .. } => app.desktop.pointer_ours = true,
             wl_pointer::Event::Leave { .. } => {

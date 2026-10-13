@@ -38,6 +38,8 @@ pub enum SurfaceKind {
     /// The desktop's menus, above the windows (`desktop_top.rs`).
     DesktopTop,
     Card,
+    /// A file manager window, by its id (`filer.rs`).
+    Files(u32),
 }
 
 /// The two globals, bound only when the compositor offers both.
@@ -110,6 +112,7 @@ impl Dispatch<WpFractionalScaleV1, SurfaceKind> for App {
                 SurfaceKind::Desktop => app.desktop_fscale.as_mut(),
                 SurfaceKind::DesktopTop => app.desktop_top.fscale.as_mut(),
                 SurfaceKind::Card => app.card_fscale.as_mut(),
+                SurfaceKind::Files(id) => app.filer.scale_slot(*id),
             };
             let Some(slot) = slot else {
                 return;

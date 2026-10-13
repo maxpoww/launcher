@@ -722,4 +722,30 @@ The big daemon files are cohesive but long — go straight to the function:
   box as a part); THE EMOJI'S PAGE has its kinds along the top (the one in view marked:
   `BarView::kind_now`, `Bottom::first_in_view`), the grid under them, and at the bottom a line of hint
   where the search shows once something is typed. Not done: a drop on the clipboard's page.
+- `filer.rs` — FILES, Golem's file manager (Max, 2026-10-13: a REAL WINDOW, icons as on the
+  desktop, Nautilus stays the system's until this one covers the daily things). Each window is an
+  `xdg_toplevel` OF THE DAEMON (class `golem-files`, `WindowHandler` + `delegate_xdg_*` at the
+  file's foot) with its own renderer and icon array (`Win`; `Filer::take`/`put` lends one out to
+  work on with the rest of the app in hand). Routing by id: `fractional::SurfaceKind::Files(id)`,
+  `options::PointerSurface::Files(id)`, `Filer::keys` (the window the keyboard is on —
+  `handle_key_event` asks it first), `CompositorHandler::frame` → `filer_frame`. ONE folder a
+  window: the desktop's cell with TWO lines of name (`two_lines`), row by row (`Layout`: `cell`,
+  `index_at`, `in_view`, `reveal`), scrolling (fingers 1:1, a wheel's notch eased), only what is
+  on screen laid out and holding a texture layer (`filer_sync_icons`; thumbnails ride the Files
+  thumbnailer — `filer_on_thumb` — at most `CHAINS_MAX` kept). Head: back · forward · the way here
+  (`crumbs`: from Home, a stick or a phone, else `/`; the first steps give way in a narrow
+  window). Side: `places` (Home, the owner's folders under their names on disk from
+  `user-dirs.dirs`, `~/Phones`, what is plugged in — `Desktop::volumes`, refreshed from
+  `on_mounts`); left out under `SIDE_FROM` wide. Listed OFF the loop (`filer_list` →
+  `desktop_off_loop`, a `generation` drops a late answer), folders first then `by_name` (numbers
+  by value), followed with inotify per window (60 ms coalesce). Click = select (Ctrl adds), double
+  click = open (a folder here, a file through `xdg-open`), mouse side buttons / Backspace /
+  Alt+←→↑ = back, forward, up (coming out of a folder leaves it selected — `Win::reveal`), arrows
+  walk, Enter opens, typing goes to a name (`typed_match`), Ctrl+A/H/R/N/W, F5. The ground is the
+  dock's colour made solid (colours are LINEAR here). NOT BUILT (the desktop's own, to be shared
+  rather than copied — menu, Properties, rename, drags in and out, cut/copy/paste, the bin,
+  rubber band): next. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
+  FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
+  <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
+  <px>|hidden|close|state` drive the newest (⚠ `activate`/`key enter` on a file really opens it).
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

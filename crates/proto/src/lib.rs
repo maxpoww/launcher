@@ -108,6 +108,12 @@ pub enum Command {
     /// files in as a drop on that cell; `forget` drops every remembered
     /// position.
     DebugDesktop(String),
+    /// FILES, Golem's file manager: alone or with a folder, open a window
+    /// on Home or on it; else drive the newest window without a pointer:
+    /// `go <folder>`, `back`, `forward`, `up`, `select <n>`, `activate <n>`,
+    /// `key <left|right|up|down|enter|back|escape|home|end>`, `type
+    /// <letters>`, `scroll <px>`, `hidden`, `close`, `state`.
+    Files(String),
     /// The CARD (the shelf that rides the windows), without a pointer:
     /// `toggle [addr]` (empty = toggle) turns it on or off for the focused
     /// window (or the one at `addr` — what the button on a title bar sends); `all` is the master switch; `add
@@ -273,6 +279,8 @@ impl fmt::Display for Command {
             Command::DebugGear(a) => write!(f, "debug-gear {a}"),
             Command::DebugDesktop(a) if a.is_empty() => f.write_str("debug-desktop"),
             Command::DebugDesktop(a) => write!(f, "debug-desktop {a}"),
+            Command::Files(a) if a.is_empty() => f.write_str("files"),
+            Command::Files(a) => write!(f, "files {a}"),
             Command::Card(a) if a.is_empty() => f.write_str("card"),
             Command::Card(a) => write!(f, "card {a}"),
             Command::FloatMode(m) => write!(f, "float-mode {m}"),
@@ -339,6 +347,7 @@ impl FromStr for Command {
             ("debug-emoji", Command::DebugEmoji as fn(String) -> Command),
             ("debug-gear", Command::DebugGear as fn(String) -> Command),
             ("debug-desktop", Command::DebugDesktop as fn(String) -> Command),
+            ("files", Command::Files as fn(String) -> Command),
             ("card", Command::Card as fn(String) -> Command),
             ("stage-show", Command::StageShow as fn(String) -> Command),
             // Before its own prefix: `stage-swipe` would otherwise be tried
@@ -441,6 +450,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "debug-stats",
     "debug-gear <open net|open bt|close|state|detail|share|hotspot|files|back|password|type|scroll|pair|fake-off>",
     "debug-desktop [reload|open <n>|move <n> <col> <row>|import <col> <row> <uri…>|select <n…>|band <x0> <y0> <x1> <y1>|hide|show|toggle|forget]",
+    "files [<folder>|go <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll <px>|hidden|close|state]",
     "card [toggle [addr]|all|add text <…>|add file <path>|remove <n>|clear|state]",
     "options-trigger <id>",
     "control-panel",
@@ -558,6 +568,7 @@ mod tests {
                 | Command::DebugStats(_)
                 | Command::DebugGear(_)
                 | Command::DebugDesktop(_)
+                | Command::Files(_)
                 | Command::Card(_)
                 | Command::FloatMode(_)
                 | Command::ControlPanel
@@ -613,6 +624,8 @@ mod tests {
         Command::DebugGear("detail".into()),
         Command::DebugDesktop(String::new()),
         Command::DebugDesktop("open 0".into()),
+        Command::Files(String::new()),
+        Command::Files("go /tmp".into()),
         Command::Card(String::new()),
         Command::Card("add text hello there".into()),
         Command::FloatMode(String::new()),

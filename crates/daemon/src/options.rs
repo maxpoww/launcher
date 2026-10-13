@@ -944,6 +944,8 @@ pub(crate) enum PointerSurface {
     DesktopTop,
     /// The card on a window (see [`crate::card`]).
     Card,
+    /// A file manager window, by its id (see [`crate::filer`]).
+    Files(u32),
 }
 
 /// The pill modules currently on the bar.
@@ -5237,6 +5239,9 @@ impl App {
         &self,
         surface: &wayland_client::protocol::wl_surface::WlSurface,
     ) -> PointerSurface {
+        if let Some(id) = self.filer.id_of(surface) {
+            return PointerSurface::Files(id);
+        }
         if self
             .options_layer
             .as_ref()

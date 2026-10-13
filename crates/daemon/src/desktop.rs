@@ -559,7 +559,7 @@ pub(crate) fn list(dir: &Path) -> Vec<Item> {
 
 /// The item for one directory entry. A `.desktop` file that parses as an
 /// application is a launcher; one that does not is just a file.
-fn item_for(path: PathBuf, name: String, is_dir: bool) -> Item {
+pub(crate) fn item_for(path: PathBuf, name: String, is_dir: bool) -> Item {
     let path_str = path.to_string_lossy().into_owned();
     if is_dir {
         return Item {
@@ -621,7 +621,7 @@ pub(crate) fn locked_shortcut(item: &Item) -> Option<waverunner_core::index::App
 
 /// The icon key for one of the dock's file-type carriers (`asset-folder`,
 /// `asset-image`, …): `asset:<themed icon name>`.
-fn asset_key(asset: &str) -> String {
+pub(crate) fn asset_key(asset: &str) -> String {
     let themed = crate::apps::ICON_ASSETS
         .iter()
         .find(|(id, _)| *id == asset)
@@ -630,14 +630,14 @@ fn asset_key(asset: &str) -> String {
 }
 
 /// The key a file's own picture is filed under once it has one.
-fn thumb_key(path: &str) -> String {
+pub(crate) fn thumb_key(path: &str) -> String {
     format!("thumb:{path}")
 }
 
 /// What to ask the icon resolver for a key: a bare themed carrier
 /// (`asset:`), a plated app tile (`app:`), or nothing — a `thumb:` comes
 /// from the thumbnailer, not the theme.
-fn icon_request(key: &str) -> Option<crate::notif_icons::Request> {
+pub(crate) fn icon_request(key: &str) -> Option<crate::notif_icons::Request> {
     if let Some(name) = key.strip_prefix("asset:") {
         Some(crate::notif_icons::Request {
             key: key.to_owned(),
@@ -1697,7 +1697,7 @@ fn label_max_w(cell: &Rect) -> f32 {
 /// cached shaping). Not the grid's per-character estimate: file names are
 /// any length in any script, and the estimate let "Holiday photos" wrap
 /// onto a second line the one-line label never shows.
-fn fit_label(text: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> String {
+pub(crate) fn fit_label(text: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> String {
     if measure(text) <= max_w {
         return text.to_owned();
     }
@@ -2580,6 +2580,8 @@ impl App {
         }
         self.desktop.mounts_seen = true;
         self.desktop.volumes = list;
+        // (They are places in the file manager's windows too.)
+        self.filer_places();
         self.phone_pill_plugged();
         self.save_desktop_positions();
         self.reload_desktop();
