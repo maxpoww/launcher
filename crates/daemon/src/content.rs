@@ -722,6 +722,8 @@ pub struct Layout {
     /// The scale a stack over the dock draws its members at: the icon
     /// scale times its zoom (Ctrl +/−, `zoom.rs`).
     pub open_box_scale: f32,
+    /// How much bigger than a label that stack's names are (`zoom.rs`).
+    pub open_box_text: f32,
     /// The Apps rows parted around a box open in the grid.
     pub apps_part: Option<AppsPart>,
     /// The band under Files while a search matches settings or modules:
@@ -1149,6 +1151,7 @@ pub fn layout(
         open_box_grid: (OPEN_BOX_COLS, OPEN_BOX_COLS),
         open_box_cap: OPEN_BOX_CAP,
         open_box_scale: icon_scale,
+        open_box_text: 1.0,
         apps_part: None,
         control_bands,
         controls: Vec::new(),
@@ -1223,10 +1226,11 @@ pub const STACK_CELL_W: f32 = 78.0;
 const STACK_ICON_TOP: f32 = 8.0;
 const STACK_BOTTOM_PAD: f32 = 6.0;
 
-/// A dock stack's cell height at `icon_scale`: the icon, its name (which
-/// doesn't scale) and the air around them.
-pub fn stack_cell_h(icon_scale: f32) -> f32 {
-    (STACK_ICON_TOP + STACK_ICON + STACK_BOTTOM_PAD) * icon_scale + GRID_LABEL_GAP + LABEL_LINE_PX
+/// A dock stack's cell height at `icon_scale`: the icon, its name (at
+/// `text` times the label's size — the name follows the stack's zoom at
+/// its own, slower pace) and the air around them.
+pub fn stack_cell_h(icon_scale: f32, text: f32) -> f32 {
+    (STACK_ICON_TOP + STACK_ICON + STACK_BOTTOM_PAD) * icon_scale + GRID_LABEL_GAP + LABEL_LINE_PX * text
 }
 
 /// Gap between a dock folder's open box and its icon: the page dots sit
@@ -3175,6 +3179,8 @@ pub fn scene(
         let member_icon = if box_over_dock { STACK_ICON * stack_scale } else { grid_icon };
         let icon_cy = if box_over_dock { STACK_ICON_TOP * stack_scale } else { grid_icon_top } + member_icon / 2.0;
         let name_w = cell - if box_over_dock { 6.0 } else { 12.0 };
+        let name_scale = if box_over_dock { layout.open_box_text } else { 1.0 };
+        let (name_px, name_line) = (LABEL_FONT_PX * name_scale, LABEL_LINE_PX * name_scale);
         let place = |di: usize| -> (f32, f32) {
             let cap = layout.open_box_cap.max(1);
             let slot = di % cap;
@@ -3231,11 +3237,11 @@ pub fn scene(
             // Each member's name rides under its icon.
             if let Some(entry) = entries.get(idx) {
                 boxgrid.labels.push(Label {
-                    text: truncate_label(&entry.name, name_w, LABEL_FONT_PX),
+                    text: truncate_label(&entry.name, name_w, name_px),
                     pos: (cx, cy + size / 2.0 + GRID_LABEL_GAP),
                     max_w: name_w,
-                    font_px: LABEL_FONT_PX,
-                    line_px: LABEL_LINE_PX,
+                    font_px: name_px,
+                    line_px: name_line,
                     centered: true,
                     dim: false,
                     cache: true,

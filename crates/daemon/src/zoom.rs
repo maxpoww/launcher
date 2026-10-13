@@ -47,6 +47,13 @@ fn factor(stored: f32) -> f32 {
     if stored > 0.0 { stored.clamp(MIN, MAX) } else { 1.0 }
 }
 
+/// The names' size at a stack zoom of `zoom`: one step for every two whole
+/// steps the zoom is from 1, either way.
+fn text_factor(zoom: f32) -> f32 {
+    let steps = ((zoom - 1.0) / STEP).round() as i32;
+    1.0 + (steps / 2) as f32 * STEP
+}
+
 /// `now` after `how` (`in`, `out`, `reset`, or a number): a tenth a step,
 /// kept between `MIN` and `MAX`. `None` for a word it does not know.
 pub(crate) fn stepped(now: f32, how: &str) -> Option<f32> {
@@ -73,6 +80,13 @@ impl App {
     /// How much bigger than their own size a dock stack's members are.
     pub(crate) fn stack_zoom(&self) -> f32 {
         factor(self.settings.stack_zoom)
+    }
+
+    /// How much bigger than a label a dock stack's names are: they grow
+    /// with its zoom, but half as fast — a step for every two of the
+    /// icons' (Max, 2026-10-13: "each 2 hits the text grows once").
+    pub(crate) fn stack_text_zoom(&self) -> f32 {
+        text_factor(self.stack_zoom())
     }
 
     /// Zoom the bar, the desktop or a dock stack (`what`) in, out, back, or
@@ -167,6 +181,9 @@ mod tests {
         assert_eq!(stepped(0.7, "out"), Some(0.7));
         assert_eq!(stepped(1.0, "1.34"), Some(1.3));
         assert_eq!(stepped(1.0, "bigger"), None);
+        // A stack's names take a step for every two of its icons'.
+        let text: Vec<f32> = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4].iter().map(|&z| (text_factor(z) * 10.0).round() / 10.0).collect();
+        assert_eq!(text, [0.9, 1.0, 1.0, 1.0, 1.1, 1.1, 1.2]);
         // Never set is as shipped; a stored one is kept within the ends.
         assert_eq!(factor(0.0), 1.0);
         assert_eq!(factor(5.0), MAX);

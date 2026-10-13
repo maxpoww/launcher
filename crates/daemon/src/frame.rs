@@ -247,8 +247,9 @@ impl App {
                         // (Ctrl +/− zooms them: `zoom.rs`.)
                         let stack = scale * self.stack_zoom();
                         layout.open_box_scale = stack;
+                        layout.open_box_text = self.stack_text_zoom();
                         let slot = content::STACK_CELL_W * stack;
-                        let band = content::stack_cell_h(stack);
+                        let band = content::stack_cell_h(stack, layout.open_box_text);
                         let dock_h = self.config.window.input_bar_height as f32 * scale;
                         let m = content::DRAG_MARGIN_X + content::DOCK_PAD_X * scale;
                         let area = content::Rect::new(
