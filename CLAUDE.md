@@ -741,7 +741,7 @@ The big daemon files are cohesive but long — go straight to the function:
   by value), followed with inotify per window (60 ms coalesce). Click = select (Ctrl adds), double
   click = open (a folder here, a file through `xdg-open`), mouse side buttons / Backspace /
   Alt+←→↑ = back, forward, up (coming out of a folder leaves it selected — `Win::reveal`), arrows
-  walk, Enter opens, typing goes to a name (`typed_match`), Ctrl+A/H/R/N/W, F5. The ground is the
+  walk, Enter opens, typing searches (below), Ctrl+A/H/R/N/W, F5. The ground is the
   dock's colour made solid (colours are LINEAR here). THE MENU (2026-10-13, second cut) is the
   desktop's `Menu` with this window's rows (`menu_rows`, `Menu::with_rows`), drawn IN the window
   (names under it are left out — `covered`; it cannot hang past the window's edge): on a thing
@@ -808,7 +808,8 @@ The big daemon files are cohesive but long — go straight to the function:
   last two only where there is room; `Win::meta`, read with the listing). Its strip names the
   columns; a click orders by one (`Spot::Col`, `Win::sort`, `sorted`: size/date in THIS window,
   folders first; Name = the folder's own order) — while ordered by size or date no room is made
-  for a drag. SEARCH (the magnifier, or Ctrl+F): a field at the head's right, the folder showing
+  for a drag. SEARCH (JUST TYPING — the first letter brings the field out, the clipboard box's way; also the
+  magnifier, or Ctrl+F): a field at the head's right, the folder showing
   only what holds the words (`Win::find`, `Win::all`, `found`, `filer_find`; Escape puts it
   away, Enter opens the first found, the walking keys go on to what is found); not into
   sub-folders. The head's icons are the bar's font (`options::NERD`). Rig: `files view

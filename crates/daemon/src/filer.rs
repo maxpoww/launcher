@@ -10,8 +10,8 @@
 //!
 //! A click selects, a double click opens (a folder in this window, a file
 //! in its app), the side buttons of the mouse / Backspace / Alt+arrows go
-//! back, forward and up, the arrows walk the icons and typing jumps to a
-//! name. The folder is listed off the loop and followed with inotify.
+//! back, forward and up, the arrows walk the icons and typing searches
+//! the folder. The folder is listed off the loop and followed with inotify.
 //!
 //! A right click opens the desktop's own menu (`desktop_menu::Menu`, with
 //! this window's rows — `menu_rows`), drawn in the window: Open · Open in
@@ -97,8 +97,6 @@ const CHAINS_MAX: usize = 400;
 const LAYER_HEADROOM: u32 = 16;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-/// Typing a name: how long between letters still counts as one word.
-const TYPE_PAUSE: Duration = Duration::from_millis(900);
 /// A wheel's notch (15 units from the compositor) in pixels of scroll.
 const WHEEL_STEP: f32 = 4.0;
 
@@ -791,8 +789,6 @@ struct Win {
     /// The scroll being reported comes from a wheel (notches), not fingers.
     wheel: bool,
     click: Option<(Instant, String)>,
-    typed: String,
-    typed_at: Option<Instant>,
     hits: Hits,
     watch: Option<calloop::RegistrationToken>,
     reload_pending: bool,
@@ -1224,12 +1220,6 @@ pub(crate) fn two_lines(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) ->
     )
 }
 
-/// The first item whose name starts with `typed`, whatever the case.
-pub(crate) fn typed_match(items: &[Item], typed: &str) -> Option<usize> {
-    let typed = typed.to_lowercase();
-    items.iter().position(|it| it.name.to_lowercase().starts_with(&typed))
-}
-
 /// A colour brought `k` of the way to white, solid: the window's ground is
 /// the dock's own colour without its glass. (Colours here are linear light:
 /// a little goes a long way.)
@@ -1354,8 +1344,6 @@ impl App {
             hover: Spot::Nothing,
             wheel: false,
             click: None,
-            typed: String::new(),
-            typed_at: None,
             hits: Hits::default(),
             watch: None,
             reload_pending: false,
@@ -1493,7 +1481,6 @@ impl App {
         win.selected.clear();
         win.cursor = None;
         win.click = None;
-        win.typed.clear();
         win.scroll = 0.0;
         win.scroll_to = 0.0;
         win.failed = false;
@@ -3878,7 +3865,6 @@ impl App {
                 }
             }
             Keysym::Escape => {
-                win.typed.clear();
                 if !win.selected.is_empty() {
                     win.selected.clear();
                     self.filer_request_draw(id);
@@ -3922,22 +3908,16 @@ impl App {
             }
             Keysym::w if ctrl => self.filer_close(id),
             _ => {
-                // Typing a name goes to the first thing called that.
+                // TYPING SEARCHES (Max, 2026-10-13: "¿por qué no empieza a
+                // buscar con solo typear?" — the clipboard box's way): the
+                // first letter brings the field out with it in.
                 let Some(text) = utf8.filter(|t| !ctrl && !alt && t.chars().all(|c| !c.is_control())) else {
                     return;
                 };
-                if text.is_empty() {
+                if text.trim().is_empty() {
                     return;
                 }
-                let now = Instant::now();
-                if win.typed_at.is_none_or(|t| now.duration_since(t) > TYPE_PAUSE) {
-                    win.typed.clear();
-                }
-                win.typed.push_str(text);
-                win.typed_at = Some(now);
-                if let Some(i) = typed_match(&win.items, &win.typed) {
-                    self.filer_walk_to(id, i);
-                }
+                self.filer_find(id, Some(text.to_owned()));
             }
         }
     }
@@ -4513,11 +4493,4 @@ mod tests {
         assert!(names(Some("zzz")).is_empty());
     }
 
-    #[test]
-    fn typing_goes_to_the_first_name_that_starts_so() {
-        let items = [item("Alpha"), item("beta"), item("Bravo")];
-        assert_eq!(typed_match(&items, "b"), Some(1));
-        assert_eq!(typed_match(&items, "BR"), Some(2));
-        assert_eq!(typed_match(&items, "z"), None);
-    }
 }
