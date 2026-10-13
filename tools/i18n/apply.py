@@ -13,7 +13,7 @@ SKIP_FILES = {"perf.rs", "hypr.rs", "ipc.rs", "launch.rs", "nix.rs", "install.rs
               "deck.rs", "playbox.rs", "emoji_table.rs", "emoji.rs", "logging.rs", "persist.rs", "main.rs", "phones.rs"}
 LOWER_OK = {"gear_pages.rs", "gear.rs", "panel.rs", "desktop.rs", "bt_files.rs", "desktop_send.rs"}
 SKIP_CALLEE = {"show_control", "open_named", "open_control", "open_content", "is_display_setting", "display_open",
-               "module", "read", "p", "kw", "nmcli", "out_of", "adb", "args", "line", "serde", "env", "str"}
+               "module", "read", "p", "kw", "is", "nmcli", "out_of", "adb", "args", "line", "serde", "env", "str"}
 SKIP_TEXT = re.compile(r"Pixel 8|^Voice note|Nerd Font|Noto Color|^CTRL|UTF-8$|^Android/|^DCIM$|^Pictures$|"
                        r"^untitled folder|\[\{|->|\{[^{}]*:\?\}|\\n|\\\"|^\(The phone's Configure|^80%, charging|^91 GB|"
                        r"^(English|Español|Português|Français|Deutsch|Italiano|Nederlands|Polski|Svenska|Dansk)\b|"
