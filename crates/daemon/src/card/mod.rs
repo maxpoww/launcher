@@ -5751,10 +5751,7 @@ impl App {
             return;
         }
         self.card.keys = on;
-        let ctl = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("waverunner-ctl")))
-            .filter(|ctl| ctl.exists());
+        let ctl = crate::hypr::ctl_program();
         let mut lua = String::new();
         for (key, what) in ZOOM_KEYS {
             lua.push_str(&format!("hl.unbind(\"{key}\") "));

@@ -330,20 +330,114 @@ fn mic_muted() -> bool {
 /// A recording whose loudest sample is under this is silence.
 pub(super) const QUIET: i32 = 120;
 
-/// The loudest sample in the 16-bit recording at `wav` (0: none, or
-/// unreadable).
-pub(super) fn loudest(wav: &PathBuf) -> i32 {
+/// What a recording holds, before anything is made of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Heard {
+    /// Something to keep, or to write out.
+    Sound,
+    /// Nothing: silence, or (for talk) an even hiss with no voice in it.
+    Nothing,
+    /// The microphone is turned up so far that it gives NOISE — its hiss
+    /// fills the recording, or clips. The level of that hiss (the quiet
+    /// tenth of the recording, RMS).
+    TooLoud(f32),
+}
+
+/// How loud the quiet tenth of a recording is when the microphone itself is
+/// the noise, and the share of clipped samples that says the same.
+const HISS: f32 = 1500.0;
+const CLIPPED: f32 = 0.05;
+/// A voice stands out of the room it is in: the loud tenth of talk is this
+/// many times its quiet tenth, and at least this loud.
+const VOICE_OVER: f32 = 3.0;
+const VOICE_LEAST: f32 = 150.0;
+/// Where a microphone that was too loud is turned down to: the level of its
+/// hiss afterwards.
+const HISS_AFTER: f32 = 200.0;
+
+/// Listen to the 16-bit recording at `wav` before it is used (`talk`: it is
+/// to be written out, so it must have a voice in it).
+///
+/// Measured on the laptops, 2026-10-13. An Acer E5-573 at its microphone's
+/// default level (100 %: +30 dB capture and +30 dB boost) records hiss at
+/// full scale, a fifth of it clipped — and the speech engine, given hiss,
+/// WRITES SOMETHING ("Bu konjun ne lan bu sorun?", "¡Y no se lo entesan
+/// bien!"), which was pasted into the window. At 22 % the same microphone
+/// hears a sentence perfectly. A quiet room on a MacBook Air is 2–200 of
+/// RMS, flat; a sentence is 300–19000 at its loud tenth over 2–150 at its
+/// quiet one.
+pub(super) fn heard(wav: &PathBuf, talk: bool) -> Heard {
     let Ok(bytes) = std::fs::read(wav) else {
-        return 0;
+        return Heard::Nothing;
     };
     // (Past the WAV's head: 44 bytes as the recorder writes it.)
-    bytes
+    let samples: Vec<i16> = bytes
         .get(44..)
         .unwrap_or(&[])
         .chunks_exact(2)
-        .map(|s| i32::from(i16::from_le_bytes([s[0], s[1]])).abs())
-        .max()
-        .unwrap_or(0)
+        .map(|s| i16::from_le_bytes([s[0], s[1]]))
+        .collect();
+    // (30 ms at the recorder's 16 kHz.)
+    const FRAME: usize = 480;
+    let mut levels: Vec<f32> = samples
+        .chunks_exact(FRAME)
+        .map(|f| (f.iter().map(|&x| f32::from(x) * f32::from(x)).sum::<f32>() / FRAME as f32).sqrt())
+        .collect();
+    if levels.len() < 5 {
+        return Heard::Nothing;
+    }
+    levels.sort_by(f32::total_cmp);
+    let (quiet, loud) = (levels[levels.len() / 10], levels[levels.len() * 9 / 10]);
+    let clipped = samples.iter().filter(|&&x| x.unsigned_abs() >= 32700).count() as f32 / samples.len() as f32;
+    if quiet > HISS || (clipped > CLIPPED && quiet > HISS / 2.0) {
+        return Heard::TooLoud(quiet);
+    }
+    let peak = samples.iter().map(|&x| i32::from(x).abs()).max().unwrap_or(0);
+    if peak < QUIET || (talk && (loud < VOICE_LEAST || loud < quiet * VOICE_OVER)) {
+        return Heard::Nothing;
+    }
+    Heard::Sound
+}
+
+/// The microphone gave noise at `hiss` (see [`Heard::TooLoud`]): turn it
+/// down to where its hiss is small — its volume is cubic, so the level goes
+/// with the cube of it. What to say of it.
+pub(super) fn mic_turn_down(hiss: f32) -> &'static str {
+    let turned = (|| {
+        let wpctl = tool("WAVERUNNER_WPCTL", "wpctl")?;
+        let out = Command::new(&wpctl)
+            .args(["get-volume", "@DEFAULT_AUDIO_SOURCE@"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let now: f32 = String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1)?.parse().ok()?;
+        let to = mic_level_for(now, hiss);
+        if to >= now {
+            return None;
+        }
+        info!("card: the microphone hisses at {hiss:.0} — turned down from {now:.2} to {to:.2}");
+        Command::new(&wpctl)
+            .args(["set-volume", "@DEFAULT_AUDIO_SOURCE@", &format!("{to:.2}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()
+            .filter(|s| s.success())
+    })();
+    if turned.is_some() {
+        "The microphone was too loud: turned down. Say it again"
+    } else {
+        "The microphone is too loud: turn its volume down"
+    }
+}
+
+/// The volume a microphone at `now` whose hiss is `hiss` is turned down to.
+fn mic_level_for(now: f32, hiss: f32) -> f32 {
+    // (A recording that clips hides how loud it really is: it is at least
+    // this, so the step down is at least this big — and never a small one.)
+    (now * (HISS_AFTER / hiss.max(HISS)).cbrt()).clamp(0.15, (now * 0.8).max(0.15))
 }
 
 /// Write out what is said in the recording at `wav`.
@@ -441,12 +535,17 @@ impl App {
             let _ = rec.child.wait();
             // (Nothing but silence in it: said, and not kept — a muted or
             // dead microphone records exactly that.)
-            if keep && loudest(&rec.path) < QUIET {
-                let _ = std::fs::remove_file(&rec.path);
-                let _ = tx.send(Done::Failed(
-                    "Nothing was heard. Is the microphone muted or off?",
-                ));
-                return;
+            if keep {
+                let why = match heard(&rec.path, talk) {
+                    Heard::Sound => None,
+                    Heard::Nothing => Some("Nothing was heard. Is the microphone muted or off?"),
+                    Heard::TooLoud(hiss) => Some(mic_turn_down(hiss)),
+                };
+                if let Some(why) = why {
+                    let _ = std::fs::remove_file(&rec.path);
+                    let _ = tx.send(Done::Failed(why));
+                    return;
+                }
             }
             let done = match (keep, talk, engine) {
                 (false, _, _) => {
@@ -786,9 +885,36 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
             path
         };
-        assert!(loudest(&wav("quiet.wav", &[0, 3, -2, 0])) < QUIET);
-        assert!(loudest(&wav("said.wav", &[0, 900, -4000, 12])) >= QUIET);
-        assert_eq!(loudest(&dir.join("none.wav")), 0);
+        assert_eq!(heard(&dir.join("none.wav"), false), Heard::Nothing);
+        // What the laptops' microphones gave (2026-10-13), in kind: a
+        // sentence in a quiet room is heard; the room alone is not; an even
+        // hiss is not TALK (the engine writes nonsense from it) though it
+        // can be kept as a note; a microphone that fills the recording with
+        // its own noise is told apart, with how loud that noise is.
+        let tone = |amp: f32, n: usize| -> Vec<i16> { (0..n).map(|i| (amp * (i as f32 * 0.3).sin()) as i16).collect() };
+        let hiss = |amp: i32, n: usize| -> Vec<i16> {
+            let mut x = 12345u32;
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (((x >> 16) as i32 % (2 * amp + 1)) - amp) as i16
+                })
+                .collect()
+        };
+        let mut sentence = hiss(30, 8000);
+        sentence.extend(tone(6000.0, 24000));
+        sentence.extend(hiss(30, 8000));
+        assert_eq!(heard(&wav("sentence.wav", &sentence), true), Heard::Sound);
+        assert_eq!(heard(&wav("room.wav", &hiss(40, 40000)), true), Heard::Nothing);
+        assert_eq!(heard(&wav("even.wav", &hiss(900, 40000)), true), Heard::Nothing);
+        assert_eq!(heard(&wav("even-note.wav", &hiss(900, 40000)), false), Heard::Sound);
+        assert!(matches!(heard(&wav("noise.wav", &hiss(32767, 40000)), true), Heard::TooLoud(h) if h > 10000.0));
+        assert_eq!(heard(&wav("short.wav", &[0, 900, -4000, 12]), true), Heard::Nothing);
+        // The Acer's microphone at 100 % is brought to about a fifth, where
+        // it heard the sentence; one a little hissy is taken down a step.
+        assert!((mic_level_for(1.0, 23000.0) - 0.205).abs() < 0.01);
+        assert!((mic_level_for(0.5, 1600.0) - 0.25).abs() < 0.01);
+        assert_eq!(mic_level_for(0.16, 9000.0), 0.15);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1643,6 +1643,23 @@ pub fn reload_config() {
     }
 }
 
+/// `waverunner-ctl`, for the binds the dock makes in the compositor at run
+/// time (Escape while a dictation is written out, Ctrl +/− over the card and
+/// the bar): the one beside this binary — a build in its target directory —
+/// or the one on the PATH. An INSTALLED dock has no ctl beside it (its
+/// package holds the daemon alone; the ctl is in the owner's profile): with
+/// only the first place looked in, none of those binds was ever made on the
+/// laptops (found 2026-10-13 with real key presses: Escape went into the
+/// window and the dictation was written out anyway).
+pub(crate) fn ctl_program() -> Option<std::path::PathBuf> {
+    const NAME: &str = "waverunner-ctl";
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join(NAME)));
+    beside.filter(|ctl| ctl.exists()).or_else(|| {
+        std::env::var_os("PATH")
+            .and_then(|path| std::env::split_paths(&path).map(|dir| dir.join(NAME)).find(|ctl| ctl.is_file()))
+    })
+}
+
 /// [`eval`], reporting whether the chunk ran (`ok`) — for callers with a
 /// fallback when it did not (e.g. a plugin function that is not loaded).
 pub fn eval_ok(lua: &str) -> bool {

@@ -109,10 +109,7 @@ impl App {
     /// the config, whose Super+Escape must not suspend the computer under a
     /// hand that has not let go of Super yet (hyprland.lua).
     fn dictate_esc(&self, on: bool) {
-        let ctl = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("waverunner-ctl")))
-            .filter(|ctl| ctl.exists());
+        let ctl = crate::hypr::ctl_program();
         let mut lua = format!("golem_dictating = {on} hl.unbind(\"ESCAPE\") ");
         if let (true, Some(ctl)) = (on, &ctl) {
             lua.push_str(&format!(
@@ -286,8 +283,13 @@ impl App {
         let (tx, rx) = calloop::channel::channel::<Result<String, &'static str>>();
         std::thread::spawn(move || {
             let _ = child.wait();
-            let said = if voice::loudest(&path) < voice::QUIET {
-                Err("Nothing was heard. Is the microphone muted or off?")
+            let said = match voice::heard(&path, true) {
+                voice::Heard::Nothing => Err("Nothing was heard. Is the microphone muted or off?"),
+                voice::Heard::TooLoud(hiss) => Err(voice::mic_turn_down(hiss)),
+                voice::Heard::Sound => Ok(()),
+            };
+            let said = if let Err(why) = said {
+                Err(why)
             } else if let Some((cli, model)) = engine {
                 voice::transcribe(&cli, &model, &path)
             } else {
@@ -331,6 +333,8 @@ impl App {
         let why = match why {
             w if w.starts_with("Nothing was heard") => "Nothing was heard",
             w if w.starts_with("The microphone is muted") => "The microphone is muted",
+            w if w.starts_with("The microphone was too loud") => "Mic was too loud: say it again",
+            w if w.starts_with("The microphone is too loud") => "Mic too loud: turn it down",
             w if w.contains("speech engine") => "No speech engine installed",
             w => w,
         };

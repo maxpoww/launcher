@@ -100,10 +100,7 @@ impl App {
             return;
         }
         self.bar_zoom_keys = on;
-        let ctl = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("waverunner-ctl")))
-            .filter(|ctl| ctl.exists());
+        let ctl = crate::hypr::ctl_program();
         let mut lua = String::new();
         for (key, how) in KEYS {
             lua.push_str(&format!("hl.unbind(\"{key}\") "));
