@@ -1163,6 +1163,15 @@ fn pick_wallpaper(path: String) {
 /// The most pictures shown.
 const MAX_PICTURES: usize = 60;
 
+/// The wallpapers the box will show, as paths (one look at the folder:
+/// quick enough for whoever asks).
+pub(crate) fn wallpaper_files() -> Vec<String> {
+    if wallpaper_tool().is_none() {
+        return Vec::new();
+    }
+    pictures().iter().take(MAX_PICTURES).map(|p| p.to_string_lossy().into_owned()).collect()
+}
+
 fn pictures() -> Vec<std::path::PathBuf> {
     let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(wallpaper_dir())
         .into_iter()

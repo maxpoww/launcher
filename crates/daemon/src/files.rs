@@ -186,16 +186,11 @@ impl App {
     /// its still is on. The first call asks for the loop; until it is in
     /// (and where none can be made) the still stays.
     pub(crate) fn picture_play(&mut self, path: &str) {
+        self.picture_loop_ask(path);
         let Some(&(slot, _)) = self.thumb_map.get(path) else {
             return;
         };
         let Some((frames, shown)) = self.moving.get_mut(path) else {
-            if self.moving.len() + self.moving_pending.len() < MOVING_CAP
-                && crate::thumbs::can_move()
-                && self.moving_pending.insert(path.to_owned())
-            {
-                self.thumbs.request_moving(path);
-            }
             return;
         };
         let at = (self.moving_since.elapsed().as_secs_f32() * crate::thumbs::MOVING_FPS as f32) as usize % frames.len();
@@ -207,6 +202,32 @@ impl App {
         let layer = self.pkg_layer_base + (crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP) as u32 + slot as u32;
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.update_icon_layer(layer, &chain);
+        }
+    }
+
+    /// Ask for the loop of the moving picture at `path`, once.
+    fn picture_loop_ask(&mut self, path: &str) {
+        if !self.moving.contains_key(path)
+            && self.moving.len() + self.moving_pending.len() < MOVING_CAP
+            && crate::thumbs::can_move()
+            && self.moving_pending.insert(path.to_owned())
+        {
+            self.thumbs.request_moving(path);
+        }
+    }
+
+    /// The quick controls came up: the wallpapers' previews — the stills,
+    /// and the loops of the ones that move — are made NOW, so the box is
+    /// whole the moment it opens (Max, 2026-10-13: "deberían estar
+    /// cargados cuando entro a la caja"; a second on his computer is many
+    /// on a weak one). The time it takes to type the setting's name is
+    /// theirs.
+    pub(crate) fn pictures_warm(&mut self) {
+        for file in crate::controls::wallpaper_files() {
+            let _ = self.picture_layer(&file);
+            if crate::controls::wallpaper_moves(&file) {
+                self.picture_loop_ask(&file);
+            }
         }
     }
 

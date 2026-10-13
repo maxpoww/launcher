@@ -519,6 +519,7 @@ impl App {
         self.fast.controls = true;
         self.fast.sel = 0;
         self.fast_rematch();
+        self.pictures_warm();
     }
 
     /// Super+Alt+Space: open the bubble, or close it if it is up.
@@ -600,6 +601,10 @@ impl App {
             // the card it came from must not show again on the way out (it
             // did, for half a second — Max, 2026-10-13).
             self.fast.card_a = 0.0;
+        }
+        // (The loops made ready for the wallpapers' box go with the card.)
+        if self.fast.controls {
+            self.pictures_rest();
         }
         self.quick.close_solo();
         if self.interactive && self.ui.target() != crate::state::Target::Open {
